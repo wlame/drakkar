@@ -23,7 +23,7 @@
     <tbody>
         {% for e in events %}
         <tr class="border-b border-gray-800 hover:bg-gray-800">
-            <td class="py-2 px-3 text-gray-400 text-xs whitespace-nowrap" title="{{ format_ts(e.ts) }}">{{ format_ts(e.ts) }}</td>
+            <td class="py-2 px-3 text-gray-400 text-xs whitespace-nowrap" title="{{ format_ts_ms(e.ts) }}">{{ format_ts(e.ts) }}</td>
             <td class="py-2 px-3">
                 {% if e.event == 'task_completed' %}
                 <span class="text-green-400">{{ e.event }}</span>

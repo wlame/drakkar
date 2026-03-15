@@ -36,20 +36,24 @@
                 {% if completed %}{{ completed.exit_code }}{% elif failed %}{{ failed.exit_code or '-' }}{% else %}-{% endif %}
             </div>
         </div>
+        <div>
+            <div class="text-xs text-gray-400 mb-1">PID</div>
+            <div class="text-lg font-mono">{{ pid or '-' }}</div>
+        </div>
     </div>
 
     {% if started %}
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
         <div>
             <div class="text-xs text-gray-400 mb-1">Started</div>
-            <div class="text-sm font-mono">{{ format_ts(started.ts) }}</div>
+            <div class="text-sm font-mono" title="{{ format_ts_ms(started.ts) }}">{{ format_ts(started.ts) }}</div>
             <div class="text-xs text-gray-500">{{ format_ts_full(started.ts) }}</div>
         </div>
         {% if completed or failed %}
         <div>
             <div class="text-xs text-gray-400 mb-1">Finished</div>
             {% set fin = completed or failed %}
-            <div class="text-sm font-mono">{{ format_ts(fin.ts) }}</div>
+            <div class="text-sm font-mono" title="{{ format_ts_ms(fin.ts) }}">{{ format_ts(fin.ts) }}</div>
             <div class="text-xs text-gray-500">{{ format_ts_full(fin.ts) }}</div>
         </div>
         {% endif %}
@@ -77,12 +81,18 @@
 </div>
 {% endif %}
 
-<!-- CLI args -->
+<!-- CLI -->
 {% if args %}
 <div class="mb-6">
-    <h2 class="text-lg font-semibold mb-2">CLI Arguments</h2>
-    <div class="bg-gray-800 rounded p-3">
-        <code class="text-sm font-mono text-gray-300 break-all">{{ args }}</code>
+    <h2 class="text-lg font-semibold mb-2">CLI</h2>
+    {% if args is string %}
+    {% set parts = [args] %}
+    {% else %}
+    {% set parts = args %}
+    {% endif %}
+    {% set cli_line = binary_path ~ ' ' ~ parts | map('tojson') | join(' ') %}
+    <div class="bg-gray-800 rounded p-3 relative group">
+        <pre class="text-sm font-mono text-gray-300 whitespace-pre-wrap break-all select-all">{{ cli_line }}</pre>
     </div>
 </div>
 {% endif %}
@@ -132,7 +142,7 @@
             <span class="text-xs text-gray-400 ml-3">{{ "%.3f"|format(e.duration) }}s</span>
             {% endif %}
         </div>
-        <span class="text-xs text-gray-500" title="{{ format_ts(e.ts) }}">{{ format_ts(e.ts) }}</span>
+        <span class="text-xs text-gray-500" title="{{ format_ts_ms(e.ts) }}">{{ format_ts(e.ts) }}</span>
     </div>
     {% endfor %}
     {% if not events %}

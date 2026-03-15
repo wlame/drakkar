@@ -66,6 +66,11 @@ function fmtTime(ts) {
     const d = new Date(ts * 1000);
     return d.toISOString().substring(11, 19);
 }
+function fmtTimeMs(ts) {
+    if (!ts) return '';
+    const d = new Date(ts * 1000);
+    return d.toISOString().substring(11, 23);
+}
 
 function eventColor(evt) {
     if (evt === 'task_completed') return 'text-green-400';
@@ -81,6 +86,7 @@ function createRow(e) {
     const tdTime = document.createElement('td');
     tdTime.className = 'py-2 px-3 text-gray-400 text-xs whitespace-nowrap';
     tdTime.textContent = fmtTime(e.ts);
+    tdTime.title = fmtTimeMs(e.ts);
     tr.appendChild(tdTime);
 
     const tdEvt = document.createElement('td');

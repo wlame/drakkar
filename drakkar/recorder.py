@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS events (
     exit_code   INTEGER,
     duration    REAL,
     output_topic TEXT,
-    metadata    TEXT
+    metadata    TEXT,
+    pid         INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_events_partition_offset ON events(partition, offset);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
@@ -168,6 +169,7 @@ class EventRecorder:
             'duration': result.duration_seconds,
             'stdout_size': len(result.stdout.encode()),
             'args': json.dumps(result.task.args),
+            'pid': result.pid,
         }
         if self._config.store_output:
             entry['stdout'] = result.stdout
@@ -187,6 +189,7 @@ class EventRecorder:
             'task_id': task.task_id,
             'exit_code': error.exit_code,
             'args': json.dumps(task.args),
+            'pid': error.pid,
             'metadata': json.dumps({
                 'exception': error.exception,
             }),
@@ -377,7 +380,7 @@ class EventRecorder:
         columns = [
             'ts', 'event', 'partition', 'offset', 'task_id', 'args',
             'stdout_size', 'stdout', 'stderr', 'exit_code', 'duration',
-            'output_topic', 'metadata',
+            'output_topic', 'metadata', 'pid',
         ]
         placeholders = ', '.join(['?'] * len(columns))
         col_names = ', '.join(columns)
@@ -390,7 +393,7 @@ class EventRecorder:
 
     async def _retention_loop(self) -> None:
         while self._running:
-            await asyncio.sleep(300)  # every 5 minutes
+            await asyncio.sleep(3600)  # every hour
             await self._rotate()
 
     async def _rotate(self) -> None:

@@ -16,78 +16,146 @@
          style="width: {{ pct }}%"></div>
 </div>
 
-<!-- Timeline: last 2 minutes of executor activity -->
-<h2 class="text-lg font-semibold mb-3">Executor Timeline (last 2 min)</h2>
-<div class="bg-gray-800 rounded-lg p-4 mb-8">
-    <!-- time axis labels -->
-    <div class="flex justify-between text-xs text-gray-500 mb-1">
-        <span>-2m</span><span>-1m30s</span><span>-1m</span><span>-30s</span><span>now</span>
+<h2 class="text-lg font-semibold mb-2">Executor Timeline <span class="text-sm font-normal text-gray-400">(last 10 min)</span></h2>
+<div class="flex items-center gap-3 mb-2">
+    <div class="flex items-center gap-1">
+        <label class="text-xs text-gray-400">Zoom:</label>
+        <button onclick="zoomIn()" class="bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-sm font-bold">+</button>
+        <span id="zoom-label" class="text-xs text-gray-400 w-10 text-center">2x</span>
+        <button onclick="zoomOut()" class="bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-sm font-bold">-</button>
+        <button onclick="zoomReset()" class="bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-xs ml-1">Reset</button>
     </div>
-    <div id="timeline" class="relative bg-gray-900 rounded overflow-x-auto" style="height: 200px; min-height: 100px;">
-        <!-- task bars rendered by JS -->
-    </div>
-    <div class="text-xs text-gray-500 mt-2">
+    <button onclick="scrollToEnd()" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-xs">Scroll to now &rarr;</button>
+    <div class="text-xs text-gray-500 ml-auto">
         <span class="inline-block w-3 h-3 bg-green-500 rounded mr-1"></span>completed
-        <span class="inline-block w-3 h-3 bg-yellow-500 rounded mr-1 ml-3"></span>running
-        <span class="inline-block w-3 h-3 bg-red-500 rounded mr-1 ml-3"></span>failed
+        <span class="inline-block w-3 h-3 bg-yellow-500 rounded mr-1 ml-2"></span>running
+        <span class="inline-block w-3 h-3 bg-red-500 rounded mr-1 ml-2"></span>failed
     </div>
 </div>
 
-<h2 class="text-lg font-semibold mb-3">Live Tasks (from memory)</h2>
-<table class="w-full text-sm mb-8">
-    <thead>
-        <tr class="text-left text-gray-400 border-b border-gray-700">
-            <th class="py-2 px-3">Task ID</th>
-            <th class="py-2 px-3">Partition</th>
-            <th class="py-2 px-3">Source Offsets</th>
-            <th class="py-2 px-3">CLI Args</th>
-        </tr>
-    </thead>
-    <tbody id="live-tasks-body">
-        {% for tid, t in live_tasks.items() %}
-        <tr class="border-b border-gray-800">
-            <td class="py-2 px-3 font-mono"><a href="/task/{{ tid }}" class="text-yellow-400 hover:underline">{{ tid }}</a></td>
-            <td class="py-2 px-3 font-mono">{{ t.partition }}</td>
-            <td class="py-2 px-3 font-mono text-xs">{{ t.source_offsets }}</td>
-            <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer" title="Click to expand">{{ t.args }}</td>
-        </tr>
-        {% endfor %}
-        {% if not live_tasks %}
-        <tr><td colspan="4" class="py-4 text-center text-gray-500">No tasks currently running</td></tr>
-        {% endif %}
-    </tbody>
-</table>
+<div class="bg-gray-800 rounded-lg p-2 mb-8">
+    <!-- scrollable viewport -->
+    <div id="tl-viewport" class="overflow-x-auto" style="position:relative;">
+        <!-- wide inner container, sized by zoom -->
+        <div id="tl-inner" style="position:relative; min-height:100px;">
+            <!-- time axis -->
+            <div id="tl-axis" style="position:relative; height:18px; border-bottom:1px solid #374151;"></div>
+            <!-- lanes -->
+            <div id="tl-lanes" style="position:relative;"></div>
+        </div>
+    </div>
+</div>
 
-<h2 class="text-lg font-semibold mb-3">Recent Started (from recorder)</h2>
-<table class="w-full text-sm">
-    <thead>
-        <tr class="text-left text-gray-400 border-b border-gray-700">
-            <th class="py-2 px-3">Task ID</th>
-            <th class="py-2 px-3">Partition</th>
-            <th class="py-2 px-3">Started</th>
-            <th class="py-2 px-3">Elapsed</th>
-            <th class="py-2 px-3">CLI Args</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for t in active_from_db %}
-        <tr class="border-b border-gray-800">
-            <td class="py-2 px-3 font-mono"><a href="/task/{{ t.task_id }}" class="text-yellow-400 hover:underline">{{ t.task_id }}</a></td>
-            <td class="py-2 px-3 font-mono">{{ t.partition }}</td>
-            <td class="py-2 px-3 text-gray-400 text-xs">{{ format_ts(t.ts) }}</td>
-            <td class="py-2 px-3 font-mono">{{ "%.1f"|format(t.elapsed) }}s</td>
-            <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer" title="Click to expand">{{ t.args }}</td>
-        </tr>
-        {% endfor %}
-        {% if not active_from_db %}
-        <tr><td colspan="5" class="py-4 text-center text-gray-500">No unfinished tasks in recorder</td></tr>
-        {% endif %}
-    </tbody>
-</table>
+<!-- Running tasks (executing subprocess now) -->
+<details open class="mb-4">
+    <summary class="text-lg font-semibold cursor-pointer select-none hover:text-white">
+        Running <span class="text-sm font-normal text-green-400">({{ running_tasks | length }})</span>
+    </summary>
+    <table class="w-full text-sm mt-2">
+        <thead>
+            <tr class="text-left text-gray-400 border-b border-gray-700">
+                <th class="py-2 px-3">Task ID</th>
+                <th class="py-2 px-3">Partition</th>
+                <th class="py-2 px-3">Source Offsets</th>
+                <th class="py-2 px-3">CLI Args</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for tid, t in running_tasks.items() %}
+            <tr class="border-b border-gray-800">
+                <td class="py-2 px-3 font-mono"><a href="/task/{{ tid }}" class="text-yellow-400 hover:underline">{{ tid }}</a></td>
+                <td class="py-2 px-3 font-mono">{{ t.partition }}</td>
+                <td class="py-2 px-3 font-mono text-xs">{{ t.source_offsets }}</td>
+                <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer" title="Click to expand">{{ t.args }}</td>
+            </tr>
+            {% endfor %}
+            {% if not running_tasks %}
+            <tr><td colspan="4" class="py-3 text-center text-gray-500">No tasks executing</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</details>
+
+<!-- Pending tasks (waiting for semaphore slot) -->
+<details class="mb-4">
+    <summary class="text-lg font-semibold cursor-pointer select-none hover:text-white">
+        Pending <span class="text-sm font-normal text-yellow-400">({{ pending_tasks | length }})</span>
+    </summary>
+    <table class="w-full text-sm mt-2">
+        <thead>
+            <tr class="text-left text-gray-400 border-b border-gray-700">
+                <th class="py-2 px-3">Task ID</th>
+                <th class="py-2 px-3">Partition</th>
+                <th class="py-2 px-3">Source Offsets</th>
+                <th class="py-2 px-3">CLI Args</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for tid, t in pending_tasks.items() %}
+            <tr class="border-b border-gray-800">
+                <td class="py-2 px-3 font-mono"><a href="/task/{{ tid }}" class="text-orange-400 hover:underline">{{ tid }}</a></td>
+                <td class="py-2 px-3 font-mono">{{ t.partition }}</td>
+                <td class="py-2 px-3 font-mono text-xs">{{ t.source_offsets }}</td>
+                <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer" title="Click to expand">{{ t.args }}</td>
+            </tr>
+            {% endfor %}
+            {% if not pending_tasks %}
+            <tr><td colspan="4" class="py-3 text-center text-gray-500">No tasks waiting</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</details>
+
+<!-- Recently finished tasks -->
+<details class="mb-4">
+    <summary class="text-lg font-semibold cursor-pointer select-none hover:text-white">
+        Finished <span class="text-sm font-normal text-gray-400">({{ recent_finished | length }})</span>
+    </summary>
+    <table class="w-full text-sm mt-2">
+        <thead>
+            <tr class="text-left text-gray-400 border-b border-gray-700">
+                <th class="py-2 px-3">Task ID</th>
+                <th class="py-2 px-3">Partition</th>
+                <th class="py-2 px-3">Status</th>
+                <th class="py-2 px-3">Duration</th>
+                <th class="py-2 px-3">Exit</th>
+                <th class="py-2 px-3">Time</th>
+                <th class="py-2 px-3">CLI Args</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for e in recent_finished %}
+            <tr class="border-b border-gray-800">
+                <td class="py-2 px-3 font-mono text-xs">
+                    {% if e.task_id %}<a href="/task/{{ e.task_id }}" class="hover:underline {% if e.event == 'task_completed' %}text-green-400{% else %}text-red-400{% endif %}">{{ e.task_id }}</a>{% endif %}
+                </td>
+                <td class="py-2 px-3 font-mono">{{ e.partition }}</td>
+                <td class="py-2 px-3 {% if e.event == 'task_completed' %}text-green-400{% else %}text-red-400{% endif %}">
+                    {{ 'completed' if e.event == 'task_completed' else 'failed' }}
+                </td>
+                <td class="py-2 px-3 font-mono">{% if e.duration is not none %}{{ "%.2f"|format(e.duration) }}s{% endif %}</td>
+                <td class="py-2 px-3 font-mono {% if e.exit_code is not none and e.exit_code != 0 %}text-red-400{% endif %}">
+                    {{ e.exit_code if e.exit_code is not none else '' }}
+                </td>
+                <td class="py-2 px-3 text-gray-400 text-xs" title="{{ format_ts_ms(e.ts) }}">{{ format_ts(e.ts) }}</td>
+                <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer" title="Click to expand">{{ e.args or '' }}</td>
+            </tr>
+            {% endfor %}
+            {% if not recent_finished %}
+            <tr><td colspan="7" class="py-3 text-center text-gray-500">No recently finished tasks</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</details>
 
 <script>
 let refreshEnabled = false;
 let refreshTimer = null;
+let zoomLevel = 2;
+const TIMELINE_MINUTES = 10;
+const LANE_H = 22;
+const LANE_GAP = 2;
+const BASE_PX_PER_SEC = 8; // pixels per second at 1x zoom
 
 function toggleRefresh() {
     refreshEnabled = !refreshEnabled;
@@ -105,63 +173,154 @@ function toggleRefresh() {
 
 function startRefresh() {
     if (refreshTimer) clearInterval(refreshTimer);
-    refreshTimer = setInterval(() => { loadTimeline(); }, 5000);
+    refreshTimer = setInterval(loadTimeline, 5000);
 }
 
-function barColorClass(status) {
-    if (status === 'completed') return 'bg-green-500 hover:bg-green-400';
-    if (status === 'failed') return 'bg-red-500 hover:bg-red-400';
-    return 'bg-yellow-500 hover:bg-yellow-400';
+function zoomIn() {
+    zoomLevel = Math.min(zoomLevel * 2, 64);
+    document.getElementById('zoom-label').textContent = zoomLevel + 'x';
+    loadTimeline();
+}
+function zoomOut() {
+    zoomLevel = Math.max(zoomLevel / 2, 0.25);
+    document.getElementById('zoom-label').textContent = zoomLevel + 'x';
+    loadTimeline();
+}
+function zoomReset() {
+    zoomLevel = 2;
+    document.getElementById('zoom-label').textContent = '2x';
+    loadTimeline();
+}
+function scrollToEnd() {
+    const vp = document.getElementById('tl-viewport');
+    vp.scrollLeft = vp.scrollWidth;
+}
+
+function barColor(status) {
+    if (status === 'completed') return '#22c55e';
+    if (status === 'failed') return '#ef4444';
+    return '#eab308';
+}
+
+function fmtTime(ts) {
+    const d = new Date(ts * 1000);
+    return d.toISOString().substring(11, 19);
+}
+function fmtTimeMs(ts) {
+    if (!ts) return '';
+    const d = new Date(ts * 1000);
+    return d.toISOString().substring(11, 23);
 }
 
 async function loadTimeline() {
+    const minutes = TIMELINE_MINUTES;
     try {
-        const r = await fetch('/api/recent-tasks?minutes=2');
+        const r = await fetch('/api/recent-tasks?minutes=' + minutes);
         const data = await r.json();
         const tasks = data.tasks || [];
         const laneCount = Math.max(data.lane_count || 1, 1);
 
-        const container = document.getElementById('timeline');
-        container.replaceChildren();
+        const pxPerSec = BASE_PX_PER_SEC * zoomLevel;
+        const totalSeconds = minutes * 60;
+        const totalWidth = Math.max(totalSeconds * pxPerSec, 600);
 
-        const laneHeight = Math.max(16, Math.min(28, Math.floor(180 / laneCount)));
-        container.style.height = Math.max(100, laneCount * (laneHeight + 2) + 20) + 'px';
+        const inner = document.getElementById('tl-inner');
+        inner.style.width = totalWidth + 'px';
 
-        // lane labels (executor slots)
+        const lanesDiv = document.getElementById('tl-lanes');
+        lanesDiv.replaceChildren();
+        lanesDiv.style.height = (laneCount * (LANE_H + LANE_GAP)) + 'px';
+
+        // lane background stripes + labels
         for (let i = 0; i < laneCount; i++) {
+            const y = i * (LANE_H + LANE_GAP);
+            // stripe
+            if (i % 2 === 0) {
+                const stripe = document.createElement('div');
+                stripe.style.cssText = 'position:absolute;left:0;width:100%;background:rgba(255,255,255,0.02);';
+                stripe.style.top = y + 'px';
+                stripe.style.height = LANE_H + 'px';
+                lanesDiv.appendChild(stripe);
+            }
+            // label
             const label = document.createElement('div');
-            label.className = 'absolute text-xs text-gray-600 font-mono';
-            label.style.left = '2px';
-            label.style.top = (i * (laneHeight + 2) + 1) + 'px';
-            label.style.lineHeight = laneHeight + 'px';
+            label.style.cssText = 'position:absolute;left:2px;font-size:10px;color:#4b5563;font-family:monospace;';
+            label.style.top = y + 'px';
+            label.style.lineHeight = LANE_H + 'px';
             label.textContent = '#' + i;
-            container.appendChild(label);
+            lanesDiv.appendChild(label);
+        }
+
+        // time axis ticks
+        const axis = document.getElementById('tl-axis');
+        axis.replaceChildren();
+        axis.style.width = totalWidth + 'px';
+        // determine tick interval based on zoom
+        let tickInterval = 30; // seconds
+        if (pxPerSec >= 16) tickInterval = 10;
+        if (pxPerSec >= 32) tickInterval = 5;
+        if (pxPerSec < 4) tickInterval = 60;
+        if (pxPerSec < 1) tickInterval = 120;
+
+        const now = Date.now() / 1000;
+        const timelineStart = now - totalSeconds;
+        for (let t = Math.ceil(timelineStart / tickInterval) * tickInterval; t <= now; t += tickInterval) {
+            const x = (t - timelineStart) * pxPerSec;
+            // tick line
+            const line = document.createElement('div');
+            line.style.cssText = 'position:absolute;top:0;width:1px;height:100%;background:#374151;';
+            line.style.left = x + 'px';
+            axis.appendChild(line);
+            // vertical guide line through lanes
+            const guide = document.createElement('div');
+            guide.style.cssText = 'position:absolute;width:1px;background:rgba(55,65,81,0.5);pointer-events:none;';
+            guide.style.left = x + 'px';
+            guide.style.top = '0';
+            guide.style.height = '100%';
+            lanesDiv.appendChild(guide);
+            // label
+            const lbl = document.createElement('div');
+            lbl.style.cssText = 'position:absolute;top:2px;font-size:9px;color:#6b7280;font-family:monospace;transform:translateX(-50%);';
+            lbl.style.left = x + 'px';
+            lbl.textContent = fmtTime(t);
+            axis.appendChild(lbl);
         }
 
         // task bars
         for (const t of tasks) {
+            const startSec = (t.start_ts || now) - timelineStart;
+            const endSec = (t.end_ts || now) - timelineStart;
+            const x = Math.max(0, startSec * pxPerSec);
+            const w = Math.max(2, (endSec - startSec) * pxPerSec);
+            const y = t.lane * (LANE_H + LANE_GAP);
+
             const bar = document.createElement('a');
             bar.href = '/task/' + encodeURIComponent(t.task_id);
-            bar.className = 'absolute rounded-sm cursor-pointer border-l border-r border-gray-900 ' + barColorClass(t.status);
-            bar.style.left = t.start_pct + '%';
-            bar.style.width = Math.max(0.15, t.width_pct) + '%';
-            bar.style.top = (t.lane * (laneHeight + 2) + 1) + 'px';
-            bar.style.height = laneHeight + 'px';
-            const dur = t.duration ? t.duration.toFixed(1) + 's' : 'running';
-            bar.title = t.task_id + ' (P' + t.partition + ', ' + t.status + ', ' + dur + ')';
-            container.appendChild(bar);
+            bar.style.cssText = 'position:absolute;border-radius:2px;cursor:pointer;border-left:1px solid rgba(0,0,0,0.4);border-right:1px solid rgba(0,0,0,0.4);';
+            bar.style.left = x + 'px';
+            bar.style.width = w + 'px';
+            bar.style.top = y + 'px';
+            bar.style.height = LANE_H + 'px';
+            bar.style.backgroundColor = barColor(t.status);
+            const dur = t.duration ? t.duration.toFixed(3) + 's' : 'running';
+            const startMs = fmtTimeMs(t.start_ts);
+            const endMs = t.end_ts ? fmtTimeMs(t.end_ts) : 'now';
+            const pidInfo = t.pid ? ' | PID ' + t.pid : '';
+            bar.title = t.task_id + '\nP' + t.partition + pidInfo + ' | ' + t.status + ' | ' + dur + '\n' + startMs + ' → ' + endMs;
+            lanesDiv.appendChild(bar);
         }
 
         if (!tasks.length) {
             const empty = document.createElement('div');
             empty.className = 'text-gray-500 text-center py-8 text-sm';
-            empty.textContent = 'No task activity in the last 2 minutes';
-            container.appendChild(empty);
+            empty.textContent = 'No task activity in the selected window';
+            empty.style.width = '100%';
+            lanesDiv.appendChild(empty);
         }
-    } catch(e) {}
+    } catch(e) { console.error(e); }
 }
 
-// initial load
-loadTimeline();
+// initial load and scroll to end
+loadTimeline().then(scrollToEnd);
 </script>
 {% endblock %}

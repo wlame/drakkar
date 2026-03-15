@@ -34,6 +34,7 @@ class ExecutorResult(BaseModel):
     stderr: str
     duration_seconds: float
     task: ExecutorTask
+    pid: int | None = None
 
 
 class ExecutorError(BaseModel):
@@ -43,6 +44,7 @@ class ExecutorError(BaseModel):
     exit_code: int | None = None
     stderr: str = ""
     exception: str | None = None
+    pid: int | None = None
 
 
 class PendingContext(BaseModel):

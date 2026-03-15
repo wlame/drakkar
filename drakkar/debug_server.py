@@ -31,11 +31,18 @@ def _format_ts(ts: float | None) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M:%S")
 
 
+def _format_ts_ms(ts: float | None) -> str:
+    if ts is None:
+        return ""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+
+
 def _format_ts_full(ts: float | None) -> str:
     if ts is None:
         return ""
     from datetime import datetime, timezone
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
 def create_debug_app(
@@ -48,6 +55,7 @@ def create_debug_app(
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.autoescape = True
     templates.env.globals['format_ts'] = _format_ts
+    templates.env.globals['format_ts_ms'] = _format_ts_ms
     templates.env.globals['format_ts_full'] = _format_ts_full
 
     async def _get_lag() -> dict[int, dict]:
@@ -124,20 +132,38 @@ def create_debug_app(
         now = time.time()
         for task in active:
             task['elapsed'] = now - task['ts'] if task.get('ts') else 0
+        # split tasks: running (have task_started in DB) vs pending (no task_started yet)
         processors = drakkar_app.processors
-        live_tasks = {}
+        active_task_ids = {t['task_id'] for t in active}
+        running_tasks = {}
+        pending_tasks = {}
         for proc in processors.values():
             for tid, t in proc._pending_tasks.items():
-                live_tasks[tid] = {
+                entry = {
                     'task_id': tid,
                     'args': t.args,
                     'partition': proc.partition_id,
                     'source_offsets': t.source_offsets,
                 }
+                if tid in active_task_ids:
+                    running_tasks[tid] = entry
+                else:
+                    pending_tasks[tid] = entry
+
+        # recently finished tasks (last 5 minutes)
+        finished = await recorder.get_events(
+            event_type='task_completed', limit=50,
+        )
+        failed = await recorder.get_events(
+            event_type='task_failed', limit=20,
+        )
+        recent_finished = sorted(finished + failed, key=lambda e: e.get('ts', 0), reverse=True)[:50]
+
         return templates.TemplateResponse(request, "executors.html", {
             'worker_id': drakkar_app._worker_id,
-            'active_from_db': active,
-            'live_tasks': live_tasks,
+            'running_tasks': running_tasks,
+            'pending_tasks': pending_tasks,
+            'recent_finished': recent_finished,
             'pool_active': drakkar_app._executor_pool.active_count if drakkar_app._executor_pool else 0,
             'pool_max': drakkar_app._executor_pool.max_workers if drakkar_app._executor_pool else 0,
         })
@@ -176,6 +202,7 @@ def create_debug_app(
                 args = json.loads(started['args'])
             except (json.JSONDecodeError, TypeError):
                 args = started['args']
+        pid = (completed or failed or {}).get('pid') or (started or {}).get('pid')
         return templates.TemplateResponse(request, "task_detail.html", {
             'worker_id': drakkar_app._worker_id,
             'task_id': task_id,
@@ -187,6 +214,8 @@ def create_debug_app(
             'source_offsets': source_offsets,
             'args': args,
             'partition': started['partition'] if started else None,
+            'pid': pid,
+            'binary_path': drakkar_app._config.executor.binary_path,
         })
 
     @app.get("/history", response_class=HTMLResponse)
@@ -289,6 +318,7 @@ def create_debug_app(
                     'duration': None,
                     'status': 'running',
                     'args': e.get('args'),
+                    'pid': e.get('pid'),
                 }
             t = tasks[tid]
             if e['event'] == 'task_started':
@@ -297,6 +327,8 @@ def create_debug_app(
                 t['end_ts'] = e['ts']
                 t['status'] = 'completed' if e['event'] == 'task_completed' else 'failed'
                 t['duration'] = e.get('duration')
+                if e.get('pid'):
+                    t['pid'] = e['pid']
 
         # compute relative positions for timeline
         timeline_start = now - (minutes * 60)

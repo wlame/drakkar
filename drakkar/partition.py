@@ -225,11 +225,9 @@ class PartitionProcessor:
         )
         executor_tasks.labels(status="started").inc()
         executor_pool_active.set(self._executor_pool.active_count)
-        if self._recorder:
-            self._recorder.record_task_started(task, self._partition_id)
 
         try:
-            result = await self._executor_pool.execute(task)
+            result = await self._executor_pool.execute(task, self._recorder, self._partition_id)
             executor_tasks.labels(status="completed").inc()
             executor_duration.observe(result.duration_seconds)
             if self._recorder:

@@ -35,8 +35,8 @@
                 <span class="inline-block w-2 h-2 bg-gray-500 rounded-full"></span> history
                 {% endif %}
             </td>
-            <td class="py-2 px-3 text-gray-400">{{ format_ts(s.last_consumed) }}</td>
-            <td class="py-2 px-3 text-gray-400">{{ format_ts(s.last_committed) }}</td>
+            <td class="py-2 px-3 text-gray-400" title="{{ format_ts_ms(s.last_consumed) }}">{{ format_ts(s.last_consumed) }}</td>
+            <td class="py-2 px-3 text-gray-400" title="{{ format_ts_ms(s.last_committed) }}">{{ format_ts(s.last_committed) }}</td>
             <td class="py-2 px-3 font-mono">{{ s.committed_offset or '-' }}</td>
             <td class="py-2 px-3 font-mono">{{ s.high_watermark or '-' }}</td>
             <td class="py-2 px-3 font-mono {% if s.lag > 20 %}text-red-400{% elif s.lag > 5 %}text-yellow-400{% else %}text-green-400{% endif %}">{{ s.lag }}</td>

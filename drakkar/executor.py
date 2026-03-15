@@ -1,11 +1,17 @@
 """Subprocess executor pool for Drakkar framework."""
 
+from __future__ import annotations
+
 import asyncio
 import time
+from typing import TYPE_CHECKING
 
 import structlog
 
 from drakkar.models import ExecutorError, ExecutorResult, ExecutorTask
+
+if TYPE_CHECKING:
+    from drakkar.recorder import EventRecorder
 
 logger = structlog.get_logger()
 
@@ -32,14 +38,21 @@ class ExecutorPool:
     def max_workers(self) -> int:
         return self._max_workers
 
-    async def execute(self, task: ExecutorTask) -> ExecutorResult:
+    async def execute(
+        self,
+        task: ExecutorTask,
+        recorder: EventRecorder | None = None,
+        partition_id: int = 0,
+    ) -> ExecutorResult:
         """Execute a single task, respecting the concurrency semaphore.
 
-        Acquires a semaphore slot, runs the binary as a subprocess,
-        and returns the result. Raises ExecutorTaskError on failure or timeout.
+        Records task_started AFTER acquiring the semaphore slot, so the
+        timestamp reflects actual execution start, not queue entry time.
         """
         async with self._semaphore:
             self._active_count += 1
+            if recorder:
+                recorder.record_task_started(task, partition_id)
             try:
                 return await self._run_subprocess(task)
             finally:
@@ -62,6 +75,7 @@ class ExecutorPool:
             )
             duration = time.monotonic() - start
 
+            pid = proc.pid
             result = ExecutorResult(
                 task_id=task.task_id,
                 exit_code=proc.returncode or 0,
@@ -69,6 +83,7 @@ class ExecutorPool:
                 stderr=stderr_bytes.decode(errors="replace") if stderr_bytes else "",
                 duration_seconds=round(duration, 3),
                 task=task,
+                pid=pid,
             )
 
             if result.exit_code != 0:
@@ -77,6 +92,7 @@ class ExecutorPool:
                         task=task,
                         exit_code=result.exit_code,
                         stderr=result.stderr,
+                        pid=pid,
                     ),
                     result=result,
                 )
@@ -92,11 +108,13 @@ class ExecutorPool:
 
         except asyncio.TimeoutError:
             duration = time.monotonic() - start
+            timeout_pid = proc.pid if proc else None
             raise ExecutorTaskError(
                 error=ExecutorError(
                     task=task,
                     stderr="task timed out",
                     exception=f"Timeout after {self._task_timeout}s",
+                    pid=timeout_pid,
                 ),
                 result=ExecutorResult(
                     task_id=task.task_id,
@@ -105,6 +123,7 @@ class ExecutorPool:
                     stderr="task timed out",
                     duration_seconds=round(duration, 3),
                     task=task,
+                    pid=timeout_pid,
                 ),
             )
 
