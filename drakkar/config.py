@@ -52,6 +52,18 @@ class LoggingConfig(BaseModel):
     format: str = Field(default="json", pattern="^(json|console)$")
 
 
+class DebugConfig(BaseModel):
+    """Debug flight recorder and web UI settings."""
+
+    enabled: bool = False
+    port: int = 8080
+    db_path: str = "/tmp/drakkar-debug.db"
+    retention_hours: int = 24
+    retention_max_events: int = 100_000
+    store_output: bool = False
+    flush_interval_seconds: int = 5
+
+
 class DrakkarConfig(BaseSettings):
     """Root configuration for a Drakkar worker."""
 
@@ -65,6 +77,7 @@ class DrakkarConfig(BaseSettings):
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    debug: DebugConfig = Field(default_factory=DebugConfig)
 
 
 def load_config(config_path: str | Path | None = None) -> DrakkarConfig:

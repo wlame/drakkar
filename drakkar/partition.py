@@ -9,6 +9,7 @@ import structlog
 
 from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler
+from drakkar.recorder import EventRecorder
 from drakkar.metrics import (
     batch_duration,
     executor_duration,
@@ -71,6 +72,7 @@ class PartitionProcessor:
         window_size: int,
         on_collect: CollectCallback | None = None,
         on_commit: CommitCallback | None = None,
+        recorder: EventRecorder | None = None,
     ):
         self._partition_id = partition_id
         self._handler = handler
@@ -78,6 +80,7 @@ class PartitionProcessor:
         self._window_size = window_size
         self._on_collect = on_collect
         self._on_commit = on_commit
+        self._recorder = recorder
 
         self._queue: asyncio.Queue[SourceMessage] = asyncio.Queue()
         self._offset_tracker = OffsetTracker()
@@ -101,6 +104,8 @@ class PartitionProcessor:
     def enqueue(self, message: SourceMessage) -> None:
         """Add a message to this partition's processing queue."""
         self._queue.put_nowait(message)
+        if self._recorder:
+            self._recorder.record_consumed(message)
         messages_consumed.labels(partition=str(self._partition_id)).inc()
         partition_queue_size.labels(partition=str(self._partition_id)).set(
             self._queue.qsize()
@@ -186,6 +191,8 @@ class PartitionProcessor:
         arrange_start = time.monotonic()
         tasks = await self._handler.arrange(messages, pending_ctx)
         handler_duration.labels(hook="arrange").observe(time.monotonic() - arrange_start)
+        if self._recorder:
+            self._recorder.record_arranged(self._partition_id, messages, tasks)
         window.tasks = tasks
         window.total_tasks = len(tasks)
 
@@ -209,11 +216,15 @@ class PartitionProcessor:
         )
         executor_tasks.labels(status="started").inc()
         executor_pool_active.set(self._executor_pool.active_count)
+        if self._recorder:
+            self._recorder.record_task_started(task, self._partition_id)
 
         try:
             result = await self._executor_pool.execute(task)
             executor_tasks.labels(status="completed").inc()
             executor_duration.observe(result.duration_seconds)
+            if self._recorder:
+                self._recorder.record_task_completed(result, self._partition_id)
 
             collect_start = time.monotonic()
             collect_result = await self._handler.collect(result)
@@ -227,6 +238,8 @@ class PartitionProcessor:
             executor_tasks.labels(status="failed").inc()
             if e.error.exception and "Timeout" in (e.error.exception or ""):
                 executor_timeouts.inc()
+            if self._recorder:
+                self._recorder.record_task_failed(task, e.error, self._partition_id)
             await log.awarning("executor_task_failed", error=str(e))
 
             on_error_start = time.monotonic()

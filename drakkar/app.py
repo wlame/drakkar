@@ -2,17 +2,18 @@
 
 import asyncio
 import signal
+import time
 from pathlib import Path
 
 import structlog
 
+from drakkar import __version__
 from drakkar.config import DrakkarConfig, load_config
 from drakkar.consumer import KafkaConsumer
 from drakkar.db import DBWriter
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.logging import setup_logging
-from drakkar import __version__
 from drakkar.metrics import (
     assigned_partitions,
     messages_produced,
@@ -22,6 +23,7 @@ from drakkar.metrics import (
 from drakkar.models import CollectResult
 from drakkar.partition import PartitionProcessor
 from drakkar.producer import KafkaProducer
+from drakkar.recorder import EventRecorder
 
 logger = structlog.get_logger()
 
@@ -45,15 +47,17 @@ class DrakkarApp:
 
         self._handler = handler
         self._worker_id = worker_id or f"drakkar-{id(self):x}"
+        self._start_time = time.monotonic()
 
         self._executor_pool: ExecutorPool | None = None
         self._consumer: KafkaConsumer | None = None
         self._producer: KafkaProducer | None = None
         self._db_writer: DBWriter | None = None
+        self._recorder: EventRecorder | None = None
+        self._debug_server = None
 
         self._processors: dict[int, PartitionProcessor] = {}
         self._running = False
-        self._shutdown_event = asyncio.Event()
 
     @property
     def config(self) -> DrakkarConfig:
@@ -62,6 +66,10 @@ class DrakkarApp:
     @property
     def processors(self) -> dict[int, PartitionProcessor]:
         return self._processors
+
+    @property
+    def recorder(self) -> EventRecorder | None:
+        return self._recorder
 
     def run(self) -> None:
         """Start the application. Blocks until shutdown."""
@@ -87,6 +95,18 @@ class DrakkarApp:
             'version': __version__,
             'consumer_group': self._config.kafka.consumer_group,
         })
+
+        if self._config.debug.enabled:
+            self._recorder = EventRecorder(self._config.debug)
+            await self._recorder.start()
+
+            from drakkar.debug_server import DebugServer
+            self._debug_server = DebugServer(
+                config=self._config.debug,
+                recorder=self._recorder,
+                app=self,
+            )
+            await self._debug_server.start()
 
         self._consumer = KafkaConsumer(
             config=self._config.kafka,
@@ -126,6 +146,8 @@ class DrakkarApp:
 
     def _on_assign(self, partition_ids: list[int]) -> None:
         """Handle new partition assignments."""
+        if self._recorder:
+            self._recorder.record_assigned(partition_ids)
         for pid in partition_ids:
             if pid not in self._processors:
                 processor = PartitionProcessor(
@@ -135,6 +157,7 @@ class DrakkarApp:
                     window_size=self._config.executor.window_size,
                     on_collect=self._handle_collect,
                     on_commit=self._handle_commit,
+                    recorder=self._recorder,
                 )
                 self._processors[pid] = processor
                 processor.start()
@@ -144,6 +167,8 @@ class DrakkarApp:
 
     def _on_revoke(self, partition_ids: list[int]) -> None:
         """Handle partition revocation."""
+        if self._recorder:
+            self._recorder.record_revoked(partition_ids)
         for pid in partition_ids:
             processor = self._processors.pop(pid, None)
             if processor:
@@ -164,6 +189,9 @@ class DrakkarApp:
         if result.output_messages and self._producer:
             await self._producer.produce_batch(result.output_messages)
             messages_produced.inc(len(result.output_messages))
+            if self._recorder:
+                for msg in result.output_messages:
+                    self._recorder.record_produced(msg, source_partition=partition_id)
 
         if result.db_rows and self._db_writer:
             await self._db_writer.write(result.db_rows)
@@ -172,6 +200,8 @@ class DrakkarApp:
         """Commit an offset for a specific partition."""
         if self._consumer:
             await self._consumer.commit({partition_id: offset})
+        if self._recorder:
+            self._recorder.record_committed(partition_id, offset)
 
     def _handle_signal(self) -> None:
         """Handle shutdown signals."""
@@ -186,6 +216,12 @@ class DrakkarApp:
         for processor in list(self._processors.values()):
             await processor.stop()
         self._processors.clear()
+
+        if self._debug_server:
+            await self._debug_server.stop()
+
+        if self._recorder:
+            await self._recorder.stop()
 
         if self._producer:
             await self._producer.flush()
