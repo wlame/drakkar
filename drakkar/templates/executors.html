@@ -1,15 +1,36 @@
 {% extends "base.html" %}
 {% block title %}Executors — Drakkar Debug{% endblock %}
-{% block head %}<meta http-equiv="refresh" content="3">{% endblock %}
 
 {% block content %}
-<h1 class="text-2xl font-bold mb-2">Active Executors</h1>
-<p class="text-gray-400 mb-6">Pool: {{ pool_active }} / {{ pool_max }} slots in use</p>
+<div class="flex items-center justify-between mb-2">
+    <h1 class="text-2xl font-bold">Active Executors</h1>
+    <button id="toggle-refresh" class="text-sm px-3 py-1 rounded bg-gray-600 hover:bg-gray-500" onclick="toggleRefresh()">
+        Auto-refresh: OFF
+    </button>
+</div>
+<p class="text-gray-400 mb-6">Pool: <span id="v-pool">{{ pool_active }} / {{ pool_max }}</span> slots in use</p>
 
 <div class="w-full bg-gray-700 rounded-full h-3 mb-6">
     {% set pct = (pool_active / pool_max * 100) if pool_max > 0 else 0 %}
-    <div class="h-3 rounded-full {% if pct > 80 %}bg-red-500{% elif pct > 50 %}bg-yellow-500{% else %}bg-green-500{% endif %}"
+    <div id="v-pool-bar" class="h-3 rounded-full transition-all {% if pct > 80 %}bg-red-500{% elif pct > 50 %}bg-yellow-500{% else %}bg-green-500{% endif %}"
          style="width: {{ pct }}%"></div>
+</div>
+
+<!-- Timeline: last 2 minutes of executor activity -->
+<h2 class="text-lg font-semibold mb-3">Executor Timeline (last 2 min)</h2>
+<div class="bg-gray-800 rounded-lg p-4 mb-8">
+    <!-- time axis labels -->
+    <div class="flex justify-between text-xs text-gray-500 mb-1">
+        <span>-2m</span><span>-1m30s</span><span>-1m</span><span>-30s</span><span>now</span>
+    </div>
+    <div id="timeline" class="relative bg-gray-900 rounded overflow-x-auto" style="height: 200px; min-height: 100px;">
+        <!-- task bars rendered by JS -->
+    </div>
+    <div class="text-xs text-gray-500 mt-2">
+        <span class="inline-block w-3 h-3 bg-green-500 rounded mr-1"></span>completed
+        <span class="inline-block w-3 h-3 bg-yellow-500 rounded mr-1 ml-3"></span>running
+        <span class="inline-block w-3 h-3 bg-red-500 rounded mr-1 ml-3"></span>failed
+    </div>
 </div>
 
 <h2 class="text-lg font-semibold mb-3">Live Tasks (from memory)</h2>
@@ -22,13 +43,13 @@
             <th class="py-2 px-3">CLI Args</th>
         </tr>
     </thead>
-    <tbody>
+    <tbody id="live-tasks-body">
         {% for tid, t in live_tasks.items() %}
         <tr class="border-b border-gray-800">
-            <td class="py-2 px-3 font-mono text-yellow-400">{{ tid }}</td>
+            <td class="py-2 px-3 font-mono"><a href="/task/{{ tid }}" class="text-yellow-400 hover:underline">{{ tid }}</a></td>
             <td class="py-2 px-3 font-mono">{{ t.partition }}</td>
             <td class="py-2 px-3 font-mono text-xs">{{ t.source_offsets }}</td>
-            <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate">{{ t.args }}</td>
+            <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer" title="Click to expand">{{ t.args }}</td>
         </tr>
         {% endfor %}
         {% if not live_tasks %}
@@ -51,11 +72,11 @@
     <tbody>
         {% for t in active_from_db %}
         <tr class="border-b border-gray-800">
-            <td class="py-2 px-3 font-mono text-yellow-400">{{ t.task_id }}</td>
+            <td class="py-2 px-3 font-mono"><a href="/task/{{ t.task_id }}" class="text-yellow-400 hover:underline">{{ t.task_id }}</a></td>
             <td class="py-2 px-3 font-mono">{{ t.partition }}</td>
-            <td class="py-2 px-3 text-gray-400 text-xs">{{ relative_time(t.ts) }}</td>
+            <td class="py-2 px-3 text-gray-400 text-xs">{{ format_ts(t.ts) }}</td>
             <td class="py-2 px-3 font-mono">{{ "%.1f"|format(t.elapsed) }}s</td>
-            <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate">{{ t.args }}</td>
+            <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer" title="Click to expand">{{ t.args }}</td>
         </tr>
         {% endfor %}
         {% if not active_from_db %}
@@ -63,4 +84,84 @@
         {% endif %}
     </tbody>
 </table>
+
+<script>
+let refreshEnabled = false;
+let refreshTimer = null;
+
+function toggleRefresh() {
+    refreshEnabled = !refreshEnabled;
+    const btn = document.getElementById('toggle-refresh');
+    if (refreshEnabled) {
+        btn.textContent = 'Auto-refresh: ON';
+        btn.className = 'text-sm px-3 py-1 rounded bg-green-700 hover:bg-green-600';
+        startRefresh();
+    } else {
+        btn.textContent = 'Auto-refresh: OFF';
+        btn.className = 'text-sm px-3 py-1 rounded bg-gray-600 hover:bg-gray-500';
+        if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+    }
+}
+
+function startRefresh() {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(() => { loadTimeline(); }, 5000);
+}
+
+function barColorClass(status) {
+    if (status === 'completed') return 'bg-green-500 hover:bg-green-400';
+    if (status === 'failed') return 'bg-red-500 hover:bg-red-400';
+    return 'bg-yellow-500 hover:bg-yellow-400';
+}
+
+async function loadTimeline() {
+    try {
+        const r = await fetch('/api/recent-tasks?minutes=2');
+        const data = await r.json();
+        const tasks = data.tasks || [];
+        const laneCount = Math.max(data.lane_count || 1, 1);
+
+        const container = document.getElementById('timeline');
+        container.replaceChildren();
+
+        const laneHeight = Math.max(16, Math.min(28, Math.floor(180 / laneCount)));
+        container.style.height = Math.max(100, laneCount * (laneHeight + 2) + 20) + 'px';
+
+        // lane labels (executor slots)
+        for (let i = 0; i < laneCount; i++) {
+            const label = document.createElement('div');
+            label.className = 'absolute text-xs text-gray-600 font-mono';
+            label.style.left = '2px';
+            label.style.top = (i * (laneHeight + 2) + 1) + 'px';
+            label.style.lineHeight = laneHeight + 'px';
+            label.textContent = '#' + i;
+            container.appendChild(label);
+        }
+
+        // task bars
+        for (const t of tasks) {
+            const bar = document.createElement('a');
+            bar.href = '/task/' + encodeURIComponent(t.task_id);
+            bar.className = 'absolute rounded-sm cursor-pointer border-l border-r border-gray-900 ' + barColorClass(t.status);
+            bar.style.left = t.start_pct + '%';
+            bar.style.width = Math.max(0.15, t.width_pct) + '%';
+            bar.style.top = (t.lane * (laneHeight + 2) + 1) + 'px';
+            bar.style.height = laneHeight + 'px';
+            const dur = t.duration ? t.duration.toFixed(1) + 's' : 'running';
+            bar.title = t.task_id + ' (P' + t.partition + ', ' + t.status + ', ' + dur + ')';
+            container.appendChild(bar);
+        }
+
+        if (!tasks.length) {
+            const empty = document.createElement('div');
+            empty.className = 'text-gray-500 text-center py-8 text-sm';
+            empty.textContent = 'No task activity in the last 2 minutes';
+            container.appendChild(empty);
+        }
+    } catch(e) {}
+}
+
+// initial load
+loadTimeline();
+</script>
 {% endblock %}

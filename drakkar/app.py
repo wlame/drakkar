@@ -16,8 +16,10 @@ from drakkar.handler import BaseDrakkarHandler
 from drakkar.logging import setup_logging
 from drakkar.metrics import (
     assigned_partitions,
+    backpressure_active,
     messages_produced,
     start_metrics_server,
+    total_queued,
     worker_info,
 )
 from drakkar.models import CollectResult
@@ -58,6 +60,7 @@ class DrakkarApp:
 
         self._processors: dict[int, PartitionProcessor] = {}
         self._running = False
+        self._paused = False
 
     @property
     def config(self) -> DrakkarConfig:
@@ -139,9 +142,45 @@ class DrakkarApp:
         finally:
             await self._shutdown()
 
+    def _total_queued(self) -> int:
+        """Total messages buffered across all partition queues + in-flight tasks."""
+        return sum(
+            p.queue_size + p.inflight_count
+            for p in self._processors.values()
+        )
+
     async def _poll_loop(self) -> None:
-        """Main polling loop — distributes messages to partition processors."""
+        """Main polling loop with backpressure via Kafka pause/resume.
+
+        Pauses all partitions when total buffered messages exceed
+        high_watermark (2x max_workers). Resumes when they drop below
+        low_watermark (max_workers / 2). This ensures we only hold
+        enough data in memory to keep the executor pool busy.
+        """
+        max_workers = self._config.executor.max_workers
+        high_watermark = max_workers * 32
+        low_watermark = max(1, max_workers * 4)
+
         while self._running:
+            total = self._total_queued()
+            total_queued.set(total)
+
+            if self._paused and total <= low_watermark:
+                partition_ids = list(self._processors.keys())
+                if partition_ids:
+                    self._consumer.resume(partition_ids)
+                    self._paused = False
+                    backpressure_active.set(0)
+
+            if not self._paused and total >= high_watermark:
+                partition_ids = list(self._processors.keys())
+                if partition_ids:
+                    self._consumer.pause(partition_ids)
+                    self._paused = True
+                    backpressure_active.set(1)
+
+            # always call poll_batch for heartbeats — paused partitions
+            # return no messages but the consumer stays in the group
             messages = await self._consumer.poll_batch()
             for msg in messages:
                 processor = self._processors.get(msg.partition)
@@ -149,7 +188,7 @@ class DrakkarApp:
                     processor.enqueue(msg)
 
             if not messages:
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.05)
 
     def _on_assign(self, partition_ids: list[int]) -> None:
         """Handle new partition assignments."""

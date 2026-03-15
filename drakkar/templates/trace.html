@@ -30,11 +30,11 @@
                 {% else %}text-gray-300{% endif %}">
                 {{ e.event }}
             </span>
-            <span class="text-xs text-gray-400" title="{{ format_ts(e.ts) }}">{{ relative_time(e.ts) }} &middot; {{ format_ts(e.ts) }}</span>
+            <span class="text-xs text-gray-400">{{ format_ts_full(e.ts) }}</span>
         </div>
 
         <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
-            {% if e.task_id %}<div><span class="text-gray-500">task:</span> <span class="font-mono">{{ e.task_id }}</span></div>{% endif %}
+            {% if e.task_id %}<div><span class="text-gray-500">task:</span> <a href="/task/{{ e.task_id }}" class="font-mono text-blue-400 hover:underline">{{ e.task_id }}</a></div>{% endif %}
             {% if e.offset is not none %}<div><span class="text-gray-500">offset:</span> <span class="font-mono">{{ e.offset }}</span></div>{% endif %}
             {% if e.exit_code is not none %}<div><span class="text-gray-500">exit:</span> <span class="font-mono {% if e.exit_code != 0 %}text-red-400{% endif %}">{{ e.exit_code }}</span></div>{% endif %}
             {% if e.duration is not none %}<div><span class="text-gray-500">duration:</span> <span class="font-mono">{{ "%.3f"|format(e.duration) }}s</span></div>{% endif %}

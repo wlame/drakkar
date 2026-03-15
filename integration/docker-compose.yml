@@ -15,10 +15,11 @@ services:
     ports:
       - "9092:9092"
     healthcheck:
-      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server=localhost:9092"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server=localhost:9092"]
       interval: 5s
       timeout: 10s
-      retries: 10
+      retries: 15
+      start_period: 10s
 
   kafka-init:
     image: apache/kafka:3.7.0
@@ -28,6 +29,18 @@ services:
     volumes:
       - ./init-kafka.sh:/init-kafka.sh
     entrypoint: ["/bin/bash", "/init-kafka.sh"]
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8088:8080"
+    environment:
+      DYNAMIC_CONFIG_ENABLED: "true"
+      KAFKA_CLUSTERS_0_NAME: drakkar-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
 
   postgres:
     image: postgres:16-alpine
@@ -57,8 +70,13 @@ services:
     environment:
       WORKER_ID: worker-1
       DRAKKAR_CONFIG: /app/drakkar.yaml
+      DRAKKAR_METRICS__PORT: "9090"
+      DRAKKAR_DEBUG__PORT: "8081"
     ports:
       - "9090:9090"
+      - "8081:8081"
+    volumes:
+      - ..:/project:ro
 
   worker-2:
     build:
@@ -73,8 +91,12 @@ services:
       WORKER_ID: worker-2
       DRAKKAR_CONFIG: /app/drakkar.yaml
       DRAKKAR_METRICS__PORT: "9091"
+      DRAKKAR_DEBUG__PORT: "8082"
     ports:
       - "9091:9091"
+      - "8082:8082"
+    volumes:
+      - ..:/project:ro
 
   worker-3:
     build:
@@ -89,8 +111,12 @@ services:
       WORKER_ID: worker-3
       DRAKKAR_CONFIG: /app/drakkar.yaml
       DRAKKAR_METRICS__PORT: "9093"
+      DRAKKAR_DEBUG__PORT: "8083"
     ports:
       - "9093:9093"
+      - "8083:8083"
+    volumes:
+      - ..:/project:ro
 
   producer:
     build:
@@ -102,5 +128,4 @@ services:
     environment:
       KAFKA_BROKERS: kafka:9092
       SOURCE_TOPIC: search-requests
-      MESSAGES_PER_SECOND: "10"
-      TOTAL_MESSAGES: "500"
+      TOTAL_MESSAGES: "5000"

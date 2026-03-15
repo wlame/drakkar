@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import structlog
 import uvicorn
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from drakkar.config import DebugConfig
@@ -24,20 +24,14 @@ logger = structlog.get_logger()
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
-def _relative_time(ts: float | None) -> str:
-    if ts is None:
-        return "never"
-    delta = time.time() - ts
-    if delta < 60:
-        return f"{delta:.0f}s ago"
-    if delta < 3600:
-        return f"{delta / 60:.0f}m ago"
-    if delta < 86400:
-        return f"{delta / 3600:.1f}h ago"
-    return f"{delta / 86400:.1f}d ago"
-
-
 def _format_ts(ts: float | None) -> str:
+    if ts is None:
+        return ""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M:%S")
+
+
+def _format_ts_full(ts: float | None) -> str:
     if ts is None:
         return ""
     from datetime import datetime, timezone
@@ -53,14 +47,27 @@ def create_debug_app(
     app = FastAPI(title="Drakkar Debug", docs_url=None, redoc_url=None)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.autoescape = True
-    templates.env.globals['relative_time'] = _relative_time
     templates.env.globals['format_ts'] = _format_ts
+    templates.env.globals['format_ts_full'] = _format_ts_full
+
+    async def _get_lag() -> dict[int, dict]:
+        consumer = drakkar_app._consumer
+        if not consumer or not drakkar_app.processors:
+            return {}
+        try:
+            return await consumer.get_partition_lag(
+                list(drakkar_app.processors.keys()),
+            )
+        except Exception:
+            return {}
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
         stats = await recorder.get_stats()
         processors = drakkar_app.processors
         pool = drakkar_app._executor_pool
+        lag_data = await _get_lag()
+        total_lag = sum(v['lag'] for v in lag_data.values())
         return templates.TemplateResponse(request, "dashboard.html", {
             'worker_id': drakkar_app._worker_id,
             'uptime': time.monotonic() - drakkar_app._start_time,
@@ -69,18 +76,25 @@ def create_debug_app(
             'partitions': sorted(processors.keys()),
             'pool_active': pool.active_count if pool else 0,
             'pool_max': pool.max_workers if pool else 0,
+            'total_lag': total_lag,
+            'lag_data': lag_data,
         })
 
     @app.get("/partitions", response_class=HTMLResponse)
     async def partitions(request: Request):
         summary = await recorder.get_partition_summary()
         processors = drakkar_app.processors
+        lag_data = await _get_lag()
         for s in summary:
             pid = s['partition']
             proc = processors.get(pid)
             s['queue_size'] = proc.queue_size if proc else 0
             s['pending_offsets'] = proc.offset_tracker.pending_count if proc else 0
             s['is_live'] = pid in processors
+            lag = lag_data.get(pid, {})
+            s['committed_offset'] = lag.get('committed', s.get('last_committed_offset'))
+            s['high_watermark'] = lag.get('high_watermark')
+            s['lag'] = lag.get('lag', 0)
         return templates.TemplateResponse(request, "partitions.html", {
             'worker_id': drakkar_app._worker_id,
             'summary': summary,
@@ -138,17 +152,56 @@ def create_debug_app(
             'events': events,
         })
 
+    @app.get("/task/{task_id}", response_class=HTMLResponse)
+    async def task_detail(request: Request, task_id: str):
+        events = await recorder.get_task_events(task_id)
+        started = next((e for e in events if e['event'] == 'task_started'), None)
+        completed = next((e for e in events if e['event'] == 'task_completed'), None)
+        failed = next((e for e in events if e['event'] == 'task_failed'), None)
+        finished = completed or failed
+        duration = finished['duration'] if finished and finished.get('duration') else None
+        if not duration and started and finished:
+            duration = finished['ts'] - started['ts']
+        import json
+        source_offsets = None
+        if started and started.get('metadata'):
+            try:
+                meta = json.loads(started['metadata'])
+                source_offsets = meta.get('source_offsets')
+            except (json.JSONDecodeError, TypeError):
+                pass
+        args = None
+        if started and started.get('args'):
+            try:
+                args = json.loads(started['args'])
+            except (json.JSONDecodeError, TypeError):
+                args = started['args']
+        return templates.TemplateResponse(request, "task_detail.html", {
+            'worker_id': drakkar_app._worker_id,
+            'task_id': task_id,
+            'events': events,
+            'started': started,
+            'completed': completed,
+            'failed': failed,
+            'duration': duration,
+            'source_offsets': source_offsets,
+            'args': args,
+            'partition': started['partition'] if started else None,
+        })
+
     @app.get("/history", response_class=HTMLResponse)
     async def history(
         request: Request,
-        partition: int | None = Query(default=None),
+        partition: str | None = Query(default=None),
         event_type: str | None = Query(default=None),
         page: int = Query(default=0, ge=0),
     ):
+        part_int = int(partition) if partition and partition.strip() else None
+        evt_type = event_type if event_type and event_type.strip() else None
         limit = 100
         events = await recorder.get_events(
-            partition=partition,
-            event_type=event_type,
+            partition=part_int,
+            event_type=evt_type,
             limit=limit,
             offset=page * limit,
         )
@@ -157,8 +210,143 @@ def create_debug_app(
             'events': events,
             'page': page,
             'has_next': len(events) == limit,
-            'filter_partition': partition,
-            'filter_event_type': event_type,
+            'filter_partition': part_int,
+            'filter_event_type': evt_type,
+        })
+
+    # --- JSON API endpoints for JS-driven pages ---
+
+    @app.get("/api/events")
+    async def api_events(
+        partitions: str | None = Query(default=None),
+        event_types: str | None = Query(default=None),
+        after_id: int = Query(default=0),
+        limit: int = Query(default=200, le=10000),
+    ):
+        """Get events as JSON. Supports multiple partitions/types as comma-separated."""
+        await recorder._flush()
+        part_list = [int(p) for p in partitions.split(',') if p.strip()] if partitions else None
+        type_list = [t.strip() for t in event_types.split(',') if t.strip()] if event_types else None
+
+        if not recorder._db:
+            return JSONResponse([])
+
+        conditions = []
+        params: list = []
+        if part_list:
+            placeholders = ','.join(['?'] * len(part_list))
+            conditions.append(f"partition IN ({placeholders})")
+            params.extend(part_list)
+        if type_list:
+            placeholders = ','.join(['?'] * len(type_list))
+            conditions.append(f"event IN ({placeholders})")
+            params.extend(type_list)
+        if after_id > 0:
+            conditions.append("id > ?")
+            params.append(after_id)
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        query = f"SELECT * FROM events {where} ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
+        async with recorder._db.execute(query, params) as cursor:
+            columns = [d[0] for d in cursor.description]
+            rows = await cursor.fetchall()
+            return JSONResponse([dict(zip(columns, row)) for row in rows])
+
+    @app.get("/api/recent-tasks")
+    async def api_recent_tasks(minutes: int = Query(default=2)):
+        """Get tasks from the last N minutes for timeline visualization."""
+        await recorder._flush()
+        if not recorder._db:
+            return JSONResponse([])
+
+        since = time.time() - (minutes * 60)
+        query = """
+            SELECT * FROM events
+            WHERE event IN ('task_started', 'task_completed', 'task_failed')
+            AND ts >= ?
+            ORDER BY ts ASC
+        """
+        async with recorder._db.execute(query, [since]) as cursor:
+            columns = [d[0] for d in cursor.description]
+            rows = await cursor.fetchall()
+            events = [dict(zip(columns, row)) for row in rows]
+
+        # group by task_id into timeline entries
+        tasks: dict[str, dict] = {}
+        now = time.time()
+        for e in events:
+            tid = e.get('task_id')
+            if not tid:
+                continue
+            if tid not in tasks:
+                tasks[tid] = {
+                    'task_id': tid,
+                    'partition': e.get('partition'),
+                    'start_ts': None,
+                    'end_ts': None,
+                    'duration': None,
+                    'status': 'running',
+                    'args': e.get('args'),
+                }
+            t = tasks[tid]
+            if e['event'] == 'task_started':
+                t['start_ts'] = e['ts']
+            elif e['event'] in ('task_completed', 'task_failed'):
+                t['end_ts'] = e['ts']
+                t['status'] = 'completed' if e['event'] == 'task_completed' else 'failed'
+                t['duration'] = e.get('duration')
+
+        # compute relative positions for timeline
+        timeline_start = now - (minutes * 60)
+        timeline_span = minutes * 60
+
+        # sort by start time for lane assignment
+        sorted_tasks = sorted(
+            [t for t in tasks.values() if t['start_ts']],
+            key=lambda t: t['start_ts'],
+        )
+
+        # assign tasks to executor lanes (slots), capped at max_workers
+        pool = drakkar_app._executor_pool
+        max_lanes = pool.max_workers if pool else 8
+        lane_end_times: list[float] = [0.0] * max_lanes
+        result = []
+        for t in sorted_tasks:
+            start_pct = max(0, (t['start_ts'] - timeline_start) / timeline_span * 100)
+            end_ts = t['end_ts'] or now
+            end_pct = min(100, (end_ts - timeline_start) / timeline_span * 100)
+            width_pct = max(0.15, end_pct - start_pct)
+
+            # find the lane with the earliest end time (most idle slot)
+            lane = min(range(max_lanes), key=lambda i: lane_end_times[i])
+            lane_end_times[lane] = end_ts
+
+            t['lane'] = lane
+            t['start_pct'] = round(start_pct, 2)
+            t['width_pct'] = round(width_pct, 2)
+            result.append(t)
+
+        return JSONResponse({'tasks': result, 'lane_count': max_lanes})
+
+    @app.get("/api/dashboard")
+    async def api_dashboard():
+        """Dashboard data as JSON for JS refresh."""
+        stats = await recorder.get_stats()
+        processors = drakkar_app.processors
+        pool = drakkar_app._executor_pool
+        lag_data = await _get_lag()
+        total_lag = sum(v['lag'] for v in lag_data.values())
+        return JSONResponse({
+            'uptime': time.monotonic() - drakkar_app._start_time,
+            'stats': stats,
+            'partition_count': len(processors),
+            'partitions': sorted(processors.keys()),
+            'pool_active': pool.active_count if pool else 0,
+            'pool_max': pool.max_workers if pool else 0,
+            'total_lag': total_lag,
+            'lag_data': {str(k): v for k, v in lag_data.items()},
         })
 
     return app

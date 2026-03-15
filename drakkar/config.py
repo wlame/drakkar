@@ -102,6 +102,39 @@ def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
         with open(path) as f:
             yaml_data = yaml.safe_load(f) or {}
 
-        return DrakkarConfig(**yaml_data)
+        # pydantic-settings ignores env vars for nested models when init
+        # kwargs are passed. Fix: extract DRAKKAR_* env vars, parse them
+        # into nested structure, and deep-merge on top of YAML.
+        env_overrides = _parse_env_overrides("DRAKKAR_", "__")
+        merged = _deep_merge(yaml_data, env_overrides)
+        return DrakkarConfig(**merged)
 
     return DrakkarConfig()
+
+
+def _parse_env_overrides(prefix: str, delimiter: str) -> dict:
+    """Extract env vars with prefix, split by delimiter into nested dict."""
+    result: dict = {}
+    for key, value in os.environ.items():
+        if not key.startswith(prefix):
+            continue
+        # skip the config file path env var itself
+        if key == f"{prefix}CONFIG":
+            continue
+        parts = key[len(prefix):].lower().split(delimiter)
+        d = result
+        for part in parts[:-1]:
+            d = d.setdefault(part, {})
+        d[parts[-1]] = value
+    return result
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Deep-merge override on top of base. Override wins for leaf values."""
+    result = dict(base)
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result

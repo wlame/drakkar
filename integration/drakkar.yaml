@@ -9,9 +9,9 @@ kafka:
   heartbeat_interval_ms: 3000
 
 executor:
-  binary_path: "/usr/bin/rg"
-  max_workers: 4
-  task_timeout_seconds: 30
+  binary_path: "/usr/local/bin/run-rg"
+  max_workers: 8
+  task_timeout_seconds: 120
   window_size: 10
 
 postgres:
@@ -26,3 +26,12 @@ metrics:
 logging:
   level: "INFO"
   format: "json"
+
+debug:
+  enabled: true
+  port: 8080
+  db_path: "/tmp/drakkar-debug.db"
+  retention_hours: 24
+  retention_max_events: 100000
+  store_output: true
+  flush_interval_seconds: 3

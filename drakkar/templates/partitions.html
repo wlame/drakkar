@@ -12,7 +12,9 @@
             <th class="py-2 px-3">Status</th>
             <th class="py-2 px-3">Last Consumed</th>
             <th class="py-2 px-3">Last Committed</th>
-            <th class="py-2 px-3">Committed Offset</th>
+            <th class="py-2 px-3">Committed</th>
+            <th class="py-2 px-3">High WM</th>
+            <th class="py-2 px-3">Lag</th>
             <th class="py-2 px-3">Queue</th>
             <th class="py-2 px-3">Pending</th>
             <th class="py-2 px-3">Consumed</th>
@@ -33,9 +35,11 @@
                 <span class="inline-block w-2 h-2 bg-gray-500 rounded-full"></span> history
                 {% endif %}
             </td>
-            <td class="py-2 px-3 text-gray-400">{{ relative_time(s.last_consumed) }}</td>
-            <td class="py-2 px-3 text-gray-400">{{ relative_time(s.last_committed) }}</td>
-            <td class="py-2 px-3 font-mono">{{ s.last_committed_offset or '-' }}</td>
+            <td class="py-2 px-3 text-gray-400">{{ format_ts(s.last_consumed) }}</td>
+            <td class="py-2 px-3 text-gray-400">{{ format_ts(s.last_committed) }}</td>
+            <td class="py-2 px-3 font-mono">{{ s.committed_offset or '-' }}</td>
+            <td class="py-2 px-3 font-mono">{{ s.high_watermark or '-' }}</td>
+            <td class="py-2 px-3 font-mono {% if s.lag > 20 %}text-red-400{% elif s.lag > 5 %}text-yellow-400{% else %}text-green-400{% endif %}">{{ s.lag }}</td>
             <td class="py-2 px-3 font-mono">{{ s.queue_size }}</td>
             <td class="py-2 px-3 font-mono">{{ s.pending_offsets }}</td>
             <td class="py-2 px-3 font-mono">{{ s.consumed_count }}</td>
@@ -44,7 +48,7 @@
         </tr>
         {% endfor %}
         {% if not summary %}
-        <tr><td colspan="10" class="py-4 text-center text-gray-500">No partition data recorded yet</td></tr>
+        <tr><td colspan="12" class="py-4 text-center text-gray-500">No partition data recorded yet</td></tr>
         {% endif %}
     </tbody>
 </table>

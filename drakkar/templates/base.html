@@ -25,5 +25,16 @@
     <main class="max-w-7xl mx-auto px-4 py-6">
         {% block content %}{% endblock %}
     </main>
+    <script>
+    document.addEventListener('click', function(e) {
+        var el = e.target.closest('.expandable');
+        if (!el) return;
+        el.classList.toggle('truncate');
+        el.classList.toggle('max-w-xs');
+        el.classList.toggle('max-w-md');
+        el.classList.toggle('whitespace-pre-wrap');
+        el.classList.toggle('break-all');
+    });
+    </script>
 </body>
 </html>

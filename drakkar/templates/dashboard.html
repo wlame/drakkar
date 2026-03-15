@@ -1,55 +1,168 @@
 {% extends "base.html" %}
 {% block title %}Dashboard — Drakkar Debug{% endblock %}
-{% block head %}<meta http-equiv="refresh" content="5">{% endblock %}
 
 {% block content %}
-<h1 class="text-2xl font-bold mb-6">Dashboard</h1>
+<div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold">Dashboard</h1>
+    <button id="toggle-refresh" class="text-sm px-3 py-1 rounded bg-green-700 hover:bg-green-600" onclick="toggleRefresh()">
+        Auto-refresh: ON
+    </button>
+</div>
 
-<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+<div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
     <div class="bg-gray-800 rounded-lg p-4">
         <div class="text-sm text-gray-400">Uptime</div>
-        <div class="text-2xl font-mono">{{ "%.0f"|format(uptime // 60) }}m {{ "%.0f"|format(uptime % 60) }}s</div>
+        <div id="v-uptime" class="text-2xl font-mono">{{ "%.0f"|format(uptime // 60) }}m {{ "%.0f"|format(uptime % 60) }}s</div>
     </div>
     <div class="bg-gray-800 rounded-lg p-4">
         <div class="text-sm text-gray-400">Partitions</div>
-        <div class="text-2xl font-mono">{{ partition_count }}</div>
+        <div id="v-partitions" class="text-2xl font-mono">{{ partition_count }}</div>
     </div>
     <div class="bg-gray-800 rounded-lg p-4">
         <div class="text-sm text-gray-400">Executor Pool</div>
-        <div class="text-2xl font-mono">{{ pool_active }} / {{ pool_max }}</div>
+        <div id="v-pool" class="text-2xl font-mono">{{ pool_active }} / {{ pool_max }}</div>
     </div>
     <div class="bg-gray-800 rounded-lg p-4">
         <div class="text-sm text-gray-400">Total Events</div>
-        <div class="text-2xl font-mono">{{ stats.total_events or 0 }}</div>
+        <div id="v-events" class="text-2xl font-mono">{{ stats.total_events or 0 }}</div>
+    </div>
+    <div class="bg-gray-800 rounded-lg p-4">
+        <div class="text-sm text-gray-400">Consumer Lag</div>
+        <div id="v-lag" class="text-2xl font-mono {% if total_lag > 100 %}text-red-400{% elif total_lag > 20 %}text-yellow-400{% else %}text-green-400{% endif %}">{{ total_lag }}</div>
     </div>
 </div>
 
 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
     <div class="bg-gray-800 rounded-lg p-4">
         <div class="text-sm text-gray-400">Consumed</div>
-        <div class="text-xl font-mono text-blue-400">{{ stats.consumed or 0 }}</div>
+        <div id="v-consumed" class="text-xl font-mono text-blue-400">{{ stats.consumed or 0 }}</div>
     </div>
     <div class="bg-gray-800 rounded-lg p-4">
         <div class="text-sm text-gray-400">Completed</div>
-        <div class="text-xl font-mono text-green-400">{{ stats.completed or 0 }}</div>
+        <div id="v-completed" class="text-xl font-mono text-green-400">{{ stats.completed or 0 }}</div>
     </div>
     <div class="bg-gray-800 rounded-lg p-4">
         <div class="text-sm text-gray-400">Failed</div>
-        <div class="text-xl font-mono text-red-400">{{ stats.failed or 0 }}</div>
+        <div id="v-failed" class="text-xl font-mono text-red-400">{{ stats.failed or 0 }}</div>
     </div>
     <div class="bg-gray-800 rounded-lg p-4">
         <div class="text-sm text-gray-400">Produced</div>
-        <div class="text-xl font-mono text-purple-400">{{ stats.produced or 0 }}</div>
+        <div id="v-produced" class="text-xl font-mono text-purple-400">{{ stats.produced or 0 }}</div>
     </div>
 </div>
 
-<h2 class="text-lg font-semibold mb-3">Assigned Partitions</h2>
-<div class="flex flex-wrap gap-2">
-    {% for p in partitions %}
-    <a href="/partitions/{{ p }}" class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-sm font-mono">{{ p }}</a>
+<h2 class="text-lg font-semibold mb-3">Partition Lag</h2>
+<div id="v-lag-bars" class="space-y-1 mb-6">
+    {% for pid in partitions %}
+    {% set lag = lag_data.get(pid, {}) %}
+    {% set plag = lag.get('lag', 0) %}
+    {% set max_lag = [total_lag, 1] | max %}
+    <a href="/partitions/{{ pid }}" class="flex items-center gap-2 hover:bg-gray-800 rounded px-2 py-0.5">
+        <span class="text-xs text-gray-500 font-mono w-8 text-right">{{ pid }}</span>
+        <div class="flex-1 bg-gray-800 rounded-full h-4 overflow-hidden">
+            <div class="h-4 rounded-full transition-all {% if plag > 20 %}bg-red-500{% elif plag > 5 %}bg-yellow-500{% else %}bg-green-600{% endif %}"
+                 style="width: {{ (plag / max_lag * 100) | round(1) }}%; min-width: {% if plag > 0 %}2px{% else %}0{% endif %}"></div>
+        </div>
+        <span class="text-xs font-mono w-12 text-right {% if plag > 20 %}text-red-400{% elif plag > 5 %}text-yellow-400{% else %}text-green-400{% endif %}">{{ plag }}</span>
+    </a>
     {% endfor %}
     {% if not partitions %}
-    <span class="text-gray-500">No partitions assigned</span>
+    <div class="text-gray-500 text-center py-4">No partitions assigned</div>
     {% endif %}
 </div>
+
+<script>
+let refreshEnabled = true;
+let refreshTimer = null;
+
+function toggleRefresh() {
+    refreshEnabled = !refreshEnabled;
+    const btn = document.getElementById('toggle-refresh');
+    if (refreshEnabled) {
+        btn.textContent = 'Auto-refresh: ON';
+        btn.className = 'text-sm px-3 py-1 rounded bg-green-700 hover:bg-green-600';
+        startRefresh();
+    } else {
+        btn.textContent = 'Auto-refresh: OFF';
+        btn.className = 'text-sm px-3 py-1 rounded bg-gray-600 hover:bg-gray-500';
+        if (refreshTimer) clearInterval(refreshTimer);
+    }
+}
+
+function lagColor(lag) {
+    if (lag > 20) return 'text-red-400';
+    if (lag > 5) return 'text-yellow-400';
+    return 'text-green-400';
+}
+
+function barColor(lag) {
+    if (lag > 20) return 'bg-red-500';
+    if (lag > 5) return 'bg-yellow-500';
+    return 'bg-green-600';
+}
+
+async function refresh() {
+    try {
+        const r = await fetch('/api/dashboard');
+        const d = await r.json();
+        const u = d.uptime;
+        document.getElementById('v-uptime').textContent = Math.floor(u/60) + 'm ' + Math.floor(u%60) + 's';
+        document.getElementById('v-partitions').textContent = d.partition_count;
+        document.getElementById('v-pool').textContent = d.pool_active + ' / ' + d.pool_max;
+        document.getElementById('v-events').textContent = d.stats.total_events || 0;
+        const lagEl = document.getElementById('v-lag');
+        lagEl.textContent = d.total_lag;
+        lagEl.className = 'text-2xl font-mono ' + lagColor(d.total_lag);
+        document.getElementById('v-consumed').textContent = d.stats.consumed || 0;
+        document.getElementById('v-completed').textContent = d.stats.completed || 0;
+        document.getElementById('v-failed').textContent = d.stats.failed || 0;
+        document.getElementById('v-produced').textContent = d.stats.produced || 0;
+
+        // rebuild lag bars using safe DOM methods
+        const maxLag = Math.max(d.total_lag, 1);
+        const container = document.getElementById('v-lag-bars');
+        container.replaceChildren();
+        for (const pid of d.partitions) {
+            const lag = (d.lag_data[String(pid)] || {}).lag || 0;
+            const pct = (lag / maxLag * 100).toFixed(1);
+
+            const a = document.createElement('a');
+            a.href = '/partitions/' + pid;
+            a.className = 'flex items-center gap-2 hover:bg-gray-800 rounded px-2 py-0.5';
+
+            const label = document.createElement('span');
+            label.className = 'text-xs text-gray-500 font-mono w-8 text-right';
+            label.textContent = pid;
+
+            const barOuter = document.createElement('div');
+            barOuter.className = 'flex-1 bg-gray-800 rounded-full h-4 overflow-hidden';
+            const barInner = document.createElement('div');
+            barInner.className = 'h-4 rounded-full transition-all ' + barColor(lag);
+            barInner.style.width = pct + '%';
+            if (lag > 0) barInner.style.minWidth = '2px';
+            barOuter.appendChild(barInner);
+
+            const num = document.createElement('span');
+            num.className = 'text-xs font-mono w-12 text-right ' + lagColor(lag);
+            num.textContent = lag;
+
+            a.appendChild(label);
+            a.appendChild(barOuter);
+            a.appendChild(num);
+            container.appendChild(a);
+        }
+        if (!d.partitions.length) {
+            const empty = document.createElement('div');
+            empty.className = 'text-gray-500 text-center py-4';
+            empty.textContent = 'No partitions assigned';
+            container.appendChild(empty);
+        }
+    } catch(e) {}
+}
+
+function startRefresh() {
+    refreshTimer = setInterval(refresh, 3000);
+}
+startRefresh();
+</script>
 {% endblock %}

@@ -266,6 +266,7 @@ class EventRecorder:
 
     async def get_trace(self, partition: int, msg_offset: int) -> list[dict]:
         """Get the full lifecycle of a message by partition and offset."""
+        await self._flush()
         if not self._db:
             return []
         query = """
@@ -281,6 +282,17 @@ class EventRecorder:
             ORDER BY id ASC
         """
         async with self._db.execute(query, [partition, msg_offset, partition, msg_offset]) as cursor:
+            columns = [d[0] for d in cursor.description]
+            rows = await cursor.fetchall()
+            return [dict(zip(columns, row)) for row in rows]
+
+    async def get_task_events(self, task_id: str) -> list[dict]:
+        """Get all events for a specific task_id, ordered chronologically."""
+        await self._flush()  # ensure recent events are queryable
+        if not self._db:
+            return []
+        query = "SELECT * FROM events WHERE task_id = ? ORDER BY id ASC"
+        async with self._db.execute(query, [task_id]) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
             return [dict(zip(columns, row)) for row in rows]
@@ -310,6 +322,7 @@ class EventRecorder:
 
     async def get_active_tasks(self) -> list[dict]:
         """Get tasks that started but haven't completed or failed."""
+        await self._flush()
         if not self._db:
             return []
         query = """

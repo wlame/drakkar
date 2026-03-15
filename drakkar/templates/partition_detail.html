@@ -23,7 +23,7 @@
     <tbody>
         {% for e in events %}
         <tr class="border-b border-gray-800 hover:bg-gray-800">
-            <td class="py-2 px-3 text-gray-400 text-xs whitespace-nowrap" title="{{ format_ts(e.ts) }}">{{ relative_time(e.ts) }}</td>
+            <td class="py-2 px-3 text-gray-400 text-xs whitespace-nowrap" title="{{ format_ts(e.ts) }}">{{ format_ts(e.ts) }}</td>
             <td class="py-2 px-3">
                 {% if e.event == 'task_completed' %}
                 <span class="text-green-400">{{ e.event }}</span>
@@ -42,7 +42,7 @@
                 <a href="/trace/{{ partition_id }}/{{ e.offset }}" class="text-blue-400 hover:underline">{{ e.offset }}</a>
                 {% endif %}
             </td>
-            <td class="py-2 px-3 font-mono text-xs">{{ e.task_id or '' }}</td>
+            <td class="py-2 px-3 font-mono text-xs">{% if e.task_id %}<a href="/task/{{ e.task_id }}" class="text-blue-400 hover:underline">{{ e.task_id }}</a>{% endif %}</td>
             <td class="py-2 px-3 font-mono">{% if e.duration is not none %}{{ "%.2f"|format(e.duration) }}s{% endif %}</td>
             <td class="py-2 px-3 font-mono {% if e.exit_code is not none and e.exit_code != 0 %}text-red-400{% endif %}">
                 {{ e.exit_code if e.exit_code is not none else '' }}
@@ -50,7 +50,7 @@
             <td class="py-2 px-3 font-mono text-xs">
                 {% if e.stdout_size %}{{ e.stdout_size }}B{% endif %}
             </td>
-            <td class="py-2 px-3 text-xs text-gray-500 max-w-xs truncate">{{ e.args or e.metadata or '' }}</td>
+            <td class="py-2 px-3 text-xs text-gray-500 max-w-xs truncate expandable cursor-pointer" title="Click to expand">{{ e.args or e.metadata or '' }}</td>
         </tr>
         {% endfor %}
     </tbody>

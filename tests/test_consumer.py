@@ -136,8 +136,9 @@ async def test_commit_offsets(mock_consumer_cls, kafka_config):
     await consumer.commit({0: 100, 1: 200})
 
     mock_inner.commit.assert_called_once()
-    topic_partitions = mock_inner.commit.call_args[0][0]
-    assert len(topic_partitions) == 2
+    call_kwargs = mock_inner.commit.call_args[1]
+    assert len(call_kwargs['offsets']) == 2
+    assert call_kwargs['asynchronous'] is False
 
 
 @patch("drakkar.consumer.Consumer")

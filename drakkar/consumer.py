@@ -117,11 +117,50 @@ class KafkaConsumer:
         ]
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            None, self._consumer.commit, topic_partitions
+            None,
+            lambda: self._consumer.commit(offsets=topic_partitions, asynchronous=False),
         )
         for partition_id in offsets:
             offsets_committed.labels(partition=str(partition_id)).inc()
         logger.debug("offsets_committed", category="kafka", offsets=offsets)
+
+    def pause(self, partition_ids: list[int]) -> None:
+        """Pause consuming from specific partitions (backpressure)."""
+        tps = [TopicPartition(self._config.source_topic, pid) for pid in partition_ids]
+        self._consumer.pause(tps)
+        logger.debug("partitions_paused", category="kafka", partitions=partition_ids)
+
+    def resume(self, partition_ids: list[int]) -> None:
+        """Resume consuming from previously paused partitions."""
+        tps = [TopicPartition(self._config.source_topic, pid) for pid in partition_ids]
+        self._consumer.resume(tps)
+        logger.debug("partitions_resumed", category="kafka", partitions=partition_ids)
+
+    async def get_partition_lag(self, partition_ids: list[int]) -> dict[int, dict]:
+        """Get committed offset, high watermark, and lag for each partition.
+
+        Returns {partition_id: {"committed": N, "high_watermark": M, "lag": M-N}}
+        """
+        loop = asyncio.get_running_loop()
+        result = {}
+        for pid in partition_ids:
+            try:
+                tp = TopicPartition(self._config.source_topic, pid)
+                low, high = await loop.run_in_executor(
+                    None, self._consumer.get_watermark_offsets, tp,
+                )
+                committed_list = await loop.run_in_executor(
+                    None, self._consumer.committed, [tp],
+                )
+                committed_offset = committed_list[0].offset if committed_list and committed_list[0].offset >= 0 else 0
+                result[pid] = {
+                    'committed': committed_offset,
+                    'high_watermark': high,
+                    'lag': high - committed_offset,
+                }
+            except Exception:
+                result[pid] = {'committed': 0, 'high_watermark': 0, 'lag': 0}
+        return result
 
     def close(self) -> None:
         """Close the consumer."""

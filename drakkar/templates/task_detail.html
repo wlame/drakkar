@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}Task {{ task_id }} — Drakkar Debug{% endblock %}
+
+{% block content %}
+<div class="flex items-center gap-4 mb-6">
+    <h1 class="text-2xl font-bold">Task Detail</h1>
+    <span class="bg-gray-700 px-3 py-1 rounded font-mono text-sm">{{ task_id }}</span>
+    {% if partition is not none %}
+    <a href="/partitions/{{ partition }}" class="text-sm text-gray-400 hover:text-white">&larr; partition {{ partition }}</a>
+    {% endif %}
+</div>
+
+<!-- Summary card -->
+<div class="bg-gray-800 rounded-lg p-5 mb-6">
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div>
+            <div class="text-xs text-gray-400 mb-1">Status</div>
+            <div class="text-lg font-semibold
+                {% if completed %}text-green-400{% elif failed %}text-red-400{% elif started %}text-yellow-400{% else %}text-gray-400{% endif %}">
+                {% if completed %}completed{% elif failed %}failed{% elif started %}running{% else %}unknown{% endif %}
+            </div>
+        </div>
+        <div>
+            <div class="text-xs text-gray-400 mb-1">Partition</div>
+            <div class="text-lg font-mono">
+                {% if partition is not none %}<a href="/partitions/{{ partition }}" class="text-blue-400 hover:underline">{{ partition }}</a>{% else %}-{% endif %}
+            </div>
+        </div>
+        <div>
+            <div class="text-xs text-gray-400 mb-1">Duration</div>
+            <div class="text-lg font-mono">{% if duration is not none %}{{ "%.3f"|format(duration) }}s{% else %}-{% endif %}</div>
+        </div>
+        <div>
+            <div class="text-xs text-gray-400 mb-1">Exit Code</div>
+            <div class="text-lg font-mono {% if completed and completed.exit_code != 0 %}text-red-400{% elif failed %}text-red-400{% endif %}">
+                {% if completed %}{{ completed.exit_code }}{% elif failed %}{{ failed.exit_code or '-' }}{% else %}-{% endif %}
+            </div>
+        </div>
+    </div>
+
+    {% if started %}
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+        <div>
+            <div class="text-xs text-gray-400 mb-1">Started</div>
+            <div class="text-sm font-mono">{{ format_ts(started.ts) }}</div>
+            <div class="text-xs text-gray-500">{{ format_ts_full(started.ts) }}</div>
+        </div>
+        {% if completed or failed %}
+        <div>
+            <div class="text-xs text-gray-400 mb-1">Finished</div>
+            {% set fin = completed or failed %}
+            <div class="text-sm font-mono">{{ format_ts(fin.ts) }}</div>
+            <div class="text-xs text-gray-500">{{ format_ts_full(fin.ts) }}</div>
+        </div>
+        {% endif %}
+        {% if completed and completed.stdout_size %}
+        <div>
+            <div class="text-xs text-gray-400 mb-1">Stdout Size</div>
+            <div class="text-sm font-mono">{{ completed.stdout_size }} bytes</div>
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+
+<!-- Source offsets -->
+{% if source_offsets %}
+<div class="mb-6">
+    <h2 class="text-lg font-semibold mb-2">Source Message Offsets</h2>
+    <div class="flex flex-wrap gap-2">
+        {% for off in source_offsets %}
+        <a href="/trace/{{ partition }}/{{ off }}" class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-sm font-mono text-blue-400">
+            {{ partition }}:{{ off }}
+        </a>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<!-- CLI args -->
+{% if args %}
+<div class="mb-6">
+    <h2 class="text-lg font-semibold mb-2">CLI Arguments</h2>
+    <div class="bg-gray-800 rounded p-3">
+        <code class="text-sm font-mono text-gray-300 break-all">{{ args }}</code>
+    </div>
+</div>
+{% endif %}
+
+<!-- Stdout/stderr -->
+{% if completed and completed.stdout %}
+<div class="mb-6">
+    <h2 class="text-lg font-semibold mb-2">Stdout</h2>
+    <pre class="bg-gray-800 rounded p-3 text-xs font-mono overflow-x-auto max-h-64 text-gray-300">{{ completed.stdout }}</pre>
+</div>
+{% endif %}
+
+{% if completed and completed.stderr %}
+<div class="mb-6">
+    <h2 class="text-lg font-semibold mb-2">Stderr</h2>
+    <pre class="bg-gray-800 rounded p-3 text-xs font-mono overflow-x-auto max-h-64 text-red-300">{{ completed.stderr }}</pre>
+</div>
+{% endif %}
+
+{% if failed and failed.stderr %}
+<div class="mb-6">
+    <h2 class="text-lg font-semibold mb-2">Stderr</h2>
+    <pre class="bg-gray-800 rounded p-3 text-xs font-mono overflow-x-auto max-h-64 text-red-300">{{ failed.stderr }}</pre>
+</div>
+{% endif %}
+
+<!-- Event timeline -->
+<h2 class="text-lg font-semibold mb-3">Event Timeline</h2>
+<div class="space-y-2">
+    {% for e in events %}
+    <div class="bg-gray-800 rounded p-3 border-l-4
+        {% if e.event == 'task_started' %}border-yellow-500
+        {% elif e.event == 'task_completed' %}border-green-500
+        {% elif e.event == 'task_failed' %}border-red-500
+        {% else %}border-gray-600{% endif %}
+        flex items-center justify-between">
+        <div>
+            <span class="font-semibold text-sm
+                {% if e.event == 'task_completed' %}text-green-400
+                {% elif e.event == 'task_failed' %}text-red-400
+                {% elif e.event == 'task_started' %}text-yellow-400
+                {% else %}text-gray-300{% endif %}">{{ e.event }}</span>
+            {% if e.exit_code is not none %}
+            <span class="text-xs text-gray-400 ml-3">exit={{ e.exit_code }}</span>
+            {% endif %}
+            {% if e.duration is not none %}
+            <span class="text-xs text-gray-400 ml-3">{{ "%.3f"|format(e.duration) }}s</span>
+            {% endif %}
+        </div>
+        <span class="text-xs text-gray-500" title="{{ format_ts(e.ts) }}">{{ format_ts(e.ts) }}</span>
+    </div>
+    {% endfor %}
+    {% if not events %}
+    <div class="text-gray-500 text-center py-4">No events found for this task</div>
+    {% endif %}
+</div>
+{% endblock %}

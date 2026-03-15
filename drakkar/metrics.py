@@ -75,6 +75,16 @@ offset_lag = Gauge(
     ["partition"],
 )
 
+backpressure_active = Gauge(
+    "drakkar_backpressure_active",
+    "Whether consumer is paused due to backpressure (1=paused, 0=flowing)",
+)
+
+total_queued = Gauge(
+    "drakkar_total_queued",
+    "Total messages buffered in partition queues plus in-flight tasks",
+)
+
 assigned_partitions = Gauge(
     "drakkar_assigned_partitions",
     "Number of partitions currently assigned to this worker",

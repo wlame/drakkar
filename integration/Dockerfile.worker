@@ -8,15 +8,15 @@ RUN pip install uv
 
 WORKDIR /app
 
-COPY pyproject.toml /app/
 RUN uv pip install --system --no-cache-dir \
     confluent-kafka pydantic pydantic-settings asyncpg \
-    prometheus-client structlog pyyaml
+    prometheus-client structlog pyyaml \
+    aiosqlite fastapi uvicorn jinja2
 
 COPY drakkar/ /app/drakkar/
 COPY integration/handler.py /app/handler.py
 COPY integration/worker.py /app/worker.py
 COPY integration/drakkar.yaml /app/drakkar.yaml
-COPY integration/sample_data/ /data/
+COPY integration/run-rg.sh /usr/local/bin/run-rg
 
 CMD ["python", "worker.py"]

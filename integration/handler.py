@@ -1,12 +1,15 @@
-"""Integration test handler: uses `rg` to search text files for patterns."""
+"""Integration test handler: runs `rg` multiple times against project source."""
 
+import asyncio
 import json
+import random
 import uuid
 
 from drakkar import (
     BaseDrakkarHandler,
     CollectResult,
     DBRow,
+    DrakkarConfig,
     ErrorAction,
     ExecutorError,
     ExecutorResult,
@@ -18,36 +21,47 @@ from drakkar import (
 
 
 class RipgrepHandler(BaseDrakkarHandler):
-    """Searches text files using ripgrep based on incoming Kafka messages.
+    """Searches source files using ripgrep based on incoming Kafka messages.
 
-    Expected input message format:
+    Input message:
     {
         "request_id": "uuid",
         "pattern": "regex pattern",
-        "file_path": "/data/sample.txt"
+        "file_path": "/project/drakkar/app.py",
+        "repeat": 5
     }
 
-    Output message format:
-    {
-        "request_id": "uuid",
-        "pattern": "regex pattern",
-        "file_path": "/data/sample.txt",
-        "match_count": 5,
-        "matches": ["line1", "line2", ...]
-    }
+    The executor runs a shell script that calls `rg` `repeat` times,
+    simulating CPU-bound work. 3% of messages have repeat=200 to
+    simulate long-running tasks.
     """
+
+    async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
+        import structlog
+        logger = structlog.get_logger()
+        await logger.ainfo(
+            "handler_startup",
+            category="handler",
+            binary=config.executor.binary_path,
+            max_workers=config.executor.max_workers,
+        )
+        return config
 
     async def arrange(
         self,
         messages: list[SourceMessage],
         pending: PendingContext,
     ) -> list[ExecutorTask]:
+        # simulate IO-bound preparation (e.g., DB lookup, cache check)
+        await asyncio.sleep(random.uniform(0.005, 0.03))
+
         tasks = []
         for msg in messages:
             payload = json.loads(msg.value)
             request_id = payload.get("request_id", str(uuid.uuid4()))
             pattern = payload["pattern"]
             file_path = payload["file_path"]
+            repeat = payload.get("repeat", 1)
 
             task_id = f"rg-{request_id}"
 
@@ -56,22 +70,21 @@ class RipgrepHandler(BaseDrakkarHandler):
 
             tasks.append(ExecutorTask(
                 task_id=task_id,
-                args=[
-                    "--no-filename",
-                    "--no-line-number",
-                    pattern,
-                    file_path,
-                ],
+                args=[str(repeat), pattern, file_path],
                 metadata={
                     "request_id": request_id,
                     "pattern": pattern,
                     "file_path": file_path,
+                    "repeat": repeat,
                 },
                 source_offsets=[msg.offset],
             ))
         return tasks
 
     async def collect(self, result: ExecutorResult) -> CollectResult | None:
+        # simulate post-processing (e.g., parsing, enrichment)
+        await asyncio.sleep(random.uniform(0.002, 0.01))
+
         matches = [
             line for line in result.stdout.strip().split("\n") if line
         ]
@@ -80,8 +93,10 @@ class RipgrepHandler(BaseDrakkarHandler):
             "request_id": result.task.metadata["request_id"],
             "pattern": result.task.metadata["pattern"],
             "file_path": result.task.metadata["file_path"],
+            "repeat": result.task.metadata["repeat"],
             "match_count": len(matches),
-            "matches": matches[:100],
+            "duration_seconds": result.duration_seconds,
+            "matches": matches[:50],
         }
 
         return CollectResult(
@@ -108,22 +123,16 @@ class RipgrepHandler(BaseDrakkarHandler):
     async def on_window_complete(self, results, source_messages):
         return None
 
-    async def on_error(
-        self,
-        task: ExecutorTask,
-        error: ExecutorError,
-    ) -> str | list[ExecutorTask]:
-        # rg exits with 1 when no matches found — treat as success with 0 matches
-        if error.exit_code == 1:
-            return ErrorAction.SKIP
+    async def on_error(self, task: ExecutorTask, error: ExecutorError):
+        # rg exits with 1 when no matches found — not a real error
         return ErrorAction.SKIP
 
     async def on_assign(self, partitions: list[int]) -> None:
         import structlog
         logger = structlog.get_logger()
-        await logger.ainfo("partitions_assigned_to_handler", partitions=partitions)
+        await logger.ainfo("handler_partitions_assigned", category="handler", partitions=partitions)
 
     async def on_revoke(self, partitions: list[int]) -> None:
         import structlog
         logger = structlog.get_logger()
-        await logger.ainfo("partitions_revoked_from_handler", partitions=partitions)
+        await logger.ainfo("handler_partitions_revoked", category="handler", partitions=partitions)
