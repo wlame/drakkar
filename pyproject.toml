@@ -2,7 +2,7 @@
 name = "drakkar"
 version = "0.1.0"
 description = "Kafka subprocess orchestration framework"
-readme = {text = "", content-type = "text/plain"}
+readme = "README.md"
 requires-python = ">=3.13"
 authors = [
     { name = "wlame" },

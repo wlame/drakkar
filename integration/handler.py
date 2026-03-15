@@ -1,8 +1,13 @@
-"""Integration test handler: runs `rg` multiple times against project source."""
+"""Integration test handler: runs `rg` multiple times against project source.
+
+Demonstrates the typed handler pattern with Pydantic models for
+input (SearchRequest) and output (SearchResult) messages.
+"""
 
 import asyncio
-import json
 import random
+
+from pydantic import BaseModel, Field
 
 from drakkar import (
     BaseDrakkarHandler,
@@ -12,28 +17,46 @@ from drakkar import (
     ErrorAction,
     ExecutorError,
     ExecutorResult,
-    make_task_id,
     ExecutorTask,
     OutputMessage,
     PendingContext,
     SourceMessage,
+    make_task_id,
 )
 
 
-class RipgrepHandler(BaseDrakkarHandler):
+# --- Typed message models ---
+
+
+class SearchRequest(BaseModel):
+    """Input message schema: what to search for."""
+
+    request_id: str
+    pattern: str
+    file_path: str
+    repeat: int = 1
+
+
+class SearchResult(BaseModel):
+    """Output message schema: search results."""
+
+    request_id: str
+    pattern: str
+    file_path: str
+    repeat: int
+    match_count: int
+    duration_seconds: float
+    matches: list[str] = Field(default_factory=list)
+
+
+# --- Handler ---
+
+
+class RipgrepHandler(BaseDrakkarHandler[SearchRequest, SearchResult]):
     """Searches source files using ripgrep based on incoming Kafka messages.
 
-    Input message:
-    {
-        "request_id": "uuid",
-        "pattern": "regex pattern",
-        "file_path": "/project/drakkar/app.py",
-        "repeat": 5
-    }
-
-    The executor runs a shell script that calls `rg` `repeat` times,
-    simulating CPU-bound work. 3% of messages have repeat=200 to
-    simulate long-running tasks.
+    Uses typed handler: msg.payload is a SearchRequest instance,
+    auto-deserialized from Kafka message bytes by the framework.
     """
 
     async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
@@ -42,6 +65,8 @@ class RipgrepHandler(BaseDrakkarHandler):
         await logger.ainfo(
             "handler_startup",
             category="handler",
+            input_model=self.input_model.__name__ if self.input_model else None,
+            output_model=self.output_model.__name__ if self.output_model else None,
             binary=config.executor.binary_path,
             max_workers=config.executor.max_workers,
         )
@@ -57,25 +82,22 @@ class RipgrepHandler(BaseDrakkarHandler):
 
         tasks = []
         for msg in messages:
-            payload = json.loads(msg.value)
-            request_id = payload.get("request_id", make_task_id("req"))
-            pattern = payload["pattern"]
-            file_path = payload["file_path"]
-            repeat = payload.get("repeat", 1)
+            req: SearchRequest = msg.payload
+            if req is None:
+                continue
 
             task_id = make_task_id("rg")
-
             if task_id in pending.pending_task_ids:
                 continue
 
             tasks.append(ExecutorTask(
                 task_id=task_id,
-                args=[str(repeat), pattern, file_path],
+                args=[str(req.repeat), req.pattern, req.file_path],
                 metadata={
-                    "request_id": request_id,
-                    "pattern": pattern,
-                    "file_path": file_path,
-                    "repeat": repeat,
+                    "request_id": req.request_id,
+                    "pattern": req.pattern,
+                    "file_path": req.file_path,
+                    "repeat": req.repeat,
                 },
                 source_offsets=[msg.offset],
             ))
@@ -89,39 +111,37 @@ class RipgrepHandler(BaseDrakkarHandler):
             line for line in result.stdout.strip().split("\n") if line
         ]
 
-        output = {
-            "request_id": result.task.metadata["request_id"],
-            "pattern": result.task.metadata["pattern"],
-            "file_path": result.task.metadata["file_path"],
-            "repeat": result.task.metadata["repeat"],
-            "match_count": len(matches),
-            "duration_seconds": result.duration_seconds,
-            "matches": matches[:50],
-        }
+        # build typed output model
+        output = SearchResult(
+            request_id=result.task.metadata["request_id"],
+            pattern=result.task.metadata["pattern"],
+            file_path=result.task.metadata["file_path"],
+            repeat=result.task.metadata["repeat"],
+            match_count=len(matches),
+            duration_seconds=result.duration_seconds,
+            matches=matches[:50],
+        )
 
         return CollectResult(
             output_messages=[
-                OutputMessage(
+                OutputMessage.from_model(
+                    output,
                     key=result.task.metadata["request_id"].encode(),
-                    value=json.dumps(output).encode(),
                 ),
             ],
             db_rows=[
                 DBRow(
                     table="search_results",
                     data={
-                        "request_id": result.task.metadata["request_id"],
-                        "pattern": result.task.metadata["pattern"],
-                        "file_path": result.task.metadata["file_path"],
-                        "match_count": len(matches),
-                        "duration_seconds": result.duration_seconds,
+                        "request_id": output.request_id,
+                        "pattern": output.pattern,
+                        "file_path": output.file_path,
+                        "match_count": output.match_count,
+                        "duration_seconds": output.duration_seconds,
                     },
                 ),
             ],
         )
-
-    async def on_window_complete(self, results, source_messages):
-        return None
 
     async def on_error(self, task: ExecutorTask, error: ExecutorError):
         # rg exits with 1 when no matches found — not a real error

@@ -187,6 +187,7 @@ class PartitionProcessor:
 
         for msg in messages:
             self._offset_tracker.register(msg.offset)
+            self._handler.deserialize_message(msg)
 
         pending_ctx = PendingContext(
             pending_tasks=list(self._pending_tasks.values()),

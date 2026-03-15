@@ -1,12 +1,15 @@
 """Tests for Drakkar handler protocol and base handler."""
 
+import json
 import os
 
 import pytest
+from pydantic import BaseModel
 
 from drakkar.config import DrakkarConfig, ExecutorConfig
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
+    OutputMessage,
     ErrorAction,
     ExecutorError,
     ExecutorResult,
@@ -111,3 +114,86 @@ async def test_custom_handler_overrides():
     assert len(tasks) == 1
     assert tasks[0].task_id == "custom-1"
     assert tasks[0].source_offsets == [5]
+
+
+# --- Generic typed handler ---
+
+
+class SearchRequest(BaseModel):
+    pattern: str
+    file_path: str
+    repeat: int = 1
+
+
+class SearchResult(BaseModel):
+    pattern: str
+    match_count: int
+    matches: list[str] = []
+
+
+async def test_generic_handler_extracts_input_model():
+    class MyHandler(BaseDrakkarHandler[SearchRequest, SearchResult]):
+        async def arrange(self, messages, pending):
+            return []
+
+    handler = MyHandler()
+    assert handler.input_model is SearchRequest
+    assert handler.output_model is SearchResult
+
+
+async def test_generic_handler_deserializes_payload():
+    class MyHandler(BaseDrakkarHandler[SearchRequest, SearchResult]):
+        async def arrange(self, messages, pending):
+            return []
+
+    handler = MyHandler()
+    msg = SourceMessage(
+        topic="t", partition=0, offset=0, timestamp=0,
+        value=json.dumps({"pattern": "error", "file_path": "/tmp/f.txt", "repeat": 5}).encode(),
+    )
+    handler.deserialize_message(msg)
+    assert msg.payload is not None
+    assert isinstance(msg.payload, SearchRequest)
+    assert msg.payload.pattern == "error"
+    assert msg.payload.repeat == 5
+
+
+async def test_generic_handler_payload_default_on_bad_json():
+    class MyHandler(BaseDrakkarHandler[SearchRequest, SearchResult]):
+        async def arrange(self, messages, pending):
+            return []
+
+    handler = MyHandler()
+    msg = SourceMessage(
+        topic="t", partition=0, offset=0, timestamp=0,
+        value=b"not json",
+    )
+    handler.deserialize_message(msg)
+    assert msg.payload is None
+
+
+async def test_non_generic_handler_skips_deserialization():
+    class PlainHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return []
+
+    handler = PlainHandler()
+    assert handler.input_model is None
+    assert handler.output_model is None
+
+    msg = SourceMessage(
+        topic="t", partition=0, offset=0, timestamp=0,
+        value=b'{"x": 1}',
+    )
+    handler.deserialize_message(msg)
+    assert msg.payload is None  # no deserialization without input_model
+
+
+async def test_output_message_from_model():
+    result = SearchResult(pattern="error", match_count=3, matches=["a", "b", "c"])
+    msg = OutputMessage.from_model(result, key=b"key-1")
+    assert msg.key == b"key-1"
+    parsed = json.loads(msg.value)
+    assert parsed["pattern"] == "error"
+    assert parsed["match_count"] == 3
+    assert parsed["matches"] == ["a", "b", "c"]

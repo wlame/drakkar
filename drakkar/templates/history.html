@@ -153,8 +153,6 @@ function updatePartitionToggles(partitions) {
     partitions.forEach(p => knownPartitions.add(p));
     const container = document.getElementById('partition-toggles');
     const sorted = Array.from(knownPartitions).sort((a,b) => a-b);
-    // only rebuild if new partitions appeared
-    if (container.children.length === sorted.length) return;
     container.replaceChildren();
     for (const p of sorted) {
         const btn = document.createElement('button');

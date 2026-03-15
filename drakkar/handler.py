@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+import json
+from typing import TYPE_CHECKING, Generic, Protocol, get_args
+
+from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from drakkar.config import DrakkarConfig
@@ -12,6 +15,8 @@ from drakkar.models import (
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
+    InputT,
+    OutputT,
     PendingContext,
     SourceMessage,
 )
@@ -20,69 +25,73 @@ from drakkar.models import (
 class DrakkarHandler(Protocol):
     """Protocol defining the hooks a user must implement."""
 
-    async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
-        """Called after config is loaded, before components are created.
+    input_model: type[BaseModel] | None
+    output_model: type[BaseModel] | None
 
-        Receives the resolved config. Return the same config or a modified
-        copy to override settings (e.g., adjust max_workers based on
-        detected CPU count, change topics based on environment).
-        """
-        ...
-
-    async def arrange(
-        self,
-        messages: list[SourceMessage],
-        pending: PendingContext,
-    ) -> list[ExecutorTask]:
-        """Transform a window of messages into executor tasks.
-
-        Receives pending context so the user can deduplicate against
-        tasks still running from previous windows on this partition.
-        """
-        ...
-
-    async def collect(
-        self,
-        result: ExecutorResult,
-    ) -> CollectResult | None:
-        """Process a single executor result. Called per task completion."""
-        ...
-
-    async def on_window_complete(
-        self,
-        results: list[ExecutorResult],
-        source_messages: list[SourceMessage],
-    ) -> CollectResult | None:
-        """Called when all tasks from one arrange() window complete."""
-        ...
-
-    async def on_error(
-        self,
-        task: ExecutorTask,
-        error: ExecutorError,
-    ) -> str | list[ExecutorTask]:
-        """Handle executor failure.
-
-        Return ErrorAction.RETRY, ErrorAction.SKIP, or a list of new
-        ExecutorTasks to schedule as replacements.
-        """
-        ...
-
-    async def on_assign(self, partitions: list[int]) -> None:
-        """Called when partitions are assigned to this worker."""
-        ...
-
-    async def on_revoke(self, partitions: list[int]) -> None:
-        """Called when partitions are revoked from this worker."""
-        ...
+    async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig: ...
+    async def arrange(self, messages: list[SourceMessage], pending: PendingContext) -> list[ExecutorTask]: ...
+    async def collect(self, result: ExecutorResult) -> CollectResult | None: ...
+    async def on_window_complete(self, results: list[ExecutorResult], source_messages: list[SourceMessage]) -> CollectResult | None: ...
+    async def on_error(self, task: ExecutorTask, error: ExecutorError) -> str | list[ExecutorTask]: ...
+    async def on_assign(self, partitions: list[int]) -> None: ...
+    async def on_revoke(self, partitions: list[int]) -> None: ...
 
 
-class BaseDrakkarHandler:
+def _extract_type_args(cls: type) -> tuple[type | None, type | None]:
+    """Extract InputT and OutputT from BaseDrakkarHandler[InputT, OutputT]."""
+    for base in getattr(cls, '__orig_bases__', ()):
+        args = get_args(base)
+        if len(args) == 2:
+            input_t, output_t = args
+            if isinstance(input_t, type) and isinstance(output_t, type):
+                return input_t, output_t
+    return None, None
+
+
+class BaseDrakkarHandler(Generic[InputT, OutputT]):
     """Base handler with no-op defaults for optional hooks.
 
     Users extend this class and must override `arrange`.
     All other hooks have sensible defaults.
+
+    Generic usage (optional):
+        class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
+            ...
+
+    When type params are provided, the framework auto-deserializes
+    incoming message bytes into `InputT` and sets `msg.payload`.
+    Use `OutputMessage.from_model(output_instance)` to serialize output.
+
+    Non-generic usage (backward compatible):
+        class MyHandler(BaseDrakkarHandler):
+            ...
+
+    In this case, `msg.payload` is None and `msg.value` has raw bytes.
     """
+
+    input_model: type[BaseModel] | None = None
+    output_model: type[BaseModel] | None = None
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        input_t, output_t = _extract_type_args(cls)
+        if input_t and issubclass(input_t, BaseModel):
+            cls.input_model = input_t
+        if output_t and issubclass(output_t, BaseModel):
+            cls.output_model = output_t
+
+    def deserialize_message(self, msg: SourceMessage) -> SourceMessage:
+        """Deserialize msg.value into msg.payload using input_model.
+
+        Called by the framework before arrange(). If no input_model
+        is set, returns the message unchanged.
+        """
+        if self.input_model is not None:
+            try:
+                msg.payload = self.input_model.model_validate_json(msg.value)
+            except Exception:
+                msg.payload = None
+        return msg
 
     async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
         return config

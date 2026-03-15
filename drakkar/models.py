@@ -1,8 +1,10 @@
 """Data models for Drakkar framework."""
 
+import json
 import os
 import time
 from enum import StrEnum
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +23,10 @@ def make_task_id(prefix: str = "t") -> str:
     return f"{prefix}-{ts:08x}-{rnd:04x}"
 
 
+InputT = TypeVar("InputT", bound=BaseModel)
+OutputT = TypeVar("OutputT", bound=BaseModel)
+
+
 class SourceMessage(BaseModel):
     """A message consumed from the Kafka source topic."""
 
@@ -30,6 +36,7 @@ class SourceMessage(BaseModel):
     key: bytes | None = None
     value: bytes
     timestamp: int
+    payload: Any = None
 
 
 class ExecutorTask(BaseModel):
@@ -75,6 +82,11 @@ class OutputMessage(BaseModel):
 
     key: bytes | None = None
     value: bytes
+
+    @classmethod
+    def from_model(cls, model: BaseModel, key: bytes | None = None) -> "OutputMessage":
+        """Create an OutputMessage by JSON-serializing a Pydantic model."""
+        return cls(key=key, value=model.model_dump_json().encode())
 
 
 class DBRow(BaseModel):
