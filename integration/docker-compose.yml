@@ -1,0 +1,106 @@
+services:
+  kafka:
+    image: apache/kafka:3.7.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: drakkar-integration-test
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server=localhost:9092"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  kafka-init:
+    image: apache/kafka:3.7.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./init-kafka.sh:/init-kafka.sh
+    entrypoint: ["/bin/bash", "/init-kafka.sh"]
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: drakkar
+      POSTGRES_PASSWORD: drakkar
+      POSTGRES_DB: drakkar
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drakkar"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  worker-1:
+    build:
+      context: ..
+      dockerfile: integration/Dockerfile.worker
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      WORKER_ID: worker-1
+      DRAKKAR_CONFIG: /app/drakkar.yaml
+    ports:
+      - "9090:9090"
+
+  worker-2:
+    build:
+      context: ..
+      dockerfile: integration/Dockerfile.worker
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      WORKER_ID: worker-2
+      DRAKKAR_CONFIG: /app/drakkar.yaml
+      DRAKKAR_METRICS__PORT: "9091"
+    ports:
+      - "9091:9091"
+
+  worker-3:
+    build:
+      context: ..
+      dockerfile: integration/Dockerfile.worker
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      WORKER_ID: worker-3
+      DRAKKAR_CONFIG: /app/drakkar.yaml
+      DRAKKAR_METRICS__PORT: "9093"
+    ports:
+      - "9093:9093"
+
+  producer:
+    build:
+      context: ..
+      dockerfile: integration/Dockerfile.producer
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      SOURCE_TOPIC: search-requests
+      MESSAGES_PER_SECOND: "10"
+      TOTAL_MESSAGES: "500"

@@ -1,0 +1,28 @@
+kafka:
+  brokers: "kafka:9092"
+  source_topic: "search-requests"
+  target_topic: "search-results"
+  consumer_group: "drakkar-integration"
+  max_poll_records: 50
+  max_poll_interval_ms: 300000
+  session_timeout_ms: 45000
+  heartbeat_interval_ms: 3000
+
+executor:
+  binary_path: "/usr/bin/rg"
+  max_workers: 4
+  task_timeout_seconds: 30
+  window_size: 10
+
+postgres:
+  dsn: "postgresql://drakkar:drakkar@postgres:5432/drakkar"
+  pool_min: 1
+  pool_max: 5
+
+metrics:
+  enabled: true
+  port: 9090
+
+logging:
+  level: "INFO"
+  format: "json"

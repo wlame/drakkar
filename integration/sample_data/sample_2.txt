@@ -1,0 +1,500 @@
+2024-01-09 06:31:51 DEBUG Processing request req-5636
+if response.status_code != 200:
+2024-01-06 20:23:48 ERROR  Exception in handler: OutOfMemoryError
+            return self._decode(token) is not None
+2024-01-12 07:49:13 DEBUG Processing request req-9277
+        try:
+if response.status_code != 200:
+    def __init__(self, db_pool):
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+2024-01-26 09:15:30 WARNING Rate limit exceeded for client api-gateway
+async def process_batch(items):
+2024-01-13 13:33:18 WARNING Rate limit exceeded for client mobile-app
+    results = await asyncio.gather(*[handle(item) for item in items])
+2024-01-03 06:16:08 DEBUG Database query returned 788 rows
+2024-01-17 18:56:43 WARNING Connection timeout after 2522ms
+    def validate_token(self, token: str) -> bool:
+if response.status_code != 200:
+        except Exception as e:
+from dataclasses import dataclass
+2024-01-23 03:01:10 WARNING Connection timeout after 2679ms
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+            return self._decode(token) is not None
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+        except Exception as e:
+2024-01-16 06:41:54 INFO  Starting service on port 5000
+    async def get_user(self, user_id: int):
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+            return self._decode(token) is not None
+2024-01-03 14:09:36 INFO  Cache hit ratio: 85.9%
+2024-01-24 19:33:08 INFO  Starting service on port 8443
+2024-01-23 14:15:13 ERROR  Failed to connect to upstream: connection refused
+    results = await asyncio.gather(*[handle(item) for item in items])
+    def validate_token(self, token: str) -> bool:
+from dataclasses import dataclass
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+            return self._decode(token) is not None
+2024-01-05 18:26:45 WARNING Rate limit exceeded for client mobile-app
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+2024-01-12 11:39:54 ERROR  Exception in handler: OutOfMemoryError
+2024-01-21 10:15:28 ERROR  Failed to connect to upstream: connection refused
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+2024-01-24 08:44:29 INFO  Request completed successfully in 4515ms
+2024-01-15 10:18:15 ERROR  Failed to connect to upstream: connection refused
+2024-01-05 22:37:15 WARNING Connection timeout after 2422ms
+    return [r for r in results if r.success]
+2024-01-12 11:20:48 INFO  User diana logged in from 172.16.0.5
+class UserService:
+2024-01-05 01:42:08 INFO  Request completed successfully in 4914ms
+    async def get_user(self, user_id: int):
+        try:
+2024-01-06 09:37:09 INFO  Request completed successfully in 1533ms
+            return self._decode(token) is not None
+from dataclasses import dataclass
+class UserService:
+2024-01-11 19:25:53 ERROR  Exception in handler: NullPointerException
+response = requests.get(url, timeout=30)
+if response.status_code != 200:
+if response.status_code != 200:
+2024-01-15 07:43:55 INFO  Request completed successfully in 171ms
+    async def get_user(self, user_id: int):
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+2024-01-07 09:48:31 WARNING Connection timeout after 2008ms
+2024-01-06 12:20:32 INFO  Request completed successfully in 1006ms
+response = requests.get(url, timeout=30)
+    results = await asyncio.gather(*[handle(item) for item in items])
+    results = await asyncio.gather(*[handle(item) for item in items])
+2024-01-24 21:21:50 INFO  User diana logged in from 172.16.0.5
+        try:
+async def process_batch(items):
+2024-01-09 17:35:54 DEBUG Processing request req-1674
+response = requests.get(url, timeout=30)
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+        try:
+response = requests.get(url, timeout=30)
+    async def get_user(self, user_id: int):
+    async def get_user(self, user_id: int):
+        try:
+2024-01-08 12:51:54 ERROR  Exception in handler: FileNotFoundError
+class UserService:
+if response.status_code != 200:
+    def __init__(self, db_pool):
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+class UserService:
+2024-01-06 07:45:42 WARNING Rate limit exceeded for client mobile-app
+2024-01-15 07:27:18 ERROR  Failed to connect to upstream: connection refused
+if response.status_code != 200:
+    results = await asyncio.gather(*[handle(item) for item in items])
+2024-01-16 09:00:17 WARNING Connection timeout after 3098ms
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+2024-01-03 03:39:07 INFO  Starting service on port 5000
+            raise ValueError(f'Invalid token: {e}')
+2024-01-07 20:23:19 WARNING Connection timeout after 1106ms
+            return self._decode(token) is not None
+            raise ValueError(f'Invalid token: {e}')
+    return [r for r in results if r.success]
+        except Exception as e:
+2024-01-03 08:57:07 DEBUG Processing request req-3134
+2024-01-28 18:32:58 DEBUG Processing request req-4181
+    return [r for r in results if r.success]
+import asyncio
+    return [r for r in results if r.success]
+    return [r for r in results if r.success]
+            return self._decode(token) is not None
+            raise ValueError(f'Invalid token: {e}')
+    def validate_token(self, token: str) -> bool:
+        self.db_pool = db_pool
+            return self._decode(token) is not None
+2024-01-23 10:54:03 DEBUG Processing request req-3846
+    def __init__(self, db_pool):
+            raise ValueError(f'Invalid token: {e}')
+    def __init__(self, db_pool):
+2024-01-23 02:02:35 WARNING Connection timeout after 1911ms
+from dataclasses import dataclass
+2024-01-08 01:59:16 INFO  Cache hit ratio: 70.5%
+2024-01-20 06:34:55 INFO  Request completed successfully in 1133ms
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+        except Exception as e:
+2024-01-21 13:11:13 DEBUG Database query returned 675 rows
+2024-01-23 17:14:19 WARNING Rate limit exceeded for client mobile-app
+2024-01-26 12:30:31 ERROR  Failed to connect to upstream: connection refused
+2024-01-13 10:01:11 WARNING Rate limit exceeded for client batch-worker
+import asyncio
+2024-01-06 20:10:30 INFO  Request completed successfully in 1520ms
+    def __init__(self, db_pool):
+if response.status_code != 200:
+class UserService:
+            return self._decode(token) is not None
+import asyncio
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+import asyncio
+2024-01-24 17:58:58 ERROR  Exception in handler: OutOfMemoryError
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+    def __init__(self, db_pool):
+from dataclasses import dataclass
+    async def get_user(self, user_id: int):
+    return [r for r in results if r.success]
+2024-01-10 12:41:50 WARNING Connection timeout after 2085ms
+2024-01-01 04:37:22 ERROR  Exception in handler: PermissionDenied
+from dataclasses import dataclass
+class UserService:
+    return [r for r in results if r.success]
+2024-01-28 07:30:36 INFO  User alice logged in from 172.16.0.5
+2024-01-14 14:26:47 INFO  Starting service on port 8080
+from dataclasses import dataclass
+if response.status_code != 200:
+        self.db_pool = db_pool
+async def process_batch(items):
+    results = await asyncio.gather(*[handle(item) for item in items])
+            return self._decode(token) is not None
+2024-01-08 07:34:18 INFO  User alice logged in from 172.16.0.5
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+    def validate_token(self, token: str) -> bool:
+    async def get_user(self, user_id: int):
+            raise ValueError(f'Invalid token: {e}')
+        try:
+2024-01-07 14:11:37 DEBUG Database query returned 868 rows
+response = requests.get(url, timeout=30)
+class UserService:
+2024-01-02 09:51:39 INFO  Starting service on port 5000
+import asyncio
+            return self._decode(token) is not None
+2024-01-01 23:51:26 INFO  Starting service on port 5000
+if response.status_code != 200:
+if response.status_code != 200:
+if response.status_code != 200:
+    return [r for r in results if r.success]
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+            raise ValueError(f'Invalid token: {e}')
+2024-01-08 13:28:59 INFO  User bob logged in from 10.0.0.42
+import asyncio
+    async def get_user(self, user_id: int):
+2024-01-09 23:28:42 DEBUG Database query returned 783 rows
+from dataclasses import dataclass
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+    def __init__(self, db_pool):
+2024-01-13 06:01:34 INFO  Cache hit ratio: 81.4%
+    results = await asyncio.gather(*[handle(item) for item in items])
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+2024-01-15 09:37:28 INFO  Request completed successfully in 4769ms
+class UserService:
+class UserService:
+        except Exception as e:
+2024-01-23 14:53:11 INFO  Cache hit ratio: 87.9%
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+2024-01-23 14:14:42 INFO  Starting service on port 3000
+    def validate_token(self, token: str) -> bool:
+import asyncio
+            raise ValueError(f'Invalid token: {e}')
+from dataclasses import dataclass
+2024-01-25 09:40:53 WARNING Rate limit exceeded for client api-gateway
+2024-01-20 15:21:37 WARNING Rate limit exceeded for client web-frontend
+    def __init__(self, db_pool):
+        except Exception as e:
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+        except Exception as e:
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+2024-01-17 01:00:10 WARNING Rate limit exceeded for client web-frontend
+2024-01-27 13:55:15 INFO  Cache hit ratio: 68.9%
+2024-01-05 07:18:22 WARNING Connection timeout after 3031ms
+    def validate_token(self, token: str) -> bool:
+2024-01-20 04:12:46 INFO  User eve logged in from 192.168.1.10
+            raise ValueError(f'Invalid token: {e}')
+2024-01-06 02:26:13 INFO  Request completed successfully in 3452ms
+    def __init__(self, db_pool):
+    def __init__(self, db_pool):
+response = requests.get(url, timeout=30)
+2024-01-15 20:32:44 INFO  Cache hit ratio: 75.0%
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+        try:
+2024-01-13 02:02:04 WARNING Rate limit exceeded for client batch-worker
+2024-01-18 09:16:08 WARNING Rate limit exceeded for client web-frontend
+if response.status_code != 200:
+async def process_batch(items):
+2024-01-20 14:22:23 INFO  User bob logged in from 172.16.0.5
+if response.status_code != 200:
+        try:
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+    results = await asyncio.gather(*[handle(item) for item in items])
+2024-01-25 19:30:22 ERROR  Failed to connect to upstream: connection refused
+            return self._decode(token) is not None
+2024-01-06 18:16:16 INFO  User eve logged in from 10.0.0.42
+2024-01-14 03:55:10 INFO  Starting service on port 8443
+        except Exception as e:
+import asyncio
+2024-01-11 13:48:14 ERROR  Failed to connect to upstream: connection refused
+if response.status_code != 200:
+import asyncio
+        try:
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+import asyncio
+if response.status_code != 200:
+            raise ValueError(f'Invalid token: {e}')
+    results = await asyncio.gather(*[handle(item) for item in items])
+2024-01-10 10:56:34 DEBUG Database query returned 464 rows
+2024-01-19 06:12:55 INFO  Cache hit ratio: 59.7%
+2024-01-05 07:36:21 INFO  Request completed successfully in 3540ms
+            raise ValueError(f'Invalid token: {e}')
+2024-01-28 23:50:15 INFO  Request completed successfully in 2176ms
+class UserService:
+        try:
+2024-01-19 06:56:20 DEBUG Database query returned 863 rows
+class UserService:
+    return [r for r in results if r.success]
+2024-01-04 11:33:24 INFO  User diana logged in from 10.0.0.42
+response = requests.get(url, timeout=30)
+    results = await asyncio.gather(*[handle(item) for item in items])
+2024-01-21 18:09:02 DEBUG Database query returned 857 rows
+    def validate_token(self, token: str) -> bool:
+    return [r for r in results if r.success]
+2024-01-25 00:42:19 WARNING Connection timeout after 938ms
+2024-01-07 14:47:06 DEBUG Database query returned 677 rows
+    def validate_token(self, token: str) -> bool:
+import asyncio
+class UserService:
+2024-01-08 20:20:39 ERROR  Failed to connect to upstream: connection refused
+    async def get_user(self, user_id: int):
+    def validate_token(self, token: str) -> bool:
+2024-01-24 03:33:48 INFO  Starting service on port 5000
+    def validate_token(self, token: str) -> bool:
+class UserService:
+        self.db_pool = db_pool
+        try:
+    async def get_user(self, user_id: int):
+2024-01-16 22:06:22 INFO  Starting service on port 8080
+        try:
+            raise ValueError(f'Invalid token: {e}')
+response = requests.get(url, timeout=30)
+class UserService:
+2024-01-13 04:53:35 WARNING Connection timeout after 28ms
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+if response.status_code != 200:
+        except Exception as e:
+2024-01-21 23:01:51 DEBUG Database query returned 626 rows
+2024-01-12 15:37:27 INFO  Starting service on port 8080
+2024-01-07 03:38:42 DEBUG Database query returned 406 rows
+2024-01-20 11:22:41 INFO  User bob logged in from 10.0.0.42
+2024-01-09 17:56:08 INFO  User charlie logged in from 172.16.0.5
+2024-01-15 21:55:19 INFO  Starting service on port 3000
+    def __init__(self, db_pool):
+if response.status_code != 200:
+2024-01-26 11:56:29 DEBUG Processing request req-3419
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+            raise ValueError(f'Invalid token: {e}')
+    async def get_user(self, user_id: int):
+if response.status_code != 200:
+class UserService:
+class UserService:
+class UserService:
+2024-01-24 06:55:24 INFO  Request completed successfully in 3312ms
+    def __init__(self, db_pool):
+async def process_batch(items):
+class UserService:
+2024-01-04 23:42:32 INFO  User alice logged in from 203.0.113.7
+2024-01-12 12:01:45 WARNING Rate limit exceeded for client batch-worker
+2024-01-06 21:40:53 INFO  Cache hit ratio: 70.1%
+2024-01-23 17:14:57 ERROR  Failed to connect to upstream: connection refused
+2024-01-21 10:28:38 INFO  Request completed successfully in 1525ms
+            return self._decode(token) is not None
+if response.status_code != 200:
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+        self.db_pool = db_pool
+if response.status_code != 200:
+2024-01-12 16:12:20 INFO  User charlie logged in from 192.168.1.10
+class UserService:
+2024-01-17 21:49:54 WARNING Connection timeout after 234ms
+import asyncio
+2024-01-25 05:36:46 INFO  Cache hit ratio: 70.9%
+    def validate_token(self, token: str) -> bool:
+2024-01-11 08:15:32 INFO  Starting service on port 8080
+from dataclasses import dataclass
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+async def process_batch(items):
+import asyncio
+    return [r for r in results if r.success]
+    def validate_token(self, token: str) -> bool:
+if response.status_code != 200:
+            return self._decode(token) is not None
+    def validate_token(self, token: str) -> bool:
+import asyncio
+        try:
+2024-01-13 23:59:04 INFO  Cache hit ratio: 93.7%
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+2024-01-27 10:11:21 DEBUG Database query returned 303 rows
+    def validate_token(self, token: str) -> bool:
+    results = await asyncio.gather(*[handle(item) for item in items])
+response = requests.get(url, timeout=30)
+2024-01-22 11:36:44 ERROR  Failed to connect to upstream: connection refused
+if response.status_code != 200:
+    def __init__(self, db_pool):
+    def validate_token(self, token: str) -> bool:
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+import asyncio
+        try:
+            raise ValueError(f'Invalid token: {e}')
+    return [r for r in results if r.success]
+            return self._decode(token) is not None
+            raise ValueError(f'Invalid token: {e}')
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+2024-01-10 19:39:48 ERROR  Exception in handler: ConnectionResetError
+2024-01-03 12:45:07 DEBUG Database query returned 108 rows
+    results = await asyncio.gather(*[handle(item) for item in items])
+    return [r for r in results if r.success]
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+async def process_batch(items):
+2024-01-26 07:51:20 DEBUG Processing request req-8107
+            raise ValueError(f'Invalid token: {e}')
+2024-01-19 20:38:18 INFO  Request completed successfully in 2460ms
+from dataclasses import dataclass
+        try:
+            raise ValueError(f'Invalid token: {e}')
+2024-01-23 15:21:31 WARNING Rate limit exceeded for client mobile-app
+async def process_batch(items):
+class UserService:
+    async def get_user(self, user_id: int):
+2024-01-27 15:10:18 WARNING Rate limit exceeded for client batch-worker
+2024-01-11 13:24:22 INFO  Starting service on port 5000
+response = requests.get(url, timeout=30)
+    return [r for r in results if r.success]
+from dataclasses import dataclass
+2024-01-08 03:10:43 INFO  Request completed successfully in 2447ms
+    return [r for r in results if r.success]
+    results = await asyncio.gather(*[handle(item) for item in items])
+2024-01-26 08:30:41 ERROR  Exception in handler: ConnectionResetError
+2024-01-27 19:20:25 INFO  User eve logged in from 192.168.1.10
+async def process_batch(items):
+            raise ValueError(f'Invalid token: {e}')
+2024-01-10 23:47:30 ERROR  Failed to connect to upstream: connection refused
+async def process_batch(items):
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+import asyncio
+2024-01-04 16:34:31 WARNING Rate limit exceeded for client web-frontend
+2024-01-20 03:38:45 ERROR  Exception in handler: ConnectionResetError
+2024-01-12 20:04:22 INFO  Starting service on port 8443
+2024-01-27 12:00:14 INFO  Request completed successfully in 766ms
+from dataclasses import dataclass
+    def validate_token(self, token: str) -> bool:
+            return self._decode(token) is not None
+2024-01-24 10:54:39 INFO  User eve logged in from 203.0.113.7
+response = requests.get(url, timeout=30)
+from dataclasses import dataclass
+2024-01-14 09:22:32 WARNING Connection timeout after 3033ms
+    def validate_token(self, token: str) -> bool:
+    return [r for r in results if r.success]
+2024-01-14 08:55:52 INFO  Starting service on port 8443
+2024-01-21 08:07:13 INFO  Request completed successfully in 4043ms
+    async def get_user(self, user_id: int):
+2024-01-08 19:22:23 ERROR  Exception in handler: PermissionDenied
+2024-01-27 08:17:26 ERROR  Exception in handler: OutOfMemoryError
+    results = await asyncio.gather(*[handle(item) for item in items])
+import asyncio
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+2024-01-19 14:17:09 ERROR  Exception in handler: ConnectionResetError
+async def process_batch(items):
+    def __init__(self, db_pool):
+from dataclasses import dataclass
+    def validate_token(self, token: str) -> bool:
+async def process_batch(items):
+2024-01-09 07:07:52 WARNING Rate limit exceeded for client mobile-app
+2024-01-13 21:47:01 ERROR  Failed to connect to upstream: connection refused
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+        except Exception as e:
+import asyncio
+2024-01-13 22:35:12 ERROR  Exception in handler: ConnectionResetError
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+2024-01-23 08:02:41 INFO  Request completed successfully in 546ms
+response = requests.get(url, timeout=30)
+if response.status_code != 200:
+2024-01-06 19:53:37 INFO  Cache hit ratio: 68.3%
+2024-01-02 23:21:57 INFO  User alice logged in from 203.0.113.7
+2024-01-25 05:10:06 WARNING Connection timeout after 3450ms
+        except Exception as e:
+2024-01-14 13:48:08 INFO  Request completed successfully in 1211ms
+    results = await asyncio.gather(*[handle(item) for item in items])
+if response.status_code != 200:
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+2024-01-19 21:29:59 INFO  User alice logged in from 10.0.0.42
+async def process_batch(items):
+    def __init__(self, db_pool):
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+        try:
+2024-01-27 06:11:35 ERROR  Exception in handler: NullPointerException
+            return self._decode(token) is not None
+2024-01-20 11:01:33 INFO  Starting service on port 3000
+class UserService:
+            raise ValueError(f'Invalid token: {e}')
+from dataclasses import dataclass
+2024-01-10 16:52:29 ERROR  Failed to connect to upstream: connection refused
+2024-01-12 13:35:51 WARNING Connection timeout after 4252ms
+2024-01-07 01:18:28 INFO  Starting service on port 8443
+    def validate_token(self, token: str) -> bool:
+2024-01-28 09:52:20 WARNING Rate limit exceeded for client mobile-app
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+            raise ValueError(f'Invalid token: {e}')
+if response.status_code != 200:
+2024-01-27 19:14:58 WARNING Rate limit exceeded for client batch-worker
+    def validate_token(self, token: str) -> bool:
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+        except Exception as e:
+    def validate_token(self, token: str) -> bool:
+    def __init__(self, db_pool):
+2024-01-24 23:38:19 INFO  Cache hit ratio: 92.1%
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+    def __init__(self, db_pool):
+    def __init__(self, db_pool):
+2024-01-08 04:07:26 ERROR  Failed to connect to upstream: connection refused
+async def process_batch(items):
+2024-01-28 22:24:40 WARNING Connection timeout after 4176ms
+2024-01-26 16:59:42 INFO  Request completed successfully in 1563ms
+from dataclasses import dataclass
+        return await self.db_pool.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+    def validate_token(self, token: str) -> bool:
+2024-01-13 18:57:16 DEBUG Database query returned 484 rows
+2024-01-12 14:43:10 INFO  Starting service on port 3000
+async def process_batch(items):
+if response.status_code != 200:
+2024-01-05 19:16:11 INFO  Starting service on port 8080
+    def validate_token(self, token: str) -> bool:
+if response.status_code != 200:
+class UserService:
+2024-01-10 00:21:33 ERROR  Exception in handler: PermissionDenied
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+async def process_batch(items):
+    return [r for r in results if r.success]
+    async def get_user(self, user_id: int):
+2024-01-28 03:50:14 DEBUG Processing request req-9442
+    def __init__(self, db_pool):
+2024-01-21 06:17:13 INFO  Request completed successfully in 3912ms
+if response.status_code != 200:
+2024-01-03 18:13:22 INFO  Starting service on port 8443
+    results = await asyncio.gather(*[handle(item) for item in items])
+    results = await asyncio.gather(*[handle(item) for item in items])
+            return self._decode(token) is not None
+response = requests.get(url, timeout=30)
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+    raise ConnectionError(f'Request failed with status {response.status_code}')
+    results = await asyncio.gather(*[handle(item) for item in items])
+    def validate_token(self, token: str) -> bool:
+2024-01-19 17:54:45 DEBUG Processing request req-7004
+async def process_batch(items):
+2024-01-12 21:24:06 WARNING Rate limit exceeded for client batch-worker
+2024-01-17 00:54:00 DEBUG Database query returned 536 rows
+import asyncio
+        self.db_pool = db_pool
+        try:
+2024-01-13 06:55:40 ERROR  Failed to connect to upstream: connection refused
+import asyncio
+2024-01-10 16:56:38 WARNING Connection timeout after 1744ms
+2024-01-07 05:59:54 DEBUG Database query returned 542 rows
+2024-01-13 21:29:00 INFO  Cache hit ratio: 86.1%
+2024-01-03 22:46:54 DEBUG Processing request req-6677
+from dataclasses import dataclass
+2024-01-03 23:59:29 INFO  Request completed successfully in 2288ms
+class UserService:
+2024-01-02 20:19:00 INFO  User bob logged in from 203.0.113.7
+2024-01-12 02:32:50 DEBUG Database query returned 613 rows
+2024-01-13 18:15:00 ERROR  Failed to connect to upstream: connection refused
+2024-01-07 12:07:37 INFO  User charlie logged in from 10.0.0.42
+            raise ValueError(f'Invalid token: {e}')

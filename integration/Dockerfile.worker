@@ -1,0 +1,22 @@
+FROM python:3.13-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ripgrep && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip install uv
+
+WORKDIR /app
+
+COPY pyproject.toml /app/
+RUN uv pip install --system --no-cache-dir \
+    confluent-kafka pydantic pydantic-settings asyncpg \
+    prometheus-client structlog pyyaml
+
+COPY drakkar/ /app/drakkar/
+COPY integration/handler.py /app/handler.py
+COPY integration/worker.py /app/worker.py
+COPY integration/drakkar.yaml /app/drakkar.yaml
+COPY integration/sample_data/ /data/
+
+CMD ["python", "worker.py"]
