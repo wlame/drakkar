@@ -1,0 +1,42 @@
+[project]
+name = "drakkar"
+version = "0.1.0"
+description = "Kafka subprocess orchestration framework"
+readme = {text = "", content-type = "text/plain"}
+requires-python = ">=3.13"
+authors = [
+    { name = "wlame" },
+]
+dependencies = [
+    "confluent-kafka>=2.6.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+    "asyncpg>=0.30.0",
+    "prometheus-client>=0.21.0",
+    "structlog>=24.4.0",
+    "pyyaml>=6.0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--strict-markers -v"
+
+[tool.coverage.run]
+source = ["drakkar"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80

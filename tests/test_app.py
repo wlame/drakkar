@@ -1,0 +1,194 @@
+"""Tests for Drakkar main application."""
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from drakkar.app import DrakkarApp
+from drakkar.config import (
+    DrakkarConfig,
+    ExecutorConfig,
+    KafkaConfig,
+    LoggingConfig,
+    MetricsConfig,
+    PostgresConfig,
+)
+from drakkar.handler import BaseDrakkarHandler
+from drakkar.models import (
+    CollectResult,
+    DBRow,
+    ExecutorTask,
+    OutputMessage,
+    PendingContext,
+    SourceMessage,
+)
+
+
+class SimpleHandler(BaseDrakkarHandler):
+    async def arrange(self, messages, pending):
+        return [
+            ExecutorTask(
+                task_id=f"t-{msg.offset}",
+                args=["test"],
+                source_offsets=[msg.offset],
+            )
+            for msg in messages
+        ]
+
+
+@pytest.fixture
+def test_config() -> DrakkarConfig:
+    return DrakkarConfig(
+        kafka=KafkaConfig(
+            brokers="localhost:9092",
+            source_topic="test-in",
+            target_topic="test-out",
+        ),
+        executor=ExecutorConfig(
+            binary_path="/bin/echo",
+            max_workers=2,
+            task_timeout_seconds=10,
+            window_size=5,
+        ),
+        postgres=PostgresConfig(dsn="postgresql://localhost/test"),
+        metrics=MetricsConfig(enabled=False),
+        logging=LoggingConfig(level="WARNING", format="console"),
+    )
+
+
+def test_app_creation(test_config):
+    handler = SimpleHandler()
+    app = DrakkarApp(handler=handler, config=test_config)
+    assert app.config == test_config
+    assert app.processors == {}
+
+
+def test_app_creation_with_worker_id(test_config):
+    handler = SimpleHandler()
+    app = DrakkarApp(handler=handler, config=test_config, worker_id="w1")
+    assert app._worker_id == "w1"
+
+
+def test_app_creation_auto_worker_id(test_config):
+    handler = SimpleHandler()
+    app = DrakkarApp(handler=handler, config=test_config)
+    assert app._worker_id.startswith("drakkar-")
+
+
+@patch("drakkar.app.KafkaConsumer")
+@patch("drakkar.app.KafkaProducer")
+@patch("drakkar.app.DBWriter")
+@patch("drakkar.app.start_metrics_server")
+async def test_app_on_assign_creates_processors(
+    mock_metrics, mock_db_cls, mock_producer_cls, mock_consumer_cls, test_config
+):
+    handler = SimpleHandler()
+    app = DrakkarApp(handler=handler, config=test_config)
+
+    # simulate what _async_run sets up
+    app._consumer = MagicMock()
+    app._producer = MagicMock()
+    app._db_writer = AsyncMock()
+
+    app._on_assign([0, 1, 2])
+    await asyncio.sleep(0.1)
+
+    assert 0 in app.processors
+    assert 1 in app.processors
+    assert 2 in app.processors
+    assert len(app.processors) == 3
+
+    # clean up
+    for proc in app.processors.values():
+        await proc.stop()
+
+
+@patch("drakkar.app.KafkaConsumer")
+@patch("drakkar.app.KafkaProducer")
+@patch("drakkar.app.DBWriter")
+@patch("drakkar.app.start_metrics_server")
+async def test_app_on_revoke_removes_processors(
+    mock_metrics, mock_db_cls, mock_producer_cls, mock_consumer_cls, test_config
+):
+    handler = SimpleHandler()
+    app = DrakkarApp(handler=handler, config=test_config)
+
+    app._consumer = AsyncMock()
+    app._producer = MagicMock()
+    app._db_writer = AsyncMock()
+
+    app._on_assign([0, 1, 2])
+    await asyncio.sleep(0.1)
+    assert len(app.processors) == 3
+
+    app._on_revoke([1])
+    await asyncio.sleep(0.2)
+    assert 1 not in app.processors
+    assert len(app.processors) == 2
+
+    # clean up
+    for proc in list(app.processors.values()):
+        await proc.stop()
+
+
+async def test_app_handle_collect(test_config):
+    handler = SimpleHandler()
+    app = DrakkarApp(handler=handler, config=test_config)
+    app._producer = AsyncMock()
+    app._db_writer = AsyncMock()
+
+    result = CollectResult(
+        output_messages=[OutputMessage(value=b"test")],
+        db_rows=[DBRow(table="t", data={"x": 1})],
+    )
+    await app._handle_collect(result, partition_id=0)
+
+    app._producer.produce_batch.assert_called_once()
+    app._db_writer.write.assert_called_once()
+
+
+async def test_app_handle_collect_empty(test_config):
+    handler = SimpleHandler()
+    app = DrakkarApp(handler=handler, config=test_config)
+    app._producer = AsyncMock()
+    app._db_writer = AsyncMock()
+
+    result = CollectResult()
+    await app._handle_collect(result, partition_id=0)
+
+    app._producer.produce_batch.assert_not_called()
+    app._db_writer.write.assert_not_called()
+
+
+async def test_app_handle_commit(test_config):
+    handler = SimpleHandler()
+    app = DrakkarApp(handler=handler, config=test_config)
+    app._consumer = AsyncMock()
+
+    await app._handle_commit(partition_id=3, offset=100)
+    app._consumer.commit.assert_called_once_with({3: 100})
+
+
+async def test_app_handle_signal(test_config):
+    handler = SimpleHandler()
+    app = DrakkarApp(handler=handler, config=test_config)
+    app._running = True
+    app._handle_signal()
+    assert not app._running
+
+
+async def test_app_shutdown(test_config):
+    handler = SimpleHandler()
+    app = DrakkarApp(handler=handler, config=test_config)
+    app._producer = MagicMock()
+    app._producer.flush = AsyncMock()
+    app._consumer = MagicMock()
+    app._db_writer = AsyncMock()
+
+    await app._shutdown()
+
+    app._producer.flush.assert_called_once()
+    app._producer.close.assert_called_once()
+    app._consumer.close.assert_called_once()
+    app._db_writer.close.assert_called_once()
