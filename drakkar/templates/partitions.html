@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Partitions — Drakkar Debug{% endblock %}
+{% block head %}<meta http-equiv="refresh" content="10">{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">Partitions</h1>
+
+<table class="w-full text-sm">
+    <thead>
+        <tr class="text-left text-gray-400 border-b border-gray-700">
+            <th class="py-2 px-3">Partition</th>
+            <th class="py-2 px-3">Status</th>
+            <th class="py-2 px-3">Last Consumed</th>
+            <th class="py-2 px-3">Last Committed</th>
+            <th class="py-2 px-3">Committed Offset</th>
+            <th class="py-2 px-3">Queue</th>
+            <th class="py-2 px-3">Pending</th>
+            <th class="py-2 px-3">Consumed</th>
+            <th class="py-2 px-3">Completed</th>
+            <th class="py-2 px-3">Failed</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for s in summary %}
+        <tr class="border-b border-gray-800 hover:bg-gray-800">
+            <td class="py-2 px-3">
+                <a href="/partitions/{{ s.partition }}" class="text-blue-400 hover:underline font-mono">{{ s.partition }}</a>
+            </td>
+            <td class="py-2 px-3">
+                {% if s.is_live %}
+                <span class="inline-block w-2 h-2 bg-green-400 rounded-full"></span> live
+                {% else %}
+                <span class="inline-block w-2 h-2 bg-gray-500 rounded-full"></span> history
+                {% endif %}
+            </td>
+            <td class="py-2 px-3 text-gray-400">{{ relative_time(s.last_consumed) }}</td>
+            <td class="py-2 px-3 text-gray-400">{{ relative_time(s.last_committed) }}</td>
+            <td class="py-2 px-3 font-mono">{{ s.last_committed_offset or '-' }}</td>
+            <td class="py-2 px-3 font-mono">{{ s.queue_size }}</td>
+            <td class="py-2 px-3 font-mono">{{ s.pending_offsets }}</td>
+            <td class="py-2 px-3 font-mono">{{ s.consumed_count }}</td>
+            <td class="py-2 px-3 font-mono text-green-400">{{ s.completed_count }}</td>
+            <td class="py-2 px-3 font-mono {% if s.failed_count > 0 %}text-red-400{% endif %}">{{ s.failed_count }}</td>
+        </tr>
+        {% endfor %}
+        {% if not summary %}
+        <tr><td colspan="10" class="py-4 text-center text-gray-500">No partition data recorded yet</td></tr>
+        {% endif %}
+    </tbody>
+</table>
+{% endblock %}

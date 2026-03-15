@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Executors — Drakkar Debug{% endblock %}
+{% block head %}<meta http-equiv="refresh" content="3">{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-bold mb-2">Active Executors</h1>
+<p class="text-gray-400 mb-6">Pool: {{ pool_active }} / {{ pool_max }} slots in use</p>
+
+<div class="w-full bg-gray-700 rounded-full h-3 mb-6">
+    {% set pct = (pool_active / pool_max * 100) if pool_max > 0 else 0 %}
+    <div class="h-3 rounded-full {% if pct > 80 %}bg-red-500{% elif pct > 50 %}bg-yellow-500{% else %}bg-green-500{% endif %}"
+         style="width: {{ pct }}%"></div>
+</div>
+
+<h2 class="text-lg font-semibold mb-3">Live Tasks (from memory)</h2>
+<table class="w-full text-sm mb-8">
+    <thead>
+        <tr class="text-left text-gray-400 border-b border-gray-700">
+            <th class="py-2 px-3">Task ID</th>
+            <th class="py-2 px-3">Partition</th>
+            <th class="py-2 px-3">Source Offsets</th>
+            <th class="py-2 px-3">CLI Args</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for tid, t in live_tasks.items() %}
+        <tr class="border-b border-gray-800">
+            <td class="py-2 px-3 font-mono text-yellow-400">{{ tid }}</td>
+            <td class="py-2 px-3 font-mono">{{ t.partition }}</td>
+            <td class="py-2 px-3 font-mono text-xs">{{ t.source_offsets }}</td>
+            <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate">{{ t.args }}</td>
+        </tr>
+        {% endfor %}
+        {% if not live_tasks %}
+        <tr><td colspan="4" class="py-4 text-center text-gray-500">No tasks currently running</td></tr>
+        {% endif %}
+    </tbody>
+</table>
+
+<h2 class="text-lg font-semibold mb-3">Recent Started (from recorder)</h2>
+<table class="w-full text-sm">
+    <thead>
+        <tr class="text-left text-gray-400 border-b border-gray-700">
+            <th class="py-2 px-3">Task ID</th>
+            <th class="py-2 px-3">Partition</th>
+            <th class="py-2 px-3">Started</th>
+            <th class="py-2 px-3">Elapsed</th>
+            <th class="py-2 px-3">CLI Args</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for t in active_from_db %}
+        <tr class="border-b border-gray-800">
+            <td class="py-2 px-3 font-mono text-yellow-400">{{ t.task_id }}</td>
+            <td class="py-2 px-3 font-mono">{{ t.partition }}</td>
+            <td class="py-2 px-3 text-gray-400 text-xs">{{ relative_time(t.ts) }}</td>
+            <td class="py-2 px-3 font-mono">{{ "%.1f"|format(t.elapsed) }}s</td>
+            <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate">{{ t.args }}</td>
+        </tr>
+        {% endfor %}
+        {% if not active_from_db %}
+        <tr><td colspan="5" class="py-4 text-center text-gray-500">No unfinished tasks in recorder</td></tr>
+        {% endif %}
+    </tbody>
+</table>
+{% endblock %}

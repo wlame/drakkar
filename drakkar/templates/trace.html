@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Trace {{ partition_id }}:{{ offset }} — Drakkar Debug{% endblock %}
+
+{% block content %}
+<div class="flex items-center gap-4 mb-6">
+    <h1 class="text-2xl font-bold">Message Trace</h1>
+    <span class="bg-gray-700 px-3 py-1 rounded font-mono text-sm">partition={{ partition_id }} offset={{ offset }}</span>
+    <a href="/partitions/{{ partition_id }}" class="text-sm text-gray-400 hover:text-white">&larr; partition {{ partition_id }}</a>
+</div>
+
+{% if events %}
+<div class="space-y-3">
+    {% for e in events %}
+    <div class="bg-gray-800 rounded-lg p-4 border-l-4
+        {% if e.event == 'consumed' %}border-blue-500
+        {% elif e.event == 'arranged' %}border-indigo-500
+        {% elif e.event == 'task_started' %}border-yellow-500
+        {% elif e.event == 'task_completed' %}border-green-500
+        {% elif e.event == 'task_failed' %}border-red-500
+        {% elif e.event == 'produced' %}border-purple-500
+        {% elif e.event == 'committed' %}border-gray-500
+        {% else %}border-gray-600{% endif %}">
+        <div class="flex items-center justify-between mb-2">
+            <span class="font-semibold
+                {% if e.event == 'task_completed' %}text-green-400
+                {% elif e.event == 'task_failed' %}text-red-400
+                {% elif e.event == 'task_started' %}text-yellow-400
+                {% elif e.event == 'consumed' %}text-blue-400
+                {% elif e.event == 'produced' %}text-purple-400
+                {% else %}text-gray-300{% endif %}">
+                {{ e.event }}
+            </span>
+            <span class="text-xs text-gray-400" title="{{ format_ts(e.ts) }}">{{ relative_time(e.ts) }} &middot; {{ format_ts(e.ts) }}</span>
+        </div>
+
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+            {% if e.task_id %}<div><span class="text-gray-500">task:</span> <span class="font-mono">{{ e.task_id }}</span></div>{% endif %}
+            {% if e.offset is not none %}<div><span class="text-gray-500">offset:</span> <span class="font-mono">{{ e.offset }}</span></div>{% endif %}
+            {% if e.exit_code is not none %}<div><span class="text-gray-500">exit:</span> <span class="font-mono {% if e.exit_code != 0 %}text-red-400{% endif %}">{{ e.exit_code }}</span></div>{% endif %}
+            {% if e.duration is not none %}<div><span class="text-gray-500">duration:</span> <span class="font-mono">{{ "%.3f"|format(e.duration) }}s</span></div>{% endif %}
+            {% if e.stdout_size %}<div><span class="text-gray-500">stdout:</span> <span class="font-mono">{{ e.stdout_size }}B</span></div>{% endif %}
+            {% if e.output_topic %}<div><span class="text-gray-500">topic:</span> <span class="font-mono">{{ e.output_topic }}</span></div>{% endif %}
+        </div>
+
+        {% if e.args %}
+        <div class="mt-2 text-xs">
+            <span class="text-gray-500">args:</span>
+            <code class="text-gray-300 bg-gray-900 px-2 py-1 rounded ml-1">{{ e.args }}</code>
+        </div>
+        {% endif %}
+
+        {% if e.stdout %}
+        <details class="mt-2">
+            <summary class="text-xs text-gray-500 cursor-pointer">stdout</summary>
+            <pre class="mt-1 text-xs bg-gray-900 p-2 rounded overflow-x-auto max-h-40">{{ e.stdout }}</pre>
+        </details>
+        {% endif %}
+
+        {% if e.stderr %}
+        <details class="mt-2">
+            <summary class="text-xs text-red-400 cursor-pointer">stderr</summary>
+            <pre class="mt-1 text-xs bg-gray-900 p-2 rounded overflow-x-auto max-h-40 text-red-300">{{ e.stderr }}</pre>
+        </details>
+        {% endif %}
+
+        {% if e.metadata %}
+        <div class="mt-2 text-xs">
+            <span class="text-gray-500">metadata:</span>
+            <code class="text-gray-400 ml-1">{{ e.metadata }}</code>
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="text-gray-500 text-center py-8">No events found for this message</div>
+{% endif %}
+{% endblock %}

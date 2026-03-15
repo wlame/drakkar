@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}History — Drakkar Debug{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">Event History</h1>
+
+<form class="flex gap-4 mb-6 items-end" method="get">
+    <div>
+        <label class="block text-xs text-gray-400 mb-1">Partition</label>
+        <input type="number" name="partition" value="{{ filter_partition if filter_partition is not none else '' }}"
+               placeholder="all" class="bg-gray-800 border border-gray-600 rounded px-3 py-1.5 text-sm w-24">
+    </div>
+    <div>
+        <label class="block text-xs text-gray-400 mb-1">Event type</label>
+        <select name="event_type" class="bg-gray-800 border border-gray-600 rounded px-3 py-1.5 text-sm">
+            <option value="">all</option>
+            {% for et in ['consumed', 'arranged', 'task_started', 'task_completed', 'task_failed', 'produced', 'committed', 'assigned', 'revoked'] %}
+            <option value="{{ et }}" {% if filter_event_type == et %}selected{% endif %}>{{ et }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <button type="submit" class="bg-blue-600 hover:bg-blue-700 px-4 py-1.5 rounded text-sm">Filter</button>
+    <a href="/history" class="text-gray-400 hover:text-white text-sm py-1.5">Reset</a>
+</form>
+
+<table class="w-full text-sm">
+    <thead>
+        <tr class="text-left text-gray-400 border-b border-gray-700">
+            <th class="py-2 px-3">Time</th>
+            <th class="py-2 px-3">Event</th>
+            <th class="py-2 px-3">Partition</th>
+            <th class="py-2 px-3">Offset</th>
+            <th class="py-2 px-3">Task ID</th>
+            <th class="py-2 px-3">Duration</th>
+            <th class="py-2 px-3">Exit</th>
+            <th class="py-2 px-3">Args / Metadata</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for e in events %}
+        <tr class="border-b border-gray-800 hover:bg-gray-800">
+            <td class="py-2 px-3 text-gray-400 text-xs whitespace-nowrap" title="{{ format_ts(e.ts) }}">{{ relative_time(e.ts) }}</td>
+            <td class="py-2 px-3">
+                {% if e.event == 'task_completed' %}<span class="text-green-400">{{ e.event }}</span>
+                {% elif e.event == 'task_failed' %}<span class="text-red-400">{{ e.event }}</span>
+                {% elif e.event == 'task_started' %}<span class="text-yellow-400">{{ e.event }}</span>
+                {% else %}{{ e.event }}{% endif %}
+            </td>
+            <td class="py-2 px-3 font-mono">
+                {% if e.partition is not none %}
+                <a href="/partitions/{{ e.partition }}" class="text-blue-400 hover:underline">{{ e.partition }}</a>
+                {% endif %}
+            </td>
+            <td class="py-2 px-3 font-mono">
+                {% if e.offset is not none and e.partition is not none %}
+                <a href="/trace/{{ e.partition }}/{{ e.offset }}" class="text-blue-400 hover:underline">{{ e.offset }}</a>
+                {% elif e.offset is not none %}{{ e.offset }}{% endif %}
+            </td>
+            <td class="py-2 px-3 font-mono text-xs">{{ e.task_id or '' }}</td>
+            <td class="py-2 px-3 font-mono">{% if e.duration is not none %}{{ "%.2f"|format(e.duration) }}s{% endif %}</td>
+            <td class="py-2 px-3 font-mono {% if e.exit_code is not none and e.exit_code != 0 %}text-red-400{% endif %}">
+                {{ e.exit_code if e.exit_code is not none else '' }}
+            </td>
+            <td class="py-2 px-3 text-xs text-gray-500 max-w-xs truncate">{{ e.args or e.metadata or '' }}</td>
+        </tr>
+        {% endfor %}
+        {% if not events %}
+        <tr><td colspan="8" class="py-4 text-center text-gray-500">No events found</td></tr>
+        {% endif %}
+    </tbody>
+</table>
+
+<div class="flex gap-4 mt-4">
+    {% if page > 0 %}
+    <a href="/history?page={{ page - 1 }}{% if filter_partition is not none %}&partition={{ filter_partition }}{% endif %}{% if filter_event_type %}&event_type={{ filter_event_type }}{% endif %}"
+       class="text-blue-400 hover:underline">&larr; Newer</a>
+    {% endif %}
+    {% if has_next %}
+    <a href="/history?page={{ page + 1 }}{% if filter_partition is not none %}&partition={{ filter_partition }}{% endif %}{% if filter_event_type %}&event_type={{ filter_event_type }}{% endif %}"
+       class="text-blue-400 hover:underline">Older &rarr;</a>
+    {% endif %}
+</div>
+{% endblock %}

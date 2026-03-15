@@ -60,8 +60,7 @@ def create_debug_app(
         stats = await recorder.get_stats()
         processors = drakkar_app.processors
         pool = drakkar_app._executor_pool
-        return templates.TemplateResponse("dashboard.html", {
-            'request': request,
+        return templates.TemplateResponse(request, "dashboard.html", {
             'worker_id': drakkar_app._worker_id,
             'uptime': time.monotonic() - drakkar_app._start_time,
             'stats': stats,
@@ -81,8 +80,7 @@ def create_debug_app(
             s['queue_size'] = proc.queue_size if proc else 0
             s['pending_offsets'] = proc.offset_tracker.pending_count if proc else 0
             s['is_live'] = pid in processors
-        return templates.TemplateResponse("partitions.html", {
-            'request': request,
+        return templates.TemplateResponse(request, "partitions.html", {
             'worker_id': drakkar_app._worker_id,
             'summary': summary,
         })
@@ -97,8 +95,7 @@ def create_debug_app(
         events = await recorder.get_events(
             partition=partition_id, limit=limit, offset=page * limit,
         )
-        return templates.TemplateResponse("partition_detail.html", {
-            'request': request,
+        return templates.TemplateResponse(request, "partition_detail.html", {
             'worker_id': drakkar_app._worker_id,
             'partition_id': partition_id,
             'events': events,
@@ -122,8 +119,7 @@ def create_debug_app(
                     'partition': proc.partition_id,
                     'source_offsets': t.source_offsets,
                 }
-        return templates.TemplateResponse("executors.html", {
-            'request': request,
+        return templates.TemplateResponse(request, "executors.html", {
             'worker_id': drakkar_app._worker_id,
             'active_from_db': active,
             'live_tasks': live_tasks,
@@ -134,8 +130,7 @@ def create_debug_app(
     @app.get("/trace/{partition_id}/{offset}", response_class=HTMLResponse)
     async def trace(request: Request, partition_id: int, offset: int):
         events = await recorder.get_trace(partition_id, offset)
-        return templates.TemplateResponse("trace.html", {
-            'request': request,
+        return templates.TemplateResponse(request, "trace.html", {
             'worker_id': drakkar_app._worker_id,
             'partition_id': partition_id,
             'offset': offset,
@@ -156,8 +151,7 @@ def create_debug_app(
             limit=limit,
             offset=page * limit,
         )
-        return templates.TemplateResponse("history.html", {
-            'request': request,
+        return templates.TemplateResponse(request, "history.html", {
             'worker_id': drakkar_app._worker_id,
             'events': events,
             'page': page,
