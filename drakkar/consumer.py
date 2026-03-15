@@ -55,14 +55,14 @@ class KafkaConsumer:
     def _handle_assign(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
         partition_ids = [p.partition for p in partitions]
         rebalance_events.labels(type="assign").inc()
-        logger.info("partitions_assigned", partitions=partition_ids)
+        logger.info("partitions_assigned", category="kafka", partitions=partition_ids, count=len(partition_ids))
         if self._on_assign_cb:
             self._on_assign_cb(partition_ids)
 
     def _handle_revoke(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
         partition_ids = [p.partition for p in partitions]
         rebalance_events.labels(type="revoke").inc()
-        logger.info("partitions_revoked", partitions=partition_ids)
+        logger.info("partitions_revoked", category="kafka", partitions=partition_ids, count=len(partition_ids))
         if self._on_revoke_cb:
             self._on_revoke_cb(partition_ids)
 
@@ -84,7 +84,7 @@ class KafkaConsumer:
                 if msg.error().code() == KafkaError._PARTITION_EOF:
                     continue
                 consumer_errors.inc()
-                logger.warning("consumer_error", error=str(msg.error()))
+                logger.warning("consumer_error", category="kafka", error=str(msg.error()))
                 continue
             messages.append(SourceMessage(
                 topic=msg.topic(),
@@ -116,7 +116,7 @@ class KafkaConsumer:
         )
         for partition_id in offsets:
             offsets_committed.labels(partition=str(partition_id)).inc()
-        logger.debug("offsets_committed", offsets=offsets)
+        logger.debug("offsets_committed", category="kafka", offsets=offsets)
 
     def close(self) -> None:
         """Close the consumer."""

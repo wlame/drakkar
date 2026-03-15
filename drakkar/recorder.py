@@ -95,7 +95,7 @@ class EventRecorder:
         self._running = True
         self._flush_task = asyncio.create_task(self._flush_loop())
         self._retention_task = asyncio.create_task(self._retention_loop())
-        await logger.ainfo("recorder_started", db_path=self._db_path)
+        await logger.ainfo("recorder_started", category="recorder", db_path=self._db_path)
 
     async def stop(self) -> None:
         self._running = False
@@ -115,7 +115,7 @@ class EventRecorder:
         if self._db:
             await self._db.close()
             self._db = None
-        await logger.ainfo("recorder_stopped")
+        await logger.ainfo("recorder_stopped", category="recorder")
 
     # --- Recording methods (sync, append to buffer) ---
 
@@ -396,7 +396,7 @@ class EventRecorder:
                 mtime = os.path.getmtime(db_file)
                 if mtime < cutoff:
                     os.remove(db_file)
-                    await logger.ainfo("recorder_deleted_old_db", path=db_file)
+                    await logger.ainfo("recorder_deleted_old_db", category="recorder", path=db_file)
             except OSError:
                 pass
 
@@ -416,4 +416,4 @@ class EventRecorder:
         self._db = await aiosqlite.connect(self._db_path)
         await self._db.executescript(SCHEMA)
         await self._db.commit()
-        await logger.ainfo("recorder_rotated", new_db=self._db_path)
+        await logger.ainfo("recorder_rotated", category="recorder", new_db=self._db_path)

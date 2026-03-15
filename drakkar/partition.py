@@ -133,7 +133,7 @@ class PartitionProcessor:
             await asyncio.sleep(0.05)
 
     async def _run(self) -> None:
-        log = logger.bind(partition=self._partition_id)
+        log = logger.bind(partition=self._partition_id, category="partition")
         await log.ainfo("partition_processor_started")
 
         try:
@@ -210,6 +210,7 @@ class PartitionProcessor:
 
     async def _execute_and_track(self, task: ExecutorTask, window: Window) -> None:
         log = logger.bind(
+            category="executor",
             partition=self._partition_id,
             task_id=task.task_id,
             window_id=window.window_id,

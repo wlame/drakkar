@@ -31,7 +31,7 @@ class DBWriter:
             min_size=self._config.pool_min,
             max_size=self._config.pool_max,
         )
-        logger.info("db_connected", dsn=self._config.dsn.split("@")[-1])
+        await logger.ainfo("db_connected", category="db", host=self._config.dsn.split("@")[-1])
 
     async def write(self, rows: list[DBRow]) -> None:
         """Write rows to their respective tables.
@@ -55,7 +55,7 @@ class DBWriter:
 
             db_rows_written.inc(len(rows))
             db_write_duration.observe(time.monotonic() - start)
-            logger.debug("db_rows_written", count=len(rows))
+            await logger.adebug("db_rows_written", category="db", count=len(rows))
         except Exception:
             db_errors.inc()
             raise

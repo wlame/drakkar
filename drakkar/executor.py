@@ -82,8 +82,10 @@ class ExecutorPool:
 
             await logger.adebug(
                 "executor_task_completed",
+                category="executor",
                 task_id=task.task_id,
                 duration=result.duration_seconds,
+                exit_code=result.exit_code,
             )
             return result
 

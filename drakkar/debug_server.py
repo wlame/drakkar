@@ -190,7 +190,7 @@ class DebugServer:
         )
         self._server = uvicorn.Server(uvi_config)
         self._task = asyncio.create_task(self._server.serve())
-        await logger.ainfo("debug_server_started", port=self._config.port)
+        await logger.ainfo("debug_server_started", category="debug", port=self._config.port)
 
     async def stop(self) -> None:
         if self._server:
@@ -200,4 +200,4 @@ class DebugServer:
                 await asyncio.wait_for(self._task, timeout=5.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
-        await logger.ainfo("debug_server_stopped")
+        await logger.ainfo("debug_server_stopped", category="debug")
