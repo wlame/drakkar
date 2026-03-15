@@ -46,12 +46,7 @@ class DrakkarApp:
         self._handler = handler
         self._worker_id = worker_id or f"drakkar-{id(self):x}"
 
-        self._executor_pool = ExecutorPool(
-            binary_path=self._config.executor.binary_path,
-            max_workers=self._config.executor.max_workers,
-            task_timeout_seconds=self._config.executor.task_timeout_seconds,
-        )
-
+        self._executor_pool: ExecutorPool | None = None
         self._consumer: KafkaConsumer | None = None
         self._producer: KafkaProducer | None = None
         self._db_writer: DBWriter | None = None
@@ -75,7 +70,16 @@ class DrakkarApp:
 
     async def _async_run(self) -> None:
         log = logger.bind(worker_id=self._worker_id)
+
+        self._config = await self._handler.on_startup(self._config)
+
         await log.ainfo("drakkar_starting", config=self._config.model_dump())
+
+        self._executor_pool = ExecutorPool(
+            binary_path=self._config.executor.binary_path,
+            max_workers=self._config.executor.max_workers,
+            task_timeout_seconds=self._config.executor.task_timeout_seconds,
+        )
 
         start_metrics_server(self._config.metrics)
         worker_info.info({

@@ -170,6 +170,34 @@ async def test_app_handle_commit(test_config):
     app._consumer.commit.assert_called_once_with({3: 100})
 
 
+async def test_app_on_startup_hook_can_modify_config(test_config):
+    class ConfigTuningHandler(BaseDrakkarHandler):
+        async def on_startup(self, config):
+            return config.model_copy(update={
+                'executor': config.executor.model_copy(update={
+                    'max_workers': 99,
+                }),
+            })
+
+        async def arrange(self, messages, pending):
+            return []
+
+    app = DrakkarApp(handler=ConfigTuningHandler(), config=test_config)
+    assert app.config.executor.max_workers == 2  # original
+
+    # simulate the on_startup call from _async_run
+    app._config = await app._handler.on_startup(app._config)
+    assert app._config.executor.max_workers == 99
+
+
+async def test_app_on_startup_default_returns_config_unchanged(test_config):
+    handler = SimpleHandler()
+    app = DrakkarApp(handler=handler, config=test_config)
+
+    result = await app._handler.on_startup(app._config)
+    assert result is app._config
+
+
 async def test_app_handle_signal(test_config):
     handler = SimpleHandler()
     app = DrakkarApp(handler=handler, config=test_config)

@@ -1,7 +1,10 @@
 """Tests for Drakkar handler protocol and base handler."""
 
+import os
+
 import pytest
 
+from drakkar.config import DrakkarConfig, ExecutorConfig
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
     ErrorAction,
@@ -58,6 +61,35 @@ async def test_base_handler_on_assign_is_noop(handler: BaseDrakkarHandler):
 
 async def test_base_handler_on_revoke_is_noop(handler: BaseDrakkarHandler):
     await handler.on_revoke([0, 1, 2])
+
+
+async def test_base_handler_on_startup_returns_config_unchanged(handler: BaseDrakkarHandler):
+    config = DrakkarConfig(executor=ExecutorConfig(binary_path="/bin/echo"))
+    result = await handler.on_startup(config)
+    assert result is config
+
+
+async def test_on_startup_can_modify_config():
+    class TuningHandler(BaseDrakkarHandler):
+        async def on_startup(self, config):
+            import os
+            cpu_count = os.cpu_count() or 4
+            return config.model_copy(update={
+                'executor': config.executor.model_copy(update={
+                    'max_workers': cpu_count,
+                }),
+            })
+
+        async def arrange(self, messages, pending):
+            return []
+
+    handler = TuningHandler()
+    config = DrakkarConfig(
+        executor=ExecutorConfig(binary_path="/bin/echo", max_workers=1),
+    )
+    result = await handler.on_startup(config)
+    assert result.executor.max_workers == (os.cpu_count() or 4)
+    assert result.executor.binary_path == "/bin/echo"
 
 
 async def test_custom_handler_overrides():

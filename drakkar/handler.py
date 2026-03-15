@@ -1,6 +1,11 @@
 """User hook protocol and base handler for Drakkar framework."""
 
-from typing import Protocol
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from drakkar.config import DrakkarConfig
 
 from drakkar.models import (
     CollectResult,
@@ -11,9 +16,21 @@ from drakkar.models import (
     SourceMessage,
 )
 
+if TYPE_CHECKING:
+    from drakkar.config import DrakkarConfig
+
 
 class DrakkarHandler(Protocol):
     """Protocol defining the hooks a user must implement."""
+
+    async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
+        """Called after config is loaded, before components are created.
+
+        Receives the resolved config. Return the same config or a modified
+        copy to override settings (e.g., adjust max_workers based on
+        detected CPU count, change topics based on environment).
+        """
+        ...
 
     async def arrange(
         self,
@@ -69,6 +86,9 @@ class BaseDrakkarHandler:
     Users extend this class and must override `arrange`.
     All other hooks have sensible defaults.
     """
+
+    async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
+        return config
 
     async def arrange(
         self,
