@@ -12,7 +12,7 @@ from drakkar.db import DBWriter
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.logging import setup_logging
-from drakkar.metrics import messages_produced, start_metrics_server
+from drakkar.metrics import assigned_partitions, messages_produced, start_metrics_server
 from drakkar.models import CollectResult
 from drakkar.partition import PartitionProcessor
 from drakkar.producer import KafkaProducer
@@ -124,6 +124,7 @@ class DrakkarApp:
                 self._processors[pid] = processor
                 processor.start()
 
+        assigned_partitions.set(len(self._processors))
         asyncio.ensure_future(self._handler.on_assign(partition_ids))
 
     def _on_revoke(self, partition_ids: list[int]) -> None:
@@ -133,6 +134,7 @@ class DrakkarApp:
             if processor:
                 asyncio.ensure_future(self._stop_processor(processor))
 
+        assigned_partitions.set(len(self._processors))
         asyncio.ensure_future(self._handler.on_revoke(partition_ids))
 
     async def _stop_processor(self, processor: PartitionProcessor) -> None:

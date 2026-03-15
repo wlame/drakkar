@@ -1,11 +1,13 @@
 """Kafka producer wrapper for Drakkar framework."""
 
 import asyncio
+import time
 
 import structlog
 from confluent_kafka import KafkaException, Producer
 
 from drakkar.config import KafkaConfig
+from drakkar.metrics import produce_duration, producer_errors
 from drakkar.models import OutputMessage
 
 logger = structlog.get_logger()
@@ -27,9 +29,11 @@ class KafkaProducer:
         """
         loop = asyncio.get_running_loop()
         future: asyncio.Future[None] = loop.create_future()
+        start = time.monotonic()
 
         def delivery_callback(err, msg):
             if err:
+                producer_errors.inc()
                 if not future.done():
                     loop.call_soon_threadsafe(
                         future.set_exception,
@@ -48,6 +52,7 @@ class KafkaProducer:
         self._producer.poll(0)
 
         await future
+        produce_duration.observe(time.monotonic() - start)
 
     async def produce_batch(self, messages: list[OutputMessage]) -> None:
         """Produce multiple messages to the target topic."""

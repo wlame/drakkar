@@ -14,9 +14,12 @@ from drakkar.metrics import (
     executor_duration,
     executor_pool_active,
     executor_tasks,
+    executor_timeouts,
+    handler_duration,
     messages_consumed,
     offset_lag,
     partition_queue_size,
+    task_retries,
 )
 from drakkar.models import (
     CollectResult,
@@ -180,7 +183,9 @@ class PartitionProcessor:
             pending_task_ids=set(self._pending_tasks.keys()),
         )
 
+        arrange_start = time.monotonic()
         tasks = await self._handler.arrange(messages, pending_ctx)
+        handler_duration.labels(hook="arrange").observe(time.monotonic() - arrange_start)
         window.tasks = tasks
         window.total_tasks = len(tasks)
 
@@ -210,7 +215,9 @@ class PartitionProcessor:
             executor_tasks.labels(status="completed").inc()
             executor_duration.observe(result.duration_seconds)
 
+            collect_start = time.monotonic()
             collect_result = await self._handler.collect(result)
+            handler_duration.labels(hook="collect").observe(time.monotonic() - collect_start)
             if collect_result and self._on_collect:
                 await self._on_collect(collect_result, self._partition_id)
 
@@ -218,9 +225,13 @@ class PartitionProcessor:
 
         except ExecutorTaskError as e:
             executor_tasks.labels(status="failed").inc()
+            if e.error.exception and "Timeout" in (e.error.exception or ""):
+                executor_timeouts.inc()
             await log.awarning("executor_task_failed", error=str(e))
 
+            on_error_start = time.monotonic()
             action = await self._handler.on_error(task, e.error)
+            handler_duration.labels(hook="on_error").observe(time.monotonic() - on_error_start)
             if isinstance(action, list):
                 for new_task in action:
                     self._pending_tasks[new_task.task_id] = new_task
@@ -228,6 +239,7 @@ class PartitionProcessor:
                     window.total_tasks += 1
                     asyncio.create_task(self._execute_and_track(new_task, window))
             elif action == ErrorAction.RETRY:
+                task_retries.inc()
                 asyncio.create_task(self._execute_and_track(task, window))
                 return
             else:
@@ -243,9 +255,11 @@ class PartitionProcessor:
             duration = time.monotonic() - window.start_time
             batch_duration.observe(duration)
 
+            wc_start = time.monotonic()
             on_complete_result = await self._handler.on_window_complete(
                 window.results, window.source_messages
             )
+            handler_duration.labels(hook="on_window_complete").observe(time.monotonic() - wc_start)
             if on_complete_result and self._on_collect:
                 await self._on_collect(on_complete_result, self._partition_id)
 

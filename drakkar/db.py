@@ -1,9 +1,12 @@
 """PostgreSQL database writer for Drakkar framework."""
 
+import time
+
 import asyncpg
 import structlog
 
 from drakkar.config import PostgresConfig
+from drakkar.metrics import db_errors, db_rows_written, db_write_duration
 from drakkar.models import DBRow
 
 logger = structlog.get_logger()
@@ -39,16 +42,23 @@ class DBWriter:
         if not rows or not self._pool:
             return
 
-        async with self._pool.acquire() as conn:
-            for row in rows:
-                columns = list(row.data.keys())
-                placeholders = ", ".join(f"${i + 1}" for i in range(len(columns)))
-                col_names = ", ".join(columns)
-                query = f"INSERT INTO {row.table} ({col_names}) VALUES ({placeholders})"
-                values = list(row.data.values())
-                await conn.execute(query, *values)
+        start = time.monotonic()
+        try:
+            async with self._pool.acquire() as conn:
+                for row in rows:
+                    columns = list(row.data.keys())
+                    placeholders = ", ".join(f"${i + 1}" for i in range(len(columns)))
+                    col_names = ", ".join(columns)
+                    query = f"INSERT INTO {row.table} ({col_names}) VALUES ({placeholders})"
+                    values = list(row.data.values())
+                    await conn.execute(query, *values)
 
-        logger.debug("db_rows_written", count=len(rows))
+            db_rows_written.inc(len(rows))
+            db_write_duration.observe(time.monotonic() - start)
+            logger.debug("db_rows_written", count=len(rows))
+        except Exception:
+            db_errors.inc()
+            raise
 
     async def close(self) -> None:
         """Close the connection pool."""

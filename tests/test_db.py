@@ -93,3 +93,20 @@ async def test_db_writer_close_no_pool(pg_config):
 async def test_db_writer_pool_property(pg_config):
     writer = DBWriter(pg_config)
     assert writer.pool is None
+
+
+async def test_db_writer_write_error_reraises(pg_config):
+    """DB write errors are re-raised after incrementing metrics (metric check in test_metrics.py)."""
+    pool = MagicMock()
+    conn = AsyncMock()
+    conn.execute.side_effect = Exception("connection lost")
+    ctx = AsyncMock()
+    ctx.__aenter__ = AsyncMock(return_value=conn)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    pool.acquire.return_value = ctx
+
+    writer = DBWriter(pg_config)
+    writer._pool = pool
+
+    with pytest.raises(Exception, match="connection lost"):
+        await writer.write([DBRow(table="t", data={"x": 1})])

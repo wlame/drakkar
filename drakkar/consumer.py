@@ -8,6 +8,7 @@ import structlog
 from confluent_kafka import Consumer, KafkaError, KafkaException, TopicPartition
 
 from drakkar.config import KafkaConfig
+from drakkar.metrics import consumer_errors, offsets_committed, rebalance_events
 from drakkar.models import SourceMessage
 
 logger = structlog.get_logger()
@@ -53,12 +54,14 @@ class KafkaConsumer:
 
     def _handle_assign(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
         partition_ids = [p.partition for p in partitions]
+        rebalance_events.labels(type="assign").inc()
         logger.info("partitions_assigned", partitions=partition_ids)
         if self._on_assign_cb:
             self._on_assign_cb(partition_ids)
 
     def _handle_revoke(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
         partition_ids = [p.partition for p in partitions]
+        rebalance_events.labels(type="revoke").inc()
         logger.info("partitions_revoked", partitions=partition_ids)
         if self._on_revoke_cb:
             self._on_revoke_cb(partition_ids)
@@ -80,6 +83,7 @@ class KafkaConsumer:
             if msg.error():
                 if msg.error().code() == KafkaError._PARTITION_EOF:
                     continue
+                consumer_errors.inc()
                 logger.warning("consumer_error", error=str(msg.error()))
                 continue
             messages.append(SourceMessage(
@@ -110,6 +114,8 @@ class KafkaConsumer:
         await loop.run_in_executor(
             None, self._consumer.commit, topic_partitions
         )
+        for partition_id in offsets:
+            offsets_committed.labels(partition=str(partition_id)).inc()
         logger.debug("offsets_committed", offsets=offsets)
 
     def close(self) -> None:
