@@ -12,7 +12,13 @@ from drakkar.db import DBWriter
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.logging import setup_logging
-from drakkar.metrics import assigned_partitions, messages_produced, start_metrics_server
+from drakkar import __version__
+from drakkar.metrics import (
+    assigned_partitions,
+    messages_produced,
+    start_metrics_server,
+    worker_info,
+)
 from drakkar.models import CollectResult
 from drakkar.partition import PartitionProcessor
 from drakkar.producer import KafkaProducer
@@ -72,6 +78,11 @@ class DrakkarApp:
         await log.ainfo("drakkar_starting", config=self._config.model_dump())
 
         start_metrics_server(self._config.metrics)
+        worker_info.info({
+            'worker_id': self._worker_id,
+            'version': __version__,
+            'consumer_group': self._config.kafka.consumer_group,
+        })
 
         self._consumer = KafkaConsumer(
             config=self._config.kafka,

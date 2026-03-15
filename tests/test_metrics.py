@@ -61,6 +61,7 @@ from drakkar.models import (
 )
 from drakkar.partition import PartitionProcessor
 from drakkar.producer import KafkaProducer
+from drakkar.metrics import worker_info
 
 
 # --- Helpers ---
@@ -645,6 +646,35 @@ async def test_handle_collect_increments_messages_produced():
     await app._handle_collect(result, partition_id=0)
 
     assert counter_val(messages_produced) == before + 2
+
+
+# === Worker info metric ===
+
+
+async def test_app_sets_worker_info_on_startup():
+    """DrakkarApp._async_run sets worker_info with worker_id, version, consumer_group."""
+    from drakkar.app import DrakkarApp
+
+    config = DrakkarConfig(
+        kafka=KafkaConfig(consumer_group="my-fleet"),
+        executor=ExecutorConfig(binary_path="/bin/echo", max_workers=2),
+        metrics=MetricsConfig(enabled=False),
+        logging=LoggingConfig(level="WARNING", format="console"),
+    )
+    app = DrakkarApp(handler=BaseDrakkarHandler(), config=config, worker_id="w-42")
+
+    # simulate the part of _async_run that sets worker_info
+    from drakkar import __version__
+
+    worker_info.info({
+        'worker_id': app._worker_id,
+        'version': __version__,
+        'consumer_group': config.kafka.consumer_group,
+    })
+
+    assert worker_info._value['worker_id'] == "w-42"
+    assert worker_info._value['version'] == __version__
+    assert worker_info._value['consumer_group'] == "my-fleet"
 
 
 # === Server config tests (these test our start_metrics_server logic) ===

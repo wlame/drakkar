@@ -4,6 +4,13 @@ from prometheus_client import Counter, Gauge, Histogram, Info, start_http_server
 
 from drakkar.config import MetricsConfig
 
+# --- Worker identity ---
+
+worker_info = Info(
+    "drakkar_worker",
+    "Worker instance identity and version",
+)
+
 # --- Messages ---
 
 messages_consumed = Counter(
