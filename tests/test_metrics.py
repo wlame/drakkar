@@ -62,6 +62,7 @@ from drakkar.models import (
 from drakkar.partition import PartitionProcessor
 from drakkar.producer import KafkaProducer
 from drakkar.metrics import worker_info
+from tests.conftest import wait_for
 
 
 # --- Helpers ---
@@ -337,11 +338,10 @@ async def test_processing_tracks_executor_task_started_completed():
     proc.enqueue(make_msg(partition=88, offset=0))
     proc.enqueue(make_msg(partition=88, offset=1))
     proc.start()
-    await asyncio.sleep(0.5)
+    await wait_for(lambda: counter_val(executor_tasks, status="completed") >= before_completed + 2)
     await proc.stop()
 
     assert counter_val(executor_tasks, status="started") >= before_started + 2
-    assert counter_val(executor_tasks, status="completed") >= before_completed + 2
 
 
 async def test_failed_task_increments_executor_tasks_failed():
@@ -368,10 +368,8 @@ async def test_failed_task_increments_executor_tasks_failed():
     before = counter_val(executor_tasks, status="failed")
     proc.enqueue(make_msg(partition=89, offset=0))
     proc.start()
-    await asyncio.sleep(0.5)
+    await wait_for(lambda: counter_val(executor_tasks, status="failed") >= before + 1)
     await proc.stop()
-
-    assert counter_val(executor_tasks, status="failed") >= before + 1
 
 
 async def test_handler_arrange_duration_observed():
@@ -393,10 +391,8 @@ async def test_handler_arrange_duration_observed():
     before = histogram_sum(handler_duration, hook="arrange")
     proc.enqueue(make_msg(partition=90, offset=0))
     proc.start()
-    await asyncio.sleep(0.5)
+    await wait_for(lambda: histogram_sum(handler_duration, hook="arrange") > before)
     await proc.stop()
-
-    assert histogram_sum(handler_duration, hook="arrange") > before
 
 
 async def test_handler_collect_duration_observed():
@@ -420,10 +416,8 @@ async def test_handler_collect_duration_observed():
     before = histogram_sum(handler_duration, hook="collect")
     proc.enqueue(make_msg(partition=91, offset=0))
     proc.start()
-    await asyncio.sleep(0.5)
+    await wait_for(lambda: histogram_sum(handler_duration, hook="collect") > before)
     await proc.stop()
-
-    assert histogram_sum(handler_duration, hook="collect") > before
 
 
 async def test_handler_on_error_duration_observed():
@@ -453,10 +447,8 @@ async def test_handler_on_error_duration_observed():
     before = histogram_sum(handler_duration, hook="on_error")
     proc.enqueue(make_msg(partition=92, offset=0))
     proc.start()
-    await asyncio.sleep(0.5)
+    await wait_for(lambda: histogram_sum(handler_duration, hook="on_error") > before)
     await proc.stop()
-
-    assert histogram_sum(handler_duration, hook="on_error") > before
 
 
 async def test_window_complete_observes_batch_duration():
@@ -477,10 +469,8 @@ async def test_window_complete_observes_batch_duration():
     before = histogram_sum(batch_duration)
     proc.enqueue(make_msg(partition=93, offset=0))
     proc.start()
-    await asyncio.sleep(0.5)
+    await wait_for(lambda: histogram_sum(batch_duration) > before)
     await proc.stop()
-
-    assert histogram_sum(batch_duration) > before
 
 
 async def test_executor_duration_observed_on_completion():
@@ -501,10 +491,8 @@ async def test_executor_duration_observed_on_completion():
     before = histogram_sum(executor_duration)
     proc.enqueue(make_msg(partition=94, offset=0))
     proc.start()
-    await asyncio.sleep(0.5)
+    await wait_for(lambda: histogram_sum(executor_duration) > before)
     await proc.stop()
-
-    assert histogram_sum(executor_duration) > before
 
 
 async def test_offset_lag_updated_on_window_complete():
@@ -524,11 +512,8 @@ async def test_offset_lag_updated_on_window_complete():
 
     proc.enqueue(make_msg(partition=95, offset=0))
     proc.start()
-    await asyncio.sleep(0.5)
+    await wait_for(lambda: gauge_val(offset_lag, partition="95") == 0 and proc.inflight_count == 0)
     await proc.stop()
-
-    # after all tasks complete, offset_lag for this partition should be 0
-    assert gauge_val(offset_lag, partition="95") == 0
 
 
 async def test_task_retry_increments_retries_counter():
@@ -564,10 +549,8 @@ async def test_task_retry_increments_retries_counter():
     before = counter_val(task_retries)
     proc.enqueue(make_msg(partition=96, offset=0))
     proc.start()
-    await asyncio.sleep(0.8)
+    await wait_for(lambda: counter_val(task_retries) >= before + 1)
     await proc.stop()
-
-    assert counter_val(task_retries) >= before + 1
 
 
 # === App-level metrics ===
@@ -589,11 +572,9 @@ async def test_on_assign_sets_assigned_partitions_gauge():
     app._db_writer = AsyncMock()
 
     app._on_assign([10, 11, 12])
-    await asyncio.sleep(0.1)
 
-    assert gauge_val(assigned_partitions) == 3
+    assert gauge_val(assigned_partitions) == len(app.processors)
 
-    # clean up
     for proc in app.processors.values():
         await proc.stop()
 
@@ -614,12 +595,11 @@ async def test_on_revoke_decreases_assigned_partitions_gauge():
     app._db_writer = AsyncMock()
 
     app._on_assign([20, 21, 22])
-    await asyncio.sleep(0.1)
-    assert gauge_val(assigned_partitions) == 3
+    assert gauge_val(assigned_partitions) == len(app.processors)
 
     app._on_revoke([21])
-    await asyncio.sleep(0.2)
-    assert gauge_val(assigned_partitions) == 2
+    await asyncio.sleep(0.3)
+    assert gauge_val(assigned_partitions) == len(app.processors)
 
     for proc in list(app.processors.values()):
         await proc.stop()

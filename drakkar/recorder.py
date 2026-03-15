@@ -74,9 +74,11 @@ class EventRecorder:
     created. Old DB files beyond retention_hours are deleted.
     """
 
+    MAX_BUFFER = 50_000
+
     def __init__(self, config: DebugConfig):
         self._config = config
-        self._buffer: deque[dict] = deque()
+        self._buffer: deque[dict] = deque(maxlen=self.MAX_BUFFER)
         self._db: aiosqlite.Connection | None = None
         self._db_path: str = ""
         self._flush_task: asyncio.Task | None = None
@@ -271,15 +273,14 @@ class EventRecorder:
             WHERE partition = ? AND (
                 offset = ?
                 OR task_id IN (
-                    SELECT task_id FROM events
-                    WHERE partition = ? AND event = 'task_started'
-                    AND json_extract(metadata, '$.source_offsets') LIKE ?
+                    SELECT e.task_id FROM events e, json_each(json_extract(e.metadata, '$.source_offsets')) j
+                    WHERE e.partition = ? AND e.event = 'task_started'
+                    AND j.value = ?
                 )
             )
             ORDER BY id ASC
         """
-        offset_pattern = f"%{msg_offset}%"
-        async with self._db.execute(query, [partition, msg_offset, partition, offset_pattern]) as cursor:
+        async with self._db.execute(query, [partition, msg_offset, partition, msg_offset]) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
             return [dict(zip(columns, row)) for row in rows]
@@ -380,18 +381,28 @@ class EventRecorder:
             await self._rotate()
 
     async def _rotate(self) -> None:
-        """Rotate: close current DB, delete old files, open a new one."""
+        """Rotate: open new DB first, then close old — no query gap."""
         # flush remaining buffer to current DB
         await self._flush()
 
-        # close current DB
-        if self._db:
-            await self._db.close()
-            self._db = None
+        # open new DB before closing old — queries keep working
+        new_path = _make_db_path(self._config.db_path)
+        new_db = await aiosqlite.connect(new_path)
+        await new_db.executescript(SCHEMA)
+        await new_db.commit()
+
+        old_db = self._db
+        self._db = new_db
+        self._db_path = new_path
+
+        if old_db:
+            await old_db.close()
 
         # delete DB files older than retention
         cutoff = time.time() - (self._config.retention_hours * 3600)
         for db_file in _list_db_files(self._config.db_path):
+            if db_file == new_path:
+                continue
             try:
                 mtime = os.path.getmtime(db_file)
                 if mtime < cutoff:
@@ -400,20 +411,15 @@ class EventRecorder:
             except OSError:
                 pass
 
-        # enforce max file count (keep newest retention_max_events files)
-        # use file count as a proxy — simpler than counting rows across files
+        # enforce max file count
         remaining = _list_db_files(self._config.db_path)
         max_files = max(1, self._config.retention_max_events // 10_000)
         if len(remaining) > max_files:
             for old_file in remaining[:-max_files]:
-                try:
-                    os.remove(old_file)
-                except OSError:
-                    pass
+                if old_file != new_path:
+                    try:
+                        os.remove(old_file)
+                    except OSError:
+                        pass
 
-        # open new DB file
-        self._db_path = _make_db_path(self._config.db_path)
-        self._db = await aiosqlite.connect(self._db_path)
-        await self._db.executescript(SCHEMA)
-        await self._db.commit()
         await logger.ainfo("recorder_rotated", category="recorder", new_db=self._db_path)

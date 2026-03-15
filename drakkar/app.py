@@ -113,10 +113,12 @@ class DrakkarApp:
             )
             await self._debug_server.start()
 
+        self._loop = asyncio.get_running_loop()
         self._consumer = KafkaConsumer(
             config=self._config.kafka,
             on_assign=self._on_assign,
             on_revoke=self._on_revoke,
+            loop=self._loop,
         )
         self._producer = KafkaProducer(config=self._config.kafka)
 
@@ -183,10 +185,19 @@ class DrakkarApp:
         asyncio.ensure_future(self._handler.on_revoke(partition_ids))
 
     async def _stop_processor(self, processor: PartitionProcessor) -> None:
+        """Drain in-flight tasks (up to 5s), commit final offsets, then stop."""
+        processor._running = False
+        try:
+            await asyncio.wait_for(processor.drain(), timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
         committable = processor.offset_tracker.committable()
         if committable is not None and self._consumer:
-            await self._consumer.commit({processor.partition_id: committable})
-            processor.offset_tracker.acknowledge_commit(committable)
+            try:
+                await self._consumer.commit({processor.partition_id: committable})
+                processor.offset_tracker.acknowledge_commit(committable)
+            except Exception:
+                pass
         await processor.stop()
 
     async def _handle_collect(self, result: CollectResult, partition_id: int) -> None:
@@ -203,10 +214,16 @@ class DrakkarApp:
 
     async def _handle_commit(self, partition_id: int, offset: int) -> None:
         """Commit an offset for a specific partition."""
-        if self._consumer:
-            await self._consumer.commit({partition_id: offset})
-        if self._recorder:
-            self._recorder.record_committed(partition_id, offset)
+        try:
+            if self._consumer:
+                await self._consumer.commit({partition_id: offset})
+            if self._recorder:
+                self._recorder.record_committed(partition_id, offset)
+        except Exception as e:
+            logger.warning(
+                "commit_failed", category="kafka",
+                partition=partition_id, offset=offset, error=str(e),
+            )
 
     def _handle_signal(self) -> None:
         """Handle shutdown signals."""
@@ -271,7 +288,7 @@ class DrakkarApp:
         drain_tasks = [
             processor.drain()
             for processor in self._processors.values()
-            if processor.offset_tracker.has_pending()
+            if processor.offset_tracker.has_pending() or processor.inflight_count > 0
         ]
         if drain_tasks:
             await asyncio.gather(*drain_tasks)

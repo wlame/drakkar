@@ -37,6 +37,8 @@ logger = structlog.get_logger()
 CollectCallback = Callable[[CollectResult, int], Awaitable[None]]
 CommitCallback = Callable[[int, int], Awaitable[None]]
 
+MAX_RETRIES = 3
+
 
 @dataclass
 class Window:
@@ -88,6 +90,7 @@ class PartitionProcessor:
         self._window_counter = 0
         self._running = False
         self._task: asyncio.Task | None = None
+        self._inflight_count = 0
 
     @property
     def partition_id(self) -> int:
@@ -100,6 +103,10 @@ class PartitionProcessor:
     @property
     def offset_tracker(self) -> OffsetTracker:
         return self._offset_tracker
+
+    @property
+    def inflight_count(self) -> int:
+        return self._inflight_count
 
     def enqueue(self, message: SourceMessage) -> None:
         """Add a message to this partition's processing queue."""
@@ -128,8 +135,8 @@ class PartitionProcessor:
             self._task = None
 
     async def drain(self) -> None:
-        """Wait for all in-flight work to complete without accepting new messages."""
-        while self._offset_tracker.has_pending():
+        """Wait for all in-flight work to complete."""
+        while self._offset_tracker.has_pending() or self._inflight_count > 0:
             await asyncio.sleep(0.05)
 
     async def _run(self) -> None:
@@ -206,9 +213,10 @@ class PartitionProcessor:
             self._pending_tasks[task.task_id] = task
 
         for task in tasks:
+            self._inflight_count += 1
             asyncio.create_task(self._execute_and_track(task, window))
 
-    async def _execute_and_track(self, task: ExecutorTask, window: Window) -> None:
+    async def _execute_and_track(self, task: ExecutorTask, window: Window, retry_count: int = 0) -> None:
         log = logger.bind(
             category="executor",
             partition=self._partition_id,
@@ -251,16 +259,38 @@ class PartitionProcessor:
                     self._pending_tasks[new_task.task_id] = new_task
                     window.tasks.append(new_task)
                     window.total_tasks += 1
+                    self._inflight_count += 1
                     asyncio.create_task(self._execute_and_track(new_task, window))
-            elif action == ErrorAction.RETRY:
+            elif action == ErrorAction.RETRY and retry_count < MAX_RETRIES:
                 task_retries.inc()
-                asyncio.create_task(self._execute_and_track(task, window))
+                # don't decrement inflight or increment completed — the retry
+                # reuses this slot, so we just re-enter with same task
+                asyncio.create_task(self._execute_and_track(task, window, retry_count + 1))
                 return
             else:
+                if action == ErrorAction.RETRY:
+                    await log.awarning(
+                        "max_retries_exceeded",
+                        task_id=task.task_id,
+                        retries=retry_count,
+                    )
                 window.results.append(e.result)
+
+        except Exception as e:
+            await log.aerror("unexpected_error_in_task", error=str(e), exc_info=True)
+            # still count as completed so the window can progress
+            window.results.append(ExecutorResult(
+                task_id=task.task_id,
+                exit_code=-1,
+                stdout="",
+                stderr=str(e),
+                duration_seconds=0,
+                task=task,
+            ))
 
         finally:
             self._pending_tasks.pop(task.task_id, None)
+            self._inflight_count -= 1
             executor_pool_active.set(self._executor_pool.active_count)
 
         window.completed_count += 1
@@ -291,5 +321,12 @@ class PartitionProcessor:
         committable = self._offset_tracker.committable()
         if committable is not None:
             if self._on_commit:
-                await self._on_commit(self._partition_id, committable)
+                try:
+                    await self._on_commit(self._partition_id, committable)
+                except Exception as e:
+                    logger.warning(
+                        "commit_failed", category="kafka",
+                        partition=self._partition_id, offset=committable, error=str(e),
+                    )
+                    return
             self._offset_tracker.acknowledge_commit(committable)

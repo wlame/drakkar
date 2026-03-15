@@ -78,10 +78,10 @@ class OffsetTracker:
         Called after a successful Kafka offset commit.
         """
         self._last_committed = committed_offset
-        to_remove = [o for o in self._sorted_offsets if o < committed_offset]
-        for offset in to_remove:
+        idx = bisect.bisect_left(self._sorted_offsets, committed_offset)
+        for offset in self._sorted_offsets[:idx]:
             del self._offsets[offset]
-            self._sorted_offsets.remove(offset)
+        del self._sorted_offsets[:idx]
 
     def has_pending(self) -> bool:
         """Check if there are any pending (in-flight) offsets."""

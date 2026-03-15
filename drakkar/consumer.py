@@ -20,6 +20,9 @@ OnRevokeCallback = Callable[[list[int]], Any]
 class KafkaConsumer:
     """Wraps confluent_kafka.Consumer with cooperative-sticky rebalancing
     and manual offset commits, integrated with asyncio.
+
+    Rebalance callbacks from librdkafka's internal thread are dispatched
+    to the asyncio event loop via call_soon_threadsafe.
     """
 
     def __init__(
@@ -27,11 +30,12 @@ class KafkaConsumer:
         config: KafkaConfig,
         on_assign: OnAssignCallback | None = None,
         on_revoke: OnRevokeCallback | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
     ):
         self._config = config
         self._on_assign_cb = on_assign
         self._on_revoke_cb = on_revoke
-        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop = loop
 
         self._consumer = Consumer({
             "bootstrap.servers": config.brokers,
@@ -53,24 +57,29 @@ class KafkaConsumer:
         )
 
     def _handle_assign(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
+        """Called from librdkafka thread — dispatches to event loop."""
         partition_ids = [p.partition for p in partitions]
         rebalance_events.labels(type="assign").inc()
         logger.info("partitions_assigned", category="kafka", partitions=partition_ids, count=len(partition_ids))
         if self._on_assign_cb:
-            self._on_assign_cb(partition_ids)
+            if self._loop:
+                self._loop.call_soon_threadsafe(self._on_assign_cb, partition_ids)
+            else:
+                self._on_assign_cb(partition_ids)
 
     def _handle_revoke(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
+        """Called from librdkafka thread — dispatches to event loop."""
         partition_ids = [p.partition for p in partitions]
         rebalance_events.labels(type="revoke").inc()
         logger.info("partitions_revoked", category="kafka", partitions=partition_ids, count=len(partition_ids))
         if self._on_revoke_cb:
-            self._on_revoke_cb(partition_ids)
+            if self._loop:
+                self._loop.call_soon_threadsafe(self._on_revoke_cb, partition_ids)
+            else:
+                self._on_revoke_cb(partition_ids)
 
     async def poll_batch(self, max_messages: int | None = None, timeout: float = 1.0) -> list[SourceMessage]:
-        """Poll up to max_messages from Kafka, non-blocking via executor.
-
-        Returns empty list if no messages available.
-        """
+        """Poll up to max_messages from Kafka, non-blocking via executor."""
         loop = asyncio.get_running_loop()
         count = max_messages or self._config.max_poll_records
 
@@ -101,11 +110,7 @@ class KafkaConsumer:
         return self._consumer.consume(num_messages=count, timeout=timeout)
 
     async def commit(self, offsets: dict[int, int]) -> None:
-        """Commit offsets for specific partitions.
-
-        Args:
-            offsets: mapping of partition_id -> offset_to_commit
-        """
+        """Commit offsets for specific partitions."""
         topic_partitions = [
             TopicPartition(self._config.source_topic, partition, offset)
             for partition, offset in offsets.items()

@@ -16,9 +16,6 @@ from drakkar.models import (
     SourceMessage,
 )
 
-if TYPE_CHECKING:
-    from drakkar.config import DrakkarConfig
-
 
 class DrakkarHandler(Protocol):
     """Protocol defining the hooks a user must implement."""

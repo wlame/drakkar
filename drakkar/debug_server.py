@@ -52,6 +52,7 @@ def create_debug_app(
     """Create the FastAPI debug application."""
     app = FastAPI(title="Drakkar Debug", docs_url=None, redoc_url=None)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    templates.env.autoescape = True
     templates.env.globals['relative_time'] = _relative_time
     templates.env.globals['format_ts'] = _format_ts
 

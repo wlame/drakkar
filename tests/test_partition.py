@@ -1,9 +1,11 @@
 """Tests for Drakkar partition processor."""
 
 import asyncio
+import sys
 
 import pytest
 
+from tests.conftest import wait_for
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
@@ -16,7 +18,7 @@ from drakkar.models import (
     PendingContext,
     SourceMessage,
 )
-from drakkar.partition import PartitionProcessor, Window
+from drakkar.partition import MAX_RETRIES, PartitionProcessor, Window
 
 
 def make_msg(partition: int = 0, offset: int = 0) -> SourceMessage:
@@ -30,8 +32,6 @@ def make_msg(partition: int = 0, offset: int = 0) -> SourceMessage:
 
 
 class EchoHandler(BaseDrakkarHandler):
-    """Test handler that creates one task per message using echo."""
-
     def __init__(self):
         self.arrange_calls: list[tuple[int, int]] = []
         self.collect_calls: list[str] = []
@@ -65,15 +65,11 @@ class EchoHandler(BaseDrakkarHandler):
 
 
 class EmptyArrangeHandler(BaseDrakkarHandler):
-    """Handler that returns no tasks from arrange."""
-
     async def arrange(self, messages, pending):
         return []
 
 
 class ErrorHandler(BaseDrakkarHandler):
-    """Handler that creates tasks with a failing binary."""
-
     async def arrange(self, messages, pending):
         return [
             ExecutorTask(
@@ -96,7 +92,6 @@ def echo_pool() -> ExecutorPool:
 
 @pytest.fixture
 def failing_pool() -> ExecutorPool:
-    import sys
     return ExecutorPool(
         binary_path=sys.executable,
         max_workers=4,
@@ -120,14 +115,11 @@ def test_window_empty_tasks_not_complete():
 async def test_partition_processor_enqueue_and_properties(echo_pool):
     handler = EchoHandler()
     proc = PartitionProcessor(
-        partition_id=5,
-        handler=handler,
-        executor_pool=echo_pool,
-        window_size=10,
+        partition_id=5, handler=handler, executor_pool=echo_pool, window_size=10,
     )
-
     assert proc.partition_id == 5
     assert proc.queue_size == 0
+    assert proc.inflight_count == 0
 
     proc.enqueue(make_msg(partition=5, offset=100))
     assert proc.queue_size == 1
@@ -145,12 +137,8 @@ async def test_partition_processor_processes_messages(echo_pool):
         committed.append((partition_id, offset))
 
     proc = PartitionProcessor(
-        partition_id=0,
-        handler=handler,
-        executor_pool=echo_pool,
-        window_size=10,
-        on_collect=on_collect,
-        on_commit=on_commit,
+        partition_id=0, handler=handler, executor_pool=echo_pool, window_size=10,
+        on_collect=on_collect, on_commit=on_commit,
     )
 
     proc.enqueue(make_msg(offset=0))
@@ -158,14 +146,13 @@ async def test_partition_processor_processes_messages(echo_pool):
     proc.enqueue(make_msg(offset=2))
 
     proc.start()
-    await asyncio.sleep(0.5)
+    await wait_for(lambda: len(handler.collect_calls) == 3)
     await proc.stop()
 
     assert len(handler.arrange_calls) >= 1
-    assert len(handler.collect_calls) == 3
     assert len(handler.window_complete_calls) >= 1
-    assert len(collected) >= 3  # per-task collects
-    assert any(c[1] == 3 for c in committed)  # committed offset 3 (next after 0,1,2)
+    assert len(collected) >= 3
+    assert any(c[1] == 3 for c in committed)
 
 
 async def test_partition_processor_empty_arrange(echo_pool):
@@ -176,10 +163,7 @@ async def test_partition_processor_empty_arrange(echo_pool):
         committed.append((partition_id, offset))
 
     proc = PartitionProcessor(
-        partition_id=0,
-        handler=handler,
-        executor_pool=echo_pool,
-        window_size=10,
+        partition_id=0, handler=handler, executor_pool=echo_pool, window_size=10,
         on_commit=on_commit,
     )
 
@@ -187,30 +171,23 @@ async def test_partition_processor_empty_arrange(echo_pool):
     proc.enqueue(make_msg(offset=11))
 
     proc.start()
-    await asyncio.sleep(0.3)
+    await wait_for(lambda: any(c[1] == 12 for c in committed))
     await proc.stop()
-
-    # offsets should be committed since arrange returned no tasks
-    assert any(c[1] == 12 for c in committed)
 
 
 async def test_partition_processor_error_handling(failing_pool):
     handler = ErrorHandler()
     proc = PartitionProcessor(
-        partition_id=0,
-        handler=handler,
-        executor_pool=failing_pool,
-        window_size=10,
+        partition_id=0, handler=handler, executor_pool=failing_pool, window_size=10,
     )
 
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await asyncio.sleep(0.5)
+    await wait_for(lambda: not proc.offset_tracker.has_pending() and proc.inflight_count == 0, timeout=3)
     await proc.stop()
 
 
 async def test_partition_processor_pending_context(echo_pool):
-    """Verify that arrange receives pending task context."""
     pending_sizes = []
 
     class TrackingHandler(BaseDrakkarHandler):
@@ -226,51 +203,156 @@ async def test_partition_processor_pending_context(echo_pool):
 
     handler = TrackingHandler()
     proc = PartitionProcessor(
-        partition_id=0,
-        handler=handler,
-        executor_pool=echo_pool,
-        window_size=1,  # one message per window
+        partition_id=0, handler=handler, executor_pool=echo_pool, window_size=1,
     )
 
     for i in range(3):
         proc.enqueue(make_msg(offset=i))
 
     proc.start()
-    await asyncio.sleep(0.5)
+    await wait_for(lambda: len(pending_sizes) >= 3)
     await proc.stop()
 
-    assert len(pending_sizes) >= 1
-    assert pending_sizes[0] == 0  # first window has no pending tasks
+    assert pending_sizes[0] == 0
 
 
 async def test_partition_processor_stop_and_drain(echo_pool):
     handler = EchoHandler()
     proc = PartitionProcessor(
-        partition_id=0,
-        handler=handler,
-        executor_pool=echo_pool,
-        window_size=5,
+        partition_id=0, handler=handler, executor_pool=echo_pool, window_size=5,
     )
 
     proc.start()
     await asyncio.sleep(0.1)
     await proc.stop()
-    # should not raise
 
 
 async def test_partition_processor_no_callbacks(echo_pool):
-    """Processor works without callbacks (just doesn't produce/commit)."""
     handler = EchoHandler()
     proc = PartitionProcessor(
-        partition_id=0,
-        handler=handler,
-        executor_pool=echo_pool,
-        window_size=10,
+        partition_id=0, handler=handler, executor_pool=echo_pool, window_size=10,
     )
 
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await asyncio.sleep(0.3)
+    await wait_for(lambda: len(handler.collect_calls) == 1)
     await proc.stop()
 
-    assert len(handler.collect_calls) == 1
+
+# --- C1: RETRY should not stall the window ---
+
+async def test_retry_does_not_stall_window(failing_pool):
+    """When on_error returns RETRY then SKIP, the window still completes
+    and offsets are committed. (Fix for C1: RETRY early return bug)
+    """
+    call_count = 0
+    committed: list[tuple[int, int]] = []
+
+    class RetryThenSkipHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f"rt-{m.offset}",
+                    args=["-c", "import sys; sys.exit(1)"],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+        async def on_error(self, task, error):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return ErrorAction.RETRY
+            return ErrorAction.SKIP
+
+    async def on_commit(partition_id, offset):
+        committed.append((partition_id, offset))
+
+    proc = PartitionProcessor(
+        partition_id=0, handler=RetryThenSkipHandler(), executor_pool=failing_pool,
+        window_size=10, on_commit=on_commit,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(committed) > 0)
+    await proc.stop()
+
+    assert any(c[1] == 1 for c in committed)
+
+
+# --- I10: Retry limit ---
+
+async def test_max_retries_exceeded(failing_pool):
+    """After MAX_RETRIES, task is skipped and window completes."""
+    error_count = 0
+
+    class AlwaysRetryHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f"inf-{m.offset}",
+                    args=["-c", "import sys; sys.exit(1)"],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+        async def on_error(self, task, error):
+            nonlocal error_count
+            error_count += 1
+            return ErrorAction.RETRY
+
+    committed: list[tuple[int, int]] = []
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0, handler=AlwaysRetryHandler(), executor_pool=failing_pool,
+        window_size=10, on_commit=on_commit,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(committed) > 0, timeout=10)
+    await proc.stop()
+
+    assert error_count == MAX_RETRIES + 1
+    assert any(c[1] == 1 for c in committed)
+
+
+# --- I1: Unhandled exception in collect should not stall window ---
+
+async def test_collect_exception_does_not_stall_window(echo_pool):
+    """If collect() raises, the window still completes."""
+    committed: list[tuple[int, int]] = []
+
+    class BrokenCollectHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f"bc-{m.offset}", args=["ok"],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+        async def collect(self, result):
+            raise RuntimeError("collect exploded")
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0, handler=BrokenCollectHandler(), executor_pool=echo_pool,
+        window_size=10, on_commit=on_commit,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(committed) > 0)
+    await proc.stop()
+
+    assert any(c[1] == 1 for c in committed)

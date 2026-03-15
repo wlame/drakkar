@@ -47,6 +47,7 @@ class ExecutorPool:
 
     async def _run_subprocess(self, task: ExecutorTask) -> ExecutorResult:
         start = time.monotonic()
+        proc = None
         try:
             # create_subprocess_exec passes args as list — no shell injection risk
             proc = await asyncio.create_subprocess_exec(
@@ -91,8 +92,6 @@ class ExecutorPool:
 
         except asyncio.TimeoutError:
             duration = time.monotonic() - start
-            proc.kill()
-            await proc.wait()
             raise ExecutorTaskError(
                 error=ExecutorError(
                     task=task,
@@ -125,6 +124,11 @@ class ExecutorPool:
                     task=task,
                 ),
             )
+
+        finally:
+            if proc and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
 
 
 class ExecutorTaskError(Exception):

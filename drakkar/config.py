@@ -24,25 +24,25 @@ class KafkaConfig(BaseModel):
 class ExecutorConfig(BaseModel):
     """Subprocess executor pool settings."""
 
-    binary_path: str
-    max_workers: int = 4
-    task_timeout_seconds: int = 120
-    window_size: int = 50
+    binary_path: str = Field(..., min_length=1)
+    max_workers: int = Field(default=4, ge=1)
+    task_timeout_seconds: int = Field(default=120, ge=1)
+    window_size: int = Field(default=50, ge=1)
 
 
 class PostgresConfig(BaseModel):
     """PostgreSQL connection settings."""
 
     dsn: str = "postgresql://localhost:5432/drakkar"
-    pool_min: int = 2
-    pool_max: int = 10
+    pool_min: int = Field(default=2, ge=1)
+    pool_max: int = Field(default=10, ge=1)
 
 
 class MetricsConfig(BaseModel):
     """Prometheus metrics settings."""
 
     enabled: bool = True
-    port: int = 9090
+    port: int = Field(default=9090, ge=1, le=65535)
 
 
 class LoggingConfig(BaseModel):
@@ -56,12 +56,12 @@ class DebugConfig(BaseModel):
     """Debug flight recorder and web UI settings."""
 
     enabled: bool = True
-    port: int = 8080
+    port: int = Field(default=8080, ge=1, le=65535)
     db_path: str = "/tmp/drakkar-debug.db"
-    retention_hours: int = 24
-    retention_max_events: int = 100_000
+    retention_hours: int = Field(default=24, ge=1)
+    retention_max_events: int = Field(default=100_000, ge=100)
     store_output: bool = True
-    flush_interval_seconds: int = 5
+    flush_interval_seconds: int = Field(default=5, ge=1)
 
 
 class DrakkarConfig(BaseSettings):

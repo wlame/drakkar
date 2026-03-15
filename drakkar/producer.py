@@ -55,9 +55,10 @@ class KafkaProducer:
         produce_duration.observe(time.monotonic() - start)
 
     async def produce_batch(self, messages: list[OutputMessage]) -> None:
-        """Produce multiple messages to the target topic."""
-        for msg in messages:
-            await self.produce(msg)
+        """Produce multiple messages concurrently."""
+        if not messages:
+            return
+        await asyncio.gather(*[self.produce(msg) for msg in messages])
 
     async def flush(self, timeout: float = 10.0) -> None:
         """Flush all pending messages."""

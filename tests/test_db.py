@@ -58,9 +58,9 @@ async def test_db_writer_write_rows(pg_config, mock_pool):
 
     first_call = conn.execute.call_args_list[0]
     query = first_call[0][0]
-    assert "INSERT INTO results" in query
-    assert "id" in query
-    assert "status" in query
+    assert '"results"' in query
+    assert '"id"' in query
+    assert '"status"' in query
 
 
 async def test_db_writer_write_empty_rows(pg_config):
@@ -93,6 +93,36 @@ async def test_db_writer_close_no_pool(pg_config):
 async def test_db_writer_pool_property(pg_config):
     writer = DBWriter(pg_config)
     assert writer.pool is None
+
+
+async def test_db_writer_rejects_invalid_table_name(pg_config, mock_pool):
+    """SQL identifiers with special chars are rejected (C4: SQL injection fix)."""
+    pool, conn = mock_pool
+    writer = DBWriter(pg_config)
+    writer._pool = pool
+
+    with pytest.raises(ValueError, match="Invalid SQL identifier"):
+        await writer.write([DBRow(table="users; DROP TABLE users--", data={"x": 1})])
+
+
+async def test_db_writer_rejects_invalid_column_name(pg_config, mock_pool):
+    pool, conn = mock_pool
+    writer = DBWriter(pg_config)
+    writer._pool = pool
+
+    with pytest.raises(ValueError, match="Invalid SQL identifier"):
+        await writer.write([DBRow(table="results", data={"col; DROP TABLE x": 1})])
+
+
+async def test_db_writer_accepts_valid_identifiers(pg_config, mock_pool):
+    pool, conn = mock_pool
+    writer = DBWriter(pg_config)
+    writer._pool = pool
+
+    await writer.write([DBRow(table="search_results", data={"match_count": 5, "status": "ok"})])
+    query = conn.execute.call_args[0][0]
+    assert '"search_results"' in query
+    assert '"match_count"' in query
 
 
 async def test_db_writer_write_error_reraises(pg_config):

@@ -38,6 +38,24 @@ def test_executor_config_defaults():
     assert cfg.window_size == 50
 
 
+def test_executor_config_rejects_empty_binary_path():
+    with pytest.raises(ValidationError):
+        ExecutorConfig(binary_path="")
+
+
+def test_executor_config_rejects_zero_workers():
+    with pytest.raises(ValidationError):
+        ExecutorConfig(binary_path="/bin/echo", max_workers=0)
+
+
+def test_metrics_config_rejects_invalid_port():
+    with pytest.raises(ValidationError):
+        MetricsConfig(port=0)
+
+    with pytest.raises(ValidationError):
+        MetricsConfig(port=99999)
+
+
 def test_postgres_config_defaults():
     cfg = PostgresConfig()
     assert "localhost" in cfg.dsn

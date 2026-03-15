@@ -357,7 +357,7 @@ async def test_rotate_flushes_buffer_to_old_db(tmp_path):
 
 
 async def test_rotate_deletes_old_files(tmp_path):
-    config = make_debug_config(tmp_path, retention_hours=0)  # expire immediately
+    config = make_debug_config(tmp_path, retention_hours=1)  # short retention
 
     # create an "old" DB file manually with ancient mtime
     old_file = tmp_path / "test-debug-2025-01-01__00_00.db"

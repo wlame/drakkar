@@ -1,6 +1,6 @@
 """Shared test fixtures for Drakkar tests."""
 
-import tempfile
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -16,6 +16,16 @@ from drakkar.models import (
     PendingContext,
     SourceMessage,
 )
+
+
+async def wait_for(condition, timeout=5.0, interval=0.05):
+    """Poll until condition() returns True or timeout expires."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if condition():
+            return
+        await asyncio.sleep(interval)
+    raise TimeoutError(f"Condition not met within {timeout}s")
 
 
 @pytest.fixture

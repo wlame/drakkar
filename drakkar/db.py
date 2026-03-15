@@ -1,5 +1,6 @@
 """PostgreSQL database writer for Drakkar framework."""
 
+import re
 import time
 
 import asyncpg
@@ -10,6 +11,19 @@ from drakkar.metrics import db_errors, db_rows_written, db_write_duration
 from drakkar.models import DBRow
 
 logger = structlog.get_logger()
+
+_IDENT_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+
+
+def _quote_ident(name: str) -> str:
+    """Quote a SQL identifier to prevent injection.
+
+    Only allows simple alphanumeric+underscore identifiers.
+    Raises ValueError for anything suspicious.
+    """
+    if not _IDENT_RE.match(name):
+        raise ValueError(f"Invalid SQL identifier: {name!r}")
+    return f'"{name}"'
 
 
 class DBWriter:
@@ -47,9 +61,10 @@ class DBWriter:
             async with self._pool.acquire() as conn:
                 for row in rows:
                     columns = list(row.data.keys())
+                    table = _quote_ident(row.table)
+                    col_names = ", ".join(_quote_ident(c) for c in columns)
                     placeholders = ", ".join(f"${i + 1}" for i in range(len(columns)))
-                    col_names = ", ".join(columns)
-                    query = f"INSERT INTO {row.table} ({col_names}) VALUES ({placeholders})"
+                    query = f"INSERT INTO {table} ({col_names}) VALUES ({placeholders})"
                     values = list(row.data.values())
                     await conn.execute(query, *values)
 

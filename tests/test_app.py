@@ -86,20 +86,16 @@ async def test_app_on_assign_creates_processors(
     handler = SimpleHandler()
     app = DrakkarApp(handler=handler, config=test_config)
 
-    # simulate what _async_run sets up
+    from drakkar.executor import ExecutorPool
+    app._executor_pool = ExecutorPool(binary_path="/bin/echo", max_workers=2, task_timeout_seconds=10)
     app._consumer = MagicMock()
+    app._consumer.commit = AsyncMock()
     app._producer = MagicMock()
     app._db_writer = AsyncMock()
 
     app._on_assign([0, 1, 2])
-    await asyncio.sleep(0.1)
-
-    assert 0 in app.processors
-    assert 1 in app.processors
-    assert 2 in app.processors
     assert len(app.processors) == 3
 
-    # clean up
     for proc in app.processors.values():
         await proc.stop()
 
@@ -114,20 +110,20 @@ async def test_app_on_revoke_removes_processors(
     handler = SimpleHandler()
     app = DrakkarApp(handler=handler, config=test_config)
 
+    from drakkar.executor import ExecutorPool
+    app._executor_pool = ExecutorPool(binary_path="/bin/echo", max_workers=2, task_timeout_seconds=10)
     app._consumer = AsyncMock()
     app._producer = MagicMock()
     app._db_writer = AsyncMock()
 
     app._on_assign([0, 1, 2])
-    await asyncio.sleep(0.1)
     assert len(app.processors) == 3
 
     app._on_revoke([1])
-    await asyncio.sleep(0.2)
+    await asyncio.sleep(0.3)  # allow drain+stop coroutine
     assert 1 not in app.processors
     assert len(app.processors) == 2
 
-    # clean up
     for proc in list(app.processors.values()):
         await proc.stop()
 

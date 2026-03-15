@@ -56,6 +56,8 @@ def test_setup_logging_level_filtering():
 
 def test_setup_logging_json_output_has_ecs_fields():
     """JSON output includes service_name, worker_id, category, timestamp."""
+    import sys
+
     buf = io.StringIO()
     config = LoggingConfig(level="INFO", format="json")
     setup_logging(config, worker_id="test-w")
@@ -65,20 +67,20 @@ def test_setup_logging_json_output_has_ecs_fields():
         logger_factory=structlog.PrintLoggerFactory(file=buf),
         cache_logger_on_first_use=False,
     )
-    logger = structlog.get_logger()
-    logger.info("check fields", category="test")
+    try:
+        logger = structlog.get_logger()
+        logger.info("check fields", category="test")
 
-    line = buf.getvalue().strip()
-    data = json.loads(line)
-    assert "timestamp" in data
-    assert data["service_name"] == "drakkar"
-    assert data["worker_id"] == "test-w"
-    assert data["category"] == "test"
-    assert data["level"] == "info"
-
-    # restore stderr logger for other tests
-    import sys
-    structlog.configure(
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
-        cache_logger_on_first_use=True,
-    )
+        line = buf.getvalue().strip()
+        data = json.loads(line)
+        assert "timestamp" in data
+        assert data["service_name"] == "drakkar"
+        assert data["worker_id"] == "test-w"
+        assert data["category"] == "test"
+        assert data["level"] == "info"
+    finally:
+        # restore stderr logger for other tests
+        structlog.configure(
+            logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+            cache_logger_on_first_use=True,
+        )
