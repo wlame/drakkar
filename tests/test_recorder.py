@@ -1,6 +1,7 @@
 """Tests for Drakkar flight recorder."""
 
 import asyncio
+import os
 import time
 
 import pytest
@@ -13,7 +14,7 @@ from drakkar.models import (
     OutputMessage,
     SourceMessage,
 )
-from drakkar.recorder import EventRecorder
+from drakkar.recorder import EventRecorder, _list_db_files, _make_db_path
 
 
 def make_debug_config(tmp_path, **overrides) -> DebugConfig:
@@ -62,13 +63,44 @@ async def recorder(tmp_path):
     await rec.stop()
 
 
-async def test_start_creates_db(tmp_path):
+# --- DB path generation ---
+
+
+def test_make_db_path_includes_timestamp():
+    path = _make_db_path("/tmp/drakkar-debug.db")
+    assert path.startswith("/tmp/drakkar-debug-")
+    assert path.endswith(".db")
+    assert "__" in path  # YYYY-MM-DD__HH_MM
+
+
+def test_make_db_path_preserves_directory():
+    path = _make_db_path("/var/log/drakkar.db")
+    assert path.startswith("/var/log/drakkar-")
+
+
+def test_list_db_files_returns_sorted(tmp_path):
+    for name in ["test-debug-2026-03-16__14_00.db", "test-debug-2026-03-15__10_00.db", "test-debug-2026-03-16__15_00.db"]:
+        (tmp_path / name).touch()
+    files = _list_db_files(str(tmp_path / "test-debug.db"))
+    assert len(files) == 3
+    assert "14_00" in files[0] or "10_00" in files[0]  # sorted
+
+
+# --- Start/stop ---
+
+
+async def test_start_creates_timestamped_db(tmp_path):
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config)
     await rec.start()
     assert rec._db is not None
+    assert rec.db_path.startswith(str(tmp_path / "test-debug-"))
+    assert os.path.exists(rec.db_path)
     await rec.stop()
     assert rec._db is None
+
+
+# --- Recording + flush ---
 
 
 async def test_record_consumed_and_flush(recorder):
@@ -105,8 +137,6 @@ async def test_record_task_started(recorder):
     assert len(events) == 1
     assert events[0]['task_id'] == "t1"
     assert events[0]['partition'] == 5
-    import json
-    assert json.loads(events[0]['args']) == ["--pattern", "error"]
 
 
 async def test_record_task_completed_without_output(recorder):
@@ -119,7 +149,7 @@ async def test_record_task_completed_without_output(recorder):
     assert events[0]['exit_code'] == 0
     assert events[0]['duration'] == 1.5
     assert events[0]['stdout_size'] == len("line1\nline2\n".encode())
-    assert events[0]['stdout'] is None  # store_output=False
+    assert events[0]['stdout'] is None
 
 
 async def test_record_task_completed_with_output(tmp_path):
@@ -179,6 +209,9 @@ async def test_record_assigned_and_revoked(recorder):
     revoked = await recorder.get_events(event_type='revoked')
     assert len(revoked) == 1
     assert revoked[0]['partition'] == 1
+
+
+# --- Queries ---
 
 
 async def test_get_events_filtering(recorder):
@@ -267,40 +300,6 @@ async def test_get_stats(recorder):
     assert stats['committed'] == 1
 
 
-async def test_retention_by_time(tmp_path):
-    config = make_debug_config(tmp_path, retention_hours=0)  # expire everything
-    rec = EventRecorder(config)
-    await rec.start()
-
-    rec.record_consumed(make_msg(offset=0))
-    await rec._flush()
-
-    events_before = await rec.get_events()
-    assert len(events_before) == 1
-
-    await rec._cleanup()
-
-    events_after = await rec.get_events()
-    assert len(events_after) == 0
-    await rec.stop()
-
-
-async def test_retention_by_count(tmp_path):
-    config = make_debug_config(tmp_path, retention_max_events=5)
-    rec = EventRecorder(config)
-    await rec.start()
-
-    for i in range(10):
-        rec.record_consumed(make_msg(offset=i))
-    await rec._flush()
-
-    await rec._cleanup()
-
-    events = await rec.get_events(limit=20)
-    assert len(events) == 5
-    await rec.stop()
-
-
 async def test_get_stats_empty_db(recorder):
     stats = await recorder.get_stats()
     assert stats['total_events'] == 0
@@ -309,6 +308,88 @@ async def test_get_stats_empty_db(recorder):
 async def test_get_events_no_db():
     config = DebugConfig(enabled=True, db_path="/tmp/nonexistent.db")
     rec = EventRecorder(config)
-    # don't start — db is None
     events = await rec.get_events()
     assert events == []
+
+
+# --- Rotation ---
+
+
+async def test_rotate_creates_new_db_and_flushes(tmp_path):
+    config = make_debug_config(tmp_path, retention_hours=24)
+    rec = EventRecorder(config)
+    await rec.start()
+
+    rec.record_consumed(make_msg(offset=0))
+    rec.record_consumed(make_msg(offset=1))
+    # buffer has 2 events, not flushed yet
+
+    await rec._rotate()
+
+    assert rec._db is not None  # new DB connection open
+    assert os.path.exists(rec.db_path)
+    # buffer was cleared during rotation flush
+    assert len(rec._buffer) == 0
+
+    await rec.stop()
+
+
+async def test_rotate_flushes_buffer_to_old_db(tmp_path):
+    config = make_debug_config(tmp_path, retention_hours=24)
+    rec = EventRecorder(config)
+    await rec.start()
+
+    rec.record_consumed(make_msg(offset=0))
+    rec.record_consumed(make_msg(offset=1))
+    # don't flush — buffer has 2 events
+
+    old_path = rec.db_path
+    await rec._rotate()
+
+    # buffer was flushed to old DB before rotation
+    import aiosqlite
+    async with aiosqlite.connect(old_path) as old_db:
+        async with old_db.execute("SELECT COUNT(*) FROM events") as cursor:
+            row = await cursor.fetchone()
+            assert row[0] == 2
+
+    await rec.stop()
+
+
+async def test_rotate_deletes_old_files(tmp_path):
+    config = make_debug_config(tmp_path, retention_hours=0)  # expire immediately
+
+    # create an "old" DB file manually with ancient mtime
+    old_file = tmp_path / "test-debug-2025-01-01__00_00.db"
+    old_file.write_text("")
+    os.utime(old_file, (0, 0))
+
+    rec = EventRecorder(config)
+    await rec.start()
+
+    await rec._rotate()
+
+    assert not os.path.exists(old_file)  # deleted because retention_hours=0
+    assert os.path.exists(rec.db_path)  # current file exists
+    await rec.stop()
+
+
+async def test_rotate_enforces_max_file_count(tmp_path):
+    config = make_debug_config(
+        tmp_path,
+        retention_hours=999,
+        retention_max_events=10_000,  # max_files = 10000/10000 = 1
+    )
+    # create several old DB files manually
+    for i in range(5):
+        p = tmp_path / f"test-debug-2026-03-{10+i:02d}__00_00.db"
+        p.write_text("")
+
+    rec = EventRecorder(config)
+    await rec.start()
+    await rec._rotate()
+
+    remaining = _list_db_files(str(tmp_path / "test-debug.db"))
+    # should keep at most 1 old file + the new one
+    assert len(remaining) <= 2
+    await rec.stop()

@@ -1,9 +1,13 @@
-"""Flight recorder — event log to SQLite for debug introspection."""
+"""Flight recorder — event log to timestamped SQLite files."""
 
 import asyncio
+import glob
 import json
+import os
 import time
 from collections import deque
+from datetime import datetime, timezone
+from pathlib import Path
 
 import aiosqlite
 import structlog
@@ -43,30 +47,55 @@ CREATE INDEX IF NOT EXISTS idx_events_type ON events(event);
 """
 
 
-class EventRecorder:
-    """Records processing events to a local SQLite database.
+def _make_db_path(base_path: str) -> str:
+    """Generate a timestamped DB filename from the base path.
 
-    Events are buffered in memory and flushed periodically to avoid
-    blocking the main processing loop. A retention task cleans up
-    old events based on age or count limits.
+    /tmp/drakkar-debug.db -> /tmp/drakkar-debug-2026-03-16__14_55.db
+    """
+    p = Path(base_path)
+    ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d__%H_%M")
+    return str(p.with_stem(f"{p.stem}-{ts}"))
+
+
+def _list_db_files(base_path: str) -> list[str]:
+    """List all rotated DB files matching the base pattern, oldest first."""
+    p = Path(base_path)
+    pattern = str(p.with_stem(f"{p.stem}-*"))
+    files = glob.glob(pattern)
+    files.sort()
+    return files
+
+
+class EventRecorder:
+    """Records processing events to timestamped SQLite database files.
+
+    Events are buffered in memory and flushed periodically. On retention
+    check, the current DB is finalized and a new timestamped file is
+    created. Old DB files beyond retention_hours are deleted.
     """
 
     def __init__(self, config: DebugConfig):
         self._config = config
         self._buffer: deque[dict] = deque()
         self._db: aiosqlite.Connection | None = None
+        self._db_path: str = ""
         self._flush_task: asyncio.Task | None = None
         self._retention_task: asyncio.Task | None = None
         self._running = False
 
+    @property
+    def db_path(self) -> str:
+        return self._db_path
+
     async def start(self) -> None:
-        self._db = await aiosqlite.connect(self._config.db_path)
+        self._db_path = _make_db_path(self._config.db_path)
+        self._db = await aiosqlite.connect(self._db_path)
         await self._db.executescript(SCHEMA)
         await self._db.commit()
         self._running = True
         self._flush_task = asyncio.create_task(self._flush_loop())
         self._retention_task = asyncio.create_task(self._retention_loop())
-        await logger.ainfo("recorder_started", db_path=self._config.db_path)
+        await logger.ainfo("recorder_started", db_path=self._db_path)
 
     async def stop(self) -> None:
         self._running = False
@@ -202,7 +231,7 @@ class EventRecorder:
                 'partition': p,
             })
 
-    # --- Query methods (for debug UI) ---
+    # --- Query methods (for debug UI, reads current DB) ---
 
     async def get_events(
         self,
@@ -237,7 +266,6 @@ class EventRecorder:
         """Get the full lifecycle of a message by partition and offset."""
         if not self._db:
             return []
-        # find events directly referencing this offset
         query = """
             SELECT * FROM events
             WHERE partition = ? AND (
@@ -349,22 +377,43 @@ class EventRecorder:
     async def _retention_loop(self) -> None:
         while self._running:
             await asyncio.sleep(300)  # every 5 minutes
-            await self._cleanup()
+            await self._rotate()
 
-    async def _cleanup(self) -> None:
-        if not self._db:
-            return
+    async def _rotate(self) -> None:
+        """Rotate: close current DB, delete old files, open a new one."""
+        # flush remaining buffer to current DB
+        await self._flush()
+
+        # close current DB
+        if self._db:
+            await self._db.close()
+            self._db = None
+
+        # delete DB files older than retention
         cutoff = time.time() - (self._config.retention_hours * 3600)
-        await self._db.execute("DELETE FROM events WHERE ts < ?", [cutoff])
+        for db_file in _list_db_files(self._config.db_path):
+            try:
+                mtime = os.path.getmtime(db_file)
+                if mtime < cutoff:
+                    os.remove(db_file)
+                    await logger.ainfo("recorder_deleted_old_db", path=db_file)
+            except OSError:
+                pass
 
-        async with self._db.execute("SELECT COUNT(*) FROM events") as cursor:
-            row = await cursor.fetchone()
-            count = row[0] if row else 0
+        # enforce max file count (keep newest retention_max_events files)
+        # use file count as a proxy — simpler than counting rows across files
+        remaining = _list_db_files(self._config.db_path)
+        max_files = max(1, self._config.retention_max_events // 10_000)
+        if len(remaining) > max_files:
+            for old_file in remaining[:-max_files]:
+                try:
+                    os.remove(old_file)
+                except OSError:
+                    pass
 
-        if count > self._config.retention_max_events:
-            excess = count - self._config.retention_max_events
-            await self._db.execute(
-                "DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id ASC LIMIT ?)",
-                [excess],
-            )
+        # open new DB file
+        self._db_path = _make_db_path(self._config.db_path)
+        self._db = await aiosqlite.connect(self._db_path)
+        await self._db.executescript(SCHEMA)
         await self._db.commit()
+        await logger.ainfo("recorder_rotated", new_db=self._db_path)

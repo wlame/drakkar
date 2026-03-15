@@ -206,12 +206,13 @@ async def test_app_handle_signal(test_config):
     assert not app._running
 
 
-async def test_app_shutdown(test_config):
+async def test_app_shutdown_closes_all_components(test_config):
     handler = SimpleHandler()
     app = DrakkarApp(handler=handler, config=test_config)
     app._producer = MagicMock()
     app._producer.flush = AsyncMock()
     app._consumer = MagicMock()
+    app._consumer.commit = AsyncMock()
     app._db_writer = AsyncMock()
 
     await app._shutdown()
@@ -220,3 +221,30 @@ async def test_app_shutdown(test_config):
     app._producer.close.assert_called_once()
     app._consumer.close.assert_called_once()
     app._db_writer.close.assert_called_once()
+
+
+async def test_app_shutdown_drains_executors(test_config):
+    """Graceful shutdown gives executors up to 5s to finish."""
+    handler = SimpleHandler()
+    app = DrakkarApp(handler=handler, config=test_config)
+    app._consumer = AsyncMock()
+    app._producer = MagicMock()
+    app._producer.flush = AsyncMock()
+    app._db_writer = AsyncMock()
+
+    # create a processor with an executor pool
+    from drakkar.executor import ExecutorPool
+    app._executor_pool = ExecutorPool(binary_path="/bin/echo", max_workers=2, task_timeout_seconds=10)
+    app._on_assign([0])
+    await asyncio.sleep(0.1)
+
+    # enqueue a message so the processor has work
+    from drakkar.models import SourceMessage
+    msg = SourceMessage(topic="t", partition=0, offset=0, value=b"x", timestamp=0)
+    app.processors[0].enqueue(msg)
+    await asyncio.sleep(0.3)
+
+    await app._shutdown()
+
+    # after shutdown, processors should be cleared
+    assert len(app.processors) == 0
