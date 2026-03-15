@@ -3,7 +3,6 @@
 import asyncio
 import json
 import random
-import uuid
 
 from drakkar import (
     BaseDrakkarHandler,
@@ -13,6 +12,7 @@ from drakkar import (
     ErrorAction,
     ExecutorError,
     ExecutorResult,
+    make_task_id,
     ExecutorTask,
     OutputMessage,
     PendingContext,
@@ -58,12 +58,12 @@ class RipgrepHandler(BaseDrakkarHandler):
         tasks = []
         for msg in messages:
             payload = json.loads(msg.value)
-            request_id = payload.get("request_id", str(uuid.uuid4()))
+            request_id = payload.get("request_id", make_task_id("req"))
             pattern = payload["pattern"]
             file_path = payload["file_path"]
             repeat = payload.get("repeat", 1)
 
-            task_id = f"rg-{request_id}"
+            task_id = make_task_id("rg")
 
             if task_id in pending.pending_task_ids:
                 continue

@@ -160,9 +160,11 @@ function updatePartitionToggles(partitions) {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.textContent = p;
-        btn.className = selectedPartitions.has(p)
-            ? 'px-3 py-1 rounded text-sm font-mono font-bold bg-blue-600 text-white ring-2 ring-blue-400'
-            : 'px-3 py-1 rounded text-sm font-mono bg-gray-800 text-gray-500 hover:bg-gray-700 border border-gray-600';
+        if (selectedPartitions.has(p)) {
+            btn.style.cssText = 'padding:4px 12px;border-radius:4px;font-size:13px;font-family:monospace;font-weight:bold;background:#2563eb;color:#fff;border:2px solid #60a5fa;';
+        } else {
+            btn.style.cssText = 'padding:4px 12px;border-radius:4px;font-size:13px;font-family:monospace;background:#1f2937;color:#6b7280;border:1px solid #374151;';
+        }
         btn.onclick = function() {
             if (selectedPartitions.has(p)) {
                 selectedPartitions.delete(p);

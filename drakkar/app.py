@@ -209,7 +209,7 @@ class DrakkarApp:
                 processor.start()
 
         assigned_partitions.set(len(self._processors))
-        asyncio.ensure_future(self._handler.on_assign(partition_ids))
+        asyncio.ensure_future(self._safe_call(self._handler.on_assign(partition_ids)))
 
     def _on_revoke(self, partition_ids: list[int]) -> None:
         """Handle partition revocation."""
@@ -221,23 +221,36 @@ class DrakkarApp:
                 asyncio.ensure_future(self._stop_processor(processor))
 
         assigned_partitions.set(len(self._processors))
-        asyncio.ensure_future(self._handler.on_revoke(partition_ids))
+        asyncio.ensure_future(self._safe_call(self._handler.on_revoke(partition_ids)))
+
+    async def _safe_call(self, coro) -> None:
+        """Run a coroutine and log any exception instead of leaving it unretrieved."""
+        try:
+            await coro
+        except Exception as e:
+            logger.warning("async_callback_failed", category="lifecycle", error=str(e))
 
     async def _stop_processor(self, processor: PartitionProcessor) -> None:
         """Drain in-flight tasks (up to 5s), commit final offsets, then stop."""
-        processor._running = False
         try:
-            await asyncio.wait_for(processor.drain(), timeout=5.0)
-        except asyncio.TimeoutError:
-            pass
-        committable = processor.offset_tracker.committable()
-        if committable is not None and self._consumer:
+            processor._running = False
             try:
-                await self._consumer.commit({processor.partition_id: committable})
-                processor.offset_tracker.acknowledge_commit(committable)
-            except Exception:
+                await asyncio.wait_for(processor.drain(), timeout=5.0)
+            except asyncio.TimeoutError:
                 pass
-        await processor.stop()
+            committable = processor.offset_tracker.committable()
+            if committable is not None and self._consumer:
+                try:
+                    await self._consumer.commit({processor.partition_id: committable})
+                    processor.offset_tracker.acknowledge_commit(committable)
+                except Exception:
+                    pass
+            await processor.stop()
+        except Exception as e:
+            logger.warning(
+                "stop_processor_failed", category="lifecycle",
+                partition=processor.partition_id, error=str(e),
+            )
 
     async def _handle_collect(self, result: CollectResult, partition_id: int) -> None:
         """Process collect results: produce messages + write DB rows."""

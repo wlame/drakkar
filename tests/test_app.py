@@ -244,3 +244,56 @@ async def test_app_shutdown_drains_executors(test_config):
 
     # after shutdown, processors should be cleared
     assert len(app.processors) == 0
+
+
+async def test_stop_processor_handles_arrange_error(test_config):
+    """If arrange() raises during stop, _stop_processor catches it
+    instead of leaving 'Task exception was never retrieved'."""
+
+    class BrokenArrangeHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            raise RuntimeError("arrange exploded")
+
+    app = DrakkarApp(handler=BrokenArrangeHandler(), config=test_config)
+    from drakkar.executor import ExecutorPool
+    app._executor_pool = ExecutorPool(binary_path="/bin/echo", max_workers=2, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+    app._producer = MagicMock()
+    app._db_writer = AsyncMock()
+
+    app._on_assign([0])
+    # enqueue a message that will trigger the broken arrange
+    from drakkar.models import SourceMessage
+    msg = SourceMessage(topic="t", partition=0, offset=0, value=b"x", timestamp=0)
+    app.processors[0].enqueue(msg)
+    await asyncio.sleep(0.3)
+
+    # revoke should not raise or produce "Task exception was never retrieved"
+    app._on_revoke([0])
+    await asyncio.sleep(0.5)
+
+    assert 0 not in app.processors
+
+
+async def test_safe_call_catches_handler_errors(test_config):
+    """_safe_call wraps async callbacks so exceptions don't go unretrieved."""
+
+    class ErrorOnAssignHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return []
+
+        async def on_assign(self, partitions):
+            raise ValueError("on_assign failed")
+
+    app = DrakkarApp(handler=ErrorOnAssignHandler(), config=test_config)
+    from drakkar.executor import ExecutorPool
+    app._executor_pool = ExecutorPool(binary_path="/bin/echo", max_workers=2, task_timeout_seconds=10)
+    app._consumer = MagicMock()
+    app._consumer.commit = AsyncMock()
+
+    # should not raise — _safe_call catches it
+    app._on_assign([0])
+    await asyncio.sleep(0.2)
+
+    for proc in app.processors.values():
+        await proc.stop()

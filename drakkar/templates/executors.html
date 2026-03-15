@@ -44,6 +44,10 @@
             <div id="tl-lanes" style="position:relative;"></div>
         </div>
     </div>
+    <!-- hover detail line -->
+    <div id="tl-hover" class="bg-gray-900 border-t border-gray-700 px-3 py-2 text-xs font-mono text-gray-400 min-h-[28px]">
+        <span class="text-gray-600">hover over a task bar to see details</span>
+    </div>
 </div>
 
 <!-- Running tasks (executing subprocess now) -->
@@ -202,6 +206,54 @@ function barColor(status) {
     return '#eab308';
 }
 
+function statusColor(status) {
+    if (status === 'completed') return 'color:#22c55e';
+    if (status === 'failed') return 'color:#ef4444';
+    return 'color:#eab308';
+}
+
+function showTaskDetail(t) {
+    const el = document.getElementById('tl-hover');
+    const dur = t.duration ? t.duration.toFixed(3) + 's' : 'running';
+    const start = fmtTimeMs(t.start_ts) || '-';
+    const end = t.end_ts ? fmtTimeMs(t.end_ts) : 'running';
+    const pid = t.pid ? t.pid : '-';
+    const args = t.args || '-';
+
+    el.textContent = '';
+    const parts = [
+        {label: 'Task', value: t.task_id, style: ''},
+        {label: 'PID', value: pid, style: ''},
+        {label: 'P', value: t.partition, style: ''},
+        {label: 'Status', value: t.status, style: statusColor(t.status)},
+        {label: 'Duration', value: dur, style: ''},
+        {label: 'Start', value: start, style: ''},
+        {label: 'End', value: end, style: ''},
+        {label: 'CLI', value: args, style: 'color:#9ca3af'},
+    ];
+    for (const p of parts) {
+        const lbl = document.createElement('span');
+        lbl.style.cssText = 'color:#6b7280;margin-right:2px;';
+        lbl.textContent = p.label + ':';
+        el.appendChild(lbl);
+
+        const val = document.createElement('span');
+        if (p.style) val.style.cssText = p.style;
+        val.style.marginRight = '12px';
+        val.textContent = p.value;
+        el.appendChild(val);
+    }
+}
+
+function clearTaskDetail() {
+    const el = document.getElementById('tl-hover');
+    el.textContent = '';
+    const hint = document.createElement('span');
+    hint.className = 'text-gray-600';
+    hint.textContent = 'hover over a task bar to see details';
+    el.appendChild(hint);
+}
+
 function fmtTime(ts) {
     const d = new Date(ts * 1000);
     return d.toISOString().substring(11, 19);
@@ -302,11 +354,9 @@ async function loadTimeline() {
             bar.style.top = y + 'px';
             bar.style.height = LANE_H + 'px';
             bar.style.backgroundColor = barColor(t.status);
-            const dur = t.duration ? t.duration.toFixed(3) + 's' : 'running';
-            const startMs = fmtTimeMs(t.start_ts);
-            const endMs = t.end_ts ? fmtTimeMs(t.end_ts) : 'now';
-            const pidInfo = t.pid ? ' | PID ' + t.pid : '';
-            bar.title = t.task_id + '\nP' + t.partition + pidInfo + ' | ' + t.status + ' | ' + dur + '\n' + startMs + ' → ' + endMs;
+            bar.title = '';
+            bar.addEventListener('mouseenter', () => showTaskDetail(t));
+            bar.addEventListener('mouseleave', clearTaskDetail);
             lanesDiv.appendChild(bar);
         }
 

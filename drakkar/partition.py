@@ -152,10 +152,8 @@ class PartitionProcessor:
                 await self._process_window(messages)
         except asyncio.CancelledError:
             await log.ainfo("partition_processor_cancelled")
-            raise
         except Exception as e:
-            await log.aerror("partition_processor_error", error=str(e))
-            raise
+            await log.aerror("partition_processor_error", error=str(e), exc_info=True)
 
     async def _collect_window(self) -> list[SourceMessage]:
         """Collect up to window_size messages from the queue."""

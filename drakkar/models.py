@@ -1,8 +1,24 @@
 """Data models for Drakkar framework."""
 
+import os
+import time
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
+
+
+def make_task_id(prefix: str = "t") -> str:
+    """Generate a short, time-sortable, unique task ID.
+
+    Format: {prefix}-{timestamp_hex}-{random_hex}
+    Example: t-68561a3f-c7a2  (18 chars with default prefix)
+
+    Time-sortable: lexicographic order matches creation order.
+    Unique: 16-bit random suffix → ~65k IDs per second before collision.
+    """
+    ts = int(time.time())
+    rnd = int.from_bytes(os.urandom(2))
+    return f"{prefix}-{ts:08x}-{rnd:04x}"
 
 
 class SourceMessage(BaseModel):

@@ -15,6 +15,7 @@ from drakkar.models import (
     OutputMessage,
     PendingContext,
     SourceMessage,
+    make_task_id,
 )
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "DBRow",
     "CollectResult",
     "ErrorAction",
+    "make_task_id",
 ]
