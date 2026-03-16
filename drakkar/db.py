@@ -22,7 +22,7 @@ def _quote_ident(name: str) -> str:
     Raises ValueError for anything suspicious.
     """
     if not _IDENT_RE.match(name):
-        raise ValueError(f"Invalid SQL identifier: {name!r}")
+        raise ValueError(f'Invalid SQL identifier: {name!r}')
     return f'"{name}"'
 
 
@@ -45,7 +45,7 @@ class DBWriter:
             min_size=self._config.pool_min,
             max_size=self._config.pool_max,
         )
-        await logger.ainfo("db_connected", category="db", host=self._config.dsn.split("@")[-1])
+        await logger.ainfo('db_connected', category='db', host=self._config.dsn.split('@')[-1])
 
     async def write(self, rows: list[DBRow]) -> None:
         """Write rows to their respective tables.
@@ -62,15 +62,15 @@ class DBWriter:
                 for row in rows:
                     columns = list(row.data.keys())
                     table = _quote_ident(row.table)
-                    col_names = ", ".join(_quote_ident(c) for c in columns)
-                    placeholders = ", ".join(f"${i + 1}" for i in range(len(columns)))
-                    query = f"INSERT INTO {table} ({col_names}) VALUES ({placeholders})"
+                    col_names = ', '.join(_quote_ident(c) for c in columns)
+                    placeholders = ', '.join(f'${i + 1}' for i in range(len(columns)))
+                    query = f'INSERT INTO {table} ({col_names}) VALUES ({placeholders})'
                     values = list(row.data.values())
                     await conn.execute(query, *values)
 
             db_rows_written.inc(len(rows))
             db_write_duration.observe(time.monotonic() - start)
-            await logger.adebug("db_rows_written", category="db", count=len(rows))
+            await logger.adebug('db_rows_written', category='db', count=len(rows))
         except Exception:
             db_errors.inc()
             raise

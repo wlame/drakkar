@@ -18,9 +18,11 @@ class KafkaProducer:
 
     def __init__(self, config: KafkaConfig) -> None:
         self._config = config
-        self._producer = Producer({
-            "bootstrap.servers": config.brokers,
-        })
+        self._producer = Producer(
+            {
+                'bootstrap.servers': config.brokers,
+            }
+        )
 
     async def produce(self, message: OutputMessage) -> None:
         """Produce a single message to the target topic.

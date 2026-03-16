@@ -10,9 +10,9 @@ from drakkar.config import LoggingConfig
 
 def setup_logging(
     config: LoggingConfig,
-    worker_id: str = "",
-    consumer_group: str = "",
-    version: str = "",
+    worker_id: str = '',
+    consumer_group: str = '',
+    version: str = '',
 ) -> None:
     """Configure structlog with JSON or console output.
 
@@ -22,7 +22,7 @@ def setup_logging(
     shared_processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
-        structlog.processors.TimeStamper(fmt="iso", key="timestamp"),
+        structlog.processors.TimeStamper(fmt='iso', key='timestamp'),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
         structlog.processors.CallsiteParameterAdder(
@@ -30,7 +30,7 @@ def setup_logging(
         ),
     ]
 
-    if config.format == "json":
+    if config.format == 'json':
         renderer: structlog.types.Processor = structlog.processors.JSONRenderer()
     else:
         renderer = structlog.dev.ConsoleRenderer()

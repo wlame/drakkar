@@ -11,10 +11,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class KafkaConfig(BaseModel):
     """Kafka connection and consumer/producer settings."""
 
-    brokers: str = "localhost:9092"
-    source_topic: str = "input-events"
-    target_topic: str = "output-results"
-    consumer_group: str = "drakkar-workers"
+    brokers: str = 'localhost:9092'
+    source_topic: str = 'input-events'
+    target_topic: str = 'output-results'
+    consumer_group: str = 'drakkar-workers'
     max_poll_records: int = 100
     max_poll_interval_ms: int = 300_000
     session_timeout_ms: int = 45_000
@@ -33,7 +33,7 @@ class ExecutorConfig(BaseModel):
 class PostgresConfig(BaseModel):
     """PostgreSQL connection settings."""
 
-    dsn: str = "postgresql://localhost:5432/drakkar"
+    dsn: str = 'postgresql://localhost:5432/drakkar'
     pool_min: int = Field(default=2, ge=1)
     pool_max: int = Field(default=10, ge=1)
 
@@ -48,8 +48,8 @@ class MetricsConfig(BaseModel):
 class LoggingConfig(BaseModel):
     """Structured logging settings."""
 
-    level: str = "INFO"
-    format: str = Field(default="json", pattern="^(json|console)$")
+    level: str = 'INFO'
+    format: str = Field(default='json', pattern='^(json|console)$')
 
 
 class DebugConfig(BaseModel):
@@ -57,7 +57,7 @@ class DebugConfig(BaseModel):
 
     enabled: bool = True
     port: int = Field(default=8080, ge=1, le=65535)
-    db_path: str = "/tmp/drakkar-debug.db"
+    db_path: str = '/tmp/drakkar-debug.db'
     retention_hours: int = Field(default=24, ge=1)
     retention_max_events: int = Field(default=100_000, ge=100)
     store_output: bool = True
@@ -68,8 +68,8 @@ class DrakkarConfig(BaseSettings):
     """Root configuration for a Drakkar worker."""
 
     model_config = SettingsConfigDict(
-        env_prefix="DRAKKAR_",
-        env_nested_delimiter="__",
+        env_prefix='DRAKKAR_',
+        env_nested_delimiter='__',
     )
 
     kafka: KafkaConfig = Field(default_factory=KafkaConfig)
@@ -92,12 +92,12 @@ def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
     with __ for nesting (e.g., DRAKKAR_KAFKA__BROKERS).
     """
     if config_path is None:
-        config_path = os.environ.get("DRAKKAR_CONFIG")
+        config_path = os.environ.get('DRAKKAR_CONFIG')
 
     if config_path is not None:
         path = Path(config_path)
         if not path.exists():
-            raise FileNotFoundError(f"Config file not found: {path}")
+            raise FileNotFoundError(f'Config file not found: {path}')
 
         with open(path) as f:
             yaml_data = yaml.safe_load(f) or {}
@@ -105,7 +105,7 @@ def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
         # pydantic-settings ignores env vars for nested models when init
         # kwargs are passed. Fix: extract DRAKKAR_* env vars, parse them
         # into nested structure, and deep-merge on top of YAML.
-        env_overrides = _parse_env_overrides("DRAKKAR_", "__")
+        env_overrides = _parse_env_overrides('DRAKKAR_', '__')
         merged = _deep_merge(yaml_data, env_overrides)
         return DrakkarConfig(**merged)
 
@@ -119,9 +119,9 @@ def _parse_env_overrides(prefix: str, delimiter: str) -> dict:
         if not key.startswith(prefix):
             continue
         # skip the config file path env var itself
-        if key == f"{prefix}CONFIG":
+        if key == f'{prefix}CONFIG':
             continue
-        parts = key[len(prefix):].lower().split(delimiter)
+        parts = key[len(prefix) :].lower().split(delimiter)
         d = result
         for part in parts[:-1]:
             d = d.setdefault(part, {})

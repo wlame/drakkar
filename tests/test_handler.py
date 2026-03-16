@@ -28,7 +28,7 @@ async def test_base_handler_arrange_raises(
     handler: BaseDrakkarHandler,
     source_message: SourceMessage,
 ):
-    with pytest.raises(NotImplementedError, match="arrange"):
+    with pytest.raises(NotImplementedError, match='arrange'):
         await handler.arrange([source_message], PendingContext())
 
 
@@ -67,7 +67,7 @@ async def test_base_handler_on_revoke_is_noop(handler: BaseDrakkarHandler):
 
 
 async def test_base_handler_on_startup_returns_config_unchanged(handler: BaseDrakkarHandler):
-    config = DrakkarConfig(executor=ExecutorConfig(binary_path="/bin/echo"))
+    config = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'))
     result = await handler.on_startup(config)
     assert result is config
 
@@ -76,23 +76,28 @@ async def test_on_startup_can_modify_config():
     class TuningHandler(BaseDrakkarHandler):
         async def on_startup(self, config):
             import os
+
             cpu_count = os.cpu_count() or 4
-            return config.model_copy(update={
-                'executor': config.executor.model_copy(update={
-                    'max_workers': cpu_count,
-                }),
-            })
+            return config.model_copy(
+                update={
+                    'executor': config.executor.model_copy(
+                        update={
+                            'max_workers': cpu_count,
+                        }
+                    ),
+                }
+            )
 
         async def arrange(self, messages, pending):
             return []
 
     handler = TuningHandler()
     config = DrakkarConfig(
-        executor=ExecutorConfig(binary_path="/bin/echo", max_workers=1),
+        executor=ExecutorConfig(binary_path='/bin/echo', max_workers=1),
     )
     result = await handler.on_startup(config)
     assert result.executor.max_workers == (os.cpu_count() or 4)
-    assert result.executor.binary_path == "/bin/echo"
+    assert result.executor.binary_path == '/bin/echo'
 
 
 async def test_custom_handler_overrides():
@@ -100,19 +105,17 @@ async def test_custom_handler_overrides():
         async def arrange(self, messages, pending):
             return [
                 ExecutorTask(
-                    task_id="custom-1",
-                    args=["--test"],
+                    task_id='custom-1',
+                    args=['--test'],
                     source_offsets=[m.offset for m in messages],
                 )
             ]
 
     handler = MyHandler()
-    msg = SourceMessage(
-        topic="t", partition=0, offset=5, value=b"x", timestamp=0
-    )
+    msg = SourceMessage(topic='t', partition=0, offset=5, value=b'x', timestamp=0)
     tasks = await handler.arrange([msg], PendingContext())
     assert len(tasks) == 1
-    assert tasks[0].task_id == "custom-1"
+    assert tasks[0].task_id == 'custom-1'
     assert tasks[0].source_offsets == [5]
 
 
@@ -148,13 +151,16 @@ async def test_generic_handler_deserializes_payload():
 
     handler = MyHandler()
     msg = SourceMessage(
-        topic="t", partition=0, offset=0, timestamp=0,
-        value=json.dumps({"pattern": "error", "file_path": "/tmp/f.txt", "repeat": 5}).encode(),
+        topic='t',
+        partition=0,
+        offset=0,
+        timestamp=0,
+        value=json.dumps({'pattern': 'error', 'file_path': '/tmp/f.txt', 'repeat': 5}).encode(),
     )
     handler.deserialize_message(msg)
     assert msg.payload is not None
     assert isinstance(msg.payload, SearchRequest)
-    assert msg.payload.pattern == "error"
+    assert msg.payload.pattern == 'error'
     assert msg.payload.repeat == 5
 
 
@@ -165,8 +171,11 @@ async def test_generic_handler_payload_default_on_bad_json():
 
     handler = MyHandler()
     msg = SourceMessage(
-        topic="t", partition=0, offset=0, timestamp=0,
-        value=b"not json",
+        topic='t',
+        partition=0,
+        offset=0,
+        timestamp=0,
+        value=b'not json',
     )
     handler.deserialize_message(msg)
     assert msg.payload is None
@@ -182,7 +191,10 @@ async def test_non_generic_handler_skips_deserialization():
     assert handler.output_model is None
 
     msg = SourceMessage(
-        topic="t", partition=0, offset=0, timestamp=0,
+        topic='t',
+        partition=0,
+        offset=0,
+        timestamp=0,
         value=b'{"x": 1}',
     )
     handler.deserialize_message(msg)
@@ -190,10 +202,10 @@ async def test_non_generic_handler_skips_deserialization():
 
 
 async def test_output_message_from_model():
-    result = SearchResult(pattern="error", match_count=3, matches=["a", "b", "c"])
-    msg = OutputMessage.from_model(result, key=b"key-1")
-    assert msg.key == b"key-1"
+    result = SearchResult(pattern='error', match_count=3, matches=['a', 'b', 'c'])
+    msg = OutputMessage.from_model(result, key=b'key-1')
+    assert msg.key == b'key-1'
     parsed = json.loads(msg.value)
-    assert parsed["pattern"] == "error"
-    assert parsed["match_count"] == 3
-    assert parsed["matches"] == ["a", "b", "c"]
+    assert parsed['pattern'] == 'error'
+    assert parsed['match_count'] == 3
+    assert parsed['matches'] == ['a', 'b', 'c']

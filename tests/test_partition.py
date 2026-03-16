@@ -20,7 +20,7 @@ from tests.conftest import wait_for
 
 def make_msg(partition: int = 0, offset: int = 0) -> SourceMessage:
     return SourceMessage(
-        topic="test",
+        topic='test',
         partition=partition,
         offset=offset,
         value=b'{"x": 1}',
@@ -39,8 +39,8 @@ class EchoHandler(BaseDrakkarHandler):
         self.arrange_calls.append((len(messages), len(pending.pending_task_ids)))
         return [
             ExecutorTask(
-                task_id=f"task-{msg.offset}",
-                args=["hello"],
+                task_id=f'task-{msg.offset}',
+                args=['hello'],
                 source_offsets=[msg.offset],
             )
             for msg in messages
@@ -70,8 +70,8 @@ class ErrorHandler(BaseDrakkarHandler):
     async def arrange(self, messages, pending):
         return [
             ExecutorTask(
-                task_id=f"fail-{msg.offset}",
-                args=["-c", "import sys; sys.exit(1)"],
+                task_id=f'fail-{msg.offset}',
+                args=['-c', 'import sys; sys.exit(1)'],
                 source_offsets=[msg.offset],
             )
             for msg in messages
@@ -81,7 +81,7 @@ class ErrorHandler(BaseDrakkarHandler):
 @pytest.fixture
 def echo_pool() -> ExecutorPool:
     return ExecutorPool(
-        binary_path="/bin/echo",
+        binary_path='/bin/echo',
         max_workers=4,
         task_timeout_seconds=10,
     )
@@ -112,7 +112,10 @@ def test_window_empty_tasks_not_complete():
 async def test_partition_processor_enqueue_and_properties(echo_pool):
     handler = EchoHandler()
     proc = PartitionProcessor(
-        partition_id=5, handler=handler, executor_pool=echo_pool, window_size=10,
+        partition_id=5,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=10,
     )
     assert proc.partition_id == 5
     assert proc.queue_size == 0
@@ -134,8 +137,12 @@ async def test_partition_processor_processes_messages(echo_pool):
         committed.append((partition_id, offset))
 
     proc = PartitionProcessor(
-        partition_id=0, handler=handler, executor_pool=echo_pool, window_size=10,
-        on_collect=on_collect, on_commit=on_commit,
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=10,
+        on_collect=on_collect,
+        on_commit=on_commit,
     )
 
     proc.enqueue(make_msg(offset=0))
@@ -160,7 +167,10 @@ async def test_partition_processor_empty_arrange(echo_pool):
         committed.append((partition_id, offset))
 
     proc = PartitionProcessor(
-        partition_id=0, handler=handler, executor_pool=echo_pool, window_size=10,
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=10,
         on_commit=on_commit,
     )
 
@@ -175,12 +185,17 @@ async def test_partition_processor_empty_arrange(echo_pool):
 async def test_partition_processor_error_handling(failing_pool):
     handler = ErrorHandler()
     proc = PartitionProcessor(
-        partition_id=0, handler=handler, executor_pool=failing_pool, window_size=10,
+        partition_id=0,
+        handler=handler,
+        executor_pool=failing_pool,
+        window_size=10,
     )
 
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(lambda: not proc.offset_tracker.has_pending() and proc.inflight_count == 0, timeout=3)
+    await wait_for(
+        lambda: not proc.offset_tracker.has_pending() and proc.inflight_count == 0, timeout=3
+    )
     await proc.stop()
 
 
@@ -192,15 +207,18 @@ async def test_partition_processor_pending_context(echo_pool):
             pending_sizes.append(len(pending.pending_task_ids))
             return [
                 ExecutorTask(
-                    task_id=f"task-{messages[0].offset}",
-                    args=["slow"],
+                    task_id=f'task-{messages[0].offset}',
+                    args=['slow'],
                     source_offsets=[msg.offset for msg in messages],
                 )
             ]
 
     handler = TrackingHandler()
     proc = PartitionProcessor(
-        partition_id=0, handler=handler, executor_pool=echo_pool, window_size=1,
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=1,
     )
 
     for i in range(3):
@@ -216,7 +234,10 @@ async def test_partition_processor_pending_context(echo_pool):
 async def test_partition_processor_stop_and_drain(echo_pool):
     handler = EchoHandler()
     proc = PartitionProcessor(
-        partition_id=0, handler=handler, executor_pool=echo_pool, window_size=5,
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=5,
     )
 
     proc.start()
@@ -227,7 +248,10 @@ async def test_partition_processor_stop_and_drain(echo_pool):
 async def test_partition_processor_no_callbacks(echo_pool):
     handler = EchoHandler()
     proc = PartitionProcessor(
-        partition_id=0, handler=handler, executor_pool=echo_pool, window_size=10,
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=10,
     )
 
     proc.enqueue(make_msg(offset=0))
@@ -237,6 +261,7 @@ async def test_partition_processor_no_callbacks(echo_pool):
 
 
 # --- C1: RETRY should not stall the window ---
+
 
 async def test_retry_does_not_stall_window(failing_pool):
     """When on_error returns RETRY then SKIP, the window still completes
@@ -249,8 +274,8 @@ async def test_retry_does_not_stall_window(failing_pool):
         async def arrange(self, messages, pending):
             return [
                 ExecutorTask(
-                    task_id=f"rt-{m.offset}",
-                    args=["-c", "import sys; sys.exit(1)"],
+                    task_id=f'rt-{m.offset}',
+                    args=['-c', 'import sys; sys.exit(1)'],
                     source_offsets=[m.offset],
                 )
                 for m in messages
@@ -267,8 +292,11 @@ async def test_retry_does_not_stall_window(failing_pool):
         committed.append((partition_id, offset))
 
     proc = PartitionProcessor(
-        partition_id=0, handler=RetryThenSkipHandler(), executor_pool=failing_pool,
-        window_size=10, on_commit=on_commit,
+        partition_id=0,
+        handler=RetryThenSkipHandler(),
+        executor_pool=failing_pool,
+        window_size=10,
+        on_commit=on_commit,
     )
 
     proc.enqueue(make_msg(offset=0))
@@ -281,6 +309,7 @@ async def test_retry_does_not_stall_window(failing_pool):
 
 # --- I10: Retry limit ---
 
+
 async def test_max_retries_exceeded(failing_pool):
     """After MAX_RETRIES, task is skipped and window completes."""
     error_count = 0
@@ -289,8 +318,8 @@ async def test_max_retries_exceeded(failing_pool):
         async def arrange(self, messages, pending):
             return [
                 ExecutorTask(
-                    task_id=f"inf-{m.offset}",
-                    args=["-c", "import sys; sys.exit(1)"],
+                    task_id=f'inf-{m.offset}',
+                    args=['-c', 'import sys; sys.exit(1)'],
                     source_offsets=[m.offset],
                 )
                 for m in messages
@@ -307,8 +336,11 @@ async def test_max_retries_exceeded(failing_pool):
         committed.append((pid, off))
 
     proc = PartitionProcessor(
-        partition_id=0, handler=AlwaysRetryHandler(), executor_pool=failing_pool,
-        window_size=10, on_commit=on_commit,
+        partition_id=0,
+        handler=AlwaysRetryHandler(),
+        executor_pool=failing_pool,
+        window_size=10,
+        on_commit=on_commit,
     )
 
     proc.enqueue(make_msg(offset=0))
@@ -322,6 +354,7 @@ async def test_max_retries_exceeded(failing_pool):
 
 # --- I1: Unhandled exception in collect should not stall window ---
 
+
 async def test_collect_exception_does_not_stall_window(echo_pool):
     """If collect() raises, the window still completes."""
     committed: list[tuple[int, int]] = []
@@ -330,21 +363,25 @@ async def test_collect_exception_does_not_stall_window(echo_pool):
         async def arrange(self, messages, pending):
             return [
                 ExecutorTask(
-                    task_id=f"bc-{m.offset}", args=["ok"],
+                    task_id=f'bc-{m.offset}',
+                    args=['ok'],
                     source_offsets=[m.offset],
                 )
                 for m in messages
             ]
 
         async def collect(self, result):
-            raise RuntimeError("collect exploded")
+            raise RuntimeError('collect exploded')
 
     async def on_commit(pid, off):
         committed.append((pid, off))
 
     proc = PartitionProcessor(
-        partition_id=0, handler=BrokenCollectHandler(), executor_pool=echo_pool,
-        window_size=10, on_commit=on_commit,
+        partition_id=0,
+        handler=BrokenCollectHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=on_commit,
     )
 
     proc.enqueue(make_msg(offset=0))

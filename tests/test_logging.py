@@ -10,48 +10,48 @@ from drakkar.logging import setup_logging
 
 
 def test_setup_logging_json():
-    config = LoggingConfig(level="INFO", format="json")
+    config = LoggingConfig(level='INFO', format='json')
     setup_logging(config)
     logger = structlog.get_logger()
-    logger.info("test message", key="value")
+    logger.info('test message', key='value')
 
 
 def test_setup_logging_console():
-    config = LoggingConfig(level="DEBUG", format="console")
+    config = LoggingConfig(level='DEBUG', format='console')
     setup_logging(config)
     logger = structlog.get_logger()
-    logger.debug("debug test")
+    logger.debug('debug test')
 
 
 def test_setup_logging_binds_worker_id():
-    config = LoggingConfig(level="INFO", format="json")
-    setup_logging(config, worker_id="worker-1")
+    config = LoggingConfig(level='INFO', format='json')
+    setup_logging(config, worker_id='worker-1')
     ctx = structlog.contextvars.get_contextvars()
-    assert ctx.get("worker_id") == "worker-1"
+    assert ctx.get('worker_id') == 'worker-1'
 
 
 def test_setup_logging_binds_service_name():
-    config = LoggingConfig(level="INFO", format="json")
+    config = LoggingConfig(level='INFO', format='json')
     setup_logging(config)
     ctx = structlog.contextvars.get_contextvars()
-    assert ctx["service_name"] == "drakkar"
+    assert ctx['service_name'] == 'drakkar'
 
 
 def test_setup_logging_binds_consumer_group_and_version():
-    config = LoggingConfig(level="INFO", format="json")
-    setup_logging(config, worker_id="w1", consumer_group="my-group", version="0.1.0")
+    config = LoggingConfig(level='INFO', format='json')
+    setup_logging(config, worker_id='w1', consumer_group='my-group', version='0.1.0')
     ctx = structlog.contextvars.get_contextvars()
-    assert ctx["consumer_group"] == "my-group"
-    assert ctx["service_version"] == "0.1.0"
-    assert ctx["worker_id"] == "w1"
+    assert ctx['consumer_group'] == 'my-group'
+    assert ctx['service_version'] == '0.1.0'
+    assert ctx['worker_id'] == 'w1'
 
 
 def test_setup_logging_level_filtering():
-    config = LoggingConfig(level="WARNING", format="json")
+    config = LoggingConfig(level='WARNING', format='json')
     setup_logging(config)
     logger = structlog.get_logger()
-    logger.info("this should be filtered")
-    logger.warning("this should pass")
+    logger.info('this should be filtered')
+    logger.warning('this should pass')
 
 
 def test_setup_logging_json_output_has_ecs_fields():
@@ -59,8 +59,8 @@ def test_setup_logging_json_output_has_ecs_fields():
     import sys
 
     buf = io.StringIO()
-    config = LoggingConfig(level="INFO", format="json")
-    setup_logging(config, worker_id="test-w")
+    config = LoggingConfig(level='INFO', format='json')
+    setup_logging(config, worker_id='test-w')
 
     # temporarily swap logger factory to capture output
     structlog.configure(
@@ -69,15 +69,15 @@ def test_setup_logging_json_output_has_ecs_fields():
     )
     try:
         logger = structlog.get_logger()
-        logger.info("check fields", category="test")
+        logger.info('check fields', category='test')
 
         line = buf.getvalue().strip()
         data = json.loads(line)
-        assert "timestamp" in data
-        assert data["service_name"] == "drakkar"
-        assert data["worker_id"] == "test-w"
-        assert data["category"] == "test"
-        assert data["level"] == "info"
+        assert 'timestamp' in data
+        assert data['service_name'] == 'drakkar'
+        assert data['worker_id'] == 'test-w'
+        assert data['category'] == 'test'
+        assert data['level'] == 'info'
     finally:
         # restore stderr logger for other tests
         structlog.configure(

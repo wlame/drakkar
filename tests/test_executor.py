@@ -9,7 +9,7 @@ from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.models import ExecutorTask
 
 
-def make_task(task_id: str = "t1", args: list[str] | None = None) -> ExecutorTask:
+def make_task(task_id: str = 't1', args: list[str] | None = None) -> ExecutorTask:
     return ExecutorTask(
         task_id=task_id,
         args=args or [],
@@ -20,20 +20,20 @@ def make_task(task_id: str = "t1", args: list[str] | None = None) -> ExecutorTas
 @pytest.fixture
 def echo_pool() -> ExecutorPool:
     return ExecutorPool(
-        binary_path="/bin/echo",
+        binary_path='/bin/echo',
         max_workers=4,
         task_timeout_seconds=10,
     )
 
 
 async def test_execute_echo(echo_pool: ExecutorPool):
-    task = make_task(args=["hello", "world"])
+    task = make_task(args=['hello', 'world'])
     result = await echo_pool.execute(task)
     assert result.exit_code == 0
-    assert result.stdout.strip() == "hello world"
-    assert result.stderr == ""
+    assert result.stdout.strip() == 'hello world'
+    assert result.stderr == ''
     assert result.duration_seconds > 0
-    assert result.task.task_id == "t1"
+    assert result.task.task_id == 't1'
 
 
 async def test_execute_captures_stderr():
@@ -42,9 +42,9 @@ async def test_execute_captures_stderr():
         max_workers=2,
         task_timeout_seconds=10,
     )
-    task = make_task(args=["-c", "import sys; sys.stderr.write('err msg')"])
+    task = make_task(args=['-c', "import sys; sys.stderr.write('err msg')"])
     result = await pool.execute(task)
-    assert result.stderr == "err msg"
+    assert result.stderr == 'err msg'
 
 
 async def test_execute_nonzero_exit_raises():
@@ -53,7 +53,7 @@ async def test_execute_nonzero_exit_raises():
         max_workers=2,
         task_timeout_seconds=10,
     )
-    task = make_task(args=["-c", "import sys; sys.exit(42)"])
+    task = make_task(args=['-c', 'import sys; sys.exit(42)'])
     with pytest.raises(ExecutorTaskError) as exc_info:
         await pool.execute(task)
     assert exc_info.value.error.exit_code == 42
@@ -66,15 +66,15 @@ async def test_execute_timeout_kills_process():
         max_workers=2,
         task_timeout_seconds=1,
     )
-    task = make_task(args=["-c", "import time; time.sleep(30)"])
+    task = make_task(args=['-c', 'import time; time.sleep(30)'])
     with pytest.raises(ExecutorTaskError) as exc_info:
         await pool.execute(task)
-    assert "timed out" in exc_info.value.error.stderr
+    assert 'timed out' in exc_info.value.error.stderr
 
 
 async def test_execute_invalid_binary():
     pool = ExecutorPool(
-        binary_path="/nonexistent/binary",
+        binary_path='/nonexistent/binary',
         max_workers=2,
         task_timeout_seconds=10,
     )
@@ -91,8 +91,7 @@ async def test_execute_concurrency_limit():
         task_timeout_seconds=10,
     )
     tasks = [
-        make_task(task_id=f"t{i}", args=["-c", "import time; time.sleep(0.2)"])
-        for i in range(4)
+        make_task(task_id=f't{i}', args=['-c', 'import time; time.sleep(0.2)']) for i in range(4)
     ]
 
     max_active = 0
@@ -113,7 +112,7 @@ async def test_execute_concurrency_limit():
 
 async def test_execute_active_count_tracking(echo_pool: ExecutorPool):
     assert echo_pool.active_count == 0
-    task = make_task(args=["test"])
+    task = make_task(args=['test'])
     await echo_pool.execute(task)
     assert echo_pool.active_count == 0
 
@@ -129,6 +128,6 @@ async def test_execute_large_stdout():
         max_workers=2,
         task_timeout_seconds=10,
     )
-    task = make_task(args=["-c", "print('x' * 10000)"])
+    task = make_task(args=['-c', "print('x' * 10000)"])
     result = await pool.execute(task)
     assert len(result.stdout.strip()) == 10000

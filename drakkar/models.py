@@ -8,7 +8,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, Field
 
 
-def make_task_id(prefix: str = "t") -> str:
+def make_task_id(prefix: str = 't') -> str:
     """Generate a short, time-sortable, unique task ID.
 
     Format: {prefix}-{timestamp_hex}-{random_hex}
@@ -19,11 +19,11 @@ def make_task_id(prefix: str = "t") -> str:
     """
     ts = int(time.time())
     rnd = int.from_bytes(os.urandom(2))
-    return f"{prefix}-{ts:08x}-{rnd:04x}"
+    return f'{prefix}-{ts:08x}-{rnd:04x}'
 
 
-InputT = TypeVar("InputT", bound=BaseModel)
-OutputT = TypeVar("OutputT", bound=BaseModel)
+InputT = TypeVar('InputT', bound=BaseModel)
+OutputT = TypeVar('OutputT', bound=BaseModel)
 
 
 class SourceMessage(BaseModel):
@@ -64,7 +64,7 @@ class ExecutorError(BaseModel):
 
     task: ExecutorTask
     exit_code: int | None = None
-    stderr: str = ""
+    stderr: str = ''
     exception: str | None = None
     pid: int | None = None
 
@@ -83,7 +83,7 @@ class OutputMessage(BaseModel):
     value: bytes
 
     @classmethod
-    def from_model(cls, model: BaseModel, key: bytes | None = None) -> "OutputMessage":
+    def from_model(cls, model: BaseModel, key: bytes | None = None) -> 'OutputMessage':
         """Create an OutputMessage by JSON-serializing a Pydantic model."""
         return cls(key=key, value=model.model_dump_json().encode())
 
@@ -105,5 +105,5 @@ class CollectResult(BaseModel):
 class ErrorAction(StrEnum):
     """Actions the error hook can return."""
 
-    RETRY = "retry"
-    SKIP = "skip"
+    RETRY = 'retry'
+    SKIP = 'skip'

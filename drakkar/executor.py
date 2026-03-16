@@ -79,8 +79,8 @@ class ExecutorPool:
             result = ExecutorResult(
                 task_id=task.task_id,
                 exit_code=proc.returncode or 0,
-                stdout=stdout_bytes.decode(errors="replace") if stdout_bytes else "",
-                stderr=stderr_bytes.decode(errors="replace") if stderr_bytes else "",
+                stdout=stdout_bytes.decode(errors='replace') if stdout_bytes else '',
+                stderr=stderr_bytes.decode(errors='replace') if stderr_bytes else '',
                 duration_seconds=round(duration, 3),
                 task=task,
                 pid=pid,
@@ -98,8 +98,8 @@ class ExecutorPool:
                 )
 
             await logger.adebug(
-                "executor_task_completed",
-                category="executor",
+                'executor_task_completed',
+                category='executor',
                 task_id=task.task_id,
                 duration=result.duration_seconds,
                 exit_code=result.exit_code,
@@ -112,15 +112,15 @@ class ExecutorPool:
             raise ExecutorTaskError(  # noqa: B904
                 error=ExecutorError(
                     task=task,
-                    stderr="task timed out",
-                    exception=f"Timeout after {self._task_timeout}s",
+                    stderr='task timed out',
+                    exception=f'Timeout after {self._task_timeout}s',
                     pid=timeout_pid,
                 ),
                 result=ExecutorResult(
                     task_id=task.task_id,
                     exit_code=-1,
-                    stdout="",
-                    stderr="task timed out",
+                    stdout='',
+                    stderr='task timed out',
                     duration_seconds=round(duration, 3),
                     task=task,
                     pid=timeout_pid,
@@ -137,7 +137,7 @@ class ExecutorPool:
                 result=ExecutorResult(
                     task_id=task.task_id,
                     exit_code=-1,
-                    stdout="",
+                    stdout='',
                     stderr=str(e),
                     duration_seconds=round(duration, 3),
                     task=task,
@@ -156,4 +156,4 @@ class ExecutorTaskError(Exception):
     def __init__(self, error: ExecutorError, result: ExecutorResult) -> None:
         self.error = error
         self.result = result
-        super().__init__(f"Task {error.task.task_id} failed: {error.stderr or error.exception}")
+        super().__init__(f'Task {error.task.task_id} failed: {error.stderr or error.exception}')

@@ -1,6 +1,6 @@
 """Drakkar — Kafka subprocess orchestration framework."""
 
-__version__ = "0.1.0"
+__version__ = '0.1.0'
 
 from drakkar.app import DrakkarApp
 from drakkar.config import DrakkarConfig, load_config
@@ -19,19 +19,19 @@ from drakkar.models import (
 )
 
 __all__ = [
-    "BaseDrakkarHandler",
-    "CollectResult",
-    "DBRow",
-    "DrakkarApp",
-    "DrakkarConfig",
-    "DrakkarHandler",
-    "ErrorAction",
-    "ExecutorError",
-    "ExecutorResult",
-    "ExecutorTask",
-    "OutputMessage",
-    "PendingContext",
-    "SourceMessage",
-    "load_config",
-    "make_task_id",
+    'BaseDrakkarHandler',
+    'CollectResult',
+    'DBRow',
+    'DrakkarApp',
+    'DrakkarConfig',
+    'DrakkarHandler',
+    'ErrorAction',
+    'ExecutorError',
+    'ExecutorResult',
+    'ExecutorTask',
+    'OutputMessage',
+    'PendingContext',
+    'SourceMessage',
+    'load_config',
+    'make_task_id',
 ]

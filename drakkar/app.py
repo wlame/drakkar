@@ -41,7 +41,7 @@ class DrakkarApp:
         handler: BaseDrakkarHandler,
         config_path: str | Path | None = None,
         config: DrakkarConfig | None = None,
-        worker_id: str = "",
+        worker_id: str = '',
     ) -> None:
         if config is not None:
             self._config = config
@@ -49,7 +49,7 @@ class DrakkarApp:
             self._config = load_config(config_path)
 
         self._handler = handler
-        self._worker_id = worker_id or f"drakkar-{id(self):x}"
+        self._worker_id = worker_id or f'drakkar-{id(self):x}'
         self._start_time = time.monotonic()
 
         self._executor_pool: ExecutorPool | None = None
@@ -90,7 +90,7 @@ class DrakkarApp:
 
         self._config = await self._handler.on_startup(self._config)
 
-        await log.ainfo("drakkar_starting", category="lifecycle")
+        await log.ainfo('drakkar_starting', category='lifecycle')
 
         self._executor_pool = ExecutorPool(
             binary_path=self._config.executor.binary_path,
@@ -99,17 +99,20 @@ class DrakkarApp:
         )
 
         start_metrics_server(self._config.metrics)
-        worker_info.info({
-            'worker_id': self._worker_id,
-            'version': __version__,
-            'consumer_group': self._config.kafka.consumer_group,
-        })
+        worker_info.info(
+            {
+                'worker_id': self._worker_id,
+                'version': __version__,
+                'consumer_group': self._config.kafka.consumer_group,
+            }
+        )
 
         if self._config.debug.enabled:
             self._recorder = EventRecorder(self._config.debug)
             await self._recorder.start()
 
             from drakkar.debug_server import DebugServer
+
             self._debug_server = DebugServer(
                 config=self._config.debug,
                 recorder=self._recorder,
@@ -145,10 +148,7 @@ class DrakkarApp:
 
     def _total_queued(self) -> int:
         """Total messages buffered across all partition queues + in-flight tasks."""
-        return sum(
-            p.queue_size + p.inflight_count
-            for p in self._processors.values()
-        )
+        return sum(p.queue_size + p.inflight_count for p in self._processors.values())
 
     async def _poll_loop(self) -> None:
         """Main polling loop with backpressure via Kafka pause/resume.
@@ -229,7 +229,7 @@ class DrakkarApp:
         try:
             await coro
         except Exception as e:
-            logger.warning("async_callback_failed", category="lifecycle", error=str(e))
+            logger.warning('async_callback_failed', category='lifecycle', error=str(e))
 
     async def _stop_processor(self, processor: PartitionProcessor) -> None:
         """Drain in-flight tasks (up to 5s), commit final offsets, then stop."""
@@ -249,8 +249,10 @@ class DrakkarApp:
             await processor.stop()
         except Exception as e:
             logger.warning(
-                "stop_processor_failed", category="lifecycle",
-                partition=processor.partition_id, error=str(e),
+                'stop_processor_failed',
+                category='lifecycle',
+                partition=processor.partition_id,
+                error=str(e),
             )
 
     async def _handle_collect(self, result: CollectResult, partition_id: int) -> None:
@@ -274,13 +276,16 @@ class DrakkarApp:
                 self._recorder.record_committed(partition_id, offset)
         except Exception as e:
             logger.warning(
-                "commit_failed", category="kafka",
-                partition=partition_id, offset=offset, error=str(e),
+                'commit_failed',
+                category='kafka',
+                partition=partition_id,
+                offset=offset,
+                error=str(e),
             )
 
     def _handle_signal(self) -> None:
         """Handle shutdown signals."""
-        logger.info("shutdown_signal_received", category="lifecycle")
+        logger.info('shutdown_signal_received', category='lifecycle')
         self._running = False
 
     async def _shutdown(self) -> None:
@@ -288,19 +293,21 @@ class DrakkarApp:
         commit offsets, disconnect from Kafka and DB.
         """
         log = logger.bind(worker_id=self._worker_id)
-        await log.ainfo("drakkar_shutting_down", category="lifecycle")
+        await log.ainfo('drakkar_shutting_down', category='lifecycle')
 
         # 1. stop accepting new messages — processors stop polling their queues
         for processor in list(self._processors.values()):
             processor._running = False
 
         # 2. give in-flight executors up to 5 seconds to finish
-        await log.ainfo("draining_executors", category="lifecycle", timeout=5)
+        await log.ainfo('draining_executors', category='lifecycle', timeout=5)
         try:
             await asyncio.wait_for(self._drain_all_processors(), timeout=5.0)
-            await log.ainfo("executors_drained", category="lifecycle")
+            await log.ainfo('executors_drained', category='lifecycle')
         except TimeoutError:
-            await log.awarning("drain_timeout", category="lifecycle", msg="some executors did not finish in 5s")
+            await log.awarning(
+                'drain_timeout', category='lifecycle', msg='some executors did not finish in 5s'
+            )
 
         # 3. commit any remaining offsets
         for processor in list(self._processors.values()):
@@ -309,7 +316,12 @@ class DrakkarApp:
                 try:
                     await self._consumer.commit({processor.partition_id: committable})
                 except Exception as e:
-                    await log.awarning("final_commit_failed", category="kafka", partition=processor.partition_id, error=str(e))
+                    await log.awarning(
+                        'final_commit_failed',
+                        category='kafka',
+                        partition=processor.partition_id,
+                        error=str(e),
+                    )
 
         # 4. cancel processor tasks
         for processor in list(self._processors.values()):
@@ -334,7 +346,7 @@ class DrakkarApp:
         if self._db_writer:
             await self._db_writer.close()
 
-        await log.ainfo("drakkar_stopped", category="lifecycle")
+        await log.ainfo('drakkar_stopped', category='lifecycle')
 
     async def _drain_all_processors(self) -> None:
         """Wait for all partition processors to finish in-flight tasks."""

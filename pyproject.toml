@@ -77,6 +77,9 @@ ignore = [
     "RUF006", # store asyncio.create_task ref — intentional fire-and-forget in partition processor
 ]
 
+[tool.ruff.format]
+quote-style = "single"
+
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN"]
 "integration/*" = ["ANN"]

@@ -18,7 +18,7 @@ from drakkar.recorder import EventRecorder, _list_db_files, _make_db_path
 def make_debug_config(tmp_path, **overrides) -> DebugConfig:
     defaults = {
         'enabled': True,
-        'db_path': str(tmp_path / "test-debug.db"),
+        'db_path': str(tmp_path / 'test-debug.db'),
         'retention_hours': 24,
         'retention_max_events': 1000,
         'store_output': False,
@@ -30,25 +30,31 @@ def make_debug_config(tmp_path, **overrides) -> DebugConfig:
 
 def make_msg(partition=0, offset=0) -> SourceMessage:
     return SourceMessage(
-        topic="t", partition=partition, offset=offset,
-        value=b'{"x":1}', timestamp=1000,
+        topic='t',
+        partition=partition,
+        offset=offset,
+        value=b'{"x":1}',
+        timestamp=1000,
     )
 
 
-def make_task(task_id="t1", args=None, offsets=None) -> ExecutorTask:
+def make_task(task_id='t1', args=None, offsets=None) -> ExecutorTask:
     return ExecutorTask(
         task_id=task_id,
-        args=args or ["--input", "file.txt"],
+        args=args or ['--input', 'file.txt'],
         source_offsets=offsets or [0],
     )
 
 
-def make_result(task_id="t1", task=None) -> ExecutorResult:
+def make_result(task_id='t1', task=None) -> ExecutorResult:
     t = task or make_task(task_id)
     return ExecutorResult(
-        task_id=task_id, exit_code=0,
-        stdout="line1\nline2\n", stderr="",
-        duration_seconds=1.5, task=t,
+        task_id=task_id,
+        exit_code=0,
+        stdout='line1\nline2\n',
+        stderr='',
+        duration_seconds=1.5,
+        task=t,
     )
 
 
@@ -65,23 +71,27 @@ async def recorder(tmp_path):
 
 
 def test_make_db_path_includes_timestamp():
-    path = _make_db_path("/tmp/drakkar-debug.db")
-    assert path.startswith("/tmp/drakkar-debug-")
-    assert path.endswith(".db")
-    assert "__" in path  # YYYY-MM-DD__HH_MM
+    path = _make_db_path('/tmp/drakkar-debug.db')
+    assert path.startswith('/tmp/drakkar-debug-')
+    assert path.endswith('.db')
+    assert '__' in path  # YYYY-MM-DD__HH_MM
 
 
 def test_make_db_path_preserves_directory():
-    path = _make_db_path("/var/log/drakkar.db")
-    assert path.startswith("/var/log/drakkar-")
+    path = _make_db_path('/var/log/drakkar.db')
+    assert path.startswith('/var/log/drakkar-')
 
 
 def test_list_db_files_returns_sorted(tmp_path):
-    for name in ["test-debug-2026-03-16__14_00.db", "test-debug-2026-03-15__10_00.db", "test-debug-2026-03-16__15_00.db"]:
+    for name in [
+        'test-debug-2026-03-16__14_00.db',
+        'test-debug-2026-03-15__10_00.db',
+        'test-debug-2026-03-16__15_00.db',
+    ]:
         (tmp_path / name).touch()
-    files = _list_db_files(str(tmp_path / "test-debug.db"))
+    files = _list_db_files(str(tmp_path / 'test-debug.db'))
     assert len(files) == 3
-    assert "14_00" in files[0] or "10_00" in files[0]  # sorted
+    assert '14_00' in files[0] or '10_00' in files[0]  # sorted
 
 
 # --- Start/stop ---
@@ -92,7 +102,7 @@ async def test_start_creates_timestamped_db(tmp_path):
     rec = EventRecorder(config)
     await rec.start()
     assert rec._db is not None
-    assert rec.db_path.startswith(str(tmp_path / "test-debug-"))
+    assert rec.db_path.startswith(str(tmp_path / 'test-debug-'))
     assert os.path.exists(rec.db_path)
     await rec.stop()
     assert rec._db is None
@@ -114,31 +124,32 @@ async def test_record_consumed_and_flush(recorder):
 
 async def test_record_arranged(recorder):
     msgs = [make_msg(offset=10), make_msg(offset=11)]
-    tasks = [make_task("t1", offsets=[10]), make_task("t2", offsets=[11])]
+    tasks = [make_task('t1', offsets=[10]), make_task('t2', offsets=[11])]
     recorder.record_arranged(partition=0, messages=msgs, tasks=tasks)
     await recorder._flush()
 
     events = await recorder.get_events(event_type='arranged')
     assert len(events) == 1
     import json
+
     meta = json.loads(events[0]['metadata'])
     assert meta['task_count'] == 2
     assert meta['offsets'] == [10, 11]
 
 
 async def test_record_task_started(recorder):
-    task = make_task("t1", args=["--pattern", "error"])
+    task = make_task('t1', args=['--pattern', 'error'])
     recorder.record_task_started(task, partition=5)
     await recorder._flush()
 
     events = await recorder.get_events(event_type='task_started')
     assert len(events) == 1
-    assert events[0]['task_id'] == "t1"
+    assert events[0]['task_id'] == 't1'
     assert events[0]['partition'] == 5
 
 
 async def test_record_task_completed_without_output(recorder):
-    result = make_result("t1")
+    result = make_result('t1')
     recorder.record_task_completed(result, partition=2)
     await recorder._flush()
 
@@ -146,7 +157,7 @@ async def test_record_task_completed_without_output(recorder):
     assert len(events) == 1
     assert events[0]['exit_code'] == 0
     assert events[0]['duration'] == 1.5
-    assert events[0]['stdout_size'] == len(b"line1\nline2\n")
+    assert events[0]['stdout_size'] == len(b'line1\nline2\n')
     assert events[0]['stdout'] is None
 
 
@@ -155,18 +166,18 @@ async def test_record_task_completed_with_output(tmp_path):
     rec = EventRecorder(config)
     await rec.start()
 
-    result = make_result("t1")
+    result = make_result('t1')
     rec.record_task_completed(result, partition=0)
     await rec._flush()
 
     events = await rec.get_events(event_type='task_completed')
-    assert events[0]['stdout'] == "line1\nline2\n"
+    assert events[0]['stdout'] == 'line1\nline2\n'
     await rec.stop()
 
 
 async def test_record_task_failed(recorder):
-    task = make_task("t1")
-    error = ExecutorError(task=task, exit_code=1, stderr="bad input")
+    task = make_task('t1')
+    error = ExecutorError(task=task, exit_code=1, stderr='bad input')
     recorder.record_task_failed(task, error, partition=0)
     await recorder._flush()
 
@@ -176,7 +187,7 @@ async def test_record_task_failed(recorder):
 
 
 async def test_record_produced(recorder):
-    msg = OutputMessage(key=b"k", value=b"v")
+    msg = OutputMessage(key=b'k', value=b'v')
     recorder.record_produced(msg, source_partition=3, source_offset=42)
     await recorder._flush()
 
@@ -243,9 +254,9 @@ async def test_get_events_pagination(recorder):
 
 async def test_get_trace(recorder):
     recorder.record_consumed(make_msg(partition=3, offset=42))
-    task = make_task("t-42", offsets=[42])
+    task = make_task('t-42', offsets=[42])
     recorder.record_task_started(task, partition=3)
-    recorder.record_task_completed(make_result("t-42", task=task), partition=3)
+    recorder.record_task_completed(make_result('t-42', task=task), partition=3)
     recorder.record_committed(partition=3, offset=43)
     await recorder._flush()
 
@@ -260,8 +271,8 @@ async def test_get_partition_summary(recorder):
     recorder.record_consumed(make_msg(partition=0, offset=1))
     recorder.record_consumed(make_msg(partition=1, offset=0))
     recorder.record_committed(partition=0, offset=2)
-    task = make_task("t1", offsets=[0])
-    recorder.record_task_completed(make_result("t1", task), partition=0)
+    task = make_task('t1', offsets=[0])
+    recorder.record_task_completed(make_result('t1', task), partition=0)
     await recorder._flush()
 
     summary = await recorder.get_partition_summary()
@@ -273,21 +284,21 @@ async def test_get_partition_summary(recorder):
 
 
 async def test_get_active_tasks(recorder):
-    recorder.record_task_started(make_task("t1"), partition=0)
-    recorder.record_task_started(make_task("t2"), partition=0)
-    recorder.record_task_completed(make_result("t1"), partition=0)
+    recorder.record_task_started(make_task('t1'), partition=0)
+    recorder.record_task_started(make_task('t2'), partition=0)
+    recorder.record_task_completed(make_result('t1'), partition=0)
     await recorder._flush()
 
     active = await recorder.get_active_tasks()
     assert len(active) == 1
-    assert active[0]['task_id'] == "t2"
+    assert active[0]['task_id'] == 't2'
 
 
 async def test_get_stats(recorder):
     recorder.record_consumed(make_msg(offset=0))
     recorder.record_consumed(make_msg(offset=1))
-    task = make_task("t1")
-    recorder.record_task_completed(make_result("t1", task), partition=0)
+    task = make_task('t1')
+    recorder.record_task_completed(make_result('t1', task), partition=0)
     recorder.record_committed(partition=0, offset=2)
     await recorder._flush()
 
@@ -304,7 +315,7 @@ async def test_get_stats_empty_db(recorder):
 
 
 async def test_get_events_no_db():
-    config = DebugConfig(enabled=True, db_path="/tmp/nonexistent.db")
+    config = DebugConfig(enabled=True, db_path='/tmp/nonexistent.db')
     rec = EventRecorder(config)
     events = await rec.get_events()
     assert events == []
@@ -346,9 +357,13 @@ async def test_rotate_flushes_buffer_to_old_db(tmp_path):
 
     # buffer was flushed to old DB before rotation
     import aiosqlite
-    async with aiosqlite.connect(old_path) as old_db, old_db.execute("SELECT COUNT(*) FROM events") as cursor:
-            row = await cursor.fetchone()
-            assert row[0] == 2
+
+    async with (
+        aiosqlite.connect(old_path) as old_db,
+        old_db.execute('SELECT COUNT(*) FROM events') as cursor,
+    ):
+        row = await cursor.fetchone()
+        assert row[0] == 2
 
     await rec.stop()
 
@@ -357,8 +372,8 @@ async def test_rotate_deletes_old_files(tmp_path):
     config = make_debug_config(tmp_path, retention_hours=1)  # short retention
 
     # create an "old" DB file manually with ancient mtime
-    old_file = tmp_path / "test-debug-2025-01-01__00_00.db"
-    old_file.write_text("")
+    old_file = tmp_path / 'test-debug-2025-01-01__00_00.db'
+    old_file.write_text('')
     os.utime(old_file, (0, 0))
 
     rec = EventRecorder(config)
@@ -379,14 +394,14 @@ async def test_rotate_enforces_max_file_count(tmp_path):
     )
     # create several old DB files manually
     for i in range(5):
-        p = tmp_path / f"test-debug-2026-03-{10+i:02d}__00_00.db"
-        p.write_text("")
+        p = tmp_path / f'test-debug-2026-03-{10 + i:02d}__00_00.db'
+        p.write_text('')
 
     rec = EventRecorder(config)
     await rec.start()
     await rec._rotate()
 
-    remaining = _list_db_files(str(tmp_path / "test-debug.db"))
+    remaining = _list_db_files(str(tmp_path / 'test-debug.db'))
     # should keep at most 1 old file + the new one
     assert len(remaining) <= 2
     await rec.stop()

@@ -5,8 +5,8 @@ from enum import StrEnum
 
 
 class OffsetState(StrEnum):
-    PENDING = "pending"
-    COMPLETED = "completed"
+    PENDING = 'pending'
+    COMPLETED = 'completed'
 
 
 class OffsetTracker:

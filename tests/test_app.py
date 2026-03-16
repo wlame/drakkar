@@ -28,8 +28,8 @@ class SimpleHandler(BaseDrakkarHandler):
     async def arrange(self, messages, pending):
         return [
             ExecutorTask(
-                task_id=f"t-{msg.offset}",
-                args=["test"],
+                task_id=f't-{msg.offset}',
+                args=['test'],
                 source_offsets=[msg.offset],
             )
             for msg in messages
@@ -40,19 +40,19 @@ class SimpleHandler(BaseDrakkarHandler):
 def test_config() -> DrakkarConfig:
     return DrakkarConfig(
         kafka=KafkaConfig(
-            brokers="localhost:9092",
-            source_topic="test-in",
-            target_topic="test-out",
+            brokers='localhost:9092',
+            source_topic='test-in',
+            target_topic='test-out',
         ),
         executor=ExecutorConfig(
-            binary_path="/bin/echo",
+            binary_path='/bin/echo',
             max_workers=2,
             task_timeout_seconds=10,
             window_size=5,
         ),
-        postgres=PostgresConfig(dsn="postgresql://localhost/test"),
+        postgres=PostgresConfig(dsn='postgresql://localhost/test'),
         metrics=MetricsConfig(enabled=False),
-        logging=LoggingConfig(level="WARNING", format="console"),
+        logging=LoggingConfig(level='WARNING', format='console'),
     )
 
 
@@ -65,20 +65,20 @@ def test_app_creation(test_config):
 
 def test_app_creation_with_worker_id(test_config):
     handler = SimpleHandler()
-    app = DrakkarApp(handler=handler, config=test_config, worker_id="w1")
-    assert app._worker_id == "w1"
+    app = DrakkarApp(handler=handler, config=test_config, worker_id='w1')
+    assert app._worker_id == 'w1'
 
 
 def test_app_creation_auto_worker_id(test_config):
     handler = SimpleHandler()
     app = DrakkarApp(handler=handler, config=test_config)
-    assert app._worker_id.startswith("drakkar-")
+    assert app._worker_id.startswith('drakkar-')
 
 
-@patch("drakkar.app.KafkaConsumer")
-@patch("drakkar.app.KafkaProducer")
-@patch("drakkar.app.DBWriter")
-@patch("drakkar.app.start_metrics_server")
+@patch('drakkar.app.KafkaConsumer')
+@patch('drakkar.app.KafkaProducer')
+@patch('drakkar.app.DBWriter')
+@patch('drakkar.app.start_metrics_server')
 async def test_app_on_assign_creates_processors(
     mock_metrics, mock_db_cls, mock_producer_cls, mock_consumer_cls, test_config
 ):
@@ -86,7 +86,10 @@ async def test_app_on_assign_creates_processors(
     app = DrakkarApp(handler=handler, config=test_config)
 
     from drakkar.executor import ExecutorPool
-    app._executor_pool = ExecutorPool(binary_path="/bin/echo", max_workers=2, task_timeout_seconds=10)
+
+    app._executor_pool = ExecutorPool(
+        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
+    )
     app._consumer = MagicMock()
     app._consumer.commit = AsyncMock()
     app._producer = MagicMock()
@@ -99,10 +102,10 @@ async def test_app_on_assign_creates_processors(
         await proc.stop()
 
 
-@patch("drakkar.app.KafkaConsumer")
-@patch("drakkar.app.KafkaProducer")
-@patch("drakkar.app.DBWriter")
-@patch("drakkar.app.start_metrics_server")
+@patch('drakkar.app.KafkaConsumer')
+@patch('drakkar.app.KafkaProducer')
+@patch('drakkar.app.DBWriter')
+@patch('drakkar.app.start_metrics_server')
 async def test_app_on_revoke_removes_processors(
     mock_metrics, mock_db_cls, mock_producer_cls, mock_consumer_cls, test_config
 ):
@@ -110,7 +113,10 @@ async def test_app_on_revoke_removes_processors(
     app = DrakkarApp(handler=handler, config=test_config)
 
     from drakkar.executor import ExecutorPool
-    app._executor_pool = ExecutorPool(binary_path="/bin/echo", max_workers=2, task_timeout_seconds=10)
+
+    app._executor_pool = ExecutorPool(
+        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
+    )
     app._consumer = AsyncMock()
     app._producer = MagicMock()
     app._db_writer = AsyncMock()
@@ -134,8 +140,8 @@ async def test_app_handle_collect(test_config):
     app._db_writer = AsyncMock()
 
     result = CollectResult(
-        output_messages=[OutputMessage(value=b"test")],
-        db_rows=[DBRow(table="t", data={"x": 1})],
+        output_messages=[OutputMessage(value=b'test')],
+        db_rows=[DBRow(table='t', data={'x': 1})],
     )
     await app._handle_collect(result, partition_id=0)
 
@@ -168,11 +174,15 @@ async def test_app_handle_commit(test_config):
 async def test_app_on_startup_hook_can_modify_config(test_config):
     class ConfigTuningHandler(BaseDrakkarHandler):
         async def on_startup(self, config):
-            return config.model_copy(update={
-                'executor': config.executor.model_copy(update={
-                    'max_workers': 99,
-                }),
-            })
+            return config.model_copy(
+                update={
+                    'executor': config.executor.model_copy(
+                        update={
+                            'max_workers': 99,
+                        }
+                    ),
+                }
+            )
 
         async def arrange(self, messages, pending):
             return []
@@ -229,12 +239,15 @@ async def test_app_shutdown_drains_executors(test_config):
 
     # create a processor with an executor pool
     from drakkar.executor import ExecutorPool
-    app._executor_pool = ExecutorPool(binary_path="/bin/echo", max_workers=2, task_timeout_seconds=10)
+
+    app._executor_pool = ExecutorPool(
+        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
+    )
     app._on_assign([0])
     await asyncio.sleep(0.1)
 
     # enqueue a message so the processor has work
-    msg = SourceMessage(topic="t", partition=0, offset=0, value=b"x", timestamp=0)
+    msg = SourceMessage(topic='t', partition=0, offset=0, value=b'x', timestamp=0)
     app.processors[0].enqueue(msg)
     await asyncio.sleep(0.3)
 
@@ -250,18 +263,21 @@ async def test_stop_processor_handles_arrange_error(test_config):
 
     class BrokenArrangeHandler(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
-            raise RuntimeError("arrange exploded")
+            raise RuntimeError('arrange exploded')
 
     app = DrakkarApp(handler=BrokenArrangeHandler(), config=test_config)
     from drakkar.executor import ExecutorPool
-    app._executor_pool = ExecutorPool(binary_path="/bin/echo", max_workers=2, task_timeout_seconds=10)
+
+    app._executor_pool = ExecutorPool(
+        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
+    )
     app._consumer = AsyncMock()
     app._producer = MagicMock()
     app._db_writer = AsyncMock()
 
     app._on_assign([0])
     # enqueue a message that will trigger the broken arrange
-    msg = SourceMessage(topic="t", partition=0, offset=0, value=b"x", timestamp=0)
+    msg = SourceMessage(topic='t', partition=0, offset=0, value=b'x', timestamp=0)
     app.processors[0].enqueue(msg)
     await asyncio.sleep(0.3)
 
@@ -280,11 +296,14 @@ async def test_safe_call_catches_handler_errors(test_config):
             return []
 
         async def on_assign(self, partitions):
-            raise ValueError("on_assign failed")
+            raise ValueError('on_assign failed')
 
     app = DrakkarApp(handler=ErrorOnAssignHandler(), config=test_config)
     from drakkar.executor import ExecutorPool
-    app._executor_pool = ExecutorPool(binary_path="/bin/echo", max_workers=2, task_timeout_seconds=10)
+
+    app._executor_pool = ExecutorPool(
+        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
+    )
     app._consumer = MagicMock()
     app._consumer.commit = AsyncMock()
 

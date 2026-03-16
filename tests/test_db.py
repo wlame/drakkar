@@ -12,7 +12,7 @@ from drakkar.models import DBRow
 @pytest.fixture
 def pg_config() -> PostgresConfig:
     return PostgresConfig(
-        dsn="postgresql://user:pass@localhost:5432/testdb",
+        dsn='postgresql://user:pass@localhost:5432/testdb',
         pool_min=1,
         pool_max=5,
     )
@@ -31,12 +31,12 @@ def mock_pool():
 
 
 async def test_db_writer_connect(pg_config):
-    with patch("drakkar.db.asyncpg.create_pool", new_callable=AsyncMock) as mock_create:
+    with patch('drakkar.db.asyncpg.create_pool', new_callable=AsyncMock) as mock_create:
         mock_create.return_value = AsyncMock()
         writer = DBWriter(pg_config)
         await writer.connect()
         mock_create.assert_called_once_with(
-            dsn="postgresql://user:pass@localhost:5432/testdb",
+            dsn='postgresql://user:pass@localhost:5432/testdb',
             min_size=1,
             max_size=5,
         )
@@ -50,8 +50,8 @@ async def test_db_writer_write_rows(pg_config, mock_pool):
     writer._pool = pool
 
     rows = [
-        DBRow(table="results", data={"id": 1, "status": "done"}),
-        DBRow(table="results", data={"id": 2, "status": "failed"}),
+        DBRow(table='results', data={'id': 1, 'status': 'done'}),
+        DBRow(table='results', data={'id': 2, 'status': 'failed'}),
     ]
     await writer.write(rows)
     assert conn.execute.call_count == 2
@@ -72,7 +72,7 @@ async def test_db_writer_write_empty_rows(pg_config):
 
 async def test_db_writer_write_no_pool(pg_config):
     writer = DBWriter(pg_config)
-    rows = [DBRow(table="t", data={"x": 1})]
+    rows = [DBRow(table='t', data={'x': 1})]
     await writer.write(rows)  # should not raise
 
 
@@ -101,8 +101,8 @@ async def test_db_writer_rejects_invalid_table_name(pg_config, mock_pool):
     writer = DBWriter(pg_config)
     writer._pool = pool
 
-    with pytest.raises(ValueError, match="Invalid SQL identifier"):
-        await writer.write([DBRow(table="users; DROP TABLE users--", data={"x": 1})])
+    with pytest.raises(ValueError, match='Invalid SQL identifier'):
+        await writer.write([DBRow(table='users; DROP TABLE users--', data={'x': 1})])
 
 
 async def test_db_writer_rejects_invalid_column_name(pg_config, mock_pool):
@@ -110,8 +110,8 @@ async def test_db_writer_rejects_invalid_column_name(pg_config, mock_pool):
     writer = DBWriter(pg_config)
     writer._pool = pool
 
-    with pytest.raises(ValueError, match="Invalid SQL identifier"):
-        await writer.write([DBRow(table="results", data={"col; DROP TABLE x": 1})])
+    with pytest.raises(ValueError, match='Invalid SQL identifier'):
+        await writer.write([DBRow(table='results', data={'col; DROP TABLE x': 1})])
 
 
 async def test_db_writer_accepts_valid_identifiers(pg_config, mock_pool):
@@ -119,7 +119,7 @@ async def test_db_writer_accepts_valid_identifiers(pg_config, mock_pool):
     writer = DBWriter(pg_config)
     writer._pool = pool
 
-    await writer.write([DBRow(table="search_results", data={"match_count": 5, "status": "ok"})])
+    await writer.write([DBRow(table='search_results', data={'match_count': 5, 'status': 'ok'})])
     query = conn.execute.call_args[0][0]
     assert '"search_results"' in query
     assert '"match_count"' in query
@@ -129,7 +129,7 @@ async def test_db_writer_write_error_reraises(pg_config):
     """DB write errors are re-raised after incrementing metrics (metric check in test_metrics.py)."""
     pool = MagicMock()
     conn = AsyncMock()
-    conn.execute.side_effect = Exception("connection lost")
+    conn.execute.side_effect = Exception('connection lost')
     ctx = AsyncMock()
     ctx.__aenter__ = AsyncMock(return_value=conn)
     ctx.__aexit__ = AsyncMock(return_value=False)
@@ -138,5 +138,5 @@ async def test_db_writer_write_error_reraises(pg_config):
     writer = DBWriter(pg_config)
     writer._pool = pool
 
-    with pytest.raises(Exception, match="connection lost"):
-        await writer.write([DBRow(table="t", data={"x": 1})])
+    with pytest.raises(Exception, match='connection lost'):
+        await writer.write([DBRow(table='t', data={'x': 1})])

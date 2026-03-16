@@ -54,14 +54,14 @@ def _make_db_path(base_path: str) -> str:
     /tmp/drakkar-debug.db -> /tmp/drakkar-debug-2026-03-16__14_55.db
     """
     p = Path(base_path)
-    ts = datetime.now(tz=UTC).strftime("%Y-%m-%d__%H_%M")
-    return str(p.with_stem(f"{p.stem}-{ts}"))
+    ts = datetime.now(tz=UTC).strftime('%Y-%m-%d__%H_%M')
+    return str(p.with_stem(f'{p.stem}-{ts}'))
 
 
 def _list_db_files(base_path: str) -> list[str]:
     """List all rotated DB files matching the base pattern, oldest first."""
     p = Path(base_path)
-    pattern = str(p.with_stem(f"{p.stem}-*"))
+    pattern = str(p.with_stem(f'{p.stem}-*'))
     files = glob.glob(pattern)
     files.sort()
     return files
@@ -81,7 +81,7 @@ class EventRecorder:
         self._config = config
         self._buffer: deque[dict] = deque(maxlen=self.MAX_BUFFER)
         self._db: aiosqlite.Connection | None = None
-        self._db_path: str = ""
+        self._db_path: str = ''
         self._flush_task: asyncio.Task | None = None
         self._retention_task: asyncio.Task | None = None
         self._running = False
@@ -98,7 +98,7 @@ class EventRecorder:
         self._running = True
         self._flush_task = asyncio.create_task(self._flush_loop())
         self._retention_task = asyncio.create_task(self._retention_loop())
-        await logger.ainfo("recorder_started", category="recorder", db_path=self._db_path)
+        await logger.ainfo('recorder_started', category='recorder', db_path=self._db_path)
 
     async def stop(self) -> None:
         self._running = False
@@ -118,17 +118,19 @@ class EventRecorder:
         if self._db:
             await self._db.close()
             self._db = None
-        await logger.ainfo("recorder_stopped", category="recorder")
+        await logger.ainfo('recorder_stopped', category='recorder')
 
     # --- Recording methods (sync, append to buffer) ---
 
     def record_consumed(self, msg: SourceMessage) -> None:
-        self._buffer.append({
-            'ts': time.time(),
-            'event': 'consumed',
-            'partition': msg.partition,
-            'offset': msg.offset,
-        })
+        self._buffer.append(
+            {
+                'ts': time.time(),
+                'event': 'consumed',
+                'partition': msg.partition,
+                'offset': msg.offset,
+            }
+        )
 
     def record_arranged(
         self,
@@ -136,28 +138,36 @@ class EventRecorder:
         messages: list[SourceMessage],
         tasks: list[ExecutorTask],
     ) -> None:
-        self._buffer.append({
-            'ts': time.time(),
-            'event': 'arranged',
-            'partition': partition,
-            'metadata': json.dumps({
-                'offsets': [m.offset for m in messages],
-                'task_ids': [t.task_id for t in tasks],
-                'task_count': len(tasks),
-            }),
-        })
+        self._buffer.append(
+            {
+                'ts': time.time(),
+                'event': 'arranged',
+                'partition': partition,
+                'metadata': json.dumps(
+                    {
+                        'offsets': [m.offset for m in messages],
+                        'task_ids': [t.task_id for t in tasks],
+                        'task_count': len(tasks),
+                    }
+                ),
+            }
+        )
 
     def record_task_started(self, task: ExecutorTask, partition: int) -> None:
-        self._buffer.append({
-            'ts': time.time(),
-            'event': 'task_started',
-            'partition': partition,
-            'task_id': task.task_id,
-            'args': json.dumps(task.args),
-            'metadata': json.dumps({
-                'source_offsets': task.source_offsets,
-            }),
-        })
+        self._buffer.append(
+            {
+                'ts': time.time(),
+                'event': 'task_started',
+                'partition': partition,
+                'task_id': task.task_id,
+                'args': json.dumps(task.args),
+                'metadata': json.dumps(
+                    {
+                        'source_offsets': task.source_offsets,
+                    }
+                ),
+            }
+        )
 
     def record_task_completed(self, result: ExecutorResult, partition: int) -> None:
         entry: dict = {
@@ -190,9 +200,11 @@ class EventRecorder:
             'exit_code': error.exit_code,
             'args': json.dumps(task.args),
             'pid': error.pid,
-            'metadata': json.dumps({
-                'exception': error.exception,
-            }),
+            'metadata': json.dumps(
+                {
+                    'exception': error.exception,
+                }
+            ),
         }
         if self._config.store_output:
             entry['stderr'] = error.stderr
@@ -204,37 +216,45 @@ class EventRecorder:
         source_partition: int,
         source_offset: int | None = None,
     ) -> None:
-        self._buffer.append({
-            'ts': time.time(),
-            'event': 'produced',
-            'partition': source_partition,
-            'offset': source_offset,
-            'output_topic': 'target',
-        })
+        self._buffer.append(
+            {
+                'ts': time.time(),
+                'event': 'produced',
+                'partition': source_partition,
+                'offset': source_offset,
+                'output_topic': 'target',
+            }
+        )
 
     def record_committed(self, partition: int, offset: int) -> None:
-        self._buffer.append({
-            'ts': time.time(),
-            'event': 'committed',
-            'partition': partition,
-            'offset': offset,
-        })
+        self._buffer.append(
+            {
+                'ts': time.time(),
+                'event': 'committed',
+                'partition': partition,
+                'offset': offset,
+            }
+        )
 
     def record_assigned(self, partitions: list[int]) -> None:
         for p in partitions:
-            self._buffer.append({
-                'ts': time.time(),
-                'event': 'assigned',
-                'partition': p,
-            })
+            self._buffer.append(
+                {
+                    'ts': time.time(),
+                    'event': 'assigned',
+                    'partition': p,
+                }
+            )
 
     def record_revoked(self, partitions: list[int]) -> None:
         for p in partitions:
-            self._buffer.append({
-                'ts': time.time(),
-                'event': 'revoked',
-                'partition': p,
-            })
+            self._buffer.append(
+                {
+                    'ts': time.time(),
+                    'event': 'revoked',
+                    'partition': p,
+                }
+            )
 
     # --- Query methods (for debug UI, reads current DB) ---
 
@@ -251,16 +271,16 @@ class EventRecorder:
         conditions = []
         params: list = []
         if partition is not None:
-            conditions.append("partition = ?")
+            conditions.append('partition = ?')
             params.append(partition)
         if event_type:
-            conditions.append("event = ?")
+            conditions.append('event = ?')
             params.append(event_type)
         if since:
-            conditions.append("ts >= ?")
+            conditions.append('ts >= ?')
             params.append(since)
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        query = f"SELECT * FROM events {where} ORDER BY id DESC LIMIT ? OFFSET ?"
+        where = f'WHERE {" AND ".join(conditions)}' if conditions else ''
+        query = f'SELECT * FROM events {where} ORDER BY id DESC LIMIT ? OFFSET ?'
         params.extend([limit, offset])
         async with self._db.execute(query, params) as cursor:
             columns = [d[0] for d in cursor.description]
@@ -284,7 +304,9 @@ class EventRecorder:
             )
             ORDER BY id ASC
         """
-        async with self._db.execute(query, [partition, msg_offset, partition, msg_offset]) as cursor:
+        async with self._db.execute(
+            query, [partition, msg_offset, partition, msg_offset]
+        ) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]
@@ -294,7 +316,7 @@ class EventRecorder:
         await self._flush()  # ensure recent events are queryable
         if not self._db:
             return []
-        query = "SELECT * FROM events WHERE task_id = ? ORDER BY id ASC"
+        query = 'SELECT * FROM events WHERE task_id = ? ORDER BY id ASC'
         async with self._db.execute(query, [task_id]) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
@@ -378,16 +400,25 @@ class EventRecorder:
         while self._buffer:
             batch.append(self._buffer.popleft())
         columns = [
-            'ts', 'event', 'partition', 'offset', 'task_id', 'args',
-            'stdout_size', 'stdout', 'stderr', 'exit_code', 'duration',
-            'output_topic', 'metadata', 'pid',
+            'ts',
+            'event',
+            'partition',
+            'offset',
+            'task_id',
+            'args',
+            'stdout_size',
+            'stdout',
+            'stderr',
+            'exit_code',
+            'duration',
+            'output_topic',
+            'metadata',
+            'pid',
         ]
         placeholders = ', '.join(['?'] * len(columns))
         col_names = ', '.join(columns)
-        query = f"INSERT INTO events ({col_names}) VALUES ({placeholders})"
-        rows = [
-            tuple(entry.get(col) for col in columns) for entry in batch
-        ]
+        query = f'INSERT INTO events ({col_names}) VALUES ({placeholders})'
+        rows = [tuple(entry.get(col) for col in columns) for entry in batch]
         await self._db.executemany(query, rows)
         await self._db.commit()
 
@@ -423,7 +454,7 @@ class EventRecorder:
                 mtime = os.path.getmtime(db_file)
                 if mtime < cutoff:
                     os.remove(db_file)
-                    await logger.ainfo("recorder_deleted_old_db", category="recorder", path=db_file)
+                    await logger.ainfo('recorder_deleted_old_db', category='recorder', path=db_file)
             except OSError:
                 pass
 
@@ -438,4 +469,4 @@ class EventRecorder:
                     except OSError:
                         pass
 
-        await logger.ainfo("recorder_rotated", category="recorder", new_db=self._db_path)
+        await logger.ainfo('recorder_rotated', category='recorder', new_db=self._db_path)

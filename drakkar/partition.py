@@ -114,9 +114,7 @@ class PartitionProcessor:
         if self._recorder:
             self._recorder.record_consumed(message)
         messages_consumed.labels(partition=str(self._partition_id)).inc()
-        partition_queue_size.labels(partition=str(self._partition_id)).set(
-            self._queue.qsize()
-        )
+        partition_queue_size.labels(partition=str(self._partition_id)).set(self._queue.qsize())
 
     def start(self) -> None:
         """Start the partition processing loop."""
@@ -140,8 +138,8 @@ class PartitionProcessor:
             await asyncio.sleep(0.05)
 
     async def _run(self) -> None:
-        log = logger.bind(partition=self._partition_id, category="partition")
-        await log.ainfo("partition_processor_started")
+        log = logger.bind(partition=self._partition_id, category='partition')
+        await log.ainfo('partition_processor_started')
 
         try:
             while self._running:
@@ -151,9 +149,9 @@ class PartitionProcessor:
 
                 await self._process_window(messages)
         except asyncio.CancelledError:
-            await log.ainfo("partition_processor_cancelled")
+            await log.ainfo('partition_processor_cancelled')
         except Exception as e:
-            await log.aerror("partition_processor_error", error=str(e), exc_info=True)
+            await log.aerror('partition_processor_error', error=str(e), exc_info=True)
 
     async def _collect_window(self) -> list[SourceMessage]:
         """Collect up to window_size messages from the queue."""
@@ -172,9 +170,7 @@ class PartitionProcessor:
             except asyncio.QueueEmpty:
                 break
 
-        partition_queue_size.labels(partition=str(self._partition_id)).set(
-            self._queue.qsize()
-        )
+        partition_queue_size.labels(partition=str(self._partition_id)).set(self._queue.qsize())
         return messages
 
     async def _process_window(self, messages: list[SourceMessage]) -> None:
@@ -196,7 +192,7 @@ class PartitionProcessor:
 
         arrange_start = time.monotonic()
         tasks = await self._handler.arrange(messages, pending_ctx)
-        handler_duration.labels(hook="arrange").observe(time.monotonic() - arrange_start)
+        handler_duration.labels(hook='arrange').observe(time.monotonic() - arrange_start)
         if self._recorder:
             self._recorder.record_arranged(self._partition_id, messages, tasks)
         window.tasks = tasks
@@ -215,42 +211,44 @@ class PartitionProcessor:
             self._inflight_count += 1
             asyncio.create_task(self._execute_and_track(task, window))
 
-    async def _execute_and_track(self, task: ExecutorTask, window: Window, retry_count: int = 0) -> None:
+    async def _execute_and_track(
+        self, task: ExecutorTask, window: Window, retry_count: int = 0
+    ) -> None:
         log = logger.bind(
-            category="executor",
+            category='executor',
             partition=self._partition_id,
             task_id=task.task_id,
             window_id=window.window_id,
         )
-        executor_tasks.labels(status="started").inc()
+        executor_tasks.labels(status='started').inc()
         executor_pool_active.set(self._executor_pool.active_count)
 
         try:
             result = await self._executor_pool.execute(task, self._recorder, self._partition_id)
-            executor_tasks.labels(status="completed").inc()
+            executor_tasks.labels(status='completed').inc()
             executor_duration.observe(result.duration_seconds)
             if self._recorder:
                 self._recorder.record_task_completed(result, self._partition_id)
 
             collect_start = time.monotonic()
             collect_result = await self._handler.collect(result)
-            handler_duration.labels(hook="collect").observe(time.monotonic() - collect_start)
+            handler_duration.labels(hook='collect').observe(time.monotonic() - collect_start)
             if collect_result and self._on_collect:
                 await self._on_collect(collect_result, self._partition_id)
 
             window.results.append(result)
 
         except ExecutorTaskError as e:
-            executor_tasks.labels(status="failed").inc()
-            if e.error.exception and "Timeout" in (e.error.exception or ""):
+            executor_tasks.labels(status='failed').inc()
+            if e.error.exception and 'Timeout' in (e.error.exception or ''):
                 executor_timeouts.inc()
             if self._recorder:
                 self._recorder.record_task_failed(task, e.error, self._partition_id)
-            await log.awarning("executor_task_failed", error=str(e))
+            await log.awarning('executor_task_failed', error=str(e))
 
             on_error_start = time.monotonic()
             action = await self._handler.on_error(task, e.error)
-            handler_duration.labels(hook="on_error").observe(time.monotonic() - on_error_start)
+            handler_duration.labels(hook='on_error').observe(time.monotonic() - on_error_start)
             if isinstance(action, list):
                 for new_task in action:
                     self._pending_tasks[new_task.task_id] = new_task
@@ -267,23 +265,25 @@ class PartitionProcessor:
             else:
                 if action == ErrorAction.RETRY:
                     await log.awarning(
-                        "max_retries_exceeded",
+                        'max_retries_exceeded',
                         task_id=task.task_id,
                         retries=retry_count,
                     )
                 window.results.append(e.result)
 
         except Exception as e:
-            await log.aerror("unexpected_error_in_task", error=str(e), exc_info=True)
+            await log.aerror('unexpected_error_in_task', error=str(e), exc_info=True)
             # still count as completed so the window can progress
-            window.results.append(ExecutorResult(
-                task_id=task.task_id,
-                exit_code=-1,
-                stdout="",
-                stderr=str(e),
-                duration_seconds=0,
-                task=task,
-            ))
+            window.results.append(
+                ExecutorResult(
+                    task_id=task.task_id,
+                    exit_code=-1,
+                    stdout='',
+                    stderr=str(e),
+                    duration_seconds=0,
+                    task=task,
+                )
+            )
 
         finally:
             self._pending_tasks.pop(task.task_id, None)
@@ -300,7 +300,7 @@ class PartitionProcessor:
             on_complete_result = await self._handler.on_window_complete(
                 window.results, window.source_messages
             )
-            handler_duration.labels(hook="on_window_complete").observe(time.monotonic() - wc_start)
+            handler_duration.labels(hook='on_window_complete').observe(time.monotonic() - wc_start)
             if on_complete_result and self._on_collect:
                 await self._on_collect(on_complete_result, self._partition_id)
 
@@ -322,8 +322,11 @@ class PartitionProcessor:
                     await self._on_commit(self._partition_id, committable)
                 except Exception as e:
                     logger.warning(
-                        "commit_failed", category="kafka",
-                        partition=self._partition_id, offset=committable, error=str(e),
+                        'commit_failed',
+                        category='kafka',
+                        partition=self._partition_id,
+                        offset=committable,
+                        error=str(e),
                     )
                     return
             self._offset_tracker.acknowledge_commit(committable)
