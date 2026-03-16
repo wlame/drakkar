@@ -5,20 +5,17 @@ import sys
 
 import pytest
 
-from tests.conftest import wait_for
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
     CollectResult,
     ErrorAction,
-    ExecutorError,
-    ExecutorResult,
     ExecutorTask,
     OutputMessage,
-    PendingContext,
     SourceMessage,
 )
 from drakkar.partition import MAX_RETRIES, PartitionProcessor, Window
+from tests.conftest import wait_for
 
 
 def make_msg(partition: int = 0, offset: int = 0) -> SourceMessage:

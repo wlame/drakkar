@@ -1,12 +1,12 @@
 """Tests for Drakkar debug web UI."""
 
 import time
-from unittest.mock import AsyncMock, MagicMock, PropertyMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from drakkar.config import DebugConfig, DrakkarConfig, ExecutorConfig, MetricsConfig
+from drakkar.config import DebugConfig
 from drakkar.debug_server import create_debug_app
 from drakkar.recorder import EventRecorder
 

@@ -9,7 +9,6 @@ import structlog
 
 from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler
-from drakkar.recorder import EventRecorder
 from drakkar.metrics import (
     batch_duration,
     executor_duration,
@@ -31,6 +30,7 @@ from drakkar.models import (
     SourceMessage,
 )
 from drakkar.offsets import OffsetTracker
+from drakkar.recorder import EventRecorder
 
 logger = structlog.get_logger()
 
@@ -75,7 +75,7 @@ class PartitionProcessor:
         on_collect: CollectCallback | None = None,
         on_commit: CommitCallback | None = None,
         recorder: EventRecorder | None = None,
-    ):
+    ) -> None:
         self._partition_id = partition_id
         self._handler = handler
         self._executor_pool = executor_pool
@@ -162,7 +162,7 @@ class PartitionProcessor:
         try:
             first = await asyncio.wait_for(self._queue.get(), timeout=1.0)
             messages.append(first)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return []
 
         while len(messages) < self._window_size:

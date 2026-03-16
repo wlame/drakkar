@@ -23,7 +23,7 @@ class ExecutorPool:
     Arguments are passed as a list, preventing shell injection.
     """
 
-    def __init__(self, binary_path: str, max_workers: int, task_timeout_seconds: int):
+    def __init__(self, binary_path: str, max_workers: int, task_timeout_seconds: int) -> None:
         self._binary_path = binary_path
         self._max_workers = max_workers
         self._task_timeout = task_timeout_seconds
@@ -106,10 +106,10 @@ class ExecutorPool:
             )
             return result
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             duration = time.monotonic() - start
             timeout_pid = proc.pid if proc else None
-            raise ExecutorTaskError(
+            raise ExecutorTaskError(  # noqa: B904
                 error=ExecutorError(
                     task=task,
                     stderr="task timed out",
@@ -129,7 +129,7 @@ class ExecutorPool:
 
         except OSError as e:
             duration = time.monotonic() - start
-            raise ExecutorTaskError(
+            raise ExecutorTaskError(  # noqa: B904
                 error=ExecutorError(
                     task=task,
                     exception=str(e),
@@ -153,7 +153,7 @@ class ExecutorPool:
 class ExecutorTaskError(Exception):
     """Raised when an executor task fails."""
 
-    def __init__(self, error: ExecutorError, result: ExecutorResult):
+    def __init__(self, error: ExecutorError, result: ExecutorResult) -> None:
         self.error = error
         self.result = result
         super().__init__(f"Task {error.task.task_id} failed: {error.stderr or error.exception}")

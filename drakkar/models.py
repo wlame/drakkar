@@ -1,10 +1,9 @@
 """Data models for Drakkar framework."""
 
-import json
 import os
 import time
 from enum import StrEnum
-from typing import Any, Generic, TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, Field
 

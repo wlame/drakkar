@@ -1,10 +1,8 @@
 """Tests for Drakkar configuration loading."""
 
-import os
 from pathlib import Path
 
 import pytest
-import yaml
 from pydantic import ValidationError
 
 from drakkar.config import (

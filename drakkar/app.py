@@ -3,6 +3,7 @@
 import asyncio
 import signal
 import time
+from collections.abc import Coroutine
 from pathlib import Path
 
 import structlog
@@ -41,7 +42,7 @@ class DrakkarApp:
         config_path: str | Path | None = None,
         config: DrakkarConfig | None = None,
         worker_id: str = "",
-    ):
+    ) -> None:
         if config is not None:
             self._config = config
         else:
@@ -209,7 +210,7 @@ class DrakkarApp:
                 processor.start()
 
         assigned_partitions.set(len(self._processors))
-        asyncio.ensure_future(self._safe_call(self._handler.on_assign(partition_ids)))
+        _task = asyncio.ensure_future(self._safe_call(self._handler.on_assign(partition_ids)))
 
     def _on_revoke(self, partition_ids: list[int]) -> None:
         """Handle partition revocation."""
@@ -218,12 +219,12 @@ class DrakkarApp:
         for pid in partition_ids:
             processor = self._processors.pop(pid, None)
             if processor:
-                asyncio.ensure_future(self._stop_processor(processor))
+                _task = asyncio.ensure_future(self._stop_processor(processor))
 
         assigned_partitions.set(len(self._processors))
-        asyncio.ensure_future(self._safe_call(self._handler.on_revoke(partition_ids)))
+        _task = asyncio.ensure_future(self._safe_call(self._handler.on_revoke(partition_ids)))
 
-    async def _safe_call(self, coro) -> None:
+    async def _safe_call(self, coro: Coroutine) -> None:
         """Run a coroutine and log any exception instead of leaving it unretrieved."""
         try:
             await coro
@@ -236,7 +237,7 @@ class DrakkarApp:
             processor._running = False
             try:
                 await asyncio.wait_for(processor.drain(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             committable = processor.offset_tracker.committable()
             if committable is not None and self._consumer:
@@ -298,7 +299,7 @@ class DrakkarApp:
         try:
             await asyncio.wait_for(self._drain_all_processors(), timeout=5.0)
             await log.ainfo("executors_drained", category="lifecycle")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await log.awarning("drain_timeout", category="lifecycle", msg="some executors did not finish in 5s")
 
         # 3. commit any remaining offsets

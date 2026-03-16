@@ -29,7 +29,7 @@ def _quote_ident(name: str) -> str:
 class DBWriter:
     """Manages asyncpg connection pool and writes result rows to PostgreSQL."""
 
-    def __init__(self, config: PostgresConfig):
+    def __init__(self, config: PostgresConfig) -> None:
         self._config = config
         self._pool: asyncpg.Pool | None = None
 

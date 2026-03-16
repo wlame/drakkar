@@ -20,7 +20,6 @@ from drakkar.models import (
     DBRow,
     ExecutorTask,
     OutputMessage,
-    PendingContext,
     SourceMessage,
 )
 
@@ -235,7 +234,6 @@ async def test_app_shutdown_drains_executors(test_config):
     await asyncio.sleep(0.1)
 
     # enqueue a message so the processor has work
-    from drakkar.models import SourceMessage
     msg = SourceMessage(topic="t", partition=0, offset=0, value=b"x", timestamp=0)
     app.processors[0].enqueue(msg)
     await asyncio.sleep(0.3)
@@ -263,7 +261,6 @@ async def test_stop_processor_handles_arrange_error(test_config):
 
     app._on_assign([0])
     # enqueue a message that will trigger the broken arrange
-    from drakkar.models import SourceMessage
     msg = SourceMessage(topic="t", partition=0, offset=0, value=b"x", timestamp=0)
     app.processors[0].enqueue(msg)
     await asyncio.sleep(0.3)

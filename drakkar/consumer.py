@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 import structlog
-from confluent_kafka import Consumer, KafkaError, KafkaException, TopicPartition
+from confluent_kafka import Consumer, KafkaError, TopicPartition
 
 from drakkar.config import KafkaConfig
 from drakkar.metrics import consumer_errors, offsets_committed, rebalance_events
@@ -31,7 +31,7 @@ class KafkaConsumer:
         on_assign: OnAssignCallback | None = None,
         on_revoke: OnRevokeCallback | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
-    ):
+    ) -> None:
         self._config = config
         self._on_assign_cb = on_assign
         self._on_revoke_cb = on_revoke
@@ -146,7 +146,7 @@ class KafkaConsumer:
         for pid in partition_ids:
             try:
                 tp = TopicPartition(self._config.source_topic, pid)
-                low, high = await loop.run_in_executor(
+                _low, high = await loop.run_in_executor(
                     None, self._consumer.get_watermark_offsets, tp,
                 )
                 committed_list = await loop.run_in_executor(

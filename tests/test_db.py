@@ -97,7 +97,7 @@ async def test_db_writer_pool_property(pg_config):
 
 async def test_db_writer_rejects_invalid_table_name(pg_config, mock_pool):
     """SQL identifiers with special chars are rejected (C4: SQL injection fix)."""
-    pool, conn = mock_pool
+    pool, _conn = mock_pool
     writer = DBWriter(pg_config)
     writer._pool = pool
 
@@ -106,7 +106,7 @@ async def test_db_writer_rejects_invalid_table_name(pg_config, mock_pool):
 
 
 async def test_db_writer_rejects_invalid_column_name(pg_config, mock_pool):
-    pool, conn = mock_pool
+    pool, _conn = mock_pool
     writer = DBWriter(pg_config)
     writer._pool = pool
 

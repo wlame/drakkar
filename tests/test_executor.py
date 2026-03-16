@@ -102,7 +102,7 @@ async def test_execute_concurrency_limit():
         result = pool.execute(task)
         # check active count while running
         coro = result
-        res = await coro
+        await coro
         if pool.active_count > max_active:
             max_active = pool.active_count
 

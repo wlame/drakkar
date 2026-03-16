@@ -9,11 +9,11 @@ from pydantic import BaseModel
 from drakkar.config import DrakkarConfig, ExecutorConfig
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
-    OutputMessage,
     ErrorAction,
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
+    OutputMessage,
     PendingContext,
     SourceMessage,
 )

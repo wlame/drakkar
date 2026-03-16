@@ -27,6 +27,7 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
     "httpx>=0.27.0",
+    "ruff>=0.11.0",
 ]
 
 [build-system]
@@ -49,3 +50,34 @@ omit = ["tests/*"]
 [tool.coverage.report]
 show_missing = true
 fail_under = 75
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "ANN",   # flake8-annotations
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "RUF",   # ruff-specific
+]
+ignore = [
+    "ANN401", # dynamically typed expressions (Any)
+    "ANN002", # missing type annotation for *args
+    "ANN003", # missing type annotation for **kwargs
+    "E501",   # line too long (handled by formatter)
+    "SIM105", # contextlib.suppress — doesn't work with async try/except
+    "UP046",  # generic class syntax — we need Generic[] for Python 3.13 compat
+    "RUF006", # store asyncio.create_task ref — intentional fire-and-forget in partition processor
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN"]
+"integration/*" = ["ANN"]
+"drakkar/debug_server.py" = ["ANN201", "ANN202"]  # FastAPI route return types inferred

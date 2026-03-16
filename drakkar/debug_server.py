@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,22 +28,22 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 def _format_ts(ts: float | None) -> str:
     if ts is None:
         return ""
-    from datetime import datetime, timezone
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M:%S")
+    from datetime import datetime
+    return datetime.fromtimestamp(ts, tz=UTC).strftime("%H:%M:%S")
 
 
 def _format_ts_ms(ts: float | None) -> str:
     if ts is None:
         return ""
-    from datetime import datetime, timezone
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+    from datetime import datetime
+    return datetime.fromtimestamp(ts, tz=UTC).strftime("%H:%M:%S.%f")[:-3]
 
 
 def _format_ts_full(ts: float | None) -> str:
     if ts is None:
         return ""
-    from datetime import datetime, timezone
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    from datetime import datetime
+    return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
 def create_debug_app(
@@ -281,7 +282,7 @@ def create_debug_app(
         async with recorder._db.execute(query, params) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
-            return JSONResponse([dict(zip(columns, row)) for row in rows])
+            return JSONResponse([dict(zip(columns, row, strict=False)) for row in rows])
 
     @app.get("/api/recent-tasks")
     async def api_recent_tasks(minutes: int = Query(default=2)):
@@ -300,7 +301,7 @@ def create_debug_app(
         async with recorder._db.execute(query, [since]) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
-            events = [dict(zip(columns, row)) for row in rows]
+            events = [dict(zip(columns, row, strict=False)) for row in rows]
 
         # group by task_id into timeline entries
         tasks: dict[str, dict] = {}
@@ -392,7 +393,7 @@ class DebugServer:
         config: DebugConfig,
         recorder: EventRecorder,
         app: DrakkarApp,
-    ):
+    ) -> None:
         self._config = config
         self._recorder = recorder
         self._drakkar_app = app
@@ -419,6 +420,6 @@ class DebugServer:
         if self._task:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 pass
         await logger.ainfo("debug_server_stopped", category="debug")

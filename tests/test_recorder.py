@@ -1,8 +1,6 @@
 """Tests for Drakkar flight recorder."""
 
-import asyncio
 import os
-import time
 
 import pytest
 
@@ -148,7 +146,7 @@ async def test_record_task_completed_without_output(recorder):
     assert len(events) == 1
     assert events[0]['exit_code'] == 0
     assert events[0]['duration'] == 1.5
-    assert events[0]['stdout_size'] == len("line1\nline2\n".encode())
+    assert events[0]['stdout_size'] == len(b"line1\nline2\n")
     assert events[0]['stdout'] is None
 
 
@@ -348,8 +346,7 @@ async def test_rotate_flushes_buffer_to_old_db(tmp_path):
 
     # buffer was flushed to old DB before rotation
     import aiosqlite
-    async with aiosqlite.connect(old_path) as old_db:
-        async with old_db.execute("SELECT COUNT(*) FROM events") as cursor:
+    async with aiosqlite.connect(old_path) as old_db, old_db.execute("SELECT COUNT(*) FROM events") as cursor:
             row = await cursor.fetchone()
             assert row[0] == 2
 

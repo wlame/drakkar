@@ -16,7 +16,7 @@ logger = structlog.get_logger()
 class KafkaProducer:
     """Wraps confluent_kafka.Producer with async produce and delivery tracking."""
 
-    def __init__(self, config: KafkaConfig):
+    def __init__(self, config: KafkaConfig) -> None:
         self._config = config
         self._producer = Producer({
             "bootstrap.servers": config.brokers,
@@ -31,7 +31,7 @@ class KafkaProducer:
         future: asyncio.Future[None] = loop.create_future()
         start = time.monotonic()
 
-        def delivery_callback(err, msg):
+        def delivery_callback(err: object, msg: object) -> None:
             if err:
                 producer_errors.inc()
                 if not future.done():

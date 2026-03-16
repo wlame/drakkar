@@ -6,7 +6,7 @@ import json
 import os
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiosqlite
@@ -54,7 +54,7 @@ def _make_db_path(base_path: str) -> str:
     /tmp/drakkar-debug.db -> /tmp/drakkar-debug-2026-03-16__14_55.db
     """
     p = Path(base_path)
-    ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d__%H_%M")
+    ts = datetime.now(tz=UTC).strftime("%Y-%m-%d__%H_%M")
     return str(p.with_stem(f"{p.stem}-{ts}"))
 
 
@@ -77,7 +77,7 @@ class EventRecorder:
 
     MAX_BUFFER = 50_000
 
-    def __init__(self, config: DebugConfig):
+    def __init__(self, config: DebugConfig) -> None:
         self._config = config
         self._buffer: deque[dict] = deque(maxlen=self.MAX_BUFFER)
         self._db: aiosqlite.Connection | None = None
@@ -265,7 +265,7 @@ class EventRecorder:
         async with self._db.execute(query, params) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
-            return [dict(zip(columns, row)) for row in rows]
+            return [dict(zip(columns, row, strict=False)) for row in rows]
 
     async def get_trace(self, partition: int, msg_offset: int) -> list[dict]:
         """Get the full lifecycle of a message by partition and offset."""
@@ -287,7 +287,7 @@ class EventRecorder:
         async with self._db.execute(query, [partition, msg_offset, partition, msg_offset]) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
-            return [dict(zip(columns, row)) for row in rows]
+            return [dict(zip(columns, row, strict=False)) for row in rows]
 
     async def get_task_events(self, task_id: str) -> list[dict]:
         """Get all events for a specific task_id, ordered chronologically."""
@@ -298,7 +298,7 @@ class EventRecorder:
         async with self._db.execute(query, [task_id]) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
-            return [dict(zip(columns, row)) for row in rows]
+            return [dict(zip(columns, row, strict=False)) for row in rows]
 
     async def get_partition_summary(self) -> list[dict]:
         """Get summary stats per partition from recorded events."""
@@ -321,7 +321,7 @@ class EventRecorder:
         async with self._db.execute(query) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
-            return [dict(zip(columns, row)) for row in rows]
+            return [dict(zip(columns, row, strict=False)) for row in rows]
 
     async def get_active_tasks(self) -> list[dict]:
         """Get tasks that started but haven't completed or failed."""
@@ -341,7 +341,7 @@ class EventRecorder:
         async with self._db.execute(query) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
-            return [dict(zip(columns, row)) for row in rows]
+            return [dict(zip(columns, row, strict=False)) for row in rows]
 
     async def get_stats(self) -> dict:
         """Get overall statistics from the event store."""
@@ -362,7 +362,7 @@ class EventRecorder:
         async with self._db.execute(query) as cursor:
             columns = [d[0] for d in cursor.description]
             row = await cursor.fetchone()
-            return dict(zip(columns, row)) if row else {'total_events': 0}
+            return dict(zip(columns, row, strict=False)) if row else {'total_events': 0}
 
     # --- Internal flush/retention ---
 

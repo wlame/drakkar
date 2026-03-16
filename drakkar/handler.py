@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Generic, Protocol, get_args
 
 from pydantic import BaseModel
@@ -72,7 +71,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
     input_model: type[BaseModel] | None = None
     output_model: type[BaseModel] | None = None
 
-    def __init_subclass__(cls, **kwargs):
+    def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
         input_t, output_t = _extract_type_args(cls)
         if input_t and issubclass(input_t, BaseModel):

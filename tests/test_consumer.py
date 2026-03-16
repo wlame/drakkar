@@ -1,6 +1,6 @@
 """Tests for Drakkar Kafka consumer wrapper."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -32,7 +32,6 @@ def make_mock_message(topic="test-source", partition=0, offset=0, key=b"k", valu
 
 
 def make_error_message(error_code):
-    from confluent_kafka import KafkaError
 
     msg = MagicMock()
     err = MagicMock()
@@ -43,7 +42,7 @@ def make_error_message(error_code):
 
 @patch("drakkar.consumer.Consumer")
 def test_consumer_creation(mock_consumer_cls, kafka_config):
-    consumer = KafkaConsumer(kafka_config)
+    _consumer = KafkaConsumer(kafka_config)
     mock_consumer_cls.assert_called_once()
     call_args = mock_consumer_cls.call_args[0][0]
     assert call_args["bootstrap.servers"] == "localhost:9092"

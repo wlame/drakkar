@@ -23,7 +23,7 @@ from drakkar.config import (
 )
 from drakkar.consumer import KafkaConsumer
 from drakkar.db import DBWriter
-from drakkar.executor import ExecutorPool, ExecutorTaskError
+from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.metrics import (
     assigned_partitions,
@@ -33,9 +33,7 @@ from drakkar.metrics import (
     db_rows_written,
     db_write_duration,
     executor_duration,
-    executor_pool_active,
     executor_tasks,
-    executor_timeouts,
     handler_duration,
     messages_consumed,
     messages_produced,
@@ -47,23 +45,19 @@ from drakkar.metrics import (
     rebalance_events,
     start_metrics_server,
     task_retries,
+    worker_info,
 )
 from drakkar.models import (
     CollectResult,
     DBRow,
     ErrorAction,
-    ExecutorError,
-    ExecutorResult,
     ExecutorTask,
     OutputMessage,
-    PendingContext,
     SourceMessage,
 )
 from drakkar.partition import PartitionProcessor
 from drakkar.producer import KafkaProducer
-from drakkar.metrics import worker_info
 from tests.conftest import wait_for
-
 
 # --- Helpers ---
 
@@ -233,7 +227,7 @@ async def test_produce_failure_increments_producer_errors(mock_cls, kafka_config
 
     producer = KafkaProducer(kafka_config)
     before = counter_val(producer_errors)
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         await producer.produce(OutputMessage(value=b"test"))
     assert counter_val(producer_errors) == before + 1
 
@@ -254,7 +248,7 @@ def _make_db_mock_pool():
 
 async def test_db_write_increments_rows_and_observes_duration():
     """Successful DB write increments db_rows_written and observes db_write_duration."""
-    pool, conn = _make_db_mock_pool()
+    pool, _conn = _make_db_mock_pool()
     writer = DBWriter(PostgresConfig(dsn="postgresql://x"))
     writer._pool = pool
 
