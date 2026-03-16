@@ -28,6 +28,7 @@ class DrakkarHandler(Protocol):
     output_model: type[BaseModel] | None
 
     async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig: ...
+    async def on_ready(self, config: DrakkarConfig, db_pool: object) -> None: ...
     async def arrange(
         self, messages: list[SourceMessage], pending: PendingContext
     ) -> list[ExecutorTask]: ...
@@ -100,6 +101,15 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
 
     async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
         return config
+
+    async def on_ready(self, config: DrakkarConfig, db_pool: object) -> None:
+        """Called after all components are initialized, before the main loop.
+
+        Use this to initialize state from DB, run migrations, load
+        lookup tables, etc. The db_pool is an asyncpg.Pool (or None
+        if Postgres is not configured).
+        """
+        pass
 
     async def arrange(
         self,

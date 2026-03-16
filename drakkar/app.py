@@ -132,6 +132,8 @@ class DrakkarApp:
         self._db_writer = DBWriter(config=self._config.postgres)
         await self._db_writer.connect()
 
+        await self._handler.on_ready(self._config, self._db_writer.pool)
+
         self._consumer.subscribe()
         self._running = True
 

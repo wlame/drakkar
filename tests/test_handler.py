@@ -72,6 +72,31 @@ async def test_base_handler_on_startup_returns_config_unchanged(handler: BaseDra
     assert result is config
 
 
+async def test_base_handler_on_ready_is_noop(handler: BaseDrakkarHandler):
+    config = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'))
+    await handler.on_ready(config, None)  # should not raise
+
+
+async def test_on_ready_receives_db_pool():
+    initialized = {}
+
+    class InitHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return []
+
+        async def on_ready(self, config, db_pool):
+            initialized['pool'] = db_pool
+            initialized['config'] = config
+
+    handler = InitHandler()
+    config = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'))
+    fake_pool = object()
+    await handler.on_ready(config, fake_pool)
+
+    assert initialized['pool'] is fake_pool
+    assert initialized['config'] is config
+
+
 async def test_on_startup_can_modify_config():
     class TuningHandler(BaseDrakkarHandler):
         async def on_startup(self, config):
