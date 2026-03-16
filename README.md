@@ -243,3 +243,7 @@ This runs 3 workers + Kafka + PostgreSQL + Kafka UI + a load-generating producer
 uv sync --extra=dev
 uv run pytest --cov=drakkar
 ```
+
+## License
+
+MIT
