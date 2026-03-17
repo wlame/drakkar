@@ -2,12 +2,7 @@
 {% block title %}Executors — Drakkar Debug{% endblock %}
 
 {% block content %}
-<div class="flex items-center justify-between mb-2">
-    <h1 class="text-2xl font-bold">Active Executors</h1>
-    <button id="toggle-refresh" class="text-sm px-3 py-1 rounded bg-gray-600 hover:bg-gray-500" onclick="toggleRefresh()">
-        Auto-refresh: OFF
-    </button>
-</div>
+<h1 class="text-2xl font-bold mb-2">Active Executors</h1>
 <p class="text-gray-400 mb-6">Pool: <span id="v-pool">{{ pool_active }} / {{ pool_max }}</span> slots in use</p>
 
 <div class="w-full bg-gray-700 rounded-full h-3 mb-6">
@@ -153,32 +148,11 @@
 </details>
 
 <script>
-let refreshEnabled = false;
-let refreshTimer = null;
 let zoomLevel = 2;
 const TIMELINE_MINUTES = 10;
 const LANE_H = 22;
 const LANE_GAP = 2;
 const BASE_PX_PER_SEC = 8; // pixels per second at 1x zoom
-
-function toggleRefresh() {
-    refreshEnabled = !refreshEnabled;
-    const btn = document.getElementById('toggle-refresh');
-    if (refreshEnabled) {
-        btn.textContent = 'Auto-refresh: ON';
-        btn.className = 'text-sm px-3 py-1 rounded bg-green-700 hover:bg-green-600';
-        startRefresh();
-    } else {
-        btn.textContent = 'Auto-refresh: OFF';
-        btn.className = 'text-sm px-3 py-1 rounded bg-gray-600 hover:bg-gray-500';
-        if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-    }
-}
-
-function startRefresh() {
-    if (refreshTimer) clearInterval(refreshTimer);
-    refreshTimer = setInterval(loadTimeline, 5000);
-}
 
 function zoomIn() {
     zoomLevel = Math.min(zoomLevel * 2, 64);

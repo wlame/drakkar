@@ -168,16 +168,18 @@ def create_debug_app(
                 else:
                     pending_tasks[tid] = entry
 
-        # recently finished tasks (last 5 minutes)
+        # recently finished tasks
         finished = await recorder.get_events(
             event_type='task_completed',
-            limit=50,
+            limit=5000,
         )
         failed = await recorder.get_events(
             event_type='task_failed',
-            limit=20,
+            limit=1000,
         )
-        recent_finished = sorted(finished + failed, key=lambda e: e.get('ts', 0), reverse=True)[:50]
+        recent_finished = sorted(
+            finished + failed, key=lambda e: e.get('ts', 0), reverse=True
+        )[:5000]
 
         return templates.TemplateResponse(
             request,

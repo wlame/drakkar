@@ -441,3 +441,60 @@ async def test_drain_waits_for_queued_messages(echo_pool):
     # the queued messages should have been processed and committed
     assert proc.queue_size == 0
     assert any(c[1] == 53 for c in committed), f'Expected commit of 53, got: {committed}'
+
+
+async def test_full_shutdown_commits_queued_messages(echo_pool):
+    """Reproduces the real shutdown path with slow tasks.
+
+    Messages enqueued just before shutdown must be processed and committed
+    even when executor tasks take time (simulated with sleep).
+    stop() must wait for the drain loop to finish, not cancel it.
+    """
+    committed: list[tuple[int, int]] = []
+
+    class SlowHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f'sh-{m.offset}',
+                    # sleep 0.5s to simulate real work
+                    args=['-c', 'import time; time.sleep(0.5); print("done")'],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    # use python as the binary so we can sleep
+    slow_pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_workers=2,
+        task_timeout_seconds=10,
+    )
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=SlowHandler(),
+        executor_pool=slow_pool,
+        window_size=10,
+        on_commit=on_commit,
+    )
+
+    proc.start()
+    await asyncio.sleep(0.1)
+
+    # enqueue messages just before shutdown
+    proc.enqueue(make_msg(offset=100))
+    proc.enqueue(make_msg(offset=101))
+
+    # full shutdown sequence: _running=False, drain, then stop
+    proc._running = False
+    await asyncio.wait_for(proc.drain(), timeout=10.0)
+    await proc.stop()
+
+    # after stop(), all messages must be committed
+    assert proc.queue_size == 0
+    assert proc.inflight_count == 0
+    assert any(c[1] == 102 for c in committed), f'Expected commit of 102, got: {committed}'

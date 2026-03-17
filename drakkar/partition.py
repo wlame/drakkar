@@ -122,12 +122,22 @@ class PartitionProcessor:
         self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
-        """Stop the partition processor and wait for completion."""
+        """Stop the partition processor and wait for completion.
+
+        Sets _running=False so _run() exits its main loop and drains
+        remaining queued messages. Waits up to 10s for natural exit
+        before force-cancelling.
+        """
         self._running = False
         if self._task:
-            self._task.cancel()
             try:
-                await self._task
+                await asyncio.wait_for(self._task, timeout=10.0)
+            except TimeoutError:
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
             except asyncio.CancelledError:
                 pass
             self._task = None
@@ -163,6 +173,13 @@ class PartitionProcessor:
                         break
                 if messages:
                     await self._process_window(messages)
+
+            # wait for any in-flight tasks to complete
+            while self._inflight_count > 0 or self._offset_tracker.has_pending():
+                await asyncio.sleep(0.05)
+
+            # final commit
+            await self._try_commit()
         except asyncio.CancelledError:
             await log.ainfo('partition_processor_cancelled')
         except Exception as e:
@@ -220,6 +237,13 @@ class PartitionProcessor:
             return
 
         for task in tasks:
+            if task.task_id in self._pending_tasks:
+                logger.warning(
+                    'duplicate_task_id_in_pending',
+                    category='partition',
+                    partition=self._partition_id,
+                    task_id=task.task_id,
+                )
             self._pending_tasks[task.task_id] = task
 
         for task in tasks:
@@ -301,9 +325,16 @@ class PartitionProcessor:
             )
 
         finally:
-            self._pending_tasks.pop(task.task_id, None)
+            removed = self._pending_tasks.pop(task.task_id, None)
             self._inflight_count -= 1
             executor_pool_active.set(self._executor_pool.active_count)
+            if removed is None:
+                await log.awarning(
+                    'task_not_in_pending_on_cleanup',
+                    task_id=task.task_id,
+                    retry_count=retry_count,
+                    pending_keys=list(self._pending_tasks.keys())[:5],
+                )
 
         window.completed_count += 1
 

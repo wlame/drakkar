@@ -222,8 +222,7 @@ function resetAll() {
     applyFilters();
 }
 
-// initial load + periodic poll for new events
+// initial load
 fetchEvents();
-pollTimer = setInterval(fetchEvents, 3000);
 </script>
 {% endblock %}

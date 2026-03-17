@@ -351,11 +351,13 @@ class DrakkarApp:
         await log.ainfo('drakkar_stopped', category='lifecycle')
 
     async def _drain_all_processors(self) -> None:
-        """Wait for all partition processors to finish in-flight tasks."""
+        """Wait for all partition processors to finish queued + in-flight work."""
         drain_tasks = [
             processor.drain()
             for processor in self._processors.values()
-            if processor.offset_tracker.has_pending() or processor.inflight_count > 0
+            if processor.queue_size > 0
+            or processor.offset_tracker.has_pending()
+            or processor.inflight_count > 0
         ]
         if drain_tasks:
             await asyncio.gather(*drain_tasks)
