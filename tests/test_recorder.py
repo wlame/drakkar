@@ -405,3 +405,85 @@ async def test_rotate_enforces_max_file_count(tmp_path):
     # should keep at most 1 old file + the new one
     assert len(remaining) <= 2
     await rec.stop()
+
+
+# --- WebSocket broadcast tests ---
+
+
+async def test_subscribe_receives_events(tmp_path):
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config)
+    await rec.start()
+
+    queue = rec.subscribe()
+    assert len(rec._ws_subscribers) == 1
+
+    rec.record_consumed(make_msg(partition=5, offset=99))
+
+    event = queue.get_nowait()
+    assert event['event'] == 'consumed'
+    assert event['partition'] == 5
+    assert event['offset'] == 99
+
+    rec.unsubscribe(queue)
+    assert len(rec._ws_subscribers) == 0
+    await rec.stop()
+
+
+async def test_broadcast_to_multiple_subscribers(tmp_path):
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config)
+    await rec.start()
+
+    q1 = rec.subscribe()
+    q2 = rec.subscribe()
+    assert len(rec._ws_subscribers) == 2
+
+    rec.record_committed(partition=3, offset=42)
+
+    e1 = q1.get_nowait()
+    e2 = q2.get_nowait()
+    assert e1['event'] == 'committed'
+    assert e2['event'] == 'committed'
+
+    rec.unsubscribe(q1)
+    rec.unsubscribe(q2)
+    await rec.stop()
+
+
+async def test_broadcast_drops_on_full_queue(tmp_path):
+    """If subscriber queue is full, events are dropped without error."""
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config)
+    await rec.start()
+
+    import asyncio
+
+    q = asyncio.Queue(maxsize=2)
+    rec._ws_subscribers.add(q)
+
+    # fill the queue
+    rec.record_consumed(make_msg(offset=0))
+    rec.record_consumed(make_msg(offset=1))
+    # this should be dropped, not raise
+    rec.record_consumed(make_msg(offset=2))
+
+    assert q.qsize() == 2  # only 2 fit
+
+    rec._ws_subscribers.discard(q)
+    await rec.stop()
+
+
+async def test_no_broadcast_without_subscribers(tmp_path):
+    """Recording works fine with no subscribers."""
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config)
+    await rec.start()
+
+    assert len(rec._ws_subscribers) == 0
+    rec.record_consumed(make_msg(offset=0))  # should not raise
+    await rec._flush()
+
+    events = await rec.get_events()
+    assert len(events) == 1
+    await rec.stop()

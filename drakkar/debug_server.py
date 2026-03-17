@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import UTC
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 import uvicorn
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
@@ -177,9 +178,9 @@ def create_debug_app(
             event_type='task_failed',
             limit=1000,
         )
-        recent_finished = sorted(
-            finished + failed, key=lambda e: e.get('ts', 0), reverse=True
-        )[:5000]
+        recent_finished = sorted(finished + failed, key=lambda e: e.get('ts', 0), reverse=True)[
+            :5000
+        ]
 
         return templates.TemplateResponse(
             request,
@@ -427,6 +428,25 @@ def create_debug_app(
                 'lag_data': {str(k): v for k, v in lag_data.items()},
             }
         )
+
+    # --- WebSocket endpoint for live event streaming ---
+
+    @app.websocket('/ws')
+    async def ws_events(ws: WebSocket):
+        """Stream recorder events to connected clients in real-time."""
+        await ws.accept()
+        queue = recorder.subscribe()
+        try:
+            while True:
+                event = await queue.get()
+                try:
+                    await ws.send_text(json.dumps(event, default=str))
+                except Exception:
+                    break
+        except WebSocketDisconnect:
+            pass
+        finally:
+            recorder.unsubscribe(queue)
 
     return app
 

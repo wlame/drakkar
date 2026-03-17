@@ -1,10 +1,12 @@
 """Tests for Drakkar debug web UI."""
 
+import json
 import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from starlette.testclient import TestClient
 
 from drakkar.config import DebugConfig
 from drakkar.debug_server import create_debug_app
@@ -209,3 +211,78 @@ async def test_executors_page_with_live_tasks(debug_config, mock_recorder, mock_
         resp = await c.get('/executors')
     assert resp.status_code == 200
     assert 'live-t1' in resp.text
+
+
+# --- WebSocket tests ---
+
+
+async def test_websocket_receives_events(debug_config, mock_recorder, mock_app):
+    """WebSocket endpoint streams recorder events to connected clients."""
+    # use a real recorder for subscribe/unsubscribe
+    real_recorder = EventRecorder(debug_config)
+    # don't start (no DB needed) — just use subscribe/broadcast
+    real_recorder._running = True
+
+    fastapi_app = create_debug_app(debug_config, real_recorder, mock_app)
+
+    with TestClient(fastapi_app) as tc, tc.websocket_connect('/ws') as ws:
+        # send an event through the recorder
+        real_recorder._record(
+            {
+                'ts': time.time(),
+                'event': 'task_started',
+                'partition': 3,
+                'task_id': 'ws-test-1',
+                'args': '["hello"]',
+            }
+        )
+
+        # should receive it via websocket
+        data = ws.receive_text()
+        event = json.loads(data)
+        assert event['event'] == 'task_started'
+        assert event['task_id'] == 'ws-test-1'
+        assert event['partition'] == 3
+
+
+async def test_websocket_multiple_events(debug_config, mock_recorder, mock_app):
+    """WebSocket receives multiple events in order."""
+    real_recorder = EventRecorder(debug_config)
+    real_recorder._running = True
+
+    fastapi_app = create_debug_app(debug_config, real_recorder, mock_app)
+
+    with TestClient(fastapi_app) as tc, tc.websocket_connect('/ws') as ws:
+        for i in range(3):
+            real_recorder._record(
+                {
+                    'ts': time.time(),
+                    'event': 'consumed',
+                    'partition': i,
+                    'offset': i * 10,
+                }
+            )
+
+        for i in range(3):
+            data = ws.receive_text()
+            event = json.loads(data)
+            assert event['event'] == 'consumed'
+            assert event['partition'] == i
+
+
+async def test_websocket_cleanup_on_disconnect(debug_config, mock_recorder, mock_app):
+    """Subscriber queue is removed when WebSocket disconnects."""
+    real_recorder = EventRecorder(debug_config)
+    real_recorder._running = True
+
+    fastapi_app = create_debug_app(debug_config, real_recorder, mock_app)
+
+    assert len(real_recorder._ws_subscribers) == 0
+
+    with TestClient(fastapi_app) as tc, tc.websocket_connect('/ws') as ws:
+        assert len(real_recorder._ws_subscribers) == 1
+        real_recorder._record({'ts': time.time(), 'event': 'test'})
+        ws.receive_text()
+
+    # after disconnect, subscriber should be cleaned up
+    assert len(real_recorder._ws_subscribers) == 0

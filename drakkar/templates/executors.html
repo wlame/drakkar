@@ -2,7 +2,10 @@
 {% block title %}Executors — Drakkar Debug{% endblock %}
 
 {% block content %}
-<h1 class="text-2xl font-bold mb-2">Active Executors</h1>
+<div class="flex items-center gap-3 mb-2">
+    <h1 class="text-2xl font-bold">Active Executors</h1>
+    <span id="ws-badge" class="text-xs px-2 py-0.5 rounded" style="background:#991b1b;color:#fca5a5;">WS: connecting</span>
+</div>
 <p class="text-gray-400 mb-6">Pool: <span id="v-pool">{{ pool_active }} / {{ pool_max }}</span> slots in use</p>
 
 <div class="w-full bg-gray-700 rounded-full h-3 mb-6">
@@ -344,7 +347,132 @@ async function loadTimeline() {
     } catch(e) { console.error(e); }
 }
 
-// initial load and scroll to end
+// --- WebSocket live streaming ---
+const liveTasks = {};  // task_id -> {start_ts, end_ts, status, partition, pid, args, lane, barEl}
+const laneEndTimes = new Array({{ pool_max }}).fill(0);
+let wsConnected = false;
+
+function wsGetLane(startTs, endTs) {
+    let best = 0;
+    for (let i = 1; i < laneEndTimes.length; i++) {
+        if (laneEndTimes[i] < laneEndTimes[best]) best = i;
+    }
+    laneEndTimes[best] = endTs || (Date.now() / 1000);
+    return best;
+}
+
+function wsAddOrUpdateBar(t) {
+    const pxPerSec = BASE_PX_PER_SEC * zoomLevel;
+    const now = Date.now() / 1000;
+    const timelineStart = now - TIMELINE_MINUTES * 60;
+    const lanesDiv = document.getElementById('tl-lanes');
+    if (!lanesDiv) return;
+
+    const startSec = (t.start_ts || now) - timelineStart;
+    const endSec = (t.end_ts || now) - timelineStart;
+    const x = Math.max(0, startSec * pxPerSec);
+    const w = Math.max(2, (endSec - startSec) * pxPerSec);
+    const y = t.lane * (LANE_H + LANE_GAP);
+
+    if (t.barEl) {
+        // update existing bar
+        t.barEl.style.left = x + 'px';
+        t.barEl.style.width = w + 'px';
+        t.barEl.style.backgroundColor = barColor(t.status);
+    } else {
+        // create new bar
+        const bar = document.createElement('a');
+        bar.href = '/task/' + encodeURIComponent(t.task_id);
+        bar.style.cssText = 'position:absolute;border-radius:2px;cursor:pointer;border-left:1px solid rgba(0,0,0,0.4);border-right:1px solid rgba(0,0,0,0.4);';
+        bar.style.left = x + 'px';
+        bar.style.width = w + 'px';
+        bar.style.top = y + 'px';
+        bar.style.height = LANE_H + 'px';
+        bar.style.backgroundColor = barColor(t.status);
+        bar.addEventListener('mouseenter', () => showTaskDetail(t));
+        bar.addEventListener('mouseleave', clearTaskDetail);
+        lanesDiv.appendChild(bar);
+        t.barEl = bar;
+    }
+}
+
+function updateRunningBars() {
+    // grow yellow bars for still-running tasks
+    for (const t of Object.values(liveTasks)) {
+        if (t.status === 'running' && t.barEl) {
+            wsAddOrUpdateBar(t);
+        }
+    }
+}
+
+function wsUpdateTaskLists() {
+    const runBody = document.getElementById('ws-running');
+    const pendBody = document.getElementById('ws-pending');
+    const finBody = document.getElementById('ws-finished');
+    if (!runBody) return;
+
+    // count by status
+    const running = [], finished = [];
+    for (const t of Object.values(liveTasks)) {
+        if (t.status === 'running') running.push(t);
+        else finished.push(t);
+    }
+    finished.sort((a, b) => (b.end_ts || 0) - (a.end_ts || 0));
+
+    // update running count
+    const runCount = document.getElementById('ws-running-count');
+    if (runCount) runCount.textContent = '(' + running.length + ')';
+    const finCount = document.getElementById('ws-finished-count');
+    if (finCount) finCount.textContent = '(' + finished.length + ')';
+}
+
+function connectWS() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(proto + '//' + location.host + '/ws');
+
+    ws.onopen = () => {
+        wsConnected = true;
+        const badge = document.getElementById('ws-badge');
+        if (badge) { badge.textContent = 'WS: connected'; badge.style.background = '#166534'; }
+    };
+    ws.onclose = () => {
+        wsConnected = false;
+        const badge = document.getElementById('ws-badge');
+        if (badge) { badge.textContent = 'WS: disconnected'; badge.style.background = '#991b1b'; }
+        setTimeout(connectWS, 3000); // reconnect
+    };
+    ws.onmessage = (msg) => {
+        try {
+            const e = JSON.parse(msg.data);
+            if (e.event === 'task_started') {
+                const lane = wsGetLane(e.ts, null);
+                liveTasks[e.task_id] = {
+                    task_id: e.task_id, partition: e.partition, pid: e.pid,
+                    start_ts: e.ts, end_ts: null, status: 'running',
+                    args: e.args, lane: lane, barEl: null, duration: null,
+                };
+                wsAddOrUpdateBar(liveTasks[e.task_id]);
+                wsUpdateTaskLists();
+            } else if (e.event === 'task_completed' || e.event === 'task_failed') {
+                const t = liveTasks[e.task_id];
+                if (t) {
+                    t.end_ts = e.ts;
+                    t.status = e.event === 'task_completed' ? 'completed' : 'failed';
+                    t.duration = e.duration;
+                    t.pid = e.pid || t.pid;
+                    laneEndTimes[t.lane] = e.ts;
+                    wsAddOrUpdateBar(t);
+                    wsUpdateTaskLists();
+                }
+            }
+        } catch(err) {}
+    };
+}
+
+// initial load from API, then connect WS for live updates
 loadTimeline().then(scrollToEnd);
+connectWS();
+// grow running bars every 500ms
+setInterval(updateRunningBars, 500);
 </script>
 {% endblock %}

@@ -85,6 +85,7 @@ class EventRecorder:
         self._flush_task: asyncio.Task | None = None
         self._retention_task: asyncio.Task | None = None
         self._running = False
+        self._ws_subscribers: set[asyncio.Queue] = set()
 
     @property
     def db_path(self) -> str:
@@ -99,6 +100,26 @@ class EventRecorder:
         self._flush_task = asyncio.create_task(self._flush_loop())
         self._retention_task = asyncio.create_task(self._retention_loop())
         await logger.ainfo('recorder_started', category='recorder', db_path=self._db_path)
+
+    def subscribe(self) -> asyncio.Queue:
+        """Subscribe to live event stream. Returns a queue that receives events."""
+        q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        self._ws_subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        """Unsubscribe from live event stream."""
+        self._ws_subscribers.discard(q)
+
+    def _record(self, event: dict) -> None:
+        """Append event to buffer and broadcast to WS subscribers."""
+        self._buffer.append(event)
+        if self._ws_subscribers:
+            for q in self._ws_subscribers:
+                try:
+                    q.put_nowait(event)
+                except asyncio.QueueFull:
+                    pass
 
     async def stop(self) -> None:
         self._running = False
@@ -123,7 +144,7 @@ class EventRecorder:
     # --- Recording methods (sync, append to buffer) ---
 
     def record_consumed(self, msg: SourceMessage) -> None:
-        self._buffer.append(
+        self._record(
             {
                 'ts': time.time(),
                 'event': 'consumed',
@@ -138,7 +159,7 @@ class EventRecorder:
         messages: list[SourceMessage],
         tasks: list[ExecutorTask],
     ) -> None:
-        self._buffer.append(
+        self._record(
             {
                 'ts': time.time(),
                 'event': 'arranged',
@@ -154,7 +175,7 @@ class EventRecorder:
         )
 
     def record_task_started(self, task: ExecutorTask, partition: int) -> None:
-        self._buffer.append(
+        self._record(
             {
                 'ts': time.time(),
                 'event': 'task_started',
@@ -184,7 +205,7 @@ class EventRecorder:
         if self._config.store_output:
             entry['stdout'] = result.stdout
             entry['stderr'] = result.stderr
-        self._buffer.append(entry)
+        self._record(entry)
 
     def record_task_failed(
         self,
@@ -208,7 +229,7 @@ class EventRecorder:
         }
         if self._config.store_output:
             entry['stderr'] = error.stderr
-        self._buffer.append(entry)
+        self._record(entry)
 
     def record_produced(
         self,
@@ -216,7 +237,7 @@ class EventRecorder:
         source_partition: int,
         source_offset: int | None = None,
     ) -> None:
-        self._buffer.append(
+        self._record(
             {
                 'ts': time.time(),
                 'event': 'produced',
@@ -227,7 +248,7 @@ class EventRecorder:
         )
 
     def record_committed(self, partition: int, offset: int) -> None:
-        self._buffer.append(
+        self._record(
             {
                 'ts': time.time(),
                 'event': 'committed',
@@ -238,7 +259,7 @@ class EventRecorder:
 
     def record_assigned(self, partitions: list[int]) -> None:
         for p in partitions:
-            self._buffer.append(
+            self._record(
                 {
                     'ts': time.time(),
                     'event': 'assigned',
@@ -248,7 +269,7 @@ class EventRecorder:
 
     def record_revoked(self, partitions: list[int]) -> None:
         for p in partitions:
-            self._buffer.append(
+            self._record(
                 {
                     'ts': time.time(),
                     'event': 'revoked',
