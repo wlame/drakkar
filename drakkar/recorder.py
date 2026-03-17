@@ -175,7 +175,13 @@ class EventRecorder:
             }
         )
 
-    def record_task_started(self, task: ExecutorTask, partition: int) -> None:
+    def record_task_started(
+        self,
+        task: ExecutorTask,
+        partition: int,
+        pool_active: int = 0,
+        pool_waiting: int = 0,
+    ) -> None:
         self._record(
             {
                 'ts': time.time(),
@@ -183,6 +189,8 @@ class EventRecorder:
                 'partition': partition,
                 'task_id': task.task_id,
                 'args': json.dumps(task.args),
+                'pool_active': pool_active,
+                'pool_waiting': pool_waiting,
                 'metadata': json.dumps(
                     {
                         'source_offsets': task.source_offsets,
@@ -191,7 +199,13 @@ class EventRecorder:
             }
         )
 
-    def record_task_completed(self, result: ExecutorResult, partition: int) -> None:
+    def record_task_completed(
+        self,
+        result: ExecutorResult,
+        partition: int,
+        pool_active: int = 0,
+        pool_waiting: int = 0,
+    ) -> None:
         entry: dict = {
             'ts': time.time(),
             'event': 'task_completed',
@@ -202,6 +216,8 @@ class EventRecorder:
             'stdout_size': len(result.stdout.encode()),
             'args': json.dumps(result.task.args),
             'pid': result.pid,
+            'pool_active': pool_active,
+            'pool_waiting': pool_waiting,
         }
         if self._config.store_output:
             entry['stdout'] = result.stdout
@@ -213,6 +229,8 @@ class EventRecorder:
         task: ExecutorTask,
         error: ExecutorError,
         partition: int,
+        pool_active: int = 0,
+        pool_waiting: int = 0,
     ) -> None:
         entry: dict = {
             'ts': time.time(),
@@ -222,6 +240,8 @@ class EventRecorder:
             'exit_code': error.exit_code,
             'args': json.dumps(task.args),
             'pid': error.pid,
+            'pool_active': pool_active,
+            'pool_waiting': pool_waiting,
             'metadata': json.dumps(
                 {
                     'exception': error.exception,

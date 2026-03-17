@@ -27,7 +27,7 @@ class ExecutorConfig(BaseModel):
     binary_path: str = Field(..., min_length=1)
     max_workers: int = Field(default=4, ge=1)
     task_timeout_seconds: int = Field(default=120, ge=1)
-    window_size: int = Field(default=50, ge=1)
+    window_size: int = Field(default=100, ge=1)
 
 
 class PostgresConfig(BaseModel):

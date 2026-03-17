@@ -498,3 +498,45 @@ async def test_full_shutdown_commits_queued_messages(echo_pool):
     assert proc.queue_size == 0
     assert proc.inflight_count == 0
     assert any(c[1] == 102 for c in committed), f'Expected commit of 102, got: {committed}'
+
+
+# --- Commit failure must not lose offsets ---
+
+
+async def test_commit_failure_preserves_offsets_for_retry(echo_pool):
+    """When on_commit raises (e.g. during rebalance), offsets must stay
+    in the tracker so the next _try_commit retries them.
+
+    Reproduces: one partition per worker retains lag after all work done.
+    Root cause was _handle_commit swallowing exceptions, making _try_commit
+    think the commit succeeded and calling acknowledge_commit.
+    """
+    commit_count = 0
+    committed: list[tuple[int, int]] = []
+
+    async def on_commit(partition_id, offset):
+        nonlocal commit_count
+        commit_count += 1
+        if commit_count == 1:
+            raise RuntimeError('rebalance in progress')
+        committed.append((partition_id, offset))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=EchoHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=on_commit,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.enqueue(make_msg(offset=1))
+    proc.enqueue(make_msg(offset=2))
+
+    proc.start()
+    # first commit attempt fails, retry on idle loop should succeed
+    await wait_for(lambda: any(c[1] == 3 for c in committed), timeout=5)
+    await proc.stop()
+
+    assert commit_count >= 2, 'Expected at least one retry after failure'
+    assert any(c[1] == 3 for c in committed), f'Expected commit of 3, got: {committed}'

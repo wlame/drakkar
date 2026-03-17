@@ -6,7 +6,7 @@
     <h1 class="text-2xl font-bold">Active Executors</h1>
     <span id="ws-badge" class="text-xs px-2 py-0.5 rounded" style="background:#991b1b;color:#fca5a5;">WS: connecting</span>
 </div>
-<p class="text-gray-400 mb-6">Pool: <span id="v-pool">{{ pool_active }} / {{ pool_max }}</span> slots in use</p>
+<p class="text-gray-400 mb-6">Pool: <span id="v-pool">{{ pool_active }} / {{ pool_max }}</span> slots in use, <span id="v-waiting" style="color:#eab308;">{{ pool_waiting }}</span> waiting</p>
 
 <div class="w-full bg-gray-700 rounded-full h-3 mb-6">
     {% set pct = (pool_active / pool_max * 100) if pool_max > 0 else 0 %}
@@ -283,6 +283,13 @@ function connectWS() {
                     t.duration = e.duration;
                     t.pid = e.pid || t.pid;
                 }
+            }
+            // update pool stats from any task event
+            if (e.pool_active !== undefined) {
+                const pe = document.getElementById('v-pool');
+                if (pe) pe.textContent = e.pool_active + ' / ' + MAX_LANES;
+                const we = document.getElementById('v-waiting');
+                if (we) we.textContent = e.pool_waiting || 0;
             }
         } catch(err) {}
     };

@@ -33,7 +33,7 @@ def test_executor_config_defaults():
     cfg = ExecutorConfig(binary_path='/usr/bin/echo')
     assert cfg.max_workers == 4
     assert cfg.task_timeout_seconds == 120
-    assert cfg.window_size == 50
+    assert cfg.window_size == 100
 
 
 def test_executor_config_rejects_empty_binary_path():

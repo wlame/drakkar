@@ -29,10 +29,15 @@ class ExecutorPool:
         self._task_timeout = task_timeout_seconds
         self._semaphore = asyncio.Semaphore(max_workers)
         self._active_count = 0
+        self._waiting_count = 0
 
     @property
     def active_count(self) -> int:
         return self._active_count
+
+    @property
+    def waiting_count(self) -> int:
+        return self._waiting_count
 
     @property
     def max_workers(self) -> int:
@@ -49,10 +54,16 @@ class ExecutorPool:
         Records task_started AFTER acquiring the semaphore slot, so the
         timestamp reflects actual execution start, not queue entry time.
         """
+        self._waiting_count += 1
         async with self._semaphore:
+            self._waiting_count -= 1
             self._active_count += 1
             if recorder:
-                recorder.record_task_started(task, partition_id)
+                recorder.record_task_started(
+                    task, partition_id,
+                    pool_active=self._active_count,
+                    pool_waiting=self._waiting_count,
+                )
             try:
                 return await self._run_subprocess(task)
             finally:

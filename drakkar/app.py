@@ -270,20 +270,15 @@ class DrakkarApp:
             await self._db_writer.write(result.db_rows)
 
     async def _handle_commit(self, partition_id: int, offset: int) -> None:
-        """Commit an offset for a specific partition."""
-        try:
-            if self._consumer:
-                await self._consumer.commit({partition_id: offset})
-            if self._recorder:
-                self._recorder.record_committed(partition_id, offset)
-        except Exception as e:
-            logger.warning(
-                'commit_failed',
-                category='kafka',
-                partition=partition_id,
-                offset=offset,
-                error=str(e),
-            )
+        """Commit an offset for a specific partition.
+
+        Exceptions propagate to _try_commit so it can preserve offsets
+        in the tracker for retry (e.g. during rebalancing).
+        """
+        if self._consumer:
+            await self._consumer.commit({partition_id: offset})
+        if self._recorder:
+            self._recorder.record_committed(partition_id, offset)
 
     def _handle_signal(self) -> None:
         """Handle shutdown signals."""

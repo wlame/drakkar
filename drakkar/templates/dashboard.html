@@ -46,14 +46,11 @@
     </div>
 </div>
 
-<h2 class="text-lg font-semibold mb-3">Partition Lag</h2>
-<div id="v-lag-tiles" class="flex flex-wrap gap-2 mb-6">
+<h2 class="text-lg font-semibold mb-3">Assigned Partitions</h2>
+<div id="v-partition-tiles" class="flex flex-wrap gap-2 mb-6">
     {% for pid in partitions %}
-    {% set lag = lag_data.get(pid, {}) %}
-    {% set plag = lag.get('lag', 0) %}
-    <a href="/partitions/{{ pid }}" class="bg-gray-800 hover:bg-gray-700 rounded-lg p-3 text-center" style="min-width:70px;">
-        <div class="text-xs text-gray-500 font-mono mb-1">P{{ pid }}</div>
-        <div class="text-lg font-mono font-bold {% if plag > 20 %}text-red-400{% elif plag > 5 %}text-yellow-400{% else %}text-green-400{% endif %}">{{ plag }}</div>
+    <a href="/partitions/{{ pid }}" class="bg-gray-800 hover:bg-gray-700 rounded-lg p-3 text-center" style="min-width:56px;">
+        <div class="text-lg font-mono font-bold text-blue-400">P{{ pid }}</div>
     </a>
     {% endfor %}
     {% if not partitions %}

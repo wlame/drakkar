@@ -80,8 +80,14 @@ def create_debug_app(
         stats = await recorder.get_stats()
         processors = drakkar_app.processors
         pool = drakkar_app._executor_pool
-        lag_data = await _get_lag()
-        total_lag = sum(v['lag'] for v in lag_data.values())
+        consumer = drakkar_app._consumer
+        partition_ids = sorted(processors.keys())
+        total_lag = 0
+        if consumer and partition_ids:
+            try:
+                total_lag = await consumer.get_total_lag(partition_ids)
+            except Exception:
+                pass
         return templates.TemplateResponse(
             request,
             'dashboard.html',
@@ -90,11 +96,10 @@ def create_debug_app(
                 'uptime': time.monotonic() - drakkar_app._start_time,
                 'stats': stats,
                 'partition_count': len(processors),
-                'partitions': sorted(processors.keys()),
+                'partitions': partition_ids,
                 'pool_active': pool.active_count if pool else 0,
                 'pool_max': pool.max_workers if pool else 0,
                 'total_lag': total_lag,
-                'lag_data': lag_data,
             },
         )
 
@@ -192,6 +197,9 @@ def create_debug_app(
                 'pending_tasks': pending_tasks,
                 'recent_finished': recent_finished,
                 'pool_active': drakkar_app._executor_pool.active_count
+                if drakkar_app._executor_pool
+                else 0,
+                'pool_waiting': drakkar_app._executor_pool.waiting_count
                 if drakkar_app._executor_pool
                 else 0,
                 'pool_max': drakkar_app._executor_pool.max_workers
@@ -415,18 +423,23 @@ def create_debug_app(
         stats = await recorder.get_stats()
         processors = drakkar_app.processors
         pool = drakkar_app._executor_pool
-        lag_data = await _get_lag()
-        total_lag = sum(v['lag'] for v in lag_data.values())
+        partition_ids = sorted(processors.keys())
+        consumer = drakkar_app._consumer
+        total_lag = 0
+        if consumer and partition_ids:
+            try:
+                total_lag = await consumer.get_total_lag(partition_ids)
+            except Exception:
+                pass
         return JSONResponse(
             {
                 'uptime': time.monotonic() - drakkar_app._start_time,
                 'stats': stats,
                 'partition_count': len(processors),
-                'partitions': sorted(processors.keys()),
+                'partitions': partition_ids,
                 'pool_active': pool.active_count if pool else 0,
                 'pool_max': pool.max_workers if pool else 0,
                 'total_lag': total_lag,
-                'lag_data': {str(k): v for k, v in lag_data.items()},
             }
         )
 

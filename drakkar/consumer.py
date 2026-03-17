@@ -150,6 +150,40 @@ class KafkaConsumer:
         self._consumer.resume(tps)
         logger.debug('partitions_resumed', category='kafka', partitions=partition_ids)
 
+    async def get_total_lag(self, partition_ids: list[int]) -> int:
+        """Get total consumer lag across all partitions.
+
+        Uses a single committed() call + parallel watermark fetches for speed.
+        """
+        if not partition_ids:
+            return 0
+        loop = asyncio.get_running_loop()
+        tps = [TopicPartition(self._config.source_topic, pid) for pid in partition_ids]
+        try:
+            committed_list = await loop.run_in_executor(
+                None, self._consumer.committed, tps,
+            )
+        except Exception:
+            return 0
+
+        committed_map = {}
+        for tp_result in committed_list or []:
+            if tp_result and tp_result.offset >= 0:
+                committed_map[tp_result.partition] = tp_result.offset
+
+        async def _watermark(pid: int) -> int:
+            try:
+                tp = TopicPartition(self._config.source_topic, pid)
+                _low, high = await loop.run_in_executor(
+                    None, self._consumer.get_watermark_offsets, tp,
+                )
+                return max(0, high - committed_map.get(pid, 0))
+            except Exception:
+                return 0
+
+        lags = await asyncio.gather(*[_watermark(pid) for pid in partition_ids])
+        return sum(lags)
+
     async def get_partition_lag(self, partition_ids: list[int]) -> dict[int, dict]:
         """Get committed offset, high watermark, and lag for each partition.
 

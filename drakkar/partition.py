@@ -159,6 +159,8 @@ class PartitionProcessor:
             while self._running:
                 messages = await self._collect_window()
                 if not messages:
+                    # retry any uncommitted offsets on idle iterations
+                    await self._try_commit()
                     continue
 
                 await self._process_window(messages)
@@ -267,7 +269,11 @@ class PartitionProcessor:
             executor_tasks.labels(status='completed').inc()
             executor_duration.observe(result.duration_seconds)
             if self._recorder:
-                self._recorder.record_task_completed(result, self._partition_id)
+                self._recorder.record_task_completed(
+                    result, self._partition_id,
+                    pool_active=self._executor_pool.active_count,
+                    pool_waiting=self._executor_pool.waiting_count,
+                )
 
             collect_start = time.monotonic()
             collect_result = await self._handler.collect(result)
@@ -282,7 +288,11 @@ class PartitionProcessor:
             if e.error.exception and 'Timeout' in (e.error.exception or ''):
                 executor_timeouts.inc()
             if self._recorder:
-                self._recorder.record_task_failed(task, e.error, self._partition_id)
+                self._recorder.record_task_failed(
+                    task, e.error, self._partition_id,
+                    pool_active=self._executor_pool.active_count,
+                    pool_waiting=self._executor_pool.waiting_count,
+                )
             await log.awarning('executor_task_failed', error=str(e))
 
             on_error_start = time.monotonic()
