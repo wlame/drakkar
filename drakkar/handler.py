@@ -11,13 +11,13 @@ if TYPE_CHECKING:
 
 from drakkar.models import (
     CollectResult,
-    ExecutorError,
-    ExecutorResult,
-    ExecutorTask,
     InputT,
     OutputT,
     PendingContext,
     SourceMessage,
+    VikingError,
+    VikingResult,
+    VikingTask,
 )
 
 
@@ -31,14 +31,12 @@ class DrakkarHandler(Protocol):
     async def on_ready(self, config: DrakkarConfig, db_pool: object) -> None: ...
     async def arrange(
         self, messages: list[SourceMessage], pending: PendingContext
-    ) -> list[ExecutorTask]: ...
-    async def collect(self, result: ExecutorResult) -> CollectResult | None: ...
+    ) -> list[VikingTask]: ...
+    async def collect(self, result: VikingResult) -> CollectResult | None: ...
     async def on_window_complete(
-        self, results: list[ExecutorResult], source_messages: list[SourceMessage]
+        self, results: list[VikingResult], source_messages: list[SourceMessage]
     ) -> CollectResult | None: ...
-    async def on_error(
-        self, task: ExecutorTask, error: ExecutorError
-    ) -> str | list[ExecutorTask]: ...
+    async def on_error(self, task: VikingTask, error: VikingError) -> str | list[VikingTask]: ...
     async def on_assign(self, partitions: list[int]) -> None: ...
     async def on_revoke(self, partitions: list[int]) -> None: ...
 
@@ -115,27 +113,27 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
         self,
         messages: list[SourceMessage],
         pending: PendingContext,
-    ) -> list[ExecutorTask]:
+    ) -> list[VikingTask]:
         raise NotImplementedError('arrange() must be implemented by the user')
 
     async def collect(
         self,
-        result: ExecutorResult,
+        result: VikingResult,
     ) -> CollectResult | None:
         return None
 
     async def on_window_complete(
         self,
-        results: list[ExecutorResult],
+        results: list[VikingResult],
         source_messages: list[SourceMessage],
     ) -> CollectResult | None:
         return None
 
     async def on_error(
         self,
-        task: ExecutorTask,
-        error: ExecutorError,
-    ) -> str | list[ExecutorTask]:
+        task: VikingTask,
+        error: VikingError,
+    ) -> str | list[VikingTask]:
         from drakkar.models import ErrorAction
 
         return ErrorAction.SKIP

@@ -4,11 +4,11 @@ from prometheus_client import Counter, Gauge, Histogram, Info, start_http_server
 
 from drakkar.config import MetricsConfig
 
-# --- Worker identity ---
+# --- Drakkar identity ---
 
-worker_info = Info(
-    'drakkar_worker',
-    'Worker instance identity and version',
+drakkar_info = Info(
+    'drakkar_info',
+    'Drakkar instance identity and version',
 )
 
 # --- Messages ---
@@ -24,33 +24,33 @@ messages_produced = Counter(
     'Total messages produced to target topic',
 )
 
-# --- Executor ---
+# --- Viking ---
 
-executor_tasks = Counter(
-    'drakkar_executor_tasks_total',
-    'Total executor tasks by status',
+viking_tasks = Counter(
+    'drakkar_viking_tasks_total',
+    'Total viking tasks by status',
     ['status'],
 )
 
-executor_duration = Histogram(
-    'drakkar_executor_duration_seconds',
-    'Executor task duration in seconds',
+viking_duration = Histogram(
+    'drakkar_viking_duration_seconds',
+    'Viking task duration in seconds',
     buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300),
 )
 
-executor_pool_active = Gauge(
-    'drakkar_executor_pool_active',
-    'Currently active executor tasks',
+viking_pool_active = Gauge(
+    'drakkar_viking_pool_active',
+    'Currently active viking tasks',
 )
 
-executor_timeouts = Counter(
-    'drakkar_executor_timeouts_total',
-    'Total executor tasks that timed out',
+viking_timeouts = Counter(
+    'drakkar_viking_timeouts_total',
+    'Total viking tasks that timed out',
 )
 
 task_retries = Counter(
     'drakkar_task_retries_total',
-    'Total executor tasks retried after failure',
+    'Total viking tasks retried after failure',
 )
 
 # --- Windows/batches ---

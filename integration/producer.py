@@ -30,7 +30,7 @@ TOTAL_MESSAGES = int(os.environ.get("TOTAL_MESSAGES", "5000"))
 SEARCH_REQUESTS = [
     {"pattern": r"error", "file_path": "/project/drakkar/app.py"},
     {"pattern": r"warning", "file_path": "/project/drakkar/partition.py"},
-    {"pattern": r"async def", "file_path": "/project/drakkar/executor.py"},
+    {"pattern": r"async def", "file_path": "/project/drakkar/viking.py"},
     {"pattern": r"import", "file_path": "/project/drakkar/consumer.py"},
     {"pattern": r"await", "file_path": "/project/drakkar/producer.py"},
     {"pattern": r"class\s+\w+", "file_path": "/project/drakkar/models.py"},
@@ -68,7 +68,7 @@ SEARCH_REQUESTS = [
     {"pattern": r"commit", "file_path": "/project/drakkar/app.py"},
     {"pattern": r"signal", "file_path": "/project/drakkar/app.py"},
     {"pattern": r"Histogram|Counter|Gauge", "file_path": "/project/drakkar/metrics.py"},
-    {"pattern": r"SourceMessage|ExecutorTask", "file_path": "/project/drakkar/models.py"},
+    {"pattern": r"SourceMessage|VikingTask", "file_path": "/project/drakkar/models.py"},
     {"pattern": r"INSERT INTO", "file_path": "/project/drakkar/db.py"},
     {"pattern": r"SELECT", "file_path": "/project/drakkar/recorder.py"},
     {"pattern": r"CREATE TABLE", "file_path": "/project/drakkar/recorder.py"},
@@ -76,7 +76,7 @@ SEARCH_REQUESTS = [
     {"pattern": r"tailwind", "file_path": "/project/drakkar/templates"},
     {"pattern": r"test_.*error", "file_path": "/project/tests"},
     {"pattern": r"conftest", "file_path": "/project/tests"},
-    {"pattern": r"ExecutorPool", "file_path": "/project/drakkar/executor.py"},
+    {"pattern": r"VikingPool", "file_path": "/project/drakkar/viking.py"},
     {"pattern": r"BaseDrakkarHandler", "file_path": "/project/drakkar/handler.py"},
 ]
 

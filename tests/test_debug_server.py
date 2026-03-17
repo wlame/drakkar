@@ -92,8 +92,8 @@ def mock_app():
 
     pool = MagicMock()
     pool.active_count = 2
-    pool.max_workers = 8
-    app._executor_pool = pool
+    pool.max_vikings = 8
+    app._viking_pool = pool
     return app
 
 
@@ -142,10 +142,10 @@ async def test_partition_detail_pagination(client):
     assert resp.status_code == 200
 
 
-async def test_executors_page(client):
-    resp = await client.get('/executors')
+async def test_vikings_page(client):
+    resp = await client.get('/vikings')
     assert resp.status_code == 200
-    assert 'Active Executors' in resp.text
+    assert 'Active Vikings' in resp.text
     assert '2 / 8' in resp.text
 
 
@@ -193,8 +193,8 @@ async def test_partitions_page_with_live_processors(debug_config, mock_recorder,
     assert resp.status_code == 200
 
 
-async def test_executors_page_with_live_tasks(debug_config, mock_recorder, mock_app):
-    """Executors page shows live in-memory tasks from processors."""
+async def test_vikings_page_with_live_tasks(debug_config, mock_recorder, mock_app):
+    """Vikings page shows live in-memory tasks from processors."""
     proc = MagicMock()
     proc.partition_id = 0
     task = MagicMock()
@@ -206,6 +206,6 @@ async def test_executors_page_with_live_tasks(debug_config, mock_recorder, mock_
     fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/executors')
+        resp = await c.get('/vikings')
     assert resp.status_code == 200
     assert 'live-t1' in resp.text

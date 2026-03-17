@@ -21,11 +21,11 @@ class KafkaConfig(BaseModel):
     heartbeat_interval_ms: int = 3_000
 
 
-class ExecutorConfig(BaseModel):
-    """Subprocess executor pool settings."""
+class VikingConfig(BaseModel):
+    """Subprocess viking pool settings."""
 
     binary_path: str = Field(..., min_length=1)
-    max_workers: int = Field(default=4, ge=1)
+    max_vikings: int = Field(default=4, ge=1)
     task_timeout_seconds: int = Field(default=120, ge=1)
     window_size: int = Field(default=50, ge=1)
 
@@ -73,7 +73,7 @@ class DrakkarConfig(BaseSettings):
     )
 
     kafka: KafkaConfig = Field(default_factory=KafkaConfig)
-    executor: ExecutorConfig
+    viking: VikingConfig
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

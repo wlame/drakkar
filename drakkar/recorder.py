@@ -14,11 +14,11 @@ import structlog
 
 from drakkar.config import DebugConfig
 from drakkar.models import (
-    ExecutorError,
-    ExecutorResult,
-    ExecutorTask,
     OutputMessage,
     SourceMessage,
+    VikingError,
+    VikingResult,
+    VikingTask,
 )
 
 logger = structlog.get_logger()
@@ -136,7 +136,7 @@ class EventRecorder:
         self,
         partition: int,
         messages: list[SourceMessage],
-        tasks: list[ExecutorTask],
+        tasks: list[VikingTask],
     ) -> None:
         self._buffer.append(
             {
@@ -153,7 +153,7 @@ class EventRecorder:
             }
         )
 
-    def record_task_started(self, task: ExecutorTask, partition: int) -> None:
+    def record_task_started(self, task: VikingTask, partition: int) -> None:
         self._buffer.append(
             {
                 'ts': time.time(),
@@ -169,7 +169,7 @@ class EventRecorder:
             }
         )
 
-    def record_task_completed(self, result: ExecutorResult, partition: int) -> None:
+    def record_task_completed(self, result: VikingResult, partition: int) -> None:
         entry: dict = {
             'ts': time.time(),
             'event': 'task_completed',
@@ -188,8 +188,8 @@ class EventRecorder:
 
     def record_task_failed(
         self,
-        task: ExecutorTask,
-        error: ExecutorError,
+        task: VikingTask,
+        error: VikingError,
         partition: int,
     ) -> None:
         entry: dict = {
@@ -424,8 +424,24 @@ class EventRecorder:
 
     async def _retention_loop(self) -> None:
         while self._running:
-            await asyncio.sleep(3600)  # every hour
-            await self._rotate()
+            await asyncio.sleep(3600)  # check every hour
+            if await self._needs_rotation():
+                await self._rotate()
+
+    async def _needs_rotation(self) -> bool:
+        """Check if current DB needs rotation based on retention policy."""
+        if not self._db:
+            return False
+        async with self._db.execute('SELECT COUNT(*), MIN(ts) FROM events') as cursor:
+            row = await cursor.fetchone()
+            if not row or not row[0]:
+                return False
+            count, oldest_ts = row[0], row[1]
+            if count > self._config.retention_max_events:
+                return True
+            if oldest_ts and (time.time() - oldest_ts) > self._config.retention_hours * 3600:
+                return True
+        return False
 
     async def _rotate(self) -> None:
         """Rotate: open new DB first, then close old — no query gap."""

@@ -2,7 +2,7 @@
 
 Kafka subprocess orchestration framework. Consumes messages from a Kafka topic, runs CPU-intensive external binaries in a managed subprocess pool, and produces results to an output topic with PostgreSQL persistence.
 
-Workers are the Drakkars, executors are the Vikings.
+Workers are the Drakkars, vikings are the subprocess runners.
 
 ## What it does
 
@@ -13,7 +13,7 @@ Kafka source topic
 [ Drakkar Worker ]
     |
     +-- poll messages (per-partition pipelines)
-    +-- arrange() -> executor tasks (user hook)
+    +-- arrange() -> viking tasks (user hook)
     +-- run external binary via subprocess pool
     +-- collect() -> output messages + DB rows (user hook)
     +-- produce to target topic
@@ -26,9 +26,9 @@ Kafka target topic + PostgreSQL
 - **Per-partition independent pipelines** with offset watermark tracking
 - **Cooperative-sticky rebalancing** -- non-revoked partitions continue without interruption
 - **Backpressure** via Kafka pause/resume -- memory stays bounded regardless of consumer lag
-- **Subprocess executor pool** with semaphore-based concurrency limiting
+- **Subprocess viking pool** with semaphore-based concurrency limiting
 - **Typed message models** -- define Pydantic schemas for input/output, get auto-deserialization
-- **Built-in debug UI** (FastAPI) with executor timeline, partition lag, message tracing
+- **Built-in debug UI** (FastAPI) with viking timeline, partition lag, message tracing
 - **Flight recorder** -- SQLite event log with retention and rotation
 - **Prometheus metrics** -- 21 metrics covering the full pipeline
 - **Structured JSON logging** -- ECS-compatible, ready for Elastic
@@ -63,7 +63,7 @@ class OutputMessage(BaseModel):
 # handler.py
 from drakkar import (
     BaseDrakkarHandler, CollectResult, DBRow, ErrorAction,
-    ExecutorTask, OutputMessage, make_task_id,
+    VikingTask, OutputMessage, make_task_id,
 )
 from models import InputMessage, OutputMessage as MyOutput
 
@@ -72,7 +72,7 @@ class MyHandler(BaseDrakkarHandler[InputMessage, MyOutput]):
         tasks = []
         for msg in messages:
             # msg.payload is an InputMessage instance (auto-deserialized)
-            tasks.append(ExecutorTask(
+            tasks.append(VikingTask(
                 task_id=make_task_id("proc"),
                 args=["--input", msg.payload.data],
                 source_offsets=[msg.offset],
@@ -108,9 +108,9 @@ kafka:
   target_topic: "output-results"
   consumer_group: "my-workers"
 
-executor:
+viking:
   binary_path: "/usr/local/bin/my-processor"
-  max_workers: 8
+  max_vikings: 8
   task_timeout_seconds: 120
   window_size: 20
 
@@ -144,7 +144,7 @@ app.run()
 | Hook | When | Purpose |
 |---|---|---|
 | `on_startup(config)` | Before components start | Modify config (e.g., auto-detect CPU count) |
-| `arrange(messages, pending)` | Window of messages received | Transform messages into executor tasks |
+| `arrange(messages, pending)` | Window of messages received | Transform messages into viking tasks |
 | `collect(result)` | Each task completes | Process result into output messages + DB rows |
 | `on_window_complete(results, messages)` | All tasks in a window done | Aggregate results across a window |
 | `on_error(task, error)` | Task fails | Return `RETRY`, `SKIP`, or replacement tasks |
@@ -187,7 +187,7 @@ All config fields support environment variable override with `DRAKKAR_` prefix a
 
 ```bash
 DRAKKAR_KAFKA__BROKERS=kafka:9092
-DRAKKAR_EXECUTOR__MAX_WORKERS=16
+DRAKKAR_VIKING__MAX_VIKINGS=16
 DRAKKAR_DEBUG__PORT=8081
 ```
 
@@ -199,7 +199,7 @@ Enabled by default at `:8080`. Pages:
 
 - `/` -- dashboard with partition lag bars, pool utilization, event counters
 - `/partitions` -- per-partition stats with committed offset, high watermark, lag
-- `/executors` -- executor timeline (scrollable, zoomable), running/pending/finished tasks
+- `/vikings` -- viking timeline (scrollable, zoomable), running/pending/finished tasks
 - `/history` -- filterable event browser with partition and event type toggles
 - `/trace/{partition}/{offset}` -- full lifecycle of a single message
 - `/task/{task_id}` -- task detail with PID, duration, CLI command, stdout/stderr
@@ -209,13 +209,13 @@ Enabled by default at `:8080`. Pages:
 Exposed at `:9090/metrics`. Key metrics:
 
 - `drakkar_messages_consumed_total`, `drakkar_messages_produced_total`
-- `drakkar_executor_tasks_total{status}`, `drakkar_executor_duration_seconds`
+- `drakkar_viking_tasks_total{status}`, `drakkar_viking_duration_seconds`
 - `drakkar_backpressure_active`, `drakkar_total_queued`
 - `drakkar_offset_lag{partition}`, `drakkar_assigned_partitions`
 - `drakkar_consumer_errors_total`, `drakkar_producer_errors_total`
 - `drakkar_db_rows_written_total`, `drakkar_db_errors_total`
 - `drakkar_handler_duration_seconds{hook}`
-- `drakkar_worker_info` (worker_id, version, consumer_group)
+- `drakkar_info` (worker_id, version, consumer_group)
 
 ### Structured logging
 

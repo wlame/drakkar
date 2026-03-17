@@ -8,9 +8,9 @@ kafka:
   session_timeout_ms: 45000
   heartbeat_interval_ms: 3000
 
-executor:
+viking:
   binary_path: "/usr/local/bin/run-rg"
-  max_workers: 8
+  max_vikings: 8
   task_timeout_seconds: 120
   window_size: 10
 

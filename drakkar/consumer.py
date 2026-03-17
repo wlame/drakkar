@@ -93,7 +93,7 @@ class KafkaConsumer:
     async def poll_batch(
         self, max_messages: int | None = None, timeout: float = 1.0
     ) -> list[SourceMessage]:
-        """Poll up to max_messages from Kafka, non-blocking via executor."""
+        """Poll up to max_messages from Kafka, non-blocking via thread pool."""
         loop = asyncio.get_running_loop()
         count = max_messages or self._config.max_poll_records
 
@@ -120,7 +120,7 @@ class KafkaConsumer:
         return messages
 
     def _consume_batch(self, count: int, timeout: float) -> list:
-        """Synchronous consume call, run in executor."""
+        """Synchronous consume call, run in thread pool."""
         return self._consumer.consume(num_messages=count, timeout=timeout)
 
     async def commit(self, offsets: dict[int, int]) -> None:

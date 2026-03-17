@@ -5,16 +5,16 @@ import sys
 
 import pytest
 
-from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
     CollectResult,
     ErrorAction,
-    ExecutorTask,
     OutputMessage,
     SourceMessage,
+    VikingTask,
 )
 from drakkar.partition import MAX_RETRIES, PartitionProcessor, Window
+from drakkar.viking import VikingPool
 from tests.conftest import wait_for
 
 
@@ -38,7 +38,7 @@ class EchoHandler(BaseDrakkarHandler):
     async def arrange(self, messages, pending):
         self.arrange_calls.append((len(messages), len(pending.pending_task_ids)))
         return [
-            ExecutorTask(
+            VikingTask(
                 task_id=f'task-{msg.offset}',
                 args=['hello'],
                 source_offsets=[msg.offset],
@@ -69,7 +69,7 @@ class EmptyArrangeHandler(BaseDrakkarHandler):
 class ErrorHandler(BaseDrakkarHandler):
     async def arrange(self, messages, pending):
         return [
-            ExecutorTask(
+            VikingTask(
                 task_id=f'fail-{msg.offset}',
                 args=['-c', 'import sys; sys.exit(1)'],
                 source_offsets=[msg.offset],
@@ -79,19 +79,19 @@ class ErrorHandler(BaseDrakkarHandler):
 
 
 @pytest.fixture
-def echo_pool() -> ExecutorPool:
-    return ExecutorPool(
+def echo_pool() -> VikingPool:
+    return VikingPool(
         binary_path='/bin/echo',
-        max_workers=4,
+        max_vikings=4,
         task_timeout_seconds=10,
     )
 
 
 @pytest.fixture
-def failing_pool() -> ExecutorPool:
-    return ExecutorPool(
+def failing_pool() -> VikingPool:
+    return VikingPool(
         binary_path=sys.executable,
-        max_workers=4,
+        max_vikings=4,
         task_timeout_seconds=10,
     )
 
@@ -114,7 +114,7 @@ async def test_partition_processor_enqueue_and_properties(echo_pool):
     proc = PartitionProcessor(
         partition_id=5,
         handler=handler,
-        executor_pool=echo_pool,
+        viking_pool=echo_pool,
         window_size=10,
     )
     assert proc.partition_id == 5
@@ -139,7 +139,7 @@ async def test_partition_processor_processes_messages(echo_pool):
     proc = PartitionProcessor(
         partition_id=0,
         handler=handler,
-        executor_pool=echo_pool,
+        viking_pool=echo_pool,
         window_size=10,
         on_collect=on_collect,
         on_commit=on_commit,
@@ -169,7 +169,7 @@ async def test_partition_processor_empty_arrange(echo_pool):
     proc = PartitionProcessor(
         partition_id=0,
         handler=handler,
-        executor_pool=echo_pool,
+        viking_pool=echo_pool,
         window_size=10,
         on_commit=on_commit,
     )
@@ -187,7 +187,7 @@ async def test_partition_processor_error_handling(failing_pool):
     proc = PartitionProcessor(
         partition_id=0,
         handler=handler,
-        executor_pool=failing_pool,
+        viking_pool=failing_pool,
         window_size=10,
     )
 
@@ -206,7 +206,7 @@ async def test_partition_processor_pending_context(echo_pool):
         async def arrange(self, messages, pending):
             pending_sizes.append(len(pending.pending_task_ids))
             return [
-                ExecutorTask(
+                VikingTask(
                     task_id=f'task-{messages[0].offset}',
                     args=['slow'],
                     source_offsets=[msg.offset for msg in messages],
@@ -217,7 +217,7 @@ async def test_partition_processor_pending_context(echo_pool):
     proc = PartitionProcessor(
         partition_id=0,
         handler=handler,
-        executor_pool=echo_pool,
+        viking_pool=echo_pool,
         window_size=1,
     )
 
@@ -236,7 +236,7 @@ async def test_partition_processor_stop_and_drain(echo_pool):
     proc = PartitionProcessor(
         partition_id=0,
         handler=handler,
-        executor_pool=echo_pool,
+        viking_pool=echo_pool,
         window_size=5,
     )
 
@@ -250,7 +250,7 @@ async def test_partition_processor_no_callbacks(echo_pool):
     proc = PartitionProcessor(
         partition_id=0,
         handler=handler,
-        executor_pool=echo_pool,
+        viking_pool=echo_pool,
         window_size=10,
     )
 
@@ -273,7 +273,7 @@ async def test_retry_does_not_stall_window(failing_pool):
     class RetryThenSkipHandler(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
             return [
-                ExecutorTask(
+                VikingTask(
                     task_id=f'rt-{m.offset}',
                     args=['-c', 'import sys; sys.exit(1)'],
                     source_offsets=[m.offset],
@@ -294,7 +294,7 @@ async def test_retry_does_not_stall_window(failing_pool):
     proc = PartitionProcessor(
         partition_id=0,
         handler=RetryThenSkipHandler(),
-        executor_pool=failing_pool,
+        viking_pool=failing_pool,
         window_size=10,
         on_commit=on_commit,
     )
@@ -317,7 +317,7 @@ async def test_max_retries_exceeded(failing_pool):
     class AlwaysRetryHandler(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
             return [
-                ExecutorTask(
+                VikingTask(
                     task_id=f'inf-{m.offset}',
                     args=['-c', 'import sys; sys.exit(1)'],
                     source_offsets=[m.offset],
@@ -338,7 +338,7 @@ async def test_max_retries_exceeded(failing_pool):
     proc = PartitionProcessor(
         partition_id=0,
         handler=AlwaysRetryHandler(),
-        executor_pool=failing_pool,
+        viking_pool=failing_pool,
         window_size=10,
         on_commit=on_commit,
     )
@@ -362,7 +362,7 @@ async def test_collect_exception_does_not_stall_window(echo_pool):
     class BrokenCollectHandler(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
             return [
-                ExecutorTask(
+                VikingTask(
                     task_id=f'bc-{m.offset}',
                     args=['ok'],
                     source_offsets=[m.offset],
@@ -379,7 +379,7 @@ async def test_collect_exception_does_not_stall_window(echo_pool):
     proc = PartitionProcessor(
         partition_id=0,
         handler=BrokenCollectHandler(),
-        executor_pool=echo_pool,
+        viking_pool=echo_pool,
         window_size=10,
         on_commit=on_commit,
     )
@@ -406,7 +406,7 @@ async def test_drain_waits_for_queued_messages(echo_pool):
     class SimpleHandler(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
             return [
-                ExecutorTask(
+                VikingTask(
                     task_id=f'dq-{m.offset}',
                     args=['ok'],
                     source_offsets=[m.offset],
@@ -420,7 +420,7 @@ async def test_drain_waits_for_queued_messages(echo_pool):
     proc = PartitionProcessor(
         partition_id=0,
         handler=SimpleHandler(),
-        executor_pool=echo_pool,
+        viking_pool=echo_pool,
         window_size=10,
         on_commit=on_commit,
     )

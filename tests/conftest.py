@@ -9,12 +9,12 @@ import yaml
 from drakkar.models import (
     CollectResult,
     DBRow,
-    ExecutorError,
-    ExecutorResult,
-    ExecutorTask,
     OutputMessage,
     PendingContext,
     SourceMessage,
+    VikingError,
+    VikingResult,
+    VikingTask,
 )
 
 
@@ -41,8 +41,8 @@ def source_message() -> SourceMessage:
 
 
 @pytest.fixture
-def executor_task() -> ExecutorTask:
-    return ExecutorTask(
+def viking_task() -> VikingTask:
+    return VikingTask(
         task_id='task-001',
         args=['--input', 'test.txt'],
         metadata={'source': 'test'},
@@ -51,31 +51,31 @@ def executor_task() -> ExecutorTask:
 
 
 @pytest.fixture
-def executor_result(executor_task: ExecutorTask) -> ExecutorResult:
-    return ExecutorResult(
+def viking_result(viking_task: VikingTask) -> VikingResult:
+    return VikingResult(
         task_id='task-001',
         exit_code=0,
         stdout='result line 1\nresult line 2\n',
         stderr='',
         duration_seconds=1.5,
-        task=executor_task,
+        task=viking_task,
     )
 
 
 @pytest.fixture
-def executor_error(executor_task: ExecutorTask) -> ExecutorError:
-    return ExecutorError(
-        task=executor_task,
+def viking_error(viking_task: VikingTask) -> VikingError:
+    return VikingError(
+        task=viking_task,
         exit_code=1,
         stderr='error: file not found',
     )
 
 
 @pytest.fixture
-def pending_context(executor_task: ExecutorTask) -> PendingContext:
+def pending_context(viking_task: VikingTask) -> PendingContext:
     return PendingContext(
-        pending_tasks=[executor_task],
-        pending_task_ids={executor_task.task_id},
+        pending_tasks=[viking_task],
+        pending_task_ids={viking_task.task_id},
     )
 
 
@@ -94,7 +94,7 @@ def collect_result() -> CollectResult:
 @pytest.fixture
 def minimal_config_dict() -> dict:
     return {
-        'executor': {
+        'viking': {
             'binary_path': '/usr/bin/echo',
         },
     }
@@ -113,9 +113,9 @@ def full_config_dict() -> dict:
             'session_timeout_ms': 30_000,
             'heartbeat_interval_ms': 5_000,
         },
-        'executor': {
+        'viking': {
             'binary_path': '/usr/local/bin/processor',
-            'max_workers': 40,
+            'max_vikings': 40,
             'task_timeout_seconds': 300,
             'window_size': 100,
         },

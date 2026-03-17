@@ -6,16 +6,16 @@ import os
 import pytest
 from pydantic import BaseModel
 
-from drakkar.config import DrakkarConfig, ExecutorConfig
+from drakkar.config import DrakkarConfig, VikingConfig
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
     ErrorAction,
-    ExecutorError,
-    ExecutorResult,
-    ExecutorTask,
     OutputMessage,
     PendingContext,
     SourceMessage,
+    VikingError,
+    VikingResult,
+    VikingTask,
 )
 
 
@@ -34,27 +34,27 @@ async def test_base_handler_arrange_raises(
 
 async def test_base_handler_collect_returns_none(
     handler: BaseDrakkarHandler,
-    executor_result: ExecutorResult,
+    viking_result: VikingResult,
 ):
-    result = await handler.collect(executor_result)
+    result = await handler.collect(viking_result)
     assert result is None
 
 
 async def test_base_handler_on_window_complete_returns_none(
     handler: BaseDrakkarHandler,
-    executor_result: ExecutorResult,
+    viking_result: VikingResult,
     source_message: SourceMessage,
 ):
-    result = await handler.on_window_complete([executor_result], [source_message])
+    result = await handler.on_window_complete([viking_result], [source_message])
     assert result is None
 
 
 async def test_base_handler_on_error_returns_skip(
     handler: BaseDrakkarHandler,
-    executor_task: ExecutorTask,
-    executor_error: ExecutorError,
+    viking_task: VikingTask,
+    viking_error: VikingError,
 ):
-    action = await handler.on_error(executor_task, executor_error)
+    action = await handler.on_error(viking_task, viking_error)
     assert action == ErrorAction.SKIP
 
 
@@ -67,13 +67,13 @@ async def test_base_handler_on_revoke_is_noop(handler: BaseDrakkarHandler):
 
 
 async def test_base_handler_on_startup_returns_config_unchanged(handler: BaseDrakkarHandler):
-    config = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'))
+    config = DrakkarConfig(viking=VikingConfig(binary_path='/bin/echo'))
     result = await handler.on_startup(config)
     assert result is config
 
 
 async def test_base_handler_on_ready_is_noop(handler: BaseDrakkarHandler):
-    config = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'))
+    config = DrakkarConfig(viking=VikingConfig(binary_path='/bin/echo'))
     await handler.on_ready(config, None)  # should not raise
 
 
@@ -89,7 +89,7 @@ async def test_on_ready_receives_db_pool():
             initialized['config'] = config
 
     handler = InitHandler()
-    config = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/echo'))
+    config = DrakkarConfig(viking=VikingConfig(binary_path='/bin/echo'))
     fake_pool = object()
     await handler.on_ready(config, fake_pool)
 
@@ -105,9 +105,9 @@ async def test_on_startup_can_modify_config():
             cpu_count = os.cpu_count() or 4
             return config.model_copy(
                 update={
-                    'executor': config.executor.model_copy(
+                    'viking': config.viking.model_copy(
                         update={
-                            'max_workers': cpu_count,
+                            'max_vikings': cpu_count,
                         }
                     ),
                 }
@@ -118,18 +118,18 @@ async def test_on_startup_can_modify_config():
 
     handler = TuningHandler()
     config = DrakkarConfig(
-        executor=ExecutorConfig(binary_path='/bin/echo', max_workers=1),
+        viking=VikingConfig(binary_path='/bin/echo', max_vikings=1),
     )
     result = await handler.on_startup(config)
-    assert result.executor.max_workers == (os.cpu_count() or 4)
-    assert result.executor.binary_path == '/bin/echo'
+    assert result.viking.max_vikings == (os.cpu_count() or 4)
+    assert result.viking.binary_path == '/bin/echo'
 
 
 async def test_custom_handler_overrides():
     class MyHandler(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
             return [
-                ExecutorTask(
+                VikingTask(
                     task_id='custom-1',
                     args=['--test'],
                     source_offsets=[m.offset for m in messages],

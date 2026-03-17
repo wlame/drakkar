@@ -77,7 +77,7 @@ def create_debug_app(
     async def dashboard(request: Request):
         stats = await recorder.get_stats()
         processors = drakkar_app.processors
-        pool = drakkar_app._executor_pool
+        pool = drakkar_app._viking_pool
         lag_data = await _get_lag()
         total_lag = sum(v['lag'] for v in lag_data.values())
         return templates.TemplateResponse(
@@ -90,7 +90,7 @@ def create_debug_app(
                 'partition_count': len(processors),
                 'partitions': sorted(processors.keys()),
                 'pool_active': pool.active_count if pool else 0,
-                'pool_max': pool.max_workers if pool else 0,
+                'pool_max': pool.max_vikings if pool else 0,
                 'total_lag': total_lag,
                 'lag_data': lag_data,
             },
@@ -144,8 +144,8 @@ def create_debug_app(
             },
         )
 
-    @app.get('/executors', response_class=HTMLResponse)
-    async def executors(request: Request):
+    @app.get('/vikings', response_class=HTMLResponse)
+    async def vikings(request: Request):
         active = await recorder.get_active_tasks()
         now = time.time()
         for task in active:
@@ -181,18 +181,16 @@ def create_debug_app(
 
         return templates.TemplateResponse(
             request,
-            'executors.html',
+            'vikings.html',
             {
                 'worker_id': drakkar_app._worker_id,
                 'running_tasks': running_tasks,
                 'pending_tasks': pending_tasks,
                 'recent_finished': recent_finished,
-                'pool_active': drakkar_app._executor_pool.active_count
-                if drakkar_app._executor_pool
+                'pool_active': drakkar_app._viking_pool.active_count
+                if drakkar_app._viking_pool
                 else 0,
-                'pool_max': drakkar_app._executor_pool.max_workers
-                if drakkar_app._executor_pool
-                else 0,
+                'pool_max': drakkar_app._viking_pool.max_vikings if drakkar_app._viking_pool else 0,
             },
         )
 
@@ -251,7 +249,7 @@ def create_debug_app(
                 'args': args,
                 'partition': started['partition'] if started else None,
                 'pid': pid,
-                'binary_path': drakkar_app._config.executor.binary_path,
+                'binary_path': drakkar_app._config.viking.binary_path,
             },
         )
 
@@ -383,9 +381,9 @@ def create_debug_app(
             key=lambda t: t['start_ts'],
         )
 
-        # assign tasks to executor lanes (slots), capped at max_workers
-        pool = drakkar_app._executor_pool
-        max_lanes = pool.max_workers if pool else 8
+        # assign tasks to viking lanes (slots), capped at max_vikings
+        pool = drakkar_app._viking_pool
+        max_lanes = pool.max_vikings if pool else 8
         lane_end_times: list[float] = [0.0] * max_lanes
         result = []
         for t in sorted_tasks:
@@ -410,7 +408,7 @@ def create_debug_app(
         """Dashboard data as JSON for JS refresh."""
         stats = await recorder.get_stats()
         processors = drakkar_app.processors
-        pool = drakkar_app._executor_pool
+        pool = drakkar_app._viking_pool
         lag_data = await _get_lag()
         total_lag = sum(v['lag'] for v in lag_data.values())
         return JSONResponse(
@@ -420,7 +418,7 @@ def create_debug_app(
                 'partition_count': len(processors),
                 'partitions': sorted(processors.keys()),
                 'pool_active': pool.active_count if pool else 0,
-                'pool_max': pool.max_workers if pool else 0,
+                'pool_max': pool.max_vikings if pool else 0,
                 'total_lag': total_lag,
                 'lag_data': {str(k): v for k, v in lag_data.items()},
             }

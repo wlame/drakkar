@@ -7,11 +7,11 @@ from pydantic import ValidationError
 
 from drakkar.config import (
     DrakkarConfig,
-    ExecutorConfig,
     KafkaConfig,
     LoggingConfig,
     MetricsConfig,
     PostgresConfig,
+    VikingConfig,
     load_config,
 )
 
@@ -24,26 +24,26 @@ def test_kafka_config_defaults():
     assert cfg.max_poll_interval_ms == 300_000
 
 
-def test_executor_config_requires_binary_path():
+def test_viking_config_requires_binary_path():
     with pytest.raises(ValidationError):
-        ExecutorConfig()  # type: ignore[call-arg]
+        VikingConfig()  # type: ignore[call-arg]
 
 
-def test_executor_config_defaults():
-    cfg = ExecutorConfig(binary_path='/usr/bin/echo')
-    assert cfg.max_workers == 4
+def test_viking_config_defaults():
+    cfg = VikingConfig(binary_path='/usr/bin/echo')
+    assert cfg.max_vikings == 4
     assert cfg.task_timeout_seconds == 120
     assert cfg.window_size == 50
 
 
-def test_executor_config_rejects_empty_binary_path():
+def test_viking_config_rejects_empty_binary_path():
     with pytest.raises(ValidationError):
-        ExecutorConfig(binary_path='')
+        VikingConfig(binary_path='')
 
 
-def test_executor_config_rejects_zero_workers():
+def test_viking_config_rejects_zero_vikings():
     with pytest.raises(ValidationError):
-        ExecutorConfig(binary_path='/bin/echo', max_workers=0)
+        VikingConfig(binary_path='/bin/echo', max_vikings=0)
 
 
 def test_metrics_config_rejects_invalid_port():
@@ -86,8 +86,8 @@ def test_logging_config_invalid_format():
 def test_load_config_from_yaml(config_yaml_file: Path):
     cfg = load_config(config_yaml_file)
     assert cfg.kafka.brokers == 'kafka1:9092,kafka2:9092'
-    assert cfg.executor.binary_path == '/usr/local/bin/processor'
-    assert cfg.executor.max_workers == 40
+    assert cfg.viking.binary_path == '/usr/local/bin/processor'
+    assert cfg.viking.max_vikings == 40
     assert cfg.postgres.dsn == 'postgresql://user:pass@db:5432/app'
     assert cfg.metrics.port == 9091
     assert cfg.logging.level == 'DEBUG'
@@ -96,7 +96,7 @@ def test_load_config_from_yaml(config_yaml_file: Path):
 
 def test_load_config_minimal_yaml(minimal_config_yaml_file: Path):
     cfg = load_config(minimal_config_yaml_file)
-    assert cfg.executor.binary_path == '/usr/bin/echo'
+    assert cfg.viking.binary_path == '/usr/bin/echo'
     assert cfg.kafka.brokers == 'localhost:9092'
     assert cfg.metrics.enabled is True
 
@@ -109,7 +109,7 @@ def test_load_config_missing_file():
 def test_load_config_from_env_var(minimal_config_yaml_file: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DRAKKAR_CONFIG', str(minimal_config_yaml_file))
     cfg = load_config()
-    assert cfg.executor.binary_path == '/usr/bin/echo'
+    assert cfg.viking.binary_path == '/usr/bin/echo'
 
 
 def test_load_config_env_override(minimal_config_yaml_file: Path, monkeypatch: pytest.MonkeyPatch):
@@ -118,11 +118,11 @@ def test_load_config_env_override(minimal_config_yaml_file: Path, monkeypatch: p
     assert cfg.kafka.brokers == 'override:9092'
 
 
-def test_load_config_no_path_no_env_requires_executor(monkeypatch: pytest.MonkeyPatch):
+def test_load_config_no_path_no_env_requires_viking(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv('DRAKKAR_CONFIG', raising=False)
-    monkeypatch.setenv('DRAKKAR_EXECUTOR__BINARY_PATH', '/usr/bin/test')
+    monkeypatch.setenv('DRAKKAR_VIKING__BINARY_PATH', '/usr/bin/test')
     cfg = load_config()
-    assert cfg.executor.binary_path == '/usr/bin/test'
+    assert cfg.viking.binary_path == '/usr/bin/test'
 
 
 def test_load_config_empty_yaml(tmp_path: Path):
@@ -133,12 +133,12 @@ def test_load_config_empty_yaml(tmp_path: Path):
 
 
 def test_drakkar_config_env_nested_delimiter(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv('DRAKKAR_EXECUTOR__BINARY_PATH', '/usr/bin/test')
-    monkeypatch.setenv('DRAKKAR_EXECUTOR__MAX_WORKERS', '16')
+    monkeypatch.setenv('DRAKKAR_VIKING__BINARY_PATH', '/usr/bin/test')
+    monkeypatch.setenv('DRAKKAR_VIKING__MAX_VIKINGS', '16')
     monkeypatch.setenv('DRAKKAR_KAFKA__SOURCE_TOPIC', 'my-topic')
     cfg = DrakkarConfig()
-    assert cfg.executor.binary_path == '/usr/bin/test'
-    assert cfg.executor.max_workers == 16
+    assert cfg.viking.binary_path == '/usr/bin/test'
+    assert cfg.viking.max_vikings == 16
     assert cfg.kafka.source_topic == 'my-topic'
 
 
@@ -146,4 +146,4 @@ def test_config_serialization(config_yaml_file: Path):
     cfg = load_config(config_yaml_file)
     data = cfg.model_dump()
     assert data['kafka']['brokers'] == 'kafka1:9092,kafka2:9092'
-    assert data['executor']['max_workers'] == 40
+    assert data['viking']['max_vikings'] == 40

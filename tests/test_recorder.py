@@ -6,11 +6,11 @@ import pytest
 
 from drakkar.config import DebugConfig
 from drakkar.models import (
-    ExecutorError,
-    ExecutorResult,
-    ExecutorTask,
     OutputMessage,
     SourceMessage,
+    VikingError,
+    VikingResult,
+    VikingTask,
 )
 from drakkar.recorder import EventRecorder, _list_db_files, _make_db_path
 
@@ -38,17 +38,17 @@ def make_msg(partition=0, offset=0) -> SourceMessage:
     )
 
 
-def make_task(task_id='t1', args=None, offsets=None) -> ExecutorTask:
-    return ExecutorTask(
+def make_task(task_id='t1', args=None, offsets=None) -> VikingTask:
+    return VikingTask(
         task_id=task_id,
         args=args or ['--input', 'file.txt'],
         source_offsets=offsets or [0],
     )
 
 
-def make_result(task_id='t1', task=None) -> ExecutorResult:
+def make_result(task_id='t1', task=None) -> VikingResult:
     t = task or make_task(task_id)
-    return ExecutorResult(
+    return VikingResult(
         task_id=task_id,
         exit_code=0,
         stdout='line1\nline2\n',
@@ -177,7 +177,7 @@ async def test_record_task_completed_with_output(tmp_path):
 
 async def test_record_task_failed(recorder):
     task = make_task('t1')
-    error = ExecutorError(task=task, exit_code=1, stderr='bad input')
+    error = VikingError(task=task, exit_code=1, stderr='bad input')
     recorder.record_task_failed(task, error, partition=0)
     await recorder._flush()
 

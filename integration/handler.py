@@ -15,12 +15,12 @@ from drakkar import (
     DBRow,
     DrakkarConfig,
     ErrorAction,
-    ExecutorError,
-    ExecutorResult,
-    ExecutorTask,
     OutputMessage,
     PendingContext,
     SourceMessage,
+    VikingError,
+    VikingResult,
+    VikingTask,
     make_task_id,
 )
 
@@ -67,8 +67,8 @@ class RipgrepHandler(BaseDrakkarHandler[SearchRequest, SearchResult]):
             category="handler",
             input_model=self.input_model.__name__ if self.input_model else None,
             output_model=self.output_model.__name__ if self.output_model else None,
-            binary=config.executor.binary_path,
-            max_workers=config.executor.max_workers,
+            binary=config.viking.binary_path,
+            max_vikings=config.viking.max_vikings,
         )
         return config
 
@@ -76,7 +76,7 @@ class RipgrepHandler(BaseDrakkarHandler[SearchRequest, SearchResult]):
         self,
         messages: list[SourceMessage],
         pending: PendingContext,
-    ) -> list[ExecutorTask]:
+    ) -> list[VikingTask]:
         # simulate IO-bound preparation (e.g., DB lookup, cache check)
         await asyncio.sleep(random.uniform(0.005, 0.03))
 
@@ -90,7 +90,7 @@ class RipgrepHandler(BaseDrakkarHandler[SearchRequest, SearchResult]):
             if task_id in pending.pending_task_ids:
                 continue
 
-            tasks.append(ExecutorTask(
+            tasks.append(VikingTask(
                 task_id=task_id,
                 args=[str(req.repeat), req.pattern, req.file_path],
                 metadata={
@@ -103,7 +103,7 @@ class RipgrepHandler(BaseDrakkarHandler[SearchRequest, SearchResult]):
             ))
         return tasks
 
-    async def collect(self, result: ExecutorResult) -> CollectResult | None:
+    async def collect(self, result: VikingResult) -> CollectResult | None:
         # simulate post-processing (e.g., parsing, enrichment)
         await asyncio.sleep(random.uniform(0.002, 0.01))
 
@@ -143,7 +143,7 @@ class RipgrepHandler(BaseDrakkarHandler[SearchRequest, SearchResult]):
             ],
         )
 
-    async def on_error(self, task: ExecutorTask, error: ExecutorError):
+    async def on_error(self, task: VikingTask, error: VikingError):
         # rg exits with 1 when no matches found — not a real error
         return ErrorAction.SKIP
 

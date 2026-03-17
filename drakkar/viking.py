@@ -1,4 +1,4 @@
-"""Subprocess executor pool for Drakkar framework."""
+"""Subprocess viking pool for Drakkar framework."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from drakkar.models import ExecutorError, ExecutorResult, ExecutorTask
+from drakkar.models import VikingError, VikingResult, VikingTask
 
 if TYPE_CHECKING:
     from drakkar.recorder import EventRecorder
@@ -16,18 +16,18 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
-class ExecutorPool:
+class VikingPool:
     """Manages concurrent subprocess execution with semaphore-based limiting.
 
     Uses asyncio.create_subprocess_exec (not shell) for safe subprocess execution.
     Arguments are passed as a list, preventing shell injection.
     """
 
-    def __init__(self, binary_path: str, max_workers: int, task_timeout_seconds: int) -> None:
+    def __init__(self, binary_path: str, max_vikings: int, task_timeout_seconds: int) -> None:
         self._binary_path = binary_path
-        self._max_workers = max_workers
+        self._max_vikings = max_vikings
         self._task_timeout = task_timeout_seconds
-        self._semaphore = asyncio.Semaphore(max_workers)
+        self._semaphore = asyncio.Semaphore(max_vikings)
         self._active_count = 0
 
     @property
@@ -35,15 +35,15 @@ class ExecutorPool:
         return self._active_count
 
     @property
-    def max_workers(self) -> int:
-        return self._max_workers
+    def max_vikings(self) -> int:
+        return self._max_vikings
 
     async def execute(
         self,
-        task: ExecutorTask,
+        task: VikingTask,
         recorder: EventRecorder | None = None,
         partition_id: int = 0,
-    ) -> ExecutorResult:
+    ) -> VikingResult:
         """Execute a single task, respecting the concurrency semaphore.
 
         Records task_started AFTER acquiring the semaphore slot, so the
@@ -58,7 +58,7 @@ class ExecutorPool:
             finally:
                 self._active_count -= 1
 
-    async def _run_subprocess(self, task: ExecutorTask) -> ExecutorResult:
+    async def _run_subprocess(self, task: VikingTask) -> VikingResult:
         start = time.monotonic()
         proc = None
         try:
@@ -76,7 +76,7 @@ class ExecutorPool:
             duration = time.monotonic() - start
 
             pid = proc.pid
-            result = ExecutorResult(
+            result = VikingResult(
                 task_id=task.task_id,
                 exit_code=proc.returncode or 0,
                 stdout=stdout_bytes.decode(errors='replace') if stdout_bytes else '',
@@ -87,8 +87,8 @@ class ExecutorPool:
             )
 
             if result.exit_code != 0:
-                raise ExecutorTaskError(
-                    error=ExecutorError(
+                raise VikingTaskError(
+                    error=VikingError(
                         task=task,
                         exit_code=result.exit_code,
                         stderr=result.stderr,
@@ -98,8 +98,8 @@ class ExecutorPool:
                 )
 
             await logger.adebug(
-                'executor_task_completed',
-                category='executor',
+                'viking_task_completed',
+                category='viking',
                 task_id=task.task_id,
                 duration=result.duration_seconds,
                 exit_code=result.exit_code,
@@ -109,14 +109,14 @@ class ExecutorPool:
         except TimeoutError:
             duration = time.monotonic() - start
             timeout_pid = proc.pid if proc else None
-            raise ExecutorTaskError(  # noqa: B904
-                error=ExecutorError(
+            raise VikingTaskError(  # noqa: B904
+                error=VikingError(
                     task=task,
                     stderr='task timed out',
                     exception=f'Timeout after {self._task_timeout}s',
                     pid=timeout_pid,
                 ),
-                result=ExecutorResult(
+                result=VikingResult(
                     task_id=task.task_id,
                     exit_code=-1,
                     stdout='',
@@ -129,12 +129,12 @@ class ExecutorPool:
 
         except OSError as e:
             duration = time.monotonic() - start
-            raise ExecutorTaskError(  # noqa: B904
-                error=ExecutorError(
+            raise VikingTaskError(  # noqa: B904
+                error=VikingError(
                     task=task,
                     exception=str(e),
                 ),
-                result=ExecutorResult(
+                result=VikingResult(
                     task_id=task.task_id,
                     exit_code=-1,
                     stdout='',
@@ -150,10 +150,10 @@ class ExecutorPool:
                 await proc.wait()
 
 
-class ExecutorTaskError(Exception):
-    """Raised when an executor task fails."""
+class VikingTaskError(Exception):
+    """Raised when a viking task fails."""
 
-    def __init__(self, error: ExecutorError, result: ExecutorResult) -> None:
+    def __init__(self, error: VikingError, result: VikingResult) -> None:
         self.error = error
         self.result = result
         super().__init__(f'Task {error.task.task_id} failed: {error.stderr or error.exception}')

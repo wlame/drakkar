@@ -7,12 +7,12 @@ from drakkar.models import (
     CollectResult,
     DBRow,
     ErrorAction,
-    ExecutorError,
-    ExecutorResult,
-    ExecutorTask,
     OutputMessage,
     PendingContext,
     SourceMessage,
+    VikingError,
+    VikingResult,
+    VikingTask,
 )
 
 
@@ -48,44 +48,44 @@ def test_source_message_serialization(source_message: SourceMessage):
     assert roundtrip == source_message
 
 
-def test_executor_task_defaults():
-    task = ExecutorTask(task_id='t1', args=['--help'], source_offsets=[0])
+def test_viking_task_defaults():
+    task = VikingTask(task_id='t1', args=['--help'], source_offsets=[0])
     assert task.metadata == {}
 
 
-def test_executor_task_with_metadata(executor_task: ExecutorTask):
-    assert executor_task.metadata == {'source': 'test'}
-    assert executor_task.source_offsets == [42]
+def test_viking_task_with_metadata(viking_task: VikingTask):
+    assert viking_task.metadata == {'source': 'test'}
+    assert viking_task.source_offsets == [42]
 
 
-def test_executor_task_multiple_source_offsets():
-    task = ExecutorTask(task_id='t1', args=[], source_offsets=[10, 11, 12])
+def test_viking_task_multiple_source_offsets():
+    task = VikingTask(task_id='t1', args=[], source_offsets=[10, 11, 12])
     assert len(task.source_offsets) == 3
 
 
-def test_executor_result_fields(executor_result: ExecutorResult):
-    assert executor_result.exit_code == 0
-    assert executor_result.duration_seconds == 1.5
-    assert executor_result.task.task_id == 'task-001'
+def test_viking_result_fields(viking_result: VikingResult):
+    assert viking_result.exit_code == 0
+    assert viking_result.duration_seconds == 1.5
+    assert viking_result.task.task_id == 'task-001'
 
 
-def test_executor_result_serialization(executor_result: ExecutorResult):
-    data = executor_result.model_dump()
-    roundtrip = ExecutorResult.model_validate(data)
-    assert roundtrip.task.task_id == executor_result.task.task_id
+def test_viking_result_serialization(viking_result: VikingResult):
+    data = viking_result.model_dump()
+    roundtrip = VikingResult.model_validate(data)
+    assert roundtrip.task.task_id == viking_result.task.task_id
 
 
-def test_executor_error_defaults():
-    task = ExecutorTask(task_id='t', args=[], source_offsets=[0])
-    err = ExecutorError(task=task)
+def test_viking_error_defaults():
+    task = VikingTask(task_id='t', args=[], source_offsets=[0])
+    err = VikingError(task=task)
     assert err.exit_code is None
     assert err.stderr == ''
     assert err.exception is None
 
 
-def test_executor_error_with_details(executor_error: ExecutorError):
-    assert executor_error.exit_code == 1
-    assert 'file not found' in executor_error.stderr
+def test_viking_error_with_details(viking_error: VikingError):
+    assert viking_error.exit_code == 1
+    assert 'file not found' in viking_error.stderr
 
 
 def test_pending_context_empty():

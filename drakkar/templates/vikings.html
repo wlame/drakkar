@@ -1,9 +1,9 @@
 {% extends "base.html" %}
-{% block title %}Executors — Drakkar Debug{% endblock %}
+{% block title %}Vikings — Drakkar Debug{% endblock %}
 
 {% block content %}
 <div class="flex items-center justify-between mb-2">
-    <h1 class="text-2xl font-bold">Active Executors</h1>
+    <h1 class="text-2xl font-bold">Active Vikings</h1>
     <button id="toggle-refresh" class="text-sm px-3 py-1 rounded bg-gray-600 hover:bg-gray-500" onclick="toggleRefresh()">
         Auto-refresh: OFF
     </button>
@@ -16,7 +16,7 @@
          style="width: {{ pct }}%"></div>
 </div>
 
-<h2 class="text-lg font-semibold mb-2">Executor Timeline <span class="text-sm font-normal text-gray-400">(last 10 min)</span></h2>
+<h2 class="text-lg font-semibold mb-2">Viking Timeline <span class="text-sm font-normal text-gray-400">(last 10 min)</span></h2>
 <div class="flex items-center gap-3 mb-2">
     <div class="flex items-center gap-1">
         <label class="text-xs text-gray-400">Zoom:</label>

@@ -38,8 +38,8 @@ class SourceMessage(BaseModel):
     payload: Any = None
 
 
-class ExecutorTask(BaseModel):
-    """A task to be executed by the subprocess executor pool."""
+class VikingTask(BaseModel):
+    """A task to be executed by the subprocess viking pool."""
 
     task_id: str
     args: list[str]
@@ -47,22 +47,22 @@ class ExecutorTask(BaseModel):
     source_offsets: list[int]
 
 
-class ExecutorResult(BaseModel):
-    """Result of a completed executor task."""
+class VikingResult(BaseModel):
+    """Result of a completed viking task."""
 
     task_id: str
     exit_code: int
     stdout: str
     stderr: str
     duration_seconds: float
-    task: ExecutorTask
+    task: VikingTask
     pid: int | None = None
 
 
-class ExecutorError(BaseModel):
-    """Error information when an executor task fails."""
+class VikingError(BaseModel):
+    """Error information when a viking task fails."""
 
-    task: ExecutorTask
+    task: VikingTask
     exit_code: int | None = None
     stderr: str = ''
     exception: str | None = None
@@ -72,7 +72,7 @@ class ExecutorError(BaseModel):
 class PendingContext(BaseModel):
     """Context about currently in-flight tasks for a partition."""
 
-    pending_tasks: list[ExecutorTask] = Field(default_factory=list)
+    pending_tasks: list[VikingTask] = Field(default_factory=list)
     pending_task_ids: set[str] = Field(default_factory=set)
 
 

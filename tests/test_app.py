@@ -8,26 +8,26 @@ import pytest
 from drakkar.app import DrakkarApp
 from drakkar.config import (
     DrakkarConfig,
-    ExecutorConfig,
     KafkaConfig,
     LoggingConfig,
     MetricsConfig,
     PostgresConfig,
+    VikingConfig,
 )
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
     CollectResult,
     DBRow,
-    ExecutorTask,
     OutputMessage,
     SourceMessage,
+    VikingTask,
 )
 
 
 class SimpleHandler(BaseDrakkarHandler):
     async def arrange(self, messages, pending):
         return [
-            ExecutorTask(
+            VikingTask(
                 task_id=f't-{msg.offset}',
                 args=['test'],
                 source_offsets=[msg.offset],
@@ -44,9 +44,9 @@ def test_config() -> DrakkarConfig:
             source_topic='test-in',
             target_topic='test-out',
         ),
-        executor=ExecutorConfig(
+        viking=VikingConfig(
             binary_path='/bin/echo',
-            max_workers=2,
+            max_vikings=2,
             task_timeout_seconds=10,
             window_size=5,
         ),
@@ -85,11 +85,9 @@ async def test_app_on_assign_creates_processors(
     handler = SimpleHandler()
     app = DrakkarApp(handler=handler, config=test_config)
 
-    from drakkar.executor import ExecutorPool
+    from drakkar.viking import VikingPool
 
-    app._executor_pool = ExecutorPool(
-        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
-    )
+    app._viking_pool = VikingPool(binary_path='/bin/echo', max_vikings=2, task_timeout_seconds=10)
     app._consumer = MagicMock()
     app._consumer.commit = AsyncMock()
     app._producer = MagicMock()
@@ -112,11 +110,9 @@ async def test_app_on_revoke_removes_processors(
     handler = SimpleHandler()
     app = DrakkarApp(handler=handler, config=test_config)
 
-    from drakkar.executor import ExecutorPool
+    from drakkar.viking import VikingPool
 
-    app._executor_pool = ExecutorPool(
-        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
-    )
+    app._viking_pool = VikingPool(binary_path='/bin/echo', max_vikings=2, task_timeout_seconds=10)
     app._consumer = AsyncMock()
     app._producer = MagicMock()
     app._db_writer = AsyncMock()
@@ -176,9 +172,9 @@ async def test_app_on_startup_hook_can_modify_config(test_config):
         async def on_startup(self, config):
             return config.model_copy(
                 update={
-                    'executor': config.executor.model_copy(
+                    'viking': config.viking.model_copy(
                         update={
-                            'max_workers': 99,
+                            'max_vikings': 99,
                         }
                     ),
                 }
@@ -188,11 +184,11 @@ async def test_app_on_startup_hook_can_modify_config(test_config):
             return []
 
     app = DrakkarApp(handler=ConfigTuningHandler(), config=test_config)
-    assert app.config.executor.max_workers == 2  # original
+    assert app.config.viking.max_vikings == 2  # original
 
     # simulate the on_startup call from _async_run
     app._config = await app._handler.on_startup(app._config)
-    assert app._config.executor.max_workers == 99
+    assert app._config.viking.max_vikings == 99
 
 
 async def test_app_on_startup_default_returns_config_unchanged(test_config):
@@ -228,8 +224,8 @@ async def test_app_shutdown_closes_all_components(test_config):
     app._db_writer.close.assert_called_once()
 
 
-async def test_app_shutdown_drains_executors(test_config):
-    """Graceful shutdown gives executors up to 5s to finish."""
+async def test_app_shutdown_drains_vikings(test_config):
+    """Graceful shutdown gives vikings up to 5s to finish."""
     handler = SimpleHandler()
     app = DrakkarApp(handler=handler, config=test_config)
     app._consumer = AsyncMock()
@@ -237,12 +233,10 @@ async def test_app_shutdown_drains_executors(test_config):
     app._producer.flush = AsyncMock()
     app._db_writer = AsyncMock()
 
-    # create a processor with an executor pool
-    from drakkar.executor import ExecutorPool
+    # create a processor with a viking pool
+    from drakkar.viking import VikingPool
 
-    app._executor_pool = ExecutorPool(
-        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
-    )
+    app._viking_pool = VikingPool(binary_path='/bin/echo', max_vikings=2, task_timeout_seconds=10)
     app._on_assign([0])
     await asyncio.sleep(0.1)
 
@@ -266,11 +260,9 @@ async def test_stop_processor_handles_arrange_error(test_config):
             raise RuntimeError('arrange exploded')
 
     app = DrakkarApp(handler=BrokenArrangeHandler(), config=test_config)
-    from drakkar.executor import ExecutorPool
+    from drakkar.viking import VikingPool
 
-    app._executor_pool = ExecutorPool(
-        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
-    )
+    app._viking_pool = VikingPool(binary_path='/bin/echo', max_vikings=2, task_timeout_seconds=10)
     app._consumer = AsyncMock()
     app._producer = MagicMock()
     app._db_writer = AsyncMock()
@@ -299,11 +291,9 @@ async def test_safe_call_catches_handler_errors(test_config):
             raise ValueError('on_assign failed')
 
     app = DrakkarApp(handler=ErrorOnAssignHandler(), config=test_config)
-    from drakkar.executor import ExecutorPool
+    from drakkar.viking import VikingPool
 
-    app._executor_pool = ExecutorPool(
-        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
-    )
+    app._viking_pool = VikingPool(binary_path='/bin/echo', max_vikings=2, task_timeout_seconds=10)
     app._consumer = MagicMock()
     app._consumer.commit = AsyncMock()
 

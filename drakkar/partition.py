@@ -7,30 +7,30 @@ from dataclasses import dataclass, field
 
 import structlog
 
-from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.metrics import (
     batch_duration,
-    executor_duration,
-    executor_pool_active,
-    executor_tasks,
-    executor_timeouts,
     handler_duration,
     messages_consumed,
     offset_lag,
     partition_queue_size,
     task_retries,
+    viking_duration,
+    viking_pool_active,
+    viking_tasks,
+    viking_timeouts,
 )
 from drakkar.models import (
     CollectResult,
     ErrorAction,
-    ExecutorResult,
-    ExecutorTask,
     PendingContext,
     SourceMessage,
+    VikingResult,
+    VikingTask,
 )
 from drakkar.offsets import OffsetTracker
 from drakkar.recorder import EventRecorder
+from drakkar.viking import VikingPool, VikingTaskError
 
 logger = structlog.get_logger()
 
@@ -46,8 +46,8 @@ class Window:
 
     window_id: int
     source_messages: list[SourceMessage]
-    tasks: list[ExecutorTask] = field(default_factory=list)
-    results: list[ExecutorResult] = field(default_factory=list)
+    tasks: list[VikingTask] = field(default_factory=list)
+    results: list[VikingResult] = field(default_factory=list)
     completed_count: int = 0
     total_tasks: int = 0
     start_time: float = 0.0
@@ -61,7 +61,7 @@ class PartitionProcessor:
     """Processes messages for a single partition.
 
     Takes windows of messages from its queue, calls the arrange hook,
-    submits tasks to the shared executor pool, and tracks offsets.
+    submits tasks to the shared viking pool, and tracks offsets.
     Windows are processed concurrently — the processor doesn't wait
     for one window to complete before starting the next.
     """
@@ -70,7 +70,7 @@ class PartitionProcessor:
         self,
         partition_id: int,
         handler: BaseDrakkarHandler,
-        executor_pool: ExecutorPool,
+        viking_pool: VikingPool,
         window_size: int,
         on_collect: CollectCallback | None = None,
         on_commit: CommitCallback | None = None,
@@ -78,7 +78,7 @@ class PartitionProcessor:
     ) -> None:
         self._partition_id = partition_id
         self._handler = handler
-        self._executor_pool = executor_pool
+        self._viking_pool = viking_pool
         self._window_size = window_size
         self._on_collect = on_collect
         self._on_commit = on_commit
@@ -86,7 +86,7 @@ class PartitionProcessor:
 
         self._queue: asyncio.Queue[SourceMessage] = asyncio.Queue()
         self._offset_tracker = OffsetTracker()
-        self._pending_tasks: dict[str, ExecutorTask] = {}
+        self._pending_tasks: dict[str, VikingTask] = {}
         self._window_counter = 0
         self._running = False
         self._task: asyncio.Task | None = None
@@ -227,21 +227,21 @@ class PartitionProcessor:
             asyncio.create_task(self._execute_and_track(task, window))
 
     async def _execute_and_track(
-        self, task: ExecutorTask, window: Window, retry_count: int = 0
+        self, task: VikingTask, window: Window, retry_count: int = 0
     ) -> None:
         log = logger.bind(
-            category='executor',
+            category='viking',
             partition=self._partition_id,
             task_id=task.task_id,
             window_id=window.window_id,
         )
-        executor_tasks.labels(status='started').inc()
-        executor_pool_active.set(self._executor_pool.active_count)
+        viking_tasks.labels(status='started').inc()
+        viking_pool_active.set(self._viking_pool.active_count)
 
         try:
-            result = await self._executor_pool.execute(task, self._recorder, self._partition_id)
-            executor_tasks.labels(status='completed').inc()
-            executor_duration.observe(result.duration_seconds)
+            result = await self._viking_pool.execute(task, self._recorder, self._partition_id)
+            viking_tasks.labels(status='completed').inc()
+            viking_duration.observe(result.duration_seconds)
             if self._recorder:
                 self._recorder.record_task_completed(result, self._partition_id)
 
@@ -253,13 +253,13 @@ class PartitionProcessor:
 
             window.results.append(result)
 
-        except ExecutorTaskError as e:
-            executor_tasks.labels(status='failed').inc()
+        except VikingTaskError as e:
+            viking_tasks.labels(status='failed').inc()
             if e.error.exception and 'Timeout' in (e.error.exception or ''):
-                executor_timeouts.inc()
+                viking_timeouts.inc()
             if self._recorder:
                 self._recorder.record_task_failed(task, e.error, self._partition_id)
-            await log.awarning('executor_task_failed', error=str(e))
+            await log.awarning('viking_task_failed', error=str(e))
 
             on_error_start = time.monotonic()
             action = await self._handler.on_error(task, e.error)
@@ -290,7 +290,7 @@ class PartitionProcessor:
             await log.aerror('unexpected_error_in_task', error=str(e), exc_info=True)
             # still count as completed so the window can progress
             window.results.append(
-                ExecutorResult(
+                VikingResult(
                     task_id=task.task_id,
                     exit_code=-1,
                     stdout='',
@@ -303,7 +303,7 @@ class PartitionProcessor:
         finally:
             self._pending_tasks.pop(task.task_id, None)
             self._inflight_count -= 1
-            executor_pool_active.set(self._executor_pool.active_count)
+            viking_pool_active.set(self._viking_pool.active_count)
 
         window.completed_count += 1
 

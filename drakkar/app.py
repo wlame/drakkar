@@ -12,21 +12,21 @@ from drakkar import __version__
 from drakkar.config import DrakkarConfig, load_config
 from drakkar.consumer import KafkaConsumer
 from drakkar.db import DBWriter
-from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.logging import setup_logging
 from drakkar.metrics import (
     assigned_partitions,
     backpressure_active,
+    drakkar_info,
     messages_produced,
     start_metrics_server,
     total_queued,
-    worker_info,
 )
 from drakkar.models import CollectResult
 from drakkar.partition import PartitionProcessor
 from drakkar.producer import KafkaProducer
 from drakkar.recorder import EventRecorder
+from drakkar.viking import VikingPool
 
 logger = structlog.get_logger()
 
@@ -52,7 +52,7 @@ class DrakkarApp:
         self._worker_id = worker_id or f'drakkar-{id(self):x}'
         self._start_time = time.monotonic()
 
-        self._executor_pool: ExecutorPool | None = None
+        self._viking_pool: VikingPool | None = None
         self._consumer: KafkaConsumer | None = None
         self._producer: KafkaProducer | None = None
         self._db_writer: DBWriter | None = None
@@ -92,14 +92,14 @@ class DrakkarApp:
 
         await log.ainfo('drakkar_starting', category='lifecycle')
 
-        self._executor_pool = ExecutorPool(
-            binary_path=self._config.executor.binary_path,
-            max_workers=self._config.executor.max_workers,
-            task_timeout_seconds=self._config.executor.task_timeout_seconds,
+        self._viking_pool = VikingPool(
+            binary_path=self._config.viking.binary_path,
+            max_vikings=self._config.viking.max_vikings,
+            task_timeout_seconds=self._config.viking.task_timeout_seconds,
         )
 
         start_metrics_server(self._config.metrics)
-        worker_info.info(
+        drakkar_info.info(
             {
                 'worker_id': self._worker_id,
                 'version': __version__,
@@ -156,13 +156,13 @@ class DrakkarApp:
         """Main polling loop with backpressure via Kafka pause/resume.
 
         Pauses all partitions when total buffered messages exceed
-        high_watermark (2x max_workers). Resumes when they drop below
-        low_watermark (max_workers / 2). This ensures we only hold
-        enough data in memory to keep the executor pool busy.
+        high_watermark (2x max_vikings). Resumes when they drop below
+        low_watermark (max_vikings / 2). This ensures we only hold
+        enough data in memory to keep the viking pool busy.
         """
-        max_workers = self._config.executor.max_workers
-        high_watermark = max_workers * 32
-        low_watermark = max(1, max_workers * 4)
+        max_vikings = self._config.viking.max_vikings
+        high_watermark = max_vikings * 32
+        low_watermark = max(1, max_vikings * 4)
 
         while self._running:
             total = self._total_queued()
@@ -202,8 +202,8 @@ class DrakkarApp:
                 processor = PartitionProcessor(
                     partition_id=pid,
                     handler=self._handler,
-                    executor_pool=self._executor_pool,
-                    window_size=self._config.executor.window_size,
+                    viking_pool=self._viking_pool,
+                    window_size=self._config.viking.window_size,
                     on_collect=self._handle_collect,
                     on_commit=self._handle_commit,
                     recorder=self._recorder,
@@ -291,7 +291,7 @@ class DrakkarApp:
         self._running = False
 
     async def _shutdown(self) -> None:
-        """Graceful shutdown: flush recorder, drain executors (up to 5s),
+        """Graceful shutdown: flush recorder, drain vikings (up to 5s),
         commit offsets, disconnect from Kafka and DB.
         """
         log = logger.bind(worker_id=self._worker_id)
@@ -301,14 +301,14 @@ class DrakkarApp:
         for processor in list(self._processors.values()):
             processor._running = False
 
-        # 2. give in-flight executors up to 5 seconds to finish
-        await log.ainfo('draining_executors', category='lifecycle', timeout=5)
+        # 2. give in-flight vikings up to 5 seconds to finish
+        await log.ainfo('draining_vikings', category='lifecycle', timeout=5)
         try:
             await asyncio.wait_for(self._drain_all_processors(), timeout=5.0)
-            await log.ainfo('executors_drained', category='lifecycle')
+            await log.ainfo('vikings_drained', category='lifecycle')
         except TimeoutError:
             await log.awarning(
-                'drain_timeout', category='lifecycle', msg='some executors did not finish in 5s'
+                'drain_timeout', category='lifecycle', msg='some vikings did not finish in 5s'
             )
 
         # 3. commit any remaining offsets
