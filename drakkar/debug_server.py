@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from datetime import UTC
 from pathlib import Path
@@ -433,12 +434,22 @@ def create_debug_app(
 
     @app.websocket('/ws')
     async def ws_events(ws: WebSocket):
-        """Stream recorder events to connected clients in real-time."""
+        """Stream recorder events to connected clients in real-time.
+
+        Uses a thread-safe queue (stdlib queue.Queue) since the recorder
+        writes from the main thread and Uvicorn runs in a separate thread.
+        """
+        import queue as queue_mod
+
         await ws.accept()
-        queue = recorder.subscribe()
+        q = recorder.subscribe()
         try:
             while True:
-                event = await queue.get()
+                try:
+                    event = q.get(timeout=0.1)
+                except queue_mod.Empty:
+                    await asyncio.sleep(0.05)
+                    continue
                 try:
                     await ws.send_text(json.dumps(event, default=str))
                 except Exception:
@@ -446,13 +457,17 @@ def create_debug_app(
         except WebSocketDisconnect:
             pass
         finally:
-            recorder.unsubscribe(queue)
+            recorder.unsubscribe(q)
 
     return app
 
 
 class DebugServer:
-    """Manages the lifecycle of the debug FastAPI server."""
+    """Manages the debug FastAPI server in a separate thread.
+
+    Runs Uvicorn in its own thread with a dedicated event loop so that
+    CPU-intensive executor tasks on the main loop don't block the UI.
+    """
 
     def __init__(
         self,
@@ -464,7 +479,7 @@ class DebugServer:
         self._recorder = recorder
         self._drakkar_app = app
         self._server: uvicorn.Server | None = None
-        self._task: asyncio.Task | None = None
+        self._thread: threading.Thread | None = None
 
     async def start(self) -> None:
         fastapi_app = create_debug_app(
@@ -479,15 +494,17 @@ class DebugServer:
             log_level='warning',
         )
         self._server = uvicorn.Server(uvi_config)
-        self._task = asyncio.create_task(self._server.serve())
+        self._thread = threading.Thread(
+            target=self._server.run,
+            name='drakkar-debug-ui',
+            daemon=True,
+        )
+        self._thread.start()
         await logger.ainfo('debug_server_started', category='debug', port=self._config.port)
 
     async def stop(self) -> None:
         if self._server:
             self._server.should_exit = True
-        if self._task:
-            try:
-                await asyncio.wait_for(self._task, timeout=5.0)
-            except (TimeoutError, asyncio.CancelledError):
-                pass
+        if self._thread:
+            self._thread.join(timeout=5.0)
         await logger.ainfo('debug_server_stopped', category='debug')

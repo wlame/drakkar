@@ -48,70 +48,28 @@
     </div>
 </div>
 
-<!-- Running tasks (executing subprocess now) -->
+<!-- Running tasks -->
 <details open class="mb-4">
     <summary class="text-lg font-semibold cursor-pointer select-none hover:text-white">
-        Running <span class="text-sm font-normal text-green-400">({{ running_tasks | length }})</span>
+        Running <span id="running-count" class="text-sm font-normal text-yellow-400">(0)</span>
     </summary>
     <table class="w-full text-sm mt-2">
         <thead>
             <tr class="text-left text-gray-400 border-b border-gray-700">
                 <th class="py-2 px-3">Task ID</th>
                 <th class="py-2 px-3">Partition</th>
-                <th class="py-2 px-3">Source Offsets</th>
+                <th class="py-2 px-3">Duration</th>
                 <th class="py-2 px-3">CLI Args</th>
             </tr>
         </thead>
-        <tbody>
-            {% for tid, t in running_tasks.items() %}
-            <tr class="border-b border-gray-800">
-                <td class="py-2 px-3 font-mono"><a href="/task/{{ tid }}" class="text-yellow-400 hover:underline">{{ tid }}</a></td>
-                <td class="py-2 px-3 font-mono">{{ t.partition }}</td>
-                <td class="py-2 px-3 font-mono text-xs">{{ t.source_offsets }}</td>
-                <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer" title="Click to expand">{{ t.args }}</td>
-            </tr>
-            {% endfor %}
-            {% if not running_tasks %}
-            <tr><td colspan="4" class="py-3 text-center text-gray-500">No tasks executing</td></tr>
-            {% endif %}
-        </tbody>
-    </table>
-</details>
-
-<!-- Pending tasks (waiting for semaphore slot) -->
-<details class="mb-4">
-    <summary class="text-lg font-semibold cursor-pointer select-none hover:text-white">
-        Pending <span class="text-sm font-normal text-yellow-400">({{ pending_tasks | length }})</span>
-    </summary>
-    <table class="w-full text-sm mt-2">
-        <thead>
-            <tr class="text-left text-gray-400 border-b border-gray-700">
-                <th class="py-2 px-3">Task ID</th>
-                <th class="py-2 px-3">Partition</th>
-                <th class="py-2 px-3">Source Offsets</th>
-                <th class="py-2 px-3">CLI Args</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for tid, t in pending_tasks.items() %}
-            <tr class="border-b border-gray-800">
-                <td class="py-2 px-3 font-mono"><a href="/task/{{ tid }}" class="text-orange-400 hover:underline">{{ tid }}</a></td>
-                <td class="py-2 px-3 font-mono">{{ t.partition }}</td>
-                <td class="py-2 px-3 font-mono text-xs">{{ t.source_offsets }}</td>
-                <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer" title="Click to expand">{{ t.args }}</td>
-            </tr>
-            {% endfor %}
-            {% if not pending_tasks %}
-            <tr><td colspan="4" class="py-3 text-center text-gray-500">No tasks waiting</td></tr>
-            {% endif %}
-        </tbody>
+        <tbody id="running-body"></tbody>
     </table>
 </details>
 
 <!-- Recently finished tasks -->
 <details class="mb-4">
     <summary class="text-lg font-semibold cursor-pointer select-none hover:text-white">
-        Finished <span class="text-sm font-normal text-gray-400">({{ recent_finished | length }})</span>
+        Finished <span id="finished-count" class="text-sm font-normal text-gray-400">(0)</span>
     </summary>
     <table class="w-full text-sm mt-2">
         <thead>
@@ -120,109 +78,62 @@
                 <th class="py-2 px-3">Partition</th>
                 <th class="py-2 px-3">Status</th>
                 <th class="py-2 px-3">Duration</th>
-                <th class="py-2 px-3">Exit</th>
                 <th class="py-2 px-3">Time</th>
                 <th class="py-2 px-3">CLI Args</th>
             </tr>
         </thead>
-        <tbody>
-            {% for e in recent_finished %}
-            <tr class="border-b border-gray-800">
-                <td class="py-2 px-3 font-mono text-xs">
-                    {% if e.task_id %}<a href="/task/{{ e.task_id }}" class="hover:underline {% if e.event == 'task_completed' %}text-green-400{% else %}text-red-400{% endif %}">{{ e.task_id }}</a>{% endif %}
-                </td>
-                <td class="py-2 px-3 font-mono">{{ e.partition }}</td>
-                <td class="py-2 px-3 {% if e.event == 'task_completed' %}text-green-400{% else %}text-red-400{% endif %}">
-                    {{ 'completed' if e.event == 'task_completed' else 'failed' }}
-                </td>
-                <td class="py-2 px-3 font-mono">{% if e.duration is not none %}{{ "%.2f"|format(e.duration) }}s{% endif %}</td>
-                <td class="py-2 px-3 font-mono {% if e.exit_code is not none and e.exit_code != 0 %}text-red-400{% endif %}">
-                    {{ e.exit_code if e.exit_code is not none else '' }}
-                </td>
-                <td class="py-2 px-3 text-gray-400 text-xs" title="{{ format_ts_ms(e.ts) }}">{{ format_ts(e.ts) }}</td>
-                <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer" title="Click to expand">{{ e.args or '' }}</td>
-            </tr>
-            {% endfor %}
-            {% if not recent_finished %}
-            <tr><td colspan="7" class="py-3 text-center text-gray-500">No recently finished tasks</td></tr>
-            {% endif %}
-        </tbody>
+        <tbody id="finished-body"></tbody>
     </table>
 </details>
 
 <script>
+// --- Unified timeline: single task model, periodic re-render ---
 let zoomLevel = 2;
 const TIMELINE_MINUTES = 10;
 const LANE_H = 22;
 const LANE_GAP = 2;
-const BASE_PX_PER_SEC = 8; // pixels per second at 1x zoom
+const BASE_PX_PER_SEC = 8;
+const MAX_LANES = {{ pool_max }};
 
-function zoomIn() {
-    zoomLevel = Math.min(zoomLevel * 2, 64);
-    document.getElementById('zoom-label').textContent = zoomLevel + 'x';
-    loadTimeline();
-}
-function zoomOut() {
-    zoomLevel = Math.max(zoomLevel / 2, 0.25);
-    document.getElementById('zoom-label').textContent = zoomLevel + 'x';
-    loadTimeline();
-}
-function zoomReset() {
-    zoomLevel = 2;
-    document.getElementById('zoom-label').textContent = '2x';
-    loadTimeline();
-}
-function scrollToEnd() {
-    const vp = document.getElementById('tl-viewport');
-    vp.scrollLeft = vp.scrollWidth;
-}
+const allTasks = {};  // task_id -> {task_id, partition, pid, start_ts, end_ts, status, args, duration}
+let hoveredTask = null;
 
-function barColor(status) {
-    if (status === 'completed') return '#22c55e';
-    if (status === 'failed') return '#ef4444';
-    return '#eab308';
-}
+function zoomIn() { zoomLevel = Math.min(zoomLevel * 2, 64); document.getElementById('zoom-label').textContent = zoomLevel + 'x'; }
+function zoomOut() { zoomLevel = Math.max(zoomLevel / 2, 0.25); document.getElementById('zoom-label').textContent = zoomLevel + 'x'; }
+function zoomReset() { zoomLevel = 2; document.getElementById('zoom-label').textContent = '2x'; }
+function scrollToEnd() { const vp = document.getElementById('tl-viewport'); vp.scrollLeft = vp.scrollWidth; }
 
-function statusColor(status) {
-    if (status === 'completed') return 'color:#22c55e';
-    if (status === 'failed') return 'color:#ef4444';
-    return 'color:#eab308';
-}
+function barColor(s) { return s === 'completed' ? '#22c55e' : s === 'failed' ? '#ef4444' : '#eab308'; }
+function statusCss(s) { return s === 'completed' ? 'color:#22c55e' : s === 'failed' ? 'color:#ef4444' : 'color:#eab308'; }
+function fmtTime(ts) { return new Date(ts * 1000).toISOString().substring(11, 19); }
+function fmtTimeMs(ts) { return ts ? new Date(ts * 1000).toISOString().substring(11, 23) : ''; }
 
 function showTaskDetail(t) {
+    hoveredTask = t;
     const el = document.getElementById('tl-hover');
-    const dur = t.duration ? t.duration.toFixed(3) + 's' : 'running';
-    const start = fmtTimeMs(t.start_ts) || '-';
-    const end = t.end_ts ? fmtTimeMs(t.end_ts) : 'running';
-    const pid = t.pid ? t.pid : '-';
-    const args = t.args || '-';
-
     el.textContent = '';
+    const dur = t.duration ? t.duration.toFixed(3) + 's' : 'running';
     const parts = [
-        {label: 'Task', value: t.task_id, style: ''},
-        {label: 'PID', value: pid, style: ''},
-        {label: 'P', value: t.partition, style: ''},
-        {label: 'Status', value: t.status, style: statusColor(t.status)},
-        {label: 'Duration', value: dur, style: ''},
-        {label: 'Start', value: start, style: ''},
-        {label: 'End', value: end, style: ''},
-        {label: 'CLI', value: args, style: 'color:#9ca3af'},
+        {l:'Task', v:t.task_id}, {l:'PID', v:t.pid||'-'}, {l:'P', v:t.partition},
+        {l:'Status', v:t.status, s:statusCss(t.status)}, {l:'Duration', v:dur},
+        {l:'Start', v:fmtTimeMs(t.start_ts)}, {l:'End', v:t.end_ts ? fmtTimeMs(t.end_ts) : 'running'},
+        {l:'CLI', v:t.args||'-', s:'color:#9ca3af'},
     ];
     for (const p of parts) {
         const lbl = document.createElement('span');
         lbl.style.cssText = 'color:#6b7280;margin-right:2px;';
-        lbl.textContent = p.label + ':';
+        lbl.textContent = p.l + ':';
         el.appendChild(lbl);
-
         const val = document.createElement('span');
-        if (p.style) val.style.cssText = p.style;
+        if (p.s) val.style.cssText = p.s;
         val.style.marginRight = '12px';
-        val.textContent = p.value;
+        val.textContent = p.v;
         el.appendChild(val);
     }
 }
 
 function clearTaskDetail() {
+    hoveredTask = null;
     const el = document.getElementById('tl-hover');
     el.textContent = '';
     const hint = document.createElement('span');
@@ -231,248 +142,249 @@ function clearTaskDetail() {
     el.appendChild(hint);
 }
 
-function fmtTime(ts) {
-    const d = new Date(ts * 1000);
-    return d.toISOString().substring(11, 19);
-}
-function fmtTimeMs(ts) {
-    if (!ts) return '';
-    const d = new Date(ts * 1000);
-    return d.toISOString().substring(11, 23);
-}
-
-async function loadTimeline() {
-    const minutes = TIMELINE_MINUTES;
-    try {
-        const r = await fetch('/api/recent-tasks?minutes=' + minutes);
-        const data = await r.json();
-        const tasks = data.tasks || [];
-        const laneCount = Math.max(data.lane_count || 1, 1);
-
-        const pxPerSec = BASE_PX_PER_SEC * zoomLevel;
-        const totalSeconds = minutes * 60;
-        const totalWidth = Math.max(totalSeconds * pxPerSec, 600);
-
-        const inner = document.getElementById('tl-inner');
-        inner.style.width = totalWidth + 'px';
-
-        const lanesDiv = document.getElementById('tl-lanes');
-        lanesDiv.replaceChildren();
-        lanesDiv.style.height = (laneCount * (LANE_H + LANE_GAP)) + 'px';
-
-        // lane background stripes + labels
-        for (let i = 0; i < laneCount; i++) {
-            const y = i * (LANE_H + LANE_GAP);
-            // stripe
-            if (i % 2 === 0) {
-                const stripe = document.createElement('div');
-                stripe.style.cssText = 'position:absolute;left:0;width:100%;background:rgba(255,255,255,0.02);';
-                stripe.style.top = y + 'px';
-                stripe.style.height = LANE_H + 'px';
-                lanesDiv.appendChild(stripe);
-            }
-            // label
-            const label = document.createElement('div');
-            label.style.cssText = 'position:absolute;left:2px;font-size:10px;color:#4b5563;font-family:monospace;';
-            label.style.top = y + 'px';
-            label.style.lineHeight = LANE_H + 'px';
-            label.textContent = '#' + i;
-            lanesDiv.appendChild(label);
-        }
-
-        // time axis ticks
-        const axis = document.getElementById('tl-axis');
-        axis.replaceChildren();
-        axis.style.width = totalWidth + 'px';
-        // determine tick interval based on zoom
-        let tickInterval = 30; // seconds
-        if (pxPerSec >= 16) tickInterval = 10;
-        if (pxPerSec >= 32) tickInterval = 5;
-        if (pxPerSec < 4) tickInterval = 60;
-        if (pxPerSec < 1) tickInterval = 120;
-
-        const now = Date.now() / 1000;
-        const timelineStart = now - totalSeconds;
-        for (let t = Math.ceil(timelineStart / tickInterval) * tickInterval; t <= now; t += tickInterval) {
-            const x = (t - timelineStart) * pxPerSec;
-            // tick line
-            const line = document.createElement('div');
-            line.style.cssText = 'position:absolute;top:0;width:1px;height:100%;background:#374151;';
-            line.style.left = x + 'px';
-            axis.appendChild(line);
-            // vertical guide line through lanes
-            const guide = document.createElement('div');
-            guide.style.cssText = 'position:absolute;width:1px;background:rgba(55,65,81,0.5);pointer-events:none;';
-            guide.style.left = x + 'px';
-            guide.style.top = '0';
-            guide.style.height = '100%';
-            lanesDiv.appendChild(guide);
-            // label
-            const lbl = document.createElement('div');
-            lbl.style.cssText = 'position:absolute;top:2px;font-size:9px;color:#6b7280;font-family:monospace;transform:translateX(-50%);';
-            lbl.style.left = x + 'px';
-            lbl.textContent = fmtTime(t);
-            axis.appendChild(lbl);
-        }
-
-        // task bars
-        for (const t of tasks) {
-            const startSec = (t.start_ts || now) - timelineStart;
-            const endSec = (t.end_ts || now) - timelineStart;
-            const x = Math.max(0, startSec * pxPerSec);
-            const w = Math.max(2, (endSec - startSec) * pxPerSec);
-            const y = t.lane * (LANE_H + LANE_GAP);
-
-            const bar = document.createElement('a');
-            bar.href = '/task/' + encodeURIComponent(t.task_id);
-            bar.style.cssText = 'position:absolute;border-radius:2px;cursor:pointer;border-left:1px solid rgba(0,0,0,0.4);border-right:1px solid rgba(0,0,0,0.4);';
-            bar.style.left = x + 'px';
-            bar.style.width = w + 'px';
-            bar.style.top = y + 'px';
-            bar.style.height = LANE_H + 'px';
-            bar.style.backgroundColor = barColor(t.status);
-            bar.title = '';
-            bar.addEventListener('mouseenter', () => showTaskDetail(t));
-            bar.addEventListener('mouseleave', clearTaskDetail);
-            lanesDiv.appendChild(bar);
-        }
-
-        if (!tasks.length) {
-            const empty = document.createElement('div');
-            empty.className = 'text-gray-500 text-center py-8 text-sm';
-            empty.textContent = 'No task activity in the selected window';
-            empty.style.width = '100%';
-            lanesDiv.appendChild(empty);
-        }
-    } catch(e) { console.error(e); }
-}
-
-// --- WebSocket live streaming ---
-const liveTasks = {};  // task_id -> {start_ts, end_ts, status, partition, pid, args, lane, barEl}
-const laneEndTimes = new Array({{ pool_max }}).fill(0);
-let wsConnected = false;
-
-function wsGetLane(startTs, endTs) {
-    let best = 0;
-    for (let i = 1; i < laneEndTimes.length; i++) {
-        if (laneEndTimes[i] < laneEndTimes[best]) best = i;
-    }
-    laneEndTimes[best] = endTs || (Date.now() / 1000);
-    return best;
-}
-
-function wsAddOrUpdateBar(t) {
-    const pxPerSec = BASE_PX_PER_SEC * zoomLevel;
+function renderTimeline() {
     const now = Date.now() / 1000;
-    const timelineStart = now - TIMELINE_MINUTES * 60;
+    const pxPerSec = BASE_PX_PER_SEC * zoomLevel;
+    const totalSeconds = TIMELINE_MINUTES * 60;
+    const totalWidth = Math.max(totalSeconds * pxPerSec, 600);
+    const timelineStart = now - totalSeconds;
+
+    const inner = document.getElementById('tl-inner');
+    const axis = document.getElementById('tl-axis');
     const lanesDiv = document.getElementById('tl-lanes');
-    if (!lanesDiv) return;
+    if (!inner || !axis || !lanesDiv) return;
 
-    const startSec = (t.start_ts || now) - timelineStart;
-    const endSec = (t.end_ts || now) - timelineStart;
-    const x = Math.max(0, startSec * pxPerSec);
-    const w = Math.max(2, (endSec - startSec) * pxPerSec);
-    const y = t.lane * (LANE_H + LANE_GAP);
+    // compute lanes first: each task goes on the first lane where it doesn't overlap
+    const sorted = Object.values(allTasks).filter(t => t.start_ts).sort((a, b) => a.start_ts - b.start_ts);
+    const renderLanes = []; // renderLanes[i] = end time of last task on lane i
+    for (const t of sorted) {
+        const endTs = t.end_ts || now;
+        let placed = false;
+        for (let i = 0; i < renderLanes.length; i++) {
+            if (renderLanes[i] <= t.start_ts) {
+                t.lane = i;
+                renderLanes[i] = endTs;
+                placed = true;
+                break;
+            }
+        }
+        if (!placed) {
+            t.lane = renderLanes.length;
+            renderLanes.push(endTs);
+        }
+    }
+    const laneCount = Math.max(renderLanes.length, 1);
 
-    if (t.barEl) {
-        // update existing bar
-        t.barEl.style.left = x + 'px';
-        t.barEl.style.width = w + 'px';
-        t.barEl.style.backgroundColor = barColor(t.status);
-    } else {
-        // create new bar
+    inner.style.width = totalWidth + 'px';
+    axis.replaceChildren();
+    axis.style.width = totalWidth + 'px';
+    lanesDiv.replaceChildren();
+    lanesDiv.style.height = (laneCount * (LANE_H + LANE_GAP)) + 'px';
+
+    // lane stripes + labels
+    for (let i = 0; i < laneCount; i++) {
+        const y = i * (LANE_H + LANE_GAP);
+        if (i % 2 === 0) {
+            const stripe = document.createElement('div');
+            stripe.style.cssText = 'position:absolute;left:0;width:100%;background:rgba(255,255,255,0.02);';
+            stripe.style.top = y + 'px'; stripe.style.height = LANE_H + 'px';
+            lanesDiv.appendChild(stripe);
+        }
+        const label = document.createElement('div');
+        label.style.cssText = 'position:absolute;left:2px;font-size:10px;color:#4b5563;font-family:monospace;';
+        label.style.top = y + 'px'; label.style.lineHeight = LANE_H + 'px';
+        label.textContent = '#' + i;
+        lanesDiv.appendChild(label);
+    }
+
+    // time axis ticks
+    let tick = 30;
+    if (pxPerSec >= 16) tick = 10;
+    if (pxPerSec >= 32) tick = 5;
+    if (pxPerSec < 4) tick = 60;
+    if (pxPerSec < 1) tick = 120;
+    for (let t = Math.ceil(timelineStart / tick) * tick; t <= now; t += tick) {
+        const x = (t - timelineStart) * pxPerSec;
+        const line = document.createElement('div');
+        line.style.cssText = 'position:absolute;top:0;width:1px;height:100%;background:#374151;';
+        line.style.left = x + 'px';
+        axis.appendChild(line);
+        const guide = document.createElement('div');
+        guide.style.cssText = 'position:absolute;width:1px;background:rgba(55,65,81,0.5);pointer-events:none;';
+        guide.style.left = x + 'px'; guide.style.top = '0'; guide.style.height = '100%';
+        lanesDiv.appendChild(guide);
+        const lbl = document.createElement('div');
+        lbl.style.cssText = 'position:absolute;top:2px;font-size:9px;color:#6b7280;font-family:monospace;transform:translateX(-50%);';
+        lbl.style.left = x + 'px';
+        lbl.textContent = fmtTime(t);
+        axis.appendChild(lbl);
+    }
+
+    // draw task bars
+    for (const t of sorted) {
+        const endTs = t.end_ts || now;
+        const x = Math.max(0, (t.start_ts - timelineStart) * pxPerSec);
+        const w = Math.max(2, (endTs - t.start_ts) * pxPerSec);
+        if (x + w < 0 || x > totalWidth) continue;
+        const y = t.lane * (LANE_H + LANE_GAP);
+
         const bar = document.createElement('a');
         bar.href = '/task/' + encodeURIComponent(t.task_id);
         bar.style.cssText = 'position:absolute;border-radius:2px;cursor:pointer;border-left:1px solid rgba(0,0,0,0.4);border-right:1px solid rgba(0,0,0,0.4);';
-        bar.style.left = x + 'px';
-        bar.style.width = w + 'px';
-        bar.style.top = y + 'px';
-        bar.style.height = LANE_H + 'px';
+        bar.style.left = x + 'px'; bar.style.width = w + 'px';
+        bar.style.top = y + 'px'; bar.style.height = LANE_H + 'px';
         bar.style.backgroundColor = barColor(t.status);
         bar.addEventListener('mouseenter', () => showTaskDetail(t));
         bar.addEventListener('mouseleave', clearTaskDetail);
         lanesDiv.appendChild(bar);
-        t.barEl = bar;
     }
 }
 
-function updateRunningBars() {
-    // grow yellow bars for still-running tasks
-    for (const t of Object.values(liveTasks)) {
-        if (t.status === 'running' && t.barEl) {
-            wsAddOrUpdateBar(t);
+// --- Load initial data from API ---
+async function loadInitial() {
+    try {
+        const r = await fetch('/api/recent-tasks?minutes=' + TIMELINE_MINUTES);
+        const data = await r.json();
+        for (const t of (data.tasks || [])) {
+            allTasks[t.task_id] = t;
         }
-    }
+    } catch(e) {}
+    renderTimeline();
+    scrollToEnd();
 }
 
-function wsUpdateTaskLists() {
-    const runBody = document.getElementById('ws-running');
-    const pendBody = document.getElementById('ws-pending');
-    const finBody = document.getElementById('ws-finished');
-    if (!runBody) return;
-
-    // count by status
-    const running = [], finished = [];
-    for (const t of Object.values(liveTasks)) {
-        if (t.status === 'running') running.push(t);
-        else finished.push(t);
-    }
-    finished.sort((a, b) => (b.end_ts || 0) - (a.end_ts || 0));
-
-    // update running count
-    const runCount = document.getElementById('ws-running-count');
-    if (runCount) runCount.textContent = '(' + running.length + ')';
-    const finCount = document.getElementById('ws-finished-count');
-    if (finCount) finCount.textContent = '(' + finished.length + ')';
-}
-
+// --- WebSocket for live updates ---
 function connectWS() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(proto + '//' + location.host + '/ws');
-
     ws.onopen = () => {
-        wsConnected = true;
-        const badge = document.getElementById('ws-badge');
-        if (badge) { badge.textContent = 'WS: connected'; badge.style.background = '#166534'; }
+        const b = document.getElementById('ws-badge');
+        if (b) { b.textContent = 'WS: connected'; b.style.background = '#166534'; }
     };
     ws.onclose = () => {
-        wsConnected = false;
-        const badge = document.getElementById('ws-badge');
-        if (badge) { badge.textContent = 'WS: disconnected'; badge.style.background = '#991b1b'; }
-        setTimeout(connectWS, 3000); // reconnect
+        const b = document.getElementById('ws-badge');
+        if (b) { b.textContent = 'WS: disconnected'; b.style.background = '#991b1b'; }
+        setTimeout(connectWS, 3000);
     };
     ws.onmessage = (msg) => {
         try {
             const e = JSON.parse(msg.data);
             if (e.event === 'task_started') {
-                const lane = wsGetLane(e.ts, null);
-                liveTasks[e.task_id] = {
+                allTasks[e.task_id] = {
                     task_id: e.task_id, partition: e.partition, pid: e.pid,
                     start_ts: e.ts, end_ts: null, status: 'running',
-                    args: e.args, lane: lane, barEl: null, duration: null,
+                    args: e.args, duration: null,
                 };
-                wsAddOrUpdateBar(liveTasks[e.task_id]);
-                wsUpdateTaskLists();
             } else if (e.event === 'task_completed' || e.event === 'task_failed') {
-                const t = liveTasks[e.task_id];
+                const t = allTasks[e.task_id];
                 if (t) {
                     t.end_ts = e.ts;
                     t.status = e.event === 'task_completed' ? 'completed' : 'failed';
                     t.duration = e.duration;
                     t.pid = e.pid || t.pid;
-                    laneEndTimes[t.lane] = e.ts;
-                    wsAddOrUpdateBar(t);
-                    wsUpdateTaskLists();
                 }
             }
         } catch(err) {}
     };
 }
 
-// initial load from API, then connect WS for live updates
-loadTimeline().then(scrollToEnd);
+function renderTaskLists() {
+    const now = Date.now() / 1000;
+    const running = [];
+    const finished = [];
+    for (const t of Object.values(allTasks)) {
+        if (t.status === 'running') running.push(t);
+        else if (t.status === 'completed' || t.status === 'failed') finished.push(t);
+    }
+    finished.sort((a, b) => (b.end_ts || 0) - (a.end_ts || 0));
+
+    // running list
+    const rc = document.getElementById('running-count');
+    const rb = document.getElementById('running-body');
+    if (rc) rc.textContent = '(' + running.length + ')';
+    if (rb) {
+        rb.replaceChildren();
+        for (const t of running) {
+            const tr = document.createElement('tr');
+            tr.className = 'border-b border-gray-800';
+            const td1 = document.createElement('td');
+            td1.className = 'py-2 px-3 font-mono';
+            const a1 = document.createElement('a');
+            a1.href = '/task/' + encodeURIComponent(t.task_id);
+            a1.className = 'text-yellow-400 hover:underline';
+            a1.textContent = t.task_id;
+            td1.appendChild(a1);
+            const td2 = document.createElement('td');
+            td2.className = 'py-2 px-3 font-mono';
+            td2.textContent = t.partition;
+            const td3 = document.createElement('td');
+            td3.className = 'py-2 px-3 font-mono';
+            td3.textContent = (now - t.start_ts).toFixed(1) + 's';
+            const td4 = document.createElement('td');
+            td4.className = 'py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer';
+            td4.title = 'Click to expand';
+            td4.textContent = t.args || '';
+            tr.append(td1, td2, td3, td4);
+            rb.appendChild(tr);
+        }
+        if (!running.length) {
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = 4; td.className = 'py-3 text-center text-gray-500';
+            td.textContent = 'No tasks running';
+            tr.appendChild(td); rb.appendChild(tr);
+        }
+    }
+
+    // finished list (cap at 5000)
+    const fc = document.getElementById('finished-count');
+    const fb = document.getElementById('finished-body');
+    if (fc) fc.textContent = '(' + finished.length + ')';
+    if (fb) {
+        fb.replaceChildren();
+        const show = finished.slice(0, 5000);
+        for (const t of show) {
+            const tr = document.createElement('tr');
+            tr.className = 'border-b border-gray-800';
+            const td1 = document.createElement('td');
+            td1.className = 'py-2 px-3 font-mono text-xs';
+            const a1 = document.createElement('a');
+            a1.href = '/task/' + encodeURIComponent(t.task_id);
+            a1.className = 'hover:underline ' + (t.status === 'completed' ? 'text-green-400' : 'text-red-400');
+            a1.textContent = t.task_id;
+            td1.appendChild(a1);
+            const td2 = document.createElement('td');
+            td2.className = 'py-2 px-3 font-mono';
+            td2.textContent = t.partition;
+            const td3 = document.createElement('td');
+            td3.className = 'py-2 px-3 ' + (t.status === 'completed' ? 'text-green-400' : 'text-red-400');
+            td3.textContent = t.status;
+            const td4 = document.createElement('td');
+            td4.className = 'py-2 px-3 font-mono';
+            td4.textContent = t.duration ? t.duration.toFixed(2) + 's' : '';
+            const td5 = document.createElement('td');
+            td5.className = 'py-2 px-3 text-gray-400 text-xs';
+            td5.textContent = t.end_ts ? fmtTimeMs(t.end_ts) : '';
+            const td6 = document.createElement('td');
+            td6.className = 'py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer';
+            td6.title = 'Click to expand';
+            td6.textContent = t.args || '';
+            tr.append(td1, td2, td3, td4, td5, td6);
+            fb.appendChild(tr);
+        }
+        if (!show.length) {
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = 6; td.className = 'py-3 text-center text-gray-500';
+            td.textContent = 'No finished tasks';
+            tr.appendChild(td); fb.appendChild(tr);
+        }
+    }
+}
+
+// boot: load history, connect WS, start render loop
+loadInitial();
 connectWS();
-// grow running bars every 500ms
-setInterval(updateRunningBars, 500);
+setInterval(() => { renderTimeline(); renderTaskLists(); }, 500);
 </script>
 {% endblock %}

@@ -195,22 +195,17 @@ async def test_partitions_page_with_live_processors(debug_config, mock_recorder,
     assert resp.status_code == 200
 
 
-async def test_executors_page_with_live_tasks(debug_config, mock_recorder, mock_app):
-    """Executors page shows live in-memory tasks from processors."""
-    proc = MagicMock()
-    proc.partition_id = 0
-    task = MagicMock()
-    task.args = ['--test']
-    task.source_offsets = [10]
-    proc._pending_tasks = {'live-t1': task}
-    mock_app.processors = {0: proc}
-
+async def test_executors_page_has_ws_and_js_targets(debug_config, mock_recorder, mock_app):
+    """Executors page has JS target elements and WebSocket connection code."""
     fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/executors')
     assert resp.status_code == 200
-    assert 'live-t1' in resp.text
+    assert 'running-body' in resp.text
+    assert 'finished-body' in resp.text
+    assert 'allTasks' in resp.text
+    assert '/ws' in resp.text
 
 
 # --- WebSocket tests ---

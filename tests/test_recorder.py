@@ -457,9 +457,9 @@ async def test_broadcast_drops_on_full_queue(tmp_path):
     rec = EventRecorder(config)
     await rec.start()
 
-    import asyncio
+    import queue as queue_mod
 
-    q = asyncio.Queue(maxsize=2)
+    q = queue_mod.Queue(maxsize=2)
     rec._ws_subscribers.add(q)
 
     # fill the queue

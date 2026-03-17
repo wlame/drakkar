@@ -4,6 +4,7 @@ import asyncio
 import glob
 import json
 import os
+import queue
 import time
 from collections import deque
 from datetime import UTC, datetime
@@ -85,7 +86,7 @@ class EventRecorder:
         self._flush_task: asyncio.Task | None = None
         self._retention_task: asyncio.Task | None = None
         self._running = False
-        self._ws_subscribers: set[asyncio.Queue] = set()
+        self._ws_subscribers: set[queue.Queue] = set()
 
     @property
     def db_path(self) -> str:
@@ -101,13 +102,13 @@ class EventRecorder:
         self._retention_task = asyncio.create_task(self._retention_loop())
         await logger.ainfo('recorder_started', category='recorder', db_path=self._db_path)
 
-    def subscribe(self) -> asyncio.Queue:
-        """Subscribe to live event stream. Returns a queue that receives events."""
-        q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+    def subscribe(self) -> queue.Queue:
+        """Subscribe to live event stream. Returns a thread-safe queue."""
+        q: queue.Queue = queue.Queue(maxsize=1000)
         self._ws_subscribers.add(q)
         return q
 
-    def unsubscribe(self, q: asyncio.Queue) -> None:
+    def unsubscribe(self, q: queue.Queue) -> None:
         """Unsubscribe from live event stream."""
         self._ws_subscribers.discard(q)
 
@@ -118,7 +119,7 @@ class EventRecorder:
             for q in self._ws_subscribers:
                 try:
                     q.put_nowait(event)
-                except asyncio.QueueFull:
+                except queue.Full:
                     pass
 
     async def stop(self) -> None:
