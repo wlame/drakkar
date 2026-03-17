@@ -143,6 +143,11 @@ def main():
     producer = Producer({"bootstrap.servers": BROKERS})
     sent = 0
 
+    # Phase 0: slow drip — 10 messages, one every 5 seconds
+    print("Phase 0: slow drip — 10 msgs, one every 5 sec", flush=True)
+    send_steady(producer, 10, rate=0.2, label="drip")
+    sent += 10
+
     # Phase 1: warm-up
     phase1 = min(500, TOTAL_MESSAGES - sent)
     print(f"Phase 1: warm-up — {phase1} msgs at 15/sec", flush=True)
