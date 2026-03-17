@@ -390,3 +390,54 @@ async def test_collect_exception_does_not_stall_window(echo_pool):
     await proc.stop()
 
     assert any(c[1] == 1 for c in committed)
+
+
+# --- Queued message must not be lost on drain ---
+
+
+async def test_drain_waits_for_queued_messages(echo_pool):
+    """drain() must wait for messages in the queue to be processed,
+    not just in-flight tasks. A message enqueued but not yet dequeued
+    by the processor must still get committed.
+    (Reproduces: one partition lag=1 per worker after all work is done)
+    """
+    committed: list[tuple[int, int]] = []
+
+    class SimpleHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f'dq-{m.offset}',
+                    args=['ok'],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=SimpleHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=on_commit,
+    )
+
+    # start the processor, let it enter _collect_window
+    proc.start()
+    await asyncio.sleep(0.1)
+
+    # enqueue messages — they go into the queue
+    proc.enqueue(make_msg(offset=50))
+    proc.enqueue(make_msg(offset=51))
+    proc.enqueue(make_msg(offset=52))
+
+    # immediately signal stop and drain
+    proc._running = False
+    await asyncio.wait_for(proc.drain(), timeout=5.0)
+
+    # the queued messages should have been processed and committed
+    assert proc.queue_size == 0
+    assert any(c[1] == 53 for c in committed), f'Expected commit of 53, got: {committed}'

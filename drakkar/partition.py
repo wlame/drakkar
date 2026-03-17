@@ -133,8 +133,12 @@ class PartitionProcessor:
             self._task = None
 
     async def drain(self) -> None:
-        """Wait for all in-flight work to complete."""
-        while self._offset_tracker.has_pending() or self._inflight_count > 0:
+        """Wait for all in-flight work and queued messages to complete."""
+        while (
+            self._queue.qsize() > 0
+            or self._offset_tracker.has_pending()
+            or self._inflight_count > 0
+        ):
             await asyncio.sleep(0.05)
 
     async def _run(self) -> None:
@@ -148,6 +152,17 @@ class PartitionProcessor:
                     continue
 
                 await self._process_window(messages)
+
+            # drain remaining queued messages after _running becomes False
+            while self._queue.qsize() > 0:
+                messages = []
+                while not self._queue.empty():
+                    try:
+                        messages.append(self._queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+                if messages:
+                    await self._process_window(messages)
         except asyncio.CancelledError:
             await log.ainfo('partition_processor_cancelled')
         except Exception as e:
