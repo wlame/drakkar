@@ -4,32 +4,29 @@
 
 {% block content %}
 <div class="flex items-center gap-3 mb-1">
-    <h1 class="text-2xl font-bold">Live Pipeline</h1>
-    <span id="ws-badge" class="text-xs px-2 py-0.5 rounded" style="background:#991b1b;color:#fca5a5;">WS: connecting</span>
-    <span class="text-gray-400 text-sm ml-auto">Pool: <span id="v-pool">{{ pool_active }} / {{ pool_max }}</span> slots, <span id="v-waiting" style="color:#eab308;">{{ pool_waiting }}</span> waiting</span>
+    <h1 class="text-2xl font-bold text-ink-900">Live Pipeline</h1>
+    <span id="ws-badge" class="text-xs px-2 py-0.5 rounded" style="background:#fecaca;color:#991b1b;border:1px solid #fca5a5;">WS: connecting</span>
+    <span id="freeze-toggle" class="text-xs px-2 py-0.5 rounded cursor-pointer select-none" style="background:#f5f3ee;color:#6b7280;border:1px solid #ddd9ce;" onclick="toggleFreeze()">Live</span>
+    <span class="text-gray-500 text-sm ml-auto">Pool: <span id="v-pool">{{ pool_active }} / {{ pool_max }}</span> slots, <span id="v-waiting" style="color:#b45309;">{{ pool_waiting }}</span> waiting</span>
 </div>
-<p id="tab-hint" class="text-xs text-gray-500 mb-3" style="line-height:1.4;"></p>
+<p id="tab-hint" class="text-xs text-gray-400 mb-3" style="line-height:1.4;"></p>
 
 <!-- Tab bar -->
-<div class="flex border-b border-gray-700 mb-4" id="tab-bar">
-    <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="arrange" style="color:#9ca3af;border-bottom:2px solid transparent;">Arrange</button>
-    <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="execute" style="color:#9ca3af;border-bottom:2px solid transparent;">Executors</button>
-    <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="collect" style="color:#9ca3af;border-bottom:2px solid transparent;">Collect</button>
-    <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="trace" style="color:#9ca3af;border-bottom:2px solid transparent;">Trace</button>
+<div class="flex border-b border-cream-200 mb-4" id="tab-bar">
+    <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="arrange" style="color:#6b7280;border-bottom:2px solid transparent;">Arrange</button>
+    <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="execute" style="color:#6b7280;border-bottom:2px solid transparent;">Executors</button>
+    <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="collect" style="color:#6b7280;border-bottom:2px solid transparent;">Collect</button>
+    <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="trace" style="color:#6b7280;border-bottom:2px solid transparent;">Trace</button>
 </div>
 
 <!-- ==================== ARRANGE TAB ==================== -->
 <div class="tab-panel" id="panel-arrange" style="display:none;">
-    <p class="text-gray-400 text-sm mb-3">Recent arrange() calls <span id="arrange-total" class="text-cyan-400"></span></p>
+    <p class="text-gray-500 text-sm mb-3">Recent arrange() calls <span id="arrange-total" class="text-teal-600"></span></p>
     <table class="w-full text-sm">
         <thead>
-            <tr class="text-left text-gray-400 border-b border-gray-700">
-                <th class="py-2 px-3">Partition</th>
-                <th class="py-2 px-3">Messages</th>
-                <th class="py-2 px-3">Tasks</th>
-                <th class="py-2 px-3">Duration</th>
-                <th class="py-2 px-3">Time</th>
-                <th class="py-2 px-3">Message Labels</th>
+            <tr class="text-left text-gray-400 border-b border-cream-200">
+                <th class="py-2 px-3">Partition</th><th class="py-2 px-3">Messages</th><th class="py-2 px-3">Tasks</th>
+                <th class="py-2 px-3">Duration</th><th class="py-2 px-3">Time</th><th class="py-2 px-3">Message Labels</th>
             </tr>
         </thead>
         <tbody id="arrange-body"></tbody>
@@ -38,57 +35,57 @@
 
 <!-- ==================== EXECUTORS TAB ==================== -->
 <div class="tab-panel" id="panel-execute" style="display:none;">
-    <div class="w-full bg-gray-700 rounded-full h-3 mb-4">
+    <div class="w-full bg-cream-200 rounded-full h-3 mb-4">
         {% set pct = (pool_active / pool_max * 100) if pool_max > 0 else 0 %}
-        <div id="v-pool-bar" class="h-3 rounded-full transition-all {% if pct > 80 %}bg-red-500{% elif pct > 50 %}bg-yellow-500{% else %}bg-green-500{% endif %}"
+        <div id="v-pool-bar" class="h-3 rounded-full transition-all {% if pct > 80 %}bg-red-400{% elif pct > 50 %}bg-amber-400{% else %}bg-emerald-400{% endif %}"
              style="width: {{ pct }}%"></div>
     </div>
 
-    <h2 class="text-lg font-semibold mb-2">Timeline <span class="text-sm font-normal text-gray-400">(last 10 min)</span></h2>
+    <h2 class="text-lg font-semibold mb-2 text-ink-800">Timeline <span class="text-sm font-normal text-gray-400">(last 10 min)</span></h2>
     <div class="flex items-center gap-3 mb-2">
         <div class="flex items-center gap-1">
             <label class="text-xs text-gray-400">Zoom:</label>
-            <button onclick="zoomIn()" class="bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-sm font-bold">+</button>
+            <button onclick="zoomIn()" class="bg-cream-200 hover:bg-cream-300 px-2 py-0.5 rounded text-sm font-bold">+</button>
             <span id="zoom-label" class="text-xs text-gray-400 w-10 text-center">2x</span>
-            <button onclick="zoomOut()" class="bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-sm font-bold">-</button>
-            <button onclick="zoomReset()" class="bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-xs ml-1">Reset</button>
+            <button onclick="zoomOut()" class="bg-cream-200 hover:bg-cream-300 px-2 py-0.5 rounded text-sm font-bold">-</button>
+            <button onclick="zoomReset()" class="bg-cream-200 hover:bg-cream-300 px-2 py-0.5 rounded text-xs ml-1">Reset</button>
         </div>
-        <button onclick="scrollToEnd()" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-xs">Now &rarr;</button>
+        <button onclick="scrollToEnd()" class="bg-cream-200 hover:bg-cream-300 px-2 py-1 rounded text-xs">Now &rarr;</button>
         <div class="text-xs text-gray-500 ml-auto">
-            <span class="inline-block w-3 h-3 bg-green-500 rounded mr-1"></span>completed
-            <span class="inline-block w-3 h-3 bg-yellow-500 rounded mr-1 ml-2"></span>running
-            <span class="inline-block w-3 h-3 bg-red-500 rounded mr-1 ml-2"></span>failed
+            <span class="inline-block w-3 h-3 rounded mr-1" style="background:#34d399;"></span>completed
+            <span class="inline-block w-3 h-3 rounded mr-1 ml-2" style="background:#fbbf24;"></span>running
+            <span class="inline-block w-3 h-3 rounded mr-1 ml-2" style="background:#f87171;"></span>failed
         </div>
     </div>
-    <div class="bg-gray-800 rounded-lg p-2 mb-6">
+    <div class="bg-white rounded-lg border border-cream-200 p-2 mb-6">
         <div id="tl-viewport" style="position:relative; overflow-x:scroll; overflow-y:hidden; scrollbar-width:none; -ms-overflow-style:none;">
             <div id="tl-inner" style="position:relative; min-height:100px;">
-                <div id="tl-axis" style="position:relative; height:18px; border-bottom:1px solid #374151;"></div>
+                <div id="tl-axis" style="position:relative; height:18px; border-bottom:1px solid #ddd9ce;"></div>
                 <div id="tl-lanes" style="position:relative;"></div>
             </div>
         </div>
-        <div id="tl-hover" class="bg-gray-900 border-t border-gray-700 px-3 py-2 text-xs font-mono text-gray-400" style="height:4.5em; overflow:hidden;">
-            <span class="text-gray-600">hover over a task bar to see details</span>
+        <div id="tl-hover" class="border-t border-cream-200 px-3 py-2 text-xs font-mono text-gray-500" style="height:4.5em; overflow:hidden; background:#f9f8f5;">
+            <span class="text-gray-400">hover over a task bar to see details</span>
         </div>
     </div>
 
     <details open class="mb-4">
-        <summary class="text-lg font-semibold cursor-pointer select-none hover:text-white">
-            Running <span id="running-count" class="text-sm font-normal text-yellow-400">(0)</span>
+        <summary class="text-lg font-semibold cursor-pointer select-none hover:text-ink-900">
+            Running <span id="running-count" class="text-sm font-normal text-amber-600">(0)</span>
         </summary>
         <table class="w-full text-sm mt-2">
-            <thead><tr class="text-left text-gray-400 border-b border-gray-700">
+            <thead><tr class="text-left text-gray-400 border-b border-cream-200">
                 <th class="py-2 px-3">Task ID</th><th class="py-2 px-3">Partition</th><th class="py-2 px-3">Duration</th><th class="py-2 px-3">CLI Args</th>
             </tr></thead>
             <tbody id="running-body"></tbody>
         </table>
     </details>
     <details class="mb-4">
-        <summary class="text-lg font-semibold cursor-pointer select-none hover:text-white">
+        <summary class="text-lg font-semibold cursor-pointer select-none hover:text-ink-900">
             Finished <span id="finished-count" class="text-sm font-normal text-gray-400">(0)</span>
         </summary>
         <table class="w-full text-sm mt-2">
-            <thead><tr class="text-left text-gray-400 border-b border-gray-700">
+            <thead><tr class="text-left text-gray-400 border-b border-cream-200">
                 <th class="py-2 px-3">Task ID</th><th class="py-2 px-3">Partition</th><th class="py-2 px-3">Status</th><th class="py-2 px-3">Duration</th><th class="py-2 px-3">Time</th><th class="py-2 px-3">CLI Args</th>
             </tr></thead>
             <tbody id="finished-body"></tbody>
@@ -98,15 +95,12 @@
 
 <!-- ==================== COLLECT TAB ==================== -->
 <div class="tab-panel" id="panel-collect" style="display:none;">
-    <p class="text-gray-400 text-sm mb-3">Recent collect() completions <span id="collect-total" class="text-purple-400"></span></p>
+    <p class="text-gray-500 text-sm mb-3">Recent collect() completions <span id="collect-total" class="text-purple-600"></span></p>
     <table class="w-full text-sm">
         <thead>
-            <tr class="text-left text-gray-400 border-b border-gray-700">
-                <th class="py-2 px-3">Task ID</th>
-                <th class="py-2 px-3">Partition</th>
-                <th class="py-2 px-3">Duration</th>
-                <th class="py-2 px-3">Output Messages</th>
-                <th class="py-2 px-3">Time</th>
+            <tr class="text-left text-gray-400 border-b border-cream-200">
+                <th class="py-2 px-3">Task ID</th><th class="py-2 px-3">Partition</th>
+                <th class="py-2 px-3">Duration</th><th class="py-2 px-3">Output Messages</th><th class="py-2 px-3">Time</th>
             </tr>
         </thead>
         <tbody id="collect-body"></tbody>
@@ -116,10 +110,10 @@
 <!-- ==================== TRACE TAB ==================== -->
 <div class="tab-panel" id="panel-trace" style="display:none;">
     <div class="flex items-center gap-3 mb-4">
-        <label class="text-sm text-gray-400">Partition:Offset</label>
-        <input id="trace-input" type="text" placeholder="e.g. 5:42" class="bg-gray-800 border border-gray-600 rounded px-3 py-1.5 text-sm font-mono text-white w-40 focus:border-cyan-500 focus:outline-none">
-        <button onclick="loadTrace()" class="bg-cyan-700 hover:bg-cyan-600 px-3 py-1.5 rounded text-sm">Trace</button>
-        <span id="trace-status" class="text-sm text-gray-500"></span>
+        <label class="text-sm text-gray-500">Partition:Offset</label>
+        <input id="trace-input" type="text" placeholder="e.g. 5:42" class="bg-white border border-cream-300 rounded px-3 py-1.5 text-sm font-mono text-ink-700 w-40 focus:border-teal-400 focus:outline-none">
+        <button onclick="loadTrace()" class="bg-teal-600 hover:bg-teal-500 text-white px-3 py-1.5 rounded text-sm">Trace</button>
+        <span id="trace-status" class="text-sm text-gray-400"></span>
     </div>
     <div id="trace-result"></div>
 </div>
@@ -136,12 +130,12 @@ var tabHints = {
 function switchTab(name) {
     document.querySelectorAll('.tab-panel').forEach(function(p) { p.style.display = 'none'; });
     document.querySelectorAll('.tab-btn').forEach(function(b) {
-        b.style.color = '#9ca3af'; b.style.borderBottom = '2px solid transparent';
+        b.style.color = '#6b7280'; b.style.borderBottom = '2px solid transparent';
     });
     var panel = document.getElementById('panel-' + name);
     var btn = document.querySelector('[data-tab="' + name + '"]');
     if (panel) panel.style.display = 'block';
-    if (btn) { btn.style.color = '#e5e7eb'; btn.style.borderBottom = '2px solid #06b6d4'; }
+    if (btn) { btn.style.color = '#1a1a1a'; btn.style.borderBottom = '2px solid #0d9488'; }
     var hint = document.getElementById('tab-hint');
     if (hint) hint.textContent = tabHints[name] || '';
     var hash = name === 'trace' && tracePartition !== null ? 'trace/' + tracePartition + '/' + traceOffset : name;
@@ -158,26 +152,37 @@ var TIMELINE_MINUTES = 10;
 var LANE_H = 22, LANE_GAP = 2, BASE_PX_PER_SEC = 8;
 var zoomLevel = 2;
 var hoveredTask = null;
+var frozen = false;
+
+function toggleFreeze() {
+    if (!frozen) {
+        frozen = true;
+        var btn = document.getElementById('freeze-toggle');
+        if (btn) { btn.textContent = 'Frozen'; btn.style.background = '#dbeafe'; btn.style.color = '#1e40af'; btn.style.border = '1px solid #93c5fd'; }
+    } else {
+        // unfreeze — reload to catch up with current live state
+        location.reload();
+    }
+}
 
 var allTasks = {};
 var recentArranges = [];
 var recentCollects = [];
-var MAX_HISTORY = 200;
+var MAX_HISTORY = {{ max_ui_rows }};
 var arrangeTotal = 0, collectTotal = 0;
 var tracePartition = null, traceOffset = null;
 
 // === Helpers ===
 function scrollToEnd() { var vp = document.getElementById('tl-viewport'); if (vp) vp.scrollLeft = vp.scrollWidth; }
 function autoScroll() {
-    // only auto-scroll if user is already near the right edge (within 200px)
     var vp = document.getElementById('tl-viewport');
     if (vp && vp.scrollWidth - vp.scrollLeft - vp.clientWidth < 200) vp.scrollLeft = vp.scrollWidth;
 }
 function fmtTime(ts) { return new Date(ts * 1000).toISOString().substring(11, 19); }
 function fmtTimeMs(ts) { return ts ? new Date(ts * 1000).toISOString().substring(11, 23) : ''; }
-function barColor(s) { return s === 'completed' ? '#22c55e' : s === 'failed' ? '#ef4444' : '#eab308'; }
-function statusCss(s) { return s === 'completed' ? 'color:#22c55e' : s === 'failed' ? 'color:#ef4444' : 'color:#eab308'; }
-function durColor(d) { return d > 1 ? '#ef4444' : d > 0.1 ? '#eab308' : '#22c55e'; }
+function barColor(s) { return s === 'completed' ? '#34d399' : s === 'failed' ? '#f87171' : '#fbbf24'; }
+function statusCss(s) { return s === 'completed' ? 'color:#059669' : s === 'failed' ? 'color:#dc2626' : 'color:#d97706'; }
+function durColor(d) { return d > 1 ? '#dc2626' : d > 0.1 ? '#d97706' : '#059669'; }
 function zoomIn() { zoomLevel = Math.min(zoomLevel * 2, 64); document.getElementById('zoom-label').textContent = zoomLevel + 'x'; }
 function zoomOut() { zoomLevel = Math.max(zoomLevel / 2, 0.25); document.getElementById('zoom-label').textContent = zoomLevel + 'x'; }
 function zoomReset() { zoomLevel = 2; document.getElementById('zoom-label').textContent = '2x'; }
@@ -203,7 +208,7 @@ function showTaskDetail(t) {
     for (var i = 0; i < line1.length; i++) {
         var p = line1[i];
         var lbl = document.createElement('span');
-        lbl.style.cssText = 'color:#6b7280;margin-right:2px;'; lbl.textContent = p.l + ':';
+        lbl.style.cssText = 'color:#9ca3af;margin-right:2px;'; lbl.textContent = p.l + ':';
         el.appendChild(lbl);
         var val = document.createElement('span');
         if (p.s) val.style.cssText = p.s;
@@ -212,10 +217,10 @@ function showTaskDetail(t) {
     }
     el.appendChild(document.createElement('br'));
     var cliLbl = document.createElement('span');
-    cliLbl.style.cssText = 'color:#6b7280;margin-right:2px;'; cliLbl.textContent = 'CLI:';
+    cliLbl.style.cssText = 'color:#9ca3af;margin-right:2px;'; cliLbl.textContent = 'CLI:';
     el.appendChild(cliLbl);
     var cliVal = document.createElement('span');
-    cliVal.style.color = '#9ca3af'; cliVal.textContent = t.args || '-';
+    cliVal.style.color = '#6b7280'; cliVal.textContent = t.args || '-';
     el.appendChild(cliVal);
 }
 function clearTaskDetail() {
@@ -223,7 +228,7 @@ function clearTaskDetail() {
     var el = document.getElementById('tl-hover');
     el.textContent = '';
     var hint = document.createElement('span');
-    hint.className = 'text-gray-600'; hint.textContent = 'hover over a task bar to see details';
+    hint.style.color = '#9ca3af'; hint.textContent = 'hover over a task bar to see details';
     el.appendChild(hint);
 }
 
@@ -241,9 +246,7 @@ function renderTimeline() {
     var sorted = Object.values(allTasks).filter(function(t) { return t.start_ts; }).sort(function(a, b) { return a.start_ts - b.start_ts; });
     var renderLanes = [];
     for (var si = 0; si < sorted.length; si++) {
-        var st = sorted[si];
-        var endTs = st.end_ts || now;
-        var placed = false;
+        var st = sorted[si]; var endTs = st.end_ts || now; var placed = false;
         for (var li = 0; li < renderLanes.length; li++) {
             if (renderLanes[li] <= st.start_ts) { st.lane = li; renderLanes[li] = endTs; placed = true; break; }
         }
@@ -260,12 +263,12 @@ function renderTimeline() {
         var y = i * (LANE_H + LANE_GAP);
         if (i % 2 === 0) {
             var stripe = document.createElement('div');
-            stripe.style.cssText = 'position:absolute;left:0;width:100%;background:rgba(255,255,255,0.02);';
+            stripe.style.cssText = 'position:absolute;left:0;width:100%;background:rgba(0,0,0,0.02);';
             stripe.style.top = y + 'px'; stripe.style.height = LANE_H + 'px';
             lanesDiv.appendChild(stripe);
         }
         var label = document.createElement('div');
-        label.style.cssText = 'position:absolute;left:2px;font-size:10px;color:#4b5563;font-family:monospace;';
+        label.style.cssText = 'position:absolute;left:2px;font-size:10px;color:#9ca3af;font-family:monospace;';
         label.style.top = y + 'px'; label.style.lineHeight = LANE_H + 'px';
         label.textContent = '#' + i;
         lanesDiv.appendChild(label);
@@ -277,28 +280,27 @@ function renderTimeline() {
     for (var t = Math.ceil(timelineStart / tick) * tick; t <= now; t += tick) {
         var x = (t - timelineStart) * pxPerSec;
         var line = document.createElement('div');
-        line.style.cssText = 'position:absolute;top:0;width:1px;height:100%;background:#374151;';
+        line.style.cssText = 'position:absolute;top:0;width:1px;height:100%;background:#e5e7eb;';
         line.style.left = x + 'px'; axis.appendChild(line);
         var guide = document.createElement('div');
-        guide.style.cssText = 'position:absolute;width:1px;background:rgba(55,65,81,0.5);pointer-events:none;';
+        guide.style.cssText = 'position:absolute;width:1px;background:rgba(0,0,0,0.04);pointer-events:none;';
         guide.style.left = x + 'px'; guide.style.top = '0'; guide.style.height = '100%';
         lanesDiv.appendChild(guide);
         var lbl = document.createElement('div');
-        lbl.style.cssText = 'position:absolute;top:2px;font-size:9px;color:#6b7280;font-family:monospace;transform:translateX(-50%);';
+        lbl.style.cssText = 'position:absolute;top:2px;font-size:9px;color:#9ca3af;font-family:monospace;transform:translateX(-50%);';
         lbl.style.left = x + 'px'; lbl.textContent = fmtTime(t);
         axis.appendChild(lbl);
     }
 
     for (var ti = 0; ti < sorted.length; ti++) {
-        var tt = sorted[ti];
-        var eTs = tt.end_ts || now;
+        var tt = sorted[ti]; var eTs = tt.end_ts || now;
         var bx = Math.max(0, (tt.start_ts - timelineStart) * pxPerSec);
         var bw = Math.max(2, (eTs - tt.start_ts) * pxPerSec);
         if (bx + bw < 0 || bx > totalWidth) continue;
         var by = tt.lane * (LANE_H + LANE_GAP);
         var bar = document.createElement('a');
         bar.href = '/task/' + encodeURIComponent(tt.task_id);
-        bar.style.cssText = 'position:absolute;border-radius:2px;cursor:pointer;border-left:1px solid rgba(0,0,0,0.4);border-right:1px solid rgba(0,0,0,0.4);';
+        bar.style.cssText = 'position:absolute;border-radius:3px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,0.1);border:1px solid rgba(0,0,0,0.15);';
         bar.style.left = bx + 'px'; bar.style.width = bw + 'px';
         bar.style.top = by + 'px'; bar.style.height = LANE_H + 'px';
         bar.style.backgroundColor = barColor(tt.status);
@@ -319,17 +321,17 @@ function renderArranges() {
     body.replaceChildren();
     for (var i = 0; i < recentArranges.length; i++) {
         var a = recentArranges[i];
-        var tr = document.createElement('tr'); tr.className = 'border-b border-gray-800';
+        var tr = document.createElement('tr'); tr.className = 'border-b border-cream-100 hover:bg-cream-100';
         var td1 = document.createElement('td'); td1.className = 'py-2 px-3 font-mono';
         var link = document.createElement('a'); link.href = '/partitions/' + a.partition;
-        link.className = 'text-cyan-400 hover:underline'; link.textContent = 'P' + a.partition;
+        link.className = 'text-teal-600 hover:underline'; link.textContent = 'P' + a.partition;
         td1.appendChild(link);
         var td2 = document.createElement('td'); td2.className = 'py-2 px-3 font-mono'; td2.textContent = a.message_count;
         var td3 = document.createElement('td'); td3.className = 'py-2 px-3 font-mono'; td3.textContent = a.task_count;
         var td4 = document.createElement('td'); td4.className = 'py-2 px-3 font-mono';
         td4.style.color = durColor(a.duration); td4.textContent = a.duration.toFixed(3) + 's';
         var td5 = document.createElement('td'); td5.className = 'py-2 px-3 text-gray-400 text-xs'; td5.textContent = fmtTimeMs(a.ts);
-        var td6 = document.createElement('td'); td6.className = 'py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer';
+        var td6 = document.createElement('td'); td6.className = 'py-2 px-3 font-mono text-xs text-gray-500 max-w-md truncate expandable cursor-pointer';
         td6.title = 'Click to expand';
         td6.setAttribute('data-full', a.labels.join('\n'));
         td6.textContent = a.labels.slice(0, 3).join(', ') + (a.labels.length > 3 ? ' ... (' + a.labels.length + ')' : '');
@@ -337,7 +339,7 @@ function renderArranges() {
     }
     if (!recentArranges.length) {
         var etr = document.createElement('tr'); var etd = document.createElement('td');
-        etd.colSpan = 6; etd.className = 'py-3 text-center text-gray-500'; etd.textContent = 'No arrange() calls yet';
+        etd.colSpan = 6; etd.className = 'py-3 text-center text-gray-400'; etd.textContent = 'No arrange() calls yet';
         etr.appendChild(etd); body.appendChild(etr);
     }
 }
@@ -350,10 +352,10 @@ function renderCollects() {
     body.replaceChildren();
     for (var i = 0; i < recentCollects.length; i++) {
         var c = recentCollects[i];
-        var tr = document.createElement('tr'); tr.className = 'border-b border-gray-800';
+        var tr = document.createElement('tr'); tr.className = 'border-b border-cream-100 hover:bg-cream-100';
         var td1 = document.createElement('td'); td1.className = 'py-2 px-3 font-mono text-xs';
         var a1 = document.createElement('a'); a1.href = '/task/' + encodeURIComponent(c.task_id);
-        a1.className = 'text-purple-400 hover:underline'; a1.textContent = c.task_id; td1.appendChild(a1);
+        a1.className = 'text-purple-600 hover:underline'; a1.textContent = c.task_id; td1.appendChild(a1);
         var td2 = document.createElement('td'); td2.className = 'py-2 px-3 font-mono'; td2.textContent = 'P' + c.partition;
         var td3 = document.createElement('td'); td3.className = 'py-2 px-3 font-mono';
         td3.style.color = durColor(c.duration); td3.textContent = c.duration.toFixed(3) + 's';
@@ -363,7 +365,7 @@ function renderCollects() {
     }
     if (!recentCollects.length) {
         var etr = document.createElement('tr'); var etd = document.createElement('td');
-        etd.colSpan = 5; etd.className = 'py-3 text-center text-gray-500'; etd.textContent = 'No collect() calls yet';
+        etd.colSpan = 5; etd.className = 'py-3 text-center text-gray-400'; etd.textContent = 'No collect() calls yet';
         etr.appendChild(etd); body.appendChild(etr);
     }
 }
@@ -386,19 +388,19 @@ function renderTaskLists() {
         rb.replaceChildren();
         for (var ri = 0; ri < running.length; ri++) {
             var rt = running[ri];
-            var rtr = document.createElement('tr'); rtr.className = 'border-b border-gray-800';
+            var rtr = document.createElement('tr'); rtr.className = 'border-b border-cream-100 hover:bg-cream-100';
             var rtd1 = document.createElement('td'); rtd1.className = 'py-2 px-3 font-mono';
             var ra1 = document.createElement('a'); ra1.href = '/task/' + encodeURIComponent(rt.task_id);
-            ra1.className = 'text-yellow-400 hover:underline'; ra1.textContent = rt.task_id; rtd1.appendChild(ra1);
+            ra1.className = 'text-amber-600 hover:underline'; ra1.textContent = rt.task_id; rtd1.appendChild(ra1);
             var rtd2 = document.createElement('td'); rtd2.className = 'py-2 px-3 font-mono'; rtd2.textContent = rt.partition;
             var rtd3 = document.createElement('td'); rtd3.className = 'py-2 px-3 font-mono'; rtd3.textContent = (now - rt.start_ts).toFixed(1) + 's';
-            var rtd4 = document.createElement('td'); rtd4.className = 'py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer';
+            var rtd4 = document.createElement('td'); rtd4.className = 'py-2 px-3 font-mono text-xs text-gray-500 max-w-md truncate expandable cursor-pointer';
             rtd4.title = 'Click to expand'; rtd4.textContent = rt.args || '';
             rtr.append(rtd1, rtd2, rtd3, rtd4); rb.appendChild(rtr);
         }
         if (!running.length) {
             var etr = document.createElement('tr'); var etd = document.createElement('td');
-            etd.colSpan = 4; etd.className = 'py-3 text-center text-gray-500'; etd.textContent = 'No tasks running';
+            etd.colSpan = 4; etd.className = 'py-3 text-center text-gray-400'; etd.textContent = 'No tasks running';
             etr.appendChild(etd); rb.appendChild(etr);
         }
     }
@@ -408,26 +410,25 @@ function renderTaskLists() {
     if (fc) fc.textContent = '(' + finished.length + ')';
     if (fb) {
         fb.replaceChildren();
-        var show = finished.slice(0, 5000);
-        for (var fi = 0; fi < show.length; fi++) {
-            var ft = show[fi];
-            var ftr = document.createElement('tr'); ftr.className = 'border-b border-gray-800';
+        for (var fi = 0; fi < finished.slice(0, MAX_HISTORY).length; fi++) {
+            var ft = finished[fi];
+            var ftr = document.createElement('tr'); ftr.className = 'border-b border-cream-100 hover:bg-cream-100';
             var ftd1 = document.createElement('td'); ftd1.className = 'py-2 px-3 font-mono text-xs';
             var fa1 = document.createElement('a'); fa1.href = '/task/' + encodeURIComponent(ft.task_id);
-            fa1.className = 'hover:underline ' + (ft.status === 'completed' ? 'text-green-400' : 'text-red-400');
+            fa1.className = 'hover:underline'; fa1.style.color = ft.status === 'completed' ? '#059669' : '#dc2626';
             fa1.textContent = ft.task_id; ftd1.appendChild(fa1);
             var ftd2 = document.createElement('td'); ftd2.className = 'py-2 px-3 font-mono'; ftd2.textContent = ft.partition;
-            var ftd3 = document.createElement('td'); ftd3.className = 'py-2 px-3 ' + (ft.status === 'completed' ? 'text-green-400' : 'text-red-400');
-            ftd3.textContent = ft.status;
+            var ftd3 = document.createElement('td'); ftd3.className = 'py-2 px-3';
+            ftd3.style.color = ft.status === 'completed' ? '#059669' : '#dc2626'; ftd3.textContent = ft.status;
             var ftd4 = document.createElement('td'); ftd4.className = 'py-2 px-3 font-mono'; ftd4.textContent = ft.duration ? ft.duration.toFixed(2) + 's' : '';
             var ftd5 = document.createElement('td'); ftd5.className = 'py-2 px-3 text-gray-400 text-xs'; ftd5.textContent = ft.end_ts ? fmtTimeMs(ft.end_ts) : '';
-            var ftd6 = document.createElement('td'); ftd6.className = 'py-2 px-3 font-mono text-xs text-gray-400 max-w-md truncate expandable cursor-pointer';
+            var ftd6 = document.createElement('td'); ftd6.className = 'py-2 px-3 font-mono text-xs text-gray-500 max-w-md truncate expandable cursor-pointer';
             ftd6.title = 'Click to expand'; ftd6.textContent = ft.args || '';
             ftr.append(ftd1, ftd2, ftd3, ftd4, ftd5, ftd6); fb.appendChild(ftr);
         }
-        if (!show.length) {
+        if (!finished.length) {
             var etr2 = document.createElement('tr'); var etd2 = document.createElement('td');
-            etd2.colSpan = 6; etd2.className = 'py-3 text-center text-gray-500'; etd2.textContent = 'No finished tasks';
+            etd2.colSpan = 6; etd2.className = 'py-3 text-center text-gray-400'; etd2.textContent = 'No finished tasks';
             etr2.appendChild(etd2); fb.appendChild(etr2);
         }
     }
@@ -470,7 +471,7 @@ async function loadTrace() {
         result.textContent = '';
         if (!traceEvents.length) {
             var msg = document.createElement('p');
-            msg.className = 'text-gray-500 py-4 text-center';
+            msg.className = 'text-gray-400 py-4 text-center';
             msg.textContent = 'No events found for ' + p + ':' + o;
             result.appendChild(msg);
             document.getElementById('trace-status').textContent = '';
@@ -480,7 +481,7 @@ async function loadTrace() {
 
         var table = document.createElement('table'); table.className = 'w-full text-sm';
         var thead = document.createElement('thead');
-        var headTr = document.createElement('tr'); headTr.className = 'text-left text-gray-400 border-b border-gray-700';
+        var headTr = document.createElement('tr'); headTr.className = 'text-left text-gray-400 border-b border-cream-200';
         var cols = ['Time', 'Event', 'Task ID', 'Duration', 'Details'];
         for (var ci = 0; ci < cols.length; ci++) {
             var th = document.createElement('th'); th.className = 'py-2 px-3'; th.textContent = cols[ci];
@@ -488,30 +489,42 @@ async function loadTrace() {
         }
         thead.appendChild(headTr); table.appendChild(thead);
 
-        var evtColors = {consumed:'#60a5fa', arranged:'#22d3ee', task_started:'#eab308', task_completed:'#22c55e', task_failed:'#ef4444', collect_completed:'#a855f7', produced:'#c084fc', committed:'#6b7280'};
+        var evtColors = {consumed:'#2563eb', arranged:'#0d9488', task_started:'#d97706', task_completed:'#059669', task_failed:'#dc2626', collect_completed:'#7c3aed', produced:'#9333ea', committed:'#6b7280'};
         var tbody = document.createElement('tbody');
         for (var ei = 0; ei < traceEvents.length; ei++) {
             var ev = traceEvents[ei];
-            var tr = document.createElement('tr'); tr.className = 'border-b border-gray-800';
+            var tr = document.createElement('tr');
+            tr.className = 'border-b border-cream-100 trace-row';
+            if (ev.task_id) tr.setAttribute('data-task-id', ev.task_id);
+            tr.addEventListener('mouseenter', function() {
+                var tid = this.getAttribute('data-task-id');
+                if (!tid) return;
+                document.querySelectorAll('.trace-row').forEach(function(row) {
+                    if (row.getAttribute('data-task-id') === tid) row.style.background = '#e0f2fe';
+                    else row.style.background = '';
+                });
+            });
+            tr.addEventListener('mouseleave', function() {
+                document.querySelectorAll('.trace-row').forEach(function(row) { row.style.background = ''; });
+            });
             var td1 = document.createElement('td'); td1.className = 'py-2 px-3 text-xs font-mono'; td1.textContent = fmtTimeMs(ev.ts);
-            var td2 = document.createElement('td'); td2.className = 'py-2 px-3 font-mono text-xs';
-            td2.style.color = evtColors[ev.event] || '#9ca3af'; td2.textContent = ev.event;
+            var td2 = document.createElement('td'); td2.className = 'py-2 px-3 font-mono text-xs font-semibold';
+            td2.style.color = evtColors[ev.event] || '#6b7280'; td2.textContent = ev.event;
             var td3 = document.createElement('td'); td3.className = 'py-2 px-3 font-mono text-xs';
             if (ev.task_id) {
                 var ta = document.createElement('a'); ta.href = '/task/' + encodeURIComponent(ev.task_id);
-                ta.className = 'text-cyan-400 hover:underline'; ta.textContent = ev.task_id; td3.appendChild(ta);
+                ta.className = 'text-teal-600 hover:underline'; ta.textContent = ev.task_id; td3.appendChild(ta);
             }
             var td4 = document.createElement('td'); td4.className = 'py-2 px-3 font-mono text-xs';
             if (ev.duration) { td4.style.color = durColor(ev.duration); td4.textContent = ev.duration.toFixed(3) + 's'; }
-            var td5 = document.createElement('td'); td5.className = 'py-2 px-3 text-xs text-gray-400 max-w-lg truncate';
+            var td5 = document.createElement('td'); td5.className = 'py-2 px-3 text-xs text-gray-500 max-w-lg truncate expandable cursor-pointer';
+            td5.title = 'Click to expand';
             var details = [];
             if (ev.args) details.push('args: ' + ev.args);
             if (ev.exit_code !== null && ev.exit_code !== undefined) details.push('exit: ' + ev.exit_code);
             if (ev.pid) details.push('pid: ' + ev.pid);
             if (ev.stdout_size) details.push('stdout: ' + ev.stdout_size + 'b');
             if (ev.metadata) details.push(ev.metadata);
-            td5.className = 'py-2 px-3 text-xs text-gray-400 max-w-lg truncate expandable cursor-pointer';
-            td5.title = 'Click to expand';
             td5.setAttribute('data-full', details.join('\n'));
             td5.textContent = details.join(' | ');
             tr.append(td1, td2, td3, td4, td5); tbody.appendChild(tr);
@@ -535,20 +548,57 @@ async function syncFromAPI() {
     } catch(e) {}
 }
 
+async function loadArrangeHistory() {
+    try {
+        var r = await fetch('/api/events?event_types=arranged&limit=' + MAX_HISTORY);
+        var events = await r.json();
+        for (var i = 0; i < events.length; i++) {
+            var e = events[i];
+            var meta = {};
+            try { meta = JSON.parse(e.metadata || '{}'); } catch(x) {}
+            recentArranges.push({
+                partition: e.partition,
+                message_count: meta.message_count || (meta.offsets ? meta.offsets.length : 0),
+                task_count: meta.task_count || 0, duration: e.duration || 0,
+                ts: e.ts, labels: meta.message_labels || [],
+            });
+        }
+        arrangeTotal = recentArranges.length;
+    } catch(ex) {}
+}
+
+async function loadCollectHistory() {
+    try {
+        var r = await fetch('/api/events?event_types=collect_completed&limit=' + MAX_HISTORY);
+        var events = await r.json();
+        for (var i = 0; i < events.length; i++) {
+            var e = events[i];
+            var outputCount = 0;
+            try { outputCount = JSON.parse(e.metadata || '{}').output_message_count || 0; } catch(x) {}
+            recentCollects.push({
+                task_id: e.task_id, partition: e.partition,
+                duration: e.duration || 0, output_count: outputCount, ts: e.ts,
+            });
+        }
+        collectTotal = recentCollects.length;
+    } catch(ex) {}
+}
+
 // === WebSocket ===
 function connectWS() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     var ws = new WebSocket(proto + '//' + location.host + '/ws');
     ws.onopen = function() {
         var b = document.getElementById('ws-badge');
-        if (b) { b.textContent = 'WS: connected'; b.style.background = '#166534'; }
+        if (b) { b.textContent = 'WS: connected'; b.style.background = '#d1fae5'; b.style.color = '#065f46'; b.style.border = '1px solid #6ee7b7'; }
     };
     ws.onclose = function() {
         var b = document.getElementById('ws-badge');
-        if (b) { b.textContent = 'WS: disconnected'; b.style.background = '#991b1b'; }
+        if (b) { b.textContent = 'WS: disconnected'; b.style.background = '#fecaca'; b.style.color = '#991b1b'; b.style.border = '1px solid #fca5a5'; }
         setTimeout(connectWS, 3000);
     };
     ws.onmessage = function(msg) {
+        if (frozen) return;
         try {
             var e = JSON.parse(msg.data);
             if (e.event === 'task_started') {
@@ -608,44 +658,6 @@ function initFromHash() {
     switchTab(hash || 'execute');
 }
 
-async function loadArrangeHistory() {
-    try {
-        var r = await fetch('/api/events?event_types=arranged&limit=5000');
-        var events = await r.json();
-        for (var i = 0; i < events.length; i++) {
-            var e = events[i];
-            var meta = {};
-            try { meta = JSON.parse(e.metadata || '{}'); } catch(x) {}
-            recentArranges.push({
-                partition: e.partition,
-                message_count: meta.message_count || (meta.offsets ? meta.offsets.length : 0),
-                task_count: meta.task_count || 0,
-                duration: e.duration || 0,
-                ts: e.ts,
-                labels: meta.message_labels || [],
-            });
-        }
-        arrangeTotal = recentArranges.length;
-    } catch(ex) {}
-}
-
-async function loadCollectHistory() {
-    try {
-        var r = await fetch('/api/events?event_types=collect_completed&limit=5000');
-        var events = await r.json();
-        for (var i = 0; i < events.length; i++) {
-            var e = events[i];
-            var outputCount = 0;
-            try { outputCount = JSON.parse(e.metadata || '{}').output_message_count || 0; } catch(x) {}
-            recentCollects.push({
-                task_id: e.task_id, partition: e.partition,
-                duration: e.duration || 0, output_count: outputCount, ts: e.ts,
-            });
-        }
-        collectTotal = recentCollects.length;
-    } catch(ex) {}
-}
-
 (async function() {
     await Promise.all([syncFromAPI(), loadArrangeHistory(), loadCollectHistory()]);
     initFromHash();
@@ -654,8 +666,8 @@ async function loadCollectHistory() {
     renderArranges();
     renderCollects();
     connectWS();
-    setInterval(function() { renderTimeline(); renderTaskLists(); autoScroll(); }, 500);
-    setInterval(syncFromAPI, 5000);
+    setInterval(function() { if (!frozen) { renderTimeline(); renderTaskLists(); autoScroll(); } }, 500);
+    setInterval(function() { if (!frozen) syncFromAPI(); }, 5000);
 })();
 
 window.addEventListener('hashchange', initFromHash);

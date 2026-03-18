@@ -4,40 +4,40 @@
 {% block content %}
 <div class="flex items-center gap-4 mb-6">
     <h1 class="text-2xl font-bold">Task Detail</h1>
-    <span class="bg-gray-700 px-3 py-1 rounded font-mono text-sm">{{ task_id }}</span>
+    <span class="bg-cream-200 px-3 py-1 rounded font-mono text-sm">{{ task_id }}</span>
     {% if partition is not none %}
-    <a href="/partitions/{{ partition }}" class="text-sm text-gray-400 hover:text-white">&larr; partition {{ partition }}</a>
+    <a href="/partitions/{{ partition }}" class="text-sm text-gray-500 hover:text-ink-900">&larr; partition {{ partition }}</a>
     {% endif %}
 </div>
 
 <!-- Summary card -->
-<div class="bg-gray-800 rounded-lg p-5 mb-6">
+<div class="bg-white rounded-lg border border-cream-200 p-5 mb-6">
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div>
-            <div class="text-xs text-gray-400 mb-1">Status</div>
+            <div class="text-xs text-gray-500 mb-1">Status</div>
             <div class="text-lg font-semibold
-                {% if completed %}text-green-400{% elif failed %}text-red-400{% elif started %}text-yellow-400{% else %}text-gray-400{% endif %}">
+                {% if completed %}text-emerald-600{% elif failed %}text-red-600{% elif started %}text-amber-600{% else %}text-gray-500{% endif %}">
                 {% if completed %}completed{% elif failed %}failed{% elif started %}running{% else %}unknown{% endif %}
             </div>
         </div>
         <div>
-            <div class="text-xs text-gray-400 mb-1">Partition</div>
+            <div class="text-xs text-gray-500 mb-1">Partition</div>
             <div class="text-lg font-mono">
-                {% if partition is not none %}<a href="/partitions/{{ partition }}" class="text-blue-400 hover:underline">{{ partition }}</a>{% else %}-{% endif %}
+                {% if partition is not none %}<a href="/partitions/{{ partition }}" class="text-teal-600 hover:underline">{{ partition }}</a>{% else %}-{% endif %}
             </div>
         </div>
         <div>
-            <div class="text-xs text-gray-400 mb-1">Duration</div>
+            <div class="text-xs text-gray-500 mb-1">Duration</div>
             <div class="text-lg font-mono">{% if duration is not none %}{{ "%.3f"|format(duration) }}s{% else %}-{% endif %}</div>
         </div>
         <div>
-            <div class="text-xs text-gray-400 mb-1">Exit Code</div>
-            <div class="text-lg font-mono {% if completed and completed.exit_code != 0 %}text-red-400{% elif failed %}text-red-400{% endif %}">
+            <div class="text-xs text-gray-500 mb-1">Exit Code</div>
+            <div class="text-lg font-mono {% if completed and completed.exit_code != 0 %}text-red-600{% elif failed %}text-red-600{% endif %}">
                 {% if completed %}{{ completed.exit_code }}{% elif failed %}{{ failed.exit_code or '-' }}{% else %}-{% endif %}
             </div>
         </div>
         <div>
-            <div class="text-xs text-gray-400 mb-1">PID</div>
+            <div class="text-xs text-gray-500 mb-1">PID</div>
             <div class="text-lg font-mono">{{ pid or '-' }}</div>
         </div>
     </div>
@@ -45,13 +45,13 @@
     {% if started %}
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
         <div>
-            <div class="text-xs text-gray-400 mb-1">Started</div>
+            <div class="text-xs text-gray-500 mb-1">Started</div>
             <div class="text-sm font-mono" title="{{ format_ts_ms(started.ts) }}">{{ format_ts(started.ts) }}</div>
             <div class="text-xs text-gray-500">{{ format_ts_full(started.ts) }}</div>
         </div>
         {% if completed or failed %}
         <div>
-            <div class="text-xs text-gray-400 mb-1">Finished</div>
+            <div class="text-xs text-gray-500 mb-1">Finished</div>
             {% set fin = completed or failed %}
             <div class="text-sm font-mono" title="{{ format_ts_ms(fin.ts) }}">{{ format_ts(fin.ts) }}</div>
             <div class="text-xs text-gray-500">{{ format_ts_full(fin.ts) }}</div>
@@ -59,7 +59,7 @@
         {% endif %}
         {% if completed and completed.stdout_size %}
         <div>
-            <div class="text-xs text-gray-400 mb-1">Stdout Size</div>
+            <div class="text-xs text-gray-500 mb-1">Stdout Size</div>
             <div class="text-sm font-mono">{{ completed.stdout_size }} bytes</div>
         </div>
         {% endif %}
@@ -73,7 +73,7 @@
     <h2 class="text-lg font-semibold mb-2">Source Message Offsets</h2>
     <div class="flex flex-wrap gap-2">
         {% for off in source_offsets %}
-        <a href="/trace/{{ partition }}/{{ off }}" class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-sm font-mono text-blue-400">
+        <a href="/trace/{{ partition }}/{{ off }}" class="bg-cream-200 hover:bg-cream-300 px-3 py-1 rounded text-sm font-mono text-teal-600">
             {{ partition }}:{{ off }}
         </a>
         {% endfor %}
@@ -91,8 +91,8 @@
     {% set parts = args %}
     {% endif %}
     {% set cli_line = binary_path ~ ' ' ~ parts | map('tojson') | join(' ') %}
-    <div class="bg-gray-800 rounded p-3 relative group">
-        <pre class="text-sm font-mono text-gray-300 whitespace-pre-wrap break-all select-all">{{ cli_line }}</pre>
+    <div class="bg-cream-50 border border-cream-200 rounded p-3 relative group">
+        <pre class="text-sm font-mono text-gray-500 whitespace-pre-wrap break-all select-all">{{ cli_line }}</pre>
     </div>
 </div>
 {% endif %}
@@ -101,21 +101,21 @@
 {% if completed and completed.stdout %}
 <div class="mb-6">
     <h2 class="text-lg font-semibold mb-2">Stdout</h2>
-    <pre class="bg-gray-800 rounded p-3 text-xs font-mono overflow-x-auto max-h-64 text-gray-300">{{ completed.stdout }}</pre>
+    <pre class="bg-cream-50 border border-cream-200 rounded p-3 text-xs font-mono overflow-x-auto max-h-64 text-gray-500">{{ completed.stdout }}</pre>
 </div>
 {% endif %}
 
 {% if completed and completed.stderr %}
 <div class="mb-6">
     <h2 class="text-lg font-semibold mb-2">Stderr</h2>
-    <pre class="bg-gray-800 rounded p-3 text-xs font-mono overflow-x-auto max-h-64 text-red-300">{{ completed.stderr }}</pre>
+    <pre class="bg-cream-50 border border-cream-200 rounded p-3 text-xs font-mono overflow-x-auto max-h-64 text-red-600">{{ completed.stderr }}</pre>
 </div>
 {% endif %}
 
 {% if failed and failed.stderr %}
 <div class="mb-6">
     <h2 class="text-lg font-semibold mb-2">Stderr</h2>
-    <pre class="bg-gray-800 rounded p-3 text-xs font-mono overflow-x-auto max-h-64 text-red-300">{{ failed.stderr }}</pre>
+    <pre class="bg-cream-50 border border-cream-200 rounded p-3 text-xs font-mono overflow-x-auto max-h-64 text-red-600">{{ failed.stderr }}</pre>
 </div>
 {% endif %}
 
@@ -123,23 +123,23 @@
 <h2 class="text-lg font-semibold mb-3">Event Timeline</h2>
 <div class="space-y-2">
     {% for e in events %}
-    <div class="bg-gray-800 rounded p-3 border-l-4
-        {% if e.event == 'task_started' %}border-yellow-500
-        {% elif e.event == 'task_completed' %}border-green-500
-        {% elif e.event == 'task_failed' %}border-red-500
-        {% else %}border-gray-600{% endif %}
+    <div class="bg-cream-50 border border-cream-200 rounded p-3 border-l-4
+        {% if e.event == 'task_started' %}border-l-amber-400
+        {% elif e.event == 'task_completed' %}border-l-emerald-400
+        {% elif e.event == 'task_failed' %}border-l-red-400
+        {% else %}border-l-gray-300{% endif %}
         flex items-center justify-between">
         <div>
             <span class="font-semibold text-sm
-                {% if e.event == 'task_completed' %}text-green-400
-                {% elif e.event == 'task_failed' %}text-red-400
-                {% elif e.event == 'task_started' %}text-yellow-400
-                {% else %}text-gray-300{% endif %}">{{ e.event }}</span>
+                {% if e.event == 'task_completed' %}text-emerald-600
+                {% elif e.event == 'task_failed' %}text-red-600
+                {% elif e.event == 'task_started' %}text-amber-600
+                {% else %}text-gray-500{% endif %}">{{ e.event }}</span>
             {% if e.exit_code is not none %}
-            <span class="text-xs text-gray-400 ml-3">exit={{ e.exit_code }}</span>
+            <span class="text-xs text-gray-500 ml-3">exit={{ e.exit_code }}</span>
             {% endif %}
             {% if e.duration is not none %}
-            <span class="text-xs text-gray-400 ml-3">{{ "%.3f"|format(e.duration) }}s</span>
+            <span class="text-xs text-gray-500 ml-3">{{ "%.3f"|format(e.duration) }}s</span>
             {% endif %}
         </div>
         <span class="text-xs text-gray-500" title="{{ format_ts_ms(e.ts) }}">{{ format_ts(e.ts) }}</span>

@@ -62,6 +62,7 @@ class DebugConfig(BaseModel):
     retention_max_events: int = Field(default=100_000, ge=100)
     store_output: bool = True
     flush_interval_seconds: int = Field(default=5, ge=1)
+    max_ui_rows: int = Field(default=5000, ge=100)
 
 
 class DrakkarConfig(BaseSettings):

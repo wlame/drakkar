@@ -4,12 +4,12 @@
 {% block content %}
 <div class="flex items-center gap-4 mb-6">
     <h1 class="text-2xl font-bold">Partition {{ partition_id }}</h1>
-    <a href="/partitions" class="text-sm text-gray-400 hover:text-white">&larr; all partitions</a>
+    <a href="/partitions" class="text-sm text-gray-500 hover:text-ink-900">&larr; all partitions</a>
 </div>
 
 <table class="w-full text-sm mb-6">
     <thead>
-        <tr class="text-left text-gray-400 border-b border-gray-700">
+        <tr class="text-left text-gray-500 border-b border-cream-200">
             <th class="py-2 px-3">Time</th>
             <th class="py-2 px-3">Event</th>
             <th class="py-2 px-3">Offset</th>
@@ -22,29 +22,29 @@
     </thead>
     <tbody>
         {% for e in events %}
-        <tr class="border-b border-gray-800 hover:bg-gray-800">
-            <td class="py-2 px-3 text-gray-400 text-xs whitespace-nowrap" title="{{ format_ts_ms(e.ts) }}">{{ format_ts(e.ts) }}</td>
+        <tr class="border-b border-cream-100 hover:bg-cream-100">
+            <td class="py-2 px-3 text-gray-500 text-xs whitespace-nowrap" title="{{ format_ts_ms(e.ts) }}">{{ format_ts(e.ts) }}</td>
             <td class="py-2 px-3">
                 {% if e.event == 'task_completed' %}
-                <span class="text-green-400">{{ e.event }}</span>
+                <span class="text-emerald-600">{{ e.event }}</span>
                 {% elif e.event == 'task_failed' %}
-                <span class="text-red-400">{{ e.event }}</span>
+                <span class="text-red-600">{{ e.event }}</span>
                 {% elif e.event == 'task_started' %}
-                <span class="text-yellow-400">{{ e.event }}</span>
+                <span class="text-amber-600">{{ e.event }}</span>
                 {% elif e.event == 'committed' %}
-                <span class="text-gray-400">{{ e.event }}</span>
+                <span class="text-gray-500">{{ e.event }}</span>
                 {% else %}
                 <span>{{ e.event }}</span>
                 {% endif %}
             </td>
             <td class="py-2 px-3 font-mono">
                 {% if e.offset is not none %}
-                <a href="/trace/{{ partition_id }}/{{ e.offset }}" class="text-blue-400 hover:underline">{{ e.offset }}</a>
+                <a href="/trace/{{ partition_id }}/{{ e.offset }}" class="text-teal-600 hover:underline">{{ e.offset }}</a>
                 {% endif %}
             </td>
-            <td class="py-2 px-3 font-mono text-xs">{% if e.task_id %}<a href="/task/{{ e.task_id }}" class="text-blue-400 hover:underline">{{ e.task_id }}</a>{% endif %}</td>
+            <td class="py-2 px-3 font-mono text-xs">{% if e.task_id %}<a href="/task/{{ e.task_id }}" class="text-teal-600 hover:underline">{{ e.task_id }}</a>{% endif %}</td>
             <td class="py-2 px-3 font-mono">{% if e.duration is not none %}{{ "%.2f"|format(e.duration) }}s{% endif %}</td>
-            <td class="py-2 px-3 font-mono {% if e.exit_code is not none and e.exit_code != 0 %}text-red-400{% endif %}">
+            <td class="py-2 px-3 font-mono {% if e.exit_code is not none and e.exit_code != 0 %}text-red-600{% endif %}">
                 {{ e.exit_code if e.exit_code is not none else '' }}
             </td>
             <td class="py-2 px-3 font-mono text-xs">
@@ -58,10 +58,10 @@
 
 <div class="flex gap-4">
     {% if page > 0 %}
-    <a href="/partitions/{{ partition_id }}?page={{ page - 1 }}" class="text-blue-400 hover:underline">&larr; Newer</a>
+    <a href="/partitions/{{ partition_id }}?page={{ page - 1 }}" class="text-teal-600 hover:underline">&larr; Newer</a>
     {% endif %}
     {% if has_next %}
-    <a href="/partitions/{{ partition_id }}?page={{ page + 1 }}" class="text-blue-400 hover:underline">Older &rarr;</a>
+    <a href="/partitions/{{ partition_id }}?page={{ page + 1 }}" class="text-teal-600 hover:underline">Older &rarr;</a>
     {% endif %}
 </div>
 {% endblock %}

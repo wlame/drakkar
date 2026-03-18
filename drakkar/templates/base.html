@@ -5,19 +5,28 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Drakkar Debug{% endblock %}</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+    tailwind.config = {
+        theme: { extend: { colors: {
+            cream: { 50:'#faf9f6', 100:'#f5f3ee', 200:'#ebe8e0', 300:'#ddd9ce' },
+            ink: { 700:'#3d3d3d', 800:'#2a2a2a', 900:'#1a1a1a' },
+        }}}
+    }
+    </script>
+    <style>@keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.3}}.live-dot{animation:pulse-dot 2s ease-in-out infinite;}</style>
     {% block head %}{% endblock %}
 </head>
-<body class="bg-gray-900 text-gray-200 min-h-screen">
-    <nav class="bg-gray-800 border-b border-gray-700 px-4 py-3">
+<body class="text-ink-700 min-h-screen" style="background: linear-gradient(180deg, #e8e6e0 0%, #f0eee8 120px, #f5f3ee 300px, #f5f3ee 100%);">
+    <nav class="px-4 py-3" style="background:#2a2a2a;">
         <div class="max-w-7xl mx-auto flex items-center justify-between">
             <div class="flex items-center gap-6">
                 <span class="text-lg font-bold text-white">Drakkar</span>
-                <a href="/" class="text-gray-300 hover:text-white text-sm">Dashboard</a>
-                <a href="/partitions" class="text-gray-300 hover:text-white text-sm">Partitions</a>
-                <a href="/live" class="text-gray-300 hover:text-white text-sm">Live</a>
-                <a href="/history" class="text-gray-300 hover:text-white text-sm">History</a>
+                <a href="/" class="text-gray-400 hover:text-white text-sm">Dashboard</a>
+                <a href="/partitions" class="text-gray-400 hover:text-white text-sm">Partitions</a>
+                <a href="/live" class="text-gray-400 hover:text-white text-sm">Live <span class="live-dot" style="color:#ef4444;font-size:12px;vertical-align:middle;">&bull;</span></a>
+                <a href="/history" class="text-gray-400 hover:text-white text-sm">History</a>
             </div>
-            <div class="text-sm text-gray-400">
+            <div class="text-sm text-gray-500">
                 <span class="font-mono">{{ worker_id }}</span>
             </div>
         </div>
@@ -35,7 +44,6 @@
         el.classList.toggle('max-w-md');
         el.classList.toggle('whitespace-pre-wrap');
         el.classList.toggle('break-all');
-        // swap between truncated and full content
         var full = el.getAttribute('data-full');
         if (full) {
             if (expanding) {

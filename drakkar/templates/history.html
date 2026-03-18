@@ -2,13 +2,12 @@
 {% block title %}History — Drakkar Debug{% endblock %}
 
 {% block content %}
-<h1 class="text-2xl font-bold mb-6">Event History</h1>
+<h1 class="text-2xl font-bold mb-6 text-ink-900">Event History</h1>
 
 <!-- Partition filter: toggle buttons -->
 <div class="mb-4">
     <label class="block text-xs text-gray-400 mb-2">Partitions (click to toggle)</label>
     <div id="partition-toggles" class="flex flex-wrap gap-1">
-        <!-- populated by JS from first data load -->
     </div>
 </div>
 
@@ -16,26 +15,24 @@
 <div class="mb-4">
     <label class="block text-xs text-gray-400 mb-2">Event types</label>
     <div class="flex flex-wrap gap-3">
-        {% for et in ['consumed', 'arranged', 'task_started', 'task_completed', 'task_failed', 'produced', 'committed'] %}
+        {% for et in ['consumed', 'arranged', 'task_started', 'task_completed', 'task_failed', 'collect_completed', 'produced', 'committed'] %}
         <label class="flex items-center gap-1 text-sm cursor-pointer">
-            <input type="checkbox" class="evt-cb" value="{{ et }}" checked
-                   onchange="applyFilters()"
-                   class="rounded bg-gray-700 border-gray-600">
-            <span class="{% if et == 'task_completed' %}text-green-400{% elif et == 'task_failed' %}text-red-400{% elif et == 'task_started' %}text-yellow-400{% else %}text-gray-300{% endif %}">{{ et }}</span>
+            <input type="checkbox" class="evt-cb" value="{{ et }}" checked onchange="applyFilters()">
+            <span class="{% if et == 'task_completed' %}text-emerald-600{% elif et == 'task_failed' %}text-red-600{% elif et == 'task_started' %}text-amber-600{% elif et == 'collect_completed' %}text-purple-600{% elif et == 'arranged' %}text-teal-600{% else %}text-gray-500{% endif %}">{{ et }}</span>
         </label>
         {% endfor %}
     </div>
 </div>
 
 <div class="flex gap-3 mb-4">
-    <button onclick="applyFilters()" class="bg-blue-600 hover:bg-blue-700 px-4 py-1.5 rounded text-sm">Apply</button>
-    <button onclick="resetAll()" class="bg-gray-600 hover:bg-gray-500 px-4 py-1.5 rounded text-sm">Reset</button>
-    <span id="row-count" class="text-xs text-gray-500 self-center ml-2"></span>
+    <button onclick="applyFilters()" class="bg-teal-600 hover:bg-teal-500 text-white px-4 py-1.5 rounded text-sm">Apply</button>
+    <button onclick="resetAll()" class="bg-cream-200 hover:bg-cream-300 px-4 py-1.5 rounded text-sm text-ink-700">Reset</button>
+    <span id="row-count" class="text-xs text-gray-400 self-center ml-2"></span>
 </div>
 
 <table class="w-full text-sm">
     <thead>
-        <tr class="text-left text-gray-400 border-b border-gray-700">
+        <tr class="text-left text-gray-400 border-b border-cream-200">
             <th class="py-2 px-3">Time</th>
             <th class="py-2 px-3">Event</th>
             <th class="py-2 px-3">Partition</th>
@@ -51,96 +48,88 @@
 </table>
 
 <script>
-const MAX_ROWS = 10000;
-let maxEventId = 0;
-let pollTimer = null;
-let knownPartitions = new Set();
-let selectedPartitions = new Set(); // empty = all
+var MAX_ROWS = {{ max_ui_rows }};
+var workerPartitions = {{ partitions | tojson }};
+var maxEventId = 0;
+var knownPartitions = new Set();
+var selectedPartitions = new Set();
 
 function getSelectedTypes() {
-    return Array.from(document.querySelectorAll('.evt-cb:checked')).map(cb => cb.value);
+    return Array.from(document.querySelectorAll('.evt-cb:checked')).map(function(cb) { return cb.value; });
 }
 
 function fmtTime(ts) {
     if (!ts) return '';
-    const d = new Date(ts * 1000);
-    return d.toISOString().substring(11, 19);
+    return new Date(ts * 1000).toISOString().substring(11, 19);
 }
 function fmtTimeMs(ts) {
     if (!ts) return '';
-    const d = new Date(ts * 1000);
-    return d.toISOString().substring(11, 23);
+    return new Date(ts * 1000).toISOString().substring(11, 23);
 }
 
-function eventColor(evt) {
-    if (evt === 'task_completed') return 'text-green-400';
-    if (evt === 'task_failed') return 'text-red-400';
-    if (evt === 'task_started') return 'text-yellow-400';
-    return '';
-}
+var evtColors = {
+    consumed:'text-blue-600', arranged:'text-teal-600', task_started:'text-amber-600',
+    task_completed:'text-emerald-600', task_failed:'text-red-600',
+    collect_completed:'text-purple-600', produced:'text-purple-500', committed:'text-gray-500'
+};
 
 function createRow(e) {
-    const tr = document.createElement('tr');
-    tr.className = 'border-b border-gray-800 hover:bg-gray-800';
+    var tr = document.createElement('tr');
+    tr.className = 'border-b border-cream-100 hover:bg-cream-100';
 
-    const tdTime = document.createElement('td');
+    var tdTime = document.createElement('td');
     tdTime.className = 'py-2 px-3 text-gray-400 text-xs whitespace-nowrap';
-    tdTime.textContent = fmtTime(e.ts);
-    tdTime.title = fmtTimeMs(e.ts);
+    tdTime.textContent = fmtTime(e.ts); tdTime.title = fmtTimeMs(e.ts);
     tr.appendChild(tdTime);
 
-    const tdEvt = document.createElement('td');
+    var tdEvt = document.createElement('td');
     tdEvt.className = 'py-2 px-3';
-    const evtSpan = document.createElement('span');
-    evtSpan.className = eventColor(e.event);
+    var evtSpan = document.createElement('span');
+    evtSpan.className = evtColors[e.event] || '';
     evtSpan.textContent = e.event;
-    tdEvt.appendChild(evtSpan);
-    tr.appendChild(tdEvt);
+    tdEvt.appendChild(evtSpan); tr.appendChild(tdEvt);
 
-    const tdPart = document.createElement('td');
+    var tdPart = document.createElement('td');
     tdPart.className = 'py-2 px-3 font-mono';
     if (e.partition !== null && e.partition !== undefined) {
-        const a = document.createElement('a');
+        var a = document.createElement('a');
         a.href = '/partitions/' + e.partition;
-        a.className = 'text-blue-400 hover:underline';
-        a.textContent = e.partition;
+        a.className = 'text-teal-600 hover:underline'; a.textContent = e.partition;
         tdPart.appendChild(a);
     }
     tr.appendChild(tdPart);
 
-    const tdOff = document.createElement('td');
+    var tdOff = document.createElement('td');
     tdOff.className = 'py-2 px-3 font-mono';
     if (e.offset !== null && e.offset !== undefined && e.partition !== null) {
-        const a = document.createElement('a');
-        a.href = '/trace/' + e.partition + '/' + e.offset;
-        a.className = 'text-blue-400 hover:underline';
-        a.textContent = e.offset;
-        tdOff.appendChild(a);
+        var a2 = document.createElement('a');
+        a2.href = '/live#trace/' + e.partition + '/' + e.offset;
+        a2.className = 'text-teal-600 hover:underline'; a2.textContent = e.offset;
+        tdOff.appendChild(a2);
     }
     tr.appendChild(tdOff);
 
-    const tdTask = document.createElement('td');
+    var tdTask = document.createElement('td');
     tdTask.className = 'py-2 px-3 font-mono text-xs';
     if (e.task_id) {
-        const a = document.createElement('a');
-        a.href = '/task/' + e.task_id;
-        a.className = 'text-blue-400 hover:underline';
-        a.textContent = e.task_id;
-        tdTask.appendChild(a);
+        var a3 = document.createElement('a');
+        a3.href = '/task/' + e.task_id;
+        a3.className = 'text-teal-600 hover:underline'; a3.textContent = e.task_id;
+        tdTask.appendChild(a3);
     }
     tr.appendChild(tdTask);
 
-    const tdDur = document.createElement('td');
+    var tdDur = document.createElement('td');
     tdDur.className = 'py-2 px-3 font-mono';
     tdDur.textContent = e.duration != null ? e.duration.toFixed(2) + 's' : '';
     tr.appendChild(tdDur);
 
-    const tdExit = document.createElement('td');
-    tdExit.className = 'py-2 px-3 font-mono' + (e.exit_code && e.exit_code !== 0 ? ' text-red-400' : '');
+    var tdExit = document.createElement('td');
+    tdExit.className = 'py-2 px-3 font-mono' + (e.exit_code && e.exit_code !== 0 ? ' text-red-600' : '');
     tdExit.textContent = e.exit_code != null ? e.exit_code : '';
     tr.appendChild(tdExit);
 
-    const tdArgs = document.createElement('td');
+    var tdArgs = document.createElement('td');
     tdArgs.className = 'py-2 px-3 text-xs text-gray-500 max-w-xs truncate expandable cursor-pointer';
     tdArgs.title = 'Click to expand';
     tdArgs.textContent = e.args || e.metadata || '';
@@ -149,67 +138,56 @@ function createRow(e) {
     return tr;
 }
 
-function updatePartitionToggles(partitions) {
-    partitions.forEach(p => knownPartitions.add(p));
-    const container = document.getElementById('partition-toggles');
-    const sorted = Array.from(knownPartitions).sort((a,b) => a-b);
+function updatePartitionToggles() {
+    var container = document.getElementById('partition-toggles');
+    var sorted = Array.from(knownPartitions).sort(function(a,b) { return a-b; });
     container.replaceChildren();
-    for (const p of sorted) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.textContent = p;
+    for (var i = 0; i < sorted.length; i++) {
+        var p = sorted[i];
+        var btn = document.createElement('button');
+        btn.type = 'button'; btn.textContent = p;
         if (selectedPartitions.has(p)) {
-            btn.style.cssText = 'padding:4px 12px;border-radius:4px;font-size:13px;font-family:monospace;font-weight:bold;background:#2563eb;color:#fff;border:2px solid #60a5fa;';
+            btn.style.cssText = 'padding:4px 12px;border-radius:4px;font-size:13px;font-family:monospace;font-weight:bold;background:#0d9488;color:#fff;border:1px solid #14b8a6;';
         } else {
-            btn.style.cssText = 'padding:4px 12px;border-radius:4px;font-size:13px;font-family:monospace;background:#1f2937;color:#6b7280;border:1px solid #374151;';
+            btn.style.cssText = 'padding:4px 12px;border-radius:4px;font-size:13px;font-family:monospace;background:#f5f3ee;color:#6b7280;border:1px solid #ddd9ce;';
         }
-        btn.onclick = function() {
-            if (selectedPartitions.has(p)) {
-                selectedPartitions.delete(p);
-            } else {
-                selectedPartitions.add(p);
-            }
-            updatePartitionToggles([]); // re-render buttons
-            applyFilters();
-        };
+        (function(pid) {
+            btn.onclick = function() {
+                if (selectedPartitions.has(pid)) selectedPartitions.delete(pid);
+                else selectedPartitions.add(pid);
+                updatePartitionToggles();
+                applyFilters();
+            };
+        })(p);
         container.appendChild(btn);
     }
 }
 
 async function fetchEvents() {
-    const types = getSelectedTypes();
-    const parts = selectedPartitions.size > 0 ? Array.from(selectedPartitions).join(',') : '';
-    const url = '/api/events?limit=200&after_id=' + maxEventId
-        + (types.length < 7 ? '&event_types=' + types.join(',') : '')
+    var types = getSelectedTypes();
+    var parts = selectedPartitions.size > 0 ? Array.from(selectedPartitions).join(',') : '';
+    var url = '/api/events?limit=' + MAX_ROWS + '&after_id=' + maxEventId
+        + (types.length < 8 ? '&event_types=' + types.join(',') : '')
         + (parts ? '&partitions=' + parts : '');
 
-    const r = await fetch(url);
-    const events = await r.json();
+    var r = await fetch(url);
+    var events = await r.json();
     if (!events.length) return;
 
-    const body = document.getElementById('events-body');
-
-    // events come newest-first from API, we prepend them
-    // but need to insert in chronological order at top
-    const reversed = events.slice().reverse();
-    for (const e of reversed) {
+    var body = document.getElementById('events-body');
+    var reversed = events.slice().reverse();
+    for (var i = 0; i < reversed.length; i++) {
+        var e = reversed[i];
         if (e.id > maxEventId) maxEventId = e.id;
         if (e.partition !== null) knownPartitions.add(e.partition);
-        const row = createRow(e);
-        body.insertBefore(row, body.firstChild);
+        body.insertBefore(createRow(e), body.firstChild);
     }
-
-    // trim to MAX_ROWS
-    while (body.children.length > MAX_ROWS) {
-        body.removeChild(body.lastChild);
-    }
-
+    while (body.children.length > MAX_ROWS) body.removeChild(body.lastChild);
     document.getElementById('row-count').textContent = body.children.length + ' rows';
-    updatePartitionToggles([]);
+    updatePartitionToggles();
 }
 
 function applyFilters() {
-    // reset and reload with new filters
     maxEventId = 0;
     document.getElementById('events-body').replaceChildren();
     fetchEvents();
@@ -217,12 +195,15 @@ function applyFilters() {
 
 function resetAll() {
     selectedPartitions.clear();
-    document.querySelectorAll('.evt-cb').forEach(cb => cb.checked = true);
-    updatePartitionToggles([]);
+    document.querySelectorAll('.evt-cb').forEach(function(cb) { cb.checked = true; });
+    updatePartitionToggles();
     applyFilters();
 }
 
-// initial load
+for (var i = 0; i < workerPartitions.length; i++) {
+    knownPartitions.add(workerPartitions[i]);
+}
+updatePartitionToggles();
 fetchEvents();
 </script>
 {% endblock %}

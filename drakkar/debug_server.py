@@ -178,14 +178,14 @@ def create_debug_app(
         # recently finished tasks
         finished = await recorder.get_events(
             event_type='task_completed',
-            limit=5000,
+            limit=config.max_ui_rows,
         )
         failed = await recorder.get_events(
             event_type='task_failed',
             limit=1000,
         )
         recent_finished = sorted(finished + failed, key=lambda e: e.get('ts', 0), reverse=True)[
-            :5000
+            :config.max_ui_rows
         ]
 
         # active arrange() calls
@@ -217,6 +217,7 @@ def create_debug_app(
                 'pool_max': drakkar_app._executor_pool.max_workers
                 if drakkar_app._executor_pool
                 else 0,
+                'max_ui_rows': config.max_ui_rows,
             },
         )
 
@@ -305,6 +306,8 @@ def create_debug_app(
                 'has_next': len(events) == limit,
                 'filter_partition': part_int,
                 'filter_event_type': evt_type,
+                'partitions': sorted(drakkar_app.processors.keys()),
+                'max_ui_rows': config.max_ui_rows,
             },
         )
 
