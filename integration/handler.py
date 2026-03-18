@@ -83,8 +83,8 @@ class RipgrepHandler(BaseDrakkarHandler[SearchRequest, SearchResult]):
         messages: list[SourceMessage],
         pending: PendingContext,
     ) -> list[ExecutorTask]:
-        # simulate IO-bound preparation (e.g., DB lookup, cache check)
-        await asyncio.sleep(random.uniform(0.005, 0.03))
+        # simulate slow IO-bound preparation (e.g., DB lookup, HTTP call)
+        await asyncio.sleep(random.uniform(0.1, 2.0))
 
         tasks = []
         for msg in messages:

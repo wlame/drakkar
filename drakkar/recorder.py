@@ -159,12 +159,18 @@ class EventRecorder:
         partition: int,
         messages: list[SourceMessage],
         tasks: list[ExecutorTask],
+        duration: float = 0.0,
+        message_labels: list[str] | None = None,
     ) -> None:
         self._record(
             {
                 'ts': time.time(),
                 'event': 'arranged',
                 'partition': partition,
+                'duration': round(duration, 4),
+                'message_count': len(messages),
+                'task_count': len(tasks),
+                'message_labels': message_labels or [],
                 'metadata': json.dumps(
                     {
                         'offsets': [m.offset for m in messages],

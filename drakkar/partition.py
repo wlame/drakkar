@@ -235,10 +235,16 @@ class PartitionProcessor:
             tasks = await self._handler.arrange(messages, pending_ctx)
         finally:
             self._arranging = False
+            arrange_labels = self._arrange_labels
             self._arrange_labels = []
-        handler_duration.labels(hook='arrange').observe(time.monotonic() - self._arrange_start)
+        arrange_duration = time.monotonic() - self._arrange_start
+        handler_duration.labels(hook='arrange').observe(arrange_duration)
         if self._recorder:
-            self._recorder.record_arranged(self._partition_id, messages, tasks)
+            self._recorder.record_arranged(
+                self._partition_id, messages, tasks,
+                duration=arrange_duration,
+                message_labels=arrange_labels,
+            )
         window.tasks = tasks
         window.total_tasks = len(tasks)
 
