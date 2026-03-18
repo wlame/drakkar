@@ -62,6 +62,7 @@ class DrakkarApp:
         self._processors: dict[int, PartitionProcessor] = {}
         self._running = False
         self._paused = False
+        self._background_tasks: set[asyncio.Task] = set()
 
     @property
     def config(self) -> DrakkarConfig:
@@ -212,7 +213,9 @@ class DrakkarApp:
                 processor.start()
 
         assigned_partitions.set(len(self._processors))
-        _task = asyncio.ensure_future(self._safe_call(self._handler.on_assign(partition_ids)))
+        t = asyncio.ensure_future(self._safe_call(self._handler.on_assign(partition_ids)))
+        self._background_tasks.add(t)
+        t.add_done_callback(self._background_tasks.discard)
 
     def _on_revoke(self, partition_ids: list[int]) -> None:
         """Handle partition revocation."""
@@ -221,10 +224,14 @@ class DrakkarApp:
         for pid in partition_ids:
             processor = self._processors.pop(pid, None)
             if processor:
-                _task = asyncio.ensure_future(self._stop_processor(processor))
+                t = asyncio.ensure_future(self._stop_processor(processor))
+                self._background_tasks.add(t)
+                t.add_done_callback(self._background_tasks.discard)
 
         assigned_partitions.set(len(self._processors))
-        _task = asyncio.ensure_future(self._safe_call(self._handler.on_revoke(partition_ids)))
+        t = asyncio.ensure_future(self._safe_call(self._handler.on_revoke(partition_ids)))
+        self._background_tasks.add(t)
+        t.add_done_callback(self._background_tasks.discard)
 
     async def _safe_call(self, coro: Coroutine) -> None:
         """Run a coroutine and log any exception instead of leaving it unretrieved."""

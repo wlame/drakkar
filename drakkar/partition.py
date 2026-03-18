@@ -91,6 +91,7 @@ class PartitionProcessor:
         self._running = False
         self._task: asyncio.Task | None = None
         self._inflight_count = 0
+        self._active_tasks: set[asyncio.Task] = set()
 
     @property
     def partition_id(self) -> int:
@@ -250,7 +251,9 @@ class PartitionProcessor:
 
         for task in tasks:
             self._inflight_count += 1
-            asyncio.create_task(self._execute_and_track(task, window))
+            t = asyncio.create_task(self._execute_and_track(task, window))
+            self._active_tasks.add(t)
+            t.add_done_callback(self._active_tasks.discard)
 
     async def _execute_and_track(
         self, task: ExecutorTask, window: Window, retry_count: int = 0
@@ -304,12 +307,16 @@ class PartitionProcessor:
                     window.tasks.append(new_task)
                     window.total_tasks += 1
                     self._inflight_count += 1
-                    asyncio.create_task(self._execute_and_track(new_task, window))
+                    t = asyncio.create_task(self._execute_and_track(new_task, window))
+                    self._active_tasks.add(t)
+                    t.add_done_callback(self._active_tasks.discard)
             elif action == ErrorAction.RETRY and retry_count < MAX_RETRIES:
                 task_retries.inc()
                 # don't decrement inflight or increment completed — the retry
                 # reuses this slot, so we just re-enter with same task
-                asyncio.create_task(self._execute_and_track(task, window, retry_count + 1))
+                t = asyncio.create_task(self._execute_and_track(task, window, retry_count + 1))
+                self._active_tasks.add(t)
+                t.add_done_callback(self._active_tasks.discard)
                 return
             else:
                 if action == ErrorAction.RETRY:

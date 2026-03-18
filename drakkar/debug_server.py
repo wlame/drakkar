@@ -443,6 +443,36 @@ def create_debug_app(
             }
         )
 
+    @app.get('/api/debug/processors')
+    async def api_debug_processors():
+        """Dump internal state of all partition processors for diagnostics."""
+        result = {}
+        for pid, proc in sorted(drakkar_app.processors.items()):
+            tracker = proc.offset_tracker
+            sorted_offsets = list(tracker._sorted_offsets[:20])
+            offset_states = {
+                o: str(tracker._offsets.get(o, '?'))
+                for o in sorted_offsets
+            }
+            result[pid] = {
+                'queue_size': proc.queue_size,
+                'inflight_count': proc.inflight_count,
+                'pending_count': tracker.pending_count,
+                'completed_count': tracker.completed_count,
+                'total_tracked': tracker.total_tracked,
+                'last_committed': tracker.last_committed,
+                'committable': tracker.committable(),
+                'first_offsets': sorted_offsets,
+                'offset_states': offset_states,
+            }
+        pool = drakkar_app._executor_pool
+        return JSONResponse({
+            'processors': result,
+            'pool_active': pool.active_count if pool else 0,
+            'pool_waiting': pool.waiting_count if pool else 0,
+            'pool_max': pool.max_workers if pool else 0,
+        })
+
     # --- WebSocket endpoint for live event streaming ---
 
     @app.websocket('/ws')
