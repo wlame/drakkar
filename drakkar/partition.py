@@ -295,7 +295,15 @@ class PartitionProcessor:
 
             collect_start = time.monotonic()
             collect_result = await self._handler.collect(result)
-            handler_duration.labels(hook='collect').observe(time.monotonic() - collect_start)
+            collect_duration = time.monotonic() - collect_start
+            handler_duration.labels(hook='collect').observe(collect_duration)
+            if self._recorder:
+                self._recorder.record_collect_completed(
+                    task_id=task.task_id,
+                    partition=self._partition_id,
+                    duration=collect_duration,
+                    output_message_count=len(collect_result.output_messages) if collect_result else 0,
+                )
             if collect_result and self._on_collect:
                 await self._on_collect(collect_result, self._partition_id)
 

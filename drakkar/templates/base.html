@@ -14,7 +14,7 @@
                 <span class="text-lg font-bold text-white">Drakkar</span>
                 <a href="/" class="text-gray-300 hover:text-white text-sm">Dashboard</a>
                 <a href="/partitions" class="text-gray-300 hover:text-white text-sm">Partitions</a>
-                <a href="/executors" class="text-gray-300 hover:text-white text-sm">Executors</a>
+                <a href="/live" class="text-gray-300 hover:text-white text-sm">Live</a>
                 <a href="/history" class="text-gray-300 hover:text-white text-sm">History</a>
             </div>
             <div class="text-sm text-gray-400">
@@ -29,11 +29,22 @@
     document.addEventListener('click', function(e) {
         var el = e.target.closest('.expandable');
         if (!el) return;
+        var expanding = el.classList.contains('truncate');
         el.classList.toggle('truncate');
         el.classList.toggle('max-w-xs');
         el.classList.toggle('max-w-md');
         el.classList.toggle('whitespace-pre-wrap');
         el.classList.toggle('break-all');
+        // swap between truncated and full content
+        var full = el.getAttribute('data-full');
+        if (full) {
+            if (expanding) {
+                el.setAttribute('data-short', el.textContent);
+                el.textContent = full;
+            } else {
+                el.textContent = el.getAttribute('data-short') || full;
+            }
+        }
     });
     </script>
 </body>

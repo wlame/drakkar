@@ -151,8 +151,8 @@ def create_debug_app(
             },
         )
 
-    @app.get('/executors', response_class=HTMLResponse)
-    async def executors(request: Request):
+    @app.get('/live', response_class=HTMLResponse)
+    async def live(request: Request):
         active = await recorder.get_active_tasks()
         now = time.time()
         for task in active:
@@ -201,7 +201,7 @@ def create_debug_app(
 
         return templates.TemplateResponse(
             request,
-            'executors.html',
+            'live.html',
             {
                 'worker_id': drakkar_app._worker_id,
                 'running_tasks': running_tasks,

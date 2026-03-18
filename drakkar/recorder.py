@@ -176,6 +176,8 @@ class EventRecorder:
                         'offsets': [m.offset for m in messages],
                         'task_ids': [t.task_id for t in tasks],
                         'task_count': len(tasks),
+                        'message_count': len(messages),
+                        'message_labels': message_labels or [],
                     }
                 ),
             }
@@ -257,6 +259,28 @@ class EventRecorder:
         if self._config.store_output:
             entry['stderr'] = error.stderr
         self._record(entry)
+
+    def record_collect_completed(
+        self,
+        task_id: str,
+        partition: int,
+        duration: float,
+        output_message_count: int,
+    ) -> None:
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'collect_completed',
+                'task_id': task_id,
+                'partition': partition,
+                'duration': round(duration, 4),
+                'metadata': json.dumps(
+                    {
+                        'output_message_count': output_message_count,
+                    }
+                ),
+            }
+        )
 
     def record_produced(
         self,

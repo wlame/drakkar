@@ -144,10 +144,10 @@ async def test_partition_detail_pagination(client):
     assert resp.status_code == 200
 
 
-async def test_executors_page(client):
-    resp = await client.get('/executors')
+async def test_live_page(client):
+    resp = await client.get('/live')
     assert resp.status_code == 200
-    assert 'Active Executors' in resp.text
+    assert 'Live Pipeline' in resp.text
     assert '2 / 8' in resp.text
 
 
@@ -195,15 +195,17 @@ async def test_partitions_page_with_live_processors(debug_config, mock_recorder,
     assert resp.status_code == 200
 
 
-async def test_executors_page_has_ws_and_js_targets(debug_config, mock_recorder, mock_app):
-    """Executors page has JS target elements and WebSocket connection code."""
+async def test_live_page_has_tabs_and_ws(debug_config, mock_recorder, mock_app):
+    """Live page has tab panels, JS targets, and WebSocket code."""
     fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/executors')
+        resp = await c.get('/live')
     assert resp.status_code == 200
-    assert 'running-body' in resp.text
-    assert 'finished-body' in resp.text
+    assert 'panel-arrange' in resp.text
+    assert 'panel-execute' in resp.text
+    assert 'panel-collect' in resp.text
+    assert 'panel-trace' in resp.text
     assert 'allTasks' in resp.text
     assert '/ws' in resp.text
 
