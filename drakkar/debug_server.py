@@ -188,6 +188,17 @@ def create_debug_app(
             :5000
         ]
 
+        # active arrange() calls
+        arranging = []
+        for proc in processors.values():
+            if proc._arranging:
+                arranging.append({
+                    'partition': proc.partition_id,
+                    'duration': round(now - proc._arrange_start, 2),
+                    'message_count': len(proc._arrange_labels),
+                    'labels': proc._arrange_labels[:10],
+                })
+
         return templates.TemplateResponse(
             request,
             'executors.html',
@@ -196,6 +207,7 @@ def create_debug_app(
                 'running_tasks': running_tasks,
                 'pending_tasks': pending_tasks,
                 'recent_finished': recent_finished,
+                'arranging': arranging,
                 'pool_active': drakkar_app._executor_pool.active_count
                 if drakkar_app._executor_pool
                 else 0,
@@ -456,9 +468,18 @@ def create_debug_app(
                 o: str(tracker._offsets.get(o, '?'))
                 for o in sorted_offsets
             }
+            arrange_info = None
+            if proc._arranging:
+                arrange_info = {
+                    'duration': round(time.time() - proc._arrange_start, 2),
+                    'message_count': len(proc._arrange_labels),
+                    'labels': proc._arrange_labels[:20],
+                }
             entry: dict = {
                 'queue_size': proc.queue_size,
                 'inflight_count': proc.inflight_count,
+                'arranging': proc._arranging,
+                'arrange': arrange_info,
                 'pending_count': tracker.pending_count,
                 'completed_count': tracker.completed_count,
                 'total_tracked': tracker.total_tracked,

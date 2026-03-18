@@ -92,6 +92,9 @@ class PartitionProcessor:
         self._task: asyncio.Task | None = None
         self._inflight_count = 0
         self._active_tasks: set[asyncio.Task] = set()
+        self._arranging = False
+        self._arrange_start: float = 0.0
+        self._arrange_labels: list[str] = []
 
     @property
     def partition_id(self) -> int:
@@ -225,9 +228,15 @@ class PartitionProcessor:
             pending_task_ids=set(self._pending_tasks.keys()),
         )
 
-        arrange_start = time.monotonic()
-        tasks = await self._handler.arrange(messages, pending_ctx)
-        handler_duration.labels(hook='arrange').observe(time.monotonic() - arrange_start)
+        self._arranging = True
+        self._arrange_start = time.monotonic()
+        self._arrange_labels = [self._handler.message_label(msg) for msg in messages]
+        try:
+            tasks = await self._handler.arrange(messages, pending_ctx)
+        finally:
+            self._arranging = False
+            self._arrange_labels = []
+        handler_duration.labels(hook='arrange').observe(time.monotonic() - self._arrange_start)
         if self._recorder:
             self._recorder.record_arranged(self._partition_id, messages, tasks)
         window.tasks = tasks

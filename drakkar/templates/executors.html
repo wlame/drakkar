@@ -14,6 +14,39 @@
          style="width: {{ pct }}%"></div>
 </div>
 
+<!-- Arranging section -->
+<details id="arrange-section" {% if arranging %}open{% endif %} class="mb-4">
+    <summary class="text-lg font-semibold cursor-pointer select-none hover:text-white">
+        Arranging <span id="arrange-count" class="text-sm font-normal text-cyan-400">({{ arranging | length }})</span>
+    </summary>
+    <div id="arrange-body" class="mt-2">
+    {% if arranging %}
+        <table class="w-full text-sm">
+            <thead>
+                <tr class="text-left text-gray-400 border-b border-gray-700">
+                    <th class="py-2 px-3">Partition</th>
+                    <th class="py-2 px-3">Messages</th>
+                    <th class="py-2 px-3">Duration</th>
+                    <th class="py-2 px-3">Message Labels</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for a in arranging %}
+                <tr class="border-b border-gray-800">
+                    <td class="py-2 px-3 font-mono"><a href="/partitions/{{ a.partition }}" class="text-cyan-400 hover:underline">P{{ a.partition }}</a></td>
+                    <td class="py-2 px-3 font-mono">{{ a.message_count }}</td>
+                    <td class="py-2 px-3 font-mono" style="color:#eab308;">{{ a.duration }}s</td>
+                    <td class="py-2 px-3 font-mono text-xs text-gray-400 max-w-lg truncate">{{ a.labels | join(', ') }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p class="text-gray-500 text-sm py-2 px-3">No arrange() calls active</p>
+    {% endif %}
+    </div>
+</details>
+
 <h2 class="text-lg font-semibold mb-2">Executor Timeline <span class="text-sm font-normal text-gray-400">(last 10 min)</span></h2>
 <div class="flex items-center gap-3 mb-2">
     <div class="flex items-center gap-1">

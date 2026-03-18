@@ -226,6 +226,31 @@ async def test_non_generic_handler_skips_deserialization():
     assert msg.payload is None  # no deserialization without input_model
 
 
+async def test_message_label_default():
+    handler = BaseDrakkarHandler()
+    msg = SourceMessage(topic='t', partition=3, offset=42, value=b'x', timestamp=0)
+    assert handler.message_label(msg) == '3:42'
+
+
+async def test_message_label_custom_override():
+    class MyHandler(BaseDrakkarHandler[SearchRequest, SearchResult]):
+        def message_label(self, msg):
+            if msg.payload:
+                return f'{msg.partition}:{msg.offset} [{msg.payload.pattern}]'
+            return f'{msg.partition}:{msg.offset}'
+
+        async def arrange(self, messages, pending):
+            return []
+
+    handler = MyHandler()
+    msg = SourceMessage(
+        topic='t', partition=5, offset=10, timestamp=0,
+        value=json.dumps({'pattern': 'TODO', 'file_path': '/tmp'}).encode(),
+    )
+    handler.deserialize_message(msg)
+    assert handler.message_label(msg) == '5:10 [TODO]'
+
+
 async def test_output_message_from_model():
     result = SearchResult(pattern='error', match_count=3, matches=['a', 'b', 'c'])
     msg = OutputMessage.from_model(result, key=b'key-1')

@@ -540,3 +540,129 @@ async def test_commit_failure_preserves_offsets_for_retry(echo_pool):
 
     assert commit_count >= 2, 'Expected at least one retry after failure'
     assert any(c[1] == 3 for c in committed), f'Expected commit of 3, got: {committed}'
+
+
+# --- Task reference retention ---
+
+
+async def test_active_tasks_set_holds_references():
+    """asyncio.create_task references are stored in _active_tasks
+    to prevent garbage collection (Python 3.12+ weak refs).
+    """
+    slow_pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_workers=4,
+        task_timeout_seconds=10,
+    )
+
+    class SlowEchoHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f'at-{m.offset}',
+                    args=['-c', 'import time; time.sleep(0.3); print("ok")'],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=SlowEchoHandler(),
+        executor_pool=slow_pool,
+        window_size=10,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.enqueue(make_msg(offset=1))
+
+    proc.start()
+    # while slow tasks are in-flight, _active_tasks should hold references
+    await wait_for(lambda: len(proc._active_tasks) > 0, timeout=2)
+    assert proc._active_tasks  # strong references exist
+
+    # after completion, done callbacks should clean up
+    await wait_for(lambda: proc.inflight_count == 0, timeout=5)
+    await wait_for(lambda: len(proc._active_tasks) == 0, timeout=2)
+    await proc.stop()
+
+
+# --- Arrange tracking ---
+
+
+async def test_arrange_tracking_state(echo_pool):
+    """Processor tracks arrange() state for debug introspection."""
+    arrange_was_active = False
+    arrange_had_labels = False
+
+    class SlowArrangeHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            nonlocal arrange_was_active, arrange_had_labels
+            # check tracking from inside arrange
+            # (can't access proc directly, but we verify after)
+            await asyncio.sleep(0.1)
+            return [
+                ExecutorTask(
+                    task_id=f'sa-{m.offset}',
+                    args=['ok'],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=SlowArrangeHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+
+    # during arrange, _arranging should be True
+    await wait_for(lambda: proc._arranging, timeout=2)
+    assert len(proc._arrange_labels) > 0
+    assert proc._arrange_labels[0] == '0:0'  # default message_label
+
+    # after arrange completes, _arranging should be False
+    await wait_for(lambda: not proc._arranging, timeout=2)
+    await proc.stop()
+
+
+# --- message_label used in arrange tracking ---
+
+
+async def test_custom_message_label_in_arrange_tracking(echo_pool):
+    """Custom message_label() is used in arrange tracking labels."""
+
+    class LabelHandler(BaseDrakkarHandler):
+        def message_label(self, msg):
+            return f'REQ-{msg.offset}'
+
+        async def arrange(self, messages, pending):
+            await asyncio.sleep(0.05)
+            return [
+                ExecutorTask(
+                    task_id=f'lbl-{m.offset}',
+                    args=['ok'],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=LabelHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+    )
+
+    proc.enqueue(make_msg(offset=42))
+    proc.start()
+
+    await wait_for(lambda: proc._arranging, timeout=2)
+    assert proc._arrange_labels == ['REQ-42']
+
+    await wait_for(lambda: not proc._arranging, timeout=2)
+    await proc.stop()

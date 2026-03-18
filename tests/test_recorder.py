@@ -407,6 +407,33 @@ async def test_rotate_enforces_max_file_count(tmp_path):
     await rec.stop()
 
 
+# --- Pool stats in events ---
+
+
+async def test_task_started_includes_pool_stats(recorder):
+    task = make_task('t1')
+    recorder.record_task_started(task, partition=0, pool_active=5, pool_waiting=12)
+    await recorder._flush()
+
+    queue = recorder.subscribe()
+    # re-record to check WS event
+    recorder.record_task_started(task, partition=0, pool_active=3, pool_waiting=7)
+    event = queue.get_nowait()
+    assert event['pool_active'] == 3
+    assert event['pool_waiting'] == 7
+    recorder.unsubscribe(queue)
+
+
+async def test_task_completed_includes_pool_stats(recorder):
+    result = make_result('t1')
+    queue = recorder.subscribe()
+    recorder.record_task_completed(result, partition=0, pool_active=4, pool_waiting=0)
+    event = queue.get_nowait()
+    assert event['pool_active'] == 4
+    assert event['pool_waiting'] == 0
+    recorder.unsubscribe(queue)
+
+
 # --- WebSocket broadcast tests ---
 
 

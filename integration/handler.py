@@ -59,6 +59,12 @@ class RipgrepHandler(BaseDrakkarHandler[SearchRequest, SearchResult]):
     auto-deserialized from Kafka message bytes by the framework.
     """
 
+    def message_label(self, msg: SourceMessage) -> str:
+        """Show request_id + pattern for debugging."""
+        if msg.payload:
+            return f'{msg.partition}:{msg.offset} [{msg.payload.request_id[:8]}] {msg.payload.pattern}'
+        return f'{msg.partition}:{msg.offset}'
+
     async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
         import structlog
         logger = structlog.get_logger()

@@ -131,3 +131,31 @@ async def test_execute_large_stdout():
     task = make_task(args=['-c', "print('x' * 10000)"])
     result = await pool.execute(task)
     assert len(result.stdout.strip()) == 10000
+
+
+async def test_waiting_count_tracks_queued_tasks():
+    """waiting_count reflects tasks blocked on the semaphore."""
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_workers=1,
+        task_timeout_seconds=10,
+    )
+    assert pool.waiting_count == 0
+
+    # fill the single slot with a slow task
+    slow = make_task('slow', args=['-c', 'import time; time.sleep(0.5)'])
+    slow_future = asyncio.create_task(pool.execute(slow))
+    await asyncio.sleep(0.05)  # let it acquire the semaphore
+    assert pool.active_count == 1
+
+    # queue a second task — it should be waiting
+    fast = make_task('fast', args=['-c', 'print("ok")'])
+    fast_future = asyncio.create_task(pool.execute(fast))
+    await asyncio.sleep(0.05)
+    assert pool.waiting_count == 1
+
+    # wait for both to complete
+    await slow_future
+    await fast_future
+    assert pool.waiting_count == 0
+    assert pool.active_count == 0

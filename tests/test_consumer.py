@@ -178,6 +178,59 @@ async def test_on_revoke_callback(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
+async def test_pause_partitions(mock_cls, kafka_config):
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
+
+    consumer = KafkaConsumer(kafka_config)
+    await consumer.pause([0, 3])
+
+    mock_inner.pause.assert_called_once()
+    tps = mock_inner.pause.call_args[0][0]
+    assert len(tps) == 2
+    assert tps[0].partition == 0
+    assert tps[1].partition == 3
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_resume_partitions(mock_cls, kafka_config):
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
+
+    consumer = KafkaConsumer(kafka_config)
+    await consumer.resume([1, 5])
+
+    mock_inner.resume.assert_called_once()
+    tps = mock_inner.resume.call_args[0][0]
+    assert len(tps) == 2
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_get_total_lag(mock_cls, kafka_config):
+    from confluent_kafka import TopicPartition
+
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
+
+    # committed returns TopicPartitions with offsets
+    tp0 = TopicPartition(kafka_config.source_topic, 0, 90)
+    tp1 = TopicPartition(kafka_config.source_topic, 1, 80)
+    mock_inner.committed.return_value = [tp0, tp1]
+
+    # watermarks: (low, high)
+    async def fake_watermarks(tp):
+        if tp.partition == 0:
+            return (0, 100)  # lag = 100 - 90 = 10
+        return (0, 95)  # lag = 95 - 80 = 15
+
+    mock_inner.get_watermark_offsets.side_effect = fake_watermarks
+
+    consumer = KafkaConsumer(kafka_config)
+    total = await consumer.get_total_lag([0, 1])
+    assert total == 25  # 10 + 15
+
+
+@patch('drakkar.consumer.AIOConsumer')
 async def test_close(mock_cls, kafka_config):
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner

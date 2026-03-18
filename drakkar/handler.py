@@ -27,6 +27,7 @@ class DrakkarHandler(Protocol):
     input_model: type[BaseModel] | None
     output_model: type[BaseModel] | None
 
+    def message_label(self, msg: SourceMessage) -> str: ...
     async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig: ...
     async def on_ready(self, config: DrakkarConfig, db_pool: object) -> None: ...
     async def arrange(
@@ -85,6 +86,14 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
             cls.input_model = input_t
         if output_t and issubclass(output_t, BaseModel):
             cls.output_model = output_t
+
+    def message_label(self, msg: SourceMessage) -> str:
+        """Return a short label for a message, used in logs and UI.
+
+        Override to include application-specific fields like request_id.
+        Default: partition:offset
+        """
+        return f'{msg.partition}:{msg.offset}'
 
     def deserialize_message(self, msg: SourceMessage) -> SourceMessage:
         """Deserialize msg.value into msg.payload using input_model.

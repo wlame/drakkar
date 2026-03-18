@@ -13,6 +13,7 @@ from drakkar.models import (
     OutputMessage,
     PendingContext,
     SourceMessage,
+    make_task_id,
 )
 
 
@@ -134,3 +135,24 @@ def test_error_action_values():
 
 def test_error_action_is_str():
     assert isinstance(ErrorAction.RETRY, str)
+
+
+def test_make_task_id_no_collisions_under_burst():
+    """make_task_id should produce unique IDs even under rapid generation."""
+    ids = [make_task_id('t') for _ in range(10000)]
+    assert len(set(ids)) == 10000
+
+
+def test_make_task_id_is_time_sortable():
+    """IDs generated later should sort after earlier ones."""
+    import time
+
+    id1 = make_task_id('t')
+    time.sleep(0.001)
+    id2 = make_task_id('t')
+    assert id1 < id2
+
+
+def test_make_task_id_prefix():
+    assert make_task_id('rg').startswith('rg-')
+    assert make_task_id('task').startswith('task-')
