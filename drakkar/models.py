@@ -12,14 +12,14 @@ def make_task_id(prefix: str = 't') -> str:
     """Generate a short, time-sortable, unique task ID.
 
     Format: {prefix}-{timestamp_hex}-{random_hex}
-    Example: t-68561a3f-c7a2  (18 chars with default prefix)
+    Example: t-68561a3f1b2c-a7c2f1e3  (28 chars with default prefix)
 
     Time-sortable: lexicographic order matches creation order.
-    Unique: 16-bit random suffix → ~65k IDs per second before collision.
+    Unique: nanosecond timestamp + 32-bit random suffix.
     """
-    ts = int(time.time())
-    rnd = int.from_bytes(os.urandom(2))
-    return f'{prefix}-{ts:08x}-{rnd:04x}'
+    ts = time.time_ns()
+    rnd = int.from_bytes(os.urandom(4))
+    return f'{prefix}-{ts:016x}-{rnd:08x}'
 
 
 InputT = TypeVar('InputT', bound=BaseModel)

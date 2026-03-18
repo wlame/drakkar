@@ -446,6 +446,8 @@ def create_debug_app(
     @app.get('/api/debug/processors')
     async def api_debug_processors():
         """Dump internal state of all partition processors for diagnostics."""
+        import traceback as tb
+
         result = {}
         for pid, proc in sorted(drakkar_app.processors.items()):
             tracker = proc.offset_tracker
@@ -454,7 +456,7 @@ def create_debug_app(
                 o: str(tracker._offsets.get(o, '?'))
                 for o in sorted_offsets
             }
-            result[pid] = {
+            entry: dict = {
                 'queue_size': proc.queue_size,
                 'inflight_count': proc.inflight_count,
                 'pending_count': tracker.pending_count,
@@ -464,7 +466,26 @@ def create_debug_app(
                 'committable': tracker.committable(),
                 'first_offsets': sorted_offsets,
                 'offset_states': offset_states,
+                'active_task_count': len(proc._active_tasks),
             }
+            # show stuck task details
+            stuck = []
+            for task in proc._active_tasks:
+                if not task.done():
+                    frames = task.get_stack(limit=5)
+                    stack_lines = []
+                    for frame in frames:
+                        stack_lines.append(
+                            f'{frame.f_code.co_filename}:{frame.f_lineno} '
+                            f'in {frame.f_code.co_name}'
+                        )
+                    stuck.append({
+                        'name': task.get_name(),
+                        'stack': stack_lines,
+                    })
+            if stuck:
+                entry['stuck_tasks'] = stuck
+            result[pid] = entry
         pool = drakkar_app._executor_pool
         return JSONResponse({
             'processors': result,

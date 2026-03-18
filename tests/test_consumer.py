@@ -1,6 +1,7 @@
 """Tests for Drakkar Kafka consumer wrapper."""
 
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -34,7 +35,6 @@ def make_mock_message(
 
 
 def make_error_message(error_code):
-
     msg = MagicMock()
     err = MagicMock()
     err.code.return_value = error_code
@@ -42,38 +42,38 @@ def make_error_message(error_code):
     return msg
 
 
-@patch('drakkar.consumer.Consumer')
-def test_consumer_creation(mock_consumer_cls, kafka_config):
+@patch('drakkar.consumer.AIOConsumer')
+def test_consumer_creation(mock_cls, kafka_config):
     _consumer = KafkaConsumer(kafka_config)
-    mock_consumer_cls.assert_called_once()
-    call_args = mock_consumer_cls.call_args[0][0]
+    mock_cls.assert_called_once()
+    call_args = mock_cls.call_args[0][0]
     assert call_args['bootstrap.servers'] == 'localhost:9092'
     assert call_args['group.id'] == 'test-group'
     assert call_args['enable.auto.commit'] is False
     assert call_args['partition.assignment.strategy'] == 'cooperative-sticky'
 
 
-@patch('drakkar.consumer.Consumer')
-def test_consumer_subscribe(mock_consumer_cls, kafka_config):
-    mock_inner = MagicMock()
-    mock_consumer_cls.return_value = mock_inner
+@patch('drakkar.consumer.AIOConsumer')
+async def test_consumer_subscribe(mock_cls, kafka_config):
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
 
     consumer = KafkaConsumer(kafka_config)
-    consumer.subscribe()
+    await consumer.subscribe()
 
     mock_inner.subscribe.assert_called_once()
     call_args = mock_inner.subscribe.call_args
     assert call_args[0][0] == ['test-source']
 
 
-@patch('drakkar.consumer.Consumer')
-async def test_poll_batch_returns_messages(mock_consumer_cls, kafka_config):
-    mock_inner = MagicMock()
+@patch('drakkar.consumer.AIOConsumer')
+async def test_poll_batch_returns_messages(mock_cls, kafka_config):
+    mock_inner = AsyncMock()
     mock_inner.consume.return_value = [
         make_mock_message(partition=0, offset=10, value=b'msg1'),
         make_mock_message(partition=1, offset=20, value=b'msg2'),
     ]
-    mock_consumer_cls.return_value = mock_inner
+    mock_cls.return_value = mock_inner
 
     consumer = KafkaConsumer(kafka_config)
     messages = await consumer.poll_batch(max_messages=10, timeout=0.1)
@@ -85,27 +85,27 @@ async def test_poll_batch_returns_messages(mock_consumer_cls, kafka_config):
     assert messages[1].partition == 1
 
 
-@patch('drakkar.consumer.Consumer')
-async def test_poll_batch_empty(mock_consumer_cls, kafka_config):
-    mock_inner = MagicMock()
+@patch('drakkar.consumer.AIOConsumer')
+async def test_poll_batch_empty(mock_cls, kafka_config):
+    mock_inner = AsyncMock()
     mock_inner.consume.return_value = []
-    mock_consumer_cls.return_value = mock_inner
+    mock_cls.return_value = mock_inner
 
     consumer = KafkaConsumer(kafka_config)
     messages = await consumer.poll_batch(timeout=0.1)
     assert messages == []
 
 
-@patch('drakkar.consumer.Consumer')
-async def test_poll_batch_skips_partition_eof(mock_consumer_cls, kafka_config):
+@patch('drakkar.consumer.AIOConsumer')
+async def test_poll_batch_skips_partition_eof(mock_cls, kafka_config):
     from confluent_kafka import KafkaError
 
-    mock_inner = MagicMock()
+    mock_inner = AsyncMock()
     mock_inner.consume.return_value = [
         make_error_message(KafkaError._PARTITION_EOF),
         make_mock_message(partition=0, offset=5, value=b'valid'),
     ]
-    mock_consumer_cls.return_value = mock_inner
+    mock_cls.return_value = mock_inner
 
     consumer = KafkaConsumer(kafka_config)
     messages = await consumer.poll_batch(timeout=0.1)
@@ -113,25 +113,25 @@ async def test_poll_batch_skips_partition_eof(mock_consumer_cls, kafka_config):
     assert messages[0].value == b'valid'
 
 
-@patch('drakkar.consumer.Consumer')
-async def test_poll_batch_logs_errors(mock_consumer_cls, kafka_config):
+@patch('drakkar.consumer.AIOConsumer')
+async def test_poll_batch_logs_errors(mock_cls, kafka_config):
     from confluent_kafka import KafkaError
 
-    mock_inner = MagicMock()
+    mock_inner = AsyncMock()
     mock_inner.consume.return_value = [
         make_error_message(KafkaError._ALL_BROKERS_DOWN),
     ]
-    mock_consumer_cls.return_value = mock_inner
+    mock_cls.return_value = mock_inner
 
     consumer = KafkaConsumer(kafka_config)
     messages = await consumer.poll_batch(timeout=0.1)
     assert messages == []
 
 
-@patch('drakkar.consumer.Consumer')
-async def test_commit_offsets(mock_consumer_cls, kafka_config):
-    mock_inner = MagicMock()
-    mock_consumer_cls.return_value = mock_inner
+@patch('drakkar.consumer.AIOConsumer')
+async def test_commit_offsets(mock_cls, kafka_config):
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
 
     consumer = KafkaConsumer(kafka_config)
     await consumer.commit({0: 100, 1: 200})
@@ -142,44 +142,46 @@ async def test_commit_offsets(mock_consumer_cls, kafka_config):
     assert call_kwargs['asynchronous'] is False
 
 
-@patch('drakkar.consumer.Consumer')
-def test_on_assign_callback(mock_consumer_cls, kafka_config):
-    mock_inner = MagicMock()
-    mock_consumer_cls.return_value = mock_inner
+@patch('drakkar.consumer.AIOConsumer')
+async def test_on_assign_callback(mock_cls, kafka_config):
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
 
     assigned = []
     consumer = KafkaConsumer(kafka_config, on_assign=lambda parts: assigned.extend(parts))
-    consumer.subscribe()
+    await consumer.subscribe()
 
-    # simulate rebalance
-    assign_cb = mock_inner.subscribe.call_args[1]['on_assign']
+    # get the async callback registered with subscribe
+    call_kwargs = mock_inner.subscribe.call_args[1]
+    assign_cb = call_kwargs['on_assign']
     from confluent_kafka import TopicPartition
 
-    assign_cb(mock_inner, [TopicPartition('test-source', 0), TopicPartition('test-source', 1)])
+    await assign_cb(mock_inner, [TopicPartition('test-source', 0), TopicPartition('test-source', 1)])
     assert assigned == [0, 1]
 
 
-@patch('drakkar.consumer.Consumer')
-def test_on_revoke_callback(mock_consumer_cls, kafka_config):
-    mock_inner = MagicMock()
-    mock_consumer_cls.return_value = mock_inner
+@patch('drakkar.consumer.AIOConsumer')
+async def test_on_revoke_callback(mock_cls, kafka_config):
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
 
     revoked = []
     consumer = KafkaConsumer(kafka_config, on_revoke=lambda parts: revoked.extend(parts))
-    consumer.subscribe()
+    await consumer.subscribe()
 
-    revoke_cb = mock_inner.subscribe.call_args[1]['on_revoke']
+    call_kwargs = mock_inner.subscribe.call_args[1]
+    revoke_cb = call_kwargs['on_revoke']
     from confluent_kafka import TopicPartition
 
-    revoke_cb(mock_inner, [TopicPartition('test-source', 3)])
+    await revoke_cb(mock_inner, [TopicPartition('test-source', 3)])
     assert revoked == [3]
 
 
-@patch('drakkar.consumer.Consumer')
-def test_close(mock_consumer_cls, kafka_config):
-    mock_inner = MagicMock()
-    mock_consumer_cls.return_value = mock_inner
+@patch('drakkar.consumer.AIOConsumer')
+async def test_close(mock_cls, kafka_config):
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
 
     consumer = KafkaConsumer(kafka_config)
-    consumer.close()
+    await consumer.close()
     mock_inner.close.assert_called_once()

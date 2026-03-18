@@ -1,10 +1,15 @@
-"""Kafka producer wrapper for Drakkar framework."""
+"""Kafka producer wrapper for Drakkar framework.
+
+Uses confluent_kafka's AIOProducer for native asyncio integration.
+AIOProducer handles delivery callback polling internally — no manual
+poll() loop needed.
+"""
 
 import asyncio
 import time
 
 import structlog
-from confluent_kafka import KafkaException, Producer
+from confluent_kafka.aio import AIOProducer
 
 from drakkar.config import KafkaConfig
 from drakkar.metrics import produce_duration, producer_errors
@@ -14,59 +19,62 @@ logger = structlog.get_logger()
 
 
 class KafkaProducer:
-    """Wraps confluent_kafka.Producer with async produce and delivery tracking."""
+    """Wraps confluent_kafka.AIOProducer for native async produce."""
 
     def __init__(self, config: KafkaConfig) -> None:
         self._config = config
-        self._producer = Producer(
+        self._producer = AIOProducer(
             {
                 'bootstrap.servers': config.brokers,
             }
         )
 
     async def produce(self, message: OutputMessage) -> None:
-        """Produce a single message to the target topic.
-
-        Uses a delivery callback and asyncio.Future for async waiting.
-        """
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[None] = loop.create_future()
+        """Produce a single message to the target topic."""
         start = time.monotonic()
-
-        def delivery_callback(err: object, msg: object) -> None:
-            if err:
-                producer_errors.inc()
-                if not future.done():
-                    loop.call_soon_threadsafe(
-                        future.set_exception,
-                        KafkaException(err),
-                    )
-            else:
-                if not future.done():
-                    loop.call_soon_threadsafe(future.set_result, None)
-
-        self._producer.produce(
-            topic=self._config.target_topic,
-            key=message.key,
-            value=message.value,
-            callback=delivery_callback,
-        )
-        self._producer.poll(0)
-
-        await future
+        try:
+            delivery_future = await self._producer.produce(
+                topic=self._config.target_topic,
+                key=message.key,
+                value=message.value,
+            )
+            await delivery_future
+        except Exception:
+            producer_errors.inc()
+            raise
         produce_duration.observe(time.monotonic() - start)
 
     async def produce_batch(self, messages: list[OutputMessage]) -> None:
-        """Produce multiple messages concurrently."""
+        """Produce multiple messages concurrently.
+
+        Submits all messages, flushes to ensure they're in flight,
+        then awaits all delivery futures concurrently.
+        """
         if not messages:
             return
-        await asyncio.gather(*[self.produce(msg) for msg in messages])
+        start = time.monotonic()
+        futures = []
+        for msg in messages:
+            try:
+                f = await self._producer.produce(
+                    topic=self._config.target_topic,
+                    key=msg.key,
+                    value=msg.value,
+                )
+                futures.append(f)
+            except Exception:
+                producer_errors.inc()
+                raise
+        # flush buffered messages so deliveries are in flight
+        await self._producer.flush()
+        # wait for all delivery confirmations
+        await asyncio.gather(*futures)
+        produce_duration.observe(time.monotonic() - start)
 
     async def flush(self, timeout: float = 10.0) -> None:
         """Flush all pending messages."""
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._producer.flush, timeout)
+        await self._producer.flush(timeout)
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Flush and close the producer."""
-        self._producer.flush(timeout=30.0)
+        await self._producer.close()

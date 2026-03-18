@@ -33,7 +33,7 @@
 
 <div class="bg-gray-800 rounded-lg p-2 mb-8">
     <!-- scrollable viewport -->
-    <div id="tl-viewport" class="overflow-x-auto" style="position:relative;">
+    <div id="tl-viewport" style="position:relative; overflow:hidden;">
         <!-- wide inner container, sized by zoom -->
         <div id="tl-inner" style="position:relative; min-height:100px;">
             <!-- time axis -->
@@ -173,7 +173,7 @@ function renderTimeline() {
             renderLanes.push(endTs);
         }
     }
-    const laneCount = Math.max(renderLanes.length, 1);
+    const laneCount = Math.max(renderLanes.length, MAX_LANES);
 
     inner.style.width = totalWidth + 'px';
     axis.replaceChildren();
@@ -241,14 +241,25 @@ function renderTimeline() {
 }
 
 // --- Load initial data from API ---
-async function loadInitial() {
+async function syncFromAPI() {
     try {
         const r = await fetch('/api/recent-tasks?minutes=' + TIMELINE_MINUTES);
         const data = await r.json();
+        // API is authoritative — overwrite stale WS state
+        const apiIds = new Set();
         for (const t of (data.tasks || [])) {
             allTasks[t.task_id] = t;
+            apiIds.add(t.task_id);
+        }
+        // remove tasks that fell outside the timeline window
+        for (const id of Object.keys(allTasks)) {
+            if (!apiIds.has(id)) delete allTasks[id];
         }
     } catch(e) {}
+}
+
+async function loadInitial() {
+    await syncFromAPI();
     renderTimeline();
     scrollToEnd();
 }
@@ -393,5 +404,7 @@ function renderTaskLists() {
 loadInitial();
 connectWS();
 setInterval(() => { renderTimeline(); renderTaskLists(); }, 500);
+// periodic re-sync from API to fix ghost tasks from missed WS events
+setInterval(syncFromAPI, 5000);
 </script>
 {% endblock %}

@@ -119,10 +119,10 @@ def kafka_config():
 # === Consumer metrics ===
 
 
-@patch('drakkar.consumer.Consumer')
+@patch('drakkar.consumer.AIOConsumer')
 async def test_poll_error_increments_consumer_errors(mock_cls, kafka_config):
     """When poll returns a non-EOF error, consumer_errors counter goes up."""
-    mock_inner = MagicMock()
+    mock_inner = AsyncMock()
     mock_inner.consume.return_value = [
         make_kafka_error_msg(KafkaError._ALL_BROKERS_DOWN),
         make_kafka_error_msg(KafkaError.UNKNOWN),
@@ -135,10 +135,10 @@ async def test_poll_error_increments_consumer_errors(mock_cls, kafka_config):
     assert counter_val(consumer_errors) == before + 2
 
 
-@patch('drakkar.consumer.Consumer')
+@patch('drakkar.consumer.AIOConsumer')
 async def test_poll_eof_does_not_increment_consumer_errors(mock_cls, kafka_config):
     """Partition EOF is not an error — should not touch consumer_errors."""
-    mock_inner = MagicMock()
+    mock_inner = AsyncMock()
     mock_inner.consume.return_value = [
         make_kafka_error_msg(KafkaError._PARTITION_EOF),
     ]
@@ -150,40 +150,40 @@ async def test_poll_eof_does_not_increment_consumer_errors(mock_cls, kafka_confi
     assert counter_val(consumer_errors) == before
 
 
-@patch('drakkar.consumer.Consumer')
-def test_rebalance_assign_increments_metric(mock_cls, kafka_config):
+@patch('drakkar.consumer.AIOConsumer')
+async def test_rebalance_assign_increments_metric(mock_cls, kafka_config):
     """_handle_assign from Kafka triggers rebalance_events(type=assign)."""
-    mock_inner = MagicMock()
+    mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
     consumer = KafkaConsumer(kafka_config)
-    consumer.subscribe()
+    await consumer.subscribe()
 
     before = counter_val(rebalance_events, type='assign')
     assign_cb = mock_inner.subscribe.call_args[1]['on_assign']
-    assign_cb(mock_inner, [TopicPartition('src', 0), TopicPartition('src', 1)])
+    await assign_cb(mock_inner, [TopicPartition('src', 0), TopicPartition('src', 1)])
     assert counter_val(rebalance_events, type='assign') == before + 1
 
 
-@patch('drakkar.consumer.Consumer')
-def test_rebalance_revoke_increments_metric(mock_cls, kafka_config):
+@patch('drakkar.consumer.AIOConsumer')
+async def test_rebalance_revoke_increments_metric(mock_cls, kafka_config):
     """_handle_revoke from Kafka triggers rebalance_events(type=revoke)."""
-    mock_inner = MagicMock()
+    mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
     consumer = KafkaConsumer(kafka_config)
-    consumer.subscribe()
+    await consumer.subscribe()
 
     before = counter_val(rebalance_events, type='revoke')
     revoke_cb = mock_inner.subscribe.call_args[1]['on_revoke']
-    revoke_cb(mock_inner, [TopicPartition('src', 5)])
+    await revoke_cb(mock_inner, [TopicPartition('src', 5)])
     assert counter_val(rebalance_events, type='revoke') == before + 1
 
 
-@patch('drakkar.consumer.Consumer')
+@patch('drakkar.consumer.AIOConsumer')
 async def test_commit_increments_offsets_committed(mock_cls, kafka_config):
     """consumer.commit() increments offsets_committed per partition."""
-    mock_inner = MagicMock()
+    mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
     consumer = KafkaConsumer(kafka_config)
@@ -199,16 +199,14 @@ async def test_commit_increments_offsets_committed(mock_cls, kafka_config):
 # === Producer metrics ===
 
 
-@patch('drakkar.producer.Producer')
+@patch('drakkar.producer.AIOProducer')
 async def test_produce_success_observes_duration(mock_cls, kafka_config):
     """Successful produce() observes produce_duration histogram."""
-    mock_inner = MagicMock()
-
-    def fake_produce(topic, key, value, callback):
-        callback(None, MagicMock())
-
-    mock_inner.produce.side_effect = fake_produce
-    mock_inner.poll.return_value = 0
+    mock_inner = AsyncMock()
+    delivered = MagicMock()
+    delivery_future = asyncio.get_event_loop().create_future()
+    delivery_future.set_result(delivered)
+    mock_inner.produce.return_value = delivery_future
     mock_cls.return_value = mock_inner
 
     producer = KafkaProducer(kafka_config)
@@ -217,16 +215,11 @@ async def test_produce_success_observes_duration(mock_cls, kafka_config):
     assert histogram_sum(produce_duration) > before
 
 
-@patch('drakkar.producer.Producer')
+@patch('drakkar.producer.AIOProducer')
 async def test_produce_failure_increments_producer_errors(mock_cls, kafka_config):
     """Delivery failure increments producer_errors counter."""
-    mock_inner = MagicMock()
-
-    def fake_produce(topic, key, value, callback):
-        callback(MagicMock(), None)  # error
-
-    mock_inner.produce.side_effect = fake_produce
-    mock_inner.poll.return_value = 0
+    mock_inner = AsyncMock()
+    mock_inner.produce.side_effect = Exception('produce failed')
     mock_cls.return_value = mock_inner
 
     producer = KafkaProducer(kafka_config)

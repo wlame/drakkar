@@ -214,15 +214,12 @@ async def test_app_handle_signal(test_config):
 async def test_app_shutdown_closes_all_components(test_config):
     handler = SimpleHandler()
     app = DrakkarApp(handler=handler, config=test_config)
-    app._producer = MagicMock()
-    app._producer.flush = AsyncMock()
-    app._consumer = MagicMock()
-    app._consumer.commit = AsyncMock()
+    app._producer = AsyncMock()
+    app._consumer = AsyncMock()
     app._db_writer = AsyncMock()
 
     await app._shutdown()
 
-    app._producer.flush.assert_called_once()
     app._producer.close.assert_called_once()
     app._consumer.close.assert_called_once()
     app._db_writer.close.assert_called_once()
@@ -233,8 +230,7 @@ async def test_app_shutdown_drains_executors(test_config):
     handler = SimpleHandler()
     app = DrakkarApp(handler=handler, config=test_config)
     app._consumer = AsyncMock()
-    app._producer = MagicMock()
-    app._producer.flush = AsyncMock()
+    app._producer = AsyncMock()
     app._db_writer = AsyncMock()
 
     # create a processor with an executor pool

@@ -121,12 +121,10 @@ class DrakkarApp:
             )
             await self._debug_server.start()
 
-        self._loop = asyncio.get_running_loop()
         self._consumer = KafkaConsumer(
             config=self._config.kafka,
             on_assign=self._on_assign,
             on_revoke=self._on_revoke,
-            loop=self._loop,
         )
         self._producer = KafkaProducer(config=self._config.kafka)
 
@@ -135,7 +133,7 @@ class DrakkarApp:
 
         await self._handler.on_ready(self._config, self._db_writer.pool)
 
-        self._consumer.subscribe()
+        await self._consumer.subscribe()
         self._running = True
 
         loop = asyncio.get_running_loop()
@@ -172,14 +170,14 @@ class DrakkarApp:
             if self._paused and total <= low_watermark:
                 partition_ids = list(self._processors.keys())
                 if partition_ids:
-                    self._consumer.resume(partition_ids)
+                    await self._consumer.resume(partition_ids)
                     self._paused = False
                     backpressure_active.set(0)
 
             if not self._paused and total >= high_watermark:
                 partition_ids = list(self._processors.keys())
                 if partition_ids:
-                    self._consumer.pause(partition_ids)
+                    await self._consumer.pause(partition_ids)
                     self._paused = True
                     backpressure_active.set(1)
 
@@ -341,11 +339,10 @@ class DrakkarApp:
 
         # 6. flush producer and disconnect
         if self._producer:
-            await self._producer.flush()
-            self._producer.close()
+            await self._producer.close()
 
         if self._consumer:
-            self._consumer.close()
+            await self._consumer.close()
 
         if self._db_writer:
             await self._db_writer.close()

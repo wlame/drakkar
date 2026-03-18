@@ -1,9 +1,9 @@
 """Tests for Drakkar Kafka producer wrapper."""
 
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from confluent_kafka import KafkaException
 
 from drakkar.config import KafkaConfig
 from drakkar.models import OutputMessage
@@ -18,16 +18,24 @@ def kafka_config() -> KafkaConfig:
     )
 
 
-@patch('drakkar.producer.Producer')
-async def test_produce_single_message(mock_producer_cls, kafka_config):
-    mock_inner = MagicMock()
+def _make_delivered_msg():
+    msg = MagicMock()
+    msg.topic.return_value = 'test-output'
+    msg.partition.return_value = 0
+    msg.offset.return_value = 42
+    return msg
 
-    def fake_produce(topic, key, value, callback):
-        callback(None, MagicMock())  # success
 
-    mock_inner.produce.side_effect = fake_produce
-    mock_inner.poll.return_value = 0
-    mock_producer_cls.return_value = mock_inner
+@patch('drakkar.producer.AIOProducer')
+async def test_produce_single_message(mock_aio_cls, kafka_config):
+    mock_inner = AsyncMock()
+    delivered = _make_delivered_msg()
+    # produce() returns a coroutine that resolves to a future
+    delivery_future: asyncio.Future = asyncio.get_event_loop().create_future()
+    delivery_future.set_result(delivered)
+    mock_inner.produce.return_value = delivery_future
+    mock_inner.flush.return_value = None
+    mock_aio_cls.return_value = mock_inner
 
     producer = KafkaProducer(kafka_config)
     msg = OutputMessage(key=b'k1', value=b'{"result": true}')
@@ -40,35 +48,33 @@ async def test_produce_single_message(mock_producer_cls, kafka_config):
     assert call_kwargs['value'] == b'{"result": true}'
 
 
-@patch('drakkar.producer.Producer')
-async def test_produce_delivery_error(mock_producer_cls, kafka_config):
-    mock_inner = MagicMock()
-    mock_err = MagicMock()
-    mock_err.str.return_value = 'delivery failed'
-
-    def fake_produce(topic, key, value, callback):
-        callback(mock_err, None)  # error
-
-    mock_inner.produce.side_effect = fake_produce
-    mock_inner.poll.return_value = 0
-    mock_producer_cls.return_value = mock_inner
+@patch('drakkar.producer.AIOProducer')
+async def test_produce_delivery_error(mock_aio_cls, kafka_config):
+    mock_inner = AsyncMock()
+    delivery_future: asyncio.Future = asyncio.get_event_loop().create_future()
+    delivery_future.set_exception(Exception('delivery failed'))
+    mock_inner.produce.return_value = delivery_future
+    mock_inner.flush.return_value = None
+    mock_aio_cls.return_value = mock_inner
 
     producer = KafkaProducer(kafka_config)
     msg = OutputMessage(value=b'test')
-    with pytest.raises(KafkaException):
+    with pytest.raises(Exception, match='delivery failed'):
         await producer.produce(msg)
 
 
-@patch('drakkar.producer.Producer')
-async def test_produce_batch(mock_producer_cls, kafka_config):
-    mock_inner = MagicMock()
+@patch('drakkar.producer.AIOProducer')
+async def test_produce_batch(mock_aio_cls, kafka_config):
+    mock_inner = AsyncMock()
 
-    def fake_produce(topic, key, value, callback):
-        callback(None, MagicMock())
+    def make_future(*args, **kwargs):
+        f: asyncio.Future = asyncio.get_event_loop().create_future()
+        f.set_result(_make_delivered_msg())
+        return f
 
-    mock_inner.produce.side_effect = fake_produce
-    mock_inner.poll.return_value = 0
-    mock_producer_cls.return_value = mock_inner
+    mock_inner.produce.side_effect = make_future
+    mock_inner.flush.return_value = None
+    mock_aio_cls.return_value = mock_inner
 
     producer = KafkaProducer(kafka_config)
     messages = [
@@ -78,32 +84,33 @@ async def test_produce_batch(mock_producer_cls, kafka_config):
     ]
     await producer.produce_batch(messages)
     assert mock_inner.produce.call_count == 3
+    mock_inner.flush.assert_called_once()
 
 
-@patch('drakkar.producer.Producer')
-async def test_flush(mock_producer_cls, kafka_config):
-    mock_inner = MagicMock()
-    mock_producer_cls.return_value = mock_inner
+@patch('drakkar.producer.AIOProducer')
+async def test_flush(mock_aio_cls, kafka_config):
+    mock_inner = AsyncMock()
+    mock_aio_cls.return_value = mock_inner
 
     producer = KafkaProducer(kafka_config)
     await producer.flush(timeout=5.0)
     mock_inner.flush.assert_called_once_with(5.0)
 
 
-@patch('drakkar.producer.Producer')
-def test_close(mock_producer_cls, kafka_config):
-    mock_inner = MagicMock()
-    mock_producer_cls.return_value = mock_inner
+@patch('drakkar.producer.AIOProducer')
+async def test_close(mock_aio_cls, kafka_config):
+    mock_inner = AsyncMock()
+    mock_aio_cls.return_value = mock_inner
 
     producer = KafkaProducer(kafka_config)
-    producer.close()
-    mock_inner.flush.assert_called_once_with(timeout=30.0)
+    await producer.close()
+    mock_inner.close.assert_called_once()
 
 
-@patch('drakkar.producer.Producer')
-def test_producer_creation(mock_producer_cls, kafka_config):
+@patch('drakkar.producer.AIOProducer')
+def test_producer_creation(mock_aio_cls, kafka_config):
     KafkaProducer(kafka_config)
-    mock_producer_cls.assert_called_once_with(
+    mock_aio_cls.assert_called_once_with(
         {
             'bootstrap.servers': 'localhost:9092',
         }
