@@ -41,7 +41,7 @@
              style="width: {{ pct }}%"></div>
     </div>
 
-    <h2 class="text-lg font-semibold mb-2 text-ink-800">Timeline <span class="text-sm font-normal text-gray-400">(last 10 min)</span></h2>
+    <h2 class="text-lg font-semibold mb-2 text-ink-800">Timeline <span class="text-sm font-normal text-gray-400">(last 10 min, 2 sec delayed)</span></h2>
     <div class="flex items-center gap-3 mb-2">
         <div class="flex items-center gap-1">
             <label class="text-xs text-gray-400">Zoom:</label>
@@ -149,6 +149,7 @@ document.querySelectorAll('.tab-btn').forEach(function(btn) {
 // === Shared state ===
 var MAX_LANES = {{ pool_max }};
 var TIMELINE_MINUTES = 10;
+var TIMELINE_DELAY = 2; // seconds behind real time for smooth rendering
 var LANE_H = 22, LANE_GAP = 2, BASE_PX_PER_SEC = 8;
 var zoomLevel = 2;
 var hoveredTask = null;
@@ -173,11 +174,7 @@ var arrangeTotal = 0, collectTotal = 0;
 var tracePartition = null, traceOffset = null;
 
 // === Helpers ===
-function scrollToEnd() { var vp = document.getElementById('tl-viewport'); if (vp) vp.scrollLeft = vp.scrollWidth; }
-function autoScroll() {
-    var vp = document.getElementById('tl-viewport');
-    if (vp && vp.scrollWidth - vp.scrollLeft - vp.clientWidth < 200) vp.scrollLeft = vp.scrollWidth;
-}
+function scrollToEnd() { tlFollowing = true; }
 function fmtTime(ts) { return new Date(ts * 1000).toISOString().substring(11, 19); }
 function fmtTimeMs(ts) { return ts ? new Date(ts * 1000).toISOString().substring(11, 23) : ''; }
 function barColor(s) { return s === 'completed' ? '#34d399' : s === 'failed' ? '#f87171' : '#fbbf24'; }
@@ -201,7 +198,7 @@ function showTaskDetail(t) {
     el.textContent = '';
     var dur = t.duration ? t.duration.toFixed(3) + 's' : 'running';
     var line1 = [
-        {l:'Task', v:t.task_id}, {l:'PID', v:t.pid||'-'}, {l:'P', v:t.partition},
+        {l:'Task', v:t.task_id}, {l:'Slot', v:t.slot != null ? '#'+t.slot : '-'}, {l:'PID', v:t.pid||'-'}, {l:'P', v:t.partition},
         {l:'Status', v:t.status, s:statusCss(t.status)}, {l:'Duration', v:dur},
         {l:'Start', v:fmtTimeMs(t.start_ts)}, {l:'End', v:t.end_ts ? fmtTimeMs(t.end_ts) : 'running'},
     ];
@@ -232,33 +229,50 @@ function clearTaskDetail() {
     el.appendChild(hint);
 }
 
+// Timeline uses a fixed anchor so bar positions are stable between renders.
+// rAF smoothly advances scrollLeft — DOM rebuilds don't cause jumps.
+var tlAnchor = 0;       // fixed time reference for pixel positions
+var tlFollowing = true; // auto-follow the right edge
+
+function tlEdgePx() {
+    // pixel position of "now - delay" relative to anchor
+    return (Date.now() / 1000 - TIMELINE_DELAY - tlAnchor) * BASE_PX_PER_SEC * zoomLevel;
+}
+function tlScrollTarget() {
+    var vp = document.getElementById('tl-viewport');
+    if (!vp) return 0;
+    return Math.max(0, tlEdgePx() - vp.clientWidth);
+}
+
 function renderTimeline() {
-    var now = Date.now() / 1000;
+    var now = Date.now() / 1000 - TIMELINE_DELAY;
     var pxPerSec = BASE_PX_PER_SEC * zoomLevel;
     var totalSeconds = TIMELINE_MINUTES * 60;
-    var totalWidth = Math.max(totalSeconds * pxPerSec, 600);
-    var timelineStart = now - totalSeconds;
+
+    // set anchor once, then re-anchor every 30s to avoid infinite canvas growth
+    var newAnchor = Math.floor((now - totalSeconds) / 30) * 30;
+    if (tlAnchor === 0 || newAnchor > tlAnchor + 30) tlAnchor = newAnchor;
+
+    var canvasSeconds = now - tlAnchor; // exactly up to delayed-now, no future
+    var totalWidth = Math.ceil(canvasSeconds * pxPerSec);
+
     var inner = document.getElementById('tl-inner');
     var axis = document.getElementById('tl-axis');
     var lanesDiv = document.getElementById('tl-lanes');
     if (!inner || !axis || !lanesDiv) return;
 
     var sorted = Object.values(allTasks).filter(function(t) { return t.start_ts; }).sort(function(a, b) { return a.start_ts - b.start_ts; });
-    var renderLanes = [];
     for (var si = 0; si < sorted.length; si++) {
-        var st = sorted[si]; var endTs = st.end_ts || now; var placed = false;
-        for (var li = 0; li < renderLanes.length; li++) {
-            if (renderLanes[li] <= st.start_ts) { st.lane = li; renderLanes[li] = endTs; placed = true; break; }
-        }
-        if (!placed) { st.lane = renderLanes.length; renderLanes.push(endTs); }
+        sorted[si].lane = sorted[si].slot != null ? sorted[si].slot : si % MAX_LANES;
     }
-    var laneCount = Math.max(renderLanes.length, MAX_LANES);
+    var laneCount = MAX_LANES;
 
     inner.style.width = totalWidth + 'px';
     axis.replaceChildren(); axis.style.width = totalWidth + 'px';
     lanesDiv.replaceChildren();
     lanesDiv.style.height = (laneCount * (LANE_H + LANE_GAP)) + 'px';
 
+    // lane stripes + labels
     for (var i = 0; i < laneCount; i++) {
         var y = i * (LANE_H + LANE_GAP);
         if (i % 2 === 0) {
@@ -274,11 +288,14 @@ function renderTimeline() {
         lanesDiv.appendChild(label);
     }
 
+    // time axis ticks
     var tick = 30;
     if (pxPerSec >= 16) tick = 10; if (pxPerSec >= 32) tick = 5;
     if (pxPerSec < 4) tick = 60; if (pxPerSec < 1) tick = 120;
-    for (var t = Math.ceil(timelineStart / tick) * tick; t <= now; t += tick) {
-        var x = (t - timelineStart) * pxPerSec;
+    var axisStart = tlAnchor;
+    var axisEnd = tlAnchor + canvasSeconds;
+    for (var t = Math.ceil(axisStart / tick) * tick; t <= axisEnd; t += tick) {
+        var x = (t - tlAnchor) * pxPerSec;
         var line = document.createElement('div');
         line.style.cssText = 'position:absolute;top:0;width:1px;height:100%;background:#e5e7eb;';
         line.style.left = x + 'px'; axis.appendChild(line);
@@ -292,9 +309,10 @@ function renderTimeline() {
         axis.appendChild(lbl);
     }
 
+    // task bars — positions relative to stable anchor
     for (var ti = 0; ti < sorted.length; ti++) {
         var tt = sorted[ti]; var eTs = tt.end_ts || now;
-        var bx = Math.max(0, (tt.start_ts - timelineStart) * pxPerSec);
+        var bx = (tt.start_ts - tlAnchor) * pxPerSec;
         var bw = Math.max(2, (eTs - tt.start_ts) * pxPerSec);
         if (bx + bw < 0 || bx > totalWidth) continue;
         var by = tt.lane * (LANE_H + LANE_GAP);
@@ -311,6 +329,41 @@ function renderTimeline() {
         lanesDiv.appendChild(bar);
     }
 }
+
+// smooth scrollLeft via rAF — no jumps, no fighting with user scroll
+function animateScroll() {
+    if (!frozen) {
+        var vp = document.getElementById('tl-viewport');
+        var inner = document.getElementById('tl-inner');
+        if (vp && inner) {
+            // grow canvas smoothly to match delayed-now
+            var edge = tlEdgePx();
+            inner.style.width = Math.ceil(edge) + 'px';
+            // clamp: user can never scroll past the right edge
+            var maxScroll = Math.max(0, edge - vp.clientWidth);
+            if (vp.scrollLeft > maxScroll) vp.scrollLeft = maxScroll;
+            // auto-follow right edge
+            if (tlFollowing) vp.scrollLeft = maxScroll;
+        }
+    }
+    requestAnimationFrame(animateScroll);
+}
+
+// detect user scrolling away from the right edge
+(function() {
+    var vp = document.getElementById('tl-viewport');
+    if (!vp) return;
+    var userScrolling = false;
+    vp.addEventListener('wheel', function() { userScrolling = true; });
+    vp.addEventListener('touchstart', function() { userScrolling = true; });
+    vp.addEventListener('scroll', function() {
+        if (!userScrolling) return;
+        userScrolling = false;
+        // if user scrolled to the right edge, re-enable following
+        var maxScroll = Math.max(0, tlEdgePx() - vp.clientWidth);
+        tlFollowing = Math.abs(vp.scrollLeft - maxScroll) < 5;
+    });
+})();
 
 // === Tab renderers ===
 function renderArranges() {
@@ -605,6 +658,7 @@ function connectWS() {
                 allTasks[e.task_id] = {
                     task_id: e.task_id, partition: e.partition, pid: e.pid,
                     start_ts: e.ts, end_ts: null, status: 'running', args: e.args, duration: null,
+                    slot: e.slot != null ? e.slot : null,
                 };
             } else if (e.event === 'task_completed' || e.event === 'task_failed') {
                 var t = allTasks[e.task_id];
@@ -662,12 +716,17 @@ function initFromHash() {
     await Promise.all([syncFromAPI(), loadArrangeHistory(), loadCollectHistory()]);
     initFromHash();
     renderTimeline();
-    scrollToEnd();
     renderArranges();
     renderCollects();
     connectWS();
-    setInterval(function() { if (!frozen) { renderTimeline(); renderTaskLists(); autoScroll(); } }, 500);
-    setInterval(function() { if (!frozen) syncFromAPI(); }, 5000);
+    // DOM rebuild every 500ms for data changes
+    setInterval(function() {
+        if (!frozen) { renderTimeline(); renderTaskLists(); }
+    }, 500);
+    // smooth scroll via rAF (60fps, no jumps)
+    requestAnimationFrame(animateScroll);
+    // periodic API sync for ghost task cleanup
+    setInterval(function() { if (!frozen) syncFromAPI(); }, 2000);
 })();
 
 window.addEventListener('hashchange', initFromHash);

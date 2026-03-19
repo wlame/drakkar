@@ -30,6 +30,7 @@ class ExecutorPool:
         self._semaphore = asyncio.Semaphore(max_workers)
         self._active_count = 0
         self._waiting_count = 0
+        self._available_slots: list[int] = list(range(max_workers))
 
     @property
     def active_count(self) -> int:
@@ -58,15 +59,19 @@ class ExecutorPool:
         async with self._semaphore:
             self._waiting_count -= 1
             self._active_count += 1
+            slot = self._available_slots.pop(0)
             if recorder:
                 recorder.record_task_started(
                     task, partition_id,
                     pool_active=self._active_count,
                     pool_waiting=self._waiting_count,
+                    slot=slot,
                 )
             try:
                 return await self._run_subprocess(task)
             finally:
+                self._available_slots.append(slot)
+                self._available_slots.sort()
                 self._active_count -= 1
 
     async def _run_subprocess(self, task: ExecutorTask) -> ExecutorResult:

@@ -389,10 +389,18 @@ def create_debug_app(
                     'status': 'running',
                     'args': e.get('args'),
                     'pid': e.get('pid'),
+                    'slot': None,
                 }
             t = tasks[tid]
             if e['event'] == 'task_started':
                 t['start_ts'] = e['ts']
+                # extract slot from metadata
+                if e.get('metadata'):
+                    try:
+                        meta = json.loads(e['metadata'])
+                        t['slot'] = meta.get('slot')
+                    except (json.JSONDecodeError, TypeError):
+                        pass
             elif e['event'] in ('task_completed', 'task_failed'):
                 t['end_ts'] = e['ts']
                 t['status'] = 'completed' if e['event'] == 'task_completed' else 'failed'
@@ -533,13 +541,21 @@ def create_debug_app(
         q = recorder.subscribe()
         try:
             while True:
+                # drain all available events from queue in one batch
+                batch = []
                 try:
-                    event = q.get(timeout=0.1)
+                    batch.append(q.get(timeout=0.1))
+                    # grab more without blocking
+                    while len(batch) < 100:
+                        batch.append(q.get_nowait())
                 except queue_mod.Empty:
-                    await asyncio.sleep(0.05)
+                    pass
+                if not batch:
+                    await asyncio.sleep(0.02)
                     continue
                 try:
-                    await ws.send_text(json.dumps(event, default=str))
+                    for event in batch:
+                        await ws.send_text(json.dumps(event, default=str))
                 except Exception:
                     break
         except WebSocketDisconnect:

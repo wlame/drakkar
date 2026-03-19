@@ -104,7 +104,7 @@ class EventRecorder:
 
     def subscribe(self) -> queue.Queue:
         """Subscribe to live event stream. Returns a thread-safe queue."""
-        q: queue.Queue = queue.Queue(maxsize=1000)
+        q: queue.Queue = queue.Queue(maxsize=10_000)
         self._ws_subscribers.add(q)
         return q
 
@@ -189,6 +189,7 @@ class EventRecorder:
         partition: int,
         pool_active: int = 0,
         pool_waiting: int = 0,
+        slot: int = 0,
     ) -> None:
         self._record(
             {
@@ -199,9 +200,11 @@ class EventRecorder:
                 'args': json.dumps(task.args),
                 'pool_active': pool_active,
                 'pool_waiting': pool_waiting,
+                'slot': slot,
                 'metadata': json.dumps(
                     {
                         'source_offsets': task.source_offsets,
+                        'slot': slot,
                     }
                 ),
             }
