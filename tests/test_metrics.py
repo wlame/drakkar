@@ -596,6 +596,9 @@ async def test_on_assign_sets_assigned_partitions_gauge():
     app._consumer = MagicMock()
     app._producer = MagicMock()
     app._db_writer = AsyncMock()
+    app._executor_pool = ExecutorPool(
+        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
+    )
 
     app._on_assign([10, 11, 12])
 
@@ -619,6 +622,9 @@ async def test_on_revoke_decreases_assigned_partitions_gauge():
     app._consumer = AsyncMock()
     app._producer = MagicMock()
     app._db_writer = AsyncMock()
+    app._executor_pool = ExecutorPool(
+        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
+    )
 
     app._on_assign([20, 21, 22])
     assert gauge_val(assigned_partitions) == len(app.processors)

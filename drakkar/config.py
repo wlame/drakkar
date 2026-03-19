@@ -115,7 +115,8 @@ def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
         merged = _deep_merge(yaml_data, env_overrides)
         return DrakkarConfig(**merged)
 
-    return DrakkarConfig()
+    env_overrides = _parse_env_overrides('DRAKKAR_', '__')
+    return DrakkarConfig(**env_overrides)
 
 
 def _parse_env_overrides(prefix: str, delimiter: str) -> dict:

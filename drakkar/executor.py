@@ -62,7 +62,8 @@ class ExecutorPool:
             slot = self._available_slots.pop(0)
             if recorder:
                 recorder.record_task_started(
-                    task, partition_id,
+                    task,
+                    partition_id,
                     pool_active=self._active_count,
                     pool_waiting=self._waiting_count,
                     slot=slot,

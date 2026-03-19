@@ -29,9 +29,9 @@ jobs:
       matrix:
         python-version: ["3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
 
@@ -41,12 +41,16 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra=dev
 
+      - name: Type check with ty
+        if: matrix.python-version == '3.14'
+        run: uv run ty check drakkar/
+
       - name: Run tests with coverage
         run: uv run pytest --cov=drakkar --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
 
       - name: Upload coverage artifact
         if: matrix.python-version == '3.14'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-report
           path: |

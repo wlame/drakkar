@@ -244,7 +244,10 @@ async def test_message_label_custom_override():
 
     handler = MyHandler()
     msg = SourceMessage(
-        topic='t', partition=5, offset=10, timestamp=0,
+        topic='t',
+        partition=5,
+        offset=10,
+        timestamp=0,
         value=json.dumps({'pattern': 'TODO', 'file_path': '/tmp'}).encode(),
     )
     handler.deserialize_message(msg)

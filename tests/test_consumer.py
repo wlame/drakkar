@@ -155,7 +155,9 @@ async def test_on_assign_callback(mock_cls, kafka_config):
     assign_cb = call_kwargs['on_assign']
     from confluent_kafka import TopicPartition
 
-    await assign_cb(mock_inner, [TopicPartition('test-source', 0), TopicPartition('test-source', 1)])
+    await assign_cb(
+        mock_inner, [TopicPartition('test-source', 0), TopicPartition('test-source', 1)]
+    )
     assert assigned == [0, 1]
 
 

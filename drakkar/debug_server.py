@@ -60,9 +60,9 @@ def create_debug_app(
     app = FastAPI(title='Drakkar Debug', docs_url=None, redoc_url=None)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.autoescape = True
-    templates.env.globals['format_ts'] = _format_ts
-    templates.env.globals['format_ts_ms'] = _format_ts_ms
-    templates.env.globals['format_ts_full'] = _format_ts_full
+    templates.env.globals['format_ts'] = _format_ts  # type: ignore[assignment]
+    templates.env.globals['format_ts_ms'] = _format_ts_ms  # type: ignore[assignment]
+    templates.env.globals['format_ts_full'] = _format_ts_full  # type: ignore[assignment]
 
     async def _get_lag() -> dict[int, dict]:
         consumer = drakkar_app._consumer
@@ -185,19 +185,21 @@ def create_debug_app(
             limit=1000,
         )
         recent_finished = sorted(finished + failed, key=lambda e: e.get('ts', 0), reverse=True)[
-            :config.max_ui_rows
+            : config.max_ui_rows
         ]
 
         # active arrange() calls
         arranging = []
         for proc in processors.values():
             if proc._arranging:
-                arranging.append({
-                    'partition': proc.partition_id,
-                    'duration': round(now - proc._arrange_start, 2),
-                    'message_count': len(proc._arrange_labels),
-                    'labels': proc._arrange_labels[:10],
-                })
+                arranging.append(
+                    {
+                        'partition': proc.partition_id,
+                        'duration': round(now - proc._arrange_start, 2),
+                        'message_count': len(proc._arrange_labels),
+                        'labels': proc._arrange_labels[:10],
+                    }
+                )
 
         return templates.TemplateResponse(
             request,
@@ -473,10 +475,7 @@ def create_debug_app(
         for pid, proc in sorted(drakkar_app.processors.items()):
             tracker = proc.offset_tracker
             sorted_offsets = list(tracker._sorted_offsets[:20])
-            offset_states = {
-                o: str(tracker._offsets.get(o, '?'))
-                for o in sorted_offsets
-            }
+            offset_states = {o: str(tracker._offsets.get(o, '?')) for o in sorted_offsets}
             arrange_info = None
             if proc._arranging:
                 arrange_info = {
@@ -506,23 +505,26 @@ def create_debug_app(
                     stack_lines = []
                     for frame in frames:
                         stack_lines.append(
-                            f'{frame.f_code.co_filename}:{frame.f_lineno} '
-                            f'in {frame.f_code.co_name}'
+                            f'{frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}'
                         )
-                    stuck.append({
-                        'name': task.get_name(),
-                        'stack': stack_lines,
-                    })
+                    stuck.append(
+                        {
+                            'name': task.get_name(),
+                            'stack': stack_lines,
+                        }
+                    )
             if stuck:
                 entry['stuck_tasks'] = stuck
             result[pid] = entry
         pool = drakkar_app._executor_pool
-        return JSONResponse({
-            'processors': result,
-            'pool_active': pool.active_count if pool else 0,
-            'pool_waiting': pool.waiting_count if pool else 0,
-            'pool_max': pool.max_workers if pool else 0,
-        })
+        return JSONResponse(
+            {
+                'processors': result,
+                'pool_active': pool.active_count if pool else 0,
+                'pool_waiting': pool.waiting_count if pool else 0,
+                'pool_max': pool.max_workers if pool else 0,
+            }
+        )
 
     # --- WebSocket endpoint for live event streaming ---
 

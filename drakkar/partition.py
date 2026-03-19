@@ -243,7 +243,9 @@ class PartitionProcessor:
         handler_duration.labels(hook='arrange').observe(arrange_duration)
         if self._recorder:
             self._recorder.record_arranged(
-                self._partition_id, messages, tasks,
+                self._partition_id,
+                messages,
+                tasks,
                 duration=arrange_duration,
                 message_labels=arrange_labels,
             )
@@ -290,7 +292,8 @@ class PartitionProcessor:
             executor_duration.observe(result.duration_seconds)
             if self._recorder:
                 self._recorder.record_task_completed(
-                    result, self._partition_id,
+                    result,
+                    self._partition_id,
                     pool_active=self._executor_pool.active_count,
                     pool_waiting=self._executor_pool.waiting_count,
                 )
@@ -304,7 +307,9 @@ class PartitionProcessor:
                     task_id=task.task_id,
                     partition=self._partition_id,
                     duration=collect_duration,
-                    output_message_count=len(collect_result.output_messages) if collect_result else 0,
+                    output_message_count=len(collect_result.output_messages)
+                    if collect_result
+                    else 0,
                 )
             if collect_result and self._on_collect:
                 await self._on_collect(collect_result, self._partition_id)
@@ -317,7 +322,9 @@ class PartitionProcessor:
                 executor_timeouts.inc()
             if self._recorder:
                 self._recorder.record_task_failed(
-                    task, e.error, self._partition_id,
+                    task,
+                    e.error,
+                    self._partition_id,
                     pool_active=self._executor_pool.active_count,
                     pool_waiting=self._executor_pool.waiting_count,
                 )

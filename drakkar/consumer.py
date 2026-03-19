@@ -89,7 +89,8 @@ class KafkaConsumer:
         """Poll up to max_messages from Kafka."""
         count = max_messages or self._config.max_poll_records
         raw_messages = await self._consumer.consume(
-            num_messages=count, timeout=timeout,
+            num_messages=count,
+            timeout=timeout,
         )
 
         messages = []
