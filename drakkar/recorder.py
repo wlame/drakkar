@@ -76,11 +76,11 @@ class EventRecorder:
     created. Old DB files beyond retention_hours are deleted.
     """
 
-    MAX_BUFFER = 50_000
+    MAX_BUFFER = 50_000  # default, overridden by config.debug.max_buffer
 
     def __init__(self, config: DebugConfig) -> None:
         self._config = config
-        self._buffer: deque[dict] = deque(maxlen=self.MAX_BUFFER)
+        self._buffer: deque[dict] = deque(maxlen=config.max_buffer)
         self._db: aiosqlite.Connection | None = None
         self._db_path: str = ''
         self._flush_task: asyncio.Task | None = None

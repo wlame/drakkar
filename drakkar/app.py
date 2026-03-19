@@ -160,8 +160,8 @@ class DrakkarApp:
         enough data in memory to keep the executor pool busy.
         """
         max_workers = self._config.executor.max_workers
-        high_watermark = max_workers * 32
-        low_watermark = max(1, max_workers * 4)
+        high_watermark = max_workers * self._config.executor.backpressure_high_multiplier
+        low_watermark = max(1, max_workers * self._config.executor.backpressure_low_multiplier)
 
         while self._running:
             total = self._total_queued()
@@ -203,6 +203,7 @@ class DrakkarApp:
                     handler=self._handler,
                     executor_pool=self._executor_pool,
                     window_size=self._config.executor.window_size,
+                    max_retries=self._config.executor.max_retries,
                     on_collect=self._handle_collect,
                     on_commit=self._handle_commit,
                     recorder=self._recorder,
@@ -243,7 +244,7 @@ class DrakkarApp:
         try:
             processor._running = False
             try:
-                await asyncio.wait_for(processor.drain(), timeout=5.0)
+                await asyncio.wait_for(processor.drain(), timeout=self._config.executor.drain_timeout_seconds)
             except TimeoutError:
                 pass
             committable = processor.offset_tracker.committable()
@@ -304,7 +305,7 @@ class DrakkarApp:
         # 2. give in-flight executors up to 5 seconds to finish
         await log.ainfo('draining_executors', category='lifecycle', timeout=5)
         try:
-            await asyncio.wait_for(self._drain_all_processors(), timeout=5.0)
+            await asyncio.wait_for(self._drain_all_processors(), timeout=self._config.executor.drain_timeout_seconds)
             await log.ainfo('executors_drained', category='lifecycle')
         except TimeoutError:
             await log.awarning(

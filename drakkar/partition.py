@@ -37,7 +37,7 @@ logger = structlog.get_logger()
 CollectCallback = Callable[[CollectResult, int], Awaitable[None]]
 CommitCallback = Callable[[int, int], Awaitable[None]]
 
-MAX_RETRIES = 3
+MAX_RETRIES = 3  # default, overridden by config.executor.max_retries
 
 
 @dataclass
@@ -72,6 +72,7 @@ class PartitionProcessor:
         handler: BaseDrakkarHandler,
         executor_pool: ExecutorPool,
         window_size: int,
+        max_retries: int = 3,
         on_collect: CollectCallback | None = None,
         on_commit: CommitCallback | None = None,
         recorder: EventRecorder | None = None,
@@ -80,6 +81,7 @@ class PartitionProcessor:
         self._handler = handler
         self._executor_pool = executor_pool
         self._window_size = window_size
+        self._max_retries = max_retries
         self._on_collect = on_collect
         self._on_commit = on_commit
         self._recorder = recorder
@@ -333,7 +335,7 @@ class PartitionProcessor:
                     t = asyncio.create_task(self._execute_and_track(new_task, window))
                     self._active_tasks.add(t)
                     t.add_done_callback(self._active_tasks.discard)
-            elif action == ErrorAction.RETRY and retry_count < MAX_RETRIES:
+            elif action == ErrorAction.RETRY and retry_count < self._max_retries:
                 task_retries.inc()
                 # don't decrement inflight or increment completed — the retry
                 # reuses this slot, so we just re-enter with same task

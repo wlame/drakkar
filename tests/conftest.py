@@ -118,6 +118,10 @@ def full_config_dict() -> dict:
             'max_workers': 40,
             'task_timeout_seconds': 300,
             'window_size': 100,
+            'max_retries': 5,
+            'drain_timeout_seconds': 10,
+            'backpressure_high_multiplier': 16,
+            'backpressure_low_multiplier': 2,
         },
         'postgres': {
             'dsn': 'postgresql://user:pass@db:5432/app',

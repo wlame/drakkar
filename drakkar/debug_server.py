@@ -469,8 +469,6 @@ def create_debug_app(
     @app.get('/api/debug/processors')
     async def api_debug_processors():
         """Dump internal state of all partition processors for diagnostics."""
-        import traceback as tb
-
         result = {}
         for pid, proc in sorted(drakkar_app.processors.items()):
             tracker = proc.offset_tracker

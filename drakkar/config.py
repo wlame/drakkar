@@ -28,6 +28,10 @@ class ExecutorConfig(BaseModel):
     max_workers: int = Field(default=4, ge=1)
     task_timeout_seconds: int = Field(default=120, ge=1)
     window_size: int = Field(default=100, ge=1)
+    max_retries: int = Field(default=3, ge=0)
+    drain_timeout_seconds: int = Field(default=5, ge=1)
+    backpressure_high_multiplier: int = Field(default=32, ge=1)
+    backpressure_low_multiplier: int = Field(default=4, ge=1)
 
 
 class PostgresConfig(BaseModel):
@@ -62,6 +66,7 @@ class DebugConfig(BaseModel):
     retention_max_events: int = Field(default=100_000, ge=100)
     store_output: bool = True
     flush_interval_seconds: int = Field(default=5, ge=1)
+    max_buffer: int = Field(default=50_000, ge=1000)
     max_ui_rows: int = Field(default=5000, ge=100)
 
 

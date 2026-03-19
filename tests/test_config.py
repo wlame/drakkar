@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from drakkar.config import (
+    DebugConfig,
     DrakkarConfig,
     ExecutorConfig,
     KafkaConfig,
@@ -34,6 +35,24 @@ def test_executor_config_defaults():
     assert cfg.max_workers == 4
     assert cfg.task_timeout_seconds == 120
     assert cfg.window_size == 100
+    assert cfg.max_retries == 3
+    assert cfg.drain_timeout_seconds == 5
+    assert cfg.backpressure_high_multiplier == 32
+    assert cfg.backpressure_low_multiplier == 4
+
+
+def test_executor_config_custom_values():
+    cfg = ExecutorConfig(
+        binary_path='/bin/test',
+        max_retries=5,
+        drain_timeout_seconds=10,
+        backpressure_high_multiplier=16,
+        backpressure_low_multiplier=2,
+    )
+    assert cfg.max_retries == 5
+    assert cfg.drain_timeout_seconds == 10
+    assert cfg.backpressure_high_multiplier == 16
+    assert cfg.backpressure_low_multiplier == 2
 
 
 def test_executor_config_rejects_empty_binary_path():
@@ -67,6 +86,14 @@ def test_metrics_config_defaults():
     assert cfg.port == 9090
 
 
+def test_debug_config_defaults():
+    cfg = DebugConfig()
+    assert cfg.max_buffer == 50_000
+    assert cfg.max_ui_rows == 5000
+    assert cfg.flush_interval_seconds == 5
+    assert cfg.retention_hours == 24
+
+
 def test_logging_config_defaults():
     cfg = LoggingConfig()
     assert cfg.level == 'INFO'
@@ -88,6 +115,10 @@ def test_load_config_from_yaml(config_yaml_file: Path):
     assert cfg.kafka.brokers == 'kafka1:9092,kafka2:9092'
     assert cfg.executor.binary_path == '/usr/local/bin/processor'
     assert cfg.executor.max_workers == 40
+    assert cfg.executor.max_retries == 5
+    assert cfg.executor.drain_timeout_seconds == 10
+    assert cfg.executor.backpressure_high_multiplier == 16
+    assert cfg.executor.backpressure_low_multiplier == 2
     assert cfg.postgres.dsn == 'postgresql://user:pass@db:5432/app'
     assert cfg.metrics.port == 9091
     assert cfg.logging.level == 'DEBUG'

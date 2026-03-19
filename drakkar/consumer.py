@@ -57,7 +57,7 @@ class KafkaConsumer:
             on_revoke=self._handle_revoke,
         )
 
-    async def _handle_assign(self, consumer, partitions: list[TopicPartition]) -> None:
+    async def _handle_assign(self, consumer: object, partitions: list[TopicPartition]) -> None:
         """Async rebalance callback — runs on the event loop."""
         partition_ids = [p.partition for p in partitions]
         rebalance_events.labels(type='assign').inc()
@@ -70,7 +70,7 @@ class KafkaConsumer:
         if self._on_assign_cb:
             self._on_assign_cb(partition_ids)
 
-    async def _handle_revoke(self, consumer, partitions: list[TopicPartition]) -> None:
+    async def _handle_revoke(self, consumer: object, partitions: list[TopicPartition]) -> None:
         """Async rebalance callback — runs on the event loop."""
         partition_ids = [p.partition for p in partitions]
         rebalance_events.labels(type='revoke').inc()
