@@ -142,6 +142,32 @@ db_errors = Counter(
     'Total database write errors',
 )
 
+# --- Sinks ---
+
+sink_deliver_duration = Histogram(
+    'drakkar_sink_deliver_duration_seconds',
+    'Duration of sink delivery operations',
+    ['sink_type', 'sink_name'],
+    buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5),
+)
+
+sink_deliver_errors = Counter(
+    'drakkar_sink_deliver_errors_total',
+    'Total sink delivery failures',
+    ['sink_type', 'sink_name'],
+)
+
+sink_payloads_delivered = Counter(
+    'drakkar_sink_payloads_delivered_total',
+    'Total payloads delivered to sinks',
+    ['sink_type', 'sink_name'],
+)
+
+sink_dlq_messages = Counter(
+    'drakkar_sink_dlq_messages_total',
+    'Total messages sent to the dead letter queue',
+)
+
 # --- Handler hooks ---
 
 handler_duration = Histogram(
