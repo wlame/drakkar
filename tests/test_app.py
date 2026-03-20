@@ -10,9 +10,11 @@ from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
     KafkaConfig,
+    KafkaSinkConfig,
     LoggingConfig,
     MetricsConfig,
-    PostgresConfig,
+    PostgresSinkConfig,
+    SinksConfig,
 )
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
@@ -42,7 +44,6 @@ def test_config() -> DrakkarConfig:
         kafka=KafkaConfig(
             brokers='localhost:9092',
             source_topic='test-in',
-            target_topic='test-out',
         ),
         executor=ExecutorConfig(
             binary_path='/bin/echo',
@@ -50,7 +51,10 @@ def test_config() -> DrakkarConfig:
             task_timeout_seconds=10,
             window_size=5,
         ),
-        postgres=PostgresConfig(dsn='postgresql://localhost/test'),
+        sinks=SinksConfig(
+            kafka={'results': KafkaSinkConfig(topic='test-out')},
+            postgres={'main': PostgresSinkConfig(dsn='postgresql://localhost/test')},
+        ),
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
     )

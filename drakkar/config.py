@@ -1,4 +1,8 @@
-"""Configuration loading for Drakkar framework."""
+"""Configuration loading for Drakkar framework.
+
+Supports YAML files with environment variable overrides.
+Use DRAKKAR_ prefix with __ for nesting (e.g., DRAKKAR_KAFKA__BROKERS).
+"""
 
 import os
 from pathlib import Path
@@ -7,18 +11,155 @@ import yaml
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# --- Kafka source (consumer) config ---
+
 
 class KafkaConfig(BaseModel):
-    """Kafka connection and consumer/producer settings."""
+    """Kafka connection and consumer settings."""
 
     brokers: str = 'localhost:9092'
     source_topic: str = 'input-events'
-    target_topic: str = 'output-results'
     consumer_group: str = 'drakkar-workers'
     max_poll_records: int = 100
     max_poll_interval_ms: int = 300_000
     session_timeout_ms: int = 45_000
     heartbeat_interval_ms: int = 3_000
+
+    # DEPRECATED: kept for import compat with producer.py until it's deleted
+    target_topic: str = 'output-results'
+
+
+# --- Sink config models ---
+
+
+class KafkaSinkConfig(BaseModel):
+    """Configuration for a Kafka output sink.
+
+    Each named instance produces messages to a specific topic.
+    If `brokers` is empty, inherits from `kafka.brokers` (same cluster).
+    """
+
+    topic: str
+    brokers: str = ''
+
+
+class PostgresSinkConfig(BaseModel):
+    """Configuration for a PostgreSQL output sink.
+
+    Each named instance connects to a database via asyncpg pool.
+    """
+
+    dsn: str
+    pool_min: int = Field(default=2, ge=1)
+    pool_max: int = Field(default=10, ge=1)
+
+
+class MongoSinkConfig(BaseModel):
+    """Configuration for a MongoDB output sink.
+
+    Each named instance connects to a database via motor AsyncIOMotorClient.
+    """
+
+    uri: str
+    database: str
+
+
+class HttpSinkConfig(BaseModel):
+    """Configuration for an HTTP output sink.
+
+    Each named instance POSTs JSON payloads to a URL.
+    """
+
+    url: str
+    method: str = 'POST'
+    timeout_seconds: int = Field(default=30, ge=1)
+    headers: dict[str, str] = Field(default_factory=dict)
+    max_retries: int = Field(default=3, ge=0)
+
+
+class RedisSinkConfig(BaseModel):
+    """Configuration for a Redis output sink.
+
+    Each named instance connects to a Redis server and sets key-value pairs.
+    """
+
+    url: str = 'redis://localhost:6379/0'
+    key_prefix: str = ''
+
+
+class FileSinkConfig(BaseModel):
+    """Configuration for a filesystem output sink.
+
+    Writes JSONL lines to files. `base_path` is optional — individual
+    payloads specify their own full paths.
+    """
+
+    base_path: str = ''
+
+
+class SinksConfig(BaseModel):
+    """Container for all configured sink instances, grouped by type.
+
+    Each sink type maps sink names to their configuration.
+    Example YAML::
+
+        sinks:
+          kafka:
+            results:
+              topic: "search-results"
+          postgres:
+            main-db:
+              dsn: "postgresql://..."
+    """
+
+    kafka: dict[str, KafkaSinkConfig] = Field(default_factory=dict)
+    postgres: dict[str, PostgresSinkConfig] = Field(default_factory=dict)
+    mongo: dict[str, MongoSinkConfig] = Field(default_factory=dict)
+    http: dict[str, HttpSinkConfig] = Field(default_factory=dict)
+    redis: dict[str, RedisSinkConfig] = Field(default_factory=dict)
+    filesystem: dict[str, FileSinkConfig] = Field(default_factory=dict)
+
+    @property
+    def is_empty(self) -> bool:
+        """True if no sinks of any type are configured."""
+        return not any(
+            [self.kafka, self.postgres, self.mongo, self.http, self.redis, self.filesystem]
+        )
+
+    def summary(self) -> dict[str, list[str]]:
+        """Return a dict of sink type → list of instance names.
+
+        Useful for startup logging. Only includes types with at least one instance.
+        """
+        result: dict[str, list[str]] = {}
+        if self.kafka:
+            result['kafka'] = list(self.kafka.keys())
+        if self.postgres:
+            result['postgres'] = list(self.postgres.keys())
+        if self.mongo:
+            result['mongo'] = list(self.mongo.keys())
+        if self.http:
+            result['http'] = list(self.http.keys())
+        if self.redis:
+            result['redis'] = list(self.redis.keys())
+        if self.filesystem:
+            result['filesystem'] = list(self.filesystem.keys())
+        return result
+
+
+class DLQConfig(BaseModel):
+    """Dead letter queue configuration.
+
+    Failed sink deliveries are written to this Kafka topic.
+    If `topic` is empty, defaults to `{source_topic}_dlq` at runtime.
+    If `brokers` is empty, inherits from `kafka.brokers`.
+    """
+
+    topic: str = ''
+    brokers: str = ''
+
+
+# --- Non-sink config models ---
 
 
 class ExecutorConfig(BaseModel):
@@ -32,14 +173,6 @@ class ExecutorConfig(BaseModel):
     drain_timeout_seconds: int = Field(default=5, ge=1)
     backpressure_high_multiplier: int = Field(default=32, ge=1)
     backpressure_low_multiplier: int = Field(default=4, ge=1)
-
-
-class PostgresConfig(BaseModel):
-    """PostgreSQL connection settings."""
-
-    dsn: str = 'postgresql://localhost:5432/drakkar'
-    pool_min: int = Field(default=2, ge=1)
-    pool_max: int = Field(default=10, ge=1)
 
 
 class MetricsConfig(BaseModel):
@@ -70,8 +203,19 @@ class DebugConfig(BaseModel):
     max_ui_rows: int = Field(default=5000, ge=100)
 
 
+# DEPRECATED: kept for import compat with db.py until it's deleted
+PostgresConfig = PostgresSinkConfig
+
+
+# --- Root config ---
+
+
 class DrakkarConfig(BaseSettings):
-    """Root configuration for a Drakkar worker."""
+    """Root configuration for a Drakkar worker.
+
+    Combines Kafka source settings, executor pool settings,
+    sink definitions, and operational configs (metrics, logging, debug).
+    """
 
     model_config = SettingsConfigDict(
         env_prefix='DRAKKAR_',
@@ -84,7 +228,8 @@ class DrakkarConfig(BaseSettings):
     )
     kafka: KafkaConfig = Field(default_factory=KafkaConfig)
     executor: ExecutorConfig
-    postgres: PostgresConfig = Field(default_factory=PostgresConfig)
+    sinks: SinksConfig = Field(default_factory=SinksConfig)
+    dlq: DLQConfig = Field(default_factory=DLQConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
@@ -96,7 +241,7 @@ def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
     YAML file path is resolved in order:
     1. Explicit config_path argument
     2. DRAKKAR_CONFIG environment variable
-    3. Raises ValueError if neither is provided
+    3. Falls back to env-only config
 
     Environment variables override YAML values. Use DRAKKAR_ prefix
     with __ for nesting (e.g., DRAKKAR_KAFKA__BROKERS).

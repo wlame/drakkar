@@ -114,7 +114,6 @@ def full_config_dict() -> dict:
         'kafka': {
             'brokers': 'kafka1:9092,kafka2:9092',
             'source_topic': 'input-events',
-            'target_topic': 'output-results',
             'consumer_group': 'drakkar-workers',
             'max_poll_records': 200,
             'max_poll_interval_ms': 600_000,
@@ -131,10 +130,11 @@ def full_config_dict() -> dict:
             'backpressure_high_multiplier': 16,
             'backpressure_low_multiplier': 2,
         },
-        'postgres': {
-            'dsn': 'postgresql://user:pass@db:5432/app',
-            'pool_min': 5,
-            'pool_max': 20,
+        'sinks': {
+            'kafka': {'results': {'topic': 'output-results'}},
+            'postgres': {
+                'main': {'dsn': 'postgresql://user:pass@db:5432/app', 'pool_min': 5, 'pool_max': 20}
+            },
         },
         'metrics': {
             'enabled': True,
