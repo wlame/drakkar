@@ -36,7 +36,6 @@ from drakkar.metrics import (
     executor_tasks,
     handler_duration,
     messages_consumed,
-    messages_produced,
     offset_lag,
     offsets_committed,
     partition_queue_size,
@@ -638,32 +637,37 @@ async def test_on_revoke_decreases_assigned_partitions_gauge():
         await proc.stop()
 
 
-async def test_handle_collect_increments_messages_produced():
-    """DrakkarApp._handle_collect increments messages_produced counter."""
+async def test_handle_collect_delivers_to_sinks():
+    """DrakkarApp._handle_collect routes payloads to configured sinks."""
     from drakkar.app import DrakkarApp
+    from drakkar.config import KafkaSinkConfig, SinksConfig
 
     config = DrakkarConfig(
         executor=ExecutorConfig(binary_path='/bin/echo', max_workers=2),
+        sinks=SinksConfig(kafka={'out': KafkaSinkConfig(topic='t')}),
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
     )
     handler = BaseDrakkarHandler()
     app = DrakkarApp(handler=handler, config=config)
-    app._producer = AsyncMock()
-    app._db_writer = AsyncMock()
+
+    # build sinks then mock the deliver method
+    app._build_sinks()
+    kafka_sink = app._sink_manager._sinks[('kafka', 'out')]
+    kafka_sink.deliver = AsyncMock()  # type: ignore[method-assign]
 
     from pydantic import BaseModel as BM
 
     class _D(BM):
         v: str = 'a'
 
-    before = counter_val(messages_produced)
     result = CollectResult(
         kafka=[KafkaPayload(data=_D(v='a')), KafkaPayload(data=_D(v='b'))],
     )
     await app._handle_collect(result, partition_id=0)
 
-    assert counter_val(messages_produced) == before + 2
+    kafka_sink.deliver.assert_called_once()
+    assert len(kafka_sink.deliver.call_args[0][0]) == 2
 
 
 # === Worker info metric ===

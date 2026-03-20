@@ -12,13 +12,13 @@ from pathlib import Path
 
 import aiosqlite
 import structlog
+from pydantic import BaseModel
 
 from drakkar.config import DebugConfig
 from drakkar.models import (
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
-    OutputMessage,
     SourceMessage,
 )
 
@@ -287,7 +287,7 @@ class EventRecorder:
 
     def record_produced(
         self,
-        msg: OutputMessage,
+        payload: BaseModel,
         source_partition: int,
         source_offset: int | None = None,
     ) -> None:
@@ -297,7 +297,7 @@ class EventRecorder:
                 'event': 'produced',
                 'partition': source_partition,
                 'offset': source_offset,
-                'output_topic': 'target',
+                'output_topic': getattr(payload, 'sink', ''),
             }
         )
 
