@@ -7,8 +7,14 @@ import httpx
 import pytest
 from pydantic import BaseModel
 
-from drakkar.config import HttpSinkConfig, KafkaSinkConfig, MongoSinkConfig, PostgresSinkConfig
-from drakkar.models import HttpPayload, KafkaPayload, MongoPayload, PostgresPayload
+from drakkar.config import (
+    HttpSinkConfig,
+    KafkaSinkConfig,
+    MongoSinkConfig,
+    PostgresSinkConfig,
+    RedisSinkConfig,
+)
+from drakkar.models import HttpPayload, KafkaPayload, MongoPayload, PostgresPayload, RedisPayload
 
 
 class SampleOutput(BaseModel):
@@ -646,3 +652,142 @@ def test_http_sink_type(http_sink_config):
 
     sink = HttpSink('webhook', http_sink_config)
     assert sink.sink_type == 'http'
+
+
+# =============================================================================
+# Redis sink
+# =============================================================================
+
+
+@pytest.fixture
+def redis_sink_config():
+    return RedisSinkConfig(url='redis://localhost:6379/0', key_prefix='drakkar:')
+
+
+def _make_redis_sink(redis_sink_config):
+    """Helper: create a RedisSink with a mocked redis client."""
+    from drakkar.sinks.redis import RedisSink
+
+    mock_client = AsyncMock()
+    sink = RedisSink('cache', redis_sink_config)
+    sink._client = mock_client
+    return sink, mock_client
+
+
+async def test_redis_sink_connect(redis_sink_config):
+    from drakkar.sinks.redis import RedisSink
+
+    with patch('redis.asyncio.from_url') as mock_from_url:
+        mock_client = AsyncMock()
+        mock_from_url.return_value = mock_client
+
+        sink = RedisSink('cache', redis_sink_config)
+        await sink.connect()
+
+        mock_from_url.assert_called_once_with('redis://localhost:6379/0')
+        assert sink._client is mock_client
+
+
+async def test_redis_sink_deliver_without_ttl(redis_sink_config):
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+
+    payload = RedisPayload(key='result:abc', data=SampleOutput(request_id='r1'))
+    await sink.deliver([payload])
+
+    mock_client.set.assert_called_once()
+    call_args = mock_client.set.call_args
+    assert call_args[0][0] == 'drakkar:result:abc'
+    assert '"request_id":"r1"' in call_args[0][1]
+    assert 'ex' not in call_args[1]
+
+
+async def test_redis_sink_deliver_with_ttl(redis_sink_config):
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+
+    payload = RedisPayload(key='cache:abc', data=SampleOutput(), ttl=3600)
+    await sink.deliver([payload])
+
+    mock_client.set.assert_called_once()
+    call_kwargs = mock_client.set.call_args[1]
+    assert call_kwargs['ex'] == 3600
+
+
+async def test_redis_sink_deliver_batch(redis_sink_config):
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+
+    payloads = [
+        RedisPayload(key='k1', data=SampleOutput(request_id='r1')),
+        RedisPayload(key='k2', data=SampleOutput(request_id='r2'), ttl=60),
+    ]
+    await sink.deliver(payloads)
+
+    assert mock_client.set.call_count == 2
+
+
+async def test_redis_sink_deliver_empty(redis_sink_config):
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+
+    await sink.deliver([])
+    mock_client.set.assert_not_called()
+
+
+async def test_redis_sink_key_prefix(redis_sink_config):
+    """Key prefix from config is prepended to payload key."""
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+
+    await sink.deliver([RedisPayload(key='mykey', data=SampleOutput())])
+
+    full_key = mock_client.set.call_args[0][0]
+    assert full_key == 'drakkar:mykey'
+
+
+async def test_redis_sink_no_prefix():
+    """Empty key prefix passes key through as-is."""
+    from drakkar.sinks.redis import RedisSink
+
+    config = RedisSinkConfig(url='redis://localhost:6379/0', key_prefix='')
+    mock_client = AsyncMock()
+    sink = RedisSink('cache', config)
+    sink._client = mock_client
+
+    await sink.deliver([RedisPayload(key='raw-key', data=SampleOutput())])
+
+    full_key = mock_client.set.call_args[0][0]
+    assert full_key == 'raw-key'
+
+
+async def test_redis_sink_deliver_error_increments_metrics(redis_sink_config):
+    from drakkar.metrics import sink_deliver_errors
+
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+    mock_client.set.side_effect = RuntimeError('connection refused')
+
+    labels = {'sink_type': 'redis', 'sink_name': 'cache'}
+    before = sink_deliver_errors.labels(**labels)._value.get()
+
+    with pytest.raises(RuntimeError, match='connection refused'):
+        await sink.deliver([RedisPayload(key='k', data=SampleOutput())])
+
+    assert sink_deliver_errors.labels(**labels)._value.get() == before + 1
+
+
+async def test_redis_sink_close(redis_sink_config):
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+    await sink.close()
+
+    mock_client.aclose.assert_called_once()
+    assert sink._client is None
+
+
+async def test_redis_sink_close_not_connected(redis_sink_config):
+    from drakkar.sinks.redis import RedisSink
+
+    sink = RedisSink('cache', redis_sink_config)
+    await sink.close()  # should not raise
+
+
+def test_redis_sink_type(redis_sink_config):
+    from drakkar.sinks.redis import RedisSink
+
+    sink = RedisSink('cache', redis_sink_config)
+    assert sink.sink_type == 'redis'
