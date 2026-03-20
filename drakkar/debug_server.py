@@ -396,6 +396,8 @@ def create_debug_app(
             t = tasks[tid]
             if e['event'] == 'task_started':
                 t['start_ts'] = e['ts']
+                t['end_ts'] = None  # reset on retry
+                t['status'] = 'running'  # reset on retry
                 # extract slot from metadata
                 if e.get('metadata'):
                     try:

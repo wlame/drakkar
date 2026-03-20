@@ -596,8 +596,20 @@ async function syncFromAPI() {
         var apiIds = {};
         var tasks = data.tasks || [];
         for (var i = 0; i < tasks.length; i++) { allTasks[tasks[i].task_id] = tasks[i]; apiIds[tasks[i].task_id] = true; }
+        // only remove tasks that are still running (no end_ts) and missing from API
+        // keep finished/failed tasks — they are historical and should stay visible
         var keys = Object.keys(allTasks);
-        for (var j = 0; j < keys.length; j++) { if (!apiIds[keys[j]]) delete allTasks[keys[j]]; }
+        for (var j = 0; j < keys.length; j++) {
+            var t = allTasks[keys[j]];
+            if (!apiIds[keys[j]] && !t.end_ts) { delete allTasks[keys[j]]; }
+        }
+        // trim old finished tasks that fell outside the timeline window
+        var cutoff = Date.now() / 1000 - TIMELINE_MINUTES * 60;
+        keys = Object.keys(allTasks);
+        for (var k = 0; k < keys.length; k++) {
+            var tk = allTasks[keys[k]];
+            if (tk.end_ts && tk.end_ts < cutoff) { delete allTasks[keys[k]]; }
+        }
     } catch(e) {}
 }
 

@@ -46,7 +46,7 @@ sinks:
 
   http:
     webhook:
-      url: "http://webhook:9000/hooks/drakkar"
+      url: "http://webhook:8080/"
       method: "POST"
       timeout_seconds: 10
       max_retries: 2
