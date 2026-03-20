@@ -1,13 +1,13 @@
 """Tests for individual sink implementations."""
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import BaseModel
 
-from drakkar.config import KafkaSinkConfig, PostgresSinkConfig
-from drakkar.models import KafkaPayload, PostgresPayload
+from drakkar.config import KafkaSinkConfig, MongoSinkConfig, PostgresSinkConfig
+from drakkar.models import KafkaPayload, MongoPayload, PostgresPayload
 
 
 class SampleOutput(BaseModel):
@@ -353,3 +353,116 @@ def test_postgres_sink_type(pg_sink_config):
 
     sink = PostgresSink('main', pg_sink_config)
     assert sink.sink_type == 'postgres'
+
+
+# =============================================================================
+# MongoDB sink
+# =============================================================================
+
+
+@pytest.fixture
+def mongo_sink_config():
+    return MongoSinkConfig(uri='mongodb://localhost:27017', database='testdb')
+
+
+def _make_mongo_sink(mongo_sink_config):
+    """Helper: create a MongoSink with mocked motor client."""
+    from unittest.mock import MagicMock
+
+    from drakkar.sinks.mongo import MongoSink
+
+    mock_collection = AsyncMock()
+    mock_db = MagicMock()
+    mock_db.__getitem__ = MagicMock(return_value=mock_collection)
+    mock_client = MagicMock()
+    mock_client.__getitem__ = MagicMock(return_value=mock_db)
+
+    sink = MongoSink('analytics', mongo_sink_config)
+    sink._client = mock_client
+    sink._db = mock_db
+    return sink, mock_collection, mock_client
+
+
+async def test_mongo_sink_connect(mongo_sink_config):
+    from drakkar.sinks.mongo import MongoSink
+
+    with patch('motor.motor_asyncio.AsyncIOMotorClient') as mock_cls:
+        mock_client = MagicMock()
+        mock_db = MagicMock()
+        mock_client.__getitem__ = MagicMock(return_value=mock_db)
+        mock_cls.return_value = mock_client
+
+        sink = MongoSink('analytics', mongo_sink_config)
+        await sink.connect()
+
+        mock_cls.assert_called_once_with('mongodb://localhost:27017')
+        assert sink._db is mock_db
+
+
+async def test_mongo_sink_deliver(mongo_sink_config):
+    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+
+    payload = MongoPayload(collection='results', data=SampleOutput(request_id='r1'))
+    await sink.deliver([payload])
+
+    mock_collection.insert_one.assert_called_once()
+    doc = mock_collection.insert_one.call_args[0][0]
+    assert doc['request_id'] == 'r1'
+    assert doc['answer'] == '42'
+
+
+async def test_mongo_sink_deliver_batch(mongo_sink_config):
+    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+
+    payloads = [
+        MongoPayload(collection='results', data=SampleOutput(request_id='r1')),
+        MongoPayload(collection='results', data=SampleOutput(request_id='r2')),
+    ]
+    await sink.deliver(payloads)
+
+    assert mock_collection.insert_one.call_count == 2
+
+
+async def test_mongo_sink_deliver_empty(mongo_sink_config):
+    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+
+    await sink.deliver([])
+    mock_collection.insert_one.assert_not_called()
+
+
+async def test_mongo_sink_deliver_error_increments_metrics(mongo_sink_config):
+    from drakkar.metrics import sink_deliver_errors
+
+    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+    mock_collection.insert_one.side_effect = RuntimeError('connection refused')
+
+    labels = {'sink_type': 'mongo', 'sink_name': 'analytics'}
+    before = sink_deliver_errors.labels(**labels)._value.get()
+
+    with pytest.raises(RuntimeError, match='connection refused'):
+        await sink.deliver([MongoPayload(collection='c', data=SampleOutput())])
+
+    assert sink_deliver_errors.labels(**labels)._value.get() == before + 1
+
+
+async def test_mongo_sink_close(mongo_sink_config):
+    sink, _, mock_client = _make_mongo_sink(mongo_sink_config)
+    await sink.close()
+
+    mock_client.close.assert_called_once()
+    assert sink._client is None
+    assert sink._db is None
+
+
+async def test_mongo_sink_close_not_connected(mongo_sink_config):
+    from drakkar.sinks.mongo import MongoSink
+
+    sink = MongoSink('analytics', mongo_sink_config)
+    await sink.close()  # should not raise
+
+
+def test_mongo_sink_type(mongo_sink_config):
+    from drakkar.sinks.mongo import MongoSink
+
+    sink = MongoSink('analytics', mongo_sink_config)
+    assert sink.sink_type == 'mongo'
