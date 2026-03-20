@@ -1,4 +1,6 @@
 services:
+  # --- Infrastructure ---
+
   kafka:
     image: apache/kafka:3.7.0
     environment:
@@ -30,18 +32,6 @@ services:
       - ./init-kafka.sh:/init-kafka.sh
     entrypoint: ["/bin/bash", "/init-kafka.sh"]
 
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    depends_on:
-      kafka:
-        condition: service_healthy
-    ports:
-      - "8088:8080"
-    environment:
-      DYNAMIC_CONFIG_ENABLED: "true"
-      KAFKA_CLUSTERS_0_NAME: drakkar-local
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
-
   postgres:
     image: postgres:16-alpine
     environment:
@@ -58,6 +48,71 @@ services:
       timeout: 5s
       retries: 10
 
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  webhook:
+    image: ghcr.io/adnanh/webhook:latest
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./webhook-hooks.json:/etc/webhook/hooks.json
+    command: ["-verbose", "-hooks=/etc/webhook/hooks.json"]
+
+  # --- Web UIs ---
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8088:8080"
+    environment:
+      DYNAMIC_CONFIG_ENABLED: "true"
+      KAFKA_CLUSTERS_0_NAME: drakkar-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+  mongo-express:
+    image: mongo-express:latest
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      - "8089:8081"
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://mongo:27017
+      ME_CONFIG_BASICAUTH: "false"
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8087:8081"
+    environment:
+      REDIS_HOSTS: local:redis:6379
+
+  # --- Workers ---
+
   worker-1:
     build:
       context: ..
@@ -66,6 +121,10 @@ services:
       kafka-init:
         condition: service_completed_successfully
       postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     environment:
       WORKER_ID: worker-1
@@ -87,6 +146,10 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       WORKER_ID: worker-2
       DRAKKAR_CONFIG: /app/drakkar.yaml
@@ -107,6 +170,10 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       WORKER_ID: worker-3
       DRAKKAR_CONFIG: /app/drakkar.yaml
@@ -117,6 +184,8 @@ services:
       - "8083:8083"
     volumes:
       - ..:/project:ro
+
+  # --- Message producer ---
 
   producer:
     build:

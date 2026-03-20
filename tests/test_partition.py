@@ -4,6 +4,7 @@ import asyncio
 import sys
 
 import pytest
+from pydantic import BaseModel as BM
 
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
@@ -11,11 +12,15 @@ from drakkar.models import (
     CollectResult,
     ErrorAction,
     ExecutorTask,
-    OutputMessage,
+    KafkaPayload,
     SourceMessage,
 )
 from drakkar.partition import MAX_RETRIES, PartitionProcessor, Window
 from tests.conftest import wait_for
+
+
+class _Out(BM):
+    v: str = ''
 
 
 def make_msg(partition: int = 0, offset: int = 0) -> SourceMessage:
@@ -49,7 +54,7 @@ class EchoHandler(BaseDrakkarHandler):
     async def collect(self, result):
         self.collect_calls.append(result.task_id)
         return CollectResult(
-            output_messages=[OutputMessage(value=result.stdout.encode())],
+            kafka=[KafkaPayload(data=_Out(v=result.stdout))],
         )
 
     async def on_window_complete(self, results, source_messages):

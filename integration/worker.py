@@ -5,12 +5,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from drakkar import DrakkarApp
 from handler import RipgrepHandler
+
+from drakkar import DrakkarApp
 
 
 def main():
-    config_path = os.environ.get("DRAKKAR_CONFIG", "/app/drakkar.yaml")
+    config_path = os.environ.get('DRAKKAR_CONFIG', '/app/drakkar.yaml')
 
     app = DrakkarApp(
         handler=RipgrepHandler(),
@@ -19,5 +20,5 @@ def main():
     app.run()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

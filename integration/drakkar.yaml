@@ -1,48 +1,78 @@
-# Drakkar worker configuration
+# Drakkar integration test configuration
 # All values can be overridden with env vars: DRAKKAR_KAFKA__BROKERS, etc.
 
-worker_name_env: "WORKER_ID"              # env var that holds the worker name (for logs, metrics, UI)
+worker_name_env: "WORKER_ID"
 
 kafka:
   brokers: "kafka:9092"
-  source_topic: "search-requests"       # Kafka topic to consume from
-  target_topic: "search-results"        # Kafka topic to produce to
-  consumer_group: "drakkar-integration" # Kafka consumer group ID
-  max_poll_records: 50                  # max messages per poll_batch() call
-  max_poll_interval_ms: 300000          # max time between polls before Kafka kicks the consumer (5 min)
-  session_timeout_ms: 45000             # Kafka session timeout (45s)
-  heartbeat_interval_ms: 3000           # heartbeat frequency to Kafka broker (3s)
+  source_topic: "search-requests"
+  consumer_group: "drakkar-integration"
+  max_poll_records: 50
+  max_poll_interval_ms: 300000
+  session_timeout_ms: 45000
+  heartbeat_interval_ms: 3000
 
 executor:
-  binary_path: "/usr/local/bin/run-rg"  # path to the CLI binary to execute
-  max_workers: 8                        # max concurrent subprocess slots (semaphore size)
-  task_timeout_seconds: 120             # kill subprocess after this many seconds
-  window_size: 10                       # max messages per arrange() window
-  max_retries: 3                        # retry failed tasks up to N times before skipping
-  drain_timeout_seconds: 5              # max wait for in-flight tasks on shutdown/revoke
-  backpressure_high_multiplier: 32      # pause consuming when queued > max_workers * this
-  backpressure_low_multiplier: 4        # resume consuming when queued < max_workers * this
+  binary_path: "/usr/local/bin/run-rg"
+  max_workers: 8
+  task_timeout_seconds: 120
+  window_size: 10
+  max_retries: 3
+  drain_timeout_seconds: 5
+  backpressure_high_multiplier: 32
+  backpressure_low_multiplier: 4
 
-postgres:
-  dsn: "postgresql://drakkar:drakkar@postgres:5432/drakkar"
-  pool_min: 1                           # minimum asyncpg connection pool size
-  pool_max: 5                           # maximum asyncpg connection pool size
+sinks:
+  kafka:
+    results:
+      topic: "search-results"
+      # brokers inherited from kafka.brokers
+
+  postgres:
+    main:
+      dsn: "postgresql://drakkar:drakkar@postgres:5432/drakkar"
+      pool_min: 1
+      pool_max: 5
+
+  mongo:
+    archive:
+      uri: "mongodb://mongo:27017"
+      database: "drakkar"
+
+  redis:
+    cache:
+      url: "redis://redis:6379/0"
+      key_prefix: "drakkar:"
+
+  http:
+    webhook:
+      url: "http://webhook:9000/hooks/drakkar"
+      method: "POST"
+      timeout_seconds: 10
+      max_retries: 2
+
+  filesystem:
+    logs:
+      base_path: "/tmp"
+
+dlq:
+  topic: ""  # auto-derived: search-requests_dlq
 
 metrics:
-  enabled: true                         # start Prometheus HTTP server
-  port: 9090                            # Prometheus metrics port
+  enabled: true
+  port: 9090
 
 logging:
-  level: "INFO"                         # log level (DEBUG, INFO, WARNING, ERROR)
-  format: "json"                        # log format: "json" (structured) or "console" (human-readable)
+  level: "INFO"
+  format: "json"
 
 debug:
-  enabled: true                         # enable flight recorder + debug web UI
-  port: 8080                            # debug web UI port
-  db_path: "/tmp/drakkar-debug.db"      # SQLite DB path (timestamped files created alongside)
-  retention_hours: 24                   # delete DB files older than this
-  retention_max_events: 100000          # max events per DB file before rotation
-  store_output: true                    # store full stdout/stderr in debug DB (false = size only)
-  flush_interval_seconds: 3             # seconds between buffer flushes to SQLite
-  max_buffer: 50000                     # max in-memory event buffer before forced flush
-  max_ui_rows: 5000                     # max rows shown in debug UI tables (arrange, collect, history)
+  enabled: true
+  port: 8080
+  db_path: "/tmp/drakkar-debug.db"
+  retention_hours: 24
+  retention_max_events: 100000
+  store_output: true
+  flush_interval_seconds: 3
+  max_buffer: 50000
+  max_ui_rows: 5000

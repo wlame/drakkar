@@ -22,62 +22,62 @@ import uuid
 
 from confluent_kafka import Producer
 
-BROKERS = os.environ.get("KAFKA_BROKERS", "kafka:9092")
-TOPIC = os.environ.get("SOURCE_TOPIC", "search-requests")
-TOTAL_MESSAGES = int(os.environ.get("TOTAL_MESSAGES", "5000"))
+BROKERS = os.environ.get('KAFKA_BROKERS', 'kafka:9092')
+TOPIC = os.environ.get('SOURCE_TOPIC', 'search-requests')
+TOTAL_MESSAGES = int(os.environ.get('TOTAL_MESSAGES', '5000'))
 
 # search requests pool — patterns x paths
 SEARCH_REQUESTS = [
-    {"pattern": r"error", "file_path": "/project/drakkar/app.py"},
-    {"pattern": r"warning", "file_path": "/project/drakkar/partition.py"},
-    {"pattern": r"async def", "file_path": "/project/drakkar/executor.py"},
-    {"pattern": r"import", "file_path": "/project/drakkar/consumer.py"},
-    {"pattern": r"await", "file_path": "/project/drakkar/producer.py"},
-    {"pattern": r"class\s+\w+", "file_path": "/project/drakkar/models.py"},
-    {"pattern": r"def\s+\w+", "file_path": "/project/drakkar/handler.py"},
-    {"pattern": r"return", "file_path": "/project/drakkar/offsets.py"},
-    {"pattern": r"self\._", "file_path": "/project/drakkar/config.py"},
-    {"pattern": r"logger", "file_path": "/project/drakkar/logging.py"},
-    {"pattern": r"metrics", "file_path": "/project/drakkar/metrics.py"},
-    {"pattern": r"async with", "file_path": "/project/drakkar/db.py"},
-    {"pattern": r"Exception", "file_path": "/project/drakkar/recorder.py"},
-    {"pattern": r"request", "file_path": "/project/drakkar/debug_server.py"},
-    {"pattern": r"assert", "file_path": "/project/tests/test_partition.py"},
-    {"pattern": r"pytest", "file_path": "/project/tests/test_app.py"},
-    {"pattern": r"fixture", "file_path": "/project/tests/conftest.py"},
-    {"pattern": r"mock", "file_path": "/project/tests/test_consumer.py"},
-    {"pattern": r"async def test_", "file_path": "/project/tests/test_metrics.py"},
-    {"pattern": r"def test_", "file_path": "/project/tests/test_models.py"},
-    {"pattern": r"import", "file_path": "/project/drakkar"},
-    {"pattern": r"asyncio", "file_path": "/project/drakkar"},
-    {"pattern": r"pydantic", "file_path": "/project/drakkar"},
-    {"pattern": r"structlog", "file_path": "/project/drakkar"},
-    {"pattern": r"json", "file_path": "/project/drakkar"},
-    {"pattern": r"time\.", "file_path": "/project/drakkar"},
-    {"pattern": r"TODO|FIXME|HACK", "file_path": "/project"},
-    {"pattern": r"def __init__", "file_path": "/project/drakkar"},
-    {"pattern": r"raise\s+\w+", "file_path": "/project/drakkar"},
-    {"pattern": r"\basync\b", "file_path": "/project/drakkar"},
-    {"pattern": r"partition", "file_path": "/project/drakkar/partition.py"},
-    {"pattern": r"offset", "file_path": "/project/drakkar/offsets.py"},
-    {"pattern": r"flush", "file_path": "/project/drakkar/recorder.py"},
-    {"pattern": r"template", "file_path": "/project/drakkar/debug_server.py"},
-    {"pattern": r"consumer", "file_path": "/project/drakkar/consumer.py"},
-    {"pattern": r"producer", "file_path": "/project/drakkar/producer.py"},
-    {"pattern": r"window", "file_path": "/project/drakkar/partition.py"},
-    {"pattern": r"commit", "file_path": "/project/drakkar/app.py"},
-    {"pattern": r"signal", "file_path": "/project/drakkar/app.py"},
-    {"pattern": r"Histogram|Counter|Gauge", "file_path": "/project/drakkar/metrics.py"},
-    {"pattern": r"SourceMessage|ExecutorTask", "file_path": "/project/drakkar/models.py"},
-    {"pattern": r"INSERT INTO", "file_path": "/project/drakkar/db.py"},
-    {"pattern": r"SELECT", "file_path": "/project/drakkar/recorder.py"},
-    {"pattern": r"CREATE TABLE", "file_path": "/project/drakkar/recorder.py"},
-    {"pattern": r"render|html", "file_path": "/project/drakkar/templates"},
-    {"pattern": r"tailwind", "file_path": "/project/drakkar/templates"},
-    {"pattern": r"test_.*error", "file_path": "/project/tests"},
-    {"pattern": r"conftest", "file_path": "/project/tests"},
-    {"pattern": r"ExecutorPool", "file_path": "/project/drakkar/executor.py"},
-    {"pattern": r"BaseDrakkarHandler", "file_path": "/project/drakkar/handler.py"},
+    {'pattern': r'error', 'file_path': '/project/drakkar/app.py'},
+    {'pattern': r'warning', 'file_path': '/project/drakkar/partition.py'},
+    {'pattern': r'async def', 'file_path': '/project/drakkar/executor.py'},
+    {'pattern': r'import', 'file_path': '/project/drakkar/consumer.py'},
+    {'pattern': r'await', 'file_path': '/project/drakkar/producer.py'},
+    {'pattern': r'class\s+\w+', 'file_path': '/project/drakkar/models.py'},
+    {'pattern': r'def\s+\w+', 'file_path': '/project/drakkar/handler.py'},
+    {'pattern': r'return', 'file_path': '/project/drakkar/offsets.py'},
+    {'pattern': r'self\._', 'file_path': '/project/drakkar/config.py'},
+    {'pattern': r'logger', 'file_path': '/project/drakkar/logging.py'},
+    {'pattern': r'metrics', 'file_path': '/project/drakkar/metrics.py'},
+    {'pattern': r'async with', 'file_path': '/project/drakkar/db.py'},
+    {'pattern': r'Exception', 'file_path': '/project/drakkar/recorder.py'},
+    {'pattern': r'request', 'file_path': '/project/drakkar/debug_server.py'},
+    {'pattern': r'assert', 'file_path': '/project/tests/test_partition.py'},
+    {'pattern': r'pytest', 'file_path': '/project/tests/test_app.py'},
+    {'pattern': r'fixture', 'file_path': '/project/tests/conftest.py'},
+    {'pattern': r'mock', 'file_path': '/project/tests/test_consumer.py'},
+    {'pattern': r'async def test_', 'file_path': '/project/tests/test_metrics.py'},
+    {'pattern': r'def test_', 'file_path': '/project/tests/test_models.py'},
+    {'pattern': r'import', 'file_path': '/project/drakkar'},
+    {'pattern': r'asyncio', 'file_path': '/project/drakkar'},
+    {'pattern': r'pydantic', 'file_path': '/project/drakkar'},
+    {'pattern': r'structlog', 'file_path': '/project/drakkar'},
+    {'pattern': r'json', 'file_path': '/project/drakkar'},
+    {'pattern': r'time\.', 'file_path': '/project/drakkar'},
+    {'pattern': r'TODO|FIXME|HACK', 'file_path': '/project'},
+    {'pattern': r'def __init__', 'file_path': '/project/drakkar'},
+    {'pattern': r'raise\s+\w+', 'file_path': '/project/drakkar'},
+    {'pattern': r'\basync\b', 'file_path': '/project/drakkar'},
+    {'pattern': r'partition', 'file_path': '/project/drakkar/partition.py'},
+    {'pattern': r'offset', 'file_path': '/project/drakkar/offsets.py'},
+    {'pattern': r'flush', 'file_path': '/project/drakkar/recorder.py'},
+    {'pattern': r'template', 'file_path': '/project/drakkar/debug_server.py'},
+    {'pattern': r'consumer', 'file_path': '/project/drakkar/consumer.py'},
+    {'pattern': r'producer', 'file_path': '/project/drakkar/producer.py'},
+    {'pattern': r'window', 'file_path': '/project/drakkar/partition.py'},
+    {'pattern': r'commit', 'file_path': '/project/drakkar/app.py'},
+    {'pattern': r'signal', 'file_path': '/project/drakkar/app.py'},
+    {'pattern': r'Histogram|Counter|Gauge', 'file_path': '/project/drakkar/metrics.py'},
+    {'pattern': r'SourceMessage|ExecutorTask', 'file_path': '/project/drakkar/models.py'},
+    {'pattern': r'INSERT INTO', 'file_path': '/project/drakkar/db.py'},
+    {'pattern': r'SELECT', 'file_path': '/project/drakkar/recorder.py'},
+    {'pattern': r'CREATE TABLE', 'file_path': '/project/drakkar/recorder.py'},
+    {'pattern': r'render|html', 'file_path': '/project/drakkar/templates'},
+    {'pattern': r'tailwind', 'file_path': '/project/drakkar/templates'},
+    {'pattern': r'test_.*error', 'file_path': '/project/tests'},
+    {'pattern': r'conftest', 'file_path': '/project/tests'},
+    {'pattern': r'ExecutorPool', 'file_path': '/project/drakkar/executor.py'},
+    {'pattern': r'BaseDrakkarHandler', 'file_path': '/project/drakkar/handler.py'},
 ]
 
 
@@ -91,80 +91,80 @@ def make_repeat() -> int:
 def make_message() -> dict:
     req = random.choice(SEARCH_REQUESTS)
     return {
-        "request_id": str(uuid.uuid4()),
-        "pattern": req["pattern"],
-        "file_path": req["file_path"],
-        "repeat": make_repeat(),
+        'request_id': str(uuid.uuid4()),
+        'pattern': req['pattern'],
+        'file_path': req['file_path'],
+        'repeat': make_repeat(),
     }
 
 
 def delivery_report(err, msg):
     if err:
-        print(f"Delivery failed: {err}", flush=True)
+        print(f'Delivery failed: {err}', flush=True)
 
 
-def send_batch(producer, count, label=""):
+def send_batch(producer, count, label=''):
     """Send `count` messages as fast as possible (burst)."""
-    for i in range(count):
+    for _i in range(count):
         message = make_message()
         producer.produce(
             topic=TOPIC,
-            key=message["request_id"].encode(),
+            key=message['request_id'].encode(),
             value=json.dumps(message).encode(),
             callback=delivery_report,
         )
         producer.poll(0)
     producer.flush(timeout=10)
-    print(f"  [{label}] burst: {count} messages sent", flush=True)
+    print(f'  [{label}] burst: {count} messages sent', flush=True)
 
 
-def send_steady(producer, count, rate, label=""):
+def send_steady(producer, count, rate, label=''):
     """Send `count` messages at `rate` per second."""
     interval = 1.0 / rate if rate > 0 else 0
     for i in range(count):
         message = make_message()
         producer.produce(
             topic=TOPIC,
-            key=message["request_id"].encode(),
+            key=message['request_id'].encode(),
             value=json.dumps(message).encode(),
             callback=delivery_report,
         )
         producer.poll(0)
         if (i + 1) % 100 == 0:
-            print(f"  [{label}] steady: {i + 1}/{count} at {rate}/sec", flush=True)
+            print(f'  [{label}] steady: {i + 1}/{count} at {rate}/sec', flush=True)
         if interval > 0:
             time.sleep(interval)
     producer.flush(timeout=10)
 
 
 def main():
-    print(f"Producer starting: {TOTAL_MESSAGES} total messages to {TOPIC}", flush=True)
+    print(f'Producer starting: {TOTAL_MESSAGES} total messages to {TOPIC}', flush=True)
 
-    producer = Producer({"bootstrap.servers": BROKERS})
+    producer = Producer({'bootstrap.servers': BROKERS})
     sent = 0
 
     # Phase 0: slow drip — 10 messages, one every 5 seconds
-    print("Phase 0: slow drip — 10 msgs, one every 5 sec", flush=True)
-    send_steady(producer, 10, rate=0.2, label="drip")
+    print('Phase 0: slow drip — 10 msgs, one every 5 sec', flush=True)
+    send_steady(producer, 10, rate=0.2, label='drip')
     sent += 10
 
     # Phase 1: warm-up
     phase1 = min(500, TOTAL_MESSAGES - sent)
-    print(f"Phase 1: warm-up — {phase1} msgs at 15/sec", flush=True)
-    send_steady(producer, phase1, rate=15, label="warmup")
+    print(f'Phase 1: warm-up — {phase1} msgs at 15/sec', flush=True)
+    send_steady(producer, phase1, rate=15, label='warmup')
     sent += phase1
 
     if sent >= TOTAL_MESSAGES:
         return _done(sent)
 
     # Phase 2: pause
-    print("Phase 2: pause — 15 seconds silence", flush=True)
+    print('Phase 2: pause — 15 seconds silence', flush=True)
     time.sleep(15)
 
     # Phase 3: burst
     phase3 = min(200, TOTAL_MESSAGES - sent)
-    print(f"Phase 3: burst — {phase3} msgs at max speed", flush=True)
-    send_batch(producer, phase3, label="burst1")
+    print(f'Phase 3: burst — {phase3} msgs at max speed', flush=True)
+    send_batch(producer, phase3, label='burst1')
     sent += phase3
 
     if sent >= TOTAL_MESSAGES:
@@ -172,21 +172,21 @@ def main():
 
     # Phase 4: steady
     phase4 = min(2000, TOTAL_MESSAGES - sent)
-    print(f"Phase 4: steady — {phase4} msgs at 20/sec", flush=True)
-    send_steady(producer, phase4, rate=20, label="steady")
+    print(f'Phase 4: steady — {phase4} msgs at 20/sec', flush=True)
+    send_steady(producer, phase4, rate=20, label='steady')
     sent += phase4
 
     if sent >= TOTAL_MESSAGES:
         return _done(sent)
 
     # Phase 5: pause
-    print("Phase 5: pause — 10 seconds silence", flush=True)
+    print('Phase 5: pause — 10 seconds silence', flush=True)
     time.sleep(10)
 
     # Phase 6: burst
     phase6 = min(300, TOTAL_MESSAGES - sent)
-    print(f"Phase 6: burst — {phase6} msgs at max speed", flush=True)
-    send_batch(producer, phase6, label="burst2")
+    print(f'Phase 6: burst — {phase6} msgs at max speed', flush=True)
+    send_batch(producer, phase6, label='burst2')
     sent += phase6
 
     if sent >= TOTAL_MESSAGES:
@@ -194,24 +194,26 @@ def main():
 
     # Phase 7: cool-down — remaining messages
     remaining = TOTAL_MESSAGES - sent
-    print(f"Phase 7: cool-down — {remaining} msgs at 10/sec", flush=True)
-    send_steady(producer, remaining, rate=10, label="cooldown")
+    print(f'Phase 7: cool-down — {remaining} msgs at 10/sec', flush=True)
+    send_steady(producer, remaining, rate=10, label='cooldown')
     sent += remaining
 
     # Phase 8: flood — same volume again, no pauses, create massive consumer lag
-    print(f"\nPhase 8: FLOOD — {TOTAL_MESSAGES} msgs at max speed (creating consumer lag)", flush=True)
-    send_batch(producer, TOTAL_MESSAGES, label="flood")
+    print(
+        f'\nPhase 8: FLOOD — {TOTAL_MESSAGES} msgs at max speed (creating consumer lag)', flush=True
+    )
+    send_batch(producer, TOTAL_MESSAGES, label='flood')
     sent += TOTAL_MESSAGES
 
     _done(sent)
 
 
 def _done(sent):
-    print(f"Producer finished: {sent} messages sent", flush=True)
+    print(f'Producer finished: {sent} messages sent', flush=True)
     # keep running so docker doesn't restart
     while True:
         time.sleep(60)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

@@ -1,7 +1,7 @@
 FROM python:3.13-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ripgrep && \
+    apt-get install -y --no-install-recommends ripgrep bc && \
     rm -rf /var/lib/apt/lists/*
 
 RUN pip install uv
@@ -11,7 +11,8 @@ WORKDIR /app
 RUN uv pip install --system --no-cache-dir \
     confluent-kafka pydantic pydantic-settings asyncpg \
     prometheus-client structlog pyyaml \
-    aiosqlite fastapi 'uvicorn[standard]' jinja2
+    aiosqlite fastapi 'uvicorn[standard]' jinja2 \
+    motor httpx redis
 
 COPY drakkar/ /app/drakkar/
 COPY integration/handler.py /app/handler.py

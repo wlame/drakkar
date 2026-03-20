@@ -2,7 +2,6 @@ CREATE TABLE IF NOT EXISTS search_results (
     id SERIAL PRIMARY KEY,
     request_id VARCHAR(64) NOT NULL,
     pattern VARCHAR(256) NOT NULL,
-    file_path VARCHAR(512) NOT NULL,
     match_count INTEGER NOT NULL DEFAULT 0,
     duration_seconds REAL NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

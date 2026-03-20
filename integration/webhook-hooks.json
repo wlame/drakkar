@@ -1,0 +1,13 @@
+[
+  {
+    "id": "drakkar",
+    "execute-command": "/bin/echo",
+    "command-working-directory": "/tmp",
+    "pass-arguments-to-command": [
+      {
+        "source": "entire-payload"
+      }
+    ],
+    "response-message": "OK"
+  }
+]
