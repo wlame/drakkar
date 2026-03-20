@@ -1,0 +1,80 @@
+"""Filesystem sink — appends JSON lines to files.
+
+Each FilePayload's data field is serialized via model_dump_json() and
+appended as a newline-terminated line (JSONL format) to the file at
+payload.path. Creates the file if it doesn't exist. Raises an error
+if the parent directory is missing or not writable.
+"""
+
+import time
+from pathlib import Path
+
+import structlog
+
+from drakkar.config import FileSinkConfig
+from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
+from drakkar.models import FilePayload
+from drakkar.sinks.base import BaseSink
+
+logger = structlog.get_logger()
+
+
+class FileSink(BaseSink):
+    """Appends JSONL lines to files on the local filesystem.
+
+    Each FilePayload specifies its own output path. The framework
+    serializes payload.data via model_dump_json(), appends a newline,
+    and writes it to the file (creating the file if needed).
+
+    Raises FileNotFoundError if the parent directory doesn't exist,
+    and PermissionError if the directory isn't writable.
+    """
+
+    sink_type = 'filesystem'
+
+    def __init__(self, name: str, config: FileSinkConfig) -> None:
+        super().__init__(name)
+        self._config = config
+
+    async def connect(self) -> None:
+        """Validate base_path if configured, otherwise no-op."""
+        if self._config.base_path:
+            base = Path(self._config.base_path)
+            if not base.is_dir():
+                raise FileNotFoundError(f'FileSink base_path does not exist: {base}')
+        await logger.ainfo(
+            'file_sink_connected',
+            category='sink',
+            sink_name=self._name,
+            base_path=self._config.base_path or '(none)',
+        )
+
+    async def deliver(self, payloads: list[FilePayload]) -> None:  # type: ignore[override]
+        """Append each payload as a JSONL line to its target file.
+
+        Creates the file if it doesn't exist. Raises FileNotFoundError
+        if the parent directory is missing, PermissionError if not writable.
+        """
+        if not payloads:
+            return
+
+        start = time.monotonic()
+        labels = {'sink_type': self.sink_type, 'sink_name': self._name}
+        try:
+            for payload in payloads:
+                path = Path(payload.path)
+                if not path.parent.is_dir():
+                    raise FileNotFoundError(f'Parent directory does not exist: {path.parent}')
+                line = payload.data.model_dump_json() + '\n'
+                with open(path, 'a') as f:
+                    f.write(line)
+
+            sink_payloads_delivered.labels(**labels).inc(len(payloads))
+            sink_deliver_duration.labels(**labels).observe(time.monotonic() - start)
+        except Exception:
+            sink_deliver_errors.labels(**labels).inc()
+            raise
+
+    async def close(self) -> None:
+        """No-op — filesystem doesn't hold persistent connections."""
+        pass

@@ -8,13 +8,21 @@ import pytest
 from pydantic import BaseModel
 
 from drakkar.config import (
+    FileSinkConfig,
     HttpSinkConfig,
     KafkaSinkConfig,
     MongoSinkConfig,
     PostgresSinkConfig,
     RedisSinkConfig,
 )
-from drakkar.models import HttpPayload, KafkaPayload, MongoPayload, PostgresPayload, RedisPayload
+from drakkar.models import (
+    FilePayload,
+    HttpPayload,
+    KafkaPayload,
+    MongoPayload,
+    PostgresPayload,
+    RedisPayload,
+)
 
 
 class SampleOutput(BaseModel):
@@ -791,3 +799,144 @@ def test_redis_sink_type(redis_sink_config):
 
     sink = RedisSink('cache', redis_sink_config)
     assert sink.sink_type == 'redis'
+
+
+# =============================================================================
+# Filesystem sink
+# =============================================================================
+
+
+async def test_file_sink_connect_no_base_path():
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig())
+    await sink.connect()  # no-op, should not raise
+
+
+async def test_file_sink_connect_valid_base_path(tmp_path):
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
+    await sink.connect()  # should not raise
+
+
+async def test_file_sink_connect_invalid_base_path():
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig(base_path='/nonexistent/path'))
+    with pytest.raises(FileNotFoundError, match='base_path does not exist'):
+        await sink.connect()
+
+
+async def test_file_sink_deliver_creates_file(tmp_path):
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig())
+    out_file = tmp_path / 'output.jsonl'
+
+    payload = FilePayload(path=str(out_file), data=SampleOutput(request_id='r1'))
+    await sink.deliver([payload])
+
+    assert out_file.exists()
+    lines = out_file.read_text().splitlines()
+    assert len(lines) == 1
+    assert '"request_id":"r1"' in lines[0]
+
+
+async def test_file_sink_deliver_appends_to_existing(tmp_path):
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig())
+    out_file = tmp_path / 'output.jsonl'
+    out_file.write_text('{"existing":"line"}\n')
+
+    payload = FilePayload(path=str(out_file), data=SampleOutput(request_id='r2'))
+    await sink.deliver([payload])
+
+    lines = out_file.read_text().splitlines()
+    assert len(lines) == 2
+    assert lines[0] == '{"existing":"line"}'
+    assert '"request_id":"r2"' in lines[1]
+
+
+async def test_file_sink_deliver_batch(tmp_path):
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig())
+    out_file = tmp_path / 'batch.jsonl'
+
+    payloads = [
+        FilePayload(path=str(out_file), data=SampleOutput(request_id='r1')),
+        FilePayload(path=str(out_file), data=SampleOutput(request_id='r2')),
+        FilePayload(path=str(out_file), data=SampleOutput(request_id='r3')),
+    ]
+    await sink.deliver(payloads)
+
+    lines = out_file.read_text().splitlines()
+    assert len(lines) == 3
+
+
+async def test_file_sink_deliver_different_files(tmp_path):
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig())
+    file_a = tmp_path / 'a.jsonl'
+    file_b = tmp_path / 'b.jsonl'
+
+    payloads = [
+        FilePayload(path=str(file_a), data=SampleOutput(request_id='r1')),
+        FilePayload(path=str(file_b), data=SampleOutput(request_id='r2')),
+    ]
+    await sink.deliver(payloads)
+
+    assert file_a.exists()
+    assert file_b.exists()
+    assert '"r1"' in file_a.read_text()
+    assert '"r2"' in file_b.read_text()
+
+
+async def test_file_sink_deliver_empty():
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig())
+    await sink.deliver([])  # should not raise
+
+
+async def test_file_sink_deliver_missing_parent_dir(tmp_path):
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig())
+    bad_path = tmp_path / 'nonexistent' / 'output.jsonl'
+
+    with pytest.raises(FileNotFoundError, match='Parent directory does not exist'):
+        await sink.deliver([FilePayload(path=str(bad_path), data=SampleOutput())])
+
+
+async def test_file_sink_deliver_error_increments_metrics(tmp_path):
+    from drakkar.metrics import sink_deliver_errors
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig())
+    bad_path = tmp_path / 'nonexistent' / 'output.jsonl'
+
+    labels = {'sink_type': 'filesystem', 'sink_name': 'output'}
+    before = sink_deliver_errors.labels(**labels)._value.get()
+
+    with pytest.raises(FileNotFoundError):
+        await sink.deliver([FilePayload(path=str(bad_path), data=SampleOutput())])
+
+    assert sink_deliver_errors.labels(**labels)._value.get() == before + 1
+
+
+async def test_file_sink_close():
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig())
+    await sink.close()  # no-op, should not raise
+
+
+def test_file_sink_type():
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig())
+    assert sink.sink_type == 'filesystem'
