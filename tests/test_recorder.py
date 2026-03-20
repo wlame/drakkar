@@ -3,16 +3,21 @@
 import os
 
 import pytest
+from pydantic import BaseModel
 
 from drakkar.config import DebugConfig
 from drakkar.models import (
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
-    OutputMessage,
+    KafkaPayload,
     SourceMessage,
 )
 from drakkar.recorder import EventRecorder, _list_db_files, _make_db_path
+
+
+class _RecData(BaseModel):
+    v: str = 'ok'
 
 
 def make_debug_config(tmp_path, **overrides) -> DebugConfig:
@@ -187,7 +192,7 @@ async def test_record_task_failed(recorder):
 
 
 async def test_record_produced(recorder):
-    msg = OutputMessage(key=b'k', value=b'v')
+    msg = KafkaPayload(key=b'k', data=_RecData())
     recorder.record_produced(msg, source_partition=3, source_offset=42)
     await recorder._flush()
 
@@ -525,7 +530,7 @@ async def test_all_event_types_persisted(recorder):
     task = make_task('t-all', args=['--check'], offsets=[10])
     result = make_result('t-all', task=task)
     error = ExecutorError(task=task, exit_code=1, stderr='oops')
-    out_msg = OutputMessage(key=b'k', value=b'v')
+    out_msg = KafkaPayload(key=b'k', data=_RecData())
 
     recorder.record_consumed(msg)
     recorder.record_arranged(partition=1, messages=[msg], tasks=[task])

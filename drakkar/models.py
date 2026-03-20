@@ -190,17 +190,6 @@ class CollectResult(BaseModel):
     redis: list[RedisPayload] = Field(default_factory=list)
     files: list[FilePayload] = Field(default_factory=list)
 
-    # Temporary compat properties — removed when app.py is rewritten in Task 12
-    @property
-    def output_messages(self) -> list:
-        return [
-            OutputMessage(key=p.key, value=p.data.model_dump_json().encode()) for p in self.kafka
-        ]
-
-    @property
-    def db_rows(self) -> list:
-        return [DBRow(table=p.table, data=p.data.model_dump()) for p in self.postgres]
-
     @property
     def has_outputs(self) -> bool:
         """True if any sink field contains at least one payload."""
@@ -229,27 +218,6 @@ class CollectResult(BaseModel):
         if self.files:
             types.add('filesystem')
         return types
-
-
-# --- Temporary backward-compat aliases (removed when producer.py/db.py are deleted) ---
-
-
-class OutputMessage(BaseModel):
-    """DEPRECATED: Use KafkaPayload instead. Kept for import compatibility during refactor."""
-
-    key: bytes | None = None
-    value: bytes
-
-    @classmethod
-    def from_model(cls, model: BaseModel, key: bytes | None = None) -> 'OutputMessage':
-        return cls(key=key, value=model.model_dump_json().encode())
-
-
-class DBRow(BaseModel):
-    """DEPRECATED: Use PostgresPayload instead. Kept for import compatibility during refactor."""
-
-    table: str
-    data: dict
 
 
 class ErrorAction(StrEnum):

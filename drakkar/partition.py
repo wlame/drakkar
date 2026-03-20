@@ -307,9 +307,7 @@ class PartitionProcessor:
                     task_id=task.task_id,
                     partition=self._partition_id,
                     duration=collect_duration,
-                    output_message_count=len(collect_result.output_messages)
-                    if collect_result
-                    else 0,
+                    output_message_count=len(collect_result.kafka) if collect_result else 0,
                 )
             if collect_result and self._on_collect:
                 await self._on_collect(collect_result, self._partition_id)

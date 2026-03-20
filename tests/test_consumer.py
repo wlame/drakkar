@@ -13,7 +13,6 @@ def kafka_config() -> KafkaConfig:
     return KafkaConfig(
         brokers='localhost:9092',
         source_topic='test-source',
-        target_topic='test-target',
         consumer_group='test-group',
         max_poll_records=10,
     )

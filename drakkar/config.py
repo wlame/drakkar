@@ -25,9 +25,6 @@ class KafkaConfig(BaseModel):
     session_timeout_ms: int = 45_000
     heartbeat_interval_ms: int = 3_000
 
-    # DEPRECATED: kept for import compat with producer.py until it's deleted
-    target_topic: str = 'output-results'
-
 
 # --- Sink config models ---
 
@@ -201,10 +198,6 @@ class DebugConfig(BaseModel):
     flush_interval_seconds: int = Field(default=5, ge=1)
     max_buffer: int = Field(default=50_000, ge=1000)
     max_ui_rows: int = Field(default=5000, ge=100)
-
-
-# DEPRECATED: kept for import compat with db.py until it's deleted
-PostgresConfig = PostgresSinkConfig
 
 
 # --- Root config ---
