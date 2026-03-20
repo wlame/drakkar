@@ -75,6 +75,30 @@ def test_app_creation_auto_worker_id(test_config):
     assert app._worker_id.startswith('drakkar-')
 
 
+def test_app_worker_id_from_env(test_config, monkeypatch):
+    monkeypatch.setenv('WORKER_ID', 'my-worker-7')
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    assert app._worker_id == 'my-worker-7'
+
+
+def test_app_worker_id_custom_env_var(monkeypatch):
+    from drakkar.config import DrakkarConfig, ExecutorConfig
+
+    monkeypatch.setenv('MY_SVC_NAME', 'svc-alpha')
+    config = DrakkarConfig(
+        executor=ExecutorConfig(binary_path='/bin/true'),
+        worker_name_env='MY_SVC_NAME',
+    )
+    app = DrakkarApp(handler=SimpleHandler(), config=config)
+    assert app._worker_id == 'svc-alpha'
+
+
+def test_app_worker_id_param_overrides_env(test_config, monkeypatch):
+    monkeypatch.setenv('WORKER_ID', 'from-env')
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config, worker_id='explicit')
+    assert app._worker_id == 'explicit'
+
+
 @patch('drakkar.app.KafkaConsumer')
 @patch('drakkar.app.KafkaProducer')
 @patch('drakkar.app.DBWriter')

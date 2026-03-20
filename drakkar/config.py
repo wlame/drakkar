@@ -78,6 +78,10 @@ class DrakkarConfig(BaseSettings):
         env_nested_delimiter='__',
     )
 
+    worker_name_env: str = Field(
+        default='WORKER_ID',
+        description='Environment variable that holds the worker name for logs, metrics, and UI',
+    )
     kafka: KafkaConfig = Field(default_factory=KafkaConfig)
     executor: ExecutorConfig
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)

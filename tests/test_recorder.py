@@ -514,3 +514,216 @@ async def test_no_broadcast_without_subscribers(tmp_path):
     events = await rec.get_events()
     assert len(events) == 1
     await rec.stop()
+
+
+# --- All event types persisted ---
+
+
+async def test_all_event_types_persisted(recorder):
+    """Every event type must survive buffer → flush → SQLite round-trip."""
+    msg = make_msg(partition=1, offset=10)
+    task = make_task('t-all', args=['--check'], offsets=[10])
+    result = make_result('t-all', task=task)
+    error = ExecutorError(task=task, exit_code=1, stderr='oops')
+    out_msg = OutputMessage(key=b'k', value=b'v')
+
+    recorder.record_consumed(msg)
+    recorder.record_arranged(partition=1, messages=[msg], tasks=[task])
+    recorder.record_task_started(task, partition=1, pool_active=2, pool_waiting=3, slot=0)
+    recorder.record_task_completed(result, partition=1, pool_active=1, pool_waiting=0)
+    recorder.record_task_failed(task, error, partition=1)
+    recorder.record_collect_completed(task_id='t-all', partition=1, duration=0.05, output_message_count=2)
+    recorder.record_produced(out_msg, source_partition=1, source_offset=10)
+    recorder.record_committed(partition=1, offset=11)
+    recorder.record_assigned([1, 2])
+    recorder.record_revoked([2])
+
+    await recorder._flush()
+
+    all_events = await recorder.get_events(limit=50)
+    event_types = {e['event'] for e in all_events}
+
+    expected = {
+        'consumed',
+        'arranged',
+        'task_started',
+        'task_completed',
+        'task_failed',
+        'collect_completed',
+        'produced',
+        'committed',
+        'assigned',
+        'revoked',
+    }
+    assert event_types == expected, f'missing: {expected - event_types}, extra: {event_types - expected}'
+
+
+async def test_collect_completed_persisted(recorder):
+    """collect_completed event stores task_id, duration, and output_message_count."""
+    recorder.record_collect_completed(
+        task_id='t-cc', partition=2, duration=0.123, output_message_count=5
+    )
+    await recorder._flush()
+
+    events = await recorder.get_events(event_type='collect_completed')
+    assert len(events) == 1
+    e = events[0]
+    assert e['task_id'] == 't-cc'
+    assert e['partition'] == 2
+    assert e['duration'] == 0.123
+
+    import json
+
+    meta = json.loads(e['metadata'])
+    assert meta['output_message_count'] == 5
+
+
+# --- Rotation smoothness ---
+
+
+async def test_rotation_no_event_loss(tmp_path):
+    """Events recorded before, during, and after rotation are all queryable."""
+    config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
+    rec = EventRecorder(config)
+    await rec.start()
+
+    # phase 1: record before rotation
+    rec.record_consumed(make_msg(offset=0))
+    rec.record_consumed(make_msg(offset=1))
+    await rec._flush()
+
+    # verify pre-rotation events
+    pre_events = await rec.get_events()
+    assert len(pre_events) == 2
+
+    # phase 2: record into buffer (not flushed), then rotate
+    rec.record_consumed(make_msg(offset=2))
+    rec.record_consumed(make_msg(offset=3))
+    old_path = rec.db_path
+
+    import asyncio
+
+    await asyncio.sleep(1.1)  # ensure different second-level timestamp
+    await rec._rotate()  # flushes buffer to old DB, opens new DB
+
+    # old DB should have all 4 events
+    import aiosqlite
+
+    async with aiosqlite.connect(old_path) as old_db:
+        async with old_db.execute('SELECT COUNT(*) FROM events') as cur:
+            row = await cur.fetchone()
+            assert row[0] == 4
+
+    # phase 3: record after rotation → goes to new DB
+    rec.record_consumed(make_msg(offset=4))
+    rec.record_consumed(make_msg(offset=5))
+    await rec._flush()
+
+    new_events = await rec.get_events()
+    assert len(new_events) == 2
+    offsets = {e['offset'] for e in new_events}
+    assert offsets == {4, 5}
+
+    await rec.stop()
+
+
+async def test_rotation_queries_work_on_new_db(tmp_path):
+    """After rotation, all query methods work on the new DB."""
+    config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
+    rec = EventRecorder(config)
+    await rec.start()
+
+    await rec._rotate()
+
+    # record fresh events in new DB
+    msg = make_msg(partition=0, offset=100)
+    task = make_task('t-rot', offsets=[100])
+    rec.record_consumed(msg)
+    rec.record_task_started(task, partition=0)
+    rec.record_task_completed(make_result('t-rot', task=task), partition=0)
+    rec.record_committed(partition=0, offset=101)
+    await rec._flush()
+
+    # all query methods should return data
+    events = await rec.get_events()
+    assert len(events) == 4
+
+    summary = await rec.get_partition_summary()
+    assert len(summary) == 1
+
+    stats = await rec.get_stats()
+    assert stats['total_events'] == 4
+
+    active = await rec.get_active_tasks()
+    assert len(active) == 0  # task was completed
+
+    trace = await rec.get_trace(partition=0, msg_offset=100)
+    assert len(trace) >= 1
+
+    await rec.stop()
+
+
+async def test_rotation_new_db_has_schema(tmp_path):
+    """The new DB file after rotation has the full schema (tables + indexes)."""
+    config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
+    rec = EventRecorder(config)
+    await rec.start()
+
+    await rec._rotate()
+    new_path = rec.db_path
+
+    import aiosqlite
+
+    async with aiosqlite.connect(new_path) as db:
+        # verify events table exists
+        async with db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='events'"
+        ) as cur:
+            tables = await cur.fetchall()
+            assert len(tables) == 1
+
+        # verify indexes exist
+        async with db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_events_%'"
+        ) as cur:
+            indexes = await cur.fetchall()
+            assert len(indexes) == 4  # partition_offset, ts, task_id, type
+
+    await rec.stop()
+
+
+async def test_multiple_rotations_keep_recent_files(tmp_path):
+    """Multiple rotations keep only files within retention limits."""
+    config = make_debug_config(
+        tmp_path,
+        retention_hours=1,
+        retention_max_events=10_000,
+    )
+    rec = EventRecorder(config)
+    await rec.start()
+
+    # create several "old" files with ancient mtime
+    old_files = []
+    for i in range(5):
+        p = tmp_path / f'test-debug-2024-01-{10 + i:02d}__00_00.db'
+        p.write_text('')
+        os.utime(p, (0, 0))
+        old_files.append(p)
+
+    # rotate twice with different timestamps
+    import asyncio
+
+    await rec._rotate()
+    path_after_first = rec.db_path
+    await asyncio.sleep(1.1)
+    await rec._rotate()
+    path_after_second = rec.db_path
+
+    # old files should be deleted (ancient mtime < retention cutoff)
+    for p in old_files:
+        assert not p.exists(), f'{p.name} should have been deleted'
+
+    # current DB should exist
+    assert os.path.exists(path_after_second)
+
+    await rec.stop()

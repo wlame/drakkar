@@ -1,6 +1,7 @@
 """Main Drakkar application — wires all components together."""
 
 import asyncio
+import os
 import signal
 import time
 from collections.abc import Coroutine
@@ -49,7 +50,11 @@ class DrakkarApp:
             self._config = load_config(config_path)
 
         self._handler = handler
-        self._worker_id = worker_id or f'drakkar-{id(self):x}'
+        self._worker_id = (
+            worker_id
+            or os.environ.get(self._config.worker_name_env, '')
+            or f'drakkar-{id(self):x}'
+        )
         self._start_time = time.monotonic()
 
         self._executor_pool: ExecutorPool | None = None

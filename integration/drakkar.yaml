@@ -1,6 +1,8 @@
 # Drakkar worker configuration
 # All values can be overridden with env vars: DRAKKAR_KAFKA__BROKERS, etc.
 
+worker_name_env: "WORKER_ID"              # env var that holds the worker name (for logs, metrics, UI)
+
 kafka:
   brokers: "kafka:9092"
   source_topic: "search-requests"       # Kafka topic to consume from

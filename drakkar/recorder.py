@@ -55,7 +55,7 @@ def _make_db_path(base_path: str) -> str:
     /tmp/drakkar-debug.db -> /tmp/drakkar-debug-2026-03-16__14_55.db
     """
     p = Path(base_path)
-    ts = datetime.now(tz=UTC).strftime('%Y-%m-%d__%H_%M')
+    ts = datetime.now(tz=UTC).strftime('%Y-%m-%d__%H_%M_%S')
     return str(p.with_stem(f'{p.stem}-{ts}'))
 
 

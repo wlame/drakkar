@@ -173,6 +173,25 @@ def test_drakkar_config_env_nested_delimiter(monkeypatch: pytest.MonkeyPatch):
     assert cfg.kafka.source_topic == 'my-topic'
 
 
+def test_worker_name_env_default():
+    """Default worker_name_env is WORKER_NAME."""
+    from drakkar.config import DrakkarConfig, ExecutorConfig
+
+    cfg = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/true'))
+    assert cfg.worker_name_env == 'WORKER_ID'
+
+
+def test_worker_name_env_custom():
+    """worker_name_env can be set to a custom env var name."""
+    from drakkar.config import DrakkarConfig, ExecutorConfig
+
+    cfg = DrakkarConfig(
+        executor=ExecutorConfig(binary_path='/bin/true'),
+        worker_name_env='MY_WORKER',
+    )
+    assert cfg.worker_name_env == 'MY_WORKER'
+
+
 def test_config_serialization(config_yaml_file: Path):
     cfg = load_config(config_yaml_file)
     data = cfg.model_dump()
