@@ -17,21 +17,18 @@ from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
     KafkaConfig,
+    KafkaSinkConfig,
     LoggingConfig,
     MetricsConfig,
-    PostgresConfig,
+    SinksConfig,
 )
 from drakkar.consumer import KafkaConsumer
-from drakkar.db import DBWriter
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.metrics import (
     assigned_partitions,
     batch_duration,
     consumer_errors,
-    db_errors,
-    db_rows_written,
-    db_write_duration,
     executor_duration,
     executor_tasks,
     handler_duration,
@@ -39,8 +36,6 @@ from drakkar.metrics import (
     offset_lag,
     offsets_committed,
     partition_queue_size,
-    produce_duration,
-    producer_errors,
     rebalance_events,
     start_metrics_server,
     task_retries,
@@ -48,15 +43,12 @@ from drakkar.metrics import (
 )
 from drakkar.models import (
     CollectResult,
-    DBRow,
     ErrorAction,
     ExecutorTask,
     KafkaPayload,
-    OutputMessage,
     SourceMessage,
 )
 from drakkar.partition import PartitionProcessor
-from drakkar.producer import KafkaProducer
 from tests.conftest import wait_for
 
 # --- Helpers ---
@@ -113,7 +105,7 @@ def make_kafka_ok_msg(partition=0, offset=0, value=b'v'):
 
 @pytest.fixture
 def kafka_config():
-    return KafkaConfig(brokers='localhost:9092', source_topic='src', target_topic='dst')
+    return KafkaConfig(brokers='localhost:9092', source_topic='src')
 
 
 # === Consumer metrics ===
@@ -194,103 +186,6 @@ async def test_commit_increments_offsets_committed(mock_cls, kafka_config):
 
     assert counter_val(offsets_committed, partition='0') == before_p0 + 1
     assert counter_val(offsets_committed, partition='3') == before_p3 + 1
-
-
-# === Producer metrics ===
-
-
-@patch('drakkar.producer.AIOProducer')
-async def test_produce_success_observes_duration(mock_cls, kafka_config):
-    """Successful produce() observes produce_duration histogram."""
-    mock_inner = AsyncMock()
-    delivered = MagicMock()
-    delivery_future = asyncio.get_event_loop().create_future()
-    delivery_future.set_result(delivered)
-    mock_inner.produce.return_value = delivery_future
-    mock_cls.return_value = mock_inner
-
-    producer = KafkaProducer(kafka_config)
-    before = histogram_sum(produce_duration)
-    await producer.produce(OutputMessage(value=b'test'))
-    assert histogram_sum(produce_duration) > before
-
-
-@patch('drakkar.producer.AIOProducer')
-async def test_produce_failure_increments_producer_errors(mock_cls, kafka_config):
-    """Delivery failure increments producer_errors counter."""
-    mock_inner = AsyncMock()
-    mock_inner.produce.side_effect = Exception('produce failed')
-    mock_cls.return_value = mock_inner
-
-    producer = KafkaProducer(kafka_config)
-    before = counter_val(producer_errors)
-    with pytest.raises(Exception):  # noqa: B017
-        await producer.produce(OutputMessage(value=b'test'))
-    assert counter_val(producer_errors) == before + 1
-
-
-# === Database metrics ===
-
-
-def _make_db_mock_pool():
-    pool = MagicMock()
-    conn = AsyncMock()
-    ctx = AsyncMock()
-    ctx.__aenter__ = AsyncMock(return_value=conn)
-    ctx.__aexit__ = AsyncMock(return_value=False)
-    pool.acquire.return_value = ctx
-    pool.close = AsyncMock()
-    return pool, conn
-
-
-async def test_db_write_increments_rows_and_observes_duration():
-    """Successful DB write increments db_rows_written and observes db_write_duration."""
-    pool, _conn = _make_db_mock_pool()
-    writer = DBWriter(PostgresConfig(dsn='postgresql://x'))
-    writer._pool = pool
-
-    before_rows = counter_val(db_rows_written)
-    before_dur = histogram_sum(db_write_duration)
-
-    await writer.write(
-        [
-            DBRow(table='t', data={'a': 1}),
-            DBRow(table='t', data={'a': 2}),
-            DBRow(table='t', data={'a': 3}),
-        ]
-    )
-
-    assert counter_val(db_rows_written) == before_rows + 3
-    assert histogram_sum(db_write_duration) > before_dur
-
-
-async def test_db_write_error_increments_db_errors():
-    """DB exception increments db_errors counter."""
-    pool = MagicMock()
-    conn = AsyncMock()
-    conn.execute.side_effect = Exception('connection lost')
-    ctx = AsyncMock()
-    ctx.__aenter__ = AsyncMock(return_value=conn)
-    ctx.__aexit__ = AsyncMock(return_value=False)
-    pool.acquire.return_value = ctx
-
-    writer = DBWriter(PostgresConfig(dsn='postgresql://x'))
-    writer._pool = pool
-
-    before = counter_val(db_errors)
-    with pytest.raises(Exception, match='connection lost'):
-        await writer.write([DBRow(table='t', data={'x': 1})])
-    assert counter_val(db_errors) == before + 1
-
-
-async def test_db_write_empty_does_not_touch_metrics():
-    """Writing empty rows list should not touch any DB metrics."""
-    writer = DBWriter(PostgresConfig(dsn='postgresql://x'))
-    writer._pool = MagicMock()
-
-    before_rows = counter_val(db_rows_written)
-    await writer.write([])
-    assert counter_val(db_rows_written) == before_rows
 
 
 # === Partition processor metrics ===
@@ -411,7 +306,12 @@ async def test_handler_collect_duration_observed():
             ]
 
         async def collect(self, result):
-            return CollectResult(output_messages=[OutputMessage(value=b'out')])
+            from pydantic import BaseModel as BM
+
+            class _Out(BM):
+                v: str = 'ok'
+
+            return CollectResult(kafka=[KafkaPayload(data=_Out())])
 
     proc = PartitionProcessor(
         partition_id=91,
@@ -594,8 +494,6 @@ async def test_on_assign_sets_assigned_partitions_gauge():
     handler = BaseDrakkarHandler()
     app = DrakkarApp(handler=handler, config=config)
     app._consumer = MagicMock()
-    app._producer = MagicMock()
-    app._db_writer = AsyncMock()
     app._executor_pool = ExecutorPool(
         binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
     )
@@ -620,8 +518,6 @@ async def test_on_revoke_decreases_assigned_partitions_gauge():
     handler = BaseDrakkarHandler()
     app = DrakkarApp(handler=handler, config=config)
     app._consumer = AsyncMock()
-    app._producer = MagicMock()
-    app._db_writer = AsyncMock()
     app._executor_pool = ExecutorPool(
         binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
     )
@@ -640,7 +536,6 @@ async def test_on_revoke_decreases_assigned_partitions_gauge():
 async def test_handle_collect_delivers_to_sinks():
     """DrakkarApp._handle_collect routes payloads to configured sinks."""
     from drakkar.app import DrakkarApp
-    from drakkar.config import KafkaSinkConfig, SinksConfig
 
     config = DrakkarConfig(
         executor=ExecutorConfig(binary_path='/bin/echo', max_workers=2),

@@ -19,11 +19,6 @@ messages_consumed = Counter(
     ['partition'],
 )
 
-messages_produced = Counter(
-    'drakkar_messages_produced_total',
-    'Total messages produced to target topic',
-)
-
 # --- Executor ---
 
 executor_tasks = Counter(
@@ -90,22 +85,11 @@ assigned_partitions = Gauge(
     'Number of partitions currently assigned to this worker',
 )
 
-# --- Consumer/Producer errors ---
+# --- Consumer errors ---
 
 consumer_errors = Counter(
     'drakkar_consumer_errors_total',
     'Total Kafka consumer poll errors',
-)
-
-producer_errors = Counter(
-    'drakkar_producer_errors_total',
-    'Total Kafka producer delivery failures',
-)
-
-produce_duration = Histogram(
-    'drakkar_produce_duration_seconds',
-    'Time to produce a single message to Kafka',
-    buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5),
 )
 
 # --- Offset commits ---
@@ -122,24 +106,6 @@ rebalance_events = Counter(
     'drakkar_rebalance_events_total',
     'Total Kafka rebalance events',
     ['type'],
-)
-
-# --- Database ---
-
-db_rows_written = Counter(
-    'drakkar_db_rows_written_total',
-    'Total rows written to PostgreSQL',
-)
-
-db_write_duration = Histogram(
-    'drakkar_db_write_duration_seconds',
-    'Duration of database write operations',
-    buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5),
-)
-
-db_errors = Counter(
-    'drakkar_db_errors_total',
-    'Total database write errors',
 )
 
 # --- Sinks ---
