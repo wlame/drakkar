@@ -9,11 +9,12 @@ from pydantic import BaseModel
 from drakkar.config import DrakkarConfig, ExecutorConfig
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
+    DeliveryAction,
+    DeliveryError,
     ErrorAction,
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
-    OutputMessage,
     PendingContext,
     SourceMessage,
 )
@@ -254,11 +255,51 @@ async def test_message_label_custom_override():
     assert handler.message_label(msg) == '5:10 [TODO]'
 
 
-async def test_output_message_from_model():
-    result = SearchResult(pattern='error', match_count=3, matches=['a', 'b', 'c'])
-    msg = OutputMessage.from_model(result, key=b'key-1')
-    assert msg.key == b'key-1'
-    parsed = json.loads(msg.value)
-    assert parsed['pattern'] == 'error'
-    assert parsed['match_count'] == 3
-    assert parsed['matches'] == ['a', 'b', 'c']
+async def test_base_handler_on_delivery_error_returns_dlq(
+    handler: BaseDrakkarHandler,
+):
+    """Default on_delivery_error returns DLQ."""
+    error = DeliveryError(
+        sink_name='results',
+        sink_type='kafka',
+        error='broker down',
+    )
+    action = await handler.on_delivery_error(error)
+    assert action == DeliveryAction.DLQ
+
+
+async def test_custom_on_delivery_error_skip():
+    """User can override on_delivery_error to return SKIP."""
+
+    class SkipHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return []
+
+        async def on_delivery_error(self, error):
+            return DeliveryAction.SKIP
+
+    handler = SkipHandler()
+    error = DeliveryError(sink_name='x', sink_type='http', error='timeout')
+    action = await handler.on_delivery_error(error)
+    assert action == DeliveryAction.SKIP
+
+
+async def test_custom_on_delivery_error_retry():
+    """User can override on_delivery_error to return RETRY."""
+
+    class RetryHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return []
+
+        async def on_delivery_error(self, error):
+            if 'transient' in error.error:
+                return DeliveryAction.RETRY
+            return DeliveryAction.DLQ
+
+    handler = RetryHandler()
+
+    transient = DeliveryError(sink_name='x', sink_type='http', error='transient failure')
+    assert await handler.on_delivery_error(transient) == DeliveryAction.RETRY
+
+    permanent = DeliveryError(sink_name='x', sink_type='http', error='auth failed')
+    assert await handler.on_delivery_error(permanent) == DeliveryAction.DLQ
