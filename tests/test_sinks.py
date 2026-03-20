@@ -940,3 +940,134 @@ def test_file_sink_type():
 
     sink = FileSink('output', FileSinkConfig())
     assert sink.sink_type == 'filesystem'
+
+
+# =============================================================================
+# DLQ sink
+# =============================================================================
+
+
+def _make_dlq_sink():
+    """Helper: create a DLQSink with a mocked AIOProducer."""
+    from drakkar.sinks.dlq import DLQSink
+
+    mock_producer = AsyncMock()
+    mock_producer.produce.side_effect = lambda **kw: _make_future()
+    sink = DLQSink(topic='test-dlq', brokers='localhost:9092')
+    sink._producer = mock_producer
+    return sink, mock_producer
+
+
+def _sample_delivery_error():
+    from drakkar.models import DeliveryError
+
+    return DeliveryError(
+        sink_name='results',
+        sink_type='kafka',
+        error='BrokerNotAvailableError: broker down',
+        payloads=[SampleOutput(request_id='r1')],
+    )
+
+
+@patch('drakkar.sinks.dlq.AIOProducer')
+async def test_dlq_sink_connect(mock_cls):
+    from drakkar.sinks.dlq import DLQSink
+
+    sink = DLQSink(topic='my-dlq', brokers='kafka:9092')
+    await sink.connect()
+
+    mock_cls.assert_called_once_with({'bootstrap.servers': 'kafka:9092'})
+    assert sink._producer is not None
+
+
+async def test_dlq_sink_send():
+    sink, mock_producer = _make_dlq_sink()
+    error = _sample_delivery_error()
+
+    await sink.send(error, partition_id=3, attempt_count=2)
+
+    mock_producer.produce.assert_called_once()
+    call_kwargs = mock_producer.produce.call_args[1]
+    assert call_kwargs['topic'] == 'test-dlq'
+
+    import json
+
+    body = json.loads(call_kwargs['value'])
+    assert body['sink_name'] == 'results'
+    assert body['sink_type'] == 'kafka'
+    assert 'BrokerNotAvailableError' in body['error']
+    assert body['partition'] == 3
+    assert body['attempt_count'] == 2
+    assert len(body['original_payloads']) == 1
+
+
+async def test_dlq_sink_send_increments_metric():
+    from drakkar.metrics import sink_dlq_messages
+
+    sink, _ = _make_dlq_sink()
+    before = sink_dlq_messages._value.get()
+
+    await sink.send(_sample_delivery_error(), partition_id=0)
+
+    assert sink_dlq_messages._value.get() == before + 1
+
+
+async def test_dlq_sink_send_not_connected():
+    from drakkar.sinks.dlq import DLQSink
+
+    sink = DLQSink(topic='dlq', brokers='localhost:9092')
+    # should log warning but not raise
+    await sink.send(_sample_delivery_error(), partition_id=0)
+
+
+async def test_dlq_sink_send_produce_failure():
+    from drakkar.sinks.dlq import DLQSink
+
+    sink = DLQSink(topic='dlq', brokers='localhost:9092')
+    mock_producer = AsyncMock()
+    mock_producer.produce.side_effect = RuntimeError('kafka down')
+    sink._producer = mock_producer
+
+    # should log error but not raise (DLQ is last resort)
+    await sink.send(_sample_delivery_error(), partition_id=0)
+
+
+async def test_dlq_message_serialization():
+    from drakkar.sinks.dlq import DLQMessage
+
+    error = _sample_delivery_error()
+    msg = DLQMessage(delivery_error=error, partition_id=5, attempt_count=3)
+    data = msg.serialize()
+
+    import json
+
+    parsed = json.loads(data)
+    assert parsed['sink_name'] == 'results'
+    assert parsed['sink_type'] == 'kafka'
+    assert parsed['partition'] == 5
+    assert parsed['attempt_count'] == 3
+    assert 'timestamp' in parsed
+    assert len(parsed['original_payloads']) == 1
+
+
+async def test_dlq_sink_close():
+    sink, mock_producer = _make_dlq_sink()
+    await sink.close()
+
+    mock_producer.close.assert_called_once()
+    assert sink._producer is None
+
+
+async def test_dlq_sink_close_not_connected():
+    from drakkar.sinks.dlq import DLQSink
+
+    sink = DLQSink(topic='dlq', brokers='localhost:9092')
+    await sink.close()  # should not raise
+
+
+def test_dlq_sink_topic():
+    from drakkar.sinks.dlq import DLQSink
+
+    sink = DLQSink(topic='my-dlq', brokers='localhost:9092')
+    assert sink.topic == 'my-dlq'
+    assert sink.sink_type == 'dlq'
