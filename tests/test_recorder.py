@@ -532,7 +532,9 @@ async def test_all_event_types_persisted(recorder):
     recorder.record_task_started(task, partition=1, pool_active=2, pool_waiting=3, slot=0)
     recorder.record_task_completed(result, partition=1, pool_active=1, pool_waiting=0)
     recorder.record_task_failed(task, error, partition=1)
-    recorder.record_collect_completed(task_id='t-all', partition=1, duration=0.05, output_message_count=2)
+    recorder.record_collect_completed(
+        task_id='t-all', partition=1, duration=0.05, output_message_count=2
+    )
     recorder.record_produced(out_msg, source_partition=1, source_offset=10)
     recorder.record_committed(partition=1, offset=11)
     recorder.record_assigned([1, 2])
@@ -555,7 +557,9 @@ async def test_all_event_types_persisted(recorder):
         'assigned',
         'revoked',
     }
-    assert event_types == expected, f'missing: {expected - event_types}, extra: {event_types - expected}'
+    assert event_types == expected, (
+        f'missing: {expected - event_types}, extra: {event_types - expected}'
+    )
 
 
 async def test_collect_completed_persisted(recorder):
@@ -609,10 +613,12 @@ async def test_rotation_no_event_loss(tmp_path):
     # old DB should have all 4 events
     import aiosqlite
 
-    async with aiosqlite.connect(old_path) as old_db:
-        async with old_db.execute('SELECT COUNT(*) FROM events') as cur:
-            row = await cur.fetchone()
-            assert row[0] == 4
+    async with (
+        aiosqlite.connect(old_path) as old_db,
+        old_db.execute('SELECT COUNT(*) FROM events') as cur,
+    ):
+        row = await cur.fetchone()
+        assert row[0] == 4
 
     # phase 3: record after rotation → goes to new DB
     rec.record_consumed(make_msg(offset=4))
@@ -714,7 +720,6 @@ async def test_multiple_rotations_keep_recent_files(tmp_path):
     import asyncio
 
     await rec._rotate()
-    path_after_first = rec.db_path
     await asyncio.sleep(1.1)
     await rec._rotate()
     path_after_second = rec.db_path

@@ -51,9 +51,7 @@ class DrakkarApp:
 
         self._handler = handler
         self._worker_id = (
-            worker_id
-            or os.environ.get(self._config.worker_name_env, '')
-            or f'drakkar-{id(self):x}'
+            worker_id or os.environ.get(self._config.worker_name_env, '') or f'drakkar-{id(self):x}'
         )
         self._start_time = time.monotonic()
 
