@@ -374,74 +374,59 @@ def create_debug_app(
             rows = await cursor.fetchall()
             events = [dict(zip(columns, row, strict=False)) for row in rows]
 
-        # group by task_id into timeline entries
+        # group events into timeline entries — one entry per execution attempt.
+        # retries (same task_id with multiple task_started) produce separate entries:
+        # previous attempts get composite keys (task_id:r{ts}), the latest keeps
+        # the original task_id so WS events can match it.
         tasks: dict[str, dict] = {}
-        now = time.time()
         for e in events:
             tid = e.get('task_id')
             if not tid:
                 continue
-            if tid not in tasks:
+
+            if e['event'] == 'task_started':
+                # if this task_id already has a current entry, archive it as a retry
+                if tid in tasks:
+                    old = tasks[tid]
+                    archive_key = tid + ':r' + str(old['start_ts'])
+                    tasks[archive_key] = old
+                    old['task_id'] = archive_key
+                    if old['end_ts'] is None:
+                        old['end_ts'] = e['ts']
+                        old['status'] = 'failed'
+
+                slot = None
+                if e.get('metadata'):
+                    try:
+                        meta = json.loads(e['metadata'])
+                        slot = meta.get('slot')
+                    except (json.JSONDecodeError, TypeError):
+                        pass
                 tasks[tid] = {
                     'task_id': tid,
                     'partition': e.get('partition'),
-                    'start_ts': None,
+                    'start_ts': e['ts'],
                     'end_ts': None,
                     'duration': None,
                     'status': 'running',
                     'args': e.get('args'),
                     'pid': e.get('pid'),
-                    'slot': None,
+                    'slot': slot,
                 }
-            t = tasks[tid]
-            if e['event'] == 'task_started':
-                t['start_ts'] = e['ts']
-                t['end_ts'] = None  # reset on retry
-                t['status'] = 'running'  # reset on retry
-                # extract slot from metadata
-                if e.get('metadata'):
-                    try:
-                        meta = json.loads(e['metadata'])
-                        t['slot'] = meta.get('slot')
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+
             elif e['event'] in ('task_completed', 'task_failed'):
-                t['end_ts'] = e['ts']
-                t['status'] = 'completed' if e['event'] == 'task_completed' else 'failed'
-                t['duration'] = e.get('duration')
-                if e.get('pid'):
-                    t['pid'] = e['pid']
+                if tid in tasks:
+                    t = tasks[tid]
+                    t['end_ts'] = e['ts']
+                    t['status'] = 'completed' if e['event'] == 'task_completed' else 'failed'
+                    t['duration'] = e.get('duration')
+                    if e.get('pid'):
+                        t['pid'] = e['pid']
 
-        # compute relative positions for timeline
-        timeline_start = now - (minutes * 60)
-        timeline_span = minutes * 60
-
-        # sort by start time for lane assignment
-        sorted_tasks = sorted(
-            [t for t in tasks.values() if t['start_ts']],
-            key=lambda t: t['start_ts'],
-        )
-
-        # assign tasks to executor lanes (slots), capped at max_workers
         pool = drakkar_app._executor_pool
         max_lanes = pool.max_workers if pool else 8
-        lane_end_times: list[float] = [0.0] * max_lanes
-        result = []
-        for t in sorted_tasks:
-            start_pct = max(0, (t['start_ts'] - timeline_start) / timeline_span * 100)
-            end_ts = t['end_ts'] or now
-            end_pct = min(100, (end_ts - timeline_start) / timeline_span * 100)
-            width_pct = max(0.15, end_pct - start_pct)
 
-            # find the lane with the earliest end time (most idle slot)
-            lane = min(range(max_lanes), key=lambda i: lane_end_times[i])
-            lane_end_times[lane] = end_ts
-
-            t['lane'] = lane
-            t['start_pct'] = round(start_pct, 2)
-            t['width_pct'] = round(width_pct, 2)
-            result.append(t)
-
+        result = [t for t in tasks.values() if t['start_ts']]
         return JSONResponse({'tasks': result, 'lane_count': max_lanes})
 
     @app.get('/api/dashboard')

@@ -54,7 +54,7 @@ class MongoSink(BaseSink):
         Each payload's data is serialized via model_dump() and inserted
         into the collection specified by payload.collection.
         """
-        if not payloads or not self._db:
+        if not payloads or self._db is None:
             return
 
         start = time.monotonic()
@@ -73,7 +73,7 @@ class MongoSink(BaseSink):
 
     async def close(self) -> None:
         """Close the motor client."""
-        if self._client:
+        if self._client is not None:
             try:
                 self._client.close()
             except Exception as e:

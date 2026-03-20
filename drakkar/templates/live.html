@@ -180,9 +180,9 @@ function fmtTimeMs(ts) { return ts ? new Date(ts * 1000).toISOString().substring
 function barColor(s) { return s === 'completed' ? '#34d399' : s === 'failed' ? '#f87171' : '#fbbf24'; }
 function statusCss(s) { return s === 'completed' ? 'color:#059669' : s === 'failed' ? 'color:#dc2626' : 'color:#d97706'; }
 function durColor(d) { return d > 1 ? '#dc2626' : d > 0.1 ? '#d97706' : '#059669'; }
-function zoomIn() { zoomLevel = Math.min(zoomLevel * 2, 64); document.getElementById('zoom-label').textContent = zoomLevel + 'x'; }
-function zoomOut() { zoomLevel = Math.max(zoomLevel / 2, 0.25); document.getElementById('zoom-label').textContent = zoomLevel + 'x'; }
-function zoomReset() { zoomLevel = 2; document.getElementById('zoom-label').textContent = '2x'; }
+function zoomIn() { zoomLevel = Math.min(zoomLevel * 2, 64); document.getElementById('zoom-label').textContent = zoomLevel + 'x'; rebuildAxis(); }
+function zoomOut() { zoomLevel = Math.max(zoomLevel / 2, 0.25); document.getElementById('zoom-label').textContent = zoomLevel + 'x'; rebuildAxis(); }
+function zoomReset() { zoomLevel = 2; document.getElementById('zoom-label').textContent = '2x'; rebuildAxis(); }
 
 function showTrace(p, o) {
     tracePartition = p; traceOffset = o;
@@ -229,124 +229,175 @@ function clearTaskDetail() {
     el.appendChild(hint);
 }
 
-// Timeline uses a fixed anchor so bar positions are stable between renders.
-// rAF smoothly advances scrollLeft — DOM rebuilds don't cause jumps.
-var tlAnchor = 0;       // fixed time reference for pixel positions
-var tlFollowing = true; // auto-follow the right edge
+// === Timeline — persistent DOM elements, no rebuild ===
+// Bars are created once and never destroyed (except on age-out).
+// rAF loop updates: canvas width, running bar widths, scroll position.
+// Axis ticks are rebuilt only on zoom change (cheap).
 
+var tlAnchor = 0;       // fixed time reference for pixel positions
+var tlFollowing = true;  // auto-follow the right edge
+var taskBars = {};       // task_id -> {el: DOM element, task: task object}
+var lastZoom = 0;        // detect zoom changes to rebuild axis
+var laneStripesBuilt = false;
+
+function tlPx(ts) {
+    // convert a unix timestamp to pixel position relative to anchor
+    return (ts - tlAnchor) * BASE_PX_PER_SEC * zoomLevel;
+}
 function tlEdgePx() {
-    // pixel position of "now - delay" relative to anchor
     return (Date.now() / 1000 - TIMELINE_DELAY - tlAnchor) * BASE_PX_PER_SEC * zoomLevel;
 }
-function tlScrollTarget() {
-    var vp = document.getElementById('tl-viewport');
-    if (!vp) return 0;
-    return Math.max(0, tlEdgePx() - vp.clientWidth);
+
+function ensureAnchor() {
+    var now = Date.now() / 1000 - TIMELINE_DELAY;
+    var newAnchor = Math.floor((now - TIMELINE_MINUTES * 60) / 30) * 30;
+    if (tlAnchor === 0 || newAnchor > tlAnchor + 30) {
+        tlAnchor = newAnchor;
+        return true; // anchor changed — need full axis rebuild
+    }
+    return false;
 }
 
-function renderTimeline() {
-    var now = Date.now() / 1000 - TIMELINE_DELAY;
-    var pxPerSec = BASE_PX_PER_SEC * zoomLevel;
-    var totalSeconds = TIMELINE_MINUTES * 60;
-
-    // set anchor once, then re-anchor every 30s to avoid infinite canvas growth
-    var newAnchor = Math.floor((now - totalSeconds) / 30) * 30;
-    if (tlAnchor === 0 || newAnchor > tlAnchor + 30) tlAnchor = newAnchor;
-
-    var canvasSeconds = now - tlAnchor; // exactly up to delayed-now, no future
-    var totalWidth = Math.ceil(canvasSeconds * pxPerSec);
-
-    var inner = document.getElementById('tl-inner');
-    var axis = document.getElementById('tl-axis');
+function buildLaneStripes() {
     var lanesDiv = document.getElementById('tl-lanes');
-    if (!inner || !axis || !lanesDiv) return;
-
-    var sorted = Object.values(allTasks).filter(function(t) { return t.start_ts; }).sort(function(a, b) { return a.start_ts - b.start_ts; });
-    for (var si = 0; si < sorted.length; si++) {
-        sorted[si].lane = sorted[si].slot != null ? sorted[si].slot : si % MAX_LANES;
-    }
-    var laneCount = MAX_LANES;
-
-    inner.style.width = totalWidth + 'px';
-    axis.replaceChildren(); axis.style.width = totalWidth + 'px';
-    lanesDiv.replaceChildren();
-    lanesDiv.style.height = (laneCount * (LANE_H + LANE_GAP)) + 'px';
-
-    // lane stripes + labels
-    for (var i = 0; i < laneCount; i++) {
+    if (!lanesDiv || laneStripesBuilt) return;
+    lanesDiv.style.height = (MAX_LANES * (LANE_H + LANE_GAP)) + 'px';
+    for (var i = 0; i < MAX_LANES; i++) {
         var y = i * (LANE_H + LANE_GAP);
         if (i % 2 === 0) {
             var stripe = document.createElement('div');
-            stripe.style.cssText = 'position:absolute;left:0;width:100%;background:rgba(0,0,0,0.02);';
+            stripe.style.cssText = 'position:absolute;left:0;width:100%;background:rgba(0,0,0,0.02);pointer-events:none;';
             stripe.style.top = y + 'px'; stripe.style.height = LANE_H + 'px';
             lanesDiv.appendChild(stripe);
         }
         var label = document.createElement('div');
-        label.style.cssText = 'position:absolute;left:2px;font-size:10px;color:#9ca3af;font-family:monospace;';
+        label.style.cssText = 'position:absolute;left:2px;font-size:10px;color:#9ca3af;font-family:monospace;pointer-events:none;z-index:1;';
         label.style.top = y + 'px'; label.style.lineHeight = LANE_H + 'px';
         label.textContent = '#' + i;
         lanesDiv.appendChild(label);
     }
+    laneStripesBuilt = true;
+}
 
-    // time axis ticks
+function rebuildAxis() {
+    var axis = document.getElementById('tl-axis');
+    if (!axis) return;
+    axis.replaceChildren();
+    var pxPerSec = BASE_PX_PER_SEC * zoomLevel;
+    var now = Date.now() / 1000 - TIMELINE_DELAY;
+    var canvasW = (now - tlAnchor) * pxPerSec;
+    axis.style.width = Math.ceil(canvasW) + 'px';
+
     var tick = 30;
     if (pxPerSec >= 16) tick = 10; if (pxPerSec >= 32) tick = 5;
     if (pxPerSec < 4) tick = 60; if (pxPerSec < 1) tick = 120;
-    var axisStart = tlAnchor;
-    var axisEnd = tlAnchor + canvasSeconds;
-    for (var t = Math.ceil(axisStart / tick) * tick; t <= axisEnd; t += tick) {
+    for (var t = Math.ceil(tlAnchor / tick) * tick; t <= now; t += tick) {
         var x = (t - tlAnchor) * pxPerSec;
         var line = document.createElement('div');
         line.style.cssText = 'position:absolute;top:0;width:1px;height:100%;background:#e5e7eb;';
         line.style.left = x + 'px'; axis.appendChild(line);
-        var guide = document.createElement('div');
-        guide.style.cssText = 'position:absolute;width:1px;background:rgba(0,0,0,0.04);pointer-events:none;';
-        guide.style.left = x + 'px'; guide.style.top = '0'; guide.style.height = '100%';
-        lanesDiv.appendChild(guide);
         var lbl = document.createElement('div');
         lbl.style.cssText = 'position:absolute;top:2px;font-size:9px;color:#9ca3af;font-family:monospace;transform:translateX(-50%);';
         lbl.style.left = x + 'px'; lbl.textContent = fmtTime(t);
         axis.appendChild(lbl);
     }
+    lastZoom = zoomLevel;
+}
 
-    // task bars — positions relative to stable anchor
-    for (var ti = 0; ti < sorted.length; ti++) {
-        var tt = sorted[ti]; var eTs = tt.end_ts || now;
-        var bx = (tt.start_ts - tlAnchor) * pxPerSec;
-        var bw = Math.max(2, (eTs - tt.start_ts) * pxPerSec);
-        if (bx + bw < 0 || bx > totalWidth) continue;
-        var by = tt.lane * (LANE_H + LANE_GAP);
-        var bar = document.createElement('a');
-        bar.href = '/task/' + encodeURIComponent(tt.task_id);
-        bar.style.cssText = 'position:absolute;border-radius:3px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,0.1);border:1px solid rgba(0,0,0,0.15);';
-        bar.style.left = bx + 'px'; bar.style.width = bw + 'px';
-        bar.style.top = by + 'px'; bar.style.height = LANE_H + 'px';
-        bar.style.backgroundColor = barColor(tt.status);
-        (function(task) {
-            bar.addEventListener('mouseenter', function() { showTaskDetail(task); });
-            bar.addEventListener('mouseleave', clearTaskDetail);
-        })(tt);
-        lanesDiv.appendChild(bar);
+// Create or update a single task bar DOM element
+function ensureBar(task) {
+    var id = task.task_id;
+    if (!task.start_ts) return;
+
+    var lane = task.slot != null ? task.slot : 0;
+    task.lane = lane;
+
+    var entry = taskBars[id];
+    if (!entry) {
+        // create new bar
+        var el = document.createElement('a');
+        el.href = '/task/' + encodeURIComponent(id);
+        el.style.cssText = 'position:absolute;border-radius:3px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,0.1);border:1px solid rgba(0,0,0,0.15);z-index:2;';
+        el.style.height = LANE_H + 'px';
+        el.style.top = (lane * (LANE_H + LANE_GAP)) + 'px';
+        (function(t) {
+            el.addEventListener('mouseenter', function() { showTaskDetail(t); });
+            el.addEventListener('mouseleave', clearTaskDetail);
+        })(task);
+        var lanesDiv = document.getElementById('tl-lanes');
+        if (lanesDiv) lanesDiv.appendChild(el);
+        entry = {el: el, task: task};
+        taskBars[id] = entry;
+    }
+
+    // update color (may change on completion/failure/retry)
+    entry.el.style.backgroundColor = barColor(task.status);
+    entry.task = task;
+}
+
+// Remove bars for tasks no longer in allTasks
+function pruneOldBars() {
+    var ids = Object.keys(taskBars);
+    for (var i = 0; i < ids.length; i++) {
+        if (!allTasks[ids[i]]) {
+            var el = taskBars[ids[i]].el;
+            if (el.parentNode) el.parentNode.removeChild(el);
+            delete taskBars[ids[i]];
+        }
     }
 }
 
-// smooth scrollLeft via rAF — no jumps, no fighting with user scroll
-function animateScroll() {
-    if (!frozen) {
-        var vp = document.getElementById('tl-viewport');
-        var inner = document.getElementById('tl-inner');
-        if (vp && inner) {
-            // grow canvas smoothly to match delayed-now
-            var edge = tlEdgePx();
-            inner.style.width = Math.ceil(edge) + 'px';
-            // clamp: user can never scroll past the right edge
-            var maxScroll = Math.max(0, edge - vp.clientWidth);
-            if (vp.scrollLeft > maxScroll) vp.scrollLeft = maxScroll;
-            // auto-follow right edge
-            if (tlFollowing) vp.scrollLeft = maxScroll;
+// rAF loop: update bar positions/widths, canvas size, scroll — 60fps, no DOM rebuild
+function animateTimeline() {
+    if (frozen) { requestAnimationFrame(animateTimeline); return; }
+
+    var vp = document.getElementById('tl-viewport');
+    var inner = document.getElementById('tl-inner');
+    if (!vp || !inner) { requestAnimationFrame(animateTimeline); return; }
+
+    ensureAnchor();
+
+    var now = Date.now() / 1000 - TIMELINE_DELAY;
+    var pxPerSec = BASE_PX_PER_SEC * zoomLevel;
+    var edge = tlEdgePx();
+    inner.style.width = Math.ceil(edge) + 'px';
+
+    // update all bar positions and widths
+    var cutoffTs = tlAnchor; // don't show bars before anchor
+    var ids = Object.keys(taskBars);
+    for (var i = 0; i < ids.length; i++) {
+        var entry = taskBars[ids[i]];
+        var t = entry.task;
+        var el = entry.el;
+        var endTs = t.end_ts || now;
+        var bx = (t.start_ts - tlAnchor) * pxPerSec;
+        var bw = Math.max(2, (endTs - t.start_ts) * pxPerSec);
+
+        // hide bars completely outside the visible canvas
+        if (bx + bw < 0 || t.start_ts < cutoffTs) {
+            el.style.display = 'none';
+        } else {
+            el.style.display = '';
+            el.style.left = bx + 'px';
+            el.style.width = bw + 'px';
         }
     }
-    requestAnimationFrame(animateScroll);
+
+    // scroll
+    var maxScroll = Math.max(0, edge - vp.clientWidth);
+    if (vp.scrollLeft > maxScroll) vp.scrollLeft = maxScroll;
+    if (tlFollowing) vp.scrollLeft = maxScroll;
+
+    requestAnimationFrame(animateTimeline);
+}
+
+// Initial population: create bars for all tasks loaded from API
+function initBars() {
+    buildLaneStripes();
+    var ids = Object.keys(allTasks);
+    for (var i = 0; i < ids.length; i++) {
+        ensureBar(allTasks[ids[i]]);
+    }
 }
 
 // detect user scrolling away from the right edge
@@ -590,25 +641,35 @@ async function loadTrace() {
 
 // === Data loading ===
 async function syncFromAPI() {
+    // API sync merges data — it never deletes WS-created tasks.
+    // Only adds tasks we don't know about yet (e.g. from before page load).
+    // Removes only tasks that aged out of the timeline window.
     try {
         var r = await fetch('/api/recent-tasks?minutes=' + TIMELINE_MINUTES);
         var data = await r.json();
-        var apiIds = {};
         var tasks = data.tasks || [];
-        for (var i = 0; i < tasks.length; i++) { allTasks[tasks[i].task_id] = tasks[i]; apiIds[tasks[i].task_id] = true; }
-        // only remove tasks that are still running (no end_ts) and missing from API
-        // keep finished/failed tasks — they are historical and should stay visible
-        var keys = Object.keys(allTasks);
-        for (var j = 0; j < keys.length; j++) {
-            var t = allTasks[keys[j]];
-            if (!apiIds[keys[j]] && !t.end_ts) { delete allTasks[keys[j]]; }
+        for (var i = 0; i < tasks.length; i++) {
+            var apiTask = tasks[i];
+            var existing = allTasks[apiTask.task_id];
+            if (!existing) {
+                // new task from API (pre-page-load history) — add it
+                allTasks[apiTask.task_id] = apiTask;
+            } else if (existing.status === 'running' && apiTask.end_ts) {
+                // WS had it as running, API knows it finished — update end state
+                existing.end_ts = apiTask.end_ts;
+                existing.status = apiTask.status;
+                existing.duration = apiTask.duration;
+                existing.pid = apiTask.pid || existing.pid;
+            }
+            // otherwise keep the WS-maintained version (it has fresher data)
         }
-        // trim old finished tasks that fell outside the timeline window
+        // trim tasks that aged out of the visible timeline window
         var cutoff = Date.now() / 1000 - TIMELINE_MINUTES * 60;
-        keys = Object.keys(allTasks);
+        var keys = Object.keys(allTasks);
         for (var k = 0; k < keys.length; k++) {
             var tk = allTasks[keys[k]];
-            if (tk.end_ts && tk.end_ts < cutoff) { delete allTasks[keys[k]]; }
+            var endOrStart = tk.end_ts || tk.start_ts;
+            if (endOrStart && endOrStart < cutoff) { delete allTasks[keys[k]]; }
         }
     } catch(e) {}
 }
@@ -667,16 +728,31 @@ function connectWS() {
         try {
             var e = JSON.parse(msg.data);
             if (e.event === 'task_started') {
+                // if this task_id already exists and finished (retry), keep the old bar
+                var prev = allTasks[e.task_id];
+                if (prev && prev.end_ts) {
+                    var retryKey = e.task_id + ':r' + e.ts;
+                    allTasks[retryKey] = prev;
+                    prev.task_id = retryKey;
+                    // move the old bar's DOM entry to the new key
+                    if (taskBars[e.task_id]) {
+                        taskBars[retryKey] = taskBars[e.task_id];
+                        taskBars[retryKey].task = prev;
+                        delete taskBars[e.task_id];
+                    }
+                }
                 allTasks[e.task_id] = {
                     task_id: e.task_id, partition: e.partition, pid: e.pid,
                     start_ts: e.ts, end_ts: null, status: 'running', args: e.args, duration: null,
                     slot: e.slot != null ? e.slot : null,
                 };
+                ensureBar(allTasks[e.task_id]);
             } else if (e.event === 'task_completed' || e.event === 'task_failed') {
                 var t = allTasks[e.task_id];
                 if (t) {
                     t.end_ts = e.ts; t.status = e.event === 'task_completed' ? 'completed' : 'failed';
                     t.duration = e.duration; t.pid = e.pid || t.pid;
+                    ensureBar(t); // update color
                 }
             } else if (e.event === 'arranged') {
                 arrangeTotal++;
@@ -725,20 +801,30 @@ function initFromHash() {
 }
 
 (async function() {
+    ensureAnchor();
     await Promise.all([syncFromAPI(), loadArrangeHistory(), loadCollectHistory()]);
     initFromHash();
-    renderTimeline();
+    initBars();
+    rebuildAxis();
     renderArranges();
     renderCollects();
     connectWS();
-    // DOM rebuild every 500ms for data changes
+    // rAF loop: updates bar positions/widths + scroll at 60fps
+    requestAnimationFrame(animateTimeline);
+    // task list tables (running/finished) — update every 500ms
+    setInterval(function() { if (!frozen) renderTaskLists(); }, 500);
+    // prune old bars + API sync + axis ticks every 5s
     setInterval(function() {
-        if (!frozen) { renderTimeline(); renderTaskLists(); }
-    }, 500);
-    // smooth scroll via rAF (60fps, no jumps)
-    requestAnimationFrame(animateScroll);
-    // periodic API sync for ghost task cleanup
-    setInterval(function() { if (!frozen) syncFromAPI(); }, 2000);
+        if (frozen) return;
+        rebuildAxis();
+        syncFromAPI().then(function() {
+            var ids = Object.keys(allTasks);
+            for (var i = 0; i < ids.length; i++) {
+                if (!taskBars[ids[i]]) ensureBar(allTasks[ids[i]]);
+            }
+            pruneOldBars();
+        });
+    }, 5000);
 })();
 
 window.addEventListener('hashchange', initFromHash);
