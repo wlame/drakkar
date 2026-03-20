@@ -5,17 +5,25 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import BaseModel
 
 from drakkar.models import (
     CollectResult,
-    DBRow,
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
-    OutputMessage,
+    KafkaPayload,
     PendingContext,
+    PostgresPayload,
     SourceMessage,
 )
+
+
+class SampleOutput(BaseModel):
+    """Simple output model used in test fixtures."""
+
+    id: int = 1
+    status: str = 'done'
 
 
 async def wait_for(condition, timeout=5.0, interval=0.05):
@@ -82,11 +90,11 @@ def pending_context(executor_task: ExecutorTask) -> PendingContext:
 @pytest.fixture
 def collect_result() -> CollectResult:
     return CollectResult(
-        output_messages=[
-            OutputMessage(key=b'out-key', value=b'{"result": "ok"}'),
+        kafka=[
+            KafkaPayload(key=b'out-key', data=SampleOutput()),
         ],
-        db_rows=[
-            DBRow(table='results', data={'id': 1, 'status': 'done'}),
+        postgres=[
+            PostgresPayload(table='results', data=SampleOutput()),
         ],
     )
 

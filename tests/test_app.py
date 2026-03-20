@@ -17,9 +17,9 @@ from drakkar.config import (
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
     CollectResult,
-    DBRow,
     ExecutorTask,
-    OutputMessage,
+    KafkaPayload,
+    PostgresPayload,
     SourceMessage,
 )
 
@@ -163,9 +163,14 @@ async def test_app_handle_collect(test_config):
     app._producer = AsyncMock()
     app._db_writer = AsyncMock()
 
+    from pydantic import BaseModel as BM
+
+    class _D(BM):
+        x: int = 1
+
     result = CollectResult(
-        output_messages=[OutputMessage(value=b'test')],
-        db_rows=[DBRow(table='t', data={'x': 1})],
+        kafka=[KafkaPayload(data=_D())],
+        postgres=[PostgresPayload(table='t', data=_D())],
     )
     await app._handle_collect(result, partition_id=0)
 

@@ -52,6 +52,7 @@ from drakkar.models import (
     DBRow,
     ErrorAction,
     ExecutorTask,
+    KafkaPayload,
     OutputMessage,
     SourceMessage,
 )
@@ -651,9 +652,14 @@ async def test_handle_collect_increments_messages_produced():
     app._producer = AsyncMock()
     app._db_writer = AsyncMock()
 
+    from pydantic import BaseModel as BM
+
+    class _D(BM):
+        v: str = 'a'
+
     before = counter_val(messages_produced)
     result = CollectResult(
-        output_messages=[OutputMessage(value=b'a'), OutputMessage(value=b'b')],
+        kafka=[KafkaPayload(data=_D(v='a')), KafkaPayload(data=_D(v='b'))],
     )
     await app._handle_collect(result, partition_id=0)
 
