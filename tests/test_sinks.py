@@ -3,11 +3,12 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from pydantic import BaseModel
 
-from drakkar.config import KafkaSinkConfig, MongoSinkConfig, PostgresSinkConfig
-from drakkar.models import KafkaPayload, MongoPayload, PostgresPayload
+from drakkar.config import HttpSinkConfig, KafkaSinkConfig, MongoSinkConfig, PostgresSinkConfig
+from drakkar.models import HttpPayload, KafkaPayload, MongoPayload, PostgresPayload
 
 
 class SampleOutput(BaseModel):
@@ -466,3 +467,182 @@ def test_mongo_sink_type(mongo_sink_config):
 
     sink = MongoSink('analytics', mongo_sink_config)
     assert sink.sink_type == 'mongo'
+
+
+# =============================================================================
+# HTTP sink
+# =============================================================================
+
+
+@pytest.fixture
+def http_sink_config():
+    return HttpSinkConfig(url='https://api.example.com/results')
+
+
+def _make_http_sink(http_sink_config):
+    """Helper: create an HttpSink with a mocked httpx client."""
+    from drakkar.sinks.http import HttpSink
+
+    mock_client = AsyncMock()
+    sink = HttpSink('webhook', http_sink_config)
+    sink._client = mock_client
+    return sink, mock_client
+
+
+def _mock_response(status_code: int = 200):
+    """Create a mock httpx.Response."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.raise_for_status = MagicMock()
+    if status_code >= 400:
+        resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            message=f'{status_code} error',
+            request=MagicMock(),
+            response=resp,
+        )
+    return resp
+
+
+async def test_http_sink_connect(http_sink_config):
+    from drakkar.sinks.http import HttpSink
+
+    sink = HttpSink('webhook', http_sink_config)
+    await sink.connect()
+
+    assert sink._client is not None
+    assert sink._client.timeout.connect == 30
+    await sink.close()
+
+
+async def test_http_sink_connect_custom_headers():
+    from drakkar.sinks.http import HttpSink
+
+    config = HttpSinkConfig(
+        url='https://api.example.com',
+        headers={'Authorization': 'Bearer token123'},
+    )
+    sink = HttpSink('webhook', config)
+    await sink.connect()
+
+    assert 'Authorization' in sink._client.headers
+    await sink.close()
+
+
+async def test_http_sink_deliver(http_sink_config):
+
+    sink, mock_client = _make_http_sink(http_sink_config)
+    mock_client.request.return_value = _mock_response(200)
+
+    payload = HttpPayload(data=SampleOutput(request_id='r1'))
+    await sink.deliver([payload])
+
+    mock_client.request.assert_called_once()
+    call_kwargs = mock_client.request.call_args[1]
+    assert call_kwargs['method'] == 'POST'
+    assert call_kwargs['url'] == 'https://api.example.com/results'
+    assert b'"request_id":"r1"' in call_kwargs['content'].encode()
+
+
+async def test_http_sink_deliver_batch(http_sink_config):
+
+    sink, mock_client = _make_http_sink(http_sink_config)
+    mock_client.request.return_value = _mock_response(200)
+
+    payloads = [
+        HttpPayload(data=SampleOutput(request_id='r1')),
+        HttpPayload(data=SampleOutput(request_id='r2')),
+    ]
+    await sink.deliver(payloads)
+
+    assert mock_client.request.call_count == 2
+
+
+async def test_http_sink_deliver_empty(http_sink_config):
+    sink, mock_client = _make_http_sink(http_sink_config)
+
+    await sink.deliver([])
+    mock_client.request.assert_not_called()
+
+
+async def test_http_sink_deliver_4xx_raises(http_sink_config):
+    import httpx
+
+    sink, mock_client = _make_http_sink(http_sink_config)
+    mock_client.request.return_value = _mock_response(400)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await sink.deliver([HttpPayload(data=SampleOutput())])
+
+
+async def test_http_sink_deliver_5xx_raises(http_sink_config):
+    import httpx
+
+    sink, mock_client = _make_http_sink(http_sink_config)
+    mock_client.request.return_value = _mock_response(500)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await sink.deliver([HttpPayload(data=SampleOutput())])
+
+
+async def test_http_sink_deliver_timeout_raises(http_sink_config):
+    import httpx
+
+    sink, mock_client = _make_http_sink(http_sink_config)
+    mock_client.request.side_effect = httpx.ConnectTimeout('timeout')
+
+    with pytest.raises(httpx.ConnectTimeout):
+        await sink.deliver([HttpPayload(data=SampleOutput())])
+
+
+async def test_http_sink_deliver_error_increments_metrics(http_sink_config):
+    import httpx
+
+    from drakkar.metrics import sink_deliver_errors
+
+    sink, mock_client = _make_http_sink(http_sink_config)
+    mock_client.request.return_value = _mock_response(500)
+
+    labels = {'sink_type': 'http', 'sink_name': 'webhook'}
+    before = sink_deliver_errors.labels(**labels)._value.get()
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await sink.deliver([HttpPayload(data=SampleOutput())])
+
+    assert sink_deliver_errors.labels(**labels)._value.get() == before + 1
+
+
+async def test_http_sink_custom_method():
+
+    config = HttpSinkConfig(url='https://api.example.com', method='PUT')
+    from drakkar.sinks.http import HttpSink
+
+    sink = HttpSink('webhook', config)
+    mock_client = AsyncMock()
+    mock_client.request.return_value = _mock_response(200)
+    sink._client = mock_client
+
+    await sink.deliver([HttpPayload(data=SampleOutput())])
+
+    assert mock_client.request.call_args[1]['method'] == 'PUT'
+
+
+async def test_http_sink_close(http_sink_config):
+    sink, mock_client = _make_http_sink(http_sink_config)
+    await sink.close()
+
+    mock_client.aclose.assert_called_once()
+    assert sink._client is None
+
+
+async def test_http_sink_close_not_connected(http_sink_config):
+    from drakkar.sinks.http import HttpSink
+
+    sink = HttpSink('webhook', http_sink_config)
+    await sink.close()  # should not raise
+
+
+def test_http_sink_type(http_sink_config):
+    from drakkar.sinks.http import HttpSink
+
+    sink = HttpSink('webhook', http_sink_config)
+    assert sink.sink_type == 'http'
