@@ -93,14 +93,19 @@ class EventRecorder:
         return self._db_path
 
     async def start(self) -> None:
-        self._db_path = _make_db_path(self._config.db_path)
-        self._db = await aiosqlite.connect(self._db_path)
-        await self._db.executescript(SCHEMA)
-        await self._db.commit()
         self._running = True
-        self._flush_task = asyncio.create_task(self._flush_loop())
-        self._retention_task = asyncio.create_task(self._retention_loop())
-        await logger.ainfo('recorder_started', category='recorder', db_path=self._db_path)
+        if self._config.db_path:
+            self._db_path = _make_db_path(self._config.db_path)
+            self._db = await aiosqlite.connect(self._db_path)
+            await self._db.executescript(SCHEMA)
+            await self._db.commit()
+            self._flush_task = asyncio.create_task(self._flush_loop())
+            self._retention_task = asyncio.create_task(self._retention_loop())
+        await logger.ainfo(
+            'recorder_started',
+            category='recorder',
+            db_path=self._db_path or '(memory only)',
+        )
 
     def subscribe(self) -> queue.Queue:
         """Subscribe to live event stream. Returns a thread-safe queue."""

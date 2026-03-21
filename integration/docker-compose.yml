@@ -29,7 +29,7 @@ services:
       kafka:
         condition: service_healthy
     volumes:
-      - ./init-kafka.sh:/init-kafka.sh
+      - ./infra/init-kafka.sh:/init-kafka.sh
     entrypoint: ["/bin/bash", "/init-kafka.sh"]
 
   postgres:
@@ -41,7 +41,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./infra/init-db.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U drakkar"]
       interval: 3s
@@ -110,12 +110,12 @@ services:
     environment:
       REDIS_HOSTS: local:redis:6379
 
-  # --- Workers ---
+  # --- Drakkar Workers ---
 
   worker-1:
     build:
       context: ..
-      dockerfile: integration/Dockerfile.worker
+      dockerfile: integration/worker/Dockerfile
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -139,7 +139,7 @@ services:
   worker-2:
     build:
       context: ..
-      dockerfile: integration/Dockerfile.worker
+      dockerfile: integration/worker/Dockerfile
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -163,7 +163,7 @@ services:
   worker-3:
     build:
       context: ..
-      dockerfile: integration/Dockerfile.worker
+      dockerfile: integration/worker/Dockerfile
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -184,12 +184,12 @@ services:
     volumes:
       - ..:/project:ro
 
-  # --- Message producer ---
+  # --- Message Producer ---
 
   producer:
     build:
       context: ..
-      dockerfile: integration/Dockerfile.producer
+      dockerfile: integration/infra/Dockerfile.producer
     depends_on:
       kafka-init:
         condition: service_completed_successfully

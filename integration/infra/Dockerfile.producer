@@ -6,6 +6,6 @@ WORKDIR /app
 
 RUN uv pip install --system --no-cache-dir confluent-kafka
 
-COPY integration/producer.py /app/producer.py
+COPY integration/infra/producer.py /app/producer.py
 
 CMD ["python", "producer.py"]

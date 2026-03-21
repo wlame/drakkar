@@ -15,9 +15,11 @@ RUN uv pip install --system --no-cache-dir \
     motor httpx redis
 
 COPY drakkar/ /app/drakkar/
-COPY integration/handler.py /app/handler.py
-COPY integration/worker.py /app/worker.py
-COPY integration/drakkar.yaml /app/drakkar.yaml
-COPY integration/run-rg.sh /usr/local/bin/run-rg
+COPY integration/worker/main.py /app/main.py
+COPY integration/worker/handler.py /app/handler.py
+COPY integration/worker/models.py /app/models.py
+COPY integration/worker/metrics.py /app/metrics.py
+COPY integration/worker/drakkar.yaml /app/drakkar.yaml
+COPY integration/worker/run-rg.sh /usr/local/bin/run-rg
 
-CMD ["python", "worker.py"]
+CMD ["python", "main.py"]

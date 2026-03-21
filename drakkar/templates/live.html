@@ -832,5 +832,12 @@ window.addEventListener('hashchange', initFromHash);
 document.getElementById('trace-input').addEventListener('keydown', function(ev) {
     if (ev.key === 'Enter') loadTrace();
 });
+
+document.addEventListener('keydown', function(ev) {
+    if (ev.key === ' ' && ev.target === document.body) {
+        ev.preventDefault();
+        toggleFreeze();
+    }
+});
 </script>
 {% endblock %}

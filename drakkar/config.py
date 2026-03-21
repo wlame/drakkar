@@ -187,7 +187,12 @@ class LoggingConfig(BaseModel):
 
 
 class DebugConfig(BaseModel):
-    """Debug flight recorder and web UI settings."""
+    """Debug flight recorder and web UI settings.
+
+    Set ``enabled: false`` to disable the entire debug feature.
+    Set ``db_path: ""`` to run the debug UI without SQLite persistence
+    (events are kept in memory only, lost on restart).
+    """
 
     enabled: bool = True
     port: int = Field(default=8080, ge=1, le=65535)
