@@ -39,7 +39,7 @@ Configured sinks (any combination)
 
 ```bash
 uv init my-processor && cd my-processor
-uv add drakkar
+uv add py-drakkar
 ```
 
 ### 1. Define your message models

@@ -1,5 +1,5 @@
 [project]
-name = "drakkar"
+name = "py-drakkar"
 dynamic = ["version"]
 description = "Kafka subprocess orchestration framework"
 readme = "README.md"
