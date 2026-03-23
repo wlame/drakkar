@@ -231,7 +231,9 @@ def create_debug_app(
 
     @app.get('/task/{task_id}', response_class=HTMLResponse)
     async def task_detail(request: Request, task_id: str):
-        events = await recorder.get_task_events(task_id)
+        # Strip retry composite key suffix (e.g. "task-abc:r1234567.89" → "task-abc")
+        base_id = task_id.split(':r')[0] if ':r' in task_id else task_id
+        events = await recorder.get_task_events(base_id)
         started = next((e for e in events if e['event'] == 'task_started'), None)
         completed = next((e for e in events if e['event'] == 'task_completed'), None)
         failed = next((e for e in events if e['event'] == 'task_failed'), None)

@@ -107,7 +107,7 @@ class DLQSink(BaseSink):
         Wraps the error in a DLQMessage with metadata and produces
         it to the configured DLQ Kafka topic.
         """
-        if not self._producer:
+        if self._producer is None:
             await logger.awarning('dlq_send_skipped_not_connected', category='sink')
             return
 
@@ -142,7 +142,7 @@ class DLQSink(BaseSink):
 
     async def close(self) -> None:
         """Flush and close the DLQ producer."""
-        if self._producer:
+        if self._producer is not None:
             try:
                 await self._producer.close()
             except Exception as e:

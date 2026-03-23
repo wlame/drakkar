@@ -180,6 +180,7 @@ function fmtTimeMs(ts) { return ts ? new Date(ts * 1000).toISOString().substring
 function barColor(s) { return s === 'completed' ? '#34d399' : s === 'failed' ? '#f87171' : '#fbbf24'; }
 function statusCss(s) { return s === 'completed' ? 'color:#059669' : s === 'failed' ? 'color:#dc2626' : 'color:#d97706'; }
 function durColor(d) { return d > 1 ? '#dc2626' : d > 0.1 ? '#d97706' : '#059669'; }
+function baseTaskId(tid) { return tid ? tid.split(':r')[0] : tid; }
 function zoomIn() { zoomLevel = Math.min(zoomLevel * 2, 64); document.getElementById('zoom-label').textContent = zoomLevel + 'x'; rebuildAxis(); }
 function zoomOut() { zoomLevel = Math.max(zoomLevel / 2, 0.25); document.getElementById('zoom-label').textContent = zoomLevel + 'x'; rebuildAxis(); }
 function zoomReset() { zoomLevel = 2; document.getElementById('zoom-label').textContent = '2x'; rebuildAxis(); }
@@ -458,7 +459,7 @@ function renderCollects() {
         var c = recentCollects[i];
         var tr = document.createElement('tr'); tr.className = 'border-b border-cream-100 hover:bg-cream-100';
         var td1 = document.createElement('td'); td1.className = 'py-2 px-3 font-mono text-xs';
-        var a1 = document.createElement('a'); a1.href = '/task/' + encodeURIComponent(c.task_id);
+        var a1 = document.createElement('a'); a1.href = '/task/' + encodeURIComponent(baseTaskId(c.task_id));
         a1.className = 'text-purple-600 hover:underline'; a1.textContent = c.task_id; td1.appendChild(a1);
         var td2 = document.createElement('td'); td2.className = 'py-2 px-3 font-mono'; td2.textContent = 'P' + c.partition;
         var td3 = document.createElement('td'); td3.className = 'py-2 px-3 font-mono';
@@ -494,7 +495,7 @@ function renderTaskLists() {
             var rt = running[ri];
             var rtr = document.createElement('tr'); rtr.className = 'border-b border-cream-100 hover:bg-cream-100';
             var rtd1 = document.createElement('td'); rtd1.className = 'py-2 px-3 font-mono';
-            var ra1 = document.createElement('a'); ra1.href = '/task/' + encodeURIComponent(rt.task_id);
+            var ra1 = document.createElement('a'); ra1.href = '/task/' + encodeURIComponent(baseTaskId(rt.task_id));
             ra1.className = 'text-amber-600 hover:underline'; ra1.textContent = rt.task_id; rtd1.appendChild(ra1);
             var rtd2 = document.createElement('td'); rtd2.className = 'py-2 px-3 font-mono'; rtd2.textContent = rt.partition;
             var rtd3 = document.createElement('td'); rtd3.className = 'py-2 px-3 font-mono'; rtd3.textContent = (now - rt.start_ts).toFixed(1) + 's';
@@ -518,7 +519,7 @@ function renderTaskLists() {
             var ft = finished[fi];
             var ftr = document.createElement('tr'); ftr.className = 'border-b border-cream-100 hover:bg-cream-100';
             var ftd1 = document.createElement('td'); ftd1.className = 'py-2 px-3 font-mono text-xs';
-            var fa1 = document.createElement('a'); fa1.href = '/task/' + encodeURIComponent(ft.task_id);
+            var fa1 = document.createElement('a'); fa1.href = '/task/' + encodeURIComponent(baseTaskId(ft.task_id));
             fa1.className = 'hover:underline'; fa1.style.color = ft.status === 'completed' ? '#059669' : '#dc2626';
             fa1.textContent = ft.task_id; ftd1.appendChild(fa1);
             var ftd2 = document.createElement('td'); ftd2.className = 'py-2 px-3 font-mono'; ftd2.textContent = ft.partition;
@@ -616,7 +617,7 @@ async function loadTrace() {
             td2.style.color = evtColors[ev.event] || '#6b7280'; td2.textContent = ev.event;
             var td3 = document.createElement('td'); td3.className = 'py-2 px-3 font-mono text-xs';
             if (ev.task_id) {
-                var ta = document.createElement('a'); ta.href = '/task/' + encodeURIComponent(ev.task_id);
+                var ta = document.createElement('a'); ta.href = '/task/' + encodeURIComponent(baseTaskId(ev.task_id));
                 ta.className = 'text-teal-600 hover:underline'; ta.textContent = ev.task_id; td3.appendChild(ta);
             }
             var td4 = document.createElement('td'); td4.className = 'py-2 px-3 font-mono text-xs';

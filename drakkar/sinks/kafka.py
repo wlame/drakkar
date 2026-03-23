@@ -58,9 +58,9 @@ class KafkaSink(BaseSink):
         """Produce all payloads to the Kafka topic.
 
         Submits all messages, flushes to push them into flight,
-        then awaits all delivery futures concurrently.
+        then awaits all delivery futures and verifies broker acknowledgement.
         """
-        if not payloads or not self._producer:
+        if not payloads or self._producer is None:
             return
 
         start = time.monotonic()
@@ -75,8 +75,25 @@ class KafkaSink(BaseSink):
                     value=value,
                 )
                 futures.append(f)
-            await self._producer.flush()
-            await asyncio.gather(*futures)
+
+            remaining = await self._producer.flush()
+            if remaining and remaining > 0:
+                raise RuntimeError(
+                    f'Kafka flush incomplete: {remaining} message(s) still in queue '
+                    f'(topic={self._config.topic!r}, sink={self._name!r})'
+                )
+            results = await asyncio.gather(*futures)
+            for i, result in enumerate(results):
+                if result is None:
+                    raise RuntimeError(
+                        f'Kafka delivery future resolved to None for message {i} '
+                        f'(topic={self._config.topic!r}, sink={self._name!r})'
+                    )
+                if hasattr(result, 'error') and result.error() is not None:
+                    raise RuntimeError(
+                        f'Kafka delivery error for message {i}: {result.error()} '
+                        f'(topic={self._config.topic!r}, sink={self._name!r})'
+                    )
 
             sink_payloads_delivered.labels(**labels).inc(len(payloads))
             sink_deliver_duration.labels(**labels).observe(time.monotonic() - start)
@@ -86,7 +103,7 @@ class KafkaSink(BaseSink):
 
     async def close(self) -> None:
         """Flush pending messages and close the producer."""
-        if self._producer:
+        if self._producer is not None:
             try:
                 await self._producer.close()
             except Exception as e:

@@ -30,10 +30,20 @@ class SampleOutput(BaseModel):
     answer: str = '42'
 
 
+def _make_mock_message():
+    """Create a mock confluent_kafka Message for resolved delivery futures."""
+    msg = MagicMock()
+    msg.error.return_value = None
+    msg.topic.return_value = 'test-results'
+    msg.partition.return_value = 0
+    msg.offset.return_value = 42
+    return msg
+
+
 def _make_future():
     """Create a resolved asyncio.Future for mocking produce() return values."""
     f = asyncio.get_event_loop().create_future()
-    f.set_result(None)
+    f.set_result(_make_mock_message())
     return f
 
 
@@ -76,6 +86,7 @@ async def test_kafka_sink_deliver_single(mock_cls, kafka_sink_config):
 
     mock_producer = AsyncMock()
     mock_producer.produce.side_effect = lambda **kw: _make_future()
+    mock_producer.flush.return_value = 0
     mock_cls.return_value = mock_producer
 
     sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
@@ -98,6 +109,7 @@ async def test_kafka_sink_deliver_batch(mock_cls, kafka_sink_config):
 
     mock_producer = AsyncMock()
     mock_producer.produce.side_effect = lambda **kw: _make_future()
+    mock_producer.flush.return_value = 0
     mock_cls.return_value = mock_producer
 
     sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
@@ -156,6 +168,7 @@ async def test_kafka_sink_deliver_success_increments_metrics(mock_cls, kafka_sin
 
     mock_producer = AsyncMock()
     mock_producer.produce.side_effect = lambda **kw: _make_future()
+    mock_producer.flush.return_value = 0
     mock_cls.return_value = mock_producer
 
     sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
@@ -193,11 +206,96 @@ async def test_kafka_sink_close_not_connected(mock_cls, kafka_sink_config):
     await sink.close()  # should not raise
 
 
+@patch('drakkar.sinks.kafka.AIOProducer')
+async def test_kafka_sink_deliver_with_falsy_producer(mock_cls, kafka_sink_config):
+    """Deliver works even when AIOProducer.__len__ returns 0 (empty queue).
+
+    AIOProducer defines __len__ but not __bool__, so bool(producer) is False
+    when the internal queue is empty. We must use 'is None' checks, not truthiness.
+    """
+    from drakkar.sinks.kafka import KafkaSink
+
+    mock_producer = AsyncMock()
+    mock_producer.produce.side_effect = lambda **kw: _make_future()
+    mock_producer.flush.return_value = 0
+    mock_producer.__len__ = lambda self: 0  # empty queue → bool() returns False
+    mock_cls.return_value = mock_producer
+
+    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    await sink.connect()
+
+    await sink.deliver([KafkaPayload(data=SampleOutput())])
+    mock_producer.produce.assert_called_once()
+
+
 def test_kafka_sink_topic_property(kafka_sink_config):
     from drakkar.sinks.kafka import KafkaSink
 
     sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
     assert sink.topic == 'test-results'
+
+
+@patch('drakkar.sinks.kafka.AIOProducer')
+async def test_kafka_sink_deliver_flush_incomplete_raises(mock_cls, kafka_sink_config):
+    """Delivery fails if flush() reports undelivered messages."""
+    from drakkar.sinks.kafka import KafkaSink
+
+    mock_producer = AsyncMock()
+    mock_producer.produce.side_effect = lambda **kw: _make_future()
+    mock_producer.flush.return_value = 3
+    mock_cls.return_value = mock_producer
+
+    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    await sink.connect()
+
+    with pytest.raises(RuntimeError, match=r'flush incomplete.*3 message'):
+        await sink.deliver([KafkaPayload(data=SampleOutput())])
+
+
+@patch('drakkar.sinks.kafka.AIOProducer')
+async def test_kafka_sink_deliver_future_none_raises(mock_cls, kafka_sink_config):
+    """Delivery fails if a produce future resolves to None."""
+    from drakkar.sinks.kafka import KafkaSink
+
+    def _make_none_future():
+        f = asyncio.get_event_loop().create_future()
+        f.set_result(None)
+        return f
+
+    mock_producer = AsyncMock()
+    mock_producer.produce.side_effect = lambda **kw: _make_none_future()
+    mock_producer.flush.return_value = 0
+    mock_cls.return_value = mock_producer
+
+    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    await sink.connect()
+
+    with pytest.raises(RuntimeError, match='future resolved to None'):
+        await sink.deliver([KafkaPayload(data=SampleOutput())])
+
+
+@patch('drakkar.sinks.kafka.AIOProducer')
+async def test_kafka_sink_deliver_future_with_error_raises(mock_cls, kafka_sink_config):
+    """Delivery fails if a produce future contains a Kafka error."""
+    from drakkar.sinks.kafka import KafkaSink
+
+    def _make_error_future():
+        msg = MagicMock()
+        msg.error.return_value = MagicMock(__str__=lambda self: 'MSG_SIZE_TOO_LARGE')
+        f = asyncio.get_event_loop().create_future()
+        f.set_result(msg)
+        return f
+
+    mock_producer = AsyncMock()
+    mock_producer.produce.side_effect = lambda **kw: _make_error_future()
+    mock_producer.flush.return_value = 0
+    mock_cls.return_value = mock_producer
+
+    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    await sink.connect()
+
+    with pytest.raises(RuntimeError, match='delivery error'):
+        await sink.deliver([KafkaPayload(data=SampleOutput())])
 
 
 def test_kafka_sink_type():
