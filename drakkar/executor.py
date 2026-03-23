@@ -83,11 +83,13 @@ class ExecutorPool:
             proc = await asyncio.create_subprocess_exec(
                 self._binary_path,
                 *task.args,
+                stdin=asyncio.subprocess.PIPE if task.stdin is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            stdin_bytes = task.stdin.encode() if task.stdin is not None else None
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
+                proc.communicate(input=stdin_bytes),
                 timeout=self._task_timeout,
             )
             duration = time.monotonic() - start

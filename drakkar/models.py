@@ -33,51 +33,106 @@ OutputT = TypeVar('OutputT', bound=BaseModel)
 class SourceMessage(BaseModel):
     """A message consumed from the Kafka source topic."""
 
-    topic: str
-    partition: int
-    offset: int
-    key: bytes | None = None
-    value: bytes
-    timestamp: int
-    payload: Any = None
+    topic: str = Field(description='Kafka topic name the message was consumed from.')
+    partition: int = Field(description='Kafka partition number.')
+    offset: int = Field(description='Kafka offset of the message within the partition.')
+    key: bytes | None = Field(default=None, description='Optional message key bytes from Kafka.')
+    value: bytes = Field(description='Raw message value bytes from Kafka.')
+    timestamp: int = Field(description='Message timestamp in milliseconds (Kafka-provided).')
+    payload: Any = Field(
+        default=None,
+        description='Parsed payload object. Set by the handler arrange() method.',
+    )
 
 
 class ExecutorTask(BaseModel):
     """A task to be executed by the subprocess executor pool."""
 
-    task_id: str
-    args: list[str]
-    metadata: dict = Field(default_factory=dict)
-    source_offsets: list[int]
+    task_id: str = Field(description='Unique identifier for this task. See make_task_id().')
+    args: list[str] = Field(
+        description='Command-line arguments appended to the binary path when launching the process.'
+    )
+    metadata: dict = Field(
+        default_factory=dict,
+        description='Arbitrary key-value data carried through the pipeline. Accessible in collect().',
+    )
+    source_offsets: list[int] = Field(
+        description=(
+            'Kafka offsets of the source messages that produced this task. '
+            'Used for offset watermark tracking — offsets are committed only after all sinks confirm delivery.'
+        )
+    )
+    stdin: str | None = Field(
+        default=None,
+        description=(
+            'Optional string written to the process stdin immediately after launch. '
+            'Equivalent to redirecting a file with < in a shell. '
+            'When None, the process stdin is not connected.'
+        ),
+    )
 
 
 class ExecutorResult(BaseModel):
     """Result of a completed executor task."""
 
-    task_id: str
-    exit_code: int
-    stdout: str
-    stderr: str
-    duration_seconds: float
-    task: ExecutorTask
-    pid: int | None = None
+    task_id: str = Field(description='Task ID matching the originating ExecutorTask.')
+    exit_code: int = Field(
+        description='Process exit code. 0 = success; any other value raises ExecutorTaskError.'
+    )
+    stdout: str = Field(
+        description='Captured stdout from the process, decoded as UTF-8 (errors replaced).'
+    )
+    stderr: str = Field(
+        description='Captured stderr from the process, decoded as UTF-8 (errors replaced).'
+    )
+    duration_seconds: float = Field(
+        description='Wall-clock time from process start to completion, rounded to 3 decimal places.'
+    )
+    task: ExecutorTask = Field(
+        description='The originating ExecutorTask, available for context in collect() and on_error().'
+    )
+    pid: int | None = Field(
+        default=None,
+        description='OS process ID of the subprocess. None if the process never started.',
+    )
 
 
 class ExecutorError(BaseModel):
     """Error information when an executor task fails."""
 
-    task: ExecutorTask
-    exit_code: int | None = None
-    stderr: str = ''
-    exception: str | None = None
-    pid: int | None = None
+    task: ExecutorTask = Field(description='The task that failed.')
+    exit_code: int | None = Field(
+        default=None,
+        description='Process exit code. None if the process failed to start or timed out.',
+    )
+    stderr: str = Field(
+        default='',
+        description='Stderr output from the process, or a short error description.',
+    )
+    exception: str | None = Field(
+        default=None,
+        description=(
+            'Exception message if the process failed to launch or timed out. '
+            'None for normal non-zero exit failures.'
+        ),
+    )
+    pid: int | None = Field(
+        default=None,
+        description='OS process ID of the subprocess. None if the process never started.',
+    )
 
 
 class PendingContext(BaseModel):
     """Context about currently in-flight tasks for a partition."""
 
-    pending_tasks: list[ExecutorTask] = Field(default_factory=list)
-    pending_task_ids: set[str] = Field(default_factory=set)
+    pending_tasks: list[ExecutorTask] = Field(
+        default_factory=list,
+        description='Tasks currently in-flight for this partition.',
+    )
+    pending_task_ids: set[str] = Field(
+        default_factory=set,
+        description='Set of in-flight task IDs. Used for O(1) membership checks.',
+    )
 
 
 # --- Sink payload models ---
@@ -88,6 +143,15 @@ class PendingContext(BaseModel):
 # The `data` field is always a Pydantic BaseModel; the framework serializes it
 # appropriately for each sink type (JSON for Kafka/HTTP/Redis/File, dict for Postgres/Mongo).
 
+_SINK_FIELD = Field(
+    default='',
+    description=(
+        'Name of the configured sink instance to route this payload to. '
+        'Empty string selects the default, which is only valid when exactly one '
+        'sink of this type is configured. An unknown name causes a startup error.'
+    ),
+)
+
 
 class KafkaPayload(BaseModel):
     """Payload for a Kafka sink — produces a message to a Kafka topic.
@@ -96,9 +160,14 @@ class KafkaPayload(BaseModel):
     Kafka message value. The `key` field is passed through as-is.
     """
 
-    sink: str = ''
-    key: bytes | None = None
-    data: BaseModel
+    sink: str = _SINK_FIELD
+    key: bytes | None = Field(
+        default=None,
+        description='Optional Kafka message key. Passed through as-is to the Kafka producer.',
+    )
+    data: BaseModel = Field(
+        description='Payload model. Serialized via model_dump_json().encode() as the Kafka message value.'
+    )
 
 
 class PostgresPayload(BaseModel):
@@ -108,9 +177,11 @@ class PostgresPayload(BaseModel):
     to value mapping, then executes an INSERT statement.
     """
 
-    sink: str = ''
-    table: str
-    data: BaseModel
+    sink: str = _SINK_FIELD
+    table: str = Field(description='Target table name for the INSERT statement.')
+    data: BaseModel = Field(
+        description='Payload model. Serialized via model_dump() to a column→value dict for INSERT.'
+    )
 
 
 class MongoPayload(BaseModel):
@@ -120,9 +191,11 @@ class MongoPayload(BaseModel):
     suitable for MongoDB document insertion.
     """
 
-    sink: str = ''
-    collection: str
-    data: BaseModel
+    sink: str = _SINK_FIELD
+    collection: str = Field(description='Target MongoDB collection name.')
+    data: BaseModel = Field(
+        description='Payload model. Serialized via model_dump() to a dict for document insertion.'
+    )
 
 
 class HttpPayload(BaseModel):
@@ -132,8 +205,10 @@ class HttpPayload(BaseModel):
     with Content-Type: application/json.
     """
 
-    sink: str = ''
-    data: BaseModel
+    sink: str = _SINK_FIELD
+    data: BaseModel = Field(
+        description='Payload model. Serialized via model_dump_json() as the JSON request body.'
+    )
 
 
 class RedisPayload(BaseModel):
@@ -143,10 +218,17 @@ class RedisPayload(BaseModel):
     The full Redis key is `{config.key_prefix}{key}`. Optional TTL in seconds.
     """
 
-    sink: str = ''
-    key: str
-    data: BaseModel
-    ttl: int | None = None
+    sink: str = _SINK_FIELD
+    key: str = Field(
+        description='Redis key suffix. The full Redis key is {config.key_prefix}{key}.'
+    )
+    data: BaseModel = Field(
+        description='Payload model. Serialized via model_dump_json() as the Redis string value.'
+    )
+    ttl: int | None = Field(
+        default=None,
+        description='Optional expiry time in seconds. The key does not expire when None.',
+    )
 
 
 class FilePayload(BaseModel):
@@ -157,9 +239,13 @@ class FilePayload(BaseModel):
     doesn't exist. Raises an error if the parent directory is missing.
     """
 
-    sink: str = ''
-    path: str
-    data: BaseModel
+    sink: str = _SINK_FIELD
+    path: str = Field(
+        description="File path relative to the sink's configured base_path."
+    )
+    data: BaseModel = Field(
+        description='Payload model. Appended as a JSON line (model_dump_json() + newline).'
+    )
 
 
 class CollectResult(BaseModel):
@@ -183,12 +269,30 @@ class CollectResult(BaseModel):
                 )
     """
 
-    kafka: list[KafkaPayload] = Field(default_factory=list)
-    postgres: list[PostgresPayload] = Field(default_factory=list)
-    mongo: list[MongoPayload] = Field(default_factory=list)
-    http: list[HttpPayload] = Field(default_factory=list)
-    redis: list[RedisPayload] = Field(default_factory=list)
-    files: list[FilePayload] = Field(default_factory=list)
+    kafka: list[KafkaPayload] = Field(
+        default_factory=list,
+        description='Payloads routed to configured Kafka sinks.',
+    )
+    postgres: list[PostgresPayload] = Field(
+        default_factory=list,
+        description='Payloads routed to configured PostgreSQL sinks.',
+    )
+    mongo: list[MongoPayload] = Field(
+        default_factory=list,
+        description='Payloads routed to configured MongoDB sinks.',
+    )
+    http: list[HttpPayload] = Field(
+        default_factory=list,
+        description='Payloads routed to configured HTTP sinks.',
+    )
+    redis: list[RedisPayload] = Field(
+        default_factory=list,
+        description='Payloads routed to configured Redis sinks.',
+    )
+    files: list[FilePayload] = Field(
+        default_factory=list,
+        description='Payloads routed to configured filesystem sinks.',
+    )
 
     @property
     def has_outputs(self) -> bool:
@@ -247,7 +351,16 @@ class DeliveryError(BaseModel):
     and the payloads that could not be delivered.
     """
 
-    sink_name: str
-    sink_type: str
-    error: str
-    payloads: list[BaseModel] = Field(default_factory=list)
+    sink_name: str = Field(
+        description='Configured name of the sink that failed (from sinks config).'
+    )
+    sink_type: str = Field(
+        description='Type of the sink that failed (e.g. "kafka", "postgres", "http").'
+    )
+    error: str = Field(
+        description='Human-readable error message from the failed delivery attempt.'
+    )
+    payloads: list[BaseModel] = Field(
+        default_factory=list,
+        description='The payloads that could not be delivered to this sink.',
+    )

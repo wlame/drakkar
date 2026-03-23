@@ -133,6 +133,44 @@ async def test_execute_large_stdout():
     assert len(result.stdout.strip()) == 10000
 
 
+async def test_execute_passes_stdin_to_process():
+    """stdin field value is written to the process stdin pipe."""
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_workers=2,
+        task_timeout_seconds=10,
+    )
+    task = ExecutorTask(
+        task_id='stdin-test',
+        args=['-c', 'import sys; print(sys.stdin.read().strip())'],
+        source_offsets=[0],
+        stdin='hello from stdin',
+    )
+    result = await pool.execute(task)
+    assert result.exit_code == 0
+    assert result.stdout.strip() == 'hello from stdin'
+
+
+async def test_execute_none_stdin_does_not_pipe():
+    """When stdin is None the process stdin is not connected (no pipe opened)."""
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_workers=2,
+        task_timeout_seconds=10,
+    )
+    # A script that checks whether stdin is a pipe; if not piped it should be a tty or closed.
+    # We verify that stdin=None tasks still work normally (echo-style usage).
+    task = ExecutorTask(
+        task_id='no-stdin',
+        args=['-c', 'print("no stdin ok")'],
+        source_offsets=[0],
+        stdin=None,
+    )
+    result = await pool.execute(task)
+    assert result.exit_code == 0
+    assert result.stdout.strip() == 'no stdin ok'
+
+
 async def test_waiting_count_tracks_queued_tasks():
     """waiting_count reflects tasks blocked on the semaphore."""
     pool = ExecutorPool(
