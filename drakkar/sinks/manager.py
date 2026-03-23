@@ -5,14 +5,23 @@ CollectResult payloads target existing sinks, and delivers payloads
 with error handling via the on_delivery_error handler hook.
 """
 
+from __future__ import annotations
+
+import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import structlog
 from pydantic import BaseModel
 
+from drakkar.metrics import sink_deliveries_skipped, sink_delivery_retries
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError
 from drakkar.sinks.base import BaseSink
+
+if TYPE_CHECKING:
+    from drakkar.recorder import EventRecorder
 
 logger = structlog.get_logger()
 
@@ -27,6 +36,20 @@ _FIELD_TO_SINK_TYPE: dict[str, str] = {
     'redis': 'redis',
     'files': 'filesystem',
 }
+
+
+@dataclass
+class SinkStats:
+    """Per-sink delivery statistics tracked in memory."""
+
+    delivered_count: int = 0
+    delivered_payloads: int = 0
+    error_count: int = 0
+    retry_count: int = 0
+    last_delivery_ts: float | None = None
+    last_delivery_duration: float | None = None
+    last_error: str | None = None
+    last_error_ts: float | None = None
 
 
 class SinkNotConfiguredError(Exception):
@@ -46,11 +69,13 @@ class SinkManager:
         - Validate that CollectResult only targets configured sinks
         - Route payloads to the correct sink instance
         - Handle delivery errors via the on_delivery_error callback
+        - Track per-sink delivery stats for the debug UI
     """
 
     def __init__(self) -> None:
         self._sinks: dict[tuple[str, str], BaseSink] = {}
         self._by_type: dict[str, list[BaseSink]] = defaultdict(list)
+        self._stats: dict[tuple[str, str], SinkStats] = {}
 
     @property
     def sinks(self) -> dict[tuple[str, str], BaseSink]:
@@ -72,6 +97,15 @@ class SinkManager:
             raise ValueError(f'Duplicate sink: type={sink.sink_type!r}, name={sink.name!r}')
         self._sinks[key] = sink
         self._by_type[sink.sink_type].append(sink)
+        self._stats[key] = SinkStats()
+
+    def get_sink_info(self) -> list[dict]:
+        """Return list of all configured sinks with their type and name."""
+        return [{'sink_type': sink_type, 'name': name} for (sink_type, name) in self._sinks]
+
+    def get_all_stats(self) -> dict[tuple[str, str], SinkStats]:
+        """Return stats for all sinks, keyed by (sink_type, name)."""
+        return dict(self._stats)
 
     async def connect_all(self) -> None:
         """Connect all registered sinks. Raises on first failure."""
@@ -146,6 +180,7 @@ class SinkManager:
         on_delivery_error: DeliveryErrorCallback,
         partition_id: int,
         max_retries: int = 3,
+        recorder: EventRecorder | None = None,
     ) -> None:
         """Route and deliver all payloads in a CollectResult to their sinks.
 
@@ -158,6 +193,7 @@ class SinkManager:
             on_delivery_error: Handler callback for delivery failures.
             partition_id: Source partition (for DLQ metadata).
             max_retries: Max delivery retry attempts before falling through to DLQ.
+            recorder: Optional EventRecorder for sink delivery/error events.
         """
         groups: dict[tuple[str, str], list[BaseModel]] = defaultdict(list)
 
@@ -171,13 +207,37 @@ class SinkManager:
 
         for (sink_type, sink_name), payloads in groups.items():
             sink = self._sinks[(sink_type, sink_name)]
+            stats = self._stats[(sink_type, sink_name)]
             attempt = 0
             while True:
                 try:
+                    start = time.monotonic()
                     await sink.deliver(payloads)
+                    duration = time.monotonic() - start
+                    stats.delivered_count += 1
+                    stats.delivered_payloads += len(payloads)
+                    stats.last_delivery_ts = time.time()
+                    stats.last_delivery_duration = round(duration, 4)
+                    if recorder:
+                        recorder.record_sink_delivery(
+                            sink_type=sink_type,
+                            sink_name=sink_name,
+                            payload_count=len(payloads),
+                            duration=duration,
+                        )
                     break
                 except Exception as e:
                     attempt += 1
+                    stats.error_count += 1
+                    stats.last_error = str(e)
+                    stats.last_error_ts = time.time()
+                    if recorder:
+                        recorder.record_sink_error(
+                            sink_type=sink_type,
+                            sink_name=sink_name,
+                            error=str(e),
+                            attempt=attempt,
+                        )
                     error = DeliveryError(
                         sink_name=sink_name,
                         sink_type=sink_type,
@@ -187,6 +247,8 @@ class SinkManager:
                     action = await on_delivery_error(error)
 
                     if action == DeliveryAction.RETRY and attempt < max_retries:
+                        stats.retry_count += 1
+                        sink_delivery_retries.labels(sink_type=sink_type, sink_name=sink_name).inc()
                         await logger.awarning(
                             'sink_delivery_retry',
                             category='sink',
@@ -196,6 +258,7 @@ class SinkManager:
                         )
                         continue
                     elif action == DeliveryAction.SKIP:
+                        sink_deliveries_skipped.labels(sink_type=sink_type, sink_name=sink_name).inc()
                         await logger.awarning(
                             'sink_delivery_skipped',
                             category='sink',

@@ -306,6 +306,50 @@ class EventRecorder:
             }
         )
 
+    def record_sink_delivery(
+        self,
+        sink_type: str,
+        sink_name: str,
+        payload_count: int,
+        duration: float,
+    ) -> None:
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'sink_delivered',
+                'metadata': json.dumps(
+                    {
+                        'sink_type': sink_type,
+                        'sink_name': sink_name,
+                        'payload_count': payload_count,
+                        'duration': round(duration, 4),
+                    }
+                ),
+            }
+        )
+
+    def record_sink_error(
+        self,
+        sink_type: str,
+        sink_name: str,
+        error: str,
+        attempt: int,
+    ) -> None:
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'sink_error',
+                'metadata': json.dumps(
+                    {
+                        'sink_type': sink_type,
+                        'sink_name': sink_name,
+                        'error': error,
+                        'attempt': attempt,
+                    }
+                ),
+            }
+        )
+
     def record_committed(self, partition: int, offset: int) -> None:
         self._record(
             {

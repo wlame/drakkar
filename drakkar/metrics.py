@@ -129,6 +129,18 @@ sink_payloads_delivered = Counter(
     ['sink_type', 'sink_name'],
 )
 
+sink_delivery_retries = Counter(
+    'drakkar_sink_delivery_retries_total',
+    'Total sink delivery retry attempts',
+    ['sink_type', 'sink_name'],
+)
+
+sink_deliveries_skipped = Counter(
+    'drakkar_sink_deliveries_skipped_total',
+    'Total sink deliveries skipped via on_delivery_error handler',
+    ['sink_type', 'sink_name'],
+)
+
 sink_dlq_messages = Counter(
     'drakkar_sink_dlq_messages_total',
     'Total messages sent to the dead letter queue',

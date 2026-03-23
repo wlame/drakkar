@@ -346,6 +346,7 @@ class DrakkarApp:
             result,
             on_delivery_error=_on_delivery_error,
             partition_id=partition_id,
+            recorder=self._recorder,
         )
 
         if self._recorder:

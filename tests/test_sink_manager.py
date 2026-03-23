@@ -441,3 +441,279 @@ def test_sink_repr():
     sink = FakeSink('results')
     assert "type='kafka'" in repr(sink)
     assert "name='results'" in repr(sink)
+
+
+# --- SinkStats tracking ---
+
+
+def test_get_sink_info_returns_all_sinks():
+    mgr = SinkManager()
+    mgr.register(FakeSink('out', sink_type='kafka'))
+    mgr.register(FakeSink('db', sink_type='postgres'))
+    info = mgr.get_sink_info()
+    assert len(info) == 2
+    types = {i['sink_type'] for i in info}
+    names = {i['name'] for i in info}
+    assert types == {'kafka', 'postgres'}
+    assert names == {'out', 'db'}
+
+
+def test_get_sink_info_empty():
+    mgr = SinkManager()
+    assert mgr.get_sink_info() == []
+
+
+def test_get_all_stats_empty():
+    mgr = SinkManager()
+    assert mgr.get_all_stats() == {}
+
+
+def test_stats_initialized_on_register():
+    mgr = SinkManager()
+    mgr.register(FakeSink('out', sink_type='kafka'))
+    stats = mgr.get_all_stats()
+    assert ('kafka', 'out') in stats
+    s = stats[('kafka', 'out')]
+    assert s.delivered_count == 0
+    assert s.error_count == 0
+
+
+async def test_stats_updated_on_successful_delivery():
+    mgr = SinkManager()
+    sink = FakeSink('out', sink_type='kafka')
+    mgr.register(sink)
+
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData(value=1)), KafkaPayload(data=SampleData(value=2))])
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    stats = mgr.get_all_stats()
+    s = stats[('kafka', 'out')]
+    assert s.delivered_count == 1
+    assert s.delivered_payloads == 2
+    assert s.last_delivery_ts is not None
+    assert s.last_delivery_duration is not None
+    assert s.last_delivery_duration >= 0
+    assert s.error_count == 0
+
+
+async def test_stats_updated_on_error():
+    mgr = SinkManager()
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    stats = mgr.get_all_stats()
+    s = stats[('kafka', 'out')]
+    assert s.error_count == 1
+    assert s.last_error == 'delivery failed'
+    assert s.last_error_ts is not None
+    assert s.delivered_count == 0
+
+
+async def test_stats_updated_on_retry_then_success():
+    mgr = SinkManager()
+    sink = FakeSink('out', sink_type='kafka')
+    mgr.register(sink)
+
+    call_count = 0
+    original_deliver = sink.deliver
+
+    async def flaky_deliver(payloads: list) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError('transient error')
+        await original_deliver(payloads)
+
+    sink.deliver = flaky_deliver  # type: ignore[assignment]
+    on_error = AsyncMock(return_value=DeliveryAction.RETRY)
+
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    stats = mgr.get_all_stats()
+    s = stats[('kafka', 'out')]
+    assert s.delivered_count == 1  # succeeded on retry
+    assert s.error_count == 1  # one failure before success
+    assert s.retry_count == 1
+    assert s.last_error == 'transient error'
+
+
+async def test_stats_multiple_sinks_tracked_independently():
+    mgr = SinkManager()
+    k_sink = FakeSink('k', sink_type='kafka')
+    p_sink = FakeSink('p', sink_type='postgres')
+    p_sink.fail_on_deliver = True
+    mgr.register(k_sink)
+    mgr.register(p_sink)
+
+    result = CollectResult(
+        kafka=[KafkaPayload(sink='k', data=SampleData())],
+        postgres=[PostgresPayload(sink='p', table='t', data=SampleData())],
+    )
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    stats = mgr.get_all_stats()
+    assert stats[('kafka', 'k')].delivered_count == 1
+    assert stats[('kafka', 'k')].error_count == 0
+    assert stats[('postgres', 'p')].delivered_count == 0
+    assert stats[('postgres', 'p')].error_count == 1
+
+
+async def test_stats_with_recorder():
+    """Stats are recorded to EventRecorder when provided."""
+    mgr = SinkManager()
+    sink = FakeSink('out', sink_type='kafka')
+    mgr.register(sink)
+
+    from unittest.mock import MagicMock
+
+    recorder = MagicMock()
+
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, recorder=recorder)
+
+    recorder.record_sink_delivery.assert_called_once()
+    call_kwargs = recorder.record_sink_delivery.call_args
+    assert call_kwargs[1]['sink_type'] == 'kafka'
+    assert call_kwargs[1]['sink_name'] == 'out'
+    assert call_kwargs[1]['payload_count'] == 1
+
+
+async def test_prometheus_retry_counter_incremented():
+    """sink_delivery_retries Prometheus counter increments on RETRY."""
+    from drakkar.metrics import sink_delivery_retries
+
+    mgr = SinkManager()
+    sink = FakeSink('out', sink_type='kafka')
+    mgr.register(sink)
+
+    call_count = 0
+    original_deliver = sink.deliver
+
+    async def flaky_deliver(payloads: list) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError('transient error')
+        await original_deliver(payloads)
+
+    sink.deliver = flaky_deliver  # type: ignore[assignment]
+    on_error = AsyncMock(return_value=DeliveryAction.RETRY)
+
+    before = sink_delivery_retries.labels(sink_type='kafka', sink_name='out')._value.get()
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    after = sink_delivery_retries.labels(sink_type='kafka', sink_name='out')._value.get()
+    assert after == before + 1
+
+
+async def test_prometheus_skip_counter_incremented():
+    """sink_deliveries_skipped Prometheus counter increments on SKIP."""
+    from drakkar.metrics import sink_deliveries_skipped
+
+    mgr = SinkManager()
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    before = sink_deliveries_skipped.labels(sink_type='kafka', sink_name='out')._value.get()
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    after = sink_deliveries_skipped.labels(sink_type='kafka', sink_name='out')._value.get()
+    assert after == before + 1
+
+
+async def test_prometheus_skip_not_incremented_on_dlq():
+    """DLQ action should NOT increment skip counter."""
+    from drakkar.metrics import sink_deliveries_skipped
+
+    mgr = SinkManager()
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
+
+    before = sink_deliveries_skipped.labels(sink_type='kafka', sink_name='out')._value.get()
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    after = sink_deliveries_skipped.labels(sink_type='kafka', sink_name='out')._value.get()
+    assert after == before  # no change
+
+
+async def test_prometheus_retry_counter_per_sink():
+    """Retry counter uses correct sink labels."""
+    from drakkar.metrics import sink_delivery_retries
+
+    mgr = SinkManager()
+    sink_a = FakeSink('a', sink_type='kafka')
+    sink_b = FakeSink('b', sink_type='postgres')
+    sink_b.fail_on_deliver = True
+    mgr.register(sink_a)
+    mgr.register(sink_b)
+
+    call_count = 0
+
+    async def flaky_deliver(payloads: list) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 1:
+            raise RuntimeError('error')
+
+    sink_b.deliver = flaky_deliver  # type: ignore[assignment]
+    on_error = AsyncMock(return_value=DeliveryAction.RETRY)
+
+    before_a = sink_delivery_retries.labels(sink_type='kafka', sink_name='a')._value.get()
+    before_b = sink_delivery_retries.labels(sink_type='postgres', sink_name='b')._value.get()
+
+    result = CollectResult(
+        kafka=[KafkaPayload(sink='a', data=SampleData())],
+        postgres=[PostgresPayload(sink='b', table='t', data=SampleData())],
+    )
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    after_a = sink_delivery_retries.labels(sink_type='kafka', sink_name='a')._value.get()
+    after_b = sink_delivery_retries.labels(sink_type='postgres', sink_name='b')._value.get()
+    assert after_a == before_a  # kafka had no errors
+    assert after_b == before_b + 1  # postgres retried once
+
+
+async def test_stats_error_with_recorder():
+    """Errors are recorded to EventRecorder when provided."""
+    mgr = SinkManager()
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    from unittest.mock import MagicMock
+
+    recorder = MagicMock()
+
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, recorder=recorder)
+
+    recorder.record_sink_error.assert_called_once()
+    call_kwargs = recorder.record_sink_error.call_args
+    assert call_kwargs[1]['sink_type'] == 'kafka'
+    assert call_kwargs[1]['sink_name'] == 'out'
+    assert 'delivery failed' in call_kwargs[1]['error']
+    assert call_kwargs[1]['attempt'] == 1

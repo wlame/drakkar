@@ -96,6 +96,34 @@ def mock_app():
     pool.active_count = 2
     pool.max_workers = 8
     app._executor_pool = pool
+
+    sink_mgr = MagicMock()
+    sink_mgr.get_sink_info.return_value = [
+        {'sink_type': 'kafka', 'name': 'results'},
+        {'sink_type': 'postgres', 'name': 'main-db'},
+    ]
+    from drakkar.sinks.manager import SinkStats
+
+    sink_mgr.get_all_stats.return_value = {
+        ('kafka', 'results'): SinkStats(
+            delivered_count=100,
+            delivered_payloads=250,
+            error_count=2,
+            retry_count=1,
+            last_delivery_ts=time.time() - 5,
+            last_delivery_duration=0.012,
+        ),
+        ('postgres', 'main-db'): SinkStats(
+            delivered_count=80,
+            delivered_payloads=80,
+            error_count=0,
+            retry_count=0,
+            last_delivery_ts=time.time() - 10,
+            last_delivery_duration=0.045,
+            last_error=None,
+        ),
+    }
+    app.sink_manager = sink_mgr
     return app
 
 
@@ -283,3 +311,62 @@ async def test_websocket_cleanup_on_disconnect(debug_config, mock_recorder, mock
 
     # after disconnect, subscriber should be cleaned up
     assert len(real_recorder._ws_subscribers) == 0
+
+
+# --- Sinks page and API ---
+
+
+async def test_sinks_page_returns_200(client):
+    resp = await client.get('/sinks')
+    assert resp.status_code == 200
+    assert 'Sinks' in resp.text
+
+
+async def test_sinks_page_shows_configured_sinks(client):
+    resp = await client.get('/sinks')
+    assert 'kafka' in resp.text
+    assert 'results' in resp.text
+    assert 'postgres' in resp.text
+    assert 'main-db' in resp.text
+
+
+async def test_sinks_page_shows_stats(client):
+    resp = await client.get('/sinks')
+    assert '100' in resp.text  # delivered_count
+    assert '250' in resp.text  # delivered_payloads
+
+
+async def test_sinks_page_shows_errors(client):
+    resp = await client.get('/sinks')
+    # kafka/results has 2 errors
+    assert '2' in resp.text
+
+
+async def test_api_sinks_returns_json(client):
+    resp = await client.get('/api/sinks')
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 2
+    kafka_sink = next(s for s in data if s['sink_type'] == 'kafka')
+    assert kafka_sink['name'] == 'results'
+    assert kafka_sink['delivered_count'] == 100
+    assert kafka_sink['delivered_payloads'] == 250
+    assert kafka_sink['error_count'] == 2
+    assert kafka_sink['retry_count'] == 1
+    assert kafka_sink['last_delivery_duration'] == 0.012
+
+
+async def test_api_sinks_postgres_stats(client):
+    resp = await client.get('/api/sinks')
+    data = resp.json()
+    pg_sink = next(s for s in data if s['sink_type'] == 'postgres')
+    assert pg_sink['name'] == 'main-db'
+    assert pg_sink['delivered_count'] == 80
+    assert pg_sink['error_count'] == 0
+    assert pg_sink['last_error'] is None
+
+
+async def test_sinks_nav_link(client):
+    """Sinks link appears in the navigation bar."""
+    resp = await client.get('/')
+    assert 'href="/sinks"' in resp.text

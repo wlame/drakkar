@@ -542,6 +542,8 @@ async def test_all_event_types_persisted(recorder):
     recorder.record_committed(partition=1, offset=11)
     recorder.record_assigned([1, 2])
     recorder.record_revoked([2])
+    recorder.record_sink_delivery(sink_type='kafka', sink_name='out', payload_count=1, duration=0.01)
+    recorder.record_sink_error(sink_type='http', sink_name='wh', error='timeout', attempt=1)
 
     await recorder._flush()
 
@@ -559,6 +561,8 @@ async def test_all_event_types_persisted(recorder):
         'committed',
         'assigned',
         'revoked',
+        'sink_delivered',
+        'sink_error',
     }
     assert event_types == expected, f'missing: {expected - event_types}, extra: {event_types - expected}'
 
@@ -727,3 +731,50 @@ async def test_multiple_rotations_keep_recent_files(tmp_path):
     assert os.path.exists(path_after_second)
 
     await rec.stop()
+
+
+# --- Sink event recording ---
+
+
+async def test_record_sink_delivery(recorder):
+    recorder.record_sink_delivery(sink_type='kafka', sink_name='results', payload_count=5, duration=0.042)
+    await recorder._flush()
+
+    events = await recorder.get_events(event_type='sink_delivered')
+    assert len(events) == 1
+
+    import json
+
+    meta = json.loads(events[0]['metadata'])
+    assert meta['sink_type'] == 'kafka'
+    assert meta['sink_name'] == 'results'
+    assert meta['payload_count'] == 5
+    assert meta['duration'] == 0.042
+
+
+async def test_record_sink_error(recorder):
+    recorder.record_sink_error(sink_type='postgres', sink_name='main-db', error='connection refused', attempt=2)
+    await recorder._flush()
+
+    events = await recorder.get_events(event_type='sink_error')
+    assert len(events) == 1
+
+    import json
+
+    meta = json.loads(events[0]['metadata'])
+    assert meta['sink_type'] == 'postgres'
+    assert meta['sink_name'] == 'main-db'
+    assert meta['error'] == 'connection refused'
+    assert meta['attempt'] == 2
+
+
+async def test_sink_events_in_all_event_types(recorder):
+    """sink_delivered and sink_error survive the buffer → flush → SQLite round-trip."""
+    recorder.record_sink_delivery(sink_type='kafka', sink_name='out', payload_count=1, duration=0.01)
+    recorder.record_sink_error(sink_type='http', sink_name='webhook', error='timeout', attempt=1)
+    await recorder._flush()
+
+    all_events = await recorder.get_events(limit=50)
+    event_types = {e['event'] for e in all_events}
+    assert 'sink_delivered' in event_types
+    assert 'sink_error' in event_types

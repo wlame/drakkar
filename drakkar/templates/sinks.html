@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Sinks — Drakkar Debug{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-bold mb-6 text-ink-900">Sinks</h1>
+
+<table class="w-full text-sm" id="sinks-table">
+    <thead>
+        <tr class="text-left text-gray-400 border-b border-cream-200">
+            <th class="py-2 px-3">Type</th>
+            <th class="py-2 px-3">Name</th>
+            <th class="py-2 px-3">Deliveries</th>
+            <th class="py-2 px-3">Payloads</th>
+            <th class="py-2 px-3">Errors</th>
+            <th class="py-2 px-3">Retries</th>
+            <th class="py-2 px-3">Last Delivery</th>
+            <th class="py-2 px-3">Duration</th>
+            <th class="py-2 px-3">Last Error</th>
+        </tr>
+    </thead>
+    <tbody id="sinks-body">
+        {% for s in sinks %}
+        <tr class="border-b border-cream-100 hover:bg-cream-100" data-sink="{{ s.sink_type }}/{{ s.name }}">
+            <td class="py-2 px-3 font-mono">{{ s.sink_type }}</td>
+            <td class="py-2 px-3 font-mono font-semibold text-teal-600">{{ s.name }}</td>
+            <td class="py-2 px-3 font-mono text-emerald-600" data-field="delivered_count">{{ s.delivered_count }}</td>
+            <td class="py-2 px-3 font-mono" data-field="delivered_payloads">{{ s.delivered_payloads }}</td>
+            <td class="py-2 px-3 font-mono {% if s.error_count > 0 %}text-red-600{% endif %}" data-field="error_count">{{ s.error_count }}</td>
+            <td class="py-2 px-3 font-mono {% if s.retry_count > 0 %}text-amber-600{% endif %}" data-field="retry_count">{{ s.retry_count }}</td>
+            <td class="py-2 px-3 text-gray-400" data-field="last_delivery_ts" title="{{ format_ts_full(s.last_delivery_ts) }}">{{ format_ts(s.last_delivery_ts) or '-' }}</td>
+            <td class="py-2 px-3 font-mono" data-field="last_delivery_duration">{% if s.last_delivery_duration is not none %}{{ "%.3f"|format(s.last_delivery_duration) }}s{% else %}-{% endif %}</td>
+            <td class="py-2 px-3 text-xs text-red-600 max-w-xs truncate expandable cursor-pointer" data-field="last_error" title="{{ s.last_error or '' }}">{{ s.last_error or '-' }}</td>
+        </tr>
+        {% endfor %}
+        {% if not sinks %}
+        <tr><td colspan="9" class="py-4 text-center text-gray-400">No sinks configured</td></tr>
+        {% endif %}
+    </tbody>
+</table>
+
+<script>
+(function() {
+    function fmt(ts) {
+        if (!ts) return '-';
+        var d = new Date(ts * 1000);
+        return d.toISOString().slice(11, 19);
+    }
+    function refresh() {
+        fetch('/api/sinks').then(function(r) { return r.json(); }).then(function(sinks) {
+            for (var i = 0; i < sinks.length; i++) {
+                var s = sinks[i];
+                var row = document.querySelector('[data-sink="' + s.sink_type + '/' + s.name + '"]');
+                if (!row) continue;
+                row.querySelector('[data-field="delivered_count"]').textContent = s.delivered_count;
+                row.querySelector('[data-field="delivered_payloads"]').textContent = s.delivered_payloads;
+                var errCell = row.querySelector('[data-field="error_count"]');
+                errCell.textContent = s.error_count;
+                errCell.className = 'py-2 px-3 font-mono' + (s.error_count > 0 ? ' text-red-600' : '');
+                var retryCell = row.querySelector('[data-field="retry_count"]');
+                retryCell.textContent = s.retry_count;
+                retryCell.className = 'py-2 px-3 font-mono' + (s.retry_count > 0 ? ' text-amber-600' : '');
+                row.querySelector('[data-field="last_delivery_ts"]').textContent = fmt(s.last_delivery_ts);
+                row.querySelector('[data-field="last_delivery_duration"]').textContent = s.last_delivery_duration != null ? s.last_delivery_duration.toFixed(3) + 's' : '-';
+                var errMsgCell = row.querySelector('[data-field="last_error"]');
+                errMsgCell.textContent = s.last_error || '-';
+                errMsgCell.title = s.last_error || '';
+            }
+        }).catch(function() {});
+    }
+    setInterval(refresh, 2000);
+})();
+</script>
+{% endblock %}

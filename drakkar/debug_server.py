@@ -305,6 +305,37 @@ def create_debug_app(
             },
         )
 
+    @app.get('/sinks', response_class=HTMLResponse)
+    async def sinks_page(request: Request):
+        mgr = drakkar_app.sink_manager
+        info = mgr.get_sink_info()
+        all_stats = mgr.get_all_stats()
+        sinks_data = []
+        for item in info:
+            key = (item['sink_type'], item['name'])
+            stats = all_stats.get(key)
+            sinks_data.append(
+                {
+                    **item,
+                    'delivered_count': stats.delivered_count if stats else 0,
+                    'delivered_payloads': stats.delivered_payloads if stats else 0,
+                    'error_count': stats.error_count if stats else 0,
+                    'retry_count': stats.retry_count if stats else 0,
+                    'last_delivery_ts': stats.last_delivery_ts if stats else None,
+                    'last_delivery_duration': stats.last_delivery_duration if stats else None,
+                    'last_error': stats.last_error if stats else None,
+                    'last_error_ts': stats.last_error_ts if stats else None,
+                }
+            )
+        return templates.TemplateResponse(
+            request,
+            'sinks.html',
+            {
+                'worker_id': drakkar_app._worker_id,
+                'sinks': sinks_data,
+            },
+        )
+
     # --- JSON API endpoints for JS-driven pages ---
 
     @app.get('/api/events')
@@ -444,6 +475,31 @@ def create_debug_app(
                 'total_lag': total_lag,
             }
         )
+
+    @app.get('/api/sinks')
+    async def api_sinks():
+        """Sink configuration and live delivery stats."""
+        mgr = drakkar_app.sink_manager
+        info = mgr.get_sink_info()
+        all_stats = mgr.get_all_stats()
+        result = []
+        for item in info:
+            key = (item['sink_type'], item['name'])
+            stats = all_stats.get(key)
+            result.append(
+                {
+                    **item,
+                    'delivered_count': stats.delivered_count if stats else 0,
+                    'delivered_payloads': stats.delivered_payloads if stats else 0,
+                    'error_count': stats.error_count if stats else 0,
+                    'retry_count': stats.retry_count if stats else 0,
+                    'last_delivery_ts': stats.last_delivery_ts if stats else None,
+                    'last_delivery_duration': stats.last_delivery_duration if stats else None,
+                    'last_error': stats.last_error if stats else None,
+                    'last_error_ts': stats.last_error_ts if stats else None,
+                }
+            )
+        return JSONResponse(result)
 
     @app.get('/api/debug/processors')
     async def api_debug_processors():
