@@ -21,9 +21,16 @@ class ExecutorPool:
 
     Uses asyncio.create_subprocess_exec (not shell) for safe subprocess execution.
     Arguments are passed as a list, preventing shell injection.
+
+    The binary to execute is resolved per-task: ``ExecutorTask.binary_path``
+    takes precedence over the pool-level ``binary_path`` (from config).
+    Either one can be ``None`` as long as the other is set. If neither is
+    provided, the task fails with a clear ``ExecutorTaskError``.
+    This allows handlers to run different binaries per message by setting
+    ``binary_path`` on the task returned from ``arrange()``.
     """
 
-    def __init__(self, binary_path: str, max_workers: int, task_timeout_seconds: int) -> None:
+    def __init__(self, binary_path: str | None, max_workers: int, task_timeout_seconds: int) -> None:
         self._binary_path = binary_path
         self._max_workers = max_workers
         self._task_timeout = task_timeout_seconds
@@ -75,13 +82,34 @@ class ExecutorPool:
                 self._available_slots.sort()
                 self._active_count -= 1
 
+    def _resolve_binary(self, task: ExecutorTask) -> str:
+        binary = task.binary_path or self._binary_path
+        if not binary:
+            msg = (
+                "No binary_path configured: neither executor config nor "
+                "ExecutorTask.binary_path provides a path to the executable."
+            )
+            raise ExecutorTaskError(
+                error=ExecutorError(task=task, exception=msg),
+                result=ExecutorResult(
+                    task_id=task.task_id,
+                    exit_code=-1,
+                    stdout='',
+                    stderr=msg,
+                    duration_seconds=0.0,
+                    task=task,
+                ),
+            )
+        return binary
+
     async def _run_subprocess(self, task: ExecutorTask) -> ExecutorResult:
+        binary = self._resolve_binary(task)
         start = time.monotonic()
         proc = None
         try:
             # create_subprocess_exec passes args as list — no shell injection risk
             proc = await asyncio.create_subprocess_exec(
-                self._binary_path,
+                binary,
                 *task.args,
                 stdin=asyncio.subprocess.PIPE if task.stdin is not None else None,
                 stdout=asyncio.subprocess.PIPE,

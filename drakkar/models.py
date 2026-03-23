@@ -62,6 +62,14 @@ class ExecutorTask(BaseModel):
             'Used for offset watermark tracking — offsets are committed only after all sinks confirm delivery.'
         )
     )
+    binary_path: str | None = Field(
+        default=None,
+        description=(
+            'Optional override for the executor binary path from config. '
+            'When set, this binary is used instead of executor.binary_path from the YAML/env config. '
+            'If neither config nor task provides a binary_path, execution fails with a clear error.'
+        ),
+    )
     stdin: str | None = Field(
         default=None,
         description=(

@@ -37,9 +37,9 @@ def test_kafka_config_defaults():
 # --- ExecutorConfig ---
 
 
-def test_executor_config_requires_binary_path():
-    with pytest.raises(ValidationError):
-        ExecutorConfig()  # type: ignore[call-arg]
+def test_executor_config_binary_path_defaults_to_none():
+    cfg = ExecutorConfig()
+    assert cfg.binary_path is None
 
 
 def test_executor_config_defaults():
@@ -332,8 +332,8 @@ def test_load_config_no_path_no_env_requires_executor(monkeypatch: pytest.Monkey
 def test_load_config_empty_yaml(tmp_path: Path):
     config_path = tmp_path / 'empty.yaml'
     config_path.write_text('')
-    with pytest.raises(ValidationError):
-        load_config(config_path)
+    cfg = load_config(config_path)
+    assert cfg.executor.binary_path is None
 
 
 def test_drakkar_config_env_nested_delimiter(monkeypatch: pytest.MonkeyPatch):

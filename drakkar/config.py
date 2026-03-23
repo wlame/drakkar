@@ -160,9 +160,14 @@ class DLQConfig(BaseModel):
 
 
 class ExecutorConfig(BaseModel):
-    """Subprocess executor pool settings."""
+    """Subprocess executor pool settings.
 
-    binary_path: str = Field(..., min_length=1)
+    ``binary_path`` is optional here — if omitted, each ``ExecutorTask``
+    must provide its own ``binary_path`` in ``arrange()``, otherwise the
+    task will fail with a clear error.
+    """
+
+    binary_path: str | None = Field(default=None, min_length=1)
     max_workers: int = Field(default=4, ge=1)
     task_timeout_seconds: int = Field(default=120, ge=1)
     window_size: int = Field(default=100, ge=1)
@@ -225,7 +230,7 @@ class DrakkarConfig(BaseSettings):
         description='Environment variable that holds the worker name for logs, metrics, and UI',
     )
     kafka: KafkaConfig = Field(default_factory=KafkaConfig)
-    executor: ExecutorConfig
+    executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
     sinks: SinksConfig = Field(default_factory=SinksConfig)
     dlq: DLQConfig = Field(default_factory=DLQConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)

@@ -171,6 +171,90 @@ async def test_execute_none_stdin_does_not_pipe():
     assert result.stdout.strip() == 'no stdin ok'
 
 
+# --- binary_path resolution tests ---
+
+
+async def test_pool_binary_path_used_when_task_has_none(echo_pool: ExecutorPool):
+    """Pool-level binary_path is used when task.binary_path is None (default)."""
+    task = make_task(args=['hello from pool binary'])
+    result = await echo_pool.execute(task)
+    assert result.exit_code == 0
+    assert result.stdout.strip() == 'hello from pool binary'
+
+
+async def test_task_binary_path_overrides_pool_binary_path():
+    """Task-level binary_path takes precedence over pool-level binary_path."""
+    pool = ExecutorPool(
+        binary_path='/bin/echo',
+        max_workers=2,
+        task_timeout_seconds=10,
+    )
+    task = ExecutorTask(
+        task_id='override',
+        args=['-c', 'print("from python")'],
+        source_offsets=[0],
+        binary_path=sys.executable,
+    )
+    result = await pool.execute(task)
+    assert result.exit_code == 0
+    assert result.stdout.strip() == 'from python'
+
+
+async def test_no_pool_binary_path_uses_task_binary_path():
+    """Pool with no binary_path works when task provides one."""
+    pool = ExecutorPool(
+        binary_path=None,
+        max_workers=2,
+        task_timeout_seconds=10,
+    )
+    task = ExecutorTask(
+        task_id='task-only',
+        args=['-c', 'print("task binary")'],
+        source_offsets=[0],
+        binary_path=sys.executable,
+    )
+    result = await pool.execute(task)
+    assert result.exit_code == 0
+    assert result.stdout.strip() == 'task binary'
+
+
+async def test_no_binary_path_anywhere_raises_error():
+    """Neither pool nor task has binary_path — raises ExecutorTaskError with clear message."""
+    pool = ExecutorPool(
+        binary_path=None,
+        max_workers=2,
+        task_timeout_seconds=10,
+    )
+    task = ExecutorTask(
+        task_id='no-binary',
+        args=['hello'],
+        source_offsets=[0],
+    )
+    with pytest.raises(ExecutorTaskError) as exc_info:
+        await pool.execute(task)
+    assert 'binary_path' in str(exc_info.value).lower()
+    assert exc_info.value.error.exception is not None
+    assert exc_info.value.result.exit_code == -1
+
+
+async def test_pool_binary_path_none_task_binary_path_none_explicit():
+    """Explicit None on both pool and task raises the same clear error."""
+    pool = ExecutorPool(
+        binary_path=None,
+        max_workers=2,
+        task_timeout_seconds=10,
+    )
+    task = ExecutorTask(
+        task_id='both-none',
+        args=[],
+        source_offsets=[0],
+        binary_path=None,
+    )
+    with pytest.raises(ExecutorTaskError) as exc_info:
+        await pool.execute(task)
+    assert 'binary_path' in str(exc_info.value).lower()
+
+
 async def test_waiting_count_tracks_queued_tasks():
     """waiting_count reflects tasks blocked on the semaphore."""
     pool = ExecutorPool(
