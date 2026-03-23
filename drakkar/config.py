@@ -38,6 +38,7 @@ class KafkaSinkConfig(BaseModel):
 
     topic: str
     brokers: str = ''
+    ui_url: str = ''
 
 
 class PostgresSinkConfig(BaseModel):
@@ -49,6 +50,7 @@ class PostgresSinkConfig(BaseModel):
     dsn: str
     pool_min: int = Field(default=2, ge=1)
     pool_max: int = Field(default=10, ge=1)
+    ui_url: str = ''
 
 
 class MongoSinkConfig(BaseModel):
@@ -59,6 +61,7 @@ class MongoSinkConfig(BaseModel):
 
     uri: str
     database: str
+    ui_url: str = ''
 
 
 class HttpSinkConfig(BaseModel):
@@ -72,6 +75,7 @@ class HttpSinkConfig(BaseModel):
     timeout_seconds: int = Field(default=30, ge=1)
     headers: dict[str, str] = Field(default_factory=dict)
     max_retries: int = Field(default=3, ge=0)
+    ui_url: str = ''
 
 
 class RedisSinkConfig(BaseModel):
@@ -82,6 +86,7 @@ class RedisSinkConfig(BaseModel):
 
     url: str = 'redis://localhost:6379/0'
     key_prefix: str = ''
+    ui_url: str = ''
 
 
 class FileSinkConfig(BaseModel):
@@ -92,6 +97,7 @@ class FileSinkConfig(BaseModel):
     """
 
     base_path: str = ''
+    ui_url: str = ''
 
 
 class SinksConfig(BaseModel):

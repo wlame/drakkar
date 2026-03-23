@@ -33,7 +33,7 @@ class FileSink(BaseSink):
     sink_type = 'filesystem'
 
     def __init__(self, name: str, config: FileSinkConfig) -> None:
-        super().__init__(name)
+        super().__init__(name, ui_url=config.ui_url)
         self._config = config
 
     async def connect(self) -> None:

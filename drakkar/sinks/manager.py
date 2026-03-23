@@ -100,8 +100,11 @@ class SinkManager:
         self._stats[key] = SinkStats()
 
     def get_sink_info(self) -> list[dict]:
-        """Return list of all configured sinks with their type and name."""
-        return [{'sink_type': sink_type, 'name': name} for (sink_type, name) in self._sinks]
+        """Return list of all configured sinks with their type, name, and optional UI URL."""
+        return [
+            {'sink_type': sink_type, 'name': name, 'ui_url': sink.ui_url}
+            for (sink_type, name), sink in self._sinks.items()
+        ]
 
     def get_all_stats(self) -> dict[tuple[str, str], SinkStats]:
         """Return stats for all sinks, keyed by (sink_type, name)."""

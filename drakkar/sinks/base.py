@@ -25,13 +25,19 @@ class BaseSink(ABC):
     sink_type: str = ''
     """Identifier for this sink type (e.g., 'kafka', 'postgres', 'mongo')."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, ui_url: str = '') -> None:
         self._name = name
+        self._ui_url = ui_url
 
     @property
     def name(self) -> str:
         """The user-defined instance name from config (e.g., 'results', 'main-db')."""
         return self._name
+
+    @property
+    def ui_url(self) -> str:
+        """Optional URL to a web UI for this sink's backing service."""
+        return self._ui_url
 
     @abstractmethod
     async def connect(self) -> None:

@@ -32,7 +32,7 @@ class HttpSink(BaseSink):
     sink_type = 'http'
 
     def __init__(self, name: str, config: HttpSinkConfig) -> None:
-        super().__init__(name)
+        super().__init__(name, ui_url=config.ui_url)
         self._config = config
         self._client: httpx.AsyncClient | None = None
 

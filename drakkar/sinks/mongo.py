@@ -29,7 +29,7 @@ class MongoSink(BaseSink):
     sink_type = 'mongo'
 
     def __init__(self, name: str, config: MongoSinkConfig) -> None:
-        super().__init__(name)
+        super().__init__(name, ui_url=config.ui_url)
         self._config = config
         self._client = None
         self._db = None

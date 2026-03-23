@@ -64,6 +64,29 @@ def create_debug_app(
     templates.env.globals['format_ts_ms'] = _format_ts_ms  # type: ignore[assignment]
     templates.env.globals['format_ts_full'] = _format_ts_full  # type: ignore[assignment]
 
+    def _get_sink_ui_links() -> list[dict[str, str]]:
+        """Return deduplicated sink UI links for the nav header."""
+        mgr = drakkar_app.sink_manager
+        if not mgr:
+            return []
+        seen: set[str] = set()
+        links: list[dict[str, str]] = []
+        for info in mgr.get_sink_info():
+            url = info.get('ui_url', '')
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            links.append(
+                {
+                    'sink_type': info['sink_type'],
+                    'name': info['name'],
+                    'ui_url': url,
+                }
+            )
+        return links
+
+    templates.env.globals['get_sink_ui_links'] = _get_sink_ui_links  # type: ignore[assignment]
+
     async def _get_lag() -> dict[int, dict]:
         consumer = drakkar_app._consumer
         if not consumer or not drakkar_app.processors:

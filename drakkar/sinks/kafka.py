@@ -33,7 +33,7 @@ class KafkaSink(BaseSink):
     sink_type = 'kafka'
 
     def __init__(self, name: str, config: KafkaSinkConfig, brokers_fallback: str = '') -> None:
-        super().__init__(name)
+        super().__init__(name, ui_url=config.ui_url)
         self._config = config
         self._brokers = config.brokers or brokers_fallback
         self._producer: AIOProducer | None = None
