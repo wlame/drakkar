@@ -132,9 +132,7 @@ def full_config_dict() -> dict:
         },
         'sinks': {
             'kafka': {'results': {'topic': 'output-results'}},
-            'postgres': {
-                'main': {'dsn': 'postgresql://user:pass@db:5432/app', 'pool_min': 5, 'pool_max': 20}
-            },
+            'postgres': {'main': {'dsn': 'postgresql://user:pass@db:5432/app', 'pool_min': 5, 'pool_max': 20}},
         },
         'metrics': {
             'enabled': True,

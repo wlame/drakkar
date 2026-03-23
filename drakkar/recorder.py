@@ -384,9 +384,7 @@ class EventRecorder:
             )
             ORDER BY id ASC
         """
-        async with self._db.execute(
-            query, [partition, msg_offset, partition, msg_offset]
-        ) as cursor:
+        async with self._db.execute(query, [partition, msg_offset, partition, msg_offset]) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]

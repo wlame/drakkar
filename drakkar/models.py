@@ -84,15 +84,9 @@ class ExecutorResult(BaseModel):
     """Result of a completed executor task."""
 
     task_id: str = Field(description='Task ID matching the originating ExecutorTask.')
-    exit_code: int = Field(
-        description='Process exit code. 0 = success; any other value raises ExecutorTaskError.'
-    )
-    stdout: str = Field(
-        description='Captured stdout from the process, decoded as UTF-8 (errors replaced).'
-    )
-    stderr: str = Field(
-        description='Captured stderr from the process, decoded as UTF-8 (errors replaced).'
-    )
+    exit_code: int = Field(description='Process exit code. 0 = success; any other value raises ExecutorTaskError.')
+    stdout: str = Field(description='Captured stdout from the process, decoded as UTF-8 (errors replaced).')
+    stderr: str = Field(description='Captured stderr from the process, decoded as UTF-8 (errors replaced).')
     duration_seconds: float = Field(
         description='Wall-clock time from process start to completion, rounded to 3 decimal places.'
     )
@@ -120,8 +114,7 @@ class ExecutorError(BaseModel):
     exception: str | None = Field(
         default=None,
         description=(
-            'Exception message if the process failed to launch or timed out. '
-            'None for normal non-zero exit failures.'
+            'Exception message if the process failed to launch or timed out. None for normal non-zero exit failures.'
         ),
     )
     pid: int | None = Field(
@@ -187,9 +180,7 @@ class PostgresPayload(BaseModel):
 
     sink: str = _SINK_FIELD
     table: str = Field(description='Target table name for the INSERT statement.')
-    data: BaseModel = Field(
-        description='Payload model. Serialized via model_dump() to a column→value dict for INSERT.'
-    )
+    data: BaseModel = Field(description='Payload model. Serialized via model_dump() to a column→value dict for INSERT.')
 
 
 class MongoPayload(BaseModel):
@@ -201,9 +192,7 @@ class MongoPayload(BaseModel):
 
     sink: str = _SINK_FIELD
     collection: str = Field(description='Target MongoDB collection name.')
-    data: BaseModel = Field(
-        description='Payload model. Serialized via model_dump() to a dict for document insertion.'
-    )
+    data: BaseModel = Field(description='Payload model. Serialized via model_dump() to a dict for document insertion.')
 
 
 class HttpPayload(BaseModel):
@@ -214,9 +203,7 @@ class HttpPayload(BaseModel):
     """
 
     sink: str = _SINK_FIELD
-    data: BaseModel = Field(
-        description='Payload model. Serialized via model_dump_json() as the JSON request body.'
-    )
+    data: BaseModel = Field(description='Payload model. Serialized via model_dump_json() as the JSON request body.')
 
 
 class RedisPayload(BaseModel):
@@ -227,12 +214,8 @@ class RedisPayload(BaseModel):
     """
 
     sink: str = _SINK_FIELD
-    key: str = Field(
-        description='Redis key suffix. The full Redis key is {config.key_prefix}{key}.'
-    )
-    data: BaseModel = Field(
-        description='Payload model. Serialized via model_dump_json() as the Redis string value.'
-    )
+    key: str = Field(description='Redis key suffix. The full Redis key is {config.key_prefix}{key}.')
+    data: BaseModel = Field(description='Payload model. Serialized via model_dump_json() as the Redis string value.')
     ttl: int | None = Field(
         default=None,
         description='Optional expiry time in seconds. The key does not expire when None.',
@@ -248,12 +231,8 @@ class FilePayload(BaseModel):
     """
 
     sink: str = _SINK_FIELD
-    path: str = Field(
-        description="File path relative to the sink's configured base_path."
-    )
-    data: BaseModel = Field(
-        description='Payload model. Appended as a JSON line (model_dump_json() + newline).'
-    )
+    path: str = Field(description="File path relative to the sink's configured base_path.")
+    data: BaseModel = Field(description='Payload model. Appended as a JSON line (model_dump_json() + newline).')
 
 
 class CollectResult(BaseModel):
@@ -305,9 +284,7 @@ class CollectResult(BaseModel):
     @property
     def has_outputs(self) -> bool:
         """True if any sink field contains at least one payload."""
-        return bool(
-            self.kafka or self.postgres or self.mongo or self.http or self.redis or self.files
-        )
+        return bool(self.kafka or self.postgres or self.mongo or self.http or self.redis or self.files)
 
     @property
     def used_sink_types(self) -> set[str]:
@@ -359,15 +336,9 @@ class DeliveryError(BaseModel):
     and the payloads that could not be delivered.
     """
 
-    sink_name: str = Field(
-        description='Configured name of the sink that failed (from sinks config).'
-    )
-    sink_type: str = Field(
-        description='Type of the sink that failed (e.g. "kafka", "postgres", "http").'
-    )
-    error: str = Field(
-        description='Human-readable error message from the failed delivery attempt.'
-    )
+    sink_name: str = Field(description='Configured name of the sink that failed (from sinks config).')
+    sink_type: str = Field(description='Type of the sink that failed (e.g. "kafka", "postgres", "http").')
+    error: str = Field(description='Human-readable error message from the failed delivery attempt.')
     payloads: list[BaseModel] = Field(
         default_factory=list,
         description='The payloads that could not be delivered to this sink.',

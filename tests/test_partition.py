@@ -198,9 +198,7 @@ async def test_partition_processor_error_handling(failing_pool):
 
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(
-        lambda: not proc.offset_tracker.has_pending() and proc.inflight_count == 0, timeout=3
-    )
+    await wait_for(lambda: not proc.offset_tracker.has_pending() and proc.inflight_count == 0, timeout=3)
     await proc.stop()
 
 

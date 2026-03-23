@@ -537,9 +537,7 @@ async def test_all_event_types_persisted(recorder):
     recorder.record_task_started(task, partition=1, pool_active=2, pool_waiting=3, slot=0)
     recorder.record_task_completed(result, partition=1, pool_active=1, pool_waiting=0)
     recorder.record_task_failed(task, error, partition=1)
-    recorder.record_collect_completed(
-        task_id='t-all', partition=1, duration=0.05, output_message_count=2
-    )
+    recorder.record_collect_completed(task_id='t-all', partition=1, duration=0.05, output_message_count=2)
     recorder.record_produced(out_msg, source_partition=1, source_offset=10)
     recorder.record_committed(partition=1, offset=11)
     recorder.record_assigned([1, 2])
@@ -562,16 +560,12 @@ async def test_all_event_types_persisted(recorder):
         'assigned',
         'revoked',
     }
-    assert event_types == expected, (
-        f'missing: {expected - event_types}, extra: {event_types - expected}'
-    )
+    assert event_types == expected, f'missing: {expected - event_types}, extra: {event_types - expected}'
 
 
 async def test_collect_completed_persisted(recorder):
     """collect_completed event stores task_id, duration, and output_message_count."""
-    recorder.record_collect_completed(
-        task_id='t-cc', partition=2, duration=0.123, output_message_count=5
-    )
+    recorder.record_collect_completed(task_id='t-cc', partition=2, duration=0.123, output_message_count=5)
     await recorder._flush()
 
     events = await recorder.get_events(event_type='collect_completed')
@@ -687,16 +681,12 @@ async def test_rotation_new_db_has_schema(tmp_path):
 
     async with aiosqlite.connect(new_path) as db:
         # verify events table exists
-        async with db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='events'"
-        ) as cur:
+        async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='events'") as cur:
             tables = await cur.fetchall()
             assert len(tables) == 1
 
         # verify indexes exist
-        async with db.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_events_%'"
-        ) as cur:
+        async with db.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_events_%'") as cur:
             indexes = await cur.fetchall()
             assert len(indexes) == 4  # partition_offset, ts, task_id, type
 

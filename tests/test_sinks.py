@@ -270,9 +270,7 @@ async def test_postgres_sink_connect(pg_sink_config):
     async def fake_create_pool(**kwargs):
         return mock_pool
 
-    with patch(
-        'drakkar.sinks.postgres.asyncpg.create_pool', side_effect=fake_create_pool
-    ) as mock_cp:
+    with patch('drakkar.sinks.postgres.asyncpg.create_pool', side_effect=fake_create_pool) as mock_cp:
         await sink.connect()
         mock_cp.assert_called_once_with(
             dsn='postgresql://localhost/testdb',

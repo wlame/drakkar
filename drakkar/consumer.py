@@ -83,9 +83,7 @@ class KafkaConsumer:
         if self._on_revoke_cb:
             self._on_revoke_cb(partition_ids)
 
-    async def poll_batch(
-        self, max_messages: int | None = None, timeout: float = 1.0
-    ) -> list[SourceMessage]:
+    async def poll_batch(self, max_messages: int | None = None, timeout: float = 1.0) -> list[SourceMessage]:
         """Poll up to max_messages from Kafka."""
         count = max_messages or self._config.max_poll_records
         raw_messages = await self._consumer.consume(
@@ -116,8 +114,7 @@ class KafkaConsumer:
     async def commit(self, offsets: dict[int, int]) -> None:
         """Commit offsets for specific partitions."""
         topic_partitions = [
-            TopicPartition(self._config.source_topic, partition, offset)
-            for partition, offset in offsets.items()
+            TopicPartition(self._config.source_topic, partition, offset) for partition, offset in offsets.items()
         ]
         await self._consumer.commit(offsets=topic_partitions, asynchronous=False)
         for partition_id in offsets:
@@ -172,11 +169,7 @@ class KafkaConsumer:
                 tp = TopicPartition(self._config.source_topic, pid)
                 _low, high = await self._consumer.get_watermark_offsets(tp)
                 committed_list = await self._consumer.committed([tp])
-                committed_offset = (
-                    committed_list[0].offset
-                    if committed_list and committed_list[0].offset >= 0
-                    else 0
-                )
+                committed_offset = committed_list[0].offset if committed_list and committed_list[0].offset >= 0 else 0
                 result[pid] = {
                     'committed': committed_offset,
                     'high_watermark': high,

@@ -180,9 +180,7 @@ async def test_app_on_assign_creates_processors(test_config):
 
     from drakkar.executor import ExecutorPool
 
-    app._executor_pool = ExecutorPool(
-        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
-    )
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
     app._consumer = MagicMock()
     app._consumer.commit = AsyncMock()
 
@@ -198,9 +196,7 @@ async def test_app_on_revoke_removes_processors(test_config):
 
     from drakkar.executor import ExecutorPool
 
-    app._executor_pool = ExecutorPool(
-        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
-    )
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
     app._consumer = AsyncMock()
 
     app._on_assign([0, 1, 2])
@@ -348,9 +344,7 @@ async def test_app_shutdown_drains_executors(test_config):
 
     from drakkar.executor import ExecutorPool
 
-    app._executor_pool = ExecutorPool(
-        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
-    )
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
     app._on_assign([0])
     await asyncio.sleep(0.1)
 
@@ -373,9 +367,7 @@ async def test_stop_processor_handles_arrange_error(test_config):
     app = DrakkarApp(handler=BrokenArrangeHandler(), config=test_config)
     from drakkar.executor import ExecutorPool
 
-    app._executor_pool = ExecutorPool(
-        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
-    )
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
     app._consumer = AsyncMock()
 
     app._on_assign([0])
@@ -399,9 +391,7 @@ async def test_safe_call_catches_handler_errors(test_config):
     app = DrakkarApp(handler=ErrorOnAssignHandler(), config=test_config)
     from drakkar.executor import ExecutorPool
 
-    app._executor_pool = ExecutorPool(
-        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
-    )
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
     app._consumer = MagicMock()
     app._consumer.commit = AsyncMock()
 

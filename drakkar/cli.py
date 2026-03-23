@@ -45,9 +45,7 @@ def merge_debug() -> None:
         description='Merge Drakkar debug SQLite files into one chronological database',
     )
     parser.add_argument('paths', nargs='+', help='DB files, glob patterns, or directories')
-    parser.add_argument(
-        '-o', '--output', default='merged-debug.db', help='Output file (default: merged-debug.db)'
-    )
+    parser.add_argument('-o', '--output', default='merged-debug.db', help='Output file (default: merged-debug.db)')
     args = parser.parse_args()
 
     files = _find_db_files(args.paths)

@@ -90,9 +90,7 @@ async def test_execute_concurrency_limit():
         max_workers=2,
         task_timeout_seconds=10,
     )
-    tasks = [
-        make_task(task_id=f't{i}', args=['-c', 'import time; time.sleep(0.2)']) for i in range(4)
-    ]
+    tasks = [make_task(task_id=f't{i}', args=['-c', 'import time; time.sleep(0.2)']) for i in range(4)]
 
     max_active = 0
 

@@ -211,10 +211,7 @@ async def test_processing_tracks_executor_task_started_completed():
 
     class SimpleHandler(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
-            return [
-                ExecutorTask(task_id=f'm-{m.offset}', args=['hi'], source_offsets=[m.offset])
-                for m in messages
-            ]
+            return [ExecutorTask(task_id=f'm-{m.offset}', args=['hi'], source_offsets=[m.offset]) for m in messages]
 
     proc = PartitionProcessor(
         partition_id=88,
@@ -275,10 +272,7 @@ async def test_handler_arrange_duration_observed():
     class SlowArrangeHandler(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
             await asyncio.sleep(0.01)
-            return [
-                ExecutorTask(task_id=f'a-{m.offset}', args=['x'], source_offsets=[m.offset])
-                for m in messages
-            ]
+            return [ExecutorTask(task_id=f'a-{m.offset}', args=['x'], source_offsets=[m.offset]) for m in messages]
 
     proc = PartitionProcessor(
         partition_id=90,
@@ -300,10 +294,7 @@ async def test_handler_collect_duration_observed():
 
     class CollectHandler(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
-            return [
-                ExecutorTask(task_id=f'c-{m.offset}', args=['x'], source_offsets=[m.offset])
-                for m in messages
-            ]
+            return [ExecutorTask(task_id=f'c-{m.offset}', args=['x'], source_offsets=[m.offset]) for m in messages]
 
         async def collect(self, result):
             from pydantic import BaseModel as BM
@@ -369,10 +360,7 @@ async def test_window_complete_observes_batch_duration():
 
     class SimpleHandler(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
-            return [
-                ExecutorTask(task_id=f'bd-{m.offset}', args=['x'], source_offsets=[m.offset])
-                for m in messages
-            ]
+            return [ExecutorTask(task_id=f'bd-{m.offset}', args=['x'], source_offsets=[m.offset]) for m in messages]
 
     proc = PartitionProcessor(
         partition_id=93,
@@ -394,10 +382,7 @@ async def test_executor_duration_observed_on_completion():
 
     class SimpleHandler(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
-            return [
-                ExecutorTask(task_id=f'ed-{m.offset}', args=['x'], source_offsets=[m.offset])
-                for m in messages
-            ]
+            return [ExecutorTask(task_id=f'ed-{m.offset}', args=['x'], source_offsets=[m.offset]) for m in messages]
 
     proc = PartitionProcessor(
         partition_id=94,
@@ -419,10 +404,7 @@ async def test_offset_lag_updated_on_window_complete():
 
     class SimpleHandler(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
-            return [
-                ExecutorTask(task_id=f'ol-{m.offset}', args=['x'], source_offsets=[m.offset])
-                for m in messages
-            ]
+            return [ExecutorTask(task_id=f'ol-{m.offset}', args=['x'], source_offsets=[m.offset]) for m in messages]
 
     proc = PartitionProcessor(
         partition_id=95,
@@ -494,9 +476,7 @@ async def test_on_assign_sets_assigned_partitions_gauge():
     handler = BaseDrakkarHandler()
     app = DrakkarApp(handler=handler, config=config)
     app._consumer = MagicMock()
-    app._executor_pool = ExecutorPool(
-        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
-    )
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
 
     app._on_assign([10, 11, 12])
 
@@ -518,9 +498,7 @@ async def test_on_revoke_decreases_assigned_partitions_gauge():
     handler = BaseDrakkarHandler()
     app = DrakkarApp(handler=handler, config=config)
     app._consumer = AsyncMock()
-    app._executor_pool = ExecutorPool(
-        binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10
-    )
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
 
     app._on_assign([20, 21, 22])
     assert gauge_val(assigned_partitions) == len(app.processors)

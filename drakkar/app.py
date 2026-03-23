@@ -59,9 +59,7 @@ class DrakkarApp:
             self._config = load_config(config_path)
 
         self._handler = handler
-        self._worker_id = (
-            worker_id or os.environ.get(self._config.worker_name_env, '') or f'drakkar-{id(self):x}'
-        )
+        self._worker_id = worker_id or os.environ.get(self._config.worker_name_env, '') or f'drakkar-{id(self):x}'
         self._start_time = time.monotonic()
 
         self._executor_pool: ExecutorPool | None = None
@@ -139,9 +137,7 @@ class DrakkarApp:
 
         # validate at least one sink is configured
         if self._config.sinks.is_empty:
-            raise SinkNotConfiguredError(
-                'No sinks configured. Add at least one sink to the sinks: section in config.'
-            )
+            raise SinkNotConfiguredError('No sinks configured. Add at least one sink to the sinks: section in config.')
 
         self._executor_pool = ExecutorPool(
             binary_path=self._config.executor.binary_path,
@@ -309,9 +305,7 @@ class DrakkarApp:
         try:
             processor._running = False
             try:
-                await asyncio.wait_for(
-                    processor.drain(), timeout=self._config.executor.drain_timeout_seconds
-                )
+                await asyncio.wait_for(processor.drain(), timeout=self._config.executor.drain_timeout_seconds)
             except TimeoutError:
                 pass
             committable = processor.offset_tracker.committable()
@@ -380,14 +374,10 @@ class DrakkarApp:
 
         await log.ainfo('draining_executors', category='lifecycle', timeout=5)
         try:
-            await asyncio.wait_for(
-                self._drain_all_processors(), timeout=self._config.executor.drain_timeout_seconds
-            )
+            await asyncio.wait_for(self._drain_all_processors(), timeout=self._config.executor.drain_timeout_seconds)
             await log.ainfo('executors_drained', category='lifecycle')
         except TimeoutError:
-            await log.awarning(
-                'drain_timeout', category='lifecycle', msg='some executors did not finish in 5s'
-            )
+            await log.awarning('drain_timeout', category='lifecycle', msg='some executors did not finish in 5s')
 
         for processor in list(self._processors.values()):
             committable = processor.offset_tracker.committable()
@@ -427,9 +417,7 @@ class DrakkarApp:
         drain_tasks = [
             processor.drain()
             for processor in self._processors.values()
-            if processor.queue_size > 0
-            or processor.offset_tracker.has_pending()
-            or processor.inflight_count > 0
+            if processor.queue_size > 0 or processor.offset_tracker.has_pending() or processor.inflight_count > 0
         ]
         if drain_tasks:
             await asyncio.gather(*drain_tasks)

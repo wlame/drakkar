@@ -18,9 +18,7 @@ def kafka_config() -> KafkaConfig:
     )
 
 
-def make_mock_message(
-    topic='test-source', partition=0, offset=0, key=b'k', value=b'v', timestamp=1000
-):
+def make_mock_message(topic='test-source', partition=0, offset=0, key=b'k', value=b'v', timestamp=1000):
     msg = MagicMock()
     msg.error.return_value = None
     msg.topic.return_value = topic
@@ -154,9 +152,7 @@ async def test_on_assign_callback(mock_cls, kafka_config):
     assign_cb = call_kwargs['on_assign']
     from confluent_kafka import TopicPartition
 
-    await assign_cb(
-        mock_inner, [TopicPartition('test-source', 0), TopicPartition('test-source', 1)]
-    )
+    await assign_cb(mock_inner, [TopicPartition('test-source', 0), TopicPartition('test-source', 1)])
     assert assigned == [0, 1]
 
 

@@ -122,8 +122,7 @@ class SinkManager:
         key = (sink_type, sink_name)
         if key not in self._sinks:
             raise SinkNotConfiguredError(
-                f'Sink {sink_type!r}/{sink_name!r} not configured, '
-                f'but collect() returned a payload targeting it'
+                f'Sink {sink_type!r}/{sink_name!r} not configured, but collect() returned a payload targeting it'
             )
         return self._sinks[key]
 

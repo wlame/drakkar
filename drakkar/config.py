@@ -119,9 +119,7 @@ class SinksConfig(BaseModel):
     @property
     def is_empty(self) -> bool:
         """True if no sinks of any type are configured."""
-        return not any(
-            [self.kafka, self.postgres, self.mongo, self.http, self.redis, self.filesystem]
-        )
+        return not any([self.kafka, self.postgres, self.mongo, self.http, self.redis, self.filesystem])
 
     def summary(self) -> dict[str, list[str]]:
         """Return a dict of sink type → list of instance names.

@@ -86,8 +86,8 @@ class ExecutorPool:
         binary = task.binary_path or self._binary_path
         if not binary:
             msg = (
-                "No binary_path configured: neither executor config nor "
-                "ExecutorTask.binary_path provides a path to the executable."
+                'No binary_path configured: neither executor config nor '
+                'ExecutorTask.binary_path provides a path to the executable.'
             )
             raise ExecutorTaskError(
                 error=ExecutorError(task=task, exception=msg),

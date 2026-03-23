@@ -184,9 +184,7 @@ def create_debug_app(
             event_type='task_failed',
             limit=1000,
         )
-        recent_finished = sorted(finished + failed, key=lambda e: e.get('ts', 0), reverse=True)[
-            : config.max_ui_rows
-        ]
+        recent_finished = sorted(finished + failed, key=lambda e: e.get('ts', 0), reverse=True)[: config.max_ui_rows]
 
         # active arrange() calls
         arranging = []
@@ -210,15 +208,9 @@ def create_debug_app(
                 'pending_tasks': pending_tasks,
                 'recent_finished': recent_finished,
                 'arranging': arranging,
-                'pool_active': drakkar_app._executor_pool.active_count
-                if drakkar_app._executor_pool
-                else 0,
-                'pool_waiting': drakkar_app._executor_pool.waiting_count
-                if drakkar_app._executor_pool
-                else 0,
-                'pool_max': drakkar_app._executor_pool.max_workers
-                if drakkar_app._executor_pool
-                else 0,
+                'pool_active': drakkar_app._executor_pool.active_count if drakkar_app._executor_pool else 0,
+                'pool_waiting': drakkar_app._executor_pool.waiting_count if drakkar_app._executor_pool else 0,
+                'pool_max': drakkar_app._executor_pool.max_workers if drakkar_app._executor_pool else 0,
                 'max_ui_rows': config.max_ui_rows,
             },
         )
@@ -325,9 +317,7 @@ def create_debug_app(
         """Get events as JSON. Supports multiple partitions/types as comma-separated."""
         await recorder._flush()
         part_list = [int(p) for p in partitions.split(',') if p.strip()] if partitions else None
-        type_list = (
-            [t.strip() for t in event_types.split(',') if t.strip()] if event_types else None
-        )
+        type_list = [t.strip() for t in event_types.split(',') if t.strip()] if event_types else None
 
         if not recorder._db:
             return JSONResponse([])
@@ -491,9 +481,7 @@ def create_debug_app(
                     frames = task.get_stack(limit=5)
                     stack_lines = []
                     for frame in frames:
-                        stack_lines.append(
-                            f'{frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}'
-                        )
+                        stack_lines.append(f'{frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}')
                     stuck.append(
                         {
                             'name': task.get_name(),

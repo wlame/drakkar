@@ -150,11 +150,7 @@ class PartitionProcessor:
 
     async def drain(self) -> None:
         """Wait for all in-flight work and queued messages to complete."""
-        while (
-            self._queue.qsize() > 0
-            or self._offset_tracker.has_pending()
-            or self._inflight_count > 0
-        ):
+        while self._queue.qsize() > 0 or self._offset_tracker.has_pending() or self._inflight_count > 0:
             await asyncio.sleep(0.05)
 
     async def _run(self) -> None:
@@ -274,9 +270,7 @@ class PartitionProcessor:
             self._active_tasks.add(t)
             t.add_done_callback(self._active_tasks.discard)
 
-    async def _execute_and_track(
-        self, task: ExecutorTask, window: Window, retry_count: int = 0
-    ) -> None:
+    async def _execute_and_track(self, task: ExecutorTask, window: Window, retry_count: int = 0) -> None:
         log = logger.bind(
             category='executor',
             partition=self._partition_id,
@@ -390,9 +384,7 @@ class PartitionProcessor:
             batch_duration.observe(duration)
 
             wc_start = time.monotonic()
-            on_complete_result = await self._handler.on_window_complete(
-                window.results, window.source_messages
-            )
+            on_complete_result = await self._handler.on_window_complete(window.results, window.source_messages)
             handler_duration.labels(hook='on_window_complete').observe(time.monotonic() - wc_start)
             if on_complete_result and self._on_collect:
                 await self._on_collect(on_complete_result, self._partition_id)
@@ -400,9 +392,7 @@ class PartitionProcessor:
             for msg in window.source_messages:
                 self._offset_tracker.complete(msg.offset)
 
-            offset_lag.labels(partition=str(self._partition_id)).set(
-                self._offset_tracker.pending_count
-            )
+            offset_lag.labels(partition=str(self._partition_id)).set(self._offset_tracker.pending_count)
 
             await self._try_commit()
 
