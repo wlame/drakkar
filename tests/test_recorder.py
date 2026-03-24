@@ -1,6 +1,7 @@
 """Tests for Drakkar flight recorder."""
 
 import os
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
@@ -13,7 +14,7 @@ from drakkar.models import (
     KafkaPayload,
     SourceMessage,
 )
-from drakkar.recorder import EventRecorder, _list_db_files, _make_db_path
+from drakkar.recorder import SCHEMA_WORKER_CONFIG, EventRecorder, _list_db_files, _live_link_path, _make_db_path
 
 
 class _RecData(BaseModel):
@@ -790,3 +791,638 @@ async def test_sink_events_in_all_event_types(recorder):
     event_types = {e['event'] for e in all_events}
     assert 'sink_delivered' in event_types
     assert 'sink_error' in event_types
+
+
+# --- Granular schema creation flags ---
+
+
+async def _table_exists(db, table_name: str) -> bool:
+    async with db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        [table_name],
+    ) as cur:
+        return await cur.fetchone() is not None
+
+
+async def test_schema_all_tables_created_by_default(tmp_path):
+    """With default config all three tables are created."""
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    assert await _table_exists(rec._db, 'events')
+    assert await _table_exists(rec._db, 'worker_config')
+    assert await _table_exists(rec._db, 'worker_state')
+    await rec.stop()
+
+
+async def test_schema_events_only(tmp_path):
+    """store_config=False, store_state=False → only events table."""
+    config = make_debug_config(tmp_path, store_config=False, store_state=False)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    assert await _table_exists(rec._db, 'events')
+    assert not await _table_exists(rec._db, 'worker_config')
+    assert not await _table_exists(rec._db, 'worker_state')
+    await rec.stop()
+
+
+async def test_schema_config_only(tmp_path):
+    """store_events=False, store_state=False → only worker_config table."""
+    config = make_debug_config(tmp_path, store_events=False, store_state=False)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    assert not await _table_exists(rec._db, 'events')
+    assert await _table_exists(rec._db, 'worker_config')
+    assert not await _table_exists(rec._db, 'worker_state')
+    await rec.stop()
+
+
+async def test_schema_state_only(tmp_path):
+    """store_events=False, store_config=False → only worker_state table."""
+    config = make_debug_config(tmp_path, store_events=False, store_config=False)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    assert not await _table_exists(rec._db, 'events')
+    assert not await _table_exists(rec._db, 'worker_config')
+    assert await _table_exists(rec._db, 'worker_state')
+    await rec.stop()
+
+
+async def test_schema_none_creates_db_but_no_tables(tmp_path):
+    """All store flags False → DB file exists but has no application tables."""
+    config = make_debug_config(tmp_path, store_events=False, store_config=False, store_state=False)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    assert rec._db is not None
+    assert os.path.exists(rec.db_path)
+    assert not await _table_exists(rec._db, 'events')
+    assert not await _table_exists(rec._db, 'worker_config')
+    assert not await _table_exists(rec._db, 'worker_state')
+    await rec.stop()
+
+
+async def test_schema_no_db_dir_means_no_db(tmp_path):
+    """Empty db_dir → no DB opened at all, recorder runs memory-only."""
+    config = make_debug_config(tmp_path, db_dir='')
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    assert rec._db is None
+    assert rec.db_path == ''
+    await rec.stop()
+
+
+# --- write_config (worker_config table) ---
+
+
+def _make_drakkar_config():
+    """Create a minimal DrakkarConfig for testing write_config."""
+    from drakkar.config import DrakkarConfig
+
+    return DrakkarConfig(
+        kafka={'brokers': 'kafka:9092', 'source_topic': 'test-topic', 'consumer_group': 'test-group'},
+        executor={'binary_path': '/usr/bin/test', 'max_workers': 4, 'task_timeout_seconds': 60, 'max_retries': 2, 'window_size': 5},
+        sinks={'kafka': {'out': {'topic': 'results'}}},
+    )
+
+
+async def test_write_config_populates_single_row(tmp_path):
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    drakkar_cfg = _make_drakkar_config()
+    await rec.write_config(drakkar_cfg)
+
+    import json
+
+    async with rec._db.execute('SELECT * FROM worker_config WHERE id = 1') as cur:
+        columns = [d[0] for d in cur.description]
+        row = await cur.fetchone()
+    assert row is not None
+    data = dict(zip(columns, row, strict=False))
+    assert data['worker_name'] == WORKER_NAME
+    assert data['kafka_brokers'] == 'kafka:9092'
+    assert data['source_topic'] == 'test-topic'
+    assert data['consumer_group'] == 'test-group'
+    assert data['binary_path'] == '/usr/bin/test'
+    assert data['max_workers'] == 4
+    sinks = json.loads(data['sinks_json'])
+    assert 'kafka' in sinks
+    await rec.stop()
+
+
+async def test_write_config_captures_env_vars(tmp_path, monkeypatch):
+    monkeypatch.setenv('MY_VAR', 'hello')
+    config = make_debug_config(tmp_path, expose_env_vars=['MY_VAR', 'MISSING_VAR'])
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    await rec.write_config(_make_drakkar_config())
+
+    import json
+
+    async with rec._db.execute('SELECT env_vars_json FROM worker_config WHERE id = 1') as cur:
+        row = await cur.fetchone()
+    env = json.loads(row[0])
+    assert env['MY_VAR'] == 'hello'
+    assert env['MISSING_VAR'] == ''
+    await rec.stop()
+
+
+async def test_write_config_idempotent(tmp_path):
+    """Calling write_config twice replaces the row (INSERT OR REPLACE)."""
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    await rec.write_config(_make_drakkar_config())
+    await rec.write_config(_make_drakkar_config())
+
+    async with rec._db.execute('SELECT COUNT(*) FROM worker_config') as cur:
+        row = await cur.fetchone()
+    assert row[0] == 1
+    await rec.stop()
+
+
+async def test_write_config_skipped_when_store_config_false(tmp_path):
+    config = make_debug_config(tmp_path, store_config=False)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    await rec.write_config(_make_drakkar_config())
+    # worker_config table doesn't exist, but no error
+    assert not await _table_exists(rec._db, 'worker_config')
+    await rec.stop()
+
+
+# --- worker_state sync ---
+
+
+async def test_sync_state_writes_single_row(tmp_path):
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.set_state_provider(lambda: {
+        'uptime_seconds': 42.5,
+        'assigned_partitions': [0, 1, 2],
+        'partition_count': 3,
+        'pool_active': 2,
+        'pool_max': 8,
+        'total_queued': 10,
+        'paused': False,
+    })
+
+    # increment some counters
+    rec._counters['consumed'] = 100
+    rec._counters['completed'] = 50
+
+    await rec._sync_state()
+
+    import json
+
+    async with rec._db.execute('SELECT * FROM worker_state WHERE id = 1') as cur:
+        columns = [d[0] for d in cur.description]
+        row = await cur.fetchone()
+    assert row is not None
+    data = dict(zip(columns, row, strict=False))
+    assert data['uptime_seconds'] == 42.5
+    assert json.loads(data['assigned_partitions']) == [0, 1, 2]
+    assert data['partition_count'] == 3
+    assert data['pool_active'] == 2
+    assert data['consumed_count'] == 100
+    assert data['completed_count'] == 50
+    assert data['paused'] == 0
+    await rec.stop()
+
+
+async def test_sync_state_overwrites_previous(tmp_path):
+    """Second sync replaces the row, not appends."""
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    rec.set_state_provider(lambda: {'uptime_seconds': 1.0})
+
+    await rec._sync_state()
+    await rec._sync_state()
+
+    async with rec._db.execute('SELECT COUNT(*) FROM worker_state') as cur:
+        row = await cur.fetchone()
+    assert row[0] == 1
+    await rec.stop()
+
+
+async def test_sync_state_skipped_when_store_state_false(tmp_path):
+    config = make_debug_config(tmp_path, store_state=False)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    rec.set_state_provider(lambda: {'uptime_seconds': 1.0})
+
+    await rec._sync_state()  # should not raise
+    assert not await _table_exists(rec._db, 'worker_state')
+    await rec.stop()
+
+
+async def test_sync_state_without_provider(tmp_path):
+    """_sync_state works even without a state provider (uses empty dict)."""
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    await rec._sync_state()
+
+    async with rec._db.execute('SELECT uptime_seconds FROM worker_state WHERE id = 1') as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] == 0  # default when no provider
+    await rec.stop()
+
+
+# --- In-memory counters ---
+
+
+async def test_counters_increment_with_store_events_true(tmp_path):
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_consumed(make_msg(offset=0))
+    rec.record_consumed(make_msg(offset=1))
+    rec.record_task_completed(make_result('t1'), partition=0)
+    rec.record_task_failed(make_task('t2'), ExecutorError(task=make_task('t2'), exit_code=1, stderr='err'), partition=0)
+    rec.record_produced(KafkaPayload(key=b'k', data=_RecData()), source_partition=0)
+    rec.record_committed(partition=0, offset=2)
+
+    assert rec.counters == {
+        'consumed': 2,
+        'completed': 1,
+        'failed': 1,
+        'produced': 1,
+        'committed': 1,
+    }
+    await rec.stop()
+
+
+async def test_counters_increment_with_store_events_false(tmp_path):
+    """Counters track regardless of store_events flag."""
+    config = make_debug_config(tmp_path, store_events=False)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_consumed(make_msg(offset=0))
+    rec.record_consumed(make_msg(offset=1))
+    rec.record_consumed(make_msg(offset=2))
+    rec.record_task_completed(make_result('t1'), partition=0)
+    rec.record_committed(partition=0, offset=3)
+
+    assert rec.counters['consumed'] == 3
+    assert rec.counters['completed'] == 1
+    assert rec.counters['committed'] == 1
+    await rec.stop()
+
+
+async def test_counters_survive_flush(tmp_path):
+    """Counters are in-memory, not reset by flush."""
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_consumed(make_msg(offset=0))
+    await rec._flush()
+    rec.record_consumed(make_msg(offset=1))
+    await rec._flush()
+
+    assert rec.counters['consumed'] == 2
+    await rec.stop()
+
+
+# --- store_events=False behavior ---
+
+
+async def test_store_events_false_queries_return_empty(tmp_path):
+    """All query methods return empty when store_events is disabled."""
+    config = make_debug_config(tmp_path, store_events=False)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_consumed(make_msg(offset=0))
+    await rec._flush()
+
+    assert await rec.get_events() == []
+    assert await rec.get_trace(partition=0, msg_offset=0) == []
+    assert await rec.get_partition_summary() == []
+    assert await rec.get_active_tasks() == []
+    stats = await rec.get_stats()
+    assert stats == {'total_events': 0}
+    await rec.stop()
+
+
+async def test_store_events_false_no_events_table(tmp_path):
+    config = make_debug_config(tmp_path, store_events=False)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    assert not await _table_exists(rec._db, 'events')
+    await rec.stop()
+
+
+async def test_store_events_false_flush_clears_buffer(tmp_path):
+    """Buffer is cleared on flush even without events table."""
+    config = make_debug_config(tmp_path, store_events=False)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_consumed(make_msg(offset=0))
+    rec.record_consumed(make_msg(offset=1))
+    assert len(rec._buffer) == 2
+
+    await rec._flush()
+    assert len(rec._buffer) == 0
+    await rec.stop()
+
+
+async def test_store_events_false_ws_broadcast_still_works(tmp_path):
+    """Events are broadcast to WS subscribers even without persistence."""
+    config = make_debug_config(tmp_path, store_events=False)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    q = rec.subscribe()
+    rec.record_consumed(make_msg(partition=7, offset=99))
+
+    event = q.get_nowait()
+    assert event['event'] == 'consumed'
+    assert event['partition'] == 7
+    rec.unsubscribe(q)
+    await rec.stop()
+
+
+async def test_store_events_false_no_flush_task(tmp_path):
+    """Flush loop task is not started when store_events=False."""
+    config = make_debug_config(tmp_path, store_events=False)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    assert rec._flush_task is None
+    await rec.stop()
+
+
+# --- Autodiscovery (discover_workers) ---
+
+
+async def test_discover_workers_finds_other_worker(tmp_path):
+    """discover_workers reads worker_config from another worker's live DB."""
+    import aiosqlite
+
+    # create a fake other worker's DB
+    other_db_path = tmp_path / 'other-worker-2026-03-24__10_00_00.db'
+    async with aiosqlite.connect(str(other_db_path)) as db:
+        await db.executescript(SCHEMA_WORKER_CONFIG)
+        await db.execute(
+            """INSERT INTO worker_config
+               (id, worker_name, ip_address, debug_port, kafka_brokers, source_topic,
+                consumer_group, binary_path, max_workers, task_timeout_seconds,
+                max_retries, window_size, sinks_json, env_vars_json, created_at)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ['other-worker', '10.0.0.2', 8080, 'kafka:9092', 'test', 'grp',
+             '/bin/test', 4, 60, 2, 5, '{}', '{}', 1000.0],
+        )
+        await db.commit()
+
+    # create live symlink for the other worker
+    link = _live_link_path(str(tmp_path), 'other-worker')
+    os.symlink(other_db_path.name, link)
+
+    # start our recorder
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    workers = await rec.discover_workers()
+    assert len(workers) == 1
+    assert workers[0]['worker_name'] == 'other-worker'
+    assert workers[0]['ip_address'] == '10.0.0.2'
+    assert workers[0]['debug_port'] == 8080
+    await rec.stop()
+
+
+async def test_discover_workers_skips_own_symlink(tmp_path):
+    """discover_workers does not include our own worker."""
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    await rec.write_config(_make_drakkar_config())
+
+    # our own live symlink exists
+    assert os.path.islink(_live_link_path(str(tmp_path), WORKER_NAME))
+
+    workers = await rec.discover_workers()
+    assert len(workers) == 0
+    await rec.stop()
+
+
+async def test_discover_workers_skips_missing_config_table(tmp_path):
+    """If another worker's DB has no worker_config table, it's skipped."""
+    import aiosqlite
+
+    # create a DB without worker_config
+    other_db = tmp_path / 'no-config-worker-2026-03-24__10_00_00.db'
+    async with aiosqlite.connect(str(other_db)) as db:
+        await db.execute('CREATE TABLE IF NOT EXISTS dummy (id INTEGER)')
+        await db.commit()
+
+    link = _live_link_path(str(tmp_path), 'no-config-worker')
+    os.symlink(other_db.name, link)
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    workers = await rec.discover_workers()
+    assert len(workers) == 0
+    await rec.stop()
+
+
+async def test_discover_workers_handles_broken_symlink(tmp_path):
+    """Broken symlink (target deleted) is handled gracefully."""
+    link = _live_link_path(str(tmp_path), 'ghost-worker')
+    os.symlink('nonexistent-file.db', link)
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    workers = await rec.discover_workers()
+    assert len(workers) == 0
+    await rec.stop()
+
+
+async def test_discover_workers_empty_when_store_config_false(tmp_path):
+    """discover_workers returns empty when store_config is disabled."""
+    config = make_debug_config(tmp_path, store_config=False)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    workers = await rec.discover_workers()
+    assert workers == []
+    await rec.stop()
+
+
+async def test_discover_workers_empty_when_no_db_dir():
+    """discover_workers returns empty when db_dir is empty."""
+    config = DebugConfig(enabled=True, db_dir='')
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+
+    workers = await rec.discover_workers()
+    assert workers == []
+
+
+async def test_discover_workers_ignores_non_symlink_files(tmp_path):
+    """Regular files matching *-live.db are not treated as workers."""
+    # create a regular file (not a symlink) that looks like a live link
+    fake_link = _live_link_path(str(tmp_path), 'fake-worker')
+    Path(fake_link).write_text('not a symlink')
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    workers = await rec.discover_workers()
+    assert len(workers) == 0
+    await rec.stop()
+
+
+# --- Rotation compatibility with new tables ---
+
+
+async def test_rotation_recreates_all_tables(tmp_path):
+    """After rotation, all configured tables exist in the new DB."""
+    import asyncio
+
+    config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    await asyncio.sleep(1.1)
+    await rec._rotate()
+
+    assert await _table_exists(rec._db, 'events')
+    assert await _table_exists(rec._db, 'worker_config')
+    assert await _table_exists(rec._db, 'worker_state')
+    await rec.stop()
+
+
+async def test_rotation_config_rewrite(tmp_path):
+    """write_config after rotation writes to the new DB file."""
+    import asyncio
+
+    config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    await rec.write_config(_make_drakkar_config())
+    old_path = rec.db_path
+
+    await asyncio.sleep(1.1)
+    await rec._rotate()
+    new_path = rec.db_path
+    assert old_path != new_path
+
+    # write config to new DB
+    await rec.write_config(_make_drakkar_config())
+
+    async with rec._db.execute('SELECT worker_name FROM worker_config WHERE id = 1') as cur:
+        row = await cur.fetchone()
+    assert row[0] == WORKER_NAME
+    await rec.stop()
+
+
+async def test_rotation_state_sync_uses_new_db(tmp_path):
+    """_sync_state after rotation writes to the new DB."""
+    import asyncio
+
+    config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    rec.set_state_provider(lambda: {'uptime_seconds': 99.0})
+
+    await asyncio.sleep(1.1)
+    await rec._rotate()
+
+    rec._counters['consumed'] = 42
+    await rec._sync_state()
+
+    async with rec._db.execute('SELECT consumed_count FROM worker_state WHERE id = 1') as cur:
+        row = await cur.fetchone()
+    assert row[0] == 42
+    await rec.stop()
+
+
+async def test_rotation_respects_granular_flags(tmp_path):
+    """Rotation with store_events=False still creates config/state tables."""
+    import asyncio
+
+    config = make_debug_config(
+        tmp_path,
+        store_events=False,
+        store_config=True,
+        store_state=True,
+        retention_hours=999,
+        retention_max_events=100_000,
+    )
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    await asyncio.sleep(1.1)
+    await rec._rotate()
+
+    assert not await _table_exists(rec._db, 'events')
+    assert await _table_exists(rec._db, 'worker_config')
+    assert await _table_exists(rec._db, 'worker_state')
+    await rec.stop()
+
+
+# --- Stop flushes state one final time ---
+
+
+async def test_stop_syncs_state_before_shutdown(tmp_path):
+    """Graceful stop writes final state snapshot."""
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    rec.set_state_provider(lambda: {'uptime_seconds': 77.0})
+    rec._counters['consumed'] = 999
+
+    db_path = rec.db_path
+    await rec.stop()
+
+    # verify by reopening the DB
+    import aiosqlite
+
+    async with (
+        aiosqlite.connect(db_path) as db,
+        db.execute('SELECT consumed_count, uptime_seconds FROM worker_state WHERE id = 1') as cur,
+    ):
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] == 999
+    assert row[1] == 77.0
+
+
+async def test_stop_removes_live_link(tmp_path):
+    """Graceful stop removes the -live.db symlink."""
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    link = _live_link_path(str(tmp_path), WORKER_NAME)
+    assert os.path.islink(link)
+
+    await rec.stop()
+    assert not os.path.exists(link)

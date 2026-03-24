@@ -370,3 +370,24 @@ async def test_sinks_nav_link(client):
     """Sinks link appears in the navigation bar."""
     resp = await client.get('/')
     assert 'href="/sinks"' in resp.text
+
+
+# --- Workers autodiscovery API ---
+
+
+async def test_api_workers_returns_json(client, mock_recorder):
+    mock_recorder.discover_workers.return_value = [
+        {'worker_name': 'worker-2', 'ip_address': '10.0.0.2', 'debug_port': 8080},
+    ]
+    resp = await client.get('/api/workers')
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]['worker_name'] == 'worker-2'
+
+
+async def test_api_workers_empty(client, mock_recorder):
+    mock_recorder.discover_workers.return_value = []
+    resp = await client.get('/api/workers')
+    assert resp.status_code == 200
+    assert resp.json() == []
