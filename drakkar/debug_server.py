@@ -582,6 +582,14 @@ def create_debug_app(
             }
         )
 
+    # --- Workers autodiscovery API ---
+
+    @app.get('/api/workers')
+    async def api_workers():
+        """Discover other live workers sharing the same db_dir."""
+        workers = await recorder.discover_workers()
+        return JSONResponse(workers)
+
     # --- WebSocket endpoint for live event streaming ---
 
     @app.websocket('/ws')

@@ -53,8 +53,19 @@
                 {% endfor %}
             </div>
             {% endif %}
-            <div class="text-sm text-gray-500">
-                <span class="font-mono">{{ worker_id }}</span>
+            <div class="flex items-center gap-3">
+                <div class="relative" id="worker-switcher">
+                    <button onclick="document.getElementById('worker-dropdown').classList.toggle('hidden')"
+                            class="text-sm text-gray-400 hover:text-white font-mono flex items-center gap-1">
+                        {{ worker_id }}
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" class="opacity-50"><path d="M7 10l5 5 5-5z"/></svg>
+                    </button>
+                    <div id="worker-dropdown" class="hidden absolute right-0 mt-1 w-56 rounded shadow-lg z-50" style="background:#3d3d3d;">
+                        <div class="py-1 text-sm" id="worker-list">
+                            <div class="px-3 py-2 text-gray-500">scanning...</div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </nav>
@@ -81,6 +92,49 @@
             }
         }
     });
+    (function() {
+        var list = document.getElementById('worker-list');
+        if (!list) return;
+        function refresh() {
+            fetch('/api/workers').then(function(r) { return r.json(); }).then(function(workers) {
+                list.textContent = '';
+                if (!workers.length) {
+                    var empty = document.createElement('div');
+                    empty.className = 'px-3 py-2 text-gray-500';
+                    empty.textContent = 'no other workers';
+                    list.appendChild(empty);
+                    return;
+                }
+                workers.forEach(function(w) {
+                    var a = document.createElement('a');
+                    a.href = 'http://' + w.ip_address + ':' + w.debug_port + '/';
+                    a.className = 'block px-3 py-2 text-gray-300 hover:text-white hover:bg-gray-600';
+                    var name = document.createElement('span');
+                    name.className = 'font-mono';
+                    name.textContent = w.worker_name || '?';
+                    var addr = document.createElement('span');
+                    addr.className = 'text-gray-500 text-xs ml-2';
+                    addr.textContent = w.ip_address + ':' + w.debug_port;
+                    a.appendChild(name);
+                    a.appendChild(addr);
+                    list.appendChild(a);
+                });
+            }).catch(function() {
+                list.textContent = '';
+                var err = document.createElement('div');
+                err.className = 'px-3 py-2 text-gray-500';
+                err.textContent = 'error';
+                list.appendChild(err);
+            });
+        }
+        refresh();
+        setInterval(refresh, 10000);
+        document.addEventListener('click', function(e) {
+            if (!e.target.closest('#worker-switcher')) {
+                document.getElementById('worker-dropdown').classList.add('hidden');
+            }
+        });
+    })();
     </script>
 </body>
 </html>

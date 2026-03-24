@@ -73,6 +73,13 @@ debug:
   enabled: true
   port: 8080
   db_dir: "/shared"
+  store_events: true
+  store_config: true
+  store_state: true
+  state_sync_interval_seconds: 10
+  expose_env_vars:
+    - "WORKER_ID"
+    - "DRAKKAR_CONFIG"
   retention_hours: 24
   retention_max_events: 100000
   store_output: true

@@ -156,7 +156,9 @@ class DrakkarApp:
 
         if self._config.debug.enabled:
             self._recorder = EventRecorder(self._config.debug, worker_name=self._worker_id)
+            self._recorder.set_state_provider(self._get_worker_state)
             await self._recorder.start()
+            await self._recorder.write_config(self._config)
 
             from drakkar.debug_server import DebugServer
 
@@ -216,6 +218,18 @@ class DrakkarApp:
     def _total_queued(self) -> int:
         """Total messages buffered across all partition queues + in-flight tasks."""
         return sum(p.queue_size + p.inflight_count for p in self._processors.values())
+
+    def _get_worker_state(self) -> dict:
+        """Return current worker state for the recorder's state sync."""
+        return {
+            'uptime_seconds': time.monotonic() - self._start_time,
+            'assigned_partitions': sorted(self._processors.keys()),
+            'partition_count': len(self._processors),
+            'pool_active': self._executor_pool.active_count if self._executor_pool else 0,
+            'pool_max': self._executor_pool.max_workers if self._executor_pool else 0,
+            'total_queued': self._total_queued(),
+            'paused': self._paused,
+        }
 
     async def _poll_loop(self) -> None:
         """Main polling loop with backpressure via Kafka pause/resume."""

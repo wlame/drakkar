@@ -199,13 +199,25 @@ class DebugConfig(BaseModel):
     """Debug flight recorder and web UI settings.
 
     Set ``enabled: false`` to disable the entire debug feature.
-    Set ``db_dir: ""`` to run the debug UI without SQLite persistence
-    (events are kept in memory only, lost on restart).
+    Set ``db_dir: ""`` to run without any SQLite files on disk.
+
+    Granular persistence flags (all require ``db_dir`` to be set):
+    - ``store_events``: write processing events to the ``events`` table.
+    - ``store_config``: write worker config to ``worker_config`` (enables autodiscovery).
+    - ``store_state``: periodically dump counters to ``worker_state``.
+
+    Any combination is valid — e.g. ``store_config=true`` with everything
+    else ``false`` gives autodiscovery without event or state logging.
     """
 
     enabled: bool = True
     port: int = Field(default=8080, ge=1, le=65535)
     db_dir: str = '/tmp'
+    store_events: bool = True
+    store_config: bool = True
+    store_state: bool = True
+    state_sync_interval_seconds: int = Field(default=10, ge=1)
+    expose_env_vars: list[str] = Field(default_factory=list)
     retention_hours: int = Field(default=24, ge=1)
     retention_max_events: int = Field(default=100_000, ge=100)
     store_output: bool = True

@@ -5,8 +5,10 @@ import glob
 import json
 import os
 import queue
+import socket
 import time
 from collections import deque
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -24,7 +26,7 @@ from drakkar.models import (
 
 logger = structlog.get_logger()
 
-SCHEMA = """
+SCHEMA_EVENTS = """
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          REAL    NOT NULL,
@@ -46,6 +48,45 @@ CREATE INDEX IF NOT EXISTS idx_events_partition_offset ON events(partition, offs
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event);
+"""
+
+SCHEMA_WORKER_CONFIG = """
+CREATE TABLE IF NOT EXISTS worker_config (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    worker_name     TEXT NOT NULL,
+    ip_address      TEXT,
+    debug_port      INTEGER,
+    kafka_brokers   TEXT,
+    source_topic    TEXT,
+    consumer_group  TEXT,
+    binary_path     TEXT,
+    max_workers     INTEGER,
+    task_timeout_seconds INTEGER,
+    max_retries     INTEGER,
+    window_size     INTEGER,
+    sinks_json      TEXT,
+    env_vars_json   TEXT,
+    created_at      REAL NOT NULL
+);
+"""
+
+SCHEMA_WORKER_STATE = """
+CREATE TABLE IF NOT EXISTS worker_state (
+    id                  INTEGER PRIMARY KEY CHECK (id = 1),
+    uptime_seconds      REAL,
+    assigned_partitions TEXT,
+    partition_count     INTEGER,
+    pool_active         INTEGER,
+    pool_max            INTEGER,
+    total_queued        INTEGER,
+    consumed_count      INTEGER,
+    completed_count     INTEGER,
+    failed_count        INTEGER,
+    produced_count      INTEGER,
+    committed_count     INTEGER,
+    paused              INTEGER,
+    updated_at          REAL NOT NULL
+);
 """
 
 
@@ -75,6 +116,18 @@ def _list_db_files(db_dir: str, worker_name: str) -> list[str]:
     return files
 
 
+def detect_worker_ip() -> str:
+    """Detect the worker's outbound IP address."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('10.255.255.255', 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return '127.0.0.1'
+
+
 class EventRecorder:
     """Records processing events to timestamped SQLite database files.
 
@@ -84,6 +137,11 @@ class EventRecorder:
 
     A ``{worker_name}-live.db`` symlink points to the current database
     while the worker is running and is removed on graceful shutdown.
+
+    Which tables are created depends on config flags:
+    - ``store_events`` -> ``events`` table
+    - ``store_config`` -> ``worker_config`` table (enables autodiscovery)
+    - ``store_state`` -> ``worker_state`` table (periodic snapshots)
     """
 
     MAX_BUFFER = 50_000  # default, overridden by config.debug.max_buffer
@@ -96,23 +154,55 @@ class EventRecorder:
         self._db_path: str = ''
         self._flush_task: asyncio.Task | None = None
         self._retention_task: asyncio.Task | None = None
+        self._state_task: asyncio.Task | None = None
         self._running = False
         self._ws_subscribers: set[queue.Queue] = set()
+        self._state_provider: Callable[[], dict] | None = None
+        # In-memory counters (used for worker_state regardless of store_events)
+        self._counters = {
+            'consumed': 0,
+            'completed': 0,
+            'failed': 0,
+            'produced': 0,
+            'committed': 0,
+        }
 
     @property
     def db_path(self) -> str:
         return self._db_path
+
+    @property
+    def counters(self) -> dict[str, int]:
+        return dict(self._counters)
+
+    def set_state_provider(self, provider: Callable[[], dict]) -> None:
+        """Set callback that returns current worker state (uptime, partitions, pool)."""
+        self._state_provider = provider
+
+    async def _create_schema(self) -> None:
+        """Create tables based on config flags."""
+        if not self._db:
+            return
+        if self._config.store_events:
+            await self._db.executescript(SCHEMA_EVENTS)
+        if self._config.store_config:
+            await self._db.executescript(SCHEMA_WORKER_CONFIG)
+        if self._config.store_state:
+            await self._db.executescript(SCHEMA_WORKER_STATE)
+        await self._db.commit()
 
     async def start(self) -> None:
         self._running = True
         if self._config.db_dir:
             self._db_path = _make_db_path(self._config.db_dir, self._worker_name)
             self._db = await aiosqlite.connect(self._db_path)
-            await self._db.executescript(SCHEMA)
-            await self._db.commit()
+            await self._create_schema()
             self._update_live_link()
-            self._flush_task = asyncio.create_task(self._flush_loop())
+            if self._config.store_events:
+                self._flush_task = asyncio.create_task(self._flush_loop())
             self._retention_task = asyncio.create_task(self._retention_loop())
+            if self._config.store_state:
+                self._state_task = asyncio.create_task(self._state_sync_loop())
         await logger.ainfo(
             'recorder_started',
             category='recorder',
@@ -163,6 +253,81 @@ class EventRecorder:
         except OSError:
             pass
 
+    # --- Worker config (autodiscovery) ---
+
+    async def write_config(self, drakkar_config: 'DrakkarConfig') -> None:  # noqa: F821
+        """Write worker configuration to worker_config table."""
+        if not self._db or not self._config.store_config:
+            return
+        env_vars = {name: os.environ.get(name, '') for name in self._config.expose_env_vars}
+        sinks: dict[str, list[str]] = {}
+        sinks_cfg = drakkar_config.sinks
+        if sinks_cfg:
+            for sink_type in ('kafka', 'postgres', 'mongo', 'http', 'redis', 'filesystem'):
+                names = list(getattr(sinks_cfg, sink_type, {}).keys())
+                if names:
+                    sinks[sink_type] = names
+        await self._db.execute(
+            """INSERT OR REPLACE INTO worker_config
+               (id, worker_name, ip_address, debug_port, kafka_brokers, source_topic,
+                consumer_group, binary_path, max_workers, task_timeout_seconds,
+                max_retries, window_size, sinks_json, env_vars_json, created_at)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                self._worker_name,
+                detect_worker_ip(),
+                self._config.port,
+                drakkar_config.kafka.brokers,
+                drakkar_config.kafka.source_topic,
+                drakkar_config.kafka.consumer_group,
+                drakkar_config.executor.binary_path,
+                drakkar_config.executor.max_workers,
+                drakkar_config.executor.task_timeout_seconds,
+                drakkar_config.executor.max_retries,
+                drakkar_config.executor.window_size,
+                json.dumps(sinks),
+                json.dumps(env_vars),
+                time.time(),
+            ],
+        )
+        await self._db.commit()
+
+    # --- Worker state (periodic snapshots) ---
+
+    async def _state_sync_loop(self) -> None:
+        while self._running:
+            await asyncio.sleep(self._config.state_sync_interval_seconds)
+            await self._sync_state()
+
+    async def _sync_state(self) -> None:
+        if not self._db or not self._config.store_state:
+            return
+        app_state = self._state_provider() if self._state_provider else {}
+        await self._db.execute(
+            """INSERT OR REPLACE INTO worker_state
+               (id, uptime_seconds, assigned_partitions, partition_count,
+                pool_active, pool_max, total_queued,
+                consumed_count, completed_count, failed_count,
+                produced_count, committed_count, paused, updated_at)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                app_state.get('uptime_seconds', 0),
+                json.dumps(app_state.get('assigned_partitions', [])),
+                app_state.get('partition_count', 0),
+                app_state.get('pool_active', 0),
+                app_state.get('pool_max', 0),
+                app_state.get('total_queued', 0),
+                self._counters['consumed'],
+                self._counters['completed'],
+                self._counters['failed'],
+                self._counters['produced'],
+                self._counters['committed'],
+                int(app_state.get('paused', False)),
+                time.time(),
+            ],
+        )
+        await self._db.commit()
+
     async def stop(self) -> None:
         self._running = False
         if self._flush_task:
@@ -177,7 +342,14 @@ class EventRecorder:
                 await self._retention_task
             except asyncio.CancelledError:
                 pass
+        if self._state_task:
+            self._state_task.cancel()
+            try:
+                await self._state_task
+            except asyncio.CancelledError:
+                pass
         await self._flush()
+        await self._sync_state()
         if self._db:
             await self._db.close()
             self._db = None
@@ -187,6 +359,7 @@ class EventRecorder:
     # --- Recording methods (sync, append to buffer) ---
 
     def record_consumed(self, msg: SourceMessage) -> None:
+        self._counters['consumed'] += 1
         self._record(
             {
                 'ts': time.time(),
@@ -259,6 +432,7 @@ class EventRecorder:
         pool_active: int = 0,
         pool_waiting: int = 0,
     ) -> None:
+        self._counters['completed'] += 1
         entry: dict = {
             'ts': time.time(),
             'event': 'task_completed',
@@ -285,6 +459,7 @@ class EventRecorder:
         pool_active: int = 0,
         pool_waiting: int = 0,
     ) -> None:
+        self._counters['failed'] += 1
         entry: dict = {
             'ts': time.time(),
             'event': 'task_failed',
@@ -333,6 +508,7 @@ class EventRecorder:
         source_partition: int,
         source_offset: int | None = None,
     ) -> None:
+        self._counters['produced'] += 1
         self._record(
             {
                 'ts': time.time(),
@@ -388,6 +564,7 @@ class EventRecorder:
         )
 
     def record_committed(self, partition: int, offset: int) -> None:
+        self._counters['committed'] += 1
         self._record(
             {
                 'ts': time.time(),
@@ -427,7 +604,7 @@ class EventRecorder:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
-        if not self._db:
+        if not self._db or not self._config.store_events:
             return []
         conditions = []
         params: list = []
@@ -451,7 +628,7 @@ class EventRecorder:
     async def get_trace(self, partition: int, msg_offset: int) -> list[dict]:
         """Get the full lifecycle of a message by partition and offset."""
         await self._flush()
-        if not self._db:
+        if not self._db or not self._config.store_events:
             return []
         query = """
             SELECT * FROM events
@@ -473,7 +650,7 @@ class EventRecorder:
     async def get_task_events(self, task_id: str) -> list[dict]:
         """Get all events for a specific task_id, ordered chronologically."""
         await self._flush()  # ensure recent events are queryable
-        if not self._db:
+        if not self._db or not self._config.store_events:
             return []
         query = 'SELECT * FROM events WHERE task_id = ? ORDER BY id ASC'
         async with self._db.execute(query, [task_id]) as cursor:
@@ -483,7 +660,7 @@ class EventRecorder:
 
     async def get_partition_summary(self) -> list[dict]:
         """Get summary stats per partition from recorded events."""
-        if not self._db:
+        if not self._db or not self._config.store_events:
             return []
         query = """
             SELECT
@@ -507,7 +684,7 @@ class EventRecorder:
     async def get_active_tasks(self) -> list[dict]:
         """Get tasks that started but haven't completed or failed."""
         await self._flush()
-        if not self._db:
+        if not self._db or not self._config.store_events:
             return []
         query = """
             SELECT s.* FROM events s
@@ -526,7 +703,7 @@ class EventRecorder:
 
     async def get_stats(self) -> dict:
         """Get overall statistics from the event store."""
-        if not self._db:
+        if not self._db or not self._config.store_events:
             return {'total_events': 0}
         query = """
             SELECT
@@ -545,6 +722,38 @@ class EventRecorder:
             row = await cursor.fetchone()
             return dict(zip(columns, row, strict=False)) if row else {'total_events': 0}
 
+    # --- Autodiscovery ---
+
+    async def discover_workers(self) -> list[dict]:
+        """Scan db_dir for other workers' -live.db symlinks, read their worker_config."""
+        if not self._config.db_dir or not self._config.store_config:
+            return []
+        pattern = os.path.join(self._config.db_dir, '*-live.db')
+        workers: list[dict] = []
+        for link_path in glob.glob(pattern):
+            if not os.path.islink(link_path):
+                continue
+            link_name = os.path.basename(link_path)
+            worker_name = link_name.removesuffix('-live.db')
+            if worker_name == self._worker_name:
+                continue
+            try:
+                target = os.path.realpath(link_path)
+                async with aiosqlite.connect(f'file:{target}?mode=ro', uri=True) as db:
+                    async with db.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='worker_config'"
+                    ) as cur:
+                        if not await cur.fetchone():
+                            continue
+                    async with db.execute('SELECT * FROM worker_config WHERE id = 1') as cur:
+                        columns = [d[0] for d in cur.description]
+                        row = await cur.fetchone()
+                        if row:
+                            workers.append(dict(zip(columns, row, strict=False)))
+            except Exception:
+                continue
+        return workers
+
     # --- Internal flush/retention ---
 
     async def _flush_loop(self) -> None:
@@ -554,6 +763,9 @@ class EventRecorder:
 
     async def _flush(self) -> None:
         if not self._db or not self._buffer:
+            return
+        if not self._config.store_events:
+            self._buffer.clear()
             return
         batch = []
         while self._buffer:
@@ -594,12 +806,11 @@ class EventRecorder:
         # open new DB before closing old — queries keep working
         new_path = _make_db_path(self._config.db_dir, self._worker_name)
         new_db = await aiosqlite.connect(new_path)
-        await new_db.executescript(SCHEMA)
-        await new_db.commit()
 
         old_db = self._db
         self._db = new_db
         self._db_path = new_path
+        await self._create_schema()
         self._update_live_link()
 
         if old_db:
