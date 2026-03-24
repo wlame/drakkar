@@ -130,6 +130,7 @@ services:
       DRAKKAR_CONFIG: /app/drakkar.yaml
       DRAKKAR_METRICS__PORT: "9090"
       DRAKKAR_DEBUG__PORT: "8081"
+      DRAKKAR_DEBUG__DEBUG_URL: "http://localhost:8081/"
     ports:
       - "9090:9090"
       - "8081:8081"
@@ -155,6 +156,7 @@ services:
       DRAKKAR_CONFIG: /app/drakkar.yaml
       DRAKKAR_METRICS__PORT: "9091"
       DRAKKAR_DEBUG__PORT: "8082"
+      DRAKKAR_DEBUG__DEBUG_URL: "http://localhost:8082/"
     ports:
       - "9091:9091"
       - "8082:8082"
@@ -180,6 +182,7 @@ services:
       DRAKKAR_CONFIG: /app/drakkar.yaml
       DRAKKAR_METRICS__PORT: "9093"
       DRAKKAR_DEBUG__PORT: "8083"
+      DRAKKAR_DEBUG__DEBUG_URL: "http://localhost:8083/"
     ports:
       - "9093:9093"
       - "8083:8083"

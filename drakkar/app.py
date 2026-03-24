@@ -196,7 +196,7 @@ class DrakkarApp:
         pg_pool = None
         for (sink_type, _), sink in self._sink_manager.sinks.items():
             if sink_type == 'postgres' and hasattr(sink, 'pool'):
-                pg_pool = sink.pool  # type: ignore[union-attr]
+                pg_pool = sink.pool
                 break
 
         await self._handler.on_ready(self._config, pg_pool)

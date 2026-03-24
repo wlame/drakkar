@@ -9,7 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from starlette.testclient import TestClient
 
 from drakkar.config import DebugConfig
-from drakkar.debug_server import create_debug_app
+from drakkar.debug_server import _worker_group, create_debug_app
 from drakkar.recorder import EventRecorder
 
 
@@ -391,3 +391,93 @@ async def test_api_workers_empty(client, mock_recorder):
     resp = await client.get('/api/workers')
     assert resp.status_code == 200
     assert resp.json() == []
+
+
+async def test_api_workers_uses_debug_url(client, mock_recorder):
+    """When debug_url is set, it is returned as the url field."""
+    mock_recorder.discover_workers.return_value = [
+        {'worker_name': 'w-1', 'ip_address': '10.0.0.2', 'debug_port': 8080, 'debug_url': 'http://localhost:8081/'},
+    ]
+    resp = await client.get('/api/workers')
+    data = resp.json()
+    assert data[0]['url'] == 'http://localhost:8081/'
+
+
+async def test_api_workers_falls_back_to_ip_port(client, mock_recorder):
+    """When debug_url is not set, url falls back to http://ip:port/."""
+    mock_recorder.discover_workers.return_value = [
+        {'worker_name': 'w-1', 'ip_address': '10.0.0.5', 'debug_port': 9090, 'debug_url': None},
+    ]
+    resp = await client.get('/api/workers')
+    data = resp.json()
+    assert data[0]['url'] == 'http://10.0.0.5:9090/'
+
+
+async def test_api_workers_sorted_and_grouped(client, mock_recorder):
+    """Workers are sorted by group then name, with group field set."""
+    mock_recorder.discover_workers.return_value = [
+        {'worker_name': 'slow-worker-05', 'ip_address': '10.0.0.5', 'debug_port': 8080},
+        {'worker_name': 'worker-3', 'ip_address': '10.0.0.3', 'debug_port': 8080},
+        {'worker_name': 'worker-vip-1', 'ip_address': '10.0.0.4', 'debug_port': 8080},
+        {'worker_name': 'worker-1', 'ip_address': '10.0.0.1', 'debug_port': 8080},
+        {'worker_name': 'slow-worker-01', 'ip_address': '10.0.0.6', 'debug_port': 8080},
+        {'worker_name': 'worker-vip-2', 'ip_address': '10.0.0.7', 'debug_port': 8080},
+    ]
+    resp = await client.get('/api/workers')
+    data = resp.json()
+    names = [w['worker_name'] for w in data]
+    groups = [w['group'] for w in data]
+    # sorted by group then name
+    assert names == [
+        'slow-worker-01',
+        'slow-worker-05',
+        'worker-1',
+        'worker-3',
+        'worker-vip-1',
+        'worker-vip-2',
+    ]
+    assert groups == [
+        'slow-worker',
+        'slow-worker',
+        'worker',
+        'worker',
+        'worker-vip',
+        'worker-vip',
+    ]
+
+
+# --- _worker_group helper ---
+
+
+def test_worker_group_strips_trailing_number():
+    assert _worker_group('worker-1') == 'worker'
+    assert _worker_group('worker-3') == 'worker'
+    assert _worker_group('worker-15') == 'worker'
+
+
+def test_worker_group_strips_number_without_separator():
+    assert _worker_group('worker15') == 'worker'
+
+
+def test_worker_group_preserves_middle_numbers():
+    assert _worker_group('worker-vip-1') == 'worker-vip'
+    assert _worker_group('worker-vip-2') == 'worker-vip'
+
+
+def test_worker_group_with_underscore_separator():
+    assert _worker_group('slow_worker_05') == 'slow_worker'
+
+
+def test_worker_group_complex_names():
+    assert _worker_group('slow-worker-01') == 'slow-worker'
+    assert _worker_group('slow-worker-05') == 'slow-worker'
+
+
+def test_worker_group_no_trailing_number():
+    assert _worker_group('worker-vip') == 'worker-vip'
+    assert _worker_group('special') == 'special'
+
+
+def test_worker_group_only_number():
+    """A name that is only digits should return itself (not empty)."""
+    assert _worker_group('123') == '123'

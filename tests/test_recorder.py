@@ -886,7 +886,13 @@ def _make_drakkar_config():
 
     return DrakkarConfig(
         kafka={'brokers': 'kafka:9092', 'source_topic': 'test-topic', 'consumer_group': 'test-group'},
-        executor={'binary_path': '/usr/bin/test', 'max_workers': 4, 'task_timeout_seconds': 60, 'max_retries': 2, 'window_size': 5},
+        executor={
+            'binary_path': '/usr/bin/test',
+            'max_workers': 4,
+            'task_timeout_seconds': 60,
+            'max_retries': 2,
+            'window_size': 5,
+        },
         sinks={'kafka': {'out': {'topic': 'results'}}},
     )
 
@@ -914,6 +920,33 @@ async def test_write_config_populates_single_row(tmp_path):
     assert data['max_workers'] == 4
     sinks = json.loads(data['sinks_json'])
     assert 'kafka' in sinks
+    await rec.stop()
+
+
+async def test_write_config_stores_debug_url(tmp_path):
+    config = make_debug_config(tmp_path, debug_url='http://localhost:8081/')
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    await rec.write_config(_make_drakkar_config())
+
+    async with rec._db.execute('SELECT debug_url FROM worker_config WHERE id = 1') as cur:
+        row = await cur.fetchone()
+    assert row[0] == 'http://localhost:8081/'
+    await rec.stop()
+
+
+async def test_write_config_debug_url_null_when_empty(tmp_path):
+    """Empty debug_url is stored as NULL."""
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    await rec.write_config(_make_drakkar_config())
+
+    async with rec._db.execute('SELECT debug_url FROM worker_config WHERE id = 1') as cur:
+        row = await cur.fetchone()
+    assert row[0] is None
     await rec.stop()
 
 
@@ -969,15 +1002,17 @@ async def test_sync_state_writes_single_row(tmp_path):
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
-    rec.set_state_provider(lambda: {
-        'uptime_seconds': 42.5,
-        'assigned_partitions': [0, 1, 2],
-        'partition_count': 3,
-        'pool_active': 2,
-        'pool_max': 8,
-        'total_queued': 10,
-        'paused': False,
-    })
+    rec.set_state_provider(
+        lambda: {
+            'uptime_seconds': 42.5,
+            'assigned_partitions': [0, 1, 2],
+            'partition_count': 3,
+            'pool_active': 2,
+            'pool_max': 8,
+            'total_queued': 10,
+            'paused': False,
+        }
+    )
 
     # increment some counters
     rec._counters['consumed'] = 100
@@ -1186,12 +1221,27 @@ async def test_discover_workers_finds_other_worker(tmp_path):
         await db.executescript(SCHEMA_WORKER_CONFIG)
         await db.execute(
             """INSERT INTO worker_config
-               (id, worker_name, ip_address, debug_port, kafka_brokers, source_topic,
+               (id, worker_name, ip_address, debug_port, debug_url, kafka_brokers, source_topic,
                 consumer_group, binary_path, max_workers, task_timeout_seconds,
                 max_retries, window_size, sinks_json, env_vars_json, created_at)
-               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ['other-worker', '10.0.0.2', 8080, 'kafka:9092', 'test', 'grp',
-             '/bin/test', 4, 60, 2, 5, '{}', '{}', 1000.0],
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                'other-worker',
+                '10.0.0.2',
+                8080,
+                'http://localhost:8080/',
+                'kafka:9092',
+                'test',
+                'grp',
+                '/bin/test',
+                4,
+                60,
+                2,
+                5,
+                '{}',
+                '{}',
+                1000.0,
+            ],
         )
         await db.commit()
 
@@ -1209,6 +1259,7 @@ async def test_discover_workers_finds_other_worker(tmp_path):
     assert workers[0]['worker_name'] == 'other-worker'
     assert workers[0]['ip_address'] == '10.0.0.2'
     assert workers[0]['debug_port'] == 8080
+    assert workers[0]['debug_url'] == 'http://localhost:8080/'
     await rec.stop()
 
 

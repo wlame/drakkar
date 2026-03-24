@@ -1,5 +1,7 @@
 """Flight recorder — event log to timestamped SQLite files."""
 
+from __future__ import annotations
+
 import asyncio
 import glob
 import json
@@ -11,6 +13,7 @@ from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import aiosqlite
 import structlog
@@ -23,6 +26,9 @@ from drakkar.models import (
     ExecutorTask,
     SourceMessage,
 )
+
+if TYPE_CHECKING:
+    from drakkar.config import DrakkarConfig
 
 logger = structlog.get_logger()
 
@@ -56,6 +62,7 @@ CREATE TABLE IF NOT EXISTS worker_config (
     worker_name     TEXT NOT NULL,
     ip_address      TEXT,
     debug_port      INTEGER,
+    debug_url       TEXT,
     kafka_brokers   TEXT,
     source_topic    TEXT,
     consumer_group  TEXT,
@@ -255,7 +262,7 @@ class EventRecorder:
 
     # --- Worker config (autodiscovery) ---
 
-    async def write_config(self, drakkar_config: 'DrakkarConfig') -> None:  # noqa: F821
+    async def write_config(self, drakkar_config: DrakkarConfig) -> None:
         """Write worker configuration to worker_config table."""
         if not self._db or not self._config.store_config:
             return
@@ -269,14 +276,15 @@ class EventRecorder:
                     sinks[sink_type] = names
         await self._db.execute(
             """INSERT OR REPLACE INTO worker_config
-               (id, worker_name, ip_address, debug_port, kafka_brokers, source_topic,
+               (id, worker_name, ip_address, debug_port, debug_url, kafka_brokers, source_topic,
                 consumer_group, binary_path, max_workers, task_timeout_seconds,
                 max_retries, window_size, sinks_json, env_vars_json, created_at)
-               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 self._worker_name,
                 detect_worker_ip(),
                 self._config.port,
+                self._config.debug_url or None,
                 drakkar_config.kafka.brokers,
                 drakkar_config.kafka.source_topic,
                 drakkar_config.kafka.consumer_group,

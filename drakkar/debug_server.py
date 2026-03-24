@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 import time
 from datetime import UTC
@@ -49,6 +50,17 @@ def _format_ts_full(ts: float | None) -> str:
     from datetime import datetime
 
     return datetime.fromtimestamp(ts, tz=UTC).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+
+
+def _worker_group(name: str) -> str:
+    """Derive a group key by stripping trailing numbers and separator.
+
+    ``worker-1``  → ``worker``
+    ``worker-vip-2`` → ``worker-vip``
+    ``slow-worker-05`` → ``slow-worker``
+    ``worker15`` → ``worker``
+    """
+    return re.sub(r'[-_]?\d+$', '', name) or name
 
 
 def create_debug_app(
@@ -586,8 +598,18 @@ def create_debug_app(
 
     @app.get('/api/workers')
     async def api_workers():
-        """Discover other live workers sharing the same db_dir."""
+        """Discover other live workers sharing the same db_dir.
+
+        Each worker gets a ``url`` field (debug_url if set, else http://ip:port)
+        and a ``group`` field derived from the worker name with trailing
+        numbers stripped (e.g. ``worker-1`` → ``worker``).
+        Workers are sorted by group then name, ready for grouped rendering.
+        """
         workers = await recorder.discover_workers()
+        for w in workers:
+            w['url'] = w.get('debug_url') or f'http://{w.get("ip_address", "127.0.0.1")}:{w.get("debug_port", 8080)}/'
+            w['group'] = _worker_group(w.get('worker_name', ''))
+        workers.sort(key=lambda w: (w['group'], w.get('worker_name', '')))
         return JSONResponse(workers)
 
     # --- WebSocket endpoint for live event streaming ---

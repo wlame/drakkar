@@ -212,6 +212,7 @@ class DebugConfig(BaseModel):
 
     enabled: bool = True
     port: int = Field(default=8080, ge=1, le=65535)
+    debug_url: str = ''
     db_dir: str = '/tmp'
     store_events: bool = True
     store_config: bool = True

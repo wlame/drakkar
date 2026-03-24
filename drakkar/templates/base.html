@@ -105,18 +105,28 @@
                     list.appendChild(empty);
                     return;
                 }
+                var lastGroup = null;
                 workers.forEach(function(w) {
+                    var group = w.group || '';
+                    if (lastGroup !== null && group !== lastGroup) {
+                        var sep = document.createElement('div');
+                        sep.className = 'border-t border-gray-600 my-1';
+                        list.appendChild(sep);
+                    }
+                    lastGroup = group;
                     var a = document.createElement('a');
-                    a.href = 'http://' + w.ip_address + ':' + w.debug_port + '/';
+                    a.href = w.url || ('http://' + w.ip_address + ':' + w.debug_port + '/');
                     a.className = 'block px-3 py-2 text-gray-300 hover:text-white hover:bg-gray-600';
                     var name = document.createElement('span');
                     name.className = 'font-mono';
                     name.textContent = w.worker_name || '?';
-                    var addr = document.createElement('span');
-                    addr.className = 'text-gray-500 text-xs ml-2';
-                    addr.textContent = w.ip_address + ':' + w.debug_port;
                     a.appendChild(name);
-                    a.appendChild(addr);
+                    if (!w.debug_url) {
+                        var addr = document.createElement('span');
+                        addr.className = 'text-gray-500 text-xs ml-2';
+                        addr.textContent = w.ip_address + ':' + w.debug_port;
+                        a.appendChild(addr);
+                    }
                     list.appendChild(a);
                 });
             }).catch(function() {
