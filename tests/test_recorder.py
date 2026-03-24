@@ -1369,8 +1369,8 @@ async def test_rotation_recreates_all_tables(tmp_path):
     await rec.stop()
 
 
-async def test_rotation_config_rewrite(tmp_path):
-    """write_config after rotation writes to the new DB file."""
+async def test_rotation_auto_rewrites_config(tmp_path):
+    """Rotation automatically re-writes worker_config to the new DB."""
     import asyncio
 
     config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
@@ -1385,11 +1385,10 @@ async def test_rotation_config_rewrite(tmp_path):
     new_path = rec.db_path
     assert old_path != new_path
 
-    # write config to new DB
-    await rec.write_config(_make_drakkar_config())
-
+    # config should be present without manual re-write
     async with rec._db.execute('SELECT worker_name FROM worker_config WHERE id = 1') as cur:
         row = await cur.fetchone()
+    assert row is not None
     assert row[0] == WORKER_NAME
     await rec.stop()
 

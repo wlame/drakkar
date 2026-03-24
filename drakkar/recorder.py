@@ -165,6 +165,7 @@ class EventRecorder:
         self._running = False
         self._ws_subscribers: set[queue.Queue] = set()
         self._state_provider: Callable[[], dict] | None = None
+        self._drakkar_config: DrakkarConfig | None = None
         # In-memory counters (used for worker_state regardless of store_events)
         self._counters = {
             'consumed': 0,
@@ -264,6 +265,7 @@ class EventRecorder:
 
     async def write_config(self, drakkar_config: DrakkarConfig) -> None:
         """Write worker configuration to worker_config table."""
+        self._drakkar_config = drakkar_config
         if not self._db or not self._config.store_config:
             return
         env_vars = {name: os.environ.get(name, '') for name in self._config.expose_env_vars}
@@ -819,6 +821,8 @@ class EventRecorder:
         self._db = new_db
         self._db_path = new_path
         await self._create_schema()
+        if self._drakkar_config:
+            await self.write_config(self._drakkar_config)
         self._update_live_link()
 
         if old_db:
