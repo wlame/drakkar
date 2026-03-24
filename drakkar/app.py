@@ -60,6 +60,11 @@ class DrakkarApp:
 
         self._handler = handler
         self._worker_id = worker_id or os.environ.get(self._config.worker_name_env, '') or f'drakkar-{id(self):x}'
+        self._cluster_name = ''
+        if self._config.cluster_name_env:
+            self._cluster_name = os.environ.get(self._config.cluster_name_env, '')
+        if not self._cluster_name:
+            self._cluster_name = self._config.cluster_name
         self._start_time = time.monotonic()
 
         self._executor_pool: ExecutorPool | None = None
@@ -155,7 +160,11 @@ class DrakkarApp:
         )
 
         if self._config.debug.enabled:
-            self._recorder = EventRecorder(self._config.debug, worker_name=self._worker_id)
+            self._recorder = EventRecorder(
+                self._config.debug,
+                worker_name=self._worker_id,
+                cluster_name=self._cluster_name,
+            )
             self._recorder.set_state_provider(self._get_worker_state)
             await self._recorder.start()
             await self._recorder.write_config(self._config)

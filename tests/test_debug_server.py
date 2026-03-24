@@ -89,6 +89,7 @@ def mock_recorder():
 def mock_app():
     app = MagicMock()
     app._worker_id = 'test-worker'
+    app._cluster_name = ''
     app._start_time = time.monotonic() - 120
     app.processors = {}
 
@@ -375,22 +376,29 @@ async def test_sinks_nav_link(client):
 # --- Workers autodiscovery API ---
 
 
-async def test_api_workers_returns_json(client, mock_recorder):
+async def test_api_workers_includes_current(client, mock_recorder):
+    """Current worker is always included in the list with is_current=True."""
     mock_recorder.discover_workers.return_value = [
         {'worker_name': 'worker-2', 'ip_address': '10.0.0.2', 'debug_port': 8080},
     ]
     resp = await client.get('/api/workers')
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) == 1
-    assert data[0]['worker_name'] == 'worker-2'
+    assert len(data) == 2
+    current = [w for w in data if w['is_current']]
+    assert len(current) == 1
+    assert current[0]['worker_name'] == 'test-worker'
 
 
-async def test_api_workers_empty(client, mock_recorder):
+async def test_api_workers_only_self_when_no_others(client, mock_recorder):
+    """Even with no discovered workers, current worker appears."""
     mock_recorder.discover_workers.return_value = []
     resp = await client.get('/api/workers')
     assert resp.status_code == 200
-    assert resp.json() == []
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]['worker_name'] == 'test-worker'
+    assert data[0]['is_current'] is True
 
 
 async def test_api_workers_uses_debug_url(client, mock_recorder):
@@ -400,7 +408,8 @@ async def test_api_workers_uses_debug_url(client, mock_recorder):
     ]
     resp = await client.get('/api/workers')
     data = resp.json()
-    assert data[0]['url'] == 'http://localhost:8081/'
+    w1 = next(w for w in data if w['worker_name'] == 'w-1')
+    assert w1['url'] == 'http://localhost:8081/'
 
 
 async def test_api_workers_falls_back_to_ip_port(client, mock_recorder):
@@ -410,40 +419,40 @@ async def test_api_workers_falls_back_to_ip_port(client, mock_recorder):
     ]
     resp = await client.get('/api/workers')
     data = resp.json()
-    assert data[0]['url'] == 'http://10.0.0.5:9090/'
+    w1 = next(w for w in data if w['worker_name'] == 'w-1')
+    assert w1['url'] == 'http://10.0.0.5:9090/'
 
 
-async def test_api_workers_sorted_and_grouped(client, mock_recorder):
-    """Workers are sorted by group then name, with group field set."""
+async def test_api_workers_grouped_by_cluster(client, mock_recorder, mock_app):
+    """Workers are grouped by cluster_name, with clustered first."""
+    mock_app._cluster_name = 'alpha'
     mock_recorder.discover_workers.return_value = [
-        {'worker_name': 'slow-worker-05', 'ip_address': '10.0.0.5', 'debug_port': 8080},
-        {'worker_name': 'worker-3', 'ip_address': '10.0.0.3', 'debug_port': 8080},
-        {'worker_name': 'worker-vip-1', 'ip_address': '10.0.0.4', 'debug_port': 8080},
-        {'worker_name': 'worker-1', 'ip_address': '10.0.0.1', 'debug_port': 8080},
-        {'worker_name': 'slow-worker-01', 'ip_address': '10.0.0.6', 'debug_port': 8080},
-        {'worker_name': 'worker-vip-2', 'ip_address': '10.0.0.7', 'debug_port': 8080},
+        {'worker_name': 'w-3', 'ip_address': '10.0.0.3', 'debug_port': 8080, 'cluster_name': 'beta'},
+        {'worker_name': 'w-1', 'ip_address': '10.0.0.1', 'debug_port': 8080, 'cluster_name': 'alpha'},
+        {'worker_name': 'w-lone', 'ip_address': '10.0.0.9', 'debug_port': 8080, 'cluster_name': None},
+        {'worker_name': 'w-2', 'ip_address': '10.0.0.2', 'debug_port': 8080, 'cluster_name': 'alpha'},
     ]
     resp = await client.get('/api/workers')
     data = resp.json()
     names = [w['worker_name'] for w in data]
-    groups = [w['group'] for w in data]
-    # sorted by group then name
-    assert names == [
-        'slow-worker-01',
-        'slow-worker-05',
-        'worker-1',
-        'worker-3',
-        'worker-vip-1',
-        'worker-vip-2',
+    clusters = [w['cluster'] for w in data]
+    # clustered first sorted by cluster then name, unclustered at end
+    assert names == ['test-worker', 'w-1', 'w-2', 'w-3', 'w-lone']
+    assert clusters == ['alpha', 'alpha', 'alpha', 'beta', '']
+
+
+async def test_api_workers_unclustered_at_end(client, mock_recorder, mock_app):
+    """Workers without cluster_name appear at the end, sorted by name."""
+    mock_app._cluster_name = ''
+    mock_recorder.discover_workers.return_value = [
+        {'worker_name': 'z-worker', 'ip_address': '10.0.0.1', 'debug_port': 8080, 'cluster_name': None},
+        {'worker_name': 'a-worker', 'ip_address': '10.0.0.2', 'debug_port': 8080, 'cluster_name': 'prod'},
     ]
-    assert groups == [
-        'slow-worker',
-        'slow-worker',
-        'worker',
-        'worker',
-        'worker-vip',
-        'worker-vip',
-    ]
+    resp = await client.get('/api/workers')
+    data = resp.json()
+    names = [w['worker_name'] for w in data]
+    # a-worker (prod cluster) first, then test-worker and z-worker (unclustered)
+    assert names == ['a-worker', 'test-worker', 'z-worker']
 
 
 # --- _worker_group helper ---

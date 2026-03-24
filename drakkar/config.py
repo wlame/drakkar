@@ -246,6 +246,14 @@ class DrakkarConfig(BaseSettings):
         default='WORKER_ID',
         description='Environment variable that holds the worker name for logs, metrics, and UI',
     )
+    cluster_name: str = Field(
+        default='',
+        description='Logical cluster name for grouping workers in the debug UI',
+    )
+    cluster_name_env: str = Field(
+        default='',
+        description='Environment variable that holds the cluster name (overrides cluster_name if set)',
+    )
     kafka: KafkaConfig = Field(default_factory=KafkaConfig)
     executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
     sinks: SinksConfig = Field(default_factory=SinksConfig)

@@ -101,33 +101,61 @@
                 if (!workers.length) {
                     var empty = document.createElement('div');
                     empty.className = 'px-3 py-2 text-gray-500';
-                    empty.textContent = 'no other workers';
+                    empty.textContent = 'no workers found';
                     list.appendChild(empty);
                     return;
                 }
-                var lastGroup = null;
+                var generalPages = ['/', '/partitions', '/sinks', '/live', '/history'];
+                var path = window.location.pathname;
+                var suffix = generalPages.indexOf(path) !== -1 ? path : '/';
+                var lastCluster = null;
                 workers.forEach(function(w) {
-                    var group = w.group || '';
-                    if (lastGroup !== null && group !== lastGroup) {
-                        var sep = document.createElement('div');
-                        sep.className = 'border-t border-gray-600 my-1';
-                        list.appendChild(sep);
+                    var cluster = w.cluster || '';
+                    if (cluster !== lastCluster) {
+                        if (lastCluster !== null) {
+                            var sep = document.createElement('div');
+                            sep.className = 'border-t border-gray-600 my-1';
+                            list.appendChild(sep);
+                        }
+                        if (cluster) {
+                            var header = document.createElement('a');
+                            header.href = '#';
+                            header.className = 'block px-3 py-1.5 text-gray-500 text-xs font-semibold uppercase tracking-wide cursor-pointer hover:text-gray-400';
+                            header.textContent = cluster;
+                            header.onclick = function(e) { e.preventDefault(); };
+                            list.appendChild(header);
+                        }
+                        lastCluster = cluster;
                     }
-                    lastGroup = group;
-                    var a = document.createElement('a');
-                    a.href = w.url || ('http://' + w.ip_address + ':' + w.debug_port + '/');
-                    a.className = 'block px-3 py-2 text-gray-300 hover:text-white hover:bg-gray-600';
-                    var name = document.createElement('span');
-                    name.className = 'font-mono';
-                    name.textContent = w.worker_name || '?';
-                    a.appendChild(name);
-                    if (!w.debug_url) {
-                        var addr = document.createElement('span');
-                        addr.className = 'text-gray-500 text-xs ml-2';
-                        addr.textContent = w.ip_address + ':' + w.debug_port;
-                        a.appendChild(addr);
+                    if (w.is_current) {
+                        var cur = document.createElement('div');
+                        cur.className = 'block px-3 py-2 text-white bg-gray-600';
+                        var name = document.createElement('span');
+                        name.className = 'font-mono';
+                        name.textContent = w.worker_name || '?';
+                        cur.appendChild(name);
+                        var badge = document.createElement('span');
+                        badge.className = 'text-gray-400 text-xs ml-2';
+                        badge.textContent = 'current';
+                        cur.appendChild(badge);
+                        list.appendChild(cur);
+                    } else {
+                        var base = w.url || ('http://' + w.ip_address + ':' + w.debug_port + '/');
+                        var a = document.createElement('a');
+                        a.href = base.replace(/\/+$/, '') + suffix;
+                        a.className = 'block px-3 py-2 text-gray-300 hover:text-white hover:bg-gray-600';
+                        var name = document.createElement('span');
+                        name.className = 'font-mono';
+                        name.textContent = w.worker_name || '?';
+                        a.appendChild(name);
+                        if (!w.debug_url) {
+                            var addr = document.createElement('span');
+                            addr.className = 'text-gray-500 text-xs ml-2';
+                            addr.textContent = w.ip_address + ':' + w.debug_port;
+                            a.appendChild(addr);
+                        }
+                        list.appendChild(a);
                     }
-                    list.appendChild(a);
                 });
             }).catch(function() {
                 list.textContent = '';

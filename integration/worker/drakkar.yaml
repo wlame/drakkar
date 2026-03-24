@@ -2,6 +2,7 @@
 # All values can be overridden with env vars: DRAKKAR_KAFKA__BROKERS, etc.
 
 worker_name_env: "WORKER_ID"
+cluster_name: "main cluster"
 
 kafka:
   brokers: "kafka:9092"
@@ -14,7 +15,7 @@ kafka:
 
 executor:
   binary_path: "/usr/local/bin/run-rg"
-  max_workers: 8
+  max_workers: 4
   task_timeout_seconds: 120
   window_size: 10
   max_retries: 3

@@ -1,0 +1,59 @@
+# Fast worker config — symbol counting pipeline
+# Same source topic, different consumer group
+
+worker_name_env: "WORKER_ID"
+cluster_name: "fast cluster"
+
+kafka:
+  brokers: "kafka:9092"
+  source_topic: "search-requests"
+  consumer_group: "drakkar-fast"
+  max_poll_records: 50
+  max_poll_interval_ms: 300000
+  session_timeout_ms: 45000
+  heartbeat_interval_ms: 3000
+
+executor:
+  binary_path: "/usr/local/bin/count-symbols"
+  max_workers: 2
+  task_timeout_seconds: 30
+  window_size: 10
+  max_retries: 1
+  drain_timeout_seconds: 5
+  backpressure_high_multiplier: 32
+  backpressure_low_multiplier: 4
+
+sinks:
+  kafka:
+    counts:
+      topic: "symbol-counts"
+      ui_url: "http://localhost:8088"
+
+dlq:
+  topic: ""  # auto-derived: search-requests_dlq
+
+metrics:
+  enabled: true
+  port: 9090
+
+logging:
+  level: "INFO"
+  format: "json"
+
+debug:
+  enabled: true
+  port: 8080
+  db_dir: "/shared"
+  store_events: true
+  store_config: true
+  store_state: true
+  state_sync_interval_seconds: 10
+  expose_env_vars:
+    - "WORKER_ID"
+    - "DRAKKAR_CONFIG"
+  retention_hours: 24
+  retention_max_events: 100000
+  store_output: true
+  flush_interval_seconds: 3
+  max_buffer: 50000
+  max_ui_rows: 5000

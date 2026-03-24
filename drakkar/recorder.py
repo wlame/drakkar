@@ -60,6 +60,7 @@ SCHEMA_WORKER_CONFIG = """
 CREATE TABLE IF NOT EXISTS worker_config (
     id              INTEGER PRIMARY KEY CHECK (id = 1),
     worker_name     TEXT NOT NULL,
+    cluster_name    TEXT,
     ip_address      TEXT,
     debug_port      INTEGER,
     debug_url       TEXT,
@@ -153,9 +154,10 @@ class EventRecorder:
 
     MAX_BUFFER = 50_000  # default, overridden by config.debug.max_buffer
 
-    def __init__(self, config: DebugConfig, worker_name: str = 'worker') -> None:
+    def __init__(self, config: DebugConfig, worker_name: str = 'worker', cluster_name: str = '') -> None:
         self._config = config
         self._worker_name = worker_name
+        self._cluster_name = cluster_name
         self._buffer: deque[dict] = deque(maxlen=config.max_buffer)
         self._db: aiosqlite.Connection | None = None
         self._db_path: str = ''
@@ -278,12 +280,13 @@ class EventRecorder:
                     sinks[sink_type] = names
         await self._db.execute(
             """INSERT OR REPLACE INTO worker_config
-               (id, worker_name, ip_address, debug_port, debug_url, kafka_brokers, source_topic,
-                consumer_group, binary_path, max_workers, task_timeout_seconds,
+               (id, worker_name, cluster_name, ip_address, debug_port, debug_url, kafka_brokers,
+                source_topic, consumer_group, binary_path, max_workers, task_timeout_seconds,
                 max_retries, window_size, sinks_json, env_vars_json, created_at)
-               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 self._worker_name,
+                self._cluster_name or None,
                 detect_worker_ip(),
                 self._config.port,
                 self._config.debug_url or None,

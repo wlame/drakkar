@@ -950,6 +950,33 @@ async def test_write_config_debug_url_null_when_empty(tmp_path):
     await rec.stop()
 
 
+async def test_write_config_stores_cluster_name(tmp_path):
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME, cluster_name='main cluster')
+    await rec.start()
+
+    await rec.write_config(_make_drakkar_config())
+
+    async with rec._db.execute('SELECT cluster_name FROM worker_config WHERE id = 1') as cur:
+        row = await cur.fetchone()
+    assert row[0] == 'main cluster'
+    await rec.stop()
+
+
+async def test_write_config_cluster_name_null_when_empty(tmp_path):
+    """Empty cluster_name is stored as NULL."""
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    await rec.write_config(_make_drakkar_config())
+
+    async with rec._db.execute('SELECT cluster_name FROM worker_config WHERE id = 1') as cur:
+        row = await cur.fetchone()
+    assert row[0] is None
+    await rec.stop()
+
+
 async def test_write_config_captures_env_vars(tmp_path, monkeypatch):
     monkeypatch.setenv('MY_VAR', 'hello')
     config = make_debug_config(tmp_path, expose_env_vars=['MY_VAR', 'MISSING_VAR'])

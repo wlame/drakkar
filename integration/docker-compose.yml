@@ -69,11 +69,12 @@ services:
       retries: 10
 
   webhook:
-    image: mendhak/http-https-echo:latest
+    image: python:3.13-slim
     ports:
       - "9000:8080"
-    environment:
-      HTTP_PORT: 8080
+    volumes:
+      - ./infra/webhook.py:/app/webhook.py:ro
+    command: ["python", "/app/webhook.py"]
 
   # --- Web UIs ---
 
@@ -186,6 +187,48 @@ services:
     ports:
       - "9093:9093"
       - "8083:8083"
+    volumes:
+      - ..:/project:ro
+      - ./shared:/shared
+
+  # --- Fast Workers (symbol counting) ---
+
+  fast-worker-1:
+    build:
+      context: ..
+      dockerfile: integration/fast-worker/Dockerfile
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      WORKER_ID: fast-worker-1
+      DRAKKAR_CONFIG: /app/drakkar.yaml
+      DRAKKAR_METRICS__PORT: "9094"
+      DRAKKAR_DEBUG__PORT: "8084"
+      DRAKKAR_DEBUG__DEBUG_URL: "http://localhost:8084/"
+    ports:
+      - "9094:9094"
+      - "8084:8084"
+    volumes:
+      - ..:/project:ro
+      - ./shared:/shared
+
+  fast-worker-2:
+    build:
+      context: ..
+      dockerfile: integration/fast-worker/Dockerfile
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      WORKER_ID: fast-worker-2
+      DRAKKAR_CONFIG: /app/drakkar.yaml
+      DRAKKAR_METRICS__PORT: "9095"
+      DRAKKAR_DEBUG__PORT: "8085"
+      DRAKKAR_DEBUG__DEBUG_URL: "http://localhost:8085/"
+    ports:
+      - "9095:9095"
+      - "8085:8085"
     volumes:
       - ..:/project:ro
       - ./shared:/shared

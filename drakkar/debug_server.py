@@ -598,18 +598,41 @@ def create_debug_app(
 
     @app.get('/api/workers')
     async def api_workers():
-        """Discover other live workers sharing the same db_dir.
+        """Discover live workers sharing the same db_dir, including self.
 
-        Each worker gets a ``url`` field (debug_url if set, else http://ip:port)
-        and a ``group`` field derived from the worker name with trailing
-        numbers stripped (e.g. ``worker-1`` → ``worker``).
-        Workers are sorted by group then name, ready for grouped rendering.
+        Each worker gets a ``url`` field (debug_url if set, else http://ip:port),
+        a ``cluster`` field from the stored cluster_name (falls back to
+        auto-derived group from worker name), and ``is_current`` for self.
+
+        Workers are sorted: clustered first (by cluster then name),
+        unclustered at the end (sorted by name).
         """
         workers = await recorder.discover_workers()
+
+        # add the current worker to the list
+        current_entry = {
+            'worker_name': drakkar_app._worker_id,
+            'cluster_name': drakkar_app._cluster_name or None,
+            'ip_address': None,
+            'debug_port': config.port,
+            'debug_url': config.debug_url or None,
+        }
+        workers.append(current_entry)
+
         for w in workers:
             w['url'] = w.get('debug_url') or f'http://{w.get("ip_address", "127.0.0.1")}:{w.get("debug_port", 8080)}/'
-            w['group'] = _worker_group(w.get('worker_name', ''))
-        workers.sort(key=lambda w: (w['group'], w.get('worker_name', '')))
+            w['cluster'] = w.get('cluster_name') or ''
+            w['is_current'] = w.get('worker_name') == drakkar_app._worker_id
+
+        # sort: clustered workers first (by cluster name, then worker name),
+        # unclustered at the end sorted by worker name
+        workers.sort(
+            key=lambda w: (
+                0 if w['cluster'] else 1,
+                w['cluster'],
+                w.get('worker_name', ''),
+            )
+        )
         return JSONResponse(workers)
 
     # --- WebSocket endpoint for live event streaming ---
