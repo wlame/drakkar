@@ -21,5 +21,7 @@ COPY integration/worker/models.py /app/models.py
 COPY integration/worker/metrics.py /app/metrics.py
 COPY integration/worker/drakkar.yaml /app/drakkar.yaml
 COPY integration/worker/run-rg.sh /usr/local/bin/run-rg
+COPY integration/worker/entrypoint.sh /app/entrypoint.sh
 
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["python", "main.py"]

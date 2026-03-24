@@ -135,6 +135,7 @@ services:
       - "8081:8081"
     volumes:
       - ..:/project:ro
+      - ./shared:/shared
 
   worker-2:
     build:
@@ -159,6 +160,7 @@ services:
       - "8082:8082"
     volumes:
       - ..:/project:ro
+      - ./shared:/shared
 
   worker-3:
     build:
@@ -183,6 +185,7 @@ services:
       - "8083:8083"
     volumes:
       - ..:/project:ro
+      - ./shared:/shared
 
   # --- Message Producer ---
 

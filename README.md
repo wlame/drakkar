@@ -336,6 +336,8 @@ The integration scenario:
 - 5% simulated executor failures with retry via `on_error()`
 - Failed deliveries route to DLQ or retry based on sink type
 
+Debug databases are stored in `integration/shared/` with per-worker filenames and automatic timestamping (e.g. `drakkar-debug-worker-1-2026-03-23__14_55_00.db`). Files persist across restarts and are rotated automatically by the recorder. See `integration/shared/README.md` for details.
+
 ## Development
 
 ```bash
