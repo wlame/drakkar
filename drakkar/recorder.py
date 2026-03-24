@@ -49,21 +49,28 @@ CREATE INDEX IF NOT EXISTS idx_events_type ON events(event);
 """
 
 
-def _make_db_path(base_path: str) -> str:
-    """Generate a timestamped DB filename from the base path.
+def _make_db_path(db_dir: str, worker_name: str) -> str:
+    """Generate a timestamped DB filename inside db_dir.
 
-    /tmp/drakkar-debug.db -> /tmp/drakkar-debug-2026-03-16__14_55.db
+    ('/shared', 'worker-1') -> '/shared/worker-1-2026-03-16__14_55_00.db'
     """
-    p = Path(base_path)
     ts = datetime.now(tz=UTC).strftime('%Y-%m-%d__%H_%M_%S')
-    return str(p.with_stem(f'{p.stem}-{ts}'))
+    return str(Path(db_dir) / f'{worker_name}-{ts}.db')
 
 
-def _list_db_files(base_path: str) -> list[str]:
-    """List all rotated DB files matching the base pattern, oldest first."""
-    p = Path(base_path)
-    pattern = str(p.with_stem(f'{p.stem}-*'))
-    files = glob.glob(pattern)
+def _live_link_path(db_dir: str, worker_name: str) -> str:
+    """Path for the live symlink: {db_dir}/{worker_name}-live.db."""
+    return str(Path(db_dir) / f'{worker_name}-live.db')
+
+
+def _list_db_files(db_dir: str, worker_name: str) -> list[str]:
+    """List all timestamped DB files for a worker, oldest first.
+
+    Excludes the -live.db symlink.
+    """
+    pattern = str(Path(db_dir) / f'{worker_name}-*.db')
+    live = _live_link_path(db_dir, worker_name)
+    files = [f for f in glob.glob(pattern) if f != live and not os.path.islink(f)]
     files.sort()
     return files
 
@@ -74,12 +81,16 @@ class EventRecorder:
     Events are buffered in memory and flushed periodically. On retention
     check, the current DB is finalized and a new timestamped file is
     created. Old DB files beyond retention_hours are deleted.
+
+    A ``{worker_name}-live.db`` symlink points to the current database
+    while the worker is running and is removed on graceful shutdown.
     """
 
     MAX_BUFFER = 50_000  # default, overridden by config.debug.max_buffer
 
-    def __init__(self, config: DebugConfig) -> None:
+    def __init__(self, config: DebugConfig, worker_name: str = 'worker') -> None:
         self._config = config
+        self._worker_name = worker_name
         self._buffer: deque[dict] = deque(maxlen=config.max_buffer)
         self._db: aiosqlite.Connection | None = None
         self._db_path: str = ''
@@ -94,11 +105,12 @@ class EventRecorder:
 
     async def start(self) -> None:
         self._running = True
-        if self._config.db_path:
-            self._db_path = _make_db_path(self._config.db_path)
+        if self._config.db_dir:
+            self._db_path = _make_db_path(self._config.db_dir, self._worker_name)
             self._db = await aiosqlite.connect(self._db_path)
             await self._db.executescript(SCHEMA)
             await self._db.commit()
+            self._update_live_link()
             self._flush_task = asyncio.create_task(self._flush_loop())
             self._retention_task = asyncio.create_task(self._retention_loop())
         await logger.ainfo(
@@ -127,6 +139,30 @@ class EventRecorder:
                 except queue.Full:
                     pass
 
+    def _update_live_link(self) -> None:
+        """Create or update the {worker}-live.db symlink to the current DB."""
+        if not self._config.db_dir or not self._db_path:
+            return
+        link = _live_link_path(self._config.db_dir, self._worker_name)
+        target = os.path.basename(self._db_path)
+        try:
+            tmp = link + '.tmp'
+            os.symlink(target, tmp)
+            os.replace(tmp, link)
+        except OSError:
+            pass
+
+    def _remove_live_link(self) -> None:
+        """Remove the live symlink on graceful shutdown."""
+        if not self._config.db_dir:
+            return
+        link = _live_link_path(self._config.db_dir, self._worker_name)
+        try:
+            if os.path.islink(link):
+                os.remove(link)
+        except OSError:
+            pass
+
     async def stop(self) -> None:
         self._running = False
         if self._flush_task:
@@ -145,6 +181,7 @@ class EventRecorder:
         if self._db:
             await self._db.close()
             self._db = None
+        self._remove_live_link()
         await logger.ainfo('recorder_stopped', category='recorder')
 
     # --- Recording methods (sync, append to buffer) ---
@@ -555,7 +592,7 @@ class EventRecorder:
         await self._flush()
 
         # open new DB before closing old — queries keep working
-        new_path = _make_db_path(self._config.db_path)
+        new_path = _make_db_path(self._config.db_dir, self._worker_name)
         new_db = await aiosqlite.connect(new_path)
         await new_db.executescript(SCHEMA)
         await new_db.commit()
@@ -563,13 +600,14 @@ class EventRecorder:
         old_db = self._db
         self._db = new_db
         self._db_path = new_path
+        self._update_live_link()
 
         if old_db:
             await old_db.close()
 
         # delete DB files older than retention
         cutoff = time.time() - (self._config.retention_hours * 3600)
-        for db_file in _list_db_files(self._config.db_path):
+        for db_file in _list_db_files(self._config.db_dir, self._worker_name):
             if db_file == new_path:
                 continue
             try:
@@ -581,7 +619,7 @@ class EventRecorder:
                 pass
 
         # enforce max file count
-        remaining = _list_db_files(self._config.db_path)
+        remaining = _list_db_files(self._config.db_dir, self._worker_name)
         max_files = max(1, self._config.retention_max_events // 10_000)
         if len(remaining) > max_files:
             for old_file in remaining[:-max_files]:

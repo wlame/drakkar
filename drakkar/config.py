@@ -199,13 +199,13 @@ class DebugConfig(BaseModel):
     """Debug flight recorder and web UI settings.
 
     Set ``enabled: false`` to disable the entire debug feature.
-    Set ``db_path: ""`` to run the debug UI without SQLite persistence
+    Set ``db_dir: ""`` to run the debug UI without SQLite persistence
     (events are kept in memory only, lost on restart).
     """
 
     enabled: bool = True
     port: int = Field(default=8080, ge=1, le=65535)
-    db_path: str = '/tmp/drakkar-debug.db'
+    db_dir: str = '/tmp'
     retention_hours: int = Field(default=24, ge=1)
     retention_max_events: int = Field(default=100_000, ge=100)
     store_output: bool = True

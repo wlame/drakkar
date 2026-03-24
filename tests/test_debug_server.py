@@ -129,7 +129,7 @@ def mock_app():
 
 @pytest.fixture
 def debug_config():
-    return DebugConfig(enabled=True, port=8080, db_path='/tmp/test.db')
+    return DebugConfig(enabled=True, port=8080, db_dir='/tmp')
 
 
 @pytest.fixture

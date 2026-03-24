@@ -72,7 +72,7 @@ logging:
 debug:
   enabled: true
   port: 8080
-  db_path: "/tmp/drakkar-debug.db"
+  db_dir: "/shared"
   retention_hours: 24
   retention_max_events: 100000
   store_output: true

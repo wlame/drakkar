@@ -155,7 +155,7 @@ class DrakkarApp:
         )
 
         if self._config.debug.enabled:
-            self._recorder = EventRecorder(self._config.debug)
+            self._recorder = EventRecorder(self._config.debug, worker_name=self._worker_id)
             await self._recorder.start()
 
             from drakkar.debug_server import DebugServer

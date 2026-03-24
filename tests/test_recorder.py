@@ -20,10 +20,13 @@ class _RecData(BaseModel):
     v: str = 'ok'
 
 
+WORKER_NAME = 'test-worker'
+
+
 def make_debug_config(tmp_path, **overrides) -> DebugConfig:
     defaults = {
         'enabled': True,
-        'db_path': str(tmp_path / 'test-debug.db'),
+        'db_dir': str(tmp_path),
         'retention_hours': 24,
         'retention_max_events': 1000,
         'store_output': False,
@@ -66,7 +69,7 @@ def make_result(task_id='t1', task=None) -> ExecutorResult:
 @pytest.fixture
 async def recorder(tmp_path):
     config = make_debug_config(tmp_path)
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
     yield rec
     await rec.stop()
@@ -76,27 +79,36 @@ async def recorder(tmp_path):
 
 
 def test_make_db_path_includes_timestamp():
-    path = _make_db_path('/tmp/drakkar-debug.db')
-    assert path.startswith('/tmp/drakkar-debug-')
+    path = _make_db_path('/tmp', 'worker-1')
+    assert path.startswith('/tmp/worker-1-')
     assert path.endswith('.db')
-    assert '__' in path  # YYYY-MM-DD__HH_MM
+    assert '__' in path  # YYYY-MM-DD__HH_MM_SS
 
 
-def test_make_db_path_preserves_directory():
-    path = _make_db_path('/var/log/drakkar.db')
-    assert path.startswith('/var/log/drakkar-')
+def test_make_db_path_uses_worker_name():
+    path = _make_db_path('/var/log', 'my-worker')
+    assert path.startswith('/var/log/my-worker-')
 
 
 def test_list_db_files_returns_sorted(tmp_path):
     for name in [
-        'test-debug-2026-03-16__14_00.db',
-        'test-debug-2026-03-15__10_00.db',
-        'test-debug-2026-03-16__15_00.db',
+        'test-worker-2026-03-16__14_00_00.db',
+        'test-worker-2026-03-15__10_00_00.db',
+        'test-worker-2026-03-16__15_00_00.db',
     ]:
         (tmp_path / name).touch()
-    files = _list_db_files(str(tmp_path / 'test-debug.db'))
+    files = _list_db_files(str(tmp_path), 'test-worker')
     assert len(files) == 3
-    assert '14_00' in files[0] or '10_00' in files[0]  # sorted
+    assert '10_00' in files[0]  # sorted oldest first
+
+
+def test_list_db_files_excludes_live_symlink(tmp_path):
+    (tmp_path / 'test-worker-2026-03-16__14_00_00.db').touch()
+    live = tmp_path / 'test-worker-live.db'
+    live.symlink_to('test-worker-2026-03-16__14_00_00.db')
+    files = _list_db_files(str(tmp_path), 'test-worker')
+    assert len(files) == 1
+    assert 'live' not in files[0]
 
 
 # --- Start/stop ---
@@ -104,10 +116,10 @@ def test_list_db_files_returns_sorted(tmp_path):
 
 async def test_start_creates_timestamped_db(tmp_path):
     config = make_debug_config(tmp_path)
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
     assert rec._db is not None
-    assert rec.db_path.startswith(str(tmp_path / 'test-debug-'))
+    assert rec.db_path.startswith(str(tmp_path / f'{WORKER_NAME}-'))
     assert os.path.exists(rec.db_path)
     await rec.stop()
     assert rec._db is None
@@ -168,7 +180,7 @@ async def test_record_task_completed_without_output(recorder):
 
 async def test_record_task_completed_with_output(tmp_path):
     config = make_debug_config(tmp_path, store_output=True)
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
     result = make_result('t1')
@@ -320,8 +332,8 @@ async def test_get_stats_empty_db(recorder):
 
 
 async def test_get_events_no_db():
-    config = DebugConfig(enabled=True, db_path='/tmp/nonexistent.db')
-    rec = EventRecorder(config)
+    config = DebugConfig(enabled=True, db_dir='')
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     events = await rec.get_events()
     assert events == []
 
@@ -331,7 +343,7 @@ async def test_get_events_no_db():
 
 async def test_rotate_creates_new_db_and_flushes(tmp_path):
     config = make_debug_config(tmp_path, retention_hours=24)
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
     rec.record_consumed(make_msg(offset=0))
@@ -350,7 +362,7 @@ async def test_rotate_creates_new_db_and_flushes(tmp_path):
 
 async def test_rotate_flushes_buffer_to_old_db(tmp_path):
     config = make_debug_config(tmp_path, retention_hours=24)
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
     rec.record_consumed(make_msg(offset=0))
@@ -377,11 +389,11 @@ async def test_rotate_deletes_old_files(tmp_path):
     config = make_debug_config(tmp_path, retention_hours=1)  # short retention
 
     # create an "old" DB file manually with ancient mtime
-    old_file = tmp_path / 'test-debug-2025-01-01__00_00.db'
+    old_file = tmp_path / f'{WORKER_NAME}-2025-01-01__00_00_00.db'
     old_file.write_text('')
     os.utime(old_file, (0, 0))
 
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
     await rec._rotate()
@@ -399,14 +411,14 @@ async def test_rotate_enforces_max_file_count(tmp_path):
     )
     # create several old DB files manually
     for i in range(5):
-        p = tmp_path / f'test-debug-2026-03-{10 + i:02d}__00_00.db'
+        p = tmp_path / f'{WORKER_NAME}-2026-03-{10 + i:02d}__00_00_00.db'
         p.write_text('')
 
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
     await rec._rotate()
 
-    remaining = _list_db_files(str(tmp_path / 'test-debug.db'))
+    remaining = _list_db_files(str(tmp_path), WORKER_NAME)
     # should keep at most 1 old file + the new one
     assert len(remaining) <= 2
     await rec.stop()
@@ -444,7 +456,7 @@ async def test_task_completed_includes_pool_stats(recorder):
 
 async def test_subscribe_receives_events(tmp_path):
     config = make_debug_config(tmp_path)
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
     queue = rec.subscribe()
@@ -464,7 +476,7 @@ async def test_subscribe_receives_events(tmp_path):
 
 async def test_broadcast_to_multiple_subscribers(tmp_path):
     config = make_debug_config(tmp_path)
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
     q1 = rec.subscribe()
@@ -486,7 +498,7 @@ async def test_broadcast_to_multiple_subscribers(tmp_path):
 async def test_broadcast_drops_on_full_queue(tmp_path):
     """If subscriber queue is full, events are dropped without error."""
     config = make_debug_config(tmp_path)
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
     import queue as queue_mod
@@ -509,7 +521,7 @@ async def test_broadcast_drops_on_full_queue(tmp_path):
 async def test_no_broadcast_without_subscribers(tmp_path):
     """Recording works fine with no subscribers."""
     config = make_debug_config(tmp_path)
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
     assert len(rec._ws_subscribers) == 0
@@ -591,7 +603,7 @@ async def test_collect_completed_persisted(recorder):
 async def test_rotation_no_event_loss(tmp_path):
     """Events recorded before, during, and after rotation are all queryable."""
     config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
     # phase 1: record before rotation
@@ -639,7 +651,7 @@ async def test_rotation_no_event_loss(tmp_path):
 async def test_rotation_queries_work_on_new_db(tmp_path):
     """After rotation, all query methods work on the new DB."""
     config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
     await rec._rotate()
@@ -675,7 +687,7 @@ async def test_rotation_queries_work_on_new_db(tmp_path):
 async def test_rotation_new_db_has_schema(tmp_path):
     """The new DB file after rotation has the full schema (tables + indexes)."""
     config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
     await rec._rotate()
@@ -704,13 +716,13 @@ async def test_multiple_rotations_keep_recent_files(tmp_path):
         retention_hours=1,
         retention_max_events=10_000,
     )
-    rec = EventRecorder(config)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
     # create several "old" files with ancient mtime
     old_files = []
     for i in range(5):
-        p = tmp_path / f'test-debug-2024-01-{10 + i:02d}__00_00.db'
+        p = tmp_path / f'{WORKER_NAME}-2024-01-{10 + i:02d}__00_00_00.db'
         p.write_text('')
         os.utime(p, (0, 0))
         old_files.append(p)

@@ -1,130 +1,208 @@
-"""Tests for the integration worker entrypoint.sh — DB path construction per worker.
+"""Tests for recorder DB naming, live symlink, and shutdown cleanup.
 
-The entrypoint sets DRAKKAR_DEBUG__DB_PATH to a per-worker base path.
-Timestamping and rotation are handled by the recorder (see test_recorder.py).
+The recorder generates timestamped filenames from db_dir + worker_name,
+maintains a {worker}-live.db symlink, and removes it on stop().
 """
 
 import os
-import subprocess
 from pathlib import Path
 
-import pytest
+from drakkar.config import DebugConfig
+from drakkar.recorder import EventRecorder, _list_db_files, _live_link_path, _make_db_path
 
-ENTRYPOINT = Path(__file__).resolve().parent.parent / 'integration' / 'worker' / 'entrypoint.sh'
+WORKER = 'worker-1'
 
 
-def _run_entrypoint(shared_dir: Path, worker_id: str = 'worker-1') -> str:
-    """Run entrypoint.sh with a patched SHARED_DIR and return stdout."""
-    script = ENTRYPOINT.read_text().replace(
-        'DRAKKAR_DEBUG__DB_PATH="/shared/',
-        f'DRAKKAR_DEBUG__DB_PATH="{shared_dir}/',
-    )
-    # Replace exec "$@" with env dump so we can inspect the exported var
-    script = script.replace('exec "$@"', 'echo "DB_PATH=$DRAKKAR_DEBUG__DB_PATH"')
-    env = {
-        'PATH': os.environ['PATH'],
-        'WORKER_ID': worker_id,
+def _make_config(tmp_path, **overrides) -> DebugConfig:
+    defaults = {
+        'enabled': True,
+        'db_dir': str(tmp_path),
+        'retention_hours': 24,
+        'retention_max_events': 100_000,
+        'flush_interval_seconds': 60,
     }
-    result = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
-    assert result.returncode == 0, f'entrypoint failed: {result.stderr}'
-    return result.stdout.strip()
+    defaults.update(overrides)
+    return DebugConfig(**defaults)
 
 
-def _get_db_path(output: str) -> str:
-    """Extract DB_PATH value from entrypoint output."""
-    for line in output.split('\n'):
-        if line.startswith('DB_PATH='):
-            return line.split('DB_PATH=', 1)[1]
-    pytest.fail(f'DB_PATH not found in output: {output}')
+# --- Filename generation ---
 
 
-# --- Path construction ---
+def test_filename_contains_worker_name():
+    path = _make_db_path('/shared', 'my-worker')
+    assert 'my-worker-' in Path(path).name
 
 
-def test_entrypoint_includes_worker_name_in_path(tmp_path):
-    output = _run_entrypoint(tmp_path, worker_id='worker-1')
-    db_path = _get_db_path(output)
-    assert 'worker-1' in db_path
+def test_filename_contains_timestamp():
+    path = _make_db_path('/tmp', 'w1')
+    name = Path(path).name
+    assert '__' in name  # YYYY-MM-DD__HH_MM_SS
 
 
-def test_entrypoint_different_workers_get_different_paths(tmp_path):
-    path1 = _get_db_path(_run_entrypoint(tmp_path, worker_id='worker-1'))
-    path2 = _get_db_path(_run_entrypoint(tmp_path, worker_id='worker-2'))
-    path3 = _get_db_path(_run_entrypoint(tmp_path, worker_id='worker-3'))
-
-    assert path1 != path2 != path3
-    assert 'worker-1' in path1
-    assert 'worker-2' in path2
-    assert 'worker-3' in path3
+def test_filename_no_drakkar_or_debug_prefix():
+    path = _make_db_path('/tmp', 'worker-1')
+    name = Path(path).name
+    assert not name.startswith('drakkar')
+    assert 'debug' not in name
 
 
-def test_entrypoint_path_is_in_shared_dir(tmp_path):
-    output = _run_entrypoint(tmp_path, worker_id='worker-1')
-    db_path = _get_db_path(output)
-    assert db_path.startswith(str(tmp_path))
+def test_filename_uses_db_dir():
+    path = _make_db_path('/custom/dir', 'w1')
+    assert path.startswith('/custom/dir/')
 
 
-def test_entrypoint_path_ends_with_db_extension(tmp_path):
-    output = _run_entrypoint(tmp_path, worker_id='worker-1')
-    db_path = _get_db_path(output)
-    assert db_path.endswith('.db')
+def test_filename_ends_with_db():
+    path = _make_db_path('/tmp', 'w1')
+    assert path.endswith('.db')
 
 
-def test_entrypoint_path_is_base_path_without_timestamp(tmp_path):
-    """The entrypoint sets a base path — no timestamp suffix.
-
-    The recorder's _make_db_path() is responsible for adding timestamps.
-    """
-    output = _run_entrypoint(tmp_path, worker_id='worker-1')
-    db_path = _get_db_path(output)
-    filename = Path(db_path).name
-    assert filename == 'drakkar-debug-worker-1.db'
+def test_different_workers_produce_different_filenames():
+    p1 = _make_db_path('/tmp', 'worker-1')
+    p2 = _make_db_path('/tmp', 'worker-2')
+    assert p1 != p2
+    assert 'worker-1' in p1
+    assert 'worker-2' in p2
 
 
-def test_entrypoint_defaults_worker_name(tmp_path):
-    """Without WORKER_ID, falls back to 'worker'."""
-    script = ENTRYPOINT.read_text().replace(
-        'DRAKKAR_DEBUG__DB_PATH="/shared/',
-        f'DRAKKAR_DEBUG__DB_PATH="{tmp_path}/',
-    )
-    script = script.replace('exec "$@"', 'echo "DB_PATH=$DRAKKAR_DEBUG__DB_PATH"')
-    # No WORKER_ID in env
-    env = {'PATH': os.environ['PATH']}
-    result = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
-    assert result.returncode == 0
-    db_path = _get_db_path(result.stdout.strip())
-    assert 'drakkar-debug-worker.db' in db_path
+# --- Live symlink ---
 
 
-# --- Integration with recorder's naming ---
+async def test_start_creates_live_symlink(tmp_path):
+    config = _make_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER)
+    await rec.start()
+
+    link = Path(_live_link_path(str(tmp_path), WORKER))
+    assert link.is_symlink()
+    assert os.readlink(link) == os.path.basename(rec.db_path)
+
+    await rec.stop()
 
 
-def test_recorder_make_db_path_adds_timestamp_to_base():
-    """Verify the recorder correctly timestamps the base path the entrypoint produces."""
-    from drakkar.recorder import _make_db_path
+async def test_live_symlink_name_is_worker_dash_live(tmp_path):
+    config = _make_config(tmp_path)
+    rec = EventRecorder(config, worker_name='my-cool-worker')
+    await rec.start()
 
-    base = '/shared/drakkar-debug-worker-1.db'
-    result = _make_db_path(base)
-    assert result.startswith('/shared/drakkar-debug-worker-1-')
-    assert result.endswith('.db')
-    # Should contain a date-time pattern
-    filename = Path(result).stem
-    assert '__' in filename  # _make_db_path uses YYYY-MM-DD__HH_MM_SS
+    link = tmp_path / 'my-cool-worker-live.db'
+    assert link.is_symlink()
+
+    await rec.stop()
 
 
-def test_recorder_list_db_files_finds_worker_specific_files(tmp_path):
-    """Verify the recorder's glob finds files for the right worker only."""
-    from drakkar.recorder import _list_db_files
+async def test_live_symlink_resolves_to_existing_db(tmp_path):
+    config = _make_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER)
+    await rec.start()
 
-    # Simulate files from two workers
-    (tmp_path / 'drakkar-debug-worker-1-2026-03-23__10_00_00.db').touch()
-    (tmp_path / 'drakkar-debug-worker-1-2026-03-23__11_00_00.db').touch()
-    (tmp_path / 'drakkar-debug-worker-2-2026-03-23__10_00_00.db').touch()
+    link = Path(_live_link_path(str(tmp_path), WORKER))
+    resolved = link.resolve()
+    assert resolved.exists()
+    assert resolved == Path(rec.db_path).resolve()
 
-    w1_files = _list_db_files(str(tmp_path / 'drakkar-debug-worker-1.db'))
-    w2_files = _list_db_files(str(tmp_path / 'drakkar-debug-worker-2.db'))
+    await rec.stop()
 
-    assert len(w1_files) == 2
-    assert all('worker-1' in f for f in w1_files)
-    assert len(w2_files) == 1
-    assert 'worker-2' in w2_files[0]
+
+async def test_stop_removes_live_symlink(tmp_path):
+    config = _make_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER)
+    await rec.start()
+
+    link = Path(_live_link_path(str(tmp_path), WORKER))
+    assert link.is_symlink()
+
+    await rec.stop()
+    assert not link.exists()
+
+
+async def test_stop_preserves_db_file(tmp_path):
+    config = _make_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER)
+    await rec.start()
+
+    db_file = rec.db_path
+    assert os.path.exists(db_file)
+
+    await rec.stop()
+    assert os.path.exists(db_file)  # file itself remains
+
+
+async def test_stop_flushes_before_removing_symlink(tmp_path):
+    config = _make_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER)
+    await rec.start()
+
+    from drakkar.models import SourceMessage
+
+    msg = SourceMessage(topic='t', partition=0, offset=0, value=b'{}', timestamp=1000)
+    rec.record_consumed(msg)
+    # event is in buffer, not flushed
+
+    await rec.stop()
+
+    # verify the event was flushed to the DB before shutdown
+    import aiosqlite
+
+    async with (
+        aiosqlite.connect(rec.db_path) as db,
+        db.execute('SELECT COUNT(*) FROM events') as cur,
+    ):
+        row = await cur.fetchone()
+        assert row[0] == 1
+
+
+# --- Rotation updates symlink ---
+
+
+async def test_rotation_updates_live_symlink(tmp_path):
+    config = _make_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER)
+    await rec.start()
+
+    link = Path(_live_link_path(str(tmp_path), WORKER))
+    first_target = os.readlink(link)
+
+    import asyncio
+
+    await asyncio.sleep(1.1)  # ensure different timestamp
+    await rec._rotate()
+
+    second_target = os.readlink(link)
+    assert second_target != first_target
+    assert second_target == os.path.basename(rec.db_path)
+
+    await rec.stop()
+
+
+# --- File listing ---
+
+
+def test_list_db_files_excludes_live_symlink(tmp_path):
+    (tmp_path / 'worker-1-2026-03-16__14_00_00.db').touch()
+    (tmp_path / 'worker-1-2026-03-16__15_00_00.db').touch()
+    live = tmp_path / 'worker-1-live.db'
+    live.symlink_to('worker-1-2026-03-16__15_00_00.db')
+
+    files = _list_db_files(str(tmp_path), 'worker-1')
+    assert len(files) == 2
+    assert all('live' not in f for f in files)
+
+
+def test_list_db_files_excludes_other_workers(tmp_path):
+    (tmp_path / 'worker-1-2026-03-16__14_00_00.db').touch()
+    (tmp_path / 'worker-2-2026-03-16__14_00_00.db').touch()
+
+    files = _list_db_files(str(tmp_path), 'worker-1')
+    assert len(files) == 1
+    assert 'worker-1' in files[0]
+
+
+# --- Memory-only mode ---
+
+
+async def test_no_symlink_when_db_dir_empty():
+    config = DebugConfig(enabled=True, db_dir='')
+    rec = EventRecorder(config, worker_name=WORKER)
+    await rec.start()
+    assert rec.db_path == ''
+    await rec.stop()
