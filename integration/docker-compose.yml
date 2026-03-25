@@ -110,6 +110,16 @@ services:
     environment:
       REDIS_HOSTS: local:redis:6379
 
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9099:9090"
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
   # --- Drakkar Workers ---
 
   worker-1:

@@ -123,19 +123,31 @@ def create_debug_app(
             return {'card_links': {}, 'worker_links': [], 'cluster_links': []}
 
         rate = config.prometheus_rate_interval
+        metrics_port = str(drakkar_app._config.metrics.port)
+        tpl_vars = {
+            'worker_id': drakkar_app._worker_id,
+            'cluster_name': drakkar_app._cluster_name or '',
+            'metrics_port': metrics_port,
+            'debug_port': str(config.port),
+        }
+
+        def _expand(template: str) -> str:
+            result = template
+            for key, val in tpl_vars.items():
+                result = result.replace('{' + key + '}', val)
+            return result
 
         # Worker-scoped label filter
         if config.prometheus_worker_label:
-            wf = config.prometheus_worker_label
+            wf = _expand(config.prometheus_worker_label)
         else:
             import socket
 
             hostname = socket.gethostname()
-            metrics_port = drakkar_app._config.metrics.port
             wf = f'instance="{hostname}:{metrics_port}"'
 
         # Cluster-scoped label filter
-        cf = config.prometheus_cluster_label
+        cf = _expand(config.prometheus_cluster_label) if config.prometheus_cluster_label else ''
 
         def _graph_url(expr: str, range_input: str = '1h') -> str:
             from urllib.parse import quote
@@ -157,7 +169,10 @@ def create_debug_app(
                 'category': 'Throughput',
                 'links': [
                     ('Consume rate', _graph_url(f'rate(drakkar_messages_consumed_total{{{wf}}}[{rate}])')),
-                    ('Task completion rate', _graph_url(f'rate(drakkar_executor_tasks_total{{{wf},status="completed"}}[{rate}])')),
+                    (
+                        'Task completion rate',
+                        _graph_url(f'rate(drakkar_executor_tasks_total{{{wf},status="completed"}}[{rate}])'),
+                    ),
                     ('Sink delivery rate', _graph_url(f'rate(drakkar_sink_payloads_delivered_total{{{wf}}}[{rate}])')),
                     ('Commit rate', _graph_url(f'rate(drakkar_offsets_committed_total{{{wf}}}[{rate}])')),
                 ],
@@ -165,10 +180,30 @@ def create_debug_app(
             {
                 'category': 'Latency',
                 'links': [
-                    ('Executor p95', _graph_url(f'histogram_quantile(0.95, rate(drakkar_executor_duration_seconds_bucket{{{wf}}}[{rate}]))')),
-                    ('Batch p95', _graph_url(f'histogram_quantile(0.95, rate(drakkar_batch_duration_seconds_bucket{{{wf}}}[{rate}]))')),
-                    ('Sink delivery p95', _graph_url(f'histogram_quantile(0.95, rate(drakkar_sink_deliver_duration_seconds_bucket{{{wf}}}[{rate}]))')),
-                    ('Handler hooks p95', _graph_url(f'histogram_quantile(0.95, rate(drakkar_handler_duration_seconds_bucket{{{wf}}}[{rate}]))')),
+                    (
+                        'Executor p95',
+                        _graph_url(
+                            f'histogram_quantile(0.95, rate(drakkar_executor_duration_seconds_bucket{{{wf}}}[{rate}]))'
+                        ),
+                    ),
+                    (
+                        'Batch p95',
+                        _graph_url(
+                            f'histogram_quantile(0.95, rate(drakkar_batch_duration_seconds_bucket{{{wf}}}[{rate}]))'
+                        ),
+                    ),
+                    (
+                        'Sink delivery p95',
+                        _graph_url(
+                            f'histogram_quantile(0.95, rate(drakkar_sink_deliver_duration_seconds_bucket{{{wf}}}[{rate}]))'
+                        ),
+                    ),
+                    (
+                        'Handler hooks p95',
+                        _graph_url(
+                            f'histogram_quantile(0.95, rate(drakkar_handler_duration_seconds_bucket{{{wf}}}[{rate}]))'
+                        ),
+                    ),
                 ],
             },
             {
@@ -183,7 +218,10 @@ def create_debug_app(
             {
                 'category': 'Errors',
                 'links': [
-                    ('Task failures', _graph_url(f'rate(drakkar_executor_tasks_total{{{wf},status="failed"}}[{rate}])')),
+                    (
+                        'Task failures',
+                        _graph_url(f'rate(drakkar_executor_tasks_total{{{wf},status="failed"}}[{rate}])'),
+                    ),
                     ('Task timeouts', _graph_url(f'rate(drakkar_executor_timeouts_total{{{wf}}}[{rate}])')),
                     ('Task retries', _graph_url(f'rate(drakkar_task_retries_total{{{wf}}}[{rate}])')),
                     ('Sink errors', _graph_url(f'rate(drakkar_sink_deliver_errors_total{{{wf}}}[{rate}])')),
@@ -200,7 +238,10 @@ def create_debug_app(
             cluster_links = [
                 ('Consume rate (cluster)', _graph_url(f'sum(rate(drakkar_messages_consumed_total{{{cf}}}[{rate}]))')),
                 ('Total lag (cluster)', _graph_url(f'sum(drakkar_offset_lag{{{cf}}})')),
-                ('Task failures (cluster)', _graph_url(f'sum(rate(drakkar_executor_tasks_total{{{cf},status="failed"}}[{rate}]))')),
+                (
+                    'Task failures (cluster)',
+                    _graph_url(f'sum(rate(drakkar_executor_tasks_total{{{cf},status="failed"}}[{rate}]))'),
+                ),
                 ('Sink errors (cluster)', _graph_url(f'sum(rate(drakkar_sink_deliver_errors_total{{{cf}}}[{rate}]))')),
                 ('Pool active (cluster)', _graph_url(f'sum(drakkar_executor_pool_active{{{cf}}})')),
                 ('Backpressure (cluster)', _graph_url(f'sum(drakkar_backpressure_active{{{cf}}})')),
@@ -221,6 +262,21 @@ def create_debug_app(
                 total_lag = await consumer.get_total_lag(partition_ids)
             except Exception:
                 pass
+        # Expand custom link URL templates
+        custom_links = []
+        if config.custom_links:
+            tpl_vars = {
+                'worker_id': drakkar_app._worker_id,
+                'cluster_name': drakkar_app._cluster_name or '',
+                'metrics_port': str(drakkar_app._config.metrics.port),
+                'debug_port': str(config.port),
+            }
+            for link in config.custom_links:
+                url = link.get('url', '')
+                for key, val in tpl_vars.items():
+                    url = url.replace('{' + key + '}', val)
+                custom_links.append({'name': link.get('name', url), 'url': url})
+
         return templates.TemplateResponse(
             request,
             'dashboard.html',
@@ -234,6 +290,7 @@ def create_debug_app(
                 'pool_max': pool.max_workers if pool else 0,
                 'total_lag': total_lag,
                 'prom': _build_prometheus_links(),
+                'custom_links': custom_links,
             },
         )
 

@@ -1,4 +1,5 @@
 # Drakkar
+## Poll -> Execute -> Sink
 
 Kafka subprocess orchestration framework with pluggable output sinks. Consumes messages from Kafka, runs CPU-intensive external binaries in a managed subprocess pool, and delivers results to any combination of Kafka, PostgreSQL, MongoDB, Redis, HTTP, and filesystem.
 

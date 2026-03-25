@@ -88,4 +88,15 @@
 </div>
 {% endif %}
 {% endif %}
+
+{% if custom_links %}
+<h2 class="text-lg font-semibold mb-3 text-ink-800">Links</h2>
+<div class="bg-white rounded-lg border border-cream-200 p-4 mb-6">
+    <ul class="flex flex-wrap gap-x-6 gap-y-1">
+        {% for link in custom_links %}
+        <li><a href="{{ link.url }}" target="_blank" rel="noopener" class="text-sm text-blue-600 hover:text-blue-800 hover:underline">{{ link.name }}</a></li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
 {% endblock %}

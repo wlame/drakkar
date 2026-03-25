@@ -87,3 +87,10 @@ debug:
   flush_interval_seconds: 3
   max_buffer: 50000
   max_ui_rows: 5000
+  prometheus_url: "http://localhost:9099"
+  prometheus_rate_interval: "30s"
+  prometheus_worker_label: 'instance="{worker_id}:{metrics_port}"'
+  prometheus_cluster_label: 'cluster="main-cluster"'
+  custom_links:
+    - name: "Drakkar GitHub"
+      url: "https://github.com/wlame/drakkar?from={worker_id}"

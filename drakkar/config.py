@@ -230,6 +230,7 @@ class DebugConfig(BaseModel):
     prometheus_rate_interval: str = '5m'
     prometheus_worker_label: str = ''
     prometheus_cluster_label: str = ''
+    custom_links: list[dict[str, str]] = Field(default_factory=list)
 
 
 # --- Root config ---
