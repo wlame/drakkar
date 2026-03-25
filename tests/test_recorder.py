@@ -14,7 +14,14 @@ from drakkar.models import (
     KafkaPayload,
     SourceMessage,
 )
-from drakkar.recorder import SCHEMA_WORKER_CONFIG, EventRecorder, _list_db_files, _live_link_path, _make_db_path
+from drakkar.recorder import (
+    SCHEMA_WORKER_CONFIG,
+    EventRecorder,
+    _format_dt,
+    _list_db_files,
+    _live_link_path,
+    _make_db_path,
+)
 
 
 class _RecData(BaseModel):
@@ -705,7 +712,7 @@ async def test_rotation_new_db_has_schema(tmp_path):
         # verify indexes exist
         async with db.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_events_%'") as cur:
             indexes = await cur.fetchall()
-            assert len(indexes) == 4  # partition_offset, ts, task_id, type
+            assert len(indexes) == 5  # partition_offset, ts, dt, task_id, type
 
     await rec.stop()
 
@@ -1024,7 +1031,7 @@ async def test_write_config_skipped_when_store_config_false(tmp_path):
 # --- worker_state sync ---
 
 
-async def test_sync_state_writes_single_row(tmp_path):
+async def test_sync_state_writes_row(tmp_path):
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
@@ -1049,7 +1056,7 @@ async def test_sync_state_writes_single_row(tmp_path):
 
     import json
 
-    async with rec._db.execute('SELECT * FROM worker_state WHERE id = 1') as cur:
+    async with rec._db.execute('SELECT * FROM worker_state ORDER BY id DESC LIMIT 1') as cur:
         columns = [d[0] for d in cur.description]
         row = await cur.fetchone()
     assert row is not None
@@ -1061,11 +1068,12 @@ async def test_sync_state_writes_single_row(tmp_path):
     assert data['consumed_count'] == 100
     assert data['completed_count'] == 50
     assert data['paused'] == 0
+    assert data['updated_at_dt'] is not None
     await rec.stop()
 
 
-async def test_sync_state_overwrites_previous(tmp_path):
-    """Second sync replaces the row, not appends."""
+async def test_sync_state_accumulates_rows(tmp_path):
+    """Each sync appends a new row (time series)."""
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
@@ -1073,10 +1081,11 @@ async def test_sync_state_overwrites_previous(tmp_path):
 
     await rec._sync_state()
     await rec._sync_state()
+    await rec._sync_state()
 
     async with rec._db.execute('SELECT COUNT(*) FROM worker_state') as cur:
         row = await cur.fetchone()
-    assert row[0] == 1
+    assert row[0] == 3
     await rec.stop()
 
 
@@ -1099,7 +1108,7 @@ async def test_sync_state_without_provider(tmp_path):
 
     await rec._sync_state()
 
-    async with rec._db.execute('SELECT uptime_seconds FROM worker_state WHERE id = 1') as cur:
+    async with rec._db.execute('SELECT uptime_seconds FROM worker_state ORDER BY id DESC LIMIT 1') as cur:
         row = await cur.fetchone()
     assert row is not None
     assert row[0] == 0  # default when no provider
@@ -1250,8 +1259,8 @@ async def test_discover_workers_finds_other_worker(tmp_path):
             """INSERT INTO worker_config
                (id, worker_name, ip_address, debug_port, debug_url, kafka_brokers, source_topic,
                 consumer_group, binary_path, max_workers, task_timeout_seconds,
-                max_retries, window_size, sinks_json, env_vars_json, created_at)
-               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                max_retries, window_size, sinks_json, env_vars_json, created_at, created_at_dt)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 'other-worker',
                 '10.0.0.2',
@@ -1268,6 +1277,7 @@ async def test_discover_workers_finds_other_worker(tmp_path):
                 '{}',
                 '{}',
                 1000.0,
+                _format_dt(1000.0),
             ],
         )
         await db.commit()
@@ -1435,7 +1445,7 @@ async def test_rotation_state_sync_uses_new_db(tmp_path):
     rec._counters['consumed'] = 42
     await rec._sync_state()
 
-    async with rec._db.execute('SELECT consumed_count FROM worker_state WHERE id = 1') as cur:
+    async with rec._db.execute('SELECT consumed_count FROM worker_state ORDER BY id DESC LIMIT 1') as cur:
         row = await cur.fetchone()
     assert row[0] == 42
     await rec.stop()
@@ -1484,7 +1494,7 @@ async def test_stop_syncs_state_before_shutdown(tmp_path):
 
     async with (
         aiosqlite.connect(db_path) as db,
-        db.execute('SELECT consumed_count, uptime_seconds FROM worker_state WHERE id = 1') as cur,
+        db.execute('SELECT consumed_count, uptime_seconds FROM worker_state ORDER BY id DESC LIMIT 1') as cur,
     ):
         row = await cur.fetchone()
     assert row is not None

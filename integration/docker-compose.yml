@@ -69,12 +69,11 @@ services:
       retries: 10
 
   webhook:
-    image: python:3.13-slim
+    image: mendhak/http-https-echo:latest
     ports:
       - "9000:8080"
-    volumes:
-      - ./infra/webhook.py:/app/webhook.py:ro
-    command: ["python", "/app/webhook.py"]
+    environment:
+      HTTP_PORT: 8080
 
   # --- Web UIs ---
 

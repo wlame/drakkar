@@ -5,16 +5,12 @@ import os
 import sqlite3
 import time
 
-import pytest
-
 from drakkar.merge import (
-    DbStats,
-    MergeResult,
     merge_databases,
     scan_db,
     scan_directory,
 )
-from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, SCHEMA_WORKER_STATE
+from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, SCHEMA_WORKER_STATE, _format_dt
 
 
 def _create_source_db(
@@ -32,13 +28,14 @@ def _create_source_db(
 
     if not skip_config_table:
         db.executescript(SCHEMA_WORKER_CONFIG)
+        now = time.time()
         db.execute(
             """INSERT INTO worker_config
                (id, worker_name, cluster_name, ip_address, debug_port, debug_url,
                 kafka_brokers, source_topic, consumer_group, binary_path,
                 max_workers, task_timeout_seconds, max_retries, window_size,
-                sinks_json, env_vars_json, created_at)
-               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                sinks_json, env_vars_json, created_at, created_at_dt)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 worker_name,
                 cluster_name,
@@ -55,19 +52,22 @@ def _create_source_db(
                 10,
                 json.dumps({'kafka': ['results']}),
                 json.dumps({'WORKER_ID': worker_name}),
-                time.time(),
+                now,
+                _format_dt(now),
             ],
         )
 
     if not skip_events_table:
         db.executescript(SCHEMA_EVENTS)
         for ev in events or []:
+            ev_ts = ev.get('ts', time.time())
             db.execute(
-                """INSERT INTO events (ts, event, partition, offset, task_id, args,
+                """INSERT INTO events (ts, dt, event, partition, offset, task_id, args,
                    stdout_size, stdout, stderr, exit_code, duration, output_topic, metadata, pid)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
-                    ev.get('ts', time.time()),
+                    ev_ts,
+                    _format_dt(ev_ts),
                     ev.get('event', 'consumed'),
                     ev.get('partition', 0),
                     ev.get('offset'),
@@ -86,28 +86,31 @@ def _create_source_db(
 
     if not skip_state_table:
         db.executescript(SCHEMA_WORKER_STATE)
-        if state:
+        state_rows = state if isinstance(state, list) else ([state] if state else [])
+        for s in state_rows:
+            s_updated = s.get('updated_at', time.time())
             db.execute(
                 """INSERT INTO worker_state
-                   (id, uptime_seconds, assigned_partitions, partition_count,
+                   (uptime_seconds, assigned_partitions, partition_count,
                     pool_active, pool_max, total_queued,
                     consumed_count, completed_count, failed_count,
-                    produced_count, committed_count, paused, updated_at)
-                   VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    produced_count, committed_count, paused, updated_at, updated_at_dt)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
-                    state.get('uptime_seconds', 100),
-                    json.dumps(state.get('assigned_partitions', [0, 1])),
-                    state.get('partition_count', 2),
-                    state.get('pool_active', 1),
-                    state.get('pool_max', 4),
-                    state.get('total_queued', 0),
-                    state.get('consumed_count', 50),
-                    state.get('completed_count', 45),
-                    state.get('failed_count', 2),
-                    state.get('produced_count', 45),
-                    state.get('committed_count', 40),
-                    state.get('paused', 0),
-                    state.get('updated_at', time.time()),
+                    s.get('uptime_seconds', 100),
+                    json.dumps(s.get('assigned_partitions', [0, 1])),
+                    s.get('partition_count', 2),
+                    s.get('pool_active', 1),
+                    s.get('pool_max', 4),
+                    s.get('total_queued', 0),
+                    s.get('consumed_count', 50),
+                    s.get('completed_count', 45),
+                    s.get('failed_count', 2),
+                    s.get('produced_count', 45),
+                    s.get('committed_count', 40),
+                    s.get('paused', 0),
+                    s_updated,
+                    _format_dt(s_updated),
                 ],
             )
 
@@ -598,9 +601,7 @@ def test_merge_event_worker_fk_valid(tmp_path):
     merged = sqlite3.connect(output)
     merged.execute('PRAGMA foreign_keys=ON')
     # this query would fail if FK is violated
-    orphans = merged.execute(
-        'SELECT COUNT(*) FROM events WHERE worker_id NOT IN (SELECT id FROM workers)'
-    ).fetchone()
+    orphans = merged.execute('SELECT COUNT(*) FROM events WHERE worker_id NOT IN (SELECT id FROM workers)').fetchone()
     assert orphans[0] == 0
     merged.close()
 
@@ -662,11 +663,11 @@ def test_merge_creates_indexes(tmp_path):
 
     merged = sqlite3.connect(output)
     indexes = {
-        row[0]
-        for row in merged.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'")
+        row[0] for row in merged.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'")
     }
     expected = {
         'idx_events_ts',
+        'idx_events_dt',
         'idx_events_event',
         'idx_events_task_id',
         'idx_events_partition',
@@ -695,9 +696,7 @@ def test_merge_overwrites_existing_output(tmp_path):
     merge_databases([str(db1)], output)
 
     merged = sqlite3.connect(output)
-    tables = {
-        row[0] for row in merged.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    }
+    tables = {row[0] for row in merged.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert 'stale' not in tables
     assert 'workers' in tables
     merged.close()
@@ -711,10 +710,7 @@ def test_merge_three_workers_global_order(tmp_path):
     dbs = []
     for i, (name, base_ts) in enumerate([('w1', 1000), ('w2', 999), ('w3', 1001)]):
         p = tmp_path / f'{name}.db'
-        events = [
-            {'ts': base_ts + j * 0.5, 'event': 'consumed', 'partition': i, 'offset': j}
-            for j in range(5)
-        ]
+        events = [{'ts': base_ts + j * 0.5, 'event': 'consumed', 'partition': i, 'offset': j} for j in range(5)]
         _create_source_db(p, worker_name=name, events=events)
         dbs.append(str(p))
 

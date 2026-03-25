@@ -36,6 +36,7 @@ CREATE TABLE workers (
     sinks_json           TEXT,
     env_vars_json        TEXT,
     created_at           REAL,
+    created_at_dt        TEXT,
     source_file          TEXT NOT NULL
 );
 
@@ -43,6 +44,7 @@ CREATE TABLE events (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     worker_id    INTEGER NOT NULL REFERENCES workers(id),
     ts           REAL NOT NULL,
+    dt           TEXT NOT NULL,
     event        TEXT NOT NULL,
     partition    INTEGER,
     offset       INTEGER,
@@ -73,10 +75,12 @@ CREATE TABLE worker_states (
     produced_count      INTEGER,
     committed_count     INTEGER,
     paused              INTEGER,
-    updated_at          REAL NOT NULL
+    updated_at          REAL NOT NULL,
+    updated_at_dt       TEXT NOT NULL
 );
 
 CREATE INDEX idx_events_ts ON events(ts);
+CREATE INDEX idx_events_dt ON events(dt);
 CREATE INDEX idx_events_event ON events(event);
 CREATE INDEX idx_events_task_id ON events(task_id);
 CREATE INDEX idx_events_partition ON events(partition);
@@ -103,10 +107,12 @@ _WORKER_CONFIG_COLUMNS = [
     'sinks_json',
     'env_vars_json',
     'created_at',
+    'created_at_dt',
 ]
 
 _EVENT_COLUMNS = [
     'ts',
+    'dt',
     'event',
     'partition',
     'offset',
@@ -136,6 +142,7 @@ _STATE_COLUMNS = [
     'committed_count',
     'paused',
     'updated_at',
+    'updated_at_dt',
 ]
 
 
@@ -169,6 +176,11 @@ class MergeResult:
     source_files: list[str] = field(default_factory=list)
 
 
+def _dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
+    """Row factory that returns dicts instead of tuples."""
+    return {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
+
+
 def _table_exists(db: sqlite3.Connection, table: str) -> bool:
     row = db.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -186,7 +198,7 @@ def scan_db(path: str) -> DbStats:
     )
     try:
         db = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
-        db.row_factory = sqlite3.Row
+        db.row_factory = _dict_factory
 
         if _table_exists(db, 'worker_config'):
             stats.has_config = True
@@ -271,7 +283,7 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
         result.source_files.append(basename)
         try:
             src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
-            src.row_factory = sqlite3.Row
+            src.row_factory = _dict_factory
         except Exception:
             continue
 
@@ -280,14 +292,14 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
         if _table_exists(src, 'worker_config'):
             row = src.execute('SELECT * FROM worker_config WHERE id = 1').fetchone()
             if row:
-                values = [row[col] if col in row.keys() else None for col in _WORKER_CONFIG_COLUMNS]
+                values = [row.get(col) for col in _WORKER_CONFIG_COLUMNS]
                 values.append(basename)
                 placeholders = ', '.join(['?'] * len(values))
-                cols = ', '.join(_WORKER_CONFIG_COLUMNS + ['source_file'])
+                cols = ', '.join([*_WORKER_CONFIG_COLUMNS, 'source_file'])
                 cursor = out.execute(f'INSERT INTO workers ({cols}) VALUES ({placeholders})', values)
                 worker_id = cursor.lastrowid
                 result.worker_count += 1
-                cluster = row['cluster_name'] if 'cluster_name' in row.keys() else None
+                cluster = row.get('cluster_name')
                 if cluster:
                     cluster_names.add(cluster)
                 else:
@@ -315,21 +327,21 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
         wid = worker_map[db_path]
         try:
             src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
-            src.row_factory = sqlite3.Row
+            src.row_factory = _dict_factory
         except Exception:
             continue
 
         if _table_exists(src, 'events'):
             rows = src.execute('SELECT * FROM events ORDER BY ts').fetchall()
             for row in rows:
-                values = tuple(row[col] if col in row.keys() else None for col in _EVENT_COLUMNS)
-                all_events.append((wid,) + values)
+                values = tuple(row.get(col) for col in _EVENT_COLUMNS)
+                all_events.append((wid, *values))
         src.close()
 
     # sort all events by ts (index 1 in the tuple: worker_id, ts, ...)
     all_events.sort(key=lambda r: r[1] or 0)
 
-    cols = ', '.join(['worker_id'] + _EVENT_COLUMNS)
+    cols = ', '.join(['worker_id', *_EVENT_COLUMNS])
     placeholders = ', '.join(['?'] * (1 + len(_EVENT_COLUMNS)))
     out.executemany(f'INSERT INTO events ({cols}) VALUES ({placeholders})', all_events)
     result.event_count = len(all_events)
@@ -341,17 +353,17 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
         wid = worker_map[db_path]
         try:
             src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
-            src.row_factory = sqlite3.Row
+            src.row_factory = _dict_factory
         except Exception:
             continue
 
         if _table_exists(src, 'worker_state'):
-            row = src.execute('SELECT * FROM worker_state WHERE id = 1').fetchone()
-            if row:
-                values = [row[col] if col in row.keys() else None for col in _STATE_COLUMNS]
-                cols = ', '.join(['worker_id'] + _STATE_COLUMNS)
-                placeholders = ', '.join(['?'] * (1 + len(_STATE_COLUMNS)))
-                out.execute(f'INSERT INTO worker_states ({cols}) VALUES ({placeholders})', [wid] + values)
+            rows = src.execute('SELECT * FROM worker_state ORDER BY updated_at').fetchall()
+            cols = ', '.join(['worker_id', *_STATE_COLUMNS])
+            placeholders = ', '.join(['?'] * (1 + len(_STATE_COLUMNS)))
+            for row in rows:
+                values = [row.get(col) for col in _STATE_COLUMNS]
+                out.execute(f'INSERT INTO worker_states ({cols}) VALUES ({placeholders})', [wid, *values])
                 result.state_count += 1
         src.close()
 

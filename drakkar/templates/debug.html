@@ -1,0 +1,284 @@
+{% extends "base.html" %}
+{% block title %}Debug Databases — Drakkar{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold text-ink-900">Debug Databases</h1>
+    <div class="flex items-center gap-3">
+        <button id="btn-merge" disabled
+                class="px-4 py-2 text-sm font-medium rounded disabled:opacity-40"
+                style="background:#2a2a2a;color:white;">
+            Merge Selected
+        </button>
+        <button id="btn-refresh" class="px-3 py-2 text-sm rounded border border-cream-300 text-ink-700 hover:bg-cream-100">
+            Refresh
+        </button>
+    </div>
+</div>
+
+<div id="db-list" class="space-y-6">
+    <div class="text-gray-500">Loading...</div>
+</div>
+
+<!-- merge result banner -->
+<div id="merge-result" class="hidden mt-4 p-4 rounded border border-green-300 bg-green-50">
+    <div class="flex items-center justify-between">
+        <div>
+            <span class="font-semibold text-green-800" id="merge-msg"></span>
+        </div>
+        <a id="merge-download" href="#" class="px-3 py-1 text-sm rounded font-medium"
+           style="background:#2a2a2a;color:white;">
+            Download
+        </a>
+    </div>
+</div>
+
+<script>
+(function() {
+    var listEl = document.getElementById('db-list');
+    var mergeBtn = document.getElementById('btn-merge');
+    var refreshBtn = document.getElementById('btn-refresh');
+    var mergeResult = document.getElementById('merge-result');
+    var mergeMsg = document.getElementById('merge-msg');
+    var mergeDownload = document.getElementById('merge-download');
+    var selected = new Set();
+
+    function updateMergeBtn() {
+        mergeBtn.disabled = selected.size < 2;
+    }
+
+    function formatSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / 1048576).toFixed(1) + ' MB';
+    }
+
+    function formatTs(ts) {
+        if (!ts) return '-';
+        var d = new Date(ts * 1000);
+        return d.toISOString().replace('T', ' ').slice(0, 19);
+    }
+
+    function makeHeaderRow() {
+        var tr = document.createElement('tr');
+        tr.className = 'text-left text-gray-500 text-xs border-b border-cream-100';
+        var cols = [
+            ['', 'px-4 py-2 w-8'],
+            ['File', 'px-2 py-2'],
+            ['Worker', 'px-2 py-2'],
+            ['Events', 'px-2 py-2 text-right'],
+            ['First', 'px-2 py-2'],
+            ['Last', 'px-2 py-2'],
+            ['Size', 'px-2 py-2 text-right'],
+            ['', 'px-2 py-2 w-8']
+        ];
+        cols.forEach(function(c) {
+            var th = document.createElement('th');
+            th.className = c[1];
+            th.textContent = c[0];
+            tr.appendChild(th);
+        });
+        return tr;
+    }
+
+    function render(databases) {
+        listEl.textContent = '';
+        if (!databases.length) {
+            var empty = document.createElement('div');
+            empty.className = 'text-gray-500 py-8 text-center';
+            empty.textContent = 'No database files found';
+            listEl.appendChild(empty);
+            return;
+        }
+
+        // group by cluster
+        var groups = {};
+        var order = [];
+        databases.forEach(function(db) {
+            var cluster = db.cluster_name || '';
+            if (!(cluster in groups)) {
+                groups[cluster] = [];
+                order.push(cluster);
+            }
+            groups[cluster].push(db);
+        });
+        // sort: named clusters first (alpha), unclustered at end
+        order.sort(function(a, b) {
+            if (a && !b) return -1;
+            if (!a && b) return 1;
+            return a.localeCompare(b);
+        });
+
+        order.forEach(function(cluster) {
+            var panel = document.createElement('div');
+            panel.className = 'rounded-lg border border-cream-200 overflow-hidden';
+            panel.style.background = '#fff';
+
+            var header = document.createElement('div');
+            header.className = 'px-4 py-3 border-b border-cream-200 flex items-center justify-between';
+            header.style.background = '#f5f3ee';
+            var title = document.createElement('span');
+            title.className = 'font-semibold text-ink-800';
+            title.textContent = cluster || 'Unclustered';
+            header.appendChild(title);
+
+            var selectAll = document.createElement('label');
+            selectAll.className = 'text-xs text-gray-500 flex items-center gap-1 cursor-pointer';
+            var saCheckbox = document.createElement('input');
+            saCheckbox.type = 'checkbox';
+            saCheckbox.className = 'rounded';
+            saCheckbox.dataset.cluster = cluster;
+            saCheckbox.onchange = function() {
+                groups[cluster].forEach(function(db) {
+                    if (saCheckbox.checked) selected.add(db.filename);
+                    else selected.delete(db.filename);
+                });
+                panel.querySelectorAll('input[data-file]').forEach(function(cb) {
+                    cb.checked = saCheckbox.checked;
+                });
+                updateMergeBtn();
+            };
+            selectAll.appendChild(saCheckbox);
+            selectAll.appendChild(document.createTextNode(' select all'));
+            header.appendChild(selectAll);
+            panel.appendChild(header);
+
+            var table = document.createElement('table');
+            table.className = 'w-full text-sm';
+            var thead = document.createElement('thead');
+            thead.appendChild(makeHeaderRow());
+            table.appendChild(thead);
+
+            var tbody = document.createElement('tbody');
+            groups[cluster].forEach(function(db) {
+                var tr = document.createElement('tr');
+                tr.className = 'border-b border-cream-50 hover:bg-cream-50';
+
+                // checkbox
+                var tdCb = document.createElement('td');
+                tdCb.className = 'px-4 py-2';
+                var cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.className = 'rounded';
+                cb.dataset.file = db.filename;
+                cb.checked = selected.has(db.filename);
+                cb.onchange = function() {
+                    if (cb.checked) selected.add(db.filename);
+                    else selected.delete(db.filename);
+                    updateMergeBtn();
+                };
+                tdCb.appendChild(cb);
+                tr.appendChild(tdCb);
+
+                // filename
+                var tdFile = document.createElement('td');
+                tdFile.className = 'px-2 py-2 font-mono text-xs';
+                tdFile.textContent = db.filename;
+                tr.appendChild(tdFile);
+
+                // worker
+                var tdWorker = document.createElement('td');
+                tdWorker.className = 'px-2 py-2 font-mono text-xs';
+                tdWorker.textContent = db.worker_name || '-';
+                tr.appendChild(tdWorker);
+
+                // event count (with type breakdown on hover)
+                var tdCount = document.createElement('td');
+                tdCount.className = 'px-2 py-2 text-right font-mono cursor-default';
+                tdCount.textContent = db.event_count.toLocaleString();
+                if (db.event_counts && Object.keys(db.event_counts).length) {
+                    var parts = [];
+                    Object.keys(db.event_counts).sort().forEach(function(k) {
+                        parts.push(k + ': ' + db.event_counts[k]);
+                    });
+                    tdCount.title = parts.join('\n');
+                }
+                tr.appendChild(tdCount);
+
+                // first/last ts
+                var tdFirst = document.createElement('td');
+                tdFirst.className = 'px-2 py-2 text-xs text-gray-500';
+                tdFirst.textContent = formatTs(db.first_event_ts);
+                tr.appendChild(tdFirst);
+
+                var tdLast = document.createElement('td');
+                tdLast.className = 'px-2 py-2 text-xs text-gray-500';
+                tdLast.textContent = formatTs(db.last_event_ts);
+                tr.appendChild(tdLast);
+
+                // size
+                var tdSize = document.createElement('td');
+                tdSize.className = 'px-2 py-2 text-right text-xs text-gray-500';
+                tdSize.textContent = formatSize(db.size_bytes);
+                tr.appendChild(tdSize);
+
+                // download icon
+                var tdDl = document.createElement('td');
+                tdDl.className = 'px-2 py-2';
+                var dlLink = document.createElement('a');
+                dlLink.href = '/debug/download/' + encodeURIComponent(db.filename);
+                dlLink.className = 'text-gray-400 hover:text-ink-700';
+                dlLink.title = 'Download';
+                dlLink.textContent = '\u2B73';
+                tdDl.appendChild(dlLink);
+                tr.appendChild(tdDl);
+
+                tbody.appendChild(tr);
+            });
+            table.appendChild(tbody);
+            panel.appendChild(table);
+            listEl.appendChild(panel);
+        });
+    }
+
+    function loadDatabases() {
+        listEl.textContent = '';
+        var loading = document.createElement('div');
+        loading.className = 'text-gray-500';
+        loading.textContent = 'Loading...';
+        listEl.appendChild(loading);
+        fetch('/api/debug/databases').then(function(r) { return r.json(); }).then(render)
+        .catch(function() {
+            listEl.textContent = '';
+            var err = document.createElement('div');
+            err.className = 'text-red-500';
+            err.textContent = 'Failed to load databases';
+            listEl.appendChild(err);
+        });
+    }
+
+    refreshBtn.onclick = loadDatabases;
+
+    mergeBtn.onclick = function() {
+        if (selected.size < 2) return;
+        mergeBtn.disabled = true;
+        mergeBtn.textContent = 'Merging...';
+        mergeResult.classList.add('hidden');
+        fetch('/api/debug/merge', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({filenames: Array.from(selected)})
+        }).then(function(r) { return r.json(); }).then(function(data) {
+            mergeBtn.textContent = 'Merge Selected';
+            updateMergeBtn();
+            if (data.error) {
+                alert('Merge failed: ' + data.error);
+                return;
+            }
+            mergeMsg.textContent = 'Merged ' + data.event_count + ' events from '
+                + data.worker_count + ' workers'
+                + (data.cluster_name ? ' (' + data.cluster_name + ')' : '');
+            mergeDownload.href = '/debug/download/' + encodeURIComponent(data.filename);
+            mergeResult.classList.remove('hidden');
+            loadDatabases();
+        }).catch(function(err) {
+            mergeBtn.textContent = 'Merge Selected';
+            updateMergeBtn();
+            alert('Merge failed: ' + err);
+        });
+    };
+
+    loadDatabases();
+})();
+</script>
+{% endblock %}

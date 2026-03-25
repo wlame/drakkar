@@ -36,6 +36,7 @@ SCHEMA_EVENTS = """
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          REAL    NOT NULL,
+    dt          TEXT    NOT NULL,
     event       TEXT    NOT NULL,
     partition   INTEGER,
     offset      INTEGER,
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_partition_offset ON events(partition, offset);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_dt ON events(dt);
 CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event);
 """
@@ -74,13 +76,14 @@ CREATE TABLE IF NOT EXISTS worker_config (
     window_size     INTEGER,
     sinks_json      TEXT,
     env_vars_json   TEXT,
-    created_at      REAL NOT NULL
+    created_at      REAL NOT NULL,
+    created_at_dt   TEXT NOT NULL
 );
 """
 
 SCHEMA_WORKER_STATE = """
 CREATE TABLE IF NOT EXISTS worker_state (
-    id                  INTEGER PRIMARY KEY CHECK (id = 1),
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     uptime_seconds      REAL,
     assigned_partitions TEXT,
     partition_count     INTEGER,
@@ -93,9 +96,17 @@ CREATE TABLE IF NOT EXISTS worker_state (
     produced_count      INTEGER,
     committed_count     INTEGER,
     paused              INTEGER,
-    updated_at          REAL NOT NULL
+    updated_at          REAL NOT NULL,
+    updated_at_dt       TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_worker_state_updated ON worker_state(updated_at);
 """
+
+
+def _format_dt(ts: float) -> str:
+    """Format a Unix timestamp as 'YYYY-MM-DD HH:MM:SS.mmm'."""
+    dt = datetime.fromtimestamp(ts, tz=UTC)
+    return dt.strftime('%Y-%m-%d %H:%M:%S.') + f'{dt.microsecond // 1000:03d}'
 
 
 def _make_db_path(db_dir: str, worker_name: str) -> str:
@@ -231,6 +242,7 @@ class EventRecorder:
 
     def _record(self, event: dict) -> None:
         """Append event to buffer and broadcast to WS subscribers."""
+        event['dt'] = _format_dt(event['ts'])
         self._buffer.append(event)
         if self._ws_subscribers:
             for q in self._ws_subscribers:
@@ -278,12 +290,13 @@ class EventRecorder:
                 names = list(getattr(sinks_cfg, sink_type, {}).keys())
                 if names:
                     sinks[sink_type] = names
+        now = time.time()
         await self._db.execute(
             """INSERT OR REPLACE INTO worker_config
                (id, worker_name, cluster_name, ip_address, debug_port, debug_url, kafka_brokers,
                 source_topic, consumer_group, binary_path, max_workers, task_timeout_seconds,
-                max_retries, window_size, sinks_json, env_vars_json, created_at)
-               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                max_retries, window_size, sinks_json, env_vars_json, created_at, created_at_dt)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 self._worker_name,
                 self._cluster_name or None,
@@ -300,7 +313,8 @@ class EventRecorder:
                 drakkar_config.executor.window_size,
                 json.dumps(sinks),
                 json.dumps(env_vars),
-                time.time(),
+                now,
+                _format_dt(now),
             ],
         )
         await self._db.commit()
@@ -316,13 +330,14 @@ class EventRecorder:
         if not self._db or not self._config.store_state:
             return
         app_state = self._state_provider() if self._state_provider else {}
+        now = time.time()
         await self._db.execute(
-            """INSERT OR REPLACE INTO worker_state
-               (id, uptime_seconds, assigned_partitions, partition_count,
+            """INSERT INTO worker_state
+               (uptime_seconds, assigned_partitions, partition_count,
                 pool_active, pool_max, total_queued,
                 consumed_count, completed_count, failed_count,
-                produced_count, committed_count, paused, updated_at)
-               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                produced_count, committed_count, paused, updated_at, updated_at_dt)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 app_state.get('uptime_seconds', 0),
                 json.dumps(app_state.get('assigned_partitions', [])),
@@ -336,7 +351,8 @@ class EventRecorder:
                 self._counters['produced'],
                 self._counters['committed'],
                 int(app_state.get('paused', False)),
-                time.time(),
+                now,
+                _format_dt(now),
             ],
         )
         await self._db.commit()
@@ -785,6 +801,7 @@ class EventRecorder:
             batch.append(self._buffer.popleft())
         columns = [
             'ts',
+            'dt',
             'event',
             'partition',
             'offset',

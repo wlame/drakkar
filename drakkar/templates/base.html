@@ -25,6 +25,7 @@
                 <a href="/partitions" class="text-gray-400 hover:text-white text-sm">Partitions</a>
                 <a href="/sinks" class="text-gray-400 hover:text-white text-sm">Sinks</a>
                 <a href="/live" class="text-gray-400 hover:text-white text-sm">Live <span class="live-dot" style="color:#ef4444;font-size:32px;vertical-align:middle;line-height:0;position:relative;top:-2px;">&bull;</span></a>
+                <a href="/debug" class="text-gray-400 hover:text-white text-sm">Debug</a>
                 <a href="/history" class="text-gray-400 hover:text-white text-sm">History</a>
             </div>
             {% set sink_links = get_sink_ui_links() %}
@@ -105,7 +106,7 @@
                     list.appendChild(empty);
                     return;
                 }
-                var generalPages = ['/', '/partitions', '/sinks', '/live', '/history'];
+                var generalPages = ['/', '/partitions', '/sinks', '/live', '/debug', '/history'];
                 var path = window.location.pathname;
                 var suffix = generalPages.indexOf(path) !== -1 ? path : '/';
                 var lastCluster = null;

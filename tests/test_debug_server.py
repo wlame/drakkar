@@ -1,6 +1,7 @@
 """Tests for Drakkar debug web UI."""
 
 import json
+import os
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -490,3 +491,178 @@ def test_worker_group_no_trailing_number():
 def test_worker_group_only_number():
     """A name that is only digits should return itself (not empty)."""
     assert _worker_group('123') == '123'
+
+
+# --- Debug databases page and API ---
+
+
+@pytest.fixture
+async def debug_client(tmp_path, mock_recorder, mock_app):
+    """Client with a real db_dir for debug database endpoints."""
+    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        yield c
+
+
+async def test_debug_page_returns_200(debug_client):
+    resp = await debug_client.get('/debug')
+    assert resp.status_code == 200
+    assert 'Debug Databases' in resp.text
+
+
+async def test_api_debug_databases_empty(debug_client):
+    resp = await debug_client.get('/api/debug/databases')
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_api_debug_databases_lists_files(tmp_path, mock_recorder, mock_app):
+    import sqlite3
+
+    from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG
+
+    # create a fake DB file
+    db_path = tmp_path / 'worker-1-2026-03-24__10_00_00.db'
+    db = sqlite3.connect(str(db_path))
+    db.executescript(SCHEMA_WORKER_CONFIG)
+    db.execute(
+        """INSERT INTO worker_config
+           (id, worker_name, cluster_name, ip_address, debug_port, debug_url,
+            kafka_brokers, source_topic, consumer_group, binary_path,
+            max_workers, task_timeout_seconds, max_retries, window_size,
+            sinks_json, env_vars_json, created_at, created_at_dt)
+           VALUES (1, 'worker-1', 'main', '10.0.0.1', 8080, NULL,
+                   'kafka:9092', 'topic', 'grp', '/bin/rg',
+                   4, 120, 3, 10, '{}', '{}', 1000.0, '1970-01-01 00:16:40.000')""",
+    )
+    db.executescript(SCHEMA_EVENTS)
+    db.execute("INSERT INTO events (ts, dt, event, partition) VALUES (1000.0, '1970-01-12 13:46:40.000', 'consumed', 0)")
+    db.execute("INSERT INTO events (ts, dt, event, partition) VALUES (1001.0, '1970-01-12 13:50:01.000', 'task_completed', 0)")
+    db.commit()
+    db.close()
+
+    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.get('/api/debug/databases')
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]['worker_name'] == 'worker-1'
+    assert data[0]['cluster_name'] == 'main'
+    assert data[0]['event_count'] == 2
+    assert data[0]['event_counts']['consumed'] == 1
+    assert data[0]['event_counts']['task_completed'] == 1
+
+
+async def test_api_debug_databases_skips_symlinks(tmp_path, mock_recorder, mock_app):
+    import os
+    import sqlite3
+
+    from drakkar.recorder import SCHEMA_EVENTS
+
+    db_path = tmp_path / 'w1.db'
+    db = sqlite3.connect(str(db_path))
+    db.executescript(SCHEMA_EVENTS)
+    db.commit()
+    db.close()
+    os.symlink('w1.db', str(tmp_path / 'w1-live.db'))
+
+    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.get('/api/debug/databases')
+
+    data = resp.json()
+    filenames = [d['filename'] for d in data]
+    assert 'w1.db' in filenames
+    assert 'w1-live.db' not in filenames
+
+
+async def test_api_debug_merge(tmp_path, mock_recorder, mock_app):
+    import sqlite3
+
+    from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG
+
+    for name in ['w1', 'w2']:
+        p = tmp_path / f'{name}.db'
+        db = sqlite3.connect(str(p))
+        db.executescript(SCHEMA_WORKER_CONFIG)
+        db.execute(
+            """INSERT INTO worker_config
+               (id, worker_name, cluster_name, ip_address, debug_port, debug_url,
+                kafka_brokers, source_topic, consumer_group, binary_path,
+                max_workers, task_timeout_seconds, max_retries, window_size,
+                sinks_json, env_vars_json, created_at, created_at_dt)
+               VALUES (1, ?, 'main', '10.0.0.1', 8080, NULL,
+                       'k:9092', 't', 'g', '/bin/x', 4, 60, 2, 5, '{}', '{}', 1000.0, '1970-01-01 00:16:40.000')""",
+            [name],
+        )
+        db.executescript(SCHEMA_EVENTS)
+        db.execute("INSERT INTO events (ts, dt, event, partition) VALUES (1000.0, '1970-01-12 13:46:40.000', 'consumed', 0)")
+        db.commit()
+        db.close()
+
+    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.post(
+            '/api/debug/merge',
+            json={'filenames': ['w1.db', 'w2.db']},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data['worker_count'] == 2
+    assert data['event_count'] == 2
+    assert data['cluster_name'] == 'main'
+    assert data['filename'].startswith('merged-')
+    # merged file should exist
+    assert os.path.isfile(os.path.join(str(tmp_path), data['filename']))
+
+
+async def test_api_debug_merge_rejects_single_file(debug_client):
+    resp = await debug_client.post(
+        '/api/debug/merge',
+        json={'filenames': ['only-one.db']},
+    )
+    assert resp.status_code == 400
+
+
+async def test_api_debug_merge_rejects_traversal(debug_client):
+    resp = await debug_client.post(
+        '/api/debug/merge',
+        json={'filenames': ['../etc/passwd', 'a.db']},
+    )
+    assert resp.status_code == 400
+
+
+async def test_debug_download(tmp_path, mock_recorder, mock_app):
+    db_path = tmp_path / 'test.db'
+    db_path.write_bytes(b'fake-sqlite')
+
+    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.get('/debug/download/test.db')
+
+    assert resp.status_code == 200
+    assert resp.content == b'fake-sqlite'
+
+
+async def test_debug_download_rejects_traversal(debug_client):
+    """Traversal attempts are blocked — either 400 or 404 (no file served)."""
+    resp = await debug_client.get('/debug/download/../../../etc/passwd')
+    assert resp.status_code in (400, 404)
+
+
+async def test_debug_download_missing_file(debug_client):
+    resp = await debug_client.get('/debug/download/nonexistent.db')
+    assert resp.status_code == 404

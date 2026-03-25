@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import threading
 import time
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING
 import structlog
 import uvicorn
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from drakkar.config import DebugConfig
@@ -371,6 +372,101 @@ def create_debug_app(
                 'worker_id': drakkar_app._worker_id,
                 'sinks': sinks_data,
             },
+        )
+
+    # --- Debug databases page ---
+
+    @app.get('/debug', response_class=HTMLResponse)
+    async def debug_databases(request: Request):
+        return templates.TemplateResponse(
+            request,
+            'debug.html',
+            {
+                'worker_id': drakkar_app._worker_id,
+                'db_dir': config.db_dir,
+            },
+        )
+
+    @app.get('/api/debug/databases')
+    async def api_debug_databases():
+        """List all debug database files in db_dir with stats."""
+        from drakkar.merge import scan_directory
+
+        databases = scan_directory(config.db_dir)
+        return JSONResponse(
+            [
+                {
+                    'filename': db.filename,
+                    'path': db.path,
+                    'worker_name': db.worker_name,
+                    'cluster_name': db.cluster_name,
+                    'event_count': db.event_count,
+                    'event_counts': db.event_counts,
+                    'first_event_ts': db.first_event_ts,
+                    'last_event_ts': db.last_event_ts,
+                    'has_events': db.has_events,
+                    'has_config': db.has_config,
+                    'has_state': db.has_state,
+                    'size_bytes': db.size_bytes,
+                }
+                for db in databases
+            ]
+        )
+
+    @app.post('/api/debug/merge')
+    async def api_debug_merge(request: Request):
+        """Merge selected database files into one."""
+        import asyncio
+        from datetime import datetime
+
+        from drakkar.merge import merge_databases
+
+        body = await request.json()
+        filenames = body.get('filenames', [])
+        if len(filenames) < 2:
+            return JSONResponse({'error': 'Select at least 2 databases'}, status_code=400)
+
+        # resolve to full paths, validate they exist in db_dir
+        db_paths = []
+        for fn in filenames:
+            # prevent directory traversal
+            if '/' in fn or '\\' in fn or fn.startswith('.'):
+                return JSONResponse({'error': f'Invalid filename: {fn}'}, status_code=400)
+            full = os.path.join(config.db_dir, fn)
+            if not os.path.isfile(full):
+                return JSONResponse({'error': f'File not found: {fn}'}, status_code=404)
+            db_paths.append(full)
+
+        ts = datetime.now(tz=UTC).strftime('%Y-%m-%d__%H_%M_%S')
+        output_name = f'merged-{ts}.db'
+        output_path = os.path.join(config.db_dir, output_name)
+
+        result = await asyncio.to_thread(merge_databases, db_paths, output_path)
+
+        return JSONResponse(
+            {
+                'filename': output_name,
+                'worker_count': result.worker_count,
+                'event_count': result.event_count,
+                'state_count': result.state_count,
+                'cluster_name': result.cluster_name,
+                'source_files': result.source_files,
+            }
+        )
+
+    @app.get('/debug/download/{filename}')
+    async def debug_download(filename: str):
+        """Download a database file from db_dir."""
+        # prevent directory traversal
+        if '/' in filename or '\\' in filename or filename.startswith('.'):
+            return JSONResponse({'error': 'Invalid filename'}, status_code=400)
+        full = os.path.join(config.db_dir, filename)
+        if not os.path.isfile(full):
+            return JSONResponse({'error': 'File not found'}, status_code=404)
+        return FileResponse(
+            path=full,
+            filename=filename,
+            media_type='application/x-sqlite3',
         )
 
     # --- JSON API endpoints for JS-driven pages ---
