@@ -58,5 +58,5 @@ jobs:
             junit.xml
 
       - name: Coverage summary
-        if: always()
+        if: always() && hashFiles('.coverage') != ''
         run: uv run coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
