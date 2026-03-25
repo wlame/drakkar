@@ -19,7 +19,7 @@ from drakkar.sinks.base import BaseSink
 logger = structlog.get_logger()
 
 
-class FileSink(BaseSink):
+class FileSink(BaseSink[FilePayload]):
     """Appends JSONL lines to files on the local filesystem.
 
     Each FilePayload specifies its own output path. The framework
@@ -49,7 +49,7 @@ class FileSink(BaseSink):
             base_path=self._config.base_path or '(none)',
         )
 
-    async def deliver(self, payloads: list[FilePayload]) -> None:  # type: ignore[override]
+    async def deliver(self, payloads: list[FilePayload]) -> None:
         """Append each payload as a JSONL line to its target file.
 
         Creates the file if it doesn't exist. Raises FileNotFoundError

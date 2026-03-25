@@ -315,6 +315,7 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
             result.worker_count += 1
             cluster_names.add('')
 
+        assert worker_id is not None
         worker_map[db_path] = worker_id
         src.close()
 

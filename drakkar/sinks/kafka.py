@@ -19,7 +19,7 @@ from drakkar.sinks.base import BaseSink
 logger = structlog.get_logger()
 
 
-class KafkaSink(BaseSink):
+class KafkaSink(BaseSink[KafkaPayload]):
     """Produces messages to a Kafka topic.
 
     Each KafkaPayload is serialized:
@@ -54,7 +54,7 @@ class KafkaSink(BaseSink):
             brokers=self._brokers,
         )
 
-    async def deliver(self, payloads: list[KafkaPayload]) -> None:  # type: ignore[override]
+    async def deliver(self, payloads: list[KafkaPayload]) -> None:
         """Produce all payloads to the Kafka topic.
 
         Submits all messages, flushes to push them into flight,

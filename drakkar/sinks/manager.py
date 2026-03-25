@@ -11,7 +11,7 @@ import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from pydantic import BaseModel
@@ -73,12 +73,12 @@ class SinkManager:
     """
 
     def __init__(self) -> None:
-        self._sinks: dict[tuple[str, str], BaseSink] = {}
-        self._by_type: dict[str, list[BaseSink]] = defaultdict(list)
+        self._sinks: dict[tuple[str, str], BaseSink[Any]] = {}
+        self._by_type: dict[str, list[BaseSink[Any]]] = defaultdict(list)
         self._stats: dict[tuple[str, str], SinkStats] = {}
 
     @property
-    def sinks(self) -> dict[tuple[str, str], BaseSink]:
+    def sinks(self) -> dict[tuple[str, str], BaseSink[Any]]:
         """All registered sinks keyed by (sink_type, name)."""
         return dict(self._sinks)
 
@@ -87,7 +87,7 @@ class SinkManager:
         """Total number of registered sinks."""
         return len(self._sinks)
 
-    def register(self, sink: BaseSink) -> None:
+    def register(self, sink: BaseSink[Any]) -> None:
         """Register a sink instance.
 
         Raises ValueError if a sink with the same (type, name) already exists.
@@ -135,7 +135,7 @@ class SinkManager:
                     error=str(e),
                 )
 
-    def resolve_sink(self, sink_type: str, sink_name: str) -> BaseSink:
+    def resolve_sink(self, sink_type: str, sink_name: str) -> BaseSink[Any]:
         """Resolve a sink instance by type and name.
 
         If sink_name is empty and exactly one sink of that type exists,

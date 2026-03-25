@@ -32,7 +32,7 @@ def _quote_ident(name: str) -> str:
     return f'"{name}"'
 
 
-class PostgresSink(BaseSink):
+class PostgresSink(BaseSink[PostgresPayload]):
     """Inserts rows into PostgreSQL tables.
 
     Each PostgresPayload is serialized:
@@ -72,7 +72,7 @@ class PostgresSink(BaseSink):
             host=self._config.dsn.split('@')[-1],
         )
 
-    async def deliver(self, payloads: list[PostgresPayload]) -> None:  # type: ignore[override]
+    async def deliver(self, payloads: list[PostgresPayload]) -> None:
         """Insert all payloads into their respective tables.
 
         Each payload's data is serialized via model_dump() and inserted

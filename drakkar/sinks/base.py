@@ -5,11 +5,14 @@ extend BaseSink and implement connect(), deliver(), and close().
 """
 
 from abc import ABC, abstractmethod
+from typing import Generic, TypeVar
 
 from pydantic import BaseModel
 
+PayloadT = TypeVar('PayloadT', bound=BaseModel)
 
-class BaseSink(ABC):
+
+class BaseSink(ABC, Generic[PayloadT]):
     """Abstract base class for all sink implementations.
 
     A sink receives payloads from the framework after collect() or
@@ -48,7 +51,7 @@ class BaseSink(ABC):
         """
 
     @abstractmethod
-    async def deliver(self, payloads: list[BaseModel]) -> None:
+    async def deliver(self, payloads: list[PayloadT]) -> None:
         """Deliver a batch of payloads to the external system.
 
         Called by SinkManager for each group of payloads routed to this sink.

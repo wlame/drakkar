@@ -17,7 +17,7 @@ from drakkar.sinks.base import BaseSink
 logger = structlog.get_logger()
 
 
-class RedisSink(BaseSink):
+class RedisSink(BaseSink[RedisPayload]):
     """Sets key-value pairs in Redis.
 
     Each RedisPayload is serialized:
@@ -46,7 +46,7 @@ class RedisSink(BaseSink):
             key_prefix=self._config.key_prefix,
         )
 
-    async def deliver(self, payloads: list[RedisPayload]) -> None:  # type: ignore[override]
+    async def deliver(self, payloads: list[RedisPayload]) -> None:
         """Set all payloads as key-value pairs in Redis.
 
         Keys are prefixed with config.key_prefix. If a payload has a TTL,

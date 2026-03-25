@@ -18,7 +18,7 @@ from drakkar.sinks.base import BaseSink
 logger = structlog.get_logger()
 
 
-class HttpSink(BaseSink):
+class HttpSink(BaseSink[HttpPayload]):
     """Sends JSON payloads to an HTTP endpoint.
 
     Each HttpPayload is serialized:
@@ -53,7 +53,7 @@ class HttpSink(BaseSink):
             method=self._config.method,
         )
 
-    async def deliver(self, payloads: list[HttpPayload]) -> None:  # type: ignore[override]
+    async def deliver(self, payloads: list[HttpPayload]) -> None:
         """Send each payload as a JSON request to the configured URL.
 
         Raises httpx.HTTPStatusError on non-2xx responses.

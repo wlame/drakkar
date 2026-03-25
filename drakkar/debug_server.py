@@ -73,9 +73,9 @@ def create_debug_app(
     app = FastAPI(title='Drakkar Debug', docs_url=None, redoc_url=None)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.autoescape = True
-    templates.env.globals['format_ts'] = _format_ts  # type: ignore[assignment]
-    templates.env.globals['format_ts_ms'] = _format_ts_ms  # type: ignore[assignment]
-    templates.env.globals['format_ts_full'] = _format_ts_full  # type: ignore[assignment]
+    templates.env.globals['format_ts'] = _format_ts  # ty: ignore[invalid-assignment]
+    templates.env.globals['format_ts_ms'] = _format_ts_ms  # ty: ignore[invalid-assignment]
+    templates.env.globals['format_ts_full'] = _format_ts_full  # ty: ignore[invalid-assignment]
 
     def _get_sink_ui_links() -> list[dict[str, str]]:
         """Return deduplicated sink UI links for the nav header."""
@@ -98,7 +98,7 @@ def create_debug_app(
             )
         return links
 
-    templates.env.globals['get_sink_ui_links'] = _get_sink_ui_links  # type: ignore[assignment]
+    templates.env.globals['get_sink_ui_links'] = _get_sink_ui_links  # ty: ignore[invalid-assignment]
 
     async def _get_lag() -> dict[int, dict]:
         consumer = drakkar_app._consumer

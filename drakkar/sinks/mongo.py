@@ -16,7 +16,7 @@ from drakkar.sinks.base import BaseSink
 logger = structlog.get_logger()
 
 
-class MongoSink(BaseSink):
+class MongoSink(BaseSink[MongoPayload]):
     """Inserts documents into MongoDB collections.
 
     Each MongoPayload is serialized:
@@ -48,7 +48,7 @@ class MongoSink(BaseSink):
             database=self._config.database,
         )
 
-    async def deliver(self, payloads: list[MongoPayload]) -> None:  # type: ignore[override]
+    async def deliver(self, payloads: list[MongoPayload]) -> None:
         """Insert all payloads as documents into their respective collections.
 
         Each payload's data is serialized via model_dump() and inserted

@@ -10,6 +10,7 @@ import time
 
 import structlog
 from confluent_kafka.aio import AIOProducer
+from pydantic import BaseModel
 
 from drakkar.metrics import sink_dlq_messages
 from drakkar.models import DeliveryError
@@ -62,7 +63,7 @@ class DLQMessage:
         return json.dumps(msg).encode()
 
 
-class DLQSink(BaseSink):
+class DLQSink(BaseSink[BaseModel]):
     """Produces failed delivery payloads to a dead letter queue Kafka topic.
 
     Used internally by the framework when on_delivery_error returns DLQ.
@@ -92,7 +93,7 @@ class DLQSink(BaseSink):
             brokers=self._brokers,
         )
 
-    async def deliver(self, payloads: list) -> None:
+    async def deliver(self, payloads: list[BaseModel]) -> None:
         """Not used directly — use send() instead."""
         raise NotImplementedError('Use DLQSink.send() instead of deliver()')
 
