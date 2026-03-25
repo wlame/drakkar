@@ -435,6 +435,11 @@ class EventRecorder:
         pool_waiting: int = 0,
         slot: int = 0,
     ) -> None:
+        stdin_lines = 0
+        stdin_size = 0
+        if task.stdin:
+            stdin_size = len(task.stdin.encode())
+            stdin_lines = task.stdin.count('\n') + (1 if task.stdin and not task.stdin.endswith('\n') else 0)
         self._record(
             {
                 'ts': time.time(),
@@ -445,6 +450,8 @@ class EventRecorder:
                 'pool_active': pool_active,
                 'pool_waiting': pool_waiting,
                 'slot': slot,
+                'stdin_lines': stdin_lines,
+                'stdin_size': stdin_size,
                 'metadata': json.dumps(
                     {
                         'source_offsets': task.source_offsets,

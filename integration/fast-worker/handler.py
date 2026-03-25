@@ -42,7 +42,7 @@ class SymbolCountHandler(dk.BaseDrakkarHandler[CountRequest, CountResult]):
             tasks.append(
                 dk.ExecutorTask(
                     task_id=task_id,
-                    args=[],
+                    args=[req.file_path],
                     stdin=json.dumps({'file_path': req.file_path}),
                     metadata={
                         'request_id': req.request_id,

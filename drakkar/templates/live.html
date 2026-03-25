@@ -75,7 +75,7 @@
         </summary>
         <table class="w-full text-sm mt-2">
             <thead><tr class="text-left text-gray-400 border-b border-cream-200">
-                <th class="py-2 px-3">Task ID</th><th class="py-2 px-3">Partition</th><th class="py-2 px-3">Duration</th><th class="py-2 px-3">CLI Args</th>
+                <th class="py-2 px-3">Task ID</th><th class="py-2 px-3">Partition</th><th class="py-2 px-3">Duration</th><th class="py-2 px-3">CLI Args</th><th class="py-2 px-3">Stdin</th>
             </tr></thead>
             <tbody id="running-body"></tbody>
         </table>
@@ -86,7 +86,7 @@
         </summary>
         <table class="w-full text-sm mt-2">
             <thead><tr class="text-left text-gray-400 border-b border-cream-200">
-                <th class="py-2 px-3">Task ID</th><th class="py-2 px-3">Partition</th><th class="py-2 px-3">Status</th><th class="py-2 px-3">Duration</th><th class="py-2 px-3">Time</th><th class="py-2 px-3">CLI Args</th>
+                <th class="py-2 px-3">Task ID</th><th class="py-2 px-3">Partition</th><th class="py-2 px-3">Status</th><th class="py-2 px-3">Duration</th><th class="py-2 px-3">Time</th><th class="py-2 px-3">CLI Args</th><th class="py-2 px-3">Stdin</th>
             </tr></thead>
             <tbody id="finished-body"></tbody>
         </table>
@@ -155,6 +155,16 @@ var zoomLevel = 2;
 var hoveredTask = null;
 var frozen = false;
 
+function fmtStdin(t) {
+    if (!t.stdin_size) return '-';
+    return t.stdin_lines + ' lines, ' + formatSize(t.stdin_size);
+}
+function formatSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
 function toggleFreeze() {
     if (!frozen) {
         frozen = true;
@@ -218,8 +228,16 @@ function showTaskDetail(t) {
     cliLbl.style.cssText = 'color:#9ca3af;margin-right:2px;'; cliLbl.textContent = 'CLI:';
     el.appendChild(cliLbl);
     var cliVal = document.createElement('span');
-    cliVal.style.color = '#6b7280'; cliVal.textContent = t.args || '-';
+    cliVal.style.cssText = 'color:#6b7280;margin-right:12px;'; cliVal.textContent = t.args || '-';
     el.appendChild(cliVal);
+    if (t.stdin_size) {
+        var stdinLbl = document.createElement('span');
+        stdinLbl.style.cssText = 'color:#9ca3af;margin-right:2px;'; stdinLbl.textContent = 'Stdin:';
+        el.appendChild(stdinLbl);
+        var stdinVal = document.createElement('span');
+        stdinVal.style.color = '#6b7280'; stdinVal.textContent = fmtStdin(t);
+        el.appendChild(stdinVal);
+    }
 }
 function clearTaskDetail() {
     hoveredTask = null;
@@ -501,11 +519,12 @@ function renderTaskLists() {
             var rtd3 = document.createElement('td'); rtd3.className = 'py-2 px-3 font-mono'; rtd3.textContent = (now - rt.start_ts).toFixed(1) + 's';
             var rtd4 = document.createElement('td'); rtd4.className = 'py-2 px-3 font-mono text-xs text-gray-500 max-w-md truncate expandable cursor-pointer';
             rtd4.title = 'Click to expand'; rtd4.textContent = rt.args || '';
-            rtr.append(rtd1, rtd2, rtd3, rtd4); rb.appendChild(rtr);
+            var rtd5 = document.createElement('td'); rtd5.className = 'py-2 px-3 font-mono text-xs text-gray-400'; rtd5.textContent = fmtStdin(rt);
+            rtr.append(rtd1, rtd2, rtd3, rtd4, rtd5); rb.appendChild(rtr);
         }
         if (!running.length) {
             var etr = document.createElement('tr'); var etd = document.createElement('td');
-            etd.colSpan = 4; etd.className = 'py-3 text-center text-gray-400'; etd.textContent = 'No tasks running';
+            etd.colSpan = 5; etd.className = 'py-3 text-center text-gray-400'; etd.textContent = 'No tasks running';
             etr.appendChild(etd); rb.appendChild(etr);
         }
     }
@@ -529,11 +548,12 @@ function renderTaskLists() {
             var ftd5 = document.createElement('td'); ftd5.className = 'py-2 px-3 text-gray-400 text-xs'; ftd5.textContent = ft.end_ts ? fmtTimeMs(ft.end_ts) : '';
             var ftd6 = document.createElement('td'); ftd6.className = 'py-2 px-3 font-mono text-xs text-gray-500 max-w-md truncate expandable cursor-pointer';
             ftd6.title = 'Click to expand'; ftd6.textContent = ft.args || '';
-            ftr.append(ftd1, ftd2, ftd3, ftd4, ftd5, ftd6); fb.appendChild(ftr);
+            var ftd7 = document.createElement('td'); ftd7.className = 'py-2 px-3 font-mono text-xs text-gray-400'; ftd7.textContent = fmtStdin(ft);
+            ftr.append(ftd1, ftd2, ftd3, ftd4, ftd5, ftd6, ftd7); fb.appendChild(ftr);
         }
         if (!finished.length) {
             var etr2 = document.createElement('tr'); var etd2 = document.createElement('td');
-            etd2.colSpan = 6; etd2.className = 'py-3 text-center text-gray-400'; etd2.textContent = 'No finished tasks';
+            etd2.colSpan = 7; etd2.className = 'py-3 text-center text-gray-400'; etd2.textContent = 'No finished tasks';
             etr2.appendChild(etd2); fb.appendChild(etr2);
         }
     }
@@ -746,6 +766,7 @@ function connectWS() {
                     task_id: e.task_id, partition: e.partition, pid: e.pid,
                     start_ts: e.ts, end_ts: null, status: 'running', args: e.args, duration: null,
                     slot: e.slot != null ? e.slot : null,
+                    stdin_lines: e.stdin_lines || 0, stdin_size: e.stdin_size || 0,
                 };
                 ensureBar(allTasks[e.task_id]);
             } else if (e.event === 'task_completed' || e.event === 'task_failed') {
