@@ -111,6 +111,103 @@ def create_debug_app(
         except Exception:
             return {}
 
+    # --- Prometheus link builder ---
+
+    def _build_prometheus_links() -> dict:
+        """Build Prometheus graph URLs for dashboard cards and metrics panel.
+
+        Returns empty dicts/lists when prometheus_url is not configured.
+        """
+        prom_url = config.prometheus_url.rstrip('/')
+        if not prom_url:
+            return {'card_links': {}, 'worker_links': [], 'cluster_links': []}
+
+        rate = config.prometheus_rate_interval
+
+        # Worker-scoped label filter
+        if config.prometheus_worker_label:
+            wf = config.prometheus_worker_label
+        else:
+            import socket
+
+            hostname = socket.gethostname()
+            metrics_port = drakkar_app._config.metrics.port
+            wf = f'instance="{hostname}:{metrics_port}"'
+
+        # Cluster-scoped label filter
+        cf = config.prometheus_cluster_label
+
+        def _graph_url(expr: str, range_input: str = '1h') -> str:
+            from urllib.parse import quote
+
+            return f'{prom_url}/graph?g0.expr={quote(expr)}&g0.tab=0&g0.range_input={range_input}'
+
+        # Links for dashboard stat cards (worker-filtered)
+        card_links = {
+            'lag': _graph_url(f'drakkar_offset_lag{{{wf}}}'),
+            'consumed': _graph_url(f'rate(drakkar_messages_consumed_total{{{wf}}}[{rate}])'),
+            'completed': _graph_url(f'rate(drakkar_executor_tasks_total{{{wf},status="completed"}}[{rate}])'),
+            'failed': _graph_url(f'rate(drakkar_executor_tasks_total{{{wf},status="failed"}}[{rate}])'),
+            'produced': _graph_url(f'rate(drakkar_sink_payloads_delivered_total{{{wf}}}[{rate}])'),
+        }
+
+        # Worker-scoped panel links (grouped by category)
+        worker_links = [
+            {
+                'category': 'Throughput',
+                'links': [
+                    ('Consume rate', _graph_url(f'rate(drakkar_messages_consumed_total{{{wf}}}[{rate}])')),
+                    ('Task completion rate', _graph_url(f'rate(drakkar_executor_tasks_total{{{wf},status="completed"}}[{rate}])')),
+                    ('Sink delivery rate', _graph_url(f'rate(drakkar_sink_payloads_delivered_total{{{wf}}}[{rate}])')),
+                    ('Commit rate', _graph_url(f'rate(drakkar_offsets_committed_total{{{wf}}}[{rate}])')),
+                ],
+            },
+            {
+                'category': 'Latency',
+                'links': [
+                    ('Executor p95', _graph_url(f'histogram_quantile(0.95, rate(drakkar_executor_duration_seconds_bucket{{{wf}}}[{rate}]))')),
+                    ('Batch p95', _graph_url(f'histogram_quantile(0.95, rate(drakkar_batch_duration_seconds_bucket{{{wf}}}[{rate}]))')),
+                    ('Sink delivery p95', _graph_url(f'histogram_quantile(0.95, rate(drakkar_sink_deliver_duration_seconds_bucket{{{wf}}}[{rate}]))')),
+                    ('Handler hooks p95', _graph_url(f'histogram_quantile(0.95, rate(drakkar_handler_duration_seconds_bucket{{{wf}}}[{rate}]))')),
+                ],
+            },
+            {
+                'category': 'Health',
+                'links': [
+                    ('Consumer lag', _graph_url(f'drakkar_offset_lag{{{wf}}}')),
+                    ('Queue sizes', _graph_url(f'drakkar_partition_queue_size{{{wf}}}')),
+                    ('Backpressure', _graph_url(f'drakkar_backpressure_active{{{wf}}}')),
+                    ('Pool active', _graph_url(f'drakkar_executor_pool_active{{{wf}}}')),
+                ],
+            },
+            {
+                'category': 'Errors',
+                'links': [
+                    ('Task failures', _graph_url(f'rate(drakkar_executor_tasks_total{{{wf},status="failed"}}[{rate}])')),
+                    ('Task timeouts', _graph_url(f'rate(drakkar_executor_timeouts_total{{{wf}}}[{rate}])')),
+                    ('Task retries', _graph_url(f'rate(drakkar_task_retries_total{{{wf}}}[{rate}])')),
+                    ('Sink errors', _graph_url(f'rate(drakkar_sink_deliver_errors_total{{{wf}}}[{rate}])')),
+                    ('Sink retries', _graph_url(f'rate(drakkar_sink_delivery_retries_total{{{wf}}}[{rate}])')),
+                    ('Consumer errors', _graph_url(f'rate(drakkar_consumer_errors_total{{{wf}}}[{rate}])')),
+                    ('DLQ messages', _graph_url(f'rate(drakkar_sink_dlq_messages_total{{{wf}}}[{rate}])')),
+                ],
+            },
+        ]
+
+        # Cluster-wide links (only when cluster label is configured)
+        cluster_links = []
+        if cf:
+            cluster_links = [
+                ('Consume rate (cluster)', _graph_url(f'sum(rate(drakkar_messages_consumed_total{{{cf}}}[{rate}]))')),
+                ('Total lag (cluster)', _graph_url(f'sum(drakkar_offset_lag{{{cf}}})')),
+                ('Task failures (cluster)', _graph_url(f'sum(rate(drakkar_executor_tasks_total{{{cf},status="failed"}}[{rate}]))')),
+                ('Sink errors (cluster)', _graph_url(f'sum(rate(drakkar_sink_deliver_errors_total{{{cf}}}[{rate}]))')),
+                ('Pool active (cluster)', _graph_url(f'sum(drakkar_executor_pool_active{{{cf}}})')),
+                ('Backpressure (cluster)', _graph_url(f'sum(drakkar_backpressure_active{{{cf}}})')),
+            ]
+
+        return {'card_links': card_links, 'worker_links': worker_links, 'cluster_links': cluster_links}
+
     @app.get('/', response_class=HTMLResponse)
     async def dashboard(request: Request):
         stats = await recorder.get_stats()
@@ -136,6 +233,7 @@ def create_debug_app(
                 'pool_active': pool.active_count if pool else 0,
                 'pool_max': pool.max_workers if pool else 0,
                 'total_lag': total_lag,
+                'prom': _build_prometheus_links(),
             },
         )
 

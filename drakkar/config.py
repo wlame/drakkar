@@ -226,6 +226,10 @@ class DebugConfig(BaseModel):
     flush_interval_seconds: int = Field(default=5, ge=1)
     max_buffer: int = Field(default=50_000, ge=1000)
     max_ui_rows: int = Field(default=5000, ge=100)
+    prometheus_url: str = ''
+    prometheus_rate_interval: str = '5m'
+    prometheus_worker_label: str = ''
+    prometheus_cluster_label: str = ''
 
 
 # --- Root config ---

@@ -1,6 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Dashboard — Drakkar Debug{% endblock %}
 
+{% set prom_icon %}
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="inline -mt-0.5 ml-1 opacity-40 hover:opacity-100"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+{% endset %}
+
 {% block content %}
 <h1 class="text-2xl font-bold mb-6 text-ink-900">Dashboard</h1>
 
@@ -22,26 +26,26 @@
         <div id="v-events" class="text-2xl font-mono text-ink-700">{{ stats.total_events or 0 }}</div>
     </div>
     <div class="bg-white rounded-lg border border-cream-200 p-4">
-        <div class="text-sm text-gray-400">Consumer Lag</div>
+        <div class="text-sm text-gray-400">Consumer Lag{% if prom.card_links.lag %}<a href="{{ prom.card_links.lag }}" target="_blank" rel="noopener" title="View in Prometheus">{{ prom_icon }}</a>{% endif %}</div>
         <div id="v-lag" class="text-2xl font-mono {% if total_lag > 100 %}text-red-600{% elif total_lag > 20 %}text-amber-600{% else %}text-emerald-600{% endif %}">{{ total_lag }}</div>
     </div>
 </div>
 
 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
     <div class="bg-white rounded-lg border border-cream-200 p-4">
-        <div class="text-sm text-gray-400">Consumed</div>
+        <div class="text-sm text-gray-400">Consumed{% if prom.card_links.consumed %}<a href="{{ prom.card_links.consumed }}" target="_blank" rel="noopener" title="View rate in Prometheus">{{ prom_icon }}</a>{% endif %}</div>
         <div id="v-consumed" class="text-xl font-mono text-blue-600">{{ stats.consumed or 0 }}</div>
     </div>
     <div class="bg-white rounded-lg border border-cream-200 p-4">
-        <div class="text-sm text-gray-400">Completed</div>
+        <div class="text-sm text-gray-400">Completed{% if prom.card_links.completed %}<a href="{{ prom.card_links.completed }}" target="_blank" rel="noopener" title="View rate in Prometheus">{{ prom_icon }}</a>{% endif %}</div>
         <div id="v-completed" class="text-xl font-mono text-emerald-600">{{ stats.completed or 0 }}</div>
     </div>
     <div class="bg-white rounded-lg border border-cream-200 p-4">
-        <div class="text-sm text-gray-400">Failed</div>
+        <div class="text-sm text-gray-400">Failed{% if prom.card_links.failed %}<a href="{{ prom.card_links.failed }}" target="_blank" rel="noopener" title="View rate in Prometheus">{{ prom_icon }}</a>{% endif %}</div>
         <div id="v-failed" class="text-xl font-mono text-red-600">{{ stats.failed or 0 }}</div>
     </div>
     <div class="bg-white rounded-lg border border-cream-200 p-4">
-        <div class="text-sm text-gray-400">Produced</div>
+        <div class="text-sm text-gray-400">Produced{% if prom.card_links.produced %}<a href="{{ prom.card_links.produced }}" target="_blank" rel="noopener" title="View rate in Prometheus">{{ prom_icon }}</a>{% endif %}</div>
         <div id="v-produced" class="text-xl font-mono text-purple-600">{{ stats.produced or 0 }}</div>
     </div>
 </div>
@@ -57,4 +61,31 @@
     <div class="text-gray-400 text-center py-4 w-full">No partitions assigned</div>
     {% endif %}
 </div>
+
+{% if prom.worker_links %}
+<h2 class="text-lg font-semibold mb-3 text-ink-800">Prometheus Metrics</h2>
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+    {% for group in prom.worker_links %}
+    <div class="bg-white rounded-lg border border-cream-200 p-4">
+        <div class="text-sm font-semibold text-gray-500 mb-2">{{ group.category }}</div>
+        <ul class="space-y-1">
+            {% for name, url in group.links %}
+            <li><a href="{{ url }}" target="_blank" rel="noopener" class="text-sm text-blue-600 hover:text-blue-800 hover:underline">{{ name }}</a></li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endfor %}
+</div>
+
+{% if prom.cluster_links %}
+<h2 class="text-lg font-semibold mb-3 text-ink-800">Cluster-wide Metrics</h2>
+<div class="bg-white rounded-lg border border-cream-200 p-4 mb-6">
+    <ul class="flex flex-wrap gap-x-6 gap-y-1">
+        {% for name, url in prom.cluster_links %}
+        <li><a href="{{ url }}" target="_blank" rel="noopener" class="text-sm text-blue-600 hover:text-blue-800 hover:underline">{{ name }}</a></li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
+{% endif %}
 {% endblock %}
