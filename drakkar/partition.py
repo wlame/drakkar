@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 import structlog
+from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler
@@ -226,6 +227,13 @@ class PartitionProcessor:
             pending_task_ids=set(self._pending_tasks.keys()),
         )
 
+        offsets = [m.offset for m in messages]
+        bind_contextvars(
+            partition=self._partition_id,
+            hook='arrange',
+            window_id=self._window_counter,
+            offsets=offsets,
+        )
         self._arranging = True
         self._arrange_start = time.monotonic()
         self._arrange_labels = [self._handler.message_label(msg) for msg in messages]
@@ -235,6 +243,7 @@ class PartitionProcessor:
             self._arranging = False
             arrange_labels = self._arrange_labels
             self._arrange_labels = []
+            unbind_contextvars('hook', 'window_id', 'offsets')
         arrange_duration = time.monotonic() - self._arrange_start
         handler_duration.labels(hook='arrange').observe(arrange_duration)
         if self._recorder:
@@ -271,6 +280,8 @@ class PartitionProcessor:
             t.add_done_callback(self._active_tasks.discard)
 
     async def _execute_and_track(self, task: ExecutorTask, window: Window, retry_count: int = 0) -> None:
+        # Bind partition context for this async task — inherited by all user hooks called within
+        bind_contextvars(partition=self._partition_id, window_id=window.window_id)
         log = logger.bind(
             category='executor',
             partition=self._partition_id,
@@ -292,10 +303,12 @@ class PartitionProcessor:
                     pool_waiting=self._executor_pool.waiting_count,
                 )
 
+            bind_contextvars(hook='collect', task_id=task.task_id)
             collect_start = time.monotonic()
             collect_result = await self._handler.collect(result)
             collect_duration = time.monotonic() - collect_start
             handler_duration.labels(hook='collect').observe(collect_duration)
+            unbind_contextvars('hook', 'task_id')
             if self._recorder:
                 self._recorder.record_collect_completed(
                     task_id=task.task_id,
@@ -322,9 +335,11 @@ class PartitionProcessor:
                 )
             await log.awarning('executor_task_failed', error=str(e))
 
+            bind_contextvars(hook='on_error', task_id=task.task_id)
             on_error_start = time.monotonic()
             action = await self._handler.on_error(task, e.error)
             handler_duration.labels(hook='on_error').observe(time.monotonic() - on_error_start)
+            unbind_contextvars('hook', 'task_id')
             if isinstance(action, list):
                 for new_task in action:
                     self._pending_tasks[new_task.task_id] = new_task
@@ -383,9 +398,11 @@ class PartitionProcessor:
             duration = time.monotonic() - window.start_time
             batch_duration.observe(duration)
 
+            bind_contextvars(hook='on_window_complete', window_id=window.window_id)
             wc_start = time.monotonic()
             on_complete_result = await self._handler.on_window_complete(window.results, window.source_messages)
             handler_duration.labels(hook='on_window_complete').observe(time.monotonic() - wc_start)
+            unbind_contextvars('hook', 'window_id')
             if on_complete_result and self._on_collect:
                 await self._on_collect(on_complete_result, self._partition_id)
 

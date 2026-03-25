@@ -12,6 +12,7 @@ from collections.abc import Coroutine
 from pathlib import Path
 
 import structlog
+from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import __version__
 from drakkar.config import DrakkarConfig, load_config
@@ -136,7 +137,9 @@ class DrakkarApp:
     async def _async_run(self) -> None:
         log = logger.bind(worker_id=self._worker_id)
 
+        bind_contextvars(hook='on_startup')
         self._config = await self._handler.on_startup(self._config)
+        unbind_contextvars('hook')
 
         await log.ainfo('drakkar_starting', category='lifecycle')
 
@@ -208,7 +211,9 @@ class DrakkarApp:
                 pg_pool = sink.pool
                 break
 
+        bind_contextvars(hook='on_ready')
         await self._handler.on_ready(self._config, pg_pool)
+        unbind_contextvars('hook')
 
         await self._consumer.subscribe()
         self._running = True
@@ -296,7 +301,15 @@ class DrakkarApp:
                 processor.start()
 
         assigned_partitions.set(len(self._processors))
-        t = asyncio.ensure_future(self._safe_call(self._handler.on_assign(partition_ids)))
+
+        async def _on_assign_with_ctx() -> None:
+            bind_contextvars(hook='on_assign', partitions=partition_ids)
+            try:
+                await self._handler.on_assign(partition_ids)
+            finally:
+                unbind_contextvars('hook', 'partitions')
+
+        t = asyncio.ensure_future(self._safe_call(_on_assign_with_ctx()))
         self._background_tasks.add(t)
         t.add_done_callback(self._background_tasks.discard)
 
@@ -312,7 +325,15 @@ class DrakkarApp:
                 t.add_done_callback(self._background_tasks.discard)
 
         assigned_partitions.set(len(self._processors))
-        t = asyncio.ensure_future(self._safe_call(self._handler.on_revoke(partition_ids)))
+
+        async def _on_revoke_with_ctx() -> None:
+            bind_contextvars(hook='on_revoke', partitions=partition_ids)
+            try:
+                await self._handler.on_revoke(partition_ids)
+            finally:
+                unbind_contextvars('hook', 'partitions')
+
+        t = asyncio.ensure_future(self._safe_call(_on_revoke_with_ctx()))
         self._background_tasks.add(t)
         t.add_done_callback(self._background_tasks.discard)
 
@@ -360,7 +381,11 @@ class DrakkarApp:
         self._sink_manager.validate_collect(result)
 
         async def _on_delivery_error(error: 'DeliveryError') -> DeliveryAction:
-            action = await self._handler.on_delivery_error(error)
+            bind_contextvars(hook='on_delivery_error', sink_type=error.sink_type, sink_name=error.sink_name)
+            try:
+                action = await self._handler.on_delivery_error(error)
+            finally:
+                unbind_contextvars('hook', 'sink_type', 'sink_name')
             if action == DeliveryAction.DLQ and self._dlq_sink:
                 await self._dlq_sink.send(error, partition_id=partition_id)
             return action
