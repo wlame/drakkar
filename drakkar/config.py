@@ -219,6 +219,7 @@ class DebugConfig(BaseModel):
     store_state: bool = True
     state_sync_interval_seconds: int = Field(default=10, ge=1)
     expose_env_vars: list[str] = Field(default_factory=list)
+    rotation_interval_minutes: int = Field(default=60, ge=1)
     retention_hours: int = Field(default=24, ge=1)
     retention_max_events: int = Field(default=100_000, ge=100)
     store_output: bool = True

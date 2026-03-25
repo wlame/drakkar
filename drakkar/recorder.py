@@ -839,25 +839,10 @@ class EventRecorder:
             return [dict(zip(columns, row, strict=False)) for row in rows]
 
     async def get_stats(self) -> dict:
-        """Get overall statistics from the event store."""
-        if not self._db or not self._config.store_events:
-            return {'total_events': 0}
-        query = """
-            SELECT
-                COUNT(*) as total_events,
-                COUNT(CASE WHEN event = 'consumed' THEN 1 END) as consumed,
-                COUNT(CASE WHEN event = 'task_completed' THEN 1 END) as completed,
-                COUNT(CASE WHEN event = 'task_failed' THEN 1 END) as failed,
-                COUNT(CASE WHEN event = 'produced' THEN 1 END) as produced,
-                COUNT(CASE WHEN event = 'committed' THEN 1 END) as committed,
-                MIN(ts) as oldest_event,
-                MAX(ts) as newest_event
-            FROM events
-        """
-        async with self._db.execute(query) as cursor:
-            columns = [d[0] for d in cursor.description]
-            row = await cursor.fetchone()
-            return dict(zip(columns, row, strict=False)) if row else {'total_events': 0}
+        """Get overall statistics from in-memory counters (accumulated since worker start)."""
+        stats = dict(self._counters)
+        stats['total_events'] = sum(self._counters.values())
+        return stats
 
     # --- Autodiscovery ---
 
@@ -933,7 +918,7 @@ class EventRecorder:
 
     async def _retention_loop(self) -> None:
         while self._running:
-            await asyncio.sleep(3600)  # every hour
+            await asyncio.sleep(self._config.rotation_interval_minutes * 60)
             await self._rotate()
 
     async def _rotate(self) -> None:

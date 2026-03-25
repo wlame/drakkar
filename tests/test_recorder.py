@@ -682,7 +682,10 @@ async def test_rotation_queries_work_on_new_db(tmp_path):
     assert len(summary) == 1
 
     stats = await rec.get_stats()
-    assert stats['total_events'] == 4
+    assert stats['consumed'] == 1
+    assert stats['completed'] == 1
+    assert stats['committed'] == 1
+    assert stats['total_events'] == 3  # consumed + completed + committed (task_started has no counter)
 
     active = await rec.get_active_tasks()
     assert len(active) == 0  # task was completed
@@ -1191,7 +1194,8 @@ async def test_store_events_false_queries_return_empty(tmp_path):
     assert await rec.get_partition_summary() == []
     assert await rec.get_active_tasks() == []
     stats = await rec.get_stats()
-    assert stats == {'total_events': 0}
+    assert stats['consumed'] == 1  # in-memory counters work regardless of store_events
+    assert stats['total_events'] == 1
     await rec.stop()
 
 
