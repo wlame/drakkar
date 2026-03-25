@@ -82,9 +82,7 @@ def mock_recorder():
         },
     ]
     rec.get_trace.return_value = rec.get_events.return_value
-    rec.cross_trace.return_value = [
-        {**e, 'worker_name': 'test-worker'} for e in rec.get_events.return_value
-    ]
+    rec.cross_trace.return_value = [{**e, 'worker_name': 'test-worker'} for e in rec.get_events.return_value]
     rec.get_active_tasks.return_value = []
     return rec
 
@@ -540,8 +538,12 @@ async def test_api_debug_databases_lists_files(tmp_path, mock_recorder, mock_app
                    4, 120, 3, 10, '{}', '{}', 1000.0, '1970-01-01 00:16:40.000')""",
     )
     db.executescript(SCHEMA_EVENTS)
-    db.execute("INSERT INTO events (ts, dt, event, partition) VALUES (1000.0, '1970-01-12 13:46:40.000', 'consumed', 0)")
-    db.execute("INSERT INTO events (ts, dt, event, partition) VALUES (1001.0, '1970-01-12 13:50:01.000', 'task_completed', 0)")
+    db.execute(
+        "INSERT INTO events (ts, dt, event, partition) VALUES (1000.0, '1970-01-12 13:46:40.000', 'consumed', 0)"
+    )
+    db.execute(
+        "INSERT INTO events (ts, dt, event, partition) VALUES (1001.0, '1970-01-12 13:50:01.000', 'task_completed', 0)"
+    )
     db.commit()
     db.close()
 
@@ -606,7 +608,9 @@ async def test_api_debug_merge(tmp_path, mock_recorder, mock_app):
             [name],
         )
         db.executescript(SCHEMA_EVENTS)
-        db.execute("INSERT INTO events (ts, dt, event, partition) VALUES (1000.0, '1970-01-12 13:46:40.000', 'consumed', 0)")
+        db.execute(
+            "INSERT INTO events (ts, dt, event, partition) VALUES (1000.0, '1970-01-12 13:46:40.000', 'consumed', 0)"
+        )
         db.commit()
         db.close()
 

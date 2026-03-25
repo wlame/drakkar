@@ -685,30 +685,35 @@ class EventRecorder:
             return [dict(zip(columns, row, strict=False)) for row in rows]
 
     async def _trace_db_file(
-        self, db_path: str, partition: int, msg_offset: int, worker_name: str,
+        self,
+        db_path: str,
+        partition: int,
+        msg_offset: int,
     ) -> list[dict]:
-        """Run trace query against a DB file, return events with worker_name attached."""
+        """Run trace query against a DB file, return events with worker_name from config."""
         try:
             async with aiosqlite.connect(f'file:{db_path}?mode=ro', uri=True) as db:
-                # Check cluster membership
-                if self._cluster_name:
-                    async with db.execute(
-                        "SELECT cluster_name FROM worker_config WHERE id = 1"
-                    ) as cur:
-                        row = await cur.fetchone()
-                        if not row or row[0] != self._cluster_name:
-                            return []
+                # Read worker_name and check cluster membership from worker_config
+                worker_name = os.path.basename(db_path)
+                async with db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='worker_config'"
+                ) as cur:
+                    if await cur.fetchone():
+                        async with db.execute(
+                            'SELECT worker_name, cluster_name FROM worker_config WHERE id = 1'
+                        ) as cfg_cur:
+                            cfg_row = await cfg_cur.fetchone()
+                            if cfg_row:
+                                worker_name = cfg_row[0]
+                                if self._cluster_name and cfg_row[1] != self._cluster_name:
+                                    return []
 
                 # Check events table exists
-                async with db.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='events'"
-                ) as cur:
+                async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='events'") as cur:
                     if not await cur.fetchone():
                         return []
 
-                async with db.execute(
-                    _TRACE_QUERY, [partition, msg_offset, partition, msg_offset]
-                ) as cur:
+                async with db.execute(_TRACE_QUERY, [partition, msg_offset, partition, msg_offset]) as cur:
                     columns = [d[0] for d in cur.description]
                     rows = await cur.fetchall()
                     events = [dict(zip(columns, row, strict=False)) for row in rows]
@@ -749,12 +754,11 @@ class EventRecorder:
             if not os.path.islink(link_path):
                 continue
             link_name = os.path.basename(link_path)
-            worker_name = link_name.removesuffix('-live.db')
-            if worker_name == self._worker_name:
+            if link_name.removesuffix('-live.db') == self._worker_name:
                 continue
             target = os.path.realpath(link_path)
             searched_paths.add(target)
-            events = await self._trace_db_file(target, partition, msg_offset, worker_name)
+            events = await self._trace_db_file(target, partition, msg_offset)
             if events:
                 return events
 
@@ -766,19 +770,15 @@ class EventRecorder:
             full = os.path.join(self._config.db_dir, entry)
             if os.path.islink(full) or not os.path.isfile(full):
                 continue
-            real = os.path.realpath(full)
-            if real in searched_paths:
+            if os.path.realpath(full) in searched_paths:
                 continue
             all_dbs.append((entry, full))
 
         # sort newest first (timestamp is in filename)
         all_dbs.sort(key=lambda x: x[0], reverse=True)
 
-        for entry, full in all_dbs:
-            # extract worker name: "worker-1-2026-03-16__14_55_00.db" → "worker-1"
-            base = entry.removesuffix('.db')
-            worker_name = base[:-21] if len(base) > 21 and base[-21] == '-' else base
-            events = await self._trace_db_file(full, partition, msg_offset, worker_name)
+        for _entry, full in all_dbs:
+            events = await self._trace_db_file(full, partition, msg_offset)
             if events:
                 return events
 
