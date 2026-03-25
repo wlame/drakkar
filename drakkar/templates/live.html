@@ -16,7 +16,6 @@
     <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="arrange" style="color:#6b7280;border-bottom:2px solid transparent;">Arrange</button>
     <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="execute" style="color:#6b7280;border-bottom:2px solid transparent;">Executors</button>
     <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="collect" style="color:#6b7280;border-bottom:2px solid transparent;">Collect</button>
-    <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="trace" style="color:#6b7280;border-bottom:2px solid transparent;">Trace</button>
 </div>
 
 <!-- ==================== ARRANGE TAB ==================== -->
@@ -107,24 +106,12 @@
     </table>
 </div>
 
-<!-- ==================== TRACE TAB ==================== -->
-<div class="tab-panel" id="panel-trace" style="display:none;">
-    <div class="flex items-center gap-3 mb-4">
-        <label class="text-sm text-gray-500">Partition:Offset</label>
-        <input id="trace-input" type="text" placeholder="e.g. 5:42" class="bg-white border border-cream-300 rounded px-3 py-1.5 text-sm font-mono text-ink-700 w-40 focus:border-teal-400 focus:outline-none">
-        <button onclick="loadTrace()" class="bg-teal-600 hover:bg-teal-500 text-white px-3 py-1.5 rounded text-sm">Trace</button>
-        <span id="trace-status" class="text-sm text-gray-400"></span>
-    </div>
-    <div id="trace-result"></div>
-</div>
-
 <script>
 // === Tab management ===
 var tabHints = {
     arrange: 'Arrange is called after message polling for each partition. It receives a batch of messages and creates executor Tasks with CLI params to run.',
     execute: 'Executors run CPU-bound Tasks as subprocesses with prepared CLI args, capturing stdout/stderr. Limited by the pool semaphore.',
     collect: 'Collect is called with each executor result and defines output messages for the target topic and database rows to persist.',
-    trace: 'Trace a Kafka message by partition:offset through the full pipeline: consumed \u2192 arranged \u2192 tasks created \u2192 executor runs \u2192 results collected \u2192 produced.',
 };
 
 function switchTab(name) {
@@ -138,7 +125,7 @@ function switchTab(name) {
     if (btn) { btn.style.color = '#1a1a1a'; btn.style.borderBottom = '2px solid #0d9488'; }
     var hint = document.getElementById('tab-hint');
     if (hint) hint.textContent = tabHints[name] || '';
-    var hash = name === 'trace' && tracePartition !== null ? 'trace/' + tracePartition + '/' + traceOffset : name;
+    var hash = name;
     history.replaceState(null, '', '#' + hash);
 }
 
@@ -181,8 +168,6 @@ var recentArranges = [];
 var recentCollects = [];
 var MAX_HISTORY = {{ max_ui_rows }};
 var arrangeTotal = 0, collectTotal = 0;
-var tracePartition = null, traceOffset = null;
-
 // === Helpers ===
 function scrollToEnd() { tlFollowing = true; }
 function fmtTime(ts) { return new Date(ts * 1000).toISOString().substring(11, 19); }
@@ -194,13 +179,6 @@ function baseTaskId(tid) { return tid ? tid.split(':r')[0] : tid; }
 function zoomIn() { zoomLevel = Math.min(zoomLevel * 2, 64); document.getElementById('zoom-label').textContent = zoomLevel + 'x'; rebuildAxis(); }
 function zoomOut() { zoomLevel = Math.max(zoomLevel / 2, 0.25); document.getElementById('zoom-label').textContent = zoomLevel + 'x'; rebuildAxis(); }
 function zoomReset() { zoomLevel = 2; document.getElementById('zoom-label').textContent = '2x'; rebuildAxis(); }
-
-function showTrace(p, o) {
-    tracePartition = p; traceOffset = o;
-    document.getElementById('trace-input').value = p + ':' + o;
-    switchTab('trace');
-    loadTrace();
-}
 
 // === Timeline ===
 function showTaskDetail(t) {
@@ -559,107 +537,6 @@ function renderTaskLists() {
     }
 }
 
-// === Trace ===
-async function loadTrace() {
-    var input = document.getElementById('trace-input').value.trim();
-    var m = input.match(/^(\d+)[:\s/](\d+)$/);
-    if (!m) {
-        document.getElementById('trace-status').textContent = 'format: partition:offset';
-        return;
-    }
-    var p = m[1], o = m[2];
-    tracePartition = parseInt(p); traceOffset = parseInt(o);
-    history.replaceState(null, '', '#trace/' + p + '/' + o);
-    document.getElementById('trace-status').textContent = 'loading...';
-    var result = document.getElementById('trace-result');
-    try {
-        var r = await fetch('/api/events?partitions=' + p + '&limit=10000');
-        var events = await r.json();
-        var taskIds = {};
-        for (var i = 0; i < events.length; i++) {
-            var e = events[i];
-            if (e.offset == o && e.task_id) taskIds[e.task_id] = true;
-            if (e.metadata && e.metadata.indexOf('"' + o + '"') >= 0 && e.task_id) taskIds[e.task_id] = true;
-            if (e.event === 'arranged' && e.metadata) {
-                try {
-                    var meta = JSON.parse(e.metadata);
-                    if (meta.offsets && meta.offsets.indexOf(parseInt(o)) >= 0) {
-                        for (var j = 0; j < (meta.task_ids || []).length; j++) taskIds[meta.task_ids[j]] = true;
-                    }
-                } catch(x) {}
-            }
-        }
-        var traceEvents = events.filter(function(e) {
-            return e.offset == o || taskIds[e.task_id] || false;
-        }).sort(function(a, b) { return a.ts - b.ts; });
-
-        result.textContent = '';
-        if (!traceEvents.length) {
-            var msg = document.createElement('p');
-            msg.className = 'text-gray-400 py-4 text-center';
-            msg.textContent = 'No events found for ' + p + ':' + o;
-            result.appendChild(msg);
-            document.getElementById('trace-status').textContent = '';
-            return;
-        }
-        document.getElementById('trace-status').textContent = traceEvents.length + ' events';
-
-        var table = document.createElement('table'); table.className = 'w-full text-sm';
-        var thead = document.createElement('thead');
-        var headTr = document.createElement('tr'); headTr.className = 'text-left text-gray-400 border-b border-cream-200';
-        var cols = ['Time', 'Event', 'Task ID', 'Duration', 'Details'];
-        for (var ci = 0; ci < cols.length; ci++) {
-            var th = document.createElement('th'); th.className = 'py-2 px-3'; th.textContent = cols[ci];
-            headTr.appendChild(th);
-        }
-        thead.appendChild(headTr); table.appendChild(thead);
-
-        var evtColors = {consumed:'#2563eb', arranged:'#0d9488', task_started:'#d97706', task_completed:'#059669', task_failed:'#dc2626', collect_completed:'#7c3aed', produced:'#9333ea', committed:'#6b7280'};
-        var tbody = document.createElement('tbody');
-        for (var ei = 0; ei < traceEvents.length; ei++) {
-            var ev = traceEvents[ei];
-            var tr = document.createElement('tr');
-            tr.className = 'border-b border-cream-100 trace-row';
-            if (ev.task_id) tr.setAttribute('data-task-id', ev.task_id);
-            tr.addEventListener('mouseenter', function() {
-                var tid = this.getAttribute('data-task-id');
-                if (!tid) return;
-                document.querySelectorAll('.trace-row').forEach(function(row) {
-                    if (row.getAttribute('data-task-id') === tid) row.style.background = '#e0f2fe';
-                    else row.style.background = '';
-                });
-            });
-            tr.addEventListener('mouseleave', function() {
-                document.querySelectorAll('.trace-row').forEach(function(row) { row.style.background = ''; });
-            });
-            var td1 = document.createElement('td'); td1.className = 'py-2 px-3 text-xs font-mono'; td1.textContent = fmtTimeMs(ev.ts);
-            var td2 = document.createElement('td'); td2.className = 'py-2 px-3 font-mono text-xs font-semibold';
-            td2.style.color = evtColors[ev.event] || '#6b7280'; td2.textContent = ev.event;
-            var td3 = document.createElement('td'); td3.className = 'py-2 px-3 font-mono text-xs';
-            if (ev.task_id) {
-                var ta = document.createElement('a'); ta.href = '/task/' + encodeURIComponent(baseTaskId(ev.task_id));
-                ta.className = 'text-teal-600 hover:underline'; ta.textContent = ev.task_id; td3.appendChild(ta);
-            }
-            var td4 = document.createElement('td'); td4.className = 'py-2 px-3 font-mono text-xs';
-            if (ev.duration) { td4.style.color = durColor(ev.duration); td4.textContent = ev.duration.toFixed(3) + 's'; }
-            var td5 = document.createElement('td'); td5.className = 'py-2 px-3 text-xs text-gray-500 max-w-lg truncate expandable cursor-pointer';
-            td5.title = 'Click to expand';
-            var details = [];
-            if (ev.args) details.push('args: ' + ev.args);
-            if (ev.exit_code !== null && ev.exit_code !== undefined) details.push('exit: ' + ev.exit_code);
-            if (ev.pid) details.push('pid: ' + ev.pid);
-            if (ev.stdout_size) details.push('stdout: ' + ev.stdout_size + 'b');
-            if (ev.metadata) details.push(ev.metadata);
-            td5.setAttribute('data-full', details.join('\n'));
-            td5.textContent = details.join(' | ');
-            tr.append(td1, td2, td3, td4, td5); tbody.appendChild(tr);
-        }
-        table.appendChild(tbody); result.appendChild(table);
-    } catch(err) {
-        document.getElementById('trace-status').textContent = 'error: ' + err.message;
-    }
-}
-
 // === Data loading ===
 async function syncFromAPI() {
     // API sync merges data — it never deletes WS-created tasks.
@@ -809,16 +686,6 @@ function connectWS() {
 // === Boot ===
 function initFromHash() {
     var hash = location.hash.slice(1);
-    if (hash.startsWith('trace/')) {
-        var parts = hash.split('/');
-        if (parts.length >= 3) {
-            tracePartition = parseInt(parts[1]); traceOffset = parseInt(parts[2]);
-            document.getElementById('trace-input').value = tracePartition + ':' + traceOffset;
-            switchTab('trace');
-            loadTrace();
-            return;
-        }
-    }
     switchTab(hash || 'execute');
 }
 
@@ -850,10 +717,6 @@ function initFromHash() {
 })();
 
 window.addEventListener('hashchange', initFromHash);
-
-document.getElementById('trace-input').addEventListener('keydown', function(ev) {
-    if (ev.key === 'Enter') loadTrace();
-});
 
 document.addEventListener('keydown', function(ev) {
     if (ev.key === ' ' && ev.target === document.body) {

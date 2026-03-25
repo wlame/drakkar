@@ -73,7 +73,7 @@
     <h2 class="text-lg font-semibold mb-2">Source Message Offsets</h2>
     <div class="flex flex-wrap gap-2">
         {% for off in source_offsets %}
-        <a href="/trace/{{ partition }}/{{ off }}" class="bg-cream-200 hover:bg-cream-300 px-3 py-1 rounded text-sm font-mono text-teal-600">
+        <a href="/debug#trace/{{ partition }}/{{ off }}" class="bg-cream-200 hover:bg-cream-300 px-3 py-1 rounded text-sm font-mono text-teal-600">
             {{ partition }}:{{ off }}
         </a>
         {% endfor %}

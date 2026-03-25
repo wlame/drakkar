@@ -1,9 +1,25 @@
 {% extends "base.html" %}
-{% block title %}Debug Databases — Drakkar{% endblock %}
+{% block title %}Debug — Drakkar{% endblock %}
 
 {% block content %}
+<!-- ==================== TRACE ==================== -->
+<div class="mb-8">
+    <h2 class="text-xl font-bold text-ink-900 mb-3">Message Trace</h2>
+    <p class="text-xs text-gray-400 mb-3">Trace a Kafka message by partition:offset through the full pipeline. Falls back to other workers in the same cluster.</p>
+    <div class="flex items-center gap-3 mb-4">
+        <label class="text-sm text-gray-500">Partition:Offset</label>
+        <input id="trace-input" type="text" placeholder="e.g. 5:42" class="bg-white border border-cream-300 rounded px-3 py-1.5 text-sm font-mono text-ink-700 w-40 focus:border-teal-400 focus:outline-none">
+        <button id="trace-btn" class="bg-teal-600 hover:bg-teal-500 text-white px-3 py-1.5 rounded text-sm">Trace</button>
+        <span id="trace-status" class="text-sm text-gray-400"></span>
+    </div>
+    <div id="trace-result"></div>
+</div>
+
+<hr class="border-cream-200 mb-6">
+
+<!-- ==================== DATABASES ==================== -->
 <div class="flex items-center justify-between mb-6">
-    <h1 class="text-2xl font-bold text-ink-900">Debug Databases</h1>
+    <h2 class="text-xl font-bold text-ink-900">Databases</h2>
     <div class="flex items-center gap-3">
         <button id="btn-merge" disabled
                 class="px-4 py-2 text-sm font-medium rounded disabled:opacity-40"
@@ -35,6 +51,138 @@
 
 <script>
 (function() {
+    // === Trace ===
+    var traceInput = document.getElementById('trace-input');
+    var traceBtn = document.getElementById('trace-btn');
+    var traceStatus = document.getElementById('trace-status');
+    var traceResult = document.getElementById('trace-result');
+
+    var evtColors = {consumed:'#2563eb', arranged:'#0d9488', task_started:'#d97706', task_completed:'#059669', task_failed:'#dc2626', collect_completed:'#7c3aed', produced:'#9333ea', committed:'#6b7280'};
+
+    function fmtTimeMs(ts) { return ts ? new Date(ts * 1000).toISOString().substring(11, 23) : ''; }
+    function durColor(d) { return d > 1 ? '#dc2626' : d > 0.1 ? '#d97706' : '#059669'; }
+
+    function loadTrace() {
+        var input = traceInput.value.trim();
+        var m = input.match(/^(\d+)[:\s/](\d+)$/);
+        if (!m) {
+            traceStatus.textContent = 'format: partition:offset';
+            return;
+        }
+        var p = m[1], o = m[2];
+        history.replaceState(null, '', '#trace/' + p + '/' + o);
+        traceStatus.textContent = 'loading...';
+        traceResult.textContent = '';
+
+        fetch('/api/debug/trace?partition=' + p + '&offset=' + o)
+            .then(function(r) { return r.json(); })
+            .then(function(events) {
+                traceResult.textContent = '';
+                if (!events.length) {
+                    var msg = document.createElement('p');
+                    msg.className = 'text-gray-400 py-4 text-center';
+                    msg.textContent = 'No events found for ' + p + ':' + o + ' in any cluster worker';
+                    traceResult.appendChild(msg);
+                    traceStatus.textContent = '';
+                    return;
+                }
+
+                var workerName = events[0].worker_name || '?';
+                traceStatus.textContent = events.length + ' events from ' + workerName;
+
+                var table = document.createElement('table');
+                table.className = 'w-full text-sm';
+                var thead = document.createElement('thead');
+                var headTr = document.createElement('tr');
+                headTr.className = 'text-left text-gray-400 border-b border-cream-200';
+                var cols = ['Time', 'Worker', 'Event', 'Task ID', 'Duration', 'Details'];
+                for (var ci = 0; ci < cols.length; ci++) {
+                    var th = document.createElement('th');
+                    th.className = 'py-2 px-3';
+                    th.textContent = cols[ci];
+                    headTr.appendChild(th);
+                }
+                thead.appendChild(headTr);
+                table.appendChild(thead);
+
+                var tbody = document.createElement('tbody');
+                for (var ei = 0; ei < events.length; ei++) {
+                    var ev = events[ei];
+                    var tr = document.createElement('tr');
+                    tr.className = 'border-b border-cream-100 trace-row';
+                    if (ev.task_id) tr.setAttribute('data-task-id', ev.task_id);
+                    tr.addEventListener('mouseenter', function() {
+                        var tid = this.getAttribute('data-task-id');
+                        if (!tid) return;
+                        document.querySelectorAll('.trace-row').forEach(function(row) {
+                            if (row.getAttribute('data-task-id') === tid) row.style.background = '#e0f2fe';
+                            else row.style.background = '';
+                        });
+                    });
+                    tr.addEventListener('mouseleave', function() {
+                        document.querySelectorAll('.trace-row').forEach(function(row) { row.style.background = ''; });
+                    });
+
+                    // time
+                    var td1 = document.createElement('td');
+                    td1.className = 'py-2 px-3 text-xs font-mono';
+                    td1.textContent = fmtTimeMs(ev.ts);
+                    // worker
+                    var td2 = document.createElement('td');
+                    td2.className = 'py-2 px-3 text-xs font-mono text-gray-500';
+                    td2.textContent = ev.worker_name || '?';
+                    // event
+                    var td3 = document.createElement('td');
+                    td3.className = 'py-2 px-3 font-mono text-xs font-semibold';
+                    td3.style.color = evtColors[ev.event] || '#6b7280';
+                    td3.textContent = ev.event;
+                    // task id
+                    var td4 = document.createElement('td');
+                    td4.className = 'py-2 px-3 font-mono text-xs';
+                    if (ev.task_id) {
+                        var ta = document.createElement('a');
+                        ta.href = '/task/' + encodeURIComponent(ev.task_id.split(':r')[0]);
+                        ta.className = 'text-teal-600 hover:underline';
+                        ta.textContent = ev.task_id;
+                        td4.appendChild(ta);
+                    }
+                    // duration
+                    var td5 = document.createElement('td');
+                    td5.className = 'py-2 px-3 font-mono text-xs';
+                    if (ev.duration) {
+                        td5.style.color = durColor(ev.duration);
+                        td5.textContent = ev.duration.toFixed(3) + 's';
+                    }
+                    // details
+                    var td6 = document.createElement('td');
+                    td6.className = 'py-2 px-3 text-xs text-gray-500 max-w-lg truncate expandable cursor-pointer';
+                    td6.title = 'Click to expand';
+                    var details = [];
+                    if (ev.args) details.push('args: ' + ev.args);
+                    if (ev.exit_code !== null && ev.exit_code !== undefined) details.push('exit: ' + ev.exit_code);
+                    if (ev.pid) details.push('pid: ' + ev.pid);
+                    if (ev.stdout_size) details.push('stdout: ' + ev.stdout_size + 'b');
+                    if (ev.metadata) details.push(ev.metadata);
+                    td6.setAttribute('data-full', details.join('\n'));
+                    td6.textContent = details.join(' | ');
+
+                    tr.append(td1, td2, td3, td4, td5, td6);
+                    tbody.appendChild(tr);
+                }
+                table.appendChild(tbody);
+                traceResult.appendChild(table);
+            })
+            .catch(function(err) {
+                traceStatus.textContent = 'error: ' + err.message;
+            });
+    }
+
+    traceBtn.onclick = loadTrace;
+    traceInput.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Enter') loadTrace();
+    });
+
+    // === Databases ===
     var listEl = document.getElementById('db-list');
     var mergeBtn = document.getElementById('btn-merge');
     var refreshBtn = document.getElementById('btn-refresh');
@@ -278,7 +426,22 @@
         });
     };
 
+    // === Boot ===
     loadDatabases();
+
+    // Handle #trace/P/O deep links
+    function initFromHash() {
+        var hash = location.hash.slice(1);
+        if (hash.startsWith('trace/')) {
+            var parts = hash.split('/');
+            if (parts.length >= 3) {
+                traceInput.value = parts[1] + ':' + parts[2];
+                loadTrace();
+            }
+        }
+    }
+    initFromHash();
+    window.addEventListener('hashchange', initFromHash);
 })();
 </script>
 {% endblock %}

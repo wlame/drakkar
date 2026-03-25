@@ -251,20 +251,6 @@ def create_debug_app(
             },
         )
 
-    @app.get('/trace/{partition_id}/{offset}', response_class=HTMLResponse)
-    async def trace(request: Request, partition_id: int, offset: int):
-        events = await recorder.get_trace(partition_id, offset)
-        return templates.TemplateResponse(
-            request,
-            'trace.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'partition_id': partition_id,
-                'offset': offset,
-                'events': events,
-            },
-        )
-
     @app.get('/task/{task_id}', response_class=HTMLResponse)
     async def task_detail(request: Request, task_id: str):
         # Strip retry composite key suffix (e.g. "task-abc:r1234567.89" → "task-abc")
@@ -453,6 +439,15 @@ def create_debug_app(
                 'source_files': result.source_files,
             }
         )
+
+    @app.get('/api/debug/trace')
+    async def api_debug_trace(
+        partition: int = Query(),
+        offset: int = Query(),
+    ):
+        """Trace a message across all workers in the same cluster."""
+        events = await recorder.cross_trace(partition, offset)
+        return JSONResponse(events)
 
     @app.get('/debug/download/{filename}')
     async def debug_download(filename: str):

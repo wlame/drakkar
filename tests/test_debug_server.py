@@ -82,6 +82,9 @@ def mock_recorder():
         },
     ]
     rec.get_trace.return_value = rec.get_events.return_value
+    rec.cross_trace.return_value = [
+        {**e, 'worker_name': 'test-worker'} for e in rec.get_events.return_value
+    ]
     rec.get_active_tasks.return_value = []
     return rec
 
@@ -181,12 +184,11 @@ async def test_live_page(client):
     assert '2 / 8' in resp.text
 
 
-async def test_trace_page(client):
-    resp = await client.get('/trace/0/42')
+async def test_debug_trace_api(client):
+    resp = await client.get('/api/debug/trace?partition=0&offset=42')
     assert resp.status_code == 200
-    assert 'Message Trace' in resp.text
-    assert 'partition=0' in resp.text
-    assert 'offset=42' in resp.text
+    data = resp.json()
+    assert isinstance(data, list)
 
 
 async def test_history_page(client):
@@ -235,7 +237,6 @@ async def test_live_page_has_tabs_and_ws(debug_config, mock_recorder, mock_app):
     assert 'panel-arrange' in resp.text
     assert 'panel-execute' in resp.text
     assert 'panel-collect' in resp.text
-    assert 'panel-trace' in resp.text
     assert 'allTasks' in resp.text
     assert '/ws' in resp.text
 
@@ -509,7 +510,8 @@ async def debug_client(tmp_path, mock_recorder, mock_app):
 async def test_debug_page_returns_200(debug_client):
     resp = await debug_client.get('/debug')
     assert resp.status_code == 200
-    assert 'Debug Databases' in resp.text
+    assert 'Message Trace' in resp.text
+    assert 'Databases' in resp.text
 
 
 async def test_api_debug_databases_empty(debug_client):

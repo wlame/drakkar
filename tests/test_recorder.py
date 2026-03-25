@@ -15,6 +15,7 @@ from drakkar.models import (
     SourceMessage,
 )
 from drakkar.recorder import (
+    SCHEMA_EVENTS,
     SCHEMA_WORKER_CONFIG,
     EventRecorder,
     _format_dt,
@@ -1513,3 +1514,147 @@ async def test_stop_removes_live_link(tmp_path):
 
     await rec.stop()
     assert not os.path.exists(link)
+
+
+# --- cross_trace ---
+
+
+async def _create_worker_db(
+    db_path, worker_name, cluster_name='', partition=0, offset=42,
+):
+    """Create a DB with worker_config + events for cross_trace testing."""
+    import aiosqlite
+
+    async with aiosqlite.connect(str(db_path)) as db:
+        await db.executescript(SCHEMA_WORKER_CONFIG)
+        await db.executescript(SCHEMA_EVENTS)
+        await db.execute(
+            """INSERT INTO worker_config
+               (id, worker_name, cluster_name, ip_address, debug_port, debug_url, kafka_brokers,
+                source_topic, consumer_group, binary_path, max_workers, task_timeout_seconds,
+                max_retries, window_size, sinks_json, env_vars_json, created_at, created_at_dt)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                worker_name, cluster_name, '10.0.0.1', 8080, '', 'kafka:9092', 'test',
+                'grp', '/bin/test', 4, 60, 2, 5, '{}', '{}', 1000.0, _format_dt(1000.0),
+            ],
+        )
+        await db.execute(
+            """INSERT INTO events (ts, dt, event, partition, offset, task_id, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                1000.0, _format_dt(1000.0), 'consumed', partition, offset,
+                None, None,
+            ],
+        )
+        await db.execute(
+            """INSERT INTO events (ts, dt, event, partition, offset, task_id, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                1001.0, _format_dt(1001.0), 'task_started', partition, None,
+                f'task-{offset}',
+                f'{{"source_offsets": [{offset}]}}',
+            ],
+        )
+        await db.commit()
+
+
+async def test_cross_trace_finds_in_current_worker(recorder):
+    """cross_trace returns events from local DB with worker_name attached."""
+    recorder.record_consumed(make_msg(partition=3, offset=42))
+    task = make_task('t-42', offsets=[42])
+    recorder.record_task_started(task, partition=3)
+    await recorder._flush()
+
+    events = await recorder.cross_trace(partition=3, msg_offset=42)
+    assert len(events) >= 2
+    assert all(e['worker_name'] == WORKER_NAME for e in events)
+
+
+async def test_cross_trace_fallback_to_other_live_worker(tmp_path):
+    """cross_trace falls back to another worker's live DB if local has no match."""
+    # create other worker's DB with events for partition=5 offset=99
+    other_db_path = tmp_path / 'other-worker-2026-03-25__10_00_00.db'
+    await _create_worker_db(other_db_path, 'other-worker', partition=5, offset=99)
+
+    # create live symlink
+    link = _live_link_path(str(tmp_path), 'other-worker')
+    os.symlink(other_db_path.name, link)
+
+    # start our recorder (has no events for partition=5 offset=99)
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    events = await rec.cross_trace(partition=5, msg_offset=99)
+    assert len(events) >= 1
+    assert all(e['worker_name'] == 'other-worker' for e in events)
+
+    await rec.stop()
+
+
+async def test_cross_trace_fallback_to_rotated_db(tmp_path):
+    """cross_trace searches rotated DB files when live workers have no match."""
+    # create a rotated (non-symlinked) DB with events
+    rotated_path = tmp_path / 'old-worker-2026-03-20__08_00_00.db'
+    await _create_worker_db(rotated_path, 'old-worker', partition=7, offset=200)
+
+    # start our recorder (has no events for partition=7 offset=200)
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    events = await rec.cross_trace(partition=7, msg_offset=200)
+    assert len(events) >= 1
+    assert all(e['worker_name'] == 'old-worker' for e in events)
+
+    await rec.stop()
+
+
+async def test_cross_trace_cluster_filtering(tmp_path):
+    """cross_trace only searches DBs in the same cluster."""
+    # create other worker's DB in a DIFFERENT cluster
+    other_db_path = tmp_path / 'other-worker-2026-03-25__10_00_00.db'
+    await _create_worker_db(
+        other_db_path, 'other-worker', cluster_name='other-cluster',
+        partition=5, offset=99,
+    )
+    link = _live_link_path(str(tmp_path), 'other-worker')
+    os.symlink(other_db_path.name, link)
+
+    # our recorder is in 'my-cluster'
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME, cluster_name='my-cluster')
+    await rec.start()
+
+    events = await rec.cross_trace(partition=5, msg_offset=99)
+    assert events == []
+
+    await rec.stop()
+
+
+async def test_cross_trace_prefers_newest_rotated_db(tmp_path):
+    """cross_trace searches rotated DBs newest-first."""
+    # create two rotated DBs for different timestamps
+    old_path = tmp_path / 'wk-2026-03-20__08_00_00.db'
+    await _create_worker_db(old_path, 'wk', partition=1, offset=10)
+
+    new_path = tmp_path / 'wk-2026-03-25__12_00_00.db'
+    await _create_worker_db(new_path, 'wk', partition=1, offset=10)
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    events = await rec.cross_trace(partition=1, msg_offset=10)
+    assert len(events) >= 1
+    # both DBs have events — should find from newest first
+    assert events[0]['worker_name'] == 'wk'
+
+    await rec.stop()
+
+
+async def test_cross_trace_empty_when_no_match(recorder):
+    """cross_trace returns empty list when no events match anywhere."""
+    events = await recorder.cross_trace(partition=99, msg_offset=999)
+    assert events == []
