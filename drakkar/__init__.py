@@ -5,7 +5,6 @@ __version__ = '0.6.0'
 from drakkar.app import DrakkarApp
 from drakkar.config import DrakkarConfig, load_config
 from drakkar.handler import BaseDrakkarHandler, DrakkarHandler
-from drakkar.periodic import periodic
 from drakkar.models import (
     CollectResult,
     DeliveryAction,
@@ -24,6 +23,7 @@ from drakkar.models import (
     SourceMessage,
     make_task_id,
 )
+from drakkar.periodic import periodic
 
 __all__ = [
     'BaseDrakkarHandler',

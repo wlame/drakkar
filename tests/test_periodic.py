@@ -13,7 +13,6 @@ from drakkar.periodic import (
     run_periodic_task,
 )
 
-
 # --- Decorator tests ---
 
 
@@ -90,7 +89,7 @@ def test_discover_periodic_tasks_on_handler():
     names = {name for name, _, _ in tasks}
     assert names == {'refresh_cache', 'health_check'}
 
-    for name, method, meta in tasks:
+    for name, _method, meta in tasks:
         if name == 'refresh_cache':
             assert meta.seconds == 30
             assert meta.on_error == 'continue'
@@ -187,7 +186,7 @@ async def test_run_periodic_task_on_error_continue():
     async def failing_task():
         nonlocal call_count
         call_count += 1
-        raise RuntimeError("boom")
+        raise RuntimeError('boom')
 
     t = asyncio.create_task(
         run_periodic_task(
@@ -213,7 +212,7 @@ async def test_run_periodic_task_on_error_stop():
     async def failing_task():
         nonlocal call_count
         call_count += 1
-        raise RuntimeError("fatal")
+        raise RuntimeError('fatal')
 
     t = asyncio.create_task(
         run_periodic_task(

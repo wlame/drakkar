@@ -41,11 +41,11 @@ def periodic(
             ``"stop"`` — log the error, cancel this periodic task.
     """
     if seconds <= 0:
-        raise ValueError(f"periodic seconds must be positive, got {seconds}")
+        raise ValueError(f'periodic seconds must be positive, got {seconds}')
 
     def decorator(fn: Callable[..., Coroutine[Any, Any, Any]]) -> Callable[..., Coroutine[Any, Any, Any]]:
         if not asyncio.iscoroutinefunction(fn):
-            raise TypeError(f"@periodic can only decorate async functions, got {fn!r}")
+            raise TypeError(f'@periodic can only decorate async functions, got {fn!r}')
         setattr(fn, PERIODIC_ATTR, PeriodicMeta(seconds=seconds, on_error=on_error))
         return fn
 
@@ -73,7 +73,7 @@ async def run_periodic_task(
 ) -> None:
     """Run a single periodic task in a loop until cancelled."""
     log = logger.bind(periodic_task=name, interval_seconds=seconds)
-    await log.ainfo("periodic_task_started", category='periodic')
+    await log.ainfo('periodic_task_started', category='periodic')
 
     while True:
         await asyncio.sleep(seconds)
@@ -82,7 +82,7 @@ async def run_periodic_task(
         except asyncio.CancelledError:
             raise
         except Exception:
-            await log.aexception("periodic_task_failed", category='periodic')
+            await log.aexception('periodic_task_failed', category='periodic')
             if on_error == 'stop':
-                await log.awarning("periodic_task_stopped", category='periodic')
+                await log.awarning('periodic_task_stopped', category='periodic')
                 return
