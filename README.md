@@ -217,6 +217,32 @@ Worker name is read from the `WORKER_ID` environment variable by default (config
 | `on_assign(partitions)` | Partitions assigned | Initialize per-partition state |
 | `on_revoke(partitions)` | Partitions revoked | Cleanup per-partition state |
 
+## Periodic tasks
+
+Use the `@periodic` decorator to schedule recurring background coroutines on the handler. They run in the same async loop alongside the poll loop, start after `on_ready()`, and are cancelled on shutdown. Overlapping runs are prevented -- the next interval starts only after the current invocation finishes.
+
+```python
+from drakkar import BaseDrakkarHandler, periodic
+
+class MyHandler(BaseDrakkarHandler):
+    async def on_ready(self, config, db_pool):
+        self.db_pool = db_pool
+
+    @periodic(seconds=60)
+    async def refresh_cache(self):
+        async with self.db_pool.acquire() as conn:
+            self.cache = await conn.fetch("SELECT * FROM lookup")
+
+    @periodic(seconds=30, on_error="stop")
+    async def health_ping(self):
+        await http_post("https://health.example.com/ping")
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `seconds` | `float` | required | Interval between runs |
+| `on_error` | `"continue" \| "stop"` | `"continue"` | `"continue"` logs and retries next interval; `"stop"` logs and cancels the task |
+
 ## Sinks
 
 Configure any combination in the `sinks:` section. Each type supports multiple named instances.
