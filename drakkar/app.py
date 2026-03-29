@@ -29,6 +29,7 @@ from drakkar.metrics import (
 )
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError
 from drakkar.partition import PartitionProcessor
+from drakkar.periodic import discover_periodic_tasks, run_periodic_task
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.dlq import DLQSink
 from drakkar.sinks.filesystem import FileSink
@@ -79,6 +80,7 @@ class DrakkarApp:
         self._running = False
         self._paused = False
         self._background_tasks: set[asyncio.Task] = set()
+        self._periodic_tasks: list[asyncio.Task] = []
 
     @property
     def config(self) -> DrakkarConfig:
@@ -214,6 +216,19 @@ class DrakkarApp:
         bind_contextvars(hook='on_ready')
         await self._handler.on_ready(self._config, pg_pool)
         unbind_contextvars('hook')
+
+        # start periodic tasks declared on the handler
+        for name, method, meta in discover_periodic_tasks(self._handler):
+            task = asyncio.create_task(
+                run_periodic_task(
+                    name=name,
+                    coro_fn=method,
+                    seconds=meta.seconds,
+                    on_error=meta.on_error,
+                ),
+                name=f'periodic:{name}',
+            )
+            self._periodic_tasks.append(task)
 
         await self._consumer.subscribe()
         self._running = True
@@ -414,9 +429,16 @@ class DrakkarApp:
         self._running = False
 
     async def _shutdown(self) -> None:
-        """Graceful shutdown: drain executors, commit offsets, close sinks."""
+        """Graceful shutdown: cancel periodic tasks, drain executors, commit offsets, close sinks."""
         log = logger.bind(worker_id=self._worker_id)
         await log.ainfo('drakkar_shutting_down', category='lifecycle')
+
+        # cancel periodic tasks
+        for task in self._periodic_tasks:
+            task.cancel()
+        if self._periodic_tasks:
+            await asyncio.gather(*self._periodic_tasks, return_exceptions=True)
+            self._periodic_tasks.clear()
 
         for processor in list(self._processors.values()):
             processor._running = False
