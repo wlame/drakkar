@@ -8,13 +8,19 @@ Shows how to:
 - Handle executor failures with on_error() and retries
 - Handle sink delivery failures with on_delivery_error() and DLQ
 - Simulate random executor failures via --fail flag
+- Use @periodic for recurring background tasks (stats, health checks)
 """
 
 import asyncio
 import random
 
 import structlog
-from metrics import delivery_retries_total, search_errors_total, search_match_count
+from metrics import (
+    delivery_retries_total,
+    periodic_stats_runs_total,
+    search_errors_total,
+    search_match_count,
+)
 from models import SearchNotification, SearchRequest, SearchResult, SearchSummary
 
 import drakkar as dk
@@ -56,6 +62,35 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
         )
         return config
 
+    async def on_ready(self, config: dk.DrakkarConfig, db_pool: object) -> None:
+        self.total_collected = 0
+
+    # -- Periodic tasks -------------------------------------------------
+
+    @dk.periodic(seconds=10)
+    async def log_stats(self):
+        """Log pipeline stats every 10 seconds. Demonstrates a recurring
+        background task that accesses handler state set during processing."""
+        periodic_stats_runs_total.inc()
+        await logger.ainfo(
+            'periodic_stats',
+            category='periodic',
+            total_collected=self.total_collected,
+        )
+
+    @dk.periodic(seconds=30, on_error='stop')
+    async def health_check(self):
+        """Verify /tmp/search-corpus exists (executor needs it).
+        Demonstrates on_error='stop' — if the corpus disappears, this
+        task logs an error and stops rather than spamming every 30s."""
+        import os
+
+        if not os.path.isdir('/tmp/search-corpus'):
+            raise RuntimeError("Search corpus directory missing: /tmp/search-corpus")
+        await logger.ainfo('health_check_ok', category='periodic')
+
+    # -------------------------------------------------------------------
+
     async def arrange(
         self,
         messages: list[dk.SourceMessage],
@@ -90,6 +125,7 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
         return tasks
 
     async def collect(self, result: dk.ExecutorResult) -> dk.CollectResult | None:
+        self.total_collected += 1
         # simulate post-processing (e.g. parsing, enrichment)
         await asyncio.sleep(random.uniform(0.001, 0.005))
 

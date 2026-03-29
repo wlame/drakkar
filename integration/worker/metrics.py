@@ -24,3 +24,8 @@ delivery_retries_total = Counter(
     'Total sink delivery retries',
     ['sink_type'],
 )
+
+periodic_stats_runs_total = Counter(
+    'app_periodic_stats_runs_total',
+    'Number of times the periodic stats task has run',
+)
