@@ -12,6 +12,7 @@ Shows how to:
 """
 
 import asyncio
+import os
 import random
 
 import structlog
@@ -83,8 +84,6 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
         """Verify /tmp/search-corpus exists (executor needs it).
         Demonstrates on_error='stop' — if the corpus disappears, this
         task logs an error and stops rather than spamming every 30s."""
-        import os
-
         if not os.path.isdir('/tmp/search-corpus'):
             raise RuntimeError("Search corpus directory missing: /tmp/search-corpus")
         await logger.ainfo('health_check_ok', category='periodic')

@@ -56,7 +56,10 @@ def discover_periodic_tasks(handler: object) -> list[tuple[str, Callable[..., Co
     """Inspect a handler instance and return all @periodic-decorated methods."""
     tasks: list[tuple[str, Callable[..., Coroutine[Any, Any, Any]], PeriodicMeta]] = []
     for name in dir(handler):
-        attr = getattr(handler, name, None)
+        try:
+            attr = getattr(handler, name, None)
+        except Exception:
+            continue
         if attr is None:
             continue
         meta = getattr(attr, PERIODIC_ATTR, None)
@@ -82,7 +85,8 @@ async def run_periodic_task(
         except asyncio.CancelledError:
             raise
         except Exception:
-            await log.aexception('periodic_task_failed', category='periodic')
             if on_error == 'stop':
+                await log.aexception('periodic_task_failed', category='periodic')
                 await log.awarning('periodic_task_stopped', category='periodic')
                 return
+            await log.aexception('periodic_task_failed', category='periodic')

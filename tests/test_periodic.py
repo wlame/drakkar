@@ -223,8 +223,10 @@ async def test_run_periodic_task_on_error_stop():
         )
     )
 
-    await asyncio.sleep(0.2)
-    # task should have stopped after first error, not cancelled
+    # poll until the task self-terminates (avoids flaky wall-clock sleep)
+    deadline = asyncio.get_event_loop().time() + 2.0
+    while not t.done() and asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.02)
     assert t.done()
     assert call_count == 1
 
