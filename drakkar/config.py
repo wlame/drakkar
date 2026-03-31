@@ -226,6 +226,10 @@ class DebugConfig(BaseModel):
     flush_interval_seconds: int = Field(default=5, ge=1)
     max_buffer: int = Field(default=50_000, ge=1000)
     max_ui_rows: int = Field(default=5000, ge=100)
+    log_min_duration_ms: int = Field(default=500, ge=0)
+    ws_min_duration_ms: int = Field(default=500, ge=0)
+    event_min_duration_ms: int = Field(default=0, ge=0)
+    output_min_duration_ms: int = Field(default=500, ge=0)
     prometheus_url: str = ''
     prometheus_rate_interval: str = '5m'
     prometheus_worker_label: str = ''

@@ -23,6 +23,9 @@ from drakkar.recorder import (
     _live_link_path,
     _make_db_path,
 )
+from drakkar.recorder import (
+    logger as recorder_logger,
+)
 
 
 class _RecData(BaseModel):
@@ -1693,3 +1696,409 @@ async def test_cross_trace_empty_when_no_match(recorder):
     """cross_trace returns empty list when no events match anywhere."""
     events = await recorder.cross_trace(partition=99, msg_offset=999)
     assert events == []
+
+
+# --- Duration threshold tests ---
+
+
+def make_fast_result(task_id='t-fast', task=None) -> ExecutorResult:
+    """Result with 100ms duration — below default 500ms thresholds."""
+    t = task or make_task(task_id)
+    return ExecutorResult(
+        task_id=task_id,
+        exit_code=0,
+        stdout='fast output\n',
+        stderr='',
+        duration_seconds=0.1,
+        task=t,
+    )
+
+
+def make_slow_result(task_id='t-slow', task=None) -> ExecutorResult:
+    """Result with 1.5s duration — above default 500ms thresholds."""
+    t = task or make_task(task_id)
+    return ExecutorResult(
+        task_id=task_id,
+        exit_code=0,
+        stdout='slow output\n',
+        stderr='warn',
+        duration_seconds=1.5,
+        task=t,
+    )
+
+
+async def test_ws_threshold_skips_fast_task(tmp_path):
+    """Fast task completion is not broadcast to WS subscribers."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=500)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    q = rec.subscribe()
+    rec.record_task_completed(make_fast_result(), partition=0)
+
+    assert q.empty()
+    rec.unsubscribe(q)
+    await rec.stop()
+
+
+async def test_ws_threshold_broadcasts_slow_task(tmp_path):
+    """Slow task completion is broadcast to WS subscribers."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=500)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    q = rec.subscribe()
+    rec.record_task_completed(make_slow_result(), partition=0)
+
+    assert not q.empty()
+    event = q.get_nowait()
+    assert event['event'] == 'task_completed'
+    rec.unsubscribe(q)
+    await rec.stop()
+
+
+async def test_event_threshold_zero_saves_all(tmp_path):
+    """event_min_duration_ms=0 (default) saves all tasks to buffer."""
+    config = make_debug_config(tmp_path, event_min_duration_ms=0)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_task_completed(make_fast_result(), partition=0)
+
+    assert len(rec._buffer) == 1
+    assert rec._buffer[0]['event'] == 'task_completed'
+    await rec.stop()
+
+
+async def test_event_threshold_skips_fast_task(tmp_path):
+    """event_min_duration_ms=500 skips fast tasks from buffer."""
+    config = make_debug_config(tmp_path, event_min_duration_ms=500)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_task_completed(make_fast_result(), partition=0)
+
+    assert len(rec._buffer) == 0
+    await rec.stop()
+
+
+async def test_event_threshold_saves_slow_task(tmp_path):
+    """event_min_duration_ms=500 saves slow tasks to buffer."""
+    config = make_debug_config(tmp_path, event_min_duration_ms=500)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_task_completed(make_slow_result(), partition=0)
+
+    assert len(rec._buffer) == 1
+    await rec.stop()
+
+
+async def test_output_threshold_excludes_args_for_fast_task(tmp_path):
+    """Fast task entry does not include args."""
+    config = make_debug_config(tmp_path, output_min_duration_ms=500)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_task_completed(make_fast_result(), partition=0)
+
+    assert len(rec._buffer) == 1
+    assert 'args' not in rec._buffer[0]
+    await rec.stop()
+
+
+async def test_output_threshold_includes_args_for_slow_task(tmp_path):
+    """Slow task entry includes args."""
+    config = make_debug_config(tmp_path, output_min_duration_ms=500)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_task_completed(make_slow_result(), partition=0)
+
+    assert len(rec._buffer) == 1
+    assert 'args' in rec._buffer[0]
+    await rec.stop()
+
+
+async def test_output_threshold_excludes_stdout_stderr_for_fast_task(tmp_path):
+    """Fast task with store_output=True still excludes stdout/stderr."""
+    config = make_debug_config(tmp_path, store_output=True, output_min_duration_ms=500)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_task_completed(make_slow_result('t-slow'), partition=0)
+    rec.record_task_completed(make_fast_result('t-fast'), partition=0)
+
+    slow_entry = rec._buffer[0]
+    fast_entry = rec._buffer[1]
+
+    assert slow_entry['stdout'] == 'slow output\n'
+    assert slow_entry['stderr'] == 'warn'
+    assert 'stdout' not in fast_entry
+    assert 'stderr' not in fast_entry
+    await rec.stop()
+
+
+async def test_output_threshold_store_output_false_no_stdout(tmp_path):
+    """store_output=False suppresses stdout/stderr even for slow tasks."""
+    config = make_debug_config(tmp_path, store_output=False, output_min_duration_ms=0)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_task_completed(make_slow_result(), partition=0)
+
+    entry = rec._buffer[0]
+    assert 'args' in entry  # output_min_duration_ms=0 so args included
+    assert 'stdout' not in entry  # store_output=False suppresses this
+    assert 'stderr' not in entry
+    await rec.stop()
+
+
+async def test_log_threshold_logs_slow_task(tmp_path):
+    """Slow task triggers structlog info line."""
+    from unittest.mock import patch
+
+    config = make_debug_config(tmp_path, log_min_duration_ms=500)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    with patch.object(recorder_logger, 'info') as mock_log:
+        rec.record_task_completed(make_slow_result(), partition=0)
+        mock_log.assert_called_once()
+        assert mock_log.call_args[0][0] == 'slow_task_completed'
+
+    await rec.stop()
+
+
+async def test_log_threshold_skips_fast_task(tmp_path):
+    """Fast task does not trigger structlog info line."""
+    from unittest.mock import patch
+
+    config = make_debug_config(tmp_path, log_min_duration_ms=500)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    with patch.object(recorder_logger, 'info') as mock_log:
+        rec.record_task_completed(make_fast_result(), partition=0)
+        mock_log.assert_not_called()
+
+    await rec.stop()
+
+
+async def test_failed_with_duration_applies_thresholds(tmp_path):
+    """record_task_failed with duration_seconds applies all thresholds."""
+    config = make_debug_config(
+        tmp_path,
+        ws_min_duration_ms=500,
+        event_min_duration_ms=500,
+        output_min_duration_ms=500,
+    )
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-fast')
+    error = ExecutorError(task=task, exit_code=1, stderr='error output')
+    q = rec.subscribe()
+
+    rec.record_task_failed(task, error, partition=0, duration_seconds=0.1)
+
+    # fast: skipped from buffer and WS
+    assert len(rec._buffer) == 0
+    assert q.empty()
+    rec.unsubscribe(q)
+    await rec.stop()
+
+
+async def test_failed_slow_task_recorded_with_duration(tmp_path):
+    """record_task_failed with slow duration records normally."""
+    config = make_debug_config(
+        tmp_path,
+        store_output=True,
+        ws_min_duration_ms=500,
+        event_min_duration_ms=500,
+        output_min_duration_ms=500,
+    )
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-slow')
+    error = ExecutorError(task=task, exit_code=1, stderr='slow error')
+    q = rec.subscribe()
+
+    rec.record_task_failed(task, error, partition=0, duration_seconds=1.5)
+
+    assert len(rec._buffer) == 1
+    entry = rec._buffer[0]
+    assert entry['duration'] == 1.5
+    assert 'args' in entry
+    assert entry['stderr'] == 'slow error'
+    assert not q.empty()
+    rec.unsubscribe(q)
+    await rec.stop()
+
+
+async def test_failed_without_duration_records_everything(tmp_path):
+    """record_task_failed without duration records all data (safe default)."""
+    config = make_debug_config(
+        tmp_path,
+        store_output=True,
+        ws_min_duration_ms=500,
+        event_min_duration_ms=500,
+        output_min_duration_ms=500,
+    )
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-nodur')
+    error = ExecutorError(task=task, exit_code=1, stderr='unknown duration error')
+    q = rec.subscribe()
+
+    rec.record_task_failed(task, error, partition=0)
+
+    # without duration: everything recorded
+    assert len(rec._buffer) == 1
+    entry = rec._buffer[0]
+    assert 'duration' not in entry
+    assert 'args' in entry
+    assert entry['stderr'] == 'unknown duration error'
+    assert not q.empty()
+    rec.unsubscribe(q)
+    await rec.stop()
+
+
+async def test_failed_output_threshold_excludes_args_stderr(tmp_path):
+    """record_task_failed with fast duration excludes args and stderr."""
+    config = make_debug_config(
+        tmp_path,
+        store_output=True,
+        event_min_duration_ms=0,
+        output_min_duration_ms=500,
+    )
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-fast')
+    error = ExecutorError(task=task, exit_code=1, stderr='error detail')
+
+    rec.record_task_failed(task, error, partition=0, duration_seconds=0.1)
+
+    assert len(rec._buffer) == 1
+    entry = rec._buffer[0]
+    assert 'args' not in entry
+    assert 'stderr' not in entry
+    await rec.stop()
+
+
+async def test_log_threshold_failed_slow_task(tmp_path):
+    """Slow failed task triggers structlog info line."""
+    from unittest.mock import patch
+
+    config = make_debug_config(tmp_path, log_min_duration_ms=500)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-slow')
+    error = ExecutorError(task=task, exit_code=1, stderr='err')
+
+    with patch.object(recorder_logger, 'info') as mock_log:
+        rec.record_task_failed(task, error, partition=0, duration_seconds=1.5)
+        mock_log.assert_called_once()
+        assert mock_log.call_args[0][0] == 'slow_task_failed'
+
+    await rec.stop()
+
+
+async def test_log_threshold_failed_fast_task_no_log(tmp_path):
+    """Fast failed task does not trigger structlog info line."""
+    from unittest.mock import patch
+
+    config = make_debug_config(tmp_path, log_min_duration_ms=500)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-fast')
+    error = ExecutorError(task=task, exit_code=1, stderr='err')
+
+    with patch.object(recorder_logger, 'info') as mock_log:
+        rec.record_task_failed(task, error, partition=0, duration_seconds=0.1)
+        mock_log.assert_not_called()
+
+    await rec.stop()
+
+
+async def test_counters_always_increment_regardless_of_thresholds(tmp_path):
+    """Counters increment even when events are filtered by thresholds."""
+    config = make_debug_config(
+        tmp_path,
+        event_min_duration_ms=500,
+        ws_min_duration_ms=500,
+    )
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_task_completed(make_fast_result('t1'), partition=0)
+    rec.record_task_completed(make_fast_result('t2'), partition=0)
+    task = make_task('t3')
+    error = ExecutorError(task=task, exit_code=1, stderr='err')
+    rec.record_task_failed(task, error, partition=0, duration_seconds=0.1)
+
+    assert rec.counters['completed'] == 2
+    assert rec.counters['failed'] == 1
+    # buffer should be empty (fast tasks, event_min_duration_ms=500)
+    assert len(rec._buffer) == 0
+    await rec.stop()
+
+
+async def test_threshold_boundary_exact_match(tmp_path):
+    """Task with duration exactly at threshold is included."""
+    config = make_debug_config(
+        tmp_path,
+        ws_min_duration_ms=500,
+        output_min_duration_ms=500,
+        log_min_duration_ms=500,
+    )
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-boundary')
+    result = ExecutorResult(
+        task_id='t-boundary',
+        exit_code=0,
+        stdout='boundary\n',
+        stderr='',
+        duration_seconds=0.5,  # exactly 500ms
+        task=task,
+    )
+    q = rec.subscribe()
+    rec.record_task_completed(result, partition=0)
+
+    # 500ms >= 500ms threshold → included
+    assert not q.empty()
+    assert 'args' in rec._buffer[0]
+    rec.unsubscribe(q)
+    await rec.stop()
+
+
+async def test_threshold_zero_means_include_all(tmp_path):
+    """All thresholds set to 0 means everything is recorded."""
+    config = make_debug_config(
+        tmp_path,
+        store_output=True,
+        log_min_duration_ms=0,
+        ws_min_duration_ms=0,
+        event_min_duration_ms=0,
+        output_min_duration_ms=0,
+    )
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    q = rec.subscribe()
+    rec.record_task_completed(make_fast_result(), partition=0)
+
+    assert len(rec._buffer) == 1
+    assert not q.empty()
+    entry = rec._buffer[0]
+    assert 'args' in entry
+    assert 'stdout' in entry
+    rec.unsubscribe(q)
+    await rec.stop()

@@ -253,11 +253,12 @@ class EventRecorder:
         """Unsubscribe from live event stream."""
         self._ws_subscribers.discard(q)
 
-    def _record(self, event: dict) -> None:
+    def _record(self, event: dict, *, skip_ws: bool = False, skip_db: bool = False) -> None:
         """Append event to buffer and broadcast to WS subscribers."""
         event['dt'] = _format_dt(event['ts'])
-        self._buffer.append(event)
-        if self._ws_subscribers:
+        if not skip_db:
+            self._buffer.append(event)
+        if not skip_ws and self._ws_subscribers:
             for q in self._ws_subscribers:
                 try:
                     q.put_nowait(event)
@@ -482,6 +483,12 @@ class EventRecorder:
         pool_waiting: int = 0,
     ) -> None:
         self._counters['completed'] += 1
+        duration_ms = result.duration_seconds * 1000
+
+        skip_ws = duration_ms < self._config.ws_min_duration_ms
+        skip_db = self._config.event_min_duration_ms > 0 and duration_ms < self._config.event_min_duration_ms
+        include_output = duration_ms >= self._config.output_min_duration_ms
+
         entry: dict = {
             'ts': time.time(),
             'event': 'task_completed',
@@ -490,15 +497,25 @@ class EventRecorder:
             'exit_code': result.exit_code,
             'duration': result.duration_seconds,
             'stdout_size': len(result.stdout.encode()),
-            'args': json.dumps(result.task.args),
             'pid': result.pid,
             'pool_active': pool_active,
             'pool_waiting': pool_waiting,
         }
-        if self._config.store_output:
+        if include_output:
+            entry['args'] = json.dumps(result.task.args)
+        if include_output and self._config.store_output:
             entry['stdout'] = result.stdout
             entry['stderr'] = result.stderr
-        self._record(entry)
+        self._record(entry, skip_ws=skip_ws, skip_db=skip_db)
+
+        if duration_ms >= self._config.log_min_duration_ms:
+            logger.info(
+                'slow_task_completed',
+                category='recorder',
+                task_id=result.task_id,
+                duration=result.duration_seconds,
+                partition=partition,
+            )
 
     def record_task_failed(
         self,
@@ -507,15 +524,28 @@ class EventRecorder:
         partition: int,
         pool_active: int = 0,
         pool_waiting: int = 0,
+        duration_seconds: float | None = None,
     ) -> None:
         self._counters['failed'] += 1
+
+        if duration_seconds is not None:
+            duration_ms = duration_seconds * 1000
+            skip_ws = duration_ms < self._config.ws_min_duration_ms
+            skip_db = self._config.event_min_duration_ms > 0 and duration_ms < self._config.event_min_duration_ms
+            include_output = duration_ms >= self._config.output_min_duration_ms
+            should_log = duration_ms >= self._config.log_min_duration_ms
+        else:
+            skip_ws = False
+            skip_db = False
+            include_output = True
+            should_log = True
+
         entry: dict = {
             'ts': time.time(),
             'event': 'task_failed',
             'partition': partition,
             'task_id': task.task_id,
             'exit_code': error.exit_code,
-            'args': json.dumps(task.args),
             'pid': error.pid,
             'pool_active': pool_active,
             'pool_waiting': pool_waiting,
@@ -525,9 +555,22 @@ class EventRecorder:
                 }
             ),
         }
-        if self._config.store_output:
+        if duration_seconds is not None:
+            entry['duration'] = duration_seconds
+        if include_output:
+            entry['args'] = json.dumps(task.args)
+        if include_output and self._config.store_output:
             entry['stderr'] = error.stderr
-        self._record(entry)
+        self._record(entry, skip_ws=skip_ws, skip_db=skip_db)
+
+        if should_log:
+            logger.info(
+                'slow_task_failed',
+                category='recorder',
+                task_id=task.task_id,
+                duration=duration_seconds,
+                partition=partition,
+            )
 
     def record_collect_completed(
         self,

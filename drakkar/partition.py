@@ -332,6 +332,7 @@ class PartitionProcessor:
                     self._partition_id,
                     pool_active=self._executor_pool.active_count,
                     pool_waiting=self._executor_pool.waiting_count,
+                    duration_seconds=e.result.duration_seconds,
                 )
             await log.awarning('executor_task_failed', error=str(e))
 
