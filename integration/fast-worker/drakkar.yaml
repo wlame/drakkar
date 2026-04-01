@@ -57,6 +57,11 @@ debug:
   flush_interval_seconds: 3
   max_buffer: 50000
   max_ui_rows: 5000
+  # Duration thresholds — tuned down for fast tasks (most finish in <100ms)
+  log_min_duration_ms: 100       # log slow tasks above 100ms
+  ws_min_duration_ms: 50         # stream all but the fastest to live UI
+  event_min_duration_ms: 0       # write all task events to DB
+  output_min_duration_ms: 100    # only store stdout/stderr/args for tasks above 100ms
   prometheus_url: "http://localhost:9099"
   prometheus_rate_interval: "30s"
   prometheus_worker_label: 'instance="{worker_id}:{metrics_port}"'
