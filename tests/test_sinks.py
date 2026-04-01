@@ -1167,3 +1167,121 @@ def test_dlq_sink_topic():
     sink = DLQSink(topic='my-dlq', brokers='localhost:9092')
     assert sink.topic == 'my-dlq'
     assert sink.sink_type == 'dlq'
+
+
+# =============================================================================
+# close() exception paths — each sink catches Exception from inner resource
+# =============================================================================
+
+
+@patch('drakkar.sinks.kafka.AIOProducer')
+async def test_kafka_sink_close_exception_is_caught(mock_cls, kafka_sink_config):
+    """Kafka close() catches exception from producer.close() and still sets producer to None."""
+    from drakkar.sinks.kafka import KafkaSink
+
+    mock_producer = AsyncMock()
+    mock_producer.close.side_effect = RuntimeError('transport error')
+    mock_cls.return_value = mock_producer
+
+    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    await sink.connect()
+
+    await sink.close()  # should not raise
+
+    mock_producer.close.assert_called_once()
+    assert sink._producer is None
+
+
+async def test_postgres_sink_close_exception_is_caught(pg_sink_config):
+    """Postgres close() catches exception from pool.close() and still sets pool to None."""
+    sink, _, mock_pool = _make_pg_sink(pg_sink_config)
+    mock_pool.close.side_effect = RuntimeError('connection reset')
+
+    await sink.close()  # should not raise
+
+    mock_pool.close.assert_called_once()
+    assert sink.pool is None
+
+
+async def test_mongo_sink_close_exception_is_caught(mongo_sink_config):
+    """Mongo close() catches exception from client.close() and still sets client to None."""
+    sink, _, mock_client = _make_mongo_sink(mongo_sink_config)
+    mock_client.close.side_effect = RuntimeError('network unreachable')
+
+    await sink.close()  # should not raise
+
+    mock_client.close.assert_called_once()
+    assert sink._client is None
+    assert sink._db is None
+
+
+async def test_http_sink_close_exception_is_caught(http_sink_config):
+    """HTTP close() catches exception from client.aclose() and still sets client to None."""
+    sink, mock_client = _make_http_sink(http_sink_config)
+    mock_client.aclose.side_effect = RuntimeError('aclose failed')
+
+    await sink.close()  # should not raise
+
+    mock_client.aclose.assert_called_once()
+    assert sink._client is None
+
+
+async def test_redis_sink_close_exception_is_caught(redis_sink_config):
+    """Redis close() catches exception from client.aclose() and still sets client to None."""
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+    mock_client.aclose.side_effect = RuntimeError('connection refused')
+
+    await sink.close()  # should not raise
+
+    mock_client.aclose.assert_called_once()
+    assert sink._client is None
+
+
+async def test_dlq_sink_close_exception_is_caught():
+    """DLQ close() catches exception from producer.close() and still sets producer to None."""
+    sink, mock_producer = _make_dlq_sink()
+    mock_producer.close.side_effect = RuntimeError('flush timeout')
+
+    await sink.close()  # should not raise
+
+    mock_producer.close.assert_called_once()
+    assert sink._producer is None
+
+
+# =============================================================================
+# DLQ serialize fallback + deliver NotImplementedError
+# =============================================================================
+
+
+def test_dlq_message_serialize_fallback_on_model_dump_failure():
+    """When model_dump_json() raises, serialize() falls back to str(payload)."""
+    from drakkar.models import DeliveryError
+    from drakkar.sinks.dlq import DLQMessage
+
+    broken_payload = MagicMock(spec=BaseModel)
+    broken_payload.model_dump_json.side_effect = TypeError('not serializable')
+
+    error = DeliveryError(
+        sink_name='results',
+        sink_type='kafka',
+        error='some error',
+        payloads=[broken_payload],
+    )
+    msg = DLQMessage(delivery_error=error, partition_id=1, attempt_count=1)
+    data = msg.serialize()
+
+    import json
+
+    parsed = json.loads(data)
+    # fallback should be str(broken_payload)
+    assert len(parsed['original_payloads']) == 1
+    assert parsed['original_payloads'][0] == str(broken_payload)
+
+
+async def test_dlq_sink_deliver_raises_not_implemented():
+    """DLQSink.deliver() always raises NotImplementedError."""
+    from drakkar.sinks.dlq import DLQSink
+
+    sink = DLQSink(topic='dlq', brokers='localhost:9092')
+    with pytest.raises(NotImplementedError, match='Use DLQSink.send'):
+        await sink.deliver([SampleOutput()])

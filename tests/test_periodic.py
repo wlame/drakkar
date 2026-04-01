@@ -443,3 +443,27 @@ async def test_multiple_periodic_tasks_run_independently():
     assert fast_count > slow_count
     assert fast_count >= 4
     assert slow_count >= 1
+
+
+def test_discover_periodic_tasks_skips_broken_descriptor():
+    """Discovery handles getattr raising an exception (e.g. broken descriptors)."""
+
+    class BrokenDescriptor:
+        def __get__(self, obj, objtype=None):
+            raise RuntimeError('descriptor broken')
+
+    class HandlerWithBroken(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return []
+
+        broken = BrokenDescriptor()
+
+        @periodic(seconds=10)
+        async def good_task(self):
+            pass
+
+    handler = HandlerWithBroken()
+    tasks = discover_periodic_tasks(handler)
+    names = {name for name, _, _ in tasks}
+    assert 'good_task' in names
+    assert 'broken' not in names

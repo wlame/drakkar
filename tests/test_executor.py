@@ -279,3 +279,22 @@ async def test_waiting_count_tracks_queued_tasks():
     await fast_future
     assert pool.waiting_count == 0
     assert pool.active_count == 0
+
+
+async def test_execute_records_task_started_with_recorder():
+    """When a recorder is provided, execute() calls record_task_started."""
+    from unittest.mock import MagicMock
+
+    pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=5)
+    task = make_task('rec-1', args=['hello'])
+    recorder = MagicMock()
+
+    result = await pool.execute(task, recorder=recorder, partition_id=3)
+    assert result.exit_code == 0
+
+    recorder.record_task_started.assert_called_once()
+    call_args = recorder.record_task_started.call_args
+    # positional: (task, partition_id), keyword: pool_active, pool_waiting, slot
+    assert call_args[0][0] is task
+    assert call_args[0][1] == 3
+    assert call_args[1]['pool_active'] >= 1

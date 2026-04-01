@@ -372,3 +372,13 @@ def test_config_serialization(config_yaml_file: Path):
     data = cfg.model_dump()
     assert data['kafka']['brokers'] == 'kafka1:9092,kafka2:9092'
     assert data['executor']['max_workers'] == 40
+
+
+def test_deep_merge_recursive():
+    """_deep_merge recursively merges nested dicts."""
+    from drakkar.config import _deep_merge
+
+    base = {'a': {'b': 1, 'c': 2}, 'd': 3}
+    override = {'a': {'c': 99, 'e': 5}}
+    result = _deep_merge(base, override)
+    assert result == {'a': {'b': 1, 'c': 99, 'e': 5}, 'd': 3}
