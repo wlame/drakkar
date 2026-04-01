@@ -284,40 +284,40 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
         try:
             src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
             src.row_factory = _dict_factory
-        except Exception:
-            continue
 
-        worker_id: int | None = None
+            worker_id: int | None = None
 
-        if _table_exists(src, 'worker_config'):
-            row = src.execute('SELECT * FROM worker_config WHERE id = 1').fetchone()
-            if row:
-                values = [row.get(col) for col in _WORKER_CONFIG_COLUMNS]
-                values.append(basename)
-                placeholders = ', '.join(['?'] * len(values))
-                cols = ', '.join([*_WORKER_CONFIG_COLUMNS, 'source_file'])
-                cursor = out.execute(f'INSERT INTO workers ({cols}) VALUES ({placeholders})', values)
+            if _table_exists(src, 'worker_config'):
+                row = src.execute('SELECT * FROM worker_config WHERE id = 1').fetchone()
+                if row:
+                    values = [row.get(col) for col in _WORKER_CONFIG_COLUMNS]
+                    values.append(basename)
+                    placeholders = ', '.join(['?'] * len(values))
+                    cols = ', '.join([*_WORKER_CONFIG_COLUMNS, 'source_file'])
+                    cursor = out.execute(f'INSERT INTO workers ({cols}) VALUES ({placeholders})', values)
+                    worker_id = cursor.lastrowid
+                    result.worker_count += 1
+                    cluster = row.get('cluster_name')
+                    if cluster:
+                        cluster_names.add(cluster)
+                    else:
+                        cluster_names.add('')
+
+            if worker_id is None:
+                # no worker_config — create a placeholder worker row
+                cursor = out.execute(
+                    'INSERT INTO workers (worker_name, source_file) VALUES (?, ?)',
+                    [Path(basename).stem, basename],
+                )
                 worker_id = cursor.lastrowid
                 result.worker_count += 1
-                cluster = row.get('cluster_name')
-                if cluster:
-                    cluster_names.add(cluster)
-                else:
-                    cluster_names.add('')
+                cluster_names.add('')
 
-        if worker_id is None:
-            # no worker_config — create a placeholder worker row
-            cursor = out.execute(
-                'INSERT INTO workers (worker_name, source_file) VALUES (?, ?)',
-                [Path(basename).stem, basename],
-            )
-            worker_id = cursor.lastrowid
-            result.worker_count += 1
-            cluster_names.add('')
-
-        assert worker_id is not None
-        worker_map[db_path] = worker_id
-        src.close()
+            assert worker_id is not None
+            worker_map[db_path] = worker_id
+            src.close()
+        except Exception:
+            continue
 
     # phase 2: collect all events into a temp list, sort by ts, then insert
     all_events: list[tuple] = []
@@ -329,15 +329,14 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
         try:
             src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
             src.row_factory = _dict_factory
+            if _table_exists(src, 'events'):
+                rows = src.execute('SELECT * FROM events ORDER BY ts').fetchall()
+                for row in rows:
+                    values = tuple(row.get(col) for col in _EVENT_COLUMNS)
+                    all_events.append((wid, *values))
+            src.close()
         except Exception:
             continue
-
-        if _table_exists(src, 'events'):
-            rows = src.execute('SELECT * FROM events ORDER BY ts').fetchall()
-            for row in rows:
-                values = tuple(row.get(col) for col in _EVENT_COLUMNS)
-                all_events.append((wid, *values))
-        src.close()
 
     # sort all events by ts (index 1 in the tuple: worker_id, ts, ...)
     all_events.sort(key=lambda r: r[1] or 0)
@@ -355,18 +354,17 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
         try:
             src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
             src.row_factory = _dict_factory
+            if _table_exists(src, 'worker_state'):
+                rows = src.execute('SELECT * FROM worker_state ORDER BY updated_at').fetchall()
+                cols = ', '.join(['worker_id', *_STATE_COLUMNS])
+                placeholders = ', '.join(['?'] * (1 + len(_STATE_COLUMNS)))
+                for row in rows:
+                    values = [row.get(col) for col in _STATE_COLUMNS]
+                    out.execute(f'INSERT INTO worker_states ({cols}) VALUES ({placeholders})', [wid, *values])
+                    result.state_count += 1
+            src.close()
         except Exception:
             continue
-
-        if _table_exists(src, 'worker_state'):
-            rows = src.execute('SELECT * FROM worker_state ORDER BY updated_at').fetchall()
-            cols = ', '.join(['worker_id', *_STATE_COLUMNS])
-            placeholders = ', '.join(['?'] * (1 + len(_STATE_COLUMNS)))
-            for row in rows:
-                values = [row.get(col) for col in _STATE_COLUMNS]
-                out.execute(f'INSERT INTO worker_states ({cols}) VALUES ({placeholders})', [wid, *values])
-                result.state_count += 1
-        src.close()
 
     out.commit()
     out.close()

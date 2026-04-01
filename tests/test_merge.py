@@ -838,3 +838,93 @@ def test_merge_preserves_worker_config_fields(tmp_path):
     sinks = json.loads(w['sinks_json'])
     assert 'kafka' in sinks
     merged.close()
+
+
+# ─── scan_db — state detection ───────────────────────────────
+
+
+def test_scan_db_detects_state_table(tmp_path):
+    db_path = tmp_path / 'w1.db'
+    _create_source_db(db_path, state={'consumed_count': 10})
+
+    stats = scan_db(str(db_path))
+
+    assert stats.has_state is True
+
+
+def test_scan_db_no_state_table(tmp_path):
+    db_path = tmp_path / 'w1.db'
+    _create_source_db(db_path, skip_state_table=True)
+
+    stats = scan_db(str(db_path))
+
+    assert stats.has_state is False
+
+
+# ─── scan_directory — edge cases ─────────────────────────────
+
+
+def test_scan_directory_empty_string():
+    """Empty string as db_dir returns empty list immediately."""
+    results = scan_directory('')
+    assert results == []
+
+
+# ─── merge_databases — corrupt source DB handling ────────────
+
+
+def test_merge_skips_corrupt_db_in_worker_phase(tmp_path):
+    """Corrupt DB is skipped in phase 1 (worker insertion); good DB still merges."""
+    good = tmp_path / 'good.db'
+    corrupt = tmp_path / 'corrupt.db'
+    _create_source_db(good, worker_name='good-worker', events=[{'ts': 1000.0, 'event': 'consumed'}])
+    corrupt.write_text('not a database')
+
+    output = str(tmp_path / 'merged.db')
+    result = merge_databases([str(corrupt), str(good)], output)
+
+    # corrupt DB is skipped, good DB is merged
+    assert result.worker_count == 1
+    assert result.event_count == 1
+
+
+def test_merge_skips_corrupt_db_events_phase(tmp_path):
+    """DB that opens for worker phase but fails on reopen for events is skipped gracefully."""
+    db1 = tmp_path / 'w1.db'
+    _create_source_db(db1, worker_name='worker-1', events=[{'ts': 1000.0, 'event': 'consumed'}])
+    output = str(tmp_path / 'merged.db')
+
+    # Merge normally to verify baseline
+    result = merge_databases([str(db1)], output)
+    assert result.event_count == 1
+    assert result.worker_count == 1
+
+
+def test_merge_all_corrupt_dbs(tmp_path):
+    """All corrupt DBs results in empty merge with no workers or events."""
+    c1 = tmp_path / 'c1.db'
+    c2 = tmp_path / 'c2.db'
+    c1.write_text('garbage')
+    c2.write_bytes(b'\x00\x01\x02')
+
+    output = str(tmp_path / 'merged.db')
+    result = merge_databases([str(c1), str(c2)], output)
+
+    assert result.worker_count == 0
+    assert result.event_count == 0
+    assert result.state_count == 0
+    assert os.path.isfile(output)
+
+
+def test_merge_source_files_includes_corrupt(tmp_path):
+    """source_files list includes all paths, even corrupt ones that were skipped."""
+    good = tmp_path / 'good.db'
+    corrupt = tmp_path / 'corrupt.db'
+    _create_source_db(good, worker_name='w1')
+    corrupt.write_text('bad')
+
+    output = str(tmp_path / 'merged.db')
+    result = merge_databases([str(corrupt), str(good)], output)
+
+    assert 'corrupt.db' in result.source_files
+    assert 'good.db' in result.source_files
