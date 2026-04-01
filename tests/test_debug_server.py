@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -9,9 +10,20 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from starlette.testclient import TestClient
 
-from drakkar.config import DebugConfig
-from drakkar.debug_server import _worker_group, create_debug_app
+from drakkar.config import DebugConfig, DrakkarConfig
+from drakkar.debug_server import (
+    _format_ts,
+    _format_ts_full,
+    _format_ts_ms,
+    _worker_group,
+    create_debug_app,
+)
 from drakkar.recorder import EventRecorder
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -94,11 +106,15 @@ def mock_app():
     app._cluster_name = ''
     app._start_time = time.monotonic() - 120
     app.processors = {}
+    app._config = DrakkarConfig()
 
     pool = MagicMock()
     pool.active_count = 2
+    pool.waiting_count = 0
     pool.max_workers = 8
     app._executor_pool = pool
+
+    app._consumer = None
 
     sink_mgr = MagicMock()
     sink_mgr.get_sink_info.return_value = [
@@ -141,6 +157,383 @@ async def client(debug_config, mock_recorder, mock_app):
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         yield c
+
+
+# ---------------------------------------------------------------------------
+# 1. Pure utility functions: _format_ts
+# ---------------------------------------------------------------------------
+
+
+class TestFormatTs:
+    def test_format_ts_none_returns_empty(self):
+        assert _format_ts(None) == ''
+
+    def test_format_ts_returns_hms(self):
+        result = _format_ts(1000.0)
+        assert result != ''
+        assert re.match(r'\d{2}:\d{2}:\d{2}$', result)
+
+    def test_format_ts_ms_none_returns_empty(self):
+        assert _format_ts_ms(None) == ''
+
+    def test_format_ts_ms_returns_hms_millis(self):
+        result = _format_ts_ms(1000.0)
+        assert result != ''
+        assert re.match(r'\d{2}:\d{2}:\d{2}\.\d{3}$', result)
+
+    def test_format_ts_full_none_returns_empty(self):
+        assert _format_ts_full(None) == ''
+
+    def test_format_ts_full_returns_datetime_millis(self):
+        result = _format_ts_full(1000.0)
+        assert result != ''
+        assert re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$', result)
+
+
+# ---------------------------------------------------------------------------
+# 1b. Pure utility functions: _worker_group
+# ---------------------------------------------------------------------------
+
+
+class TestWorkerGroup:
+    def test_strips_trailing_number_with_dash(self):
+        assert _worker_group('worker-1') == 'worker'
+
+    def test_compound_name_with_trailing_number(self):
+        assert _worker_group('worker-vip-2') == 'worker-vip'
+
+    def test_multi_digit_trailing_number(self):
+        assert _worker_group('slow-worker-05') == 'slow-worker'
+
+    def test_number_without_separator(self):
+        assert _worker_group('worker15') == 'worker'
+
+    def test_no_trailing_number(self):
+        assert _worker_group('single') == 'single'
+
+    def test_strips_trailing_number_multiple(self):
+        assert _worker_group('worker-3') == 'worker'
+        assert _worker_group('worker-15') == 'worker'
+
+    def test_preserves_middle_numbers(self):
+        assert _worker_group('worker-vip-1') == 'worker-vip'
+        assert _worker_group('worker-vip-2') == 'worker-vip'
+
+    def test_underscore_separator(self):
+        assert _worker_group('slow_worker_05') == 'slow_worker'
+
+    def test_no_trailing_number_compound(self):
+        assert _worker_group('worker-vip') == 'worker-vip'
+        assert _worker_group('special') == 'special'
+
+    def test_only_digits_returns_itself(self):
+        assert _worker_group('123') == '123'
+
+
+# ---------------------------------------------------------------------------
+# 2. _build_prometheus_links (accessed via create_debug_app internals)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPrometheusLinks:
+    async def test_empty_prometheus_url_returns_empty_dicts(self, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', prometheus_url='')
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+
+        # The dashboard endpoint invokes _build_prometheus_links via the
+        # template context. We hit /api/dashboard which does NOT include prom
+        # links, so we test via the HTML dashboard that renders them.
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/')
+        assert resp.status_code == 200
+        # no prometheus links should appear in the page
+        assert 'prometheus' not in resp.text.lower() or 'graph?g0' not in resp.text
+
+    async def test_prometheus_url_set_returns_links(self, mock_recorder, mock_app):
+        cfg = DebugConfig(
+            enabled=True,
+            port=8080,
+            db_dir='/tmp',
+            prometheus_url='http://prom:9090',
+            prometheus_rate_interval='5m',
+            prometheus_cluster_label='cluster="test"',
+        )
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/')
+        assert resp.status_code == 200
+        # prometheus graph links should be in the rendered HTML
+        assert 'http://prom:9090/graph' in resp.text
+
+    async def test_prometheus_links_card_keys(self, mock_recorder, mock_app):
+        """Verify _build_prometheus_links returns expected card/worker/cluster keys."""
+        cfg = DebugConfig(
+            enabled=True,
+            port=8080,
+            db_dir='/tmp',
+            prometheus_url='http://prom:9090',
+            prometheus_rate_interval='5m',
+            prometheus_cluster_label='cluster="prod"',
+        )
+        # Access _build_prometheus_links by extracting it from the closure.
+        # We do this by creating the app and finding the inner function.
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+
+        # The function is used inside the dashboard route. We can verify its
+        # output by checking the rendered dashboard contains links for each card.
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/')
+        body = resp.text
+        # card links contain metric names
+        assert 'drakkar_offset_lag' in body
+        assert 'drakkar_messages_consumed_total' in body
+        # cluster links are present when prometheus_cluster_label is set
+        assert 'cluster' in body
+
+    async def test_prometheus_links_no_cluster_label(self, mock_recorder, mock_app):
+        """When prometheus_cluster_label is empty, cluster_links should be empty."""
+        cfg = DebugConfig(
+            enabled=True,
+            port=8080,
+            db_dir='/tmp',
+            prometheus_url='http://prom:9090',
+            prometheus_rate_interval='5m',
+            prometheus_cluster_label='',
+        )
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/')
+        # cluster-scoped sum() queries should not appear when label is empty
+        # (sum%28 is URL-encoded 'sum(')
+        assert 'sum%28rate%28' not in resp.text
+        assert 'sum%28drakkar' not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# 3. JSON API endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestApiDashboard:
+    async def test_returns_200_with_stats(self, client):
+        resp = await client.get('/api/dashboard')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert 'stats' in data
+        assert 'uptime' in data
+        assert 'partition_count' in data
+        assert data['partition_count'] == 0
+        assert data['stats']['total_events'] == 42
+
+    async def test_uptime_is_positive(self, client):
+        resp = await client.get('/api/dashboard')
+        data = resp.json()
+        assert data['uptime'] > 0
+
+    async def test_pool_info(self, client):
+        resp = await client.get('/api/dashboard')
+        data = resp.json()
+        assert data['pool_active'] == 2
+        assert data['pool_max'] == 8
+
+
+class TestApiSinks:
+    async def test_returns_200_json_list(self, client):
+        resp = await client.get('/api/sinks')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+        assert len(data) == 2
+
+    async def test_kafka_sink_stats(self, client):
+        resp = await client.get('/api/sinks')
+        data = resp.json()
+        kafka_sink = next(s for s in data if s['sink_type'] == 'kafka')
+        assert kafka_sink['name'] == 'results'
+        assert kafka_sink['delivered_count'] == 100
+        assert kafka_sink['delivered_payloads'] == 250
+        assert kafka_sink['error_count'] == 2
+        assert kafka_sink['retry_count'] == 1
+        assert kafka_sink['last_delivery_duration'] == 0.012
+
+    async def test_postgres_sink_stats(self, client):
+        resp = await client.get('/api/sinks')
+        data = resp.json()
+        pg_sink = next(s for s in data if s['sink_type'] == 'postgres')
+        assert pg_sink['name'] == 'main-db'
+        assert pg_sink['delivered_count'] == 80
+        assert pg_sink['error_count'] == 0
+        assert pg_sink['last_error'] is None
+
+
+class TestApiDebugDatabases:
+    async def test_empty_dir_returns_empty_list(self, tmp_path, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/databases')
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    async def test_lists_db_files(self, tmp_path, mock_recorder, mock_app):
+        import sqlite3
+
+        from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG
+
+        db_path = tmp_path / 'worker-1-2026-03-24__10_00_00.db'
+        db = sqlite3.connect(str(db_path))
+        db.executescript(SCHEMA_WORKER_CONFIG)
+        db.execute(
+            """INSERT INTO worker_config
+               (id, worker_name, cluster_name, ip_address, debug_port, debug_url,
+                kafka_brokers, source_topic, consumer_group, binary_path,
+                max_workers, task_timeout_seconds, max_retries, window_size,
+                sinks_json, env_vars_json, created_at, created_at_dt)
+               VALUES (1, 'worker-1', 'main', '10.0.0.1', 8080, NULL,
+                       'kafka:9092', 'topic', 'grp', '/bin/rg',
+                       4, 120, 3, 10, '{}', '{}', 1000.0, '1970-01-01 00:16:40.000')""",
+        )
+        db.executescript(SCHEMA_EVENTS)
+        db.execute(
+            "INSERT INTO events (ts, dt, event, partition) VALUES (1000.0, '1970-01-12 13:46:40.000', 'consumed', 0)"
+        )
+        db.execute(
+            "INSERT INTO events (ts, dt, event, partition) VALUES (1001.0, '1970-01-12 13:50:01.000', 'task_completed', 0)"
+        )
+        db.commit()
+        db.close()
+
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/databases')
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]['worker_name'] == 'worker-1'
+        assert data[0]['cluster_name'] == 'main'
+        assert data[0]['event_count'] == 2
+        assert data[0]['event_counts']['consumed'] == 1
+        assert data[0]['event_counts']['task_completed'] == 1
+
+
+class TestApiDebugProcessors:
+    async def test_returns_200_with_empty_processors(self, client):
+        resp = await client.get('/api/debug/processors')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert 'processors' in data
+        assert isinstance(data['processors'], dict)
+        assert len(data['processors']) == 0
+        assert data['pool_active'] == 2
+        assert data['pool_max'] == 8
+
+    async def test_returns_processor_state(self, debug_config, mock_recorder, mock_app):
+        proc = MagicMock()
+        proc.queue_size = 10
+        proc.inflight_count = 3
+        proc._arranging = False
+        proc._arrange_start = 0
+        proc._arrange_labels = []
+        proc._active_tasks = []
+
+        tracker = MagicMock()
+        tracker.pending_count = 5
+        tracker.completed_count = 20
+        tracker.total_tracked = 25
+        tracker.last_committed = 99
+        tracker.committable.return_value = 100
+        tracker._sorted_offsets = [95, 96, 97, 98, 99]
+        tracker._offsets = {95: 'completed', 96: 'completed', 97: 'pending', 98: 'pending', 99: 'pending'}
+        proc.offset_tracker = tracker
+
+        mock_app.processors = {0: proc}
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/processors')
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert '0' in data['processors']
+        p = data['processors']['0']
+        assert p['queue_size'] == 10
+        assert p['inflight_count'] == 3
+        assert p['pending_count'] == 5
+        assert p['completed_count'] == 20
+        assert p['last_committed'] == 99
+
+
+class TestApiWorkers:
+    async def test_returns_200_with_current_worker(self, client, mock_recorder):
+        mock_recorder.discover_workers.return_value = []
+        resp = await client.get('/api/workers')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert data[0]['worker_name'] == 'test-worker'
+        assert data[0]['is_current'] is True
+
+    async def test_includes_discovered_workers(self, client, mock_recorder):
+        mock_recorder.discover_workers.return_value = [
+            {'worker_name': 'worker-2', 'ip_address': '10.0.0.2', 'debug_port': 8080},
+        ]
+        resp = await client.get('/api/workers')
+        data = resp.json()
+        assert len(data) == 2
+        names = [w['worker_name'] for w in data]
+        assert 'test-worker' in names
+        assert 'worker-2' in names
+
+
+# ---------------------------------------------------------------------------
+# 4. Debug download endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestDebugDownload:
+    async def test_download_existing_file(self, tmp_path, mock_recorder, mock_app):
+        db_path = tmp_path / 'test.db'
+        db_path.write_bytes(b'fake-sqlite')
+
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/debug/download/test.db')
+
+        assert resp.status_code == 200
+        assert resp.content == b'fake-sqlite'
+
+    async def test_download_directory_traversal_blocked(self, tmp_path, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/debug/download/../etc/passwd')
+        assert resp.status_code in (400, 404)
+
+    async def test_download_nonexistent_file(self, tmp_path, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/debug/download/nonexistent.db')
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Existing coverage: HTML pages, WebSocket, sinks, workers
+# ---------------------------------------------------------------------------
 
 
 async def test_dashboard_returns_200(client):
@@ -244,15 +637,12 @@ async def test_live_page_has_tabs_and_ws(debug_config, mock_recorder, mock_app):
 
 async def test_websocket_receives_events(debug_config, mock_recorder, mock_app):
     """WebSocket endpoint streams recorder events to connected clients."""
-    # use a real recorder for subscribe/unsubscribe
     real_recorder = EventRecorder(debug_config)
-    # don't start (no DB needed) — just use subscribe/broadcast
     real_recorder._running = True
 
     fastapi_app = create_debug_app(debug_config, real_recorder, mock_app)
 
     with TestClient(fastapi_app) as tc, tc.websocket_connect('/ws') as ws:
-        # send an event through the recorder
         real_recorder._record(
             {
                 'ts': time.time(),
@@ -263,7 +653,6 @@ async def test_websocket_receives_events(debug_config, mock_recorder, mock_app):
             }
         )
 
-        # should receive it via websocket
         data = ws.receive_text()
         event = json.loads(data)
         assert event['event'] == 'task_started'
@@ -310,7 +699,6 @@ async def test_websocket_cleanup_on_disconnect(debug_config, mock_recorder, mock
         real_recorder._record({'ts': time.time(), 'event': 'test'})
         ws.receive_text()
 
-    # after disconnect, subscriber should be cleaned up
     assert len(real_recorder._ws_subscribers) == 0
 
 
@@ -339,32 +727,7 @@ async def test_sinks_page_shows_stats(client):
 
 async def test_sinks_page_shows_errors(client):
     resp = await client.get('/sinks')
-    # kafka/results has 2 errors
     assert '2' in resp.text
-
-
-async def test_api_sinks_returns_json(client):
-    resp = await client.get('/api/sinks')
-    assert resp.status_code == 200
-    data = resp.json()
-    assert len(data) == 2
-    kafka_sink = next(s for s in data if s['sink_type'] == 'kafka')
-    assert kafka_sink['name'] == 'results'
-    assert kafka_sink['delivered_count'] == 100
-    assert kafka_sink['delivered_payloads'] == 250
-    assert kafka_sink['error_count'] == 2
-    assert kafka_sink['retry_count'] == 1
-    assert kafka_sink['last_delivery_duration'] == 0.012
-
-
-async def test_api_sinks_postgres_stats(client):
-    resp = await client.get('/api/sinks')
-    data = resp.json()
-    pg_sink = next(s for s in data if s['sink_type'] == 'postgres')
-    assert pg_sink['name'] == 'main-db'
-    assert pg_sink['delivered_count'] == 80
-    assert pg_sink['error_count'] == 0
-    assert pg_sink['last_error'] is None
 
 
 async def test_sinks_nav_link(client):
@@ -436,7 +799,6 @@ async def test_api_workers_grouped_by_cluster(client, mock_recorder, mock_app):
     data = resp.json()
     names = [w['worker_name'] for w in data]
     clusters = [w['cluster'] for w in data]
-    # clustered first sorted by cluster then name, unclustered at end
     assert names == ['test-worker', 'w-1', 'w-2', 'w-3', 'w-lone']
     assert clusters == ['alpha', 'alpha', 'alpha', 'beta', '']
 
@@ -451,45 +813,7 @@ async def test_api_workers_unclustered_at_end(client, mock_recorder, mock_app):
     resp = await client.get('/api/workers')
     data = resp.json()
     names = [w['worker_name'] for w in data]
-    # a-worker (prod cluster) first, then test-worker and z-worker (unclustered)
     assert names == ['a-worker', 'test-worker', 'z-worker']
-
-
-# --- _worker_group helper ---
-
-
-def test_worker_group_strips_trailing_number():
-    assert _worker_group('worker-1') == 'worker'
-    assert _worker_group('worker-3') == 'worker'
-    assert _worker_group('worker-15') == 'worker'
-
-
-def test_worker_group_strips_number_without_separator():
-    assert _worker_group('worker15') == 'worker'
-
-
-def test_worker_group_preserves_middle_numbers():
-    assert _worker_group('worker-vip-1') == 'worker-vip'
-    assert _worker_group('worker-vip-2') == 'worker-vip'
-
-
-def test_worker_group_with_underscore_separator():
-    assert _worker_group('slow_worker_05') == 'slow_worker'
-
-
-def test_worker_group_complex_names():
-    assert _worker_group('slow-worker-01') == 'slow-worker'
-    assert _worker_group('slow-worker-05') == 'slow-worker'
-
-
-def test_worker_group_no_trailing_number():
-    assert _worker_group('worker-vip') == 'worker-vip'
-    assert _worker_group('special') == 'special'
-
-
-def test_worker_group_only_number():
-    """A name that is only digits should return itself (not empty)."""
-    assert _worker_group('123') == '123'
 
 
 # --- Debug databases page and API ---
@@ -523,7 +847,6 @@ async def test_api_debug_databases_lists_files(tmp_path, mock_recorder, mock_app
 
     from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG
 
-    # create a fake DB file
     db_path = tmp_path / 'worker-1-2026-03-24__10_00_00.db'
     db = sqlite3.connect(str(db_path))
     db.executescript(SCHEMA_WORKER_CONFIG)
@@ -564,7 +887,6 @@ async def test_api_debug_databases_lists_files(tmp_path, mock_recorder, mock_app
 
 
 async def test_api_debug_databases_skips_symlinks(tmp_path, mock_recorder, mock_app):
-    import os
     import sqlite3
 
     from drakkar.recorder import SCHEMA_EVENTS
@@ -629,7 +951,6 @@ async def test_api_debug_merge(tmp_path, mock_recorder, mock_app):
     assert data['event_count'] == 2
     assert data['cluster_name'] == 'main'
     assert data['filename'].startswith('merged-')
-    # merged file should exist
     assert os.path.isfile(os.path.join(str(tmp_path), data['filename']))
 
 
