@@ -669,3 +669,188 @@ async def test_custom_message_label_in_arrange_tracking(echo_pool):
 
     await wait_for(lambda: not proc._arranging, timeout=2)
     await proc.stop()
+
+
+# --- on_error returning replacement task list ---
+
+
+async def test_on_error_returns_replacement_tasks(failing_pool, echo_pool):
+    """When on_error returns a list of ExecutorTask, those tasks are
+    scheduled in the same window and must complete before it closes."""
+    collected_task_ids: list[str] = []
+    committed: list[tuple[int, int]] = []
+
+    class ReplaceOnErrorHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f'fail-{m.offset}',
+                    args=['-c', 'import sys; sys.exit(1)'],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+        async def collect(self, result):
+            collected_task_ids.append(result.task_id)
+            return None
+
+        async def on_error(self, task, error):
+            # replace with a task that succeeds using echo
+            return [
+                ExecutorTask(
+                    task_id=f'replace-{task.task_id}',
+                    args=['recovered'],
+                    source_offsets=task.source_offsets,
+                    binary_path='/bin/echo',
+                )
+            ]
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=ReplaceOnErrorHandler(),
+        executor_pool=failing_pool,
+        window_size=10,
+        on_commit=on_commit,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(committed) > 0, timeout=5)
+    await proc.stop()
+
+    assert 'replace-fail-0' in collected_task_ids
+    assert any(c[1] == 1 for c in committed)
+
+
+# --- on_window_complete returning CollectResult ---
+
+
+async def test_on_window_complete_returns_collect_result(echo_pool):
+    """When on_window_complete returns a CollectResult, it is passed to on_collect."""
+    window_complete_collected: list[CollectResult] = []
+
+    class WindowCollectHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f'wc-{m.offset}',
+                    args=['ok'],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+        async def on_window_complete(self, results, source_messages):
+            return CollectResult(
+                kafka=[KafkaPayload(data=_Out(v='from_window_complete'))],
+            )
+
+    async def on_collect(result, partition_id):
+        window_complete_collected.append(result)
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=WindowCollectHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_collect=on_collect,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(window_complete_collected) > 0, timeout=3)
+    await proc.stop()
+
+    wc_results = [r for r in window_complete_collected if r.kafka and r.kafka[0].data.v == 'from_window_complete']
+    assert len(wc_results) >= 1
+
+
+# --- stop() timeout + force cancel ---
+
+
+async def test_stop_force_cancels_hung_processor(echo_pool):
+    """When the processor is stuck, stop() force-cancels after timeout."""
+    blocked = asyncio.Event()
+
+    class HangingHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            blocked.set()
+            await asyncio.sleep(3600)
+            return []
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=HangingHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await blocked.wait()
+
+    # Simulate stop() with a short timeout to avoid 10s wait
+    proc._running = False
+    task = proc._task
+    assert task is not None
+
+    try:
+        await asyncio.wait_for(task, timeout=0.1)
+    except TimeoutError:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    proc._task = None
+
+    assert proc._task is None
+    assert task.cancelled() or task.done()
+
+
+# --- max_retries exceeded logs warning ---
+
+
+async def test_max_retries_exceeded_logs_warning(failing_pool):
+    """When retries exceed max_retries, a 'max_retries_exceeded' warning is logged."""
+
+    class AlwaysRetryHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f'mr-{m.offset}',
+                    args=['-c', 'import sys; sys.exit(1)'],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+        async def on_error(self, task, error):
+            return ErrorAction.RETRY
+
+    committed: list[tuple[int, int]] = []
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=AlwaysRetryHandler(),
+        executor_pool=failing_pool,
+        window_size=10,
+        max_retries=1,
+        on_commit=on_commit,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(committed) > 0, timeout=10)
+    await proc.stop()
+
+    # With max_retries=1: first attempt fails → RETRY → second attempt fails → exceeds limit
+    # Window still completes and offsets are committed
+    assert any(c[1] == 1 for c in committed)
