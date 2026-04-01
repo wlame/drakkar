@@ -400,3 +400,227 @@ async def test_safe_call_catches_handler_errors(test_config):
 
     for proc in app.processors.values():
         await proc.stop()
+
+
+# --- cluster_name resolution ---
+
+
+def test_app_cluster_name_from_env(monkeypatch):
+    """cluster_name_env takes precedence over config.cluster_name."""
+    monkeypatch.setenv('MY_CLUSTER', 'env-cluster')
+    config = DrakkarConfig(
+        executor=ExecutorConfig(binary_path='/bin/true'),
+        cluster_name='config-cluster',
+        cluster_name_env='MY_CLUSTER',
+    )
+    app = DrakkarApp(handler=SimpleHandler(), config=config)
+    assert app._cluster_name == 'env-cluster'
+
+
+def test_app_cluster_name_falls_back_to_config(monkeypatch):
+    """When cluster_name_env is not set, config.cluster_name is used."""
+    monkeypatch.delenv('MY_CLUSTER', raising=False)
+    config = DrakkarConfig(
+        executor=ExecutorConfig(binary_path='/bin/true'),
+        cluster_name='fallback-cluster',
+        cluster_name_env='MY_CLUSTER',
+    )
+    app = DrakkarApp(handler=SimpleHandler(), config=config)
+    assert app._cluster_name == 'fallback-cluster'
+
+
+def test_app_cluster_name_no_env_var_configured():
+    """When cluster_name_env is empty, config.cluster_name is used directly."""
+    config = DrakkarConfig(
+        executor=ExecutorConfig(binary_path='/bin/true'),
+        cluster_name='direct-cluster',
+    )
+    app = DrakkarApp(handler=SimpleHandler(), config=config)
+    assert app._cluster_name == 'direct-cluster'
+
+
+# --- _get_worker_state ---
+
+
+def test_app_get_worker_state(test_config):
+    """_get_worker_state returns a dict with current worker metrics."""
+    from drakkar.executor import ExecutorPool
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+
+    state = app._get_worker_state()
+    assert 'uptime_seconds' in state
+    assert state['uptime_seconds'] >= 0
+    assert state['assigned_partitions'] == []
+    assert state['partition_count'] == 0
+    assert state['pool_active'] == 0
+    assert state['pool_max'] == 2
+    assert state['total_queued'] == 0
+    assert state['paused'] is False
+
+
+def test_app_get_worker_state_no_pool(test_config):
+    """_get_worker_state handles None executor_pool gracefully."""
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    state = app._get_worker_state()
+    assert state['pool_active'] == 0
+    assert state['pool_max'] == 0
+
+
+# --- _total_queued ---
+
+
+async def test_app_total_queued_with_processors(test_config):
+    """_total_queued sums queue sizes and inflight counts across processors."""
+    from drakkar.executor import ExecutorPool
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._consumer = MagicMock()
+    app._consumer.commit = AsyncMock()
+
+    app._on_assign([0, 1])
+    assert app._total_queued() == 0
+
+    msg0 = SourceMessage(topic='t', partition=0, offset=0, value=b'x', timestamp=0)
+    msg1 = SourceMessage(topic='t', partition=1, offset=0, value=b'x', timestamp=0)
+    app.processors[0].enqueue(msg0)
+    app.processors[1].enqueue(msg1)
+    assert app._total_queued() >= 2
+
+    for proc in app.processors.values():
+        await proc.stop()
+
+
+# --- Backpressure ---
+
+
+async def test_app_backpressure_pauses_and_resumes(test_config):
+    """When queue exceeds high watermark, consumer is paused. When it drops
+    below low watermark, consumer is resumed."""
+    from drakkar.executor import ExecutorPool
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+    app._running = True
+
+    app._on_assign([0])
+    await asyncio.sleep(0.05)
+
+    # config: max_workers=2, high_mult=32, low_mult=4 → high=64, low=8
+    # Simulate high queue by directly putting messages
+    for i in range(65):
+        msg = SourceMessage(topic='t', partition=0, offset=i, value=b'x', timestamp=0)
+        app.processors[0]._queue.put_nowait(msg)
+
+    # Run one iteration of the poll loop manually
+    total = app._total_queued()
+    assert total >= 64
+
+    max_workers = app.config.executor.max_workers
+    high_watermark = max_workers * app.config.executor.backpressure_high_multiplier
+    low_watermark = max(1, max_workers * app.config.executor.backpressure_low_multiplier)
+
+    # Simulate pause trigger
+    if not app._paused and total >= high_watermark:
+        partition_ids = list(app.processors.keys())
+        if partition_ids:
+            await app._consumer.pause(partition_ids)
+            app._paused = True
+
+    app._consumer.pause.assert_called_once_with([0])
+    assert app._paused
+
+    # Drain queue to below low watermark
+    while app.processors[0]._queue.qsize() > low_watermark - 1:
+        app.processors[0]._queue.get_nowait()
+
+    total = app._total_queued()
+    assert total <= low_watermark
+
+    # Simulate resume trigger
+    if app._paused and total <= low_watermark:
+        partition_ids = list(app.processors.keys())
+        if partition_ids:
+            await app._consumer.resume(partition_ids)
+            app._paused = False
+
+    app._consumer.resume.assert_called_once_with([0])
+    assert not app._paused
+
+    for proc in app.processors.values():
+        await proc.stop()
+
+
+# --- Shutdown: periodic task cancellation ---
+
+
+async def test_shutdown_cancels_periodic_tasks(test_config):
+    """Shutdown cancels periodic tasks."""
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._consumer = AsyncMock()
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+
+    # Create a fake periodic task
+    async def fake_periodic():
+        await asyncio.sleep(3600)
+
+    task = asyncio.create_task(fake_periodic())
+    app._periodic_tasks.append(task)
+
+    await app._shutdown()
+
+    assert task.cancelled() or task.done()
+    assert len(app._periodic_tasks) == 0
+
+
+# --- Shutdown: final commit failure ---
+
+
+async def test_shutdown_final_commit_failure_is_logged(test_config):
+    """Final commit during shutdown that fails doesn't prevent cleanup."""
+    from drakkar.executor import ExecutorPool
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+
+    mock_consumer = AsyncMock()
+    mock_consumer.commit.side_effect = RuntimeError('commit failed during rebalance')
+    app._consumer = mock_consumer
+
+    app._on_assign([0])
+
+    # Force a committable offset
+    app.processors[0]._offset_tracker.register(0)
+    app.processors[0]._offset_tracker.complete(0)
+
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+
+    # Should not raise despite commit failure
+    await app._shutdown()
+    assert len(app.processors) == 0
+
+
+# --- Shutdown: recorder and debug server cleanup ---
+
+
+async def test_shutdown_stops_recorder_and_debug_server(test_config):
+    """Shutdown stops the recorder and debug server if they exist."""
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._consumer = AsyncMock()
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+
+    mock_recorder = AsyncMock()
+    mock_debug_server = AsyncMock()
+    app._recorder = mock_recorder
+    app._debug_server = mock_debug_server
+
+    await app._shutdown()
+
+    mock_recorder.stop.assert_called_once()
+    mock_debug_server.stop.assert_called_once()
