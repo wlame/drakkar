@@ -234,3 +234,169 @@ async def test_close(mock_cls, kafka_config):
     consumer = KafkaConsumer(kafka_config)
     await consumer.close()
     mock_inner.close.assert_called_once()
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_get_total_lag_empty_partitions(mock_cls, kafka_config):
+    """get_total_lag returns 0 immediately when partition list is empty."""
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
+
+    consumer = KafkaConsumer(kafka_config)
+    total = await consumer.get_total_lag([])
+    assert total == 0
+    mock_inner.committed.assert_not_called()
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_get_total_lag_committed_exception(mock_cls, kafka_config):
+    """get_total_lag returns 0 when committed() raises."""
+    mock_inner = AsyncMock()
+    mock_inner.committed.side_effect = RuntimeError('broker unreachable')
+    mock_cls.return_value = mock_inner
+
+    consumer = KafkaConsumer(kafka_config)
+    total = await consumer.get_total_lag([0, 1])
+    assert total == 0
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_get_total_lag_watermark_exception(mock_cls, kafka_config):
+    """Watermark exception for one partition yields 0 lag for that partition only."""
+    from confluent_kafka import TopicPartition
+
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
+
+    tp0 = TopicPartition(kafka_config.source_topic, 0, 50)
+    tp1 = TopicPartition(kafka_config.source_topic, 1, 80)
+    mock_inner.committed.return_value = [tp0, tp1]
+
+    async def fake_watermarks(tp):
+        if tp.partition == 0:
+            raise RuntimeError('timeout')
+        return (0, 100)  # partition 1 lag = 100 - 80 = 20
+
+    mock_inner.get_watermark_offsets.side_effect = fake_watermarks
+
+    consumer = KafkaConsumer(kafka_config)
+    total = await consumer.get_total_lag([0, 1])
+    assert total == 20  # partition 0 = 0 (exception), partition 1 = 20
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_get_partition_lag(mock_cls, kafka_config):
+    """get_partition_lag returns per-partition committed, high_watermark, lag."""
+    from confluent_kafka import TopicPartition
+
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
+
+    async def fake_watermarks(tp):
+        if tp.partition == 0:
+            return (0, 100)
+        return (0, 200)
+
+    mock_inner.get_watermark_offsets.side_effect = fake_watermarks
+
+    tp0_committed = TopicPartition(kafka_config.source_topic, 0, 90)
+    tp1_committed = TopicPartition(kafka_config.source_topic, 1, 150)
+    mock_inner.committed.side_effect = [[tp0_committed], [tp1_committed]]
+
+    consumer = KafkaConsumer(kafka_config)
+    result = await consumer.get_partition_lag([0, 1])
+
+    assert result[0] == {'committed': 90, 'high_watermark': 100, 'lag': 10}
+    assert result[1] == {'committed': 150, 'high_watermark': 200, 'lag': 50}
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_get_partition_lag_exception_returns_zeros(mock_cls, kafka_config):
+    """get_partition_lag returns zeros for a partition when an exception occurs."""
+    mock_inner = AsyncMock()
+    mock_inner.get_watermark_offsets.side_effect = RuntimeError('connection lost')
+    mock_cls.return_value = mock_inner
+
+    consumer = KafkaConsumer(kafka_config)
+    result = await consumer.get_partition_lag([0])
+
+    assert result[0] == {'committed': 0, 'high_watermark': 0, 'lag': 0}
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_get_total_lag_committed_negative_offset(mock_cls, kafka_config):
+    """Partitions with negative committed offset (no commit yet) use 0 as baseline."""
+    from confluent_kafka import TopicPartition
+
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
+
+    # offset -1001 means no committed offset
+    tp0 = TopicPartition(kafka_config.source_topic, 0, -1001)
+    mock_inner.committed.return_value = [tp0]
+
+    async def fake_watermarks(tp):
+        return (0, 50)
+
+    mock_inner.get_watermark_offsets.side_effect = fake_watermarks
+
+    consumer = KafkaConsumer(kafka_config)
+    total = await consumer.get_total_lag([0])
+    # no committed offset → committed_map has no entry → lag = max(0, 50 - 0) = 50
+    assert total == 50
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_get_partition_lag_negative_committed_offset(mock_cls, kafka_config):
+    """Partition with negative committed offset uses 0."""
+    from confluent_kafka import TopicPartition
+
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
+
+    async def fake_watermarks(tp):
+        return (0, 100)
+
+    mock_inner.get_watermark_offsets.side_effect = fake_watermarks
+
+    tp_committed = TopicPartition(kafka_config.source_topic, 0, -1001)
+    mock_inner.committed.return_value = [tp_committed]
+
+    consumer = KafkaConsumer(kafka_config)
+    result = await consumer.get_partition_lag([0])
+
+    assert result[0] == {'committed': 0, 'high_watermark': 100, 'lag': 100}
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_on_assign_without_callback(mock_cls, kafka_config):
+    """_handle_assign with no callback still logs and increments metrics."""
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
+
+    consumer = KafkaConsumer(kafka_config)  # no on_assign callback
+    await consumer.subscribe()
+
+    call_kwargs = mock_inner.subscribe.call_args[1]
+    assign_cb = call_kwargs['on_assign']
+    from confluent_kafka import TopicPartition
+
+    # should not raise even without callback
+    await assign_cb(mock_inner, [TopicPartition('test-source', 0)])
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_on_revoke_without_callback(mock_cls, kafka_config):
+    """_handle_revoke with no callback still logs and increments metrics."""
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
+
+    consumer = KafkaConsumer(kafka_config)  # no on_revoke callback
+    await consumer.subscribe()
+
+    call_kwargs = mock_inner.subscribe.call_args[1]
+    revoke_cb = call_kwargs['on_revoke']
+    from confluent_kafka import TopicPartition
+
+    # should not raise even without callback
+    await revoke_cb(mock_inner, [TopicPartition('test-source', 2)])
