@@ -1283,5 +1283,5 @@ async def test_dlq_sink_deliver_raises_not_implemented():
     from drakkar.sinks.dlq import DLQSink
 
     sink = DLQSink(topic='dlq', brokers='localhost:9092')
-    with pytest.raises(NotImplementedError, match='Use DLQSink.send'):
+    with pytest.raises(NotImplementedError, match=r'Use DLQSink\.send'):
         await sink.deliver([SampleOutput()])
