@@ -81,6 +81,7 @@ class DrakkarApp:
         self._paused = False
         self._background_tasks: set[asyncio.Task] = set()
         self._periodic_tasks: list[asyncio.Task] = []
+        self._config_summary: str = ''
 
     @property
     def config(self) -> DrakkarConfig:
@@ -97,6 +98,10 @@ class DrakkarApp:
     @property
     def sink_manager(self) -> SinkManager:
         return self._sink_manager
+
+    @property
+    def config_summary(self) -> str:
+        return self._config_summary
 
     def run(self) -> None:
         """Start the application. Blocks until shutdown."""
@@ -143,7 +148,11 @@ class DrakkarApp:
         self._config = await self._handler.on_startup(self._config)
         unbind_contextvars('hook')
 
-        await log.ainfo('drakkar_starting', category='lifecycle')
+        self._config_summary = self._config.config_summary(
+            worker_id=self._worker_id,
+            cluster_name=self._cluster_name,
+        )
+        await log.ainfo('drakkar_starting', category='lifecycle', config=self._config_summary)
 
         # validate at least one sink is configured
         if self._config.sinks.is_empty:

@@ -525,6 +525,7 @@ def create_debug_app(
             {
                 'worker_id': drakkar_app._worker_id,
                 'db_dir': config.db_dir,
+                'config_summary': drakkar_app.config_summary,
             },
         )
 

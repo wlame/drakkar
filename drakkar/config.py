@@ -272,6 +272,53 @@ class DrakkarConfig(BaseSettings):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
 
+    def config_summary(self, worker_id: str = '', cluster_name: str = '') -> str:
+        """One-line human-readable config summary for startup logging and debug UI.
+
+        Format (Option C — structured-but-readable):
+        [worker/cluster] topic=... group=... exec=4w/100win/100poll retries=3/120s debug=on metrics=9090 dlq=on sinks=[kafka:a,b pg:main] log=INFO
+        """
+        identity = worker_id or '?'
+        if cluster_name:
+            identity = f'{identity}/{cluster_name}'
+
+        ex = self.executor
+        exec_part = f'{ex.max_workers}w/{ex.window_size}win/{self.kafka.max_poll_records}poll'
+        retries_part = f'{ex.max_retries}/{ex.task_timeout_seconds}s'
+
+        debug_part = f'on:{self.debug.port}' if self.debug.enabled else 'off'
+        metrics_part = str(self.metrics.port) if self.metrics.enabled else 'off'
+
+        dlq_topic = self.dlq.topic or f'{self.kafka.source_topic}_dlq'
+        dlq_part = dlq_topic if self.dlq.topic else 'on'
+
+        sink_parts: list[str] = []
+        abbrevs = {
+            'kafka': 'kf',
+            'postgres': 'pg',
+            'mongo': 'mg',
+            'http': 'http',
+            'redis': 'rd',
+            'filesystem': 'fs',
+        }
+        for sink_type, names in self.sinks.summary().items():
+            abbr = abbrevs.get(sink_type, sink_type)
+            sink_parts.append(f'{abbr}:{",".join(names)}')
+        sinks_str = ' '.join(sink_parts) if sink_parts else 'none'
+
+        return (
+            f'[{identity}]'
+            f' topic={self.kafka.source_topic}'
+            f' group={self.kafka.consumer_group}'
+            f' exec={exec_part}'
+            f' retries={retries_part}'
+            f' debug={debug_part}'
+            f' metrics={metrics_part}'
+            f' dlq={dlq_part}'
+            f' sinks=[{sinks_str}]'
+            f' log={self.logging.level}'
+        )
+
 
 def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
     """Load configuration from YAML file and environment variables.

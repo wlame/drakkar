@@ -941,3 +941,91 @@ class TestProcessorCallbackModes:
         await proc.stop()
 
         assert len(collected) >= 1
+
+
+# ========== Config Summary ==========
+
+
+class TestConfigSummary:
+    """Tests for DrakkarConfig.config_summary() one-liner."""
+
+    def test_default_config_summary_format(self):
+        cfg = make_config()
+        summary = cfg.config_summary(worker_id='worker-01', cluster_name='prod')
+        assert summary.startswith('[worker-01/prod]')
+        assert 'topic=test-in' in summary
+        assert 'group=drakkar-workers' in summary
+        assert 'exec=2w/' in summary
+        assert 'retries=' in summary
+        assert 'debug=off' in summary
+        assert 'sinks=[kf:out]' in summary
+        assert 'log=WARNING' in summary
+
+    def test_summary_no_cluster(self):
+        cfg = make_config()
+        summary = cfg.config_summary(worker_id='w1')
+        assert summary.startswith('[w1]')
+        assert '/prod' not in summary.split(']')[0]
+
+    def test_summary_no_worker_id(self):
+        cfg = make_config()
+        summary = cfg.config_summary()
+        assert summary.startswith('[?]')
+
+    def test_summary_debug_on(self):
+        cfg = make_config(debug=DebugConfig(enabled=True, port=8080))
+        summary = cfg.config_summary(worker_id='w')
+        assert 'debug=on:8080' in summary
+
+    def test_summary_metrics_enabled(self):
+        cfg = make_config(metrics=MetricsConfig(enabled=True, port=9090))
+        summary = cfg.config_summary(worker_id='w')
+        assert 'metrics=9090' in summary
+
+    def test_summary_metrics_disabled(self):
+        cfg = make_config(metrics=MetricsConfig(enabled=False))
+        summary = cfg.config_summary(worker_id='w')
+        assert 'metrics=off' in summary
+
+    def test_summary_custom_dlq_topic(self):
+        cfg = make_config(dlq=DLQConfig(topic='my-dlq'))
+        summary = cfg.config_summary(worker_id='w')
+        assert 'dlq=my-dlq' in summary
+
+    def test_summary_default_dlq(self):
+        cfg = make_config()
+        summary = cfg.config_summary(worker_id='w')
+        assert 'dlq=on' in summary
+
+    def test_summary_multiple_sink_types(self):
+        from drakkar.config import PostgresSinkConfig
+
+        cfg = make_config(
+            sinks=SinksConfig(
+                kafka={'events': KafkaSinkConfig(topic='t1'), 'alerts': KafkaSinkConfig(topic='t2')},
+                postgres={'main': PostgresSinkConfig(dsn='postgresql://localhost/db')},
+            ),
+        )
+        summary = cfg.config_summary(worker_id='w')
+        assert 'kf:events,alerts' in summary
+        assert 'pg:main' in summary
+
+    def test_summary_no_sinks(self):
+        cfg = make_config(sinks=SinksConfig())
+        summary = cfg.config_summary(worker_id='w')
+        assert 'sinks=[none]' in summary
+
+    def test_summary_executor_params(self):
+        cfg = make_config(
+            executor=ExecutorConfig(
+                binary_path='/bin/echo',
+                max_workers=8,
+                window_size=200,
+                max_retries=5,
+                task_timeout_seconds=300,
+            ),
+            kafka=KafkaConfig(max_poll_records=50),
+        )
+        summary = cfg.config_summary(worker_id='w')
+        assert 'exec=8w/200win/50poll' in summary
+        assert 'retries=5/300s' in summary

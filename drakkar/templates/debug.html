@@ -2,6 +2,13 @@
 {% block title %}Debug — Drakkar{% endblock %}
 
 {% block content %}
+<!-- ==================== CONFIG SUMMARY ==================== -->
+{% if config_summary %}
+<div class="mb-6 px-4 py-3 rounded-lg border border-cream-200 font-mono text-xs text-ink-700 break-all select-all" style="background:#f5f3ee;">
+    {{ config_summary }}
+</div>
+{% endif %}
+
 <!-- ==================== TRACE ==================== -->
 <div class="mb-8">
     <h2 class="text-xl font-bold text-ink-900 mb-3">Message Trace</h2>
