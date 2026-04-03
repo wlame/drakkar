@@ -992,3 +992,991 @@ async def test_debug_download_rejects_traversal(debug_client):
 async def test_debug_download_missing_file(debug_client):
     resp = await debug_client.get('/debug/download/nonexistent.db')
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 5. Additional coverage tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetSinkUiLinksEmpty:
+    """Cover _get_sink_ui_links when sink_manager is falsy (line 84)."""
+
+    async def test_no_sink_manager_returns_no_links(self, debug_config, mock_recorder, mock_app):
+        mock_app.sink_manager = None
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/')
+        assert resp.status_code == 200
+
+
+class TestGetSinkUiLinksWithUrls:
+    """Cover _get_sink_ui_links filtering/deduplication (lines 91-92)."""
+
+    async def test_sinks_with_ui_url_appear_in_nav(self, debug_config, mock_recorder, mock_app):
+        sink_mgr = mock_app.sink_manager
+        sink_mgr.get_sink_info.return_value = [
+            {'sink_type': 'kafka', 'name': 'results', 'ui_url': 'http://kafka-ui:8080'},
+            {'sink_type': 'kafka', 'name': 'results2', 'ui_url': 'http://kafka-ui:8080'},
+            {'sink_type': 'postgres', 'name': 'main-db'},
+        ]
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/')
+        assert resp.status_code == 200
+        assert 'http://kafka-ui:8080' in resp.text
+
+
+class TestGetLagWithConsumer:
+    """Cover _get_lag calling consumer.get_partition_lag (lines 107-112)."""
+
+    async def test_lag_data_on_partitions_page(self, debug_config, mock_recorder, mock_app):
+        consumer = AsyncMock()
+        consumer.get_partition_lag.return_value = {
+            0: {'committed': 100, 'high_watermark': 150, 'lag': 50},
+        }
+        mock_app._consumer = consumer
+
+        proc = MagicMock()
+        proc.queue_size = 5
+        proc.offset_tracker.pending_count = 3
+        mock_app.processors = {0: proc}
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/partitions')
+        assert resp.status_code == 200
+        consumer.get_partition_lag.assert_awaited_once()
+
+    async def test_lag_exception_returns_empty(self, debug_config, mock_recorder, mock_app):
+        consumer = AsyncMock()
+        consumer.get_partition_lag.side_effect = RuntimeError('connection lost')
+        mock_app._consumer = consumer
+
+        proc = MagicMock()
+        proc.queue_size = 0
+        proc.offset_tracker.pending_count = 0
+        mock_app.processors = {0: proc}
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/partitions')
+        assert resp.status_code == 200
+
+
+class TestDashboardTotalLag:
+    """Cover dashboard get_total_lag block (lines 261-264)."""
+
+    async def test_dashboard_shows_total_lag(self, debug_config, mock_recorder, mock_app):
+        consumer = AsyncMock()
+        consumer.get_total_lag.return_value = 1234
+        mock_app._consumer = consumer
+
+        proc = MagicMock()
+        mock_app.processors = {0: proc}
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/')
+        assert resp.status_code == 200
+        assert '1234' in resp.text or '1,234' in resp.text
+
+    async def test_dashboard_total_lag_exception_shows_zero(self, debug_config, mock_recorder, mock_app):
+        consumer = AsyncMock()
+        consumer.get_total_lag.side_effect = RuntimeError('fail')
+        mock_app._consumer = consumer
+
+        proc = MagicMock()
+        mock_app.processors = {0: proc}
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/')
+        assert resp.status_code == 200
+
+
+class TestDashboardCustomLinks:
+    """Cover custom_links template expansion (lines 268-278)."""
+
+    async def test_custom_links_rendered(self, mock_recorder, mock_app):
+        cfg = DebugConfig(
+            enabled=True,
+            port=8080,
+            db_dir='/tmp',
+            custom_links=[
+                {'name': 'Grafana', 'url': 'http://grafana/{worker_id}'},
+                {'name': 'Logs', 'url': 'http://logs/{cluster_name}'},
+            ],
+        )
+        mock_app._worker_id = 'worker-7'
+        mock_app._cluster_name = 'prod'
+
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/')
+        assert resp.status_code == 200
+        assert 'http://grafana/worker-7' in resp.text
+        assert 'http://logs/prod' in resp.text
+
+
+class TestLivePageWithTasks:
+    """Cover live page task processing (lines 350, 357-367, 383-384)."""
+
+    async def test_live_page_with_active_and_pending_tasks(self, debug_config, mock_recorder, mock_app):
+        now = time.time()
+        mock_recorder.get_active_tasks.return_value = [
+            {'task_id': 'task-active-1', 'ts': now - 5, 'event': 'task_started'},
+        ]
+
+        pending_task = MagicMock()
+        pending_task.args = '["--fast"]'
+        pending_task.source_offsets = [10, 11]
+
+        proc = MagicMock()
+        proc.partition_id = 0
+        proc._pending_tasks = {'task-active-1': pending_task, 'task-pending-1': pending_task}
+        proc._arranging = False
+        proc._active_tasks = []
+
+        mock_app.processors = {0: proc}
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/live')
+        assert resp.status_code == 200
+        assert 'Live Pipeline' in resp.text
+
+    async def test_live_page_with_arranging_processor(self, debug_config, mock_recorder, mock_app):
+        now = time.time()
+        mock_recorder.get_active_tasks.return_value = []
+
+        proc = MagicMock()
+        proc.partition_id = 0
+        proc._pending_tasks = {}
+        proc._arranging = True
+        proc._arrange_start = now - 2.5
+        proc._arrange_labels = ['label-a', 'label-b']
+        proc._active_tasks = []
+
+        mock_app.processors = {0: proc}
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/live')
+        assert resp.status_code == 200
+        assert 'Arrange' in resp.text
+
+
+class TestTaskDetailPage:
+    """Cover /task/{task_id} page (lines 412-437)."""
+
+    async def test_task_detail_with_events(self, debug_config, mock_recorder, mock_app):
+        now = time.time()
+        mock_recorder.get_task_events.return_value = [
+            {
+                'id': 1,
+                'ts': now - 10,
+                'event': 'task_started',
+                'partition': 0,
+                'offset': None,
+                'task_id': 'task-abc',
+                'args': '["--input", "f.txt"]',
+                'stdout_size': 0,
+                'stdout': None,
+                'stderr': None,
+                'exit_code': None,
+                'duration': None,
+                'output_topic': None,
+                'pid': 1234,
+                'metadata': json.dumps({'source_offsets': [10, 11], 'slot': 2}),
+            },
+            {
+                'id': 2,
+                'ts': now - 5,
+                'event': 'task_completed',
+                'partition': 0,
+                'offset': None,
+                'task_id': 'task-abc',
+                'args': None,
+                'stdout_size': 512,
+                'stdout': 'output data',
+                'stderr': None,
+                'exit_code': 0,
+                'duration': 5.0,
+                'output_topic': None,
+                'pid': 1234,
+                'metadata': None,
+            },
+        ]
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/task/task-abc')
+        assert resp.status_code == 200
+        assert 'task-abc' in resp.text
+        assert '5.0' in resp.text or '5.00' in resp.text
+
+    async def test_task_detail_retry_key_strips_suffix(self, debug_config, mock_recorder, mock_app):
+        mock_recorder.get_task_events.return_value = []
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/task/task-abc:r1234567.89')
+        assert resp.status_code == 200
+        mock_recorder.get_task_events.assert_awaited_with('task-abc')
+
+    async def test_task_detail_no_started_event(self, debug_config, mock_recorder, mock_app):
+        now = time.time()
+        mock_recorder.get_task_events.return_value = [
+            {
+                'id': 1,
+                'ts': now - 5,
+                'event': 'task_failed',
+                'partition': 0,
+                'offset': None,
+                'task_id': 'task-xyz',
+                'args': None,
+                'stdout_size': 0,
+                'stdout': None,
+                'stderr': 'error msg',
+                'exit_code': 1,
+                'duration': None,
+                'output_topic': None,
+                'pid': 5678,
+                'metadata': None,
+            },
+        ]
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/task/task-xyz')
+        assert resp.status_code == 200
+
+    async def test_task_detail_duration_computed_from_timestamps(self, debug_config, mock_recorder, mock_app):
+        now = time.time()
+        mock_recorder.get_task_events.return_value = [
+            {
+                'id': 1,
+                'ts': now - 10,
+                'event': 'task_started',
+                'partition': 0,
+                'offset': None,
+                'task_id': 'task-dur',
+                'args': None,
+                'stdout_size': 0,
+                'stdout': None,
+                'stderr': None,
+                'exit_code': None,
+                'duration': None,
+                'output_topic': None,
+                'pid': None,
+                'metadata': None,
+            },
+            {
+                'id': 2,
+                'ts': now - 3,
+                'event': 'task_completed',
+                'partition': 0,
+                'offset': None,
+                'task_id': 'task-dur',
+                'args': None,
+                'stdout_size': 0,
+                'stdout': None,
+                'stderr': None,
+                'exit_code': 0,
+                'duration': None,
+                'output_topic': None,
+                'pid': None,
+                'metadata': None,
+            },
+        ]
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/task/task-dur')
+        assert resp.status_code == 200
+
+
+class TestMergeEndpointDotPrefixed:
+    """Cover merge endpoint rejecting dot-prefixed filenames (line 579)."""
+
+    async def test_merge_rejects_dot_prefixed_filename(self, tmp_path, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post(
+                '/api/debug/merge',
+                json={'filenames': ['.hidden.db', 'normal.db']},
+            )
+        assert resp.status_code == 400
+
+
+class TestMergeEndpointFileNotFound:
+    """Cover merge endpoint file-not-found branch (line 579)."""
+
+    async def test_merge_nonexistent_file_returns_404(self, tmp_path, mock_recorder, mock_app):
+        # Create one valid file so only the second triggers the 404
+        (tmp_path / 'exists.db').write_bytes(b'fake')
+
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post(
+                '/api/debug/merge',
+                json={'filenames': ['exists.db', 'missing.db']},
+            )
+        assert resp.status_code == 404
+        assert 'missing.db' in resp.json()['error']
+
+
+class TestApiDebugMetrics:
+    """Cover /api/debug/metrics endpoint (lines 611-613)."""
+
+    async def test_returns_metrics_list(self, debug_config, mock_recorder, mock_app):
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/metrics')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+
+
+class TestDownloadDotPrefixed:
+    """Cover download endpoint blocking dot-prefixed files (line 620)."""
+
+    async def test_download_dot_prefixed_blocked(self, tmp_path, mock_recorder, mock_app):
+        hidden = tmp_path / '.secret.db'
+        hidden.write_bytes(b'secret')
+
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/debug/download/.secret.db')
+        assert resp.status_code == 400
+
+
+class TestApiEvents:
+    """Cover /api/events endpoint with filters (lines 640-668)."""
+
+    async def _make_client_with_db(self, tmp_path, mock_recorder, mock_app):
+        import aiosqlite
+
+        from drakkar.recorder import SCHEMA_EVENTS
+
+        db_path = str(tmp_path / 'live.db')
+        db = await aiosqlite.connect(db_path)
+        await db.executescript(SCHEMA_EVENTS)
+
+        now = time.time()
+        for i in range(5):
+            await db.execute(
+                'INSERT INTO events (ts, dt, event, partition, offset, task_id) VALUES (?, ?, ?, ?, ?, ?)',
+                (now - i, '2026-04-02', 'consumed' if i % 2 == 0 else 'task_completed', i % 2, i, f'task-{i}'),
+            )
+        await db.commit()
+
+        mock_recorder._db = db
+        mock_recorder._flush = AsyncMock()
+        mock_recorder._buffer = []
+
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        client = AsyncClient(transport=transport, base_url='http://test')
+        return client, db
+
+    async def test_events_no_filter(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_db(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/events')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 5
+        await db.close()
+
+    async def test_events_filter_by_partition(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_db(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/events?partitions=0')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert all(e['partition'] == 0 for e in data)
+        await db.close()
+
+    async def test_events_filter_by_event_type(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_db(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/events?event_types=consumed')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert all(e['event'] == 'consumed' for e in data)
+        await db.close()
+
+    async def test_events_filter_by_after_id(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_db(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/events?after_id=3')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert all(e['id'] > 3 for e in data)
+        await db.close()
+
+    async def test_events_no_db_returns_empty(self, debug_config, mock_recorder, mock_app):
+        mock_recorder._db = None
+        mock_recorder._flush = AsyncMock()
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/events')
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+
+class TestApiRecentTasks:
+    """Cover /api/recent-tasks endpoint (lines 673-742)."""
+
+    async def _make_client_with_task_events(self, tmp_path, mock_recorder, mock_app):
+        import aiosqlite
+
+        from drakkar.recorder import SCHEMA_EVENTS
+
+        db_path = str(tmp_path / 'live.db')
+        db = await aiosqlite.connect(db_path)
+        await db.executescript(SCHEMA_EVENTS)
+
+        now = time.time()
+        # task-1: started and completed
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, args, pid, metadata) '
+            "VALUES (?, ?, 'task_started', 0, 'task-1', '[\"--fast\"]', 100, ?)",
+            (now - 30, '2026-04-02', json.dumps({'slot': 1})),
+        )
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, duration, pid) '
+            "VALUES (?, ?, 'task_completed', 0, 'task-1', 1.5, 100)",
+            (now - 28, '2026-04-02'),
+        )
+        # task-2: started but not completed (running)
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, args, pid) '
+            "VALUES (?, ?, 'task_started', 1, 'task-2', '[\"--slow\"]', 200)",
+            (now - 10, '2026-04-02'),
+        )
+        # task-3: started, then retried (two task_started events)
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, args, pid) '
+            "VALUES (?, ?, 'task_started', 0, 'task-3', '[\"--retry\"]', 300)",
+            (now - 20, '2026-04-02'),
+        )
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, args, pid) '
+            "VALUES (?, ?, 'task_started', 0, 'task-3', '[\"--retry\"]', 301)",
+            (now - 15, '2026-04-02'),
+        )
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, duration, pid) '
+            "VALUES (?, ?, 'task_completed', 0, 'task-3', 2.0, 301)",
+            (now - 13, '2026-04-02'),
+        )
+        # task-4: failed
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, args, pid) '
+            "VALUES (?, ?, 'task_started', 1, 'task-4', '[]', 400)",
+            (now - 8, '2026-04-02'),
+        )
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, duration, pid) '
+            "VALUES (?, ?, 'task_failed', 1, 'task-4', 0.5, 400)",
+            (now - 7, '2026-04-02'),
+        )
+        await db.commit()
+
+        mock_recorder._db = db
+        mock_recorder._flush = AsyncMock()
+        mock_recorder._buffer = []
+
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        client = AsyncClient(transport=transport, base_url='http://test')
+        return client, db
+
+    async def test_recent_tasks_returns_task_entries(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=5')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert 'tasks' in data
+        assert 'lane_count' in data
+        assert data['lane_count'] == 8
+        tasks = data['tasks']
+        assert len(tasks) >= 1
+        await db.close()
+
+    async def test_recent_tasks_completed_status(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=5')
+        data = resp.json()
+        tasks_by_id = {t['task_id']: t for t in data['tasks']}
+        assert tasks_by_id['task-1']['status'] == 'completed'
+        assert tasks_by_id['task-1']['duration'] == 1.5
+        await db.close()
+
+    async def test_recent_tasks_running_status(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=5')
+        data = resp.json()
+        tasks_by_id = {t['task_id']: t for t in data['tasks']}
+        assert tasks_by_id['task-2']['status'] == 'running'
+        assert tasks_by_id['task-2']['end_ts'] is None
+        await db.close()
+
+    async def test_recent_tasks_failed_status(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=5')
+        data = resp.json()
+        tasks_by_id = {t['task_id']: t for t in data['tasks']}
+        assert tasks_by_id['task-4']['status'] == 'failed'
+        await db.close()
+
+    async def test_recent_tasks_retry_creates_archive_entry(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=5')
+        data = resp.json()
+        task_ids = [t['task_id'] for t in data['tasks']]
+        # The retry should create an archived entry with :r prefix
+        retry_entries = [tid for tid in task_ids if ':r' in tid]
+        assert len(retry_entries) >= 1
+        await db.close()
+
+    async def test_recent_tasks_no_db_returns_empty(self, debug_config, mock_recorder, mock_app):
+        mock_recorder._db = None
+        mock_recorder._flush = AsyncMock()
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/recent-tasks')
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    async def test_recent_tasks_slot_extracted_from_metadata(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=5')
+        data = resp.json()
+        tasks_by_id = {t['task_id']: t for t in data['tasks']}
+        assert tasks_by_id['task-1']['slot'] == 1
+        await db.close()
+
+
+class TestApiDashboardWithConsumerLag:
+    """Cover /api/dashboard with consumer lag (lines 754-757)."""
+
+    async def test_api_dashboard_includes_lag(self, debug_config, mock_recorder, mock_app):
+        consumer = AsyncMock()
+        consumer.get_total_lag.return_value = 42
+        mock_app._consumer = consumer
+
+        proc = MagicMock()
+        mock_app.processors = {0: proc}
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/dashboard')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['total_lag'] == 42
+
+
+class TestProcessorDiagnosticsArrangeAndStuck:
+    """Cover processor diagnostics: arrange info + stuck tasks (lines 805, 827-832, 839)."""
+
+    async def test_processor_with_arrange_info(self, debug_config, mock_recorder, mock_app):
+        proc = MagicMock()
+        proc.queue_size = 10
+        proc.inflight_count = 3
+        proc._arranging = True
+        proc._arrange_start = time.time() - 5.0
+        proc._arrange_labels = ['label-x', 'label-y']
+        proc._active_tasks = []
+
+        tracker = MagicMock()
+        tracker.pending_count = 2
+        tracker.completed_count = 10
+        tracker.total_tracked = 12
+        tracker.last_committed = 50
+        tracker.committable.return_value = 51
+        tracker._sorted_offsets = [49, 50, 51]
+        tracker._offsets = {49: 'completed', 50: 'completed', 51: 'pending'}
+        proc.offset_tracker = tracker
+
+        mock_app.processors = {0: proc}
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/processors')
+        assert resp.status_code == 200
+        data = resp.json()
+        p = data['processors']['0']
+        assert p['arranging'] is True
+        assert p['arrange'] is not None
+        assert p['arrange']['message_count'] == 2
+        assert 'label-x' in p['arrange']['labels']
+
+    async def test_processor_with_stuck_tasks(self, debug_config, mock_recorder, mock_app):
+        proc = MagicMock()
+        proc.queue_size = 5
+        proc.inflight_count = 1
+        proc._arranging = False
+        proc._arrange_start = 0
+        proc._arrange_labels = []
+
+        # Create a mock task that is not done
+        stuck_task = MagicMock()
+        stuck_task.done.return_value = False
+        stuck_task.get_name.return_value = 'stuck-task-1'
+        frame = MagicMock()
+        frame.f_code.co_filename = '/app/worker.py'
+        frame.f_lineno = 42
+        frame.f_code.co_name = 'process_message'
+        stuck_task.get_stack.return_value = [frame]
+        proc._active_tasks = [stuck_task]
+
+        tracker = MagicMock()
+        tracker.pending_count = 1
+        tracker.completed_count = 5
+        tracker.total_tracked = 6
+        tracker.last_committed = 20
+        tracker.committable.return_value = 21
+        tracker._sorted_offsets = [20, 21]
+        tracker._offsets = {20: 'completed', 21: 'pending'}
+        proc.offset_tracker = tracker
+
+        mock_app.processors = {0: proc}
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/processors')
+        assert resp.status_code == 200
+        data = resp.json()
+        p = data['processors']['0']
+        assert 'stuck_tasks' in p
+        assert len(p['stuck_tasks']) == 1
+        assert p['stuck_tasks'][0]['name'] == 'stuck-task-1'
+        assert '/app/worker.py:42 in process_message' in p['stuck_tasks'][0]['stack'][0]
+
+
+class TestDebugPage:
+    """Cover debug page with config_summary."""
+
+    async def test_debug_page_shows_config_summary(self, tmp_path, mock_recorder, mock_app):
+        mock_app.config_summary = 'worker=test-worker topic=events group=drakkar'
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/debug')
+        assert resp.status_code == 200
+        assert 'worker=test-worker' in resp.text
+
+
+class TestDebugServerClass:
+    """Cover DebugServer start/stop (lines 945-977)."""
+
+    async def test_start_creates_server_and_thread(self, debug_config, mock_recorder, mock_app):
+        from unittest.mock import patch
+
+        from drakkar.debug_server import DebugServer
+
+        server = DebugServer(debug_config, mock_recorder, mock_app)
+        assert server._server is None
+        assert server._thread is None
+
+        with (
+            patch('drakkar.debug_server.uvicorn.Server') as mock_uvi_server,
+            patch('drakkar.debug_server.uvicorn.Config') as mock_uvi_config,
+            patch('drakkar.debug_server.threading.Thread') as mock_thread,
+            patch('drakkar.debug_server.logger') as mock_logger,
+        ):
+            mock_uvi_server.return_value = MagicMock()
+            mock_uvi_config.return_value = MagicMock()
+            mock_thread_instance = MagicMock()
+            mock_thread.return_value = mock_thread_instance
+            mock_logger.ainfo = AsyncMock()
+
+            await server.start()
+
+            mock_uvi_server.assert_called_once()
+            mock_thread.assert_called_once()
+            mock_thread_instance.start.assert_called_once()
+            assert server._server is not None
+            assert server._thread is not None
+
+    async def test_stop_signals_exit_and_joins(self, debug_config, mock_recorder, mock_app):
+        from unittest.mock import patch
+
+        from drakkar.debug_server import DebugServer
+
+        server = DebugServer(debug_config, mock_recorder, mock_app)
+        server._server = MagicMock()
+        server._thread = MagicMock()
+
+        with patch('drakkar.debug_server.logger') as mock_logger:
+            mock_logger.ainfo = AsyncMock()
+            await server.stop()
+
+        assert server._server.should_exit is True
+        server._thread.join.assert_called_once_with(timeout=5.0)
+
+    async def test_stop_when_not_started(self, debug_config, mock_recorder, mock_app):
+        from unittest.mock import patch
+
+        from drakkar.debug_server import DebugServer
+
+        server = DebugServer(debug_config, mock_recorder, mock_app)
+
+        with patch('drakkar.debug_server.logger') as mock_logger:
+            mock_logger.ainfo = AsyncMock()
+            await server.stop()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# 6. Additional edge-case coverage
+# ---------------------------------------------------------------------------
+
+
+class TestTaskDetailEdgeCases:
+    """Cover JSON decode exception paths in task_detail (lines 428-429, 434-435)."""
+
+    async def test_task_detail_invalid_metadata_json(self, debug_config, mock_recorder, mock_app):
+        now = time.time()
+        mock_recorder.get_task_events.return_value = [
+            {
+                'id': 1,
+                'ts': now - 10,
+                'event': 'task_started',
+                'partition': 0,
+                'offset': None,
+                'task_id': 'task-bad-meta',
+                'args': '["ok"]',
+                'stdout_size': 0,
+                'stdout': None,
+                'stderr': None,
+                'exit_code': None,
+                'duration': None,
+                'output_topic': None,
+                'pid': None,
+                'metadata': 'not-valid-json{{{',
+            },
+            {
+                'id': 2,
+                'ts': now - 5,
+                'event': 'task_completed',
+                'partition': 0,
+                'offset': None,
+                'task_id': 'task-bad-meta',
+                'args': None,
+                'stdout_size': 0,
+                'stdout': None,
+                'stderr': None,
+                'exit_code': 0,
+                'duration': 5.0,
+                'output_topic': None,
+                'pid': None,
+                'metadata': None,
+            },
+        ]
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/task/task-bad-meta')
+        assert resp.status_code == 200
+
+    async def test_task_detail_invalid_args_json(self, debug_config, mock_recorder, mock_app):
+        now = time.time()
+        mock_recorder.get_task_events.return_value = [
+            {
+                'id': 1,
+                'ts': now - 10,
+                'event': 'task_started',
+                'partition': 0,
+                'offset': None,
+                'task_id': 'task-bad-args',
+                'args': 'not-json!!!',
+                'stdout_size': 0,
+                'stdout': None,
+                'stderr': None,
+                'exit_code': None,
+                'duration': None,
+                'output_topic': None,
+                'pid': None,
+                'metadata': None,
+            },
+            {
+                'id': 2,
+                'ts': now - 5,
+                'event': 'task_completed',
+                'partition': 0,
+                'offset': None,
+                'task_id': 'task-bad-args',
+                'args': None,
+                'stdout_size': 0,
+                'stdout': None,
+                'stderr': None,
+                'exit_code': 0,
+                'duration': 5.0,
+                'output_topic': None,
+                'pid': None,
+                'metadata': None,
+            },
+        ]
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/task/task-bad-args')
+        assert resp.status_code == 200
+
+
+class TestApiRecentTasksEdgeCases:
+    """Cover edge cases in api_recent_tasks (lines 697, 715-716)."""
+
+    async def test_events_without_task_id_are_skipped(self, tmp_path, mock_recorder, mock_app):
+        import aiosqlite
+
+        from drakkar.recorder import SCHEMA_EVENTS
+
+        db_path = str(tmp_path / 'live.db')
+        db = await aiosqlite.connect(db_path)
+        await db.executescript(SCHEMA_EVENTS)
+
+        now = time.time()
+        # event with no task_id (e.g. a 'consumed' event)
+        await db.execute(
+            "INSERT INTO events (ts, dt, event, partition, offset) VALUES (?, ?, 'task_started', 0, 99)",
+            (now - 10, '2026-04-02'),
+        )
+        # event with task_id
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, args, pid) '
+            "VALUES (?, ?, 'task_started', 0, 'real-task', '[]', 100)",
+            (now - 5, '2026-04-02'),
+        )
+        await db.commit()
+
+        mock_recorder._db = db
+        mock_recorder._flush = AsyncMock()
+        mock_recorder._buffer = []
+
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/recent-tasks?minutes=5')
+        assert resp.status_code == 200
+        data = resp.json()
+        task_ids = [t['task_id'] for t in data['tasks']]
+        assert 'real-task' in task_ids
+        await db.close()
+
+    async def test_events_with_invalid_metadata_json(self, tmp_path, mock_recorder, mock_app):
+        import aiosqlite
+
+        from drakkar.recorder import SCHEMA_EVENTS
+
+        db_path = str(tmp_path / 'live.db')
+        db = await aiosqlite.connect(db_path)
+        await db.executescript(SCHEMA_EVENTS)
+
+        now = time.time()
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, args, pid, metadata) '
+            "VALUES (?, ?, 'task_started', 0, 'task-bad', '[]', 100, 'invalid{json')",
+            (now - 5, '2026-04-02'),
+        )
+        await db.commit()
+
+        mock_recorder._db = db
+        mock_recorder._flush = AsyncMock()
+        mock_recorder._buffer = []
+
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/recent-tasks?minutes=5')
+        assert resp.status_code == 200
+        data = resp.json()
+        tasks_by_id = {t['task_id']: t for t in data['tasks']}
+        assert tasks_by_id['task-bad']['slot'] is None
+        await db.close()
+
+
+class TestPrometheusWorkerLabel:
+    """Cover _build_prometheus_links with prometheus_worker_label set (line 142)."""
+
+    async def test_prometheus_worker_label_used_in_links(self, mock_recorder, mock_app):
+        cfg = DebugConfig(
+            enabled=True,
+            port=8080,
+            db_dir='/tmp',
+            prometheus_url='http://prom:9090',
+            prometheus_worker_label='job="drakkar",instance="{worker_id}"',
+        )
+        mock_app._worker_id = 'worker-42'
+
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/')
+        assert resp.status_code == 200
+        assert 'worker-42' in resp.text
+        assert 'http://prom:9090/graph' in resp.text
+
+
+class TestApiDashboardLagException:
+    """Cover consumer lag exception in /api/dashboard (lines 756-757)."""
+
+    async def test_api_dashboard_lag_exception_returns_zero(self, debug_config, mock_recorder, mock_app):
+        consumer = AsyncMock()
+        consumer.get_total_lag.side_effect = RuntimeError('connection lost')
+        mock_app._consumer = consumer
+
+        proc = MagicMock()
+        mock_app.processors = {0: proc}
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/dashboard')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['total_lag'] == 0
