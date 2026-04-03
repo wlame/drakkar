@@ -214,19 +214,23 @@ def collect_all_metrics() -> list[dict[str, Any]]:
                 continue
             if sample.name.endswith('_bucket'):
                 continue
-            samples.append({
-                'name': sample.name,
-                'labels': dict(sample.labels) if sample.labels else {},
-                'value': sample.value,
-            })
+            samples.append(
+                {
+                    'name': sample.name,
+                    'labels': dict(sample.labels) if sample.labels else {},
+                    'value': sample.value,
+                }
+            )
 
-        result.append({
-            'name': metric_family.name,
-            'type': metric_family.type,
-            'help': metric_family.documentation,
-            'source': source,
-            'samples': samples,
-        })
+        result.append(
+            {
+                'name': metric_family.name,
+                'type': metric_family.type,
+                'help': metric_family.documentation,
+                'source': source,
+                'samples': samples,
+            }
+        )
 
     result.sort(key=lambda m: (0 if m['source'] == 'framework' else 1, m['name']))
     return result

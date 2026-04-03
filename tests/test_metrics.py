@@ -707,7 +707,7 @@ class TestCollectAllMetrics:
             if s == 'user':
                 seen_user = True
             if s == 'framework' and seen_user:
-                pytest.fail("Framework metric found after user metric — sort is wrong")
+                pytest.fail('Framework metric found after user metric — sort is wrong')
 
     def test_metric_structure(self):
         from drakkar.metrics import collect_all_metrics

@@ -308,9 +308,7 @@ class TestRecorderStoreFlags:
             (False, False, False),
         ],
     )
-    async def test_recorder_start_stop_with_flag_combos(
-        self, tmp_path, store_events, store_config, store_state
-    ):
+    async def test_recorder_start_stop_with_flag_combos(self, tmp_path, store_events, store_config, store_state):
         """Recorder starts and stops cleanly with any combination of store flags."""
         cfg = DebugConfig(
             enabled=True,
@@ -406,15 +404,17 @@ class TestRecorderStoreFlags:
             state_sync_interval_seconds=1,
         )
         rec = EventRecorder(cfg, worker_name='test', cluster_name='')
-        rec.set_state_provider(lambda: {
-            'uptime_seconds': 1.0,
-            'assigned_partitions': [],
-            'partition_count': 0,
-            'pool_active': 0,
-            'pool_max': 4,
-            'total_queued': 0,
-            'paused': False,
-        })
+        rec.set_state_provider(
+            lambda: {
+                'uptime_seconds': 1.0,
+                'assigned_partitions': [],
+                'partition_count': 0,
+                'pool_active': 0,
+                'pool_max': 4,
+                'total_queued': 0,
+                'paused': False,
+            }
+        )
         await rec.start()
 
         # manually trigger state sync
@@ -758,9 +758,9 @@ class TestCombinedModes:
             proc.enqueue(make_msg(offset=i))
 
         await wait_for(
-            lambda: app._consumer.commit.call_count >= 1 and any(
-                call.args[0].get(0, 0) >= 3
-                for call in app._consumer.commit.call_args_list
+            lambda: (
+                app._consumer.commit.call_count >= 1
+                and any(call.args[0].get(0, 0) >= 3 for call in app._consumer.commit.call_args_list)
             ),
             timeout=5.0,
         )
@@ -779,9 +779,7 @@ class TestCombinedModes:
         )
         handler = RetryHandler()  # asks for RETRY but max_retries=0 blocks it
         app = DrakkarApp(handler=handler, config=config)
-        app._executor_pool = ExecutorPool(
-            binary_path=sys.executable, max_workers=2, task_timeout_seconds=10
-        )
+        app._executor_pool = ExecutorPool(binary_path=sys.executable, max_workers=2, task_timeout_seconds=10)
         app._consumer = MagicMock()
         app._consumer.commit = AsyncMock()
         _setup_app_sinks(app)
