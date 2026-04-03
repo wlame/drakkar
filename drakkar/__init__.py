@@ -1,6 +1,6 @@
 """Drakkar — Kafka subprocess orchestration framework."""
 
-__version__ = '0.6.0'
+__version__ = '0.7.0'
 
 from drakkar.app import DrakkarApp
 from drakkar.config import DrakkarConfig, load_config
