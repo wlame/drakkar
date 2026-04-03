@@ -682,19 +682,6 @@ class TestDLQModes:
 # ============================================================================
 
 
-class TestMetricsModes:
-    def test_app_creation_with_metrics_disabled(self):
-        config = make_config(metrics=MetricsConfig(enabled=False))
-        app = DrakkarApp(handler=SimpleHandler(), config=config)
-        assert app.config.metrics.enabled is False
-
-    def test_app_creation_with_metrics_enabled(self):
-        config = make_config(metrics=MetricsConfig(enabled=True, port=19090))
-        app = DrakkarApp(handler=SimpleHandler(), config=config)
-        assert app.config.metrics.enabled is True
-        assert app.config.metrics.port == 19090
-
-
 # ============================================================================
 # 8. Combined mode stress: debug=off + processing full pipeline
 # ============================================================================

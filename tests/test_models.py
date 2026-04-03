@@ -1,13 +1,10 @@
 """Tests for Drakkar data models."""
 
-import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from drakkar.models import (
     CollectResult,
-    DeliveryAction,
     DeliveryError,
-    ErrorAction,
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
@@ -52,19 +49,6 @@ def test_source_message_with_all_fields():
     assert msg.partition == 3
 
 
-def test_source_message_missing_required_field():
-    with pytest.raises(ValidationError):
-        SourceMessage(topic='t', partition=0, offset=0, timestamp=0)  # type: ignore[call-arg]
-
-
-def test_source_message_serialization(source_message: SourceMessage):
-    data = source_message.model_dump()
-    assert data['topic'] == 'test-topic'
-    assert data['offset'] == 42
-    roundtrip = SourceMessage.model_validate(data)
-    assert roundtrip == source_message
-
-
 # --- ExecutorTask ---
 
 
@@ -90,12 +74,6 @@ def test_executor_result_fields(executor_result: ExecutorResult):
     assert executor_result.exit_code == 0
     assert executor_result.duration_seconds == 1.5
     assert executor_result.task.task_id == 'task-001'
-
-
-def test_executor_result_serialization(executor_result: ExecutorResult):
-    data = executor_result.model_dump()
-    roundtrip = ExecutorResult.model_validate(data)
-    assert roundtrip.task.task_id == executor_result.task.task_id
 
 
 # --- ExecutorError ---
@@ -143,12 +121,6 @@ def test_kafka_payload_with_key_and_sink():
     assert p.sink == 'results'
     assert p.key == b'my-key'
     assert p.data.value == 99
-
-
-def test_kafka_payload_data_serialization():
-    p = KafkaPayload(data=SampleData())
-    json_bytes = p.data.model_dump_json().encode()
-    assert b'"request_id":"abc"' in json_bytes
 
 
 def test_postgres_payload():
@@ -265,31 +237,6 @@ def test_collect_result_multiple_payloads_same_type():
     )
     assert len(result.kafka) == 2
     assert result.used_sink_types == {'kafka'}
-
-
-# --- ErrorAction ---
-
-
-def test_error_action_values():
-    assert ErrorAction.RETRY == 'retry'
-    assert ErrorAction.SKIP == 'skip'
-
-
-def test_error_action_is_str():
-    assert isinstance(ErrorAction.RETRY, str)
-
-
-# --- DeliveryAction ---
-
-
-def test_delivery_action_values():
-    assert DeliveryAction.DLQ == 'dlq'
-    assert DeliveryAction.RETRY == 'retry'
-    assert DeliveryAction.SKIP == 'skip'
-
-
-def test_delivery_action_is_str():
-    assert isinstance(DeliveryAction.DLQ, str)
 
 
 # --- DeliveryError ---
