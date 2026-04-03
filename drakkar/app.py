@@ -23,6 +23,7 @@ from drakkar.logging import setup_logging
 from drakkar.metrics import (
     assigned_partitions,
     backpressure_active,
+    discover_handler_metrics,
     start_metrics_server,
     total_queued,
     worker_info,
@@ -172,6 +173,14 @@ class DrakkarApp:
                 'consumer_group': self._config.kafka.consumer_group,
             }
         )
+
+        user_metrics = discover_handler_metrics(self._handler)
+        if user_metrics:
+            await log.ainfo(
+                'user_metrics_discovered',
+                category='lifecycle',
+                metrics=[f'{m._name} ({m._type})' for m in user_metrics.values()],
+            )
 
         if self._config.debug.enabled:
             self._recorder = EventRecorder(

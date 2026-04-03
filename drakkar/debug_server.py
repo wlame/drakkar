@@ -605,6 +605,13 @@ def create_debug_app(
         events = await recorder.cross_trace(partition, offset)
         return JSONResponse(events)
 
+    @app.get('/api/debug/metrics')
+    async def api_debug_metrics():
+        """Return all registered Prometheus metrics with current values."""
+        from drakkar.metrics import collect_all_metrics
+
+        return JSONResponse(collect_all_metrics())
+
     @app.get('/debug/download/{filename}')
     async def debug_download(filename: str):
         """Download a database file from db_dir."""

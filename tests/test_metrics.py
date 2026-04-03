@@ -589,3 +589,143 @@ def test_start_metrics_server_disabled():
     with patch('drakkar.metrics.start_http_server') as mock_start:
         start_metrics_server(config)
         mock_start.assert_not_called()
+
+
+# --- Handler metrics discovery ---
+
+
+class TestDiscoverHandlerMetrics:
+    """Tests for auto-discovery of prometheus metrics on handler classes."""
+
+    def test_discover_counter_on_handler(self):
+        from prometheus_client import Counter
+
+        from drakkar.metrics import discover_handler_metrics
+
+        class MyHandler(BaseDrakkarHandler):
+            items = Counter('test_dhm_items_total', 'Items processed')
+
+        handler = MyHandler()
+        discovered = discover_handler_metrics(handler)
+        assert 'items' in discovered
+        # prometheus_client strips _total suffix for counter internal name
+        assert discovered['items']._name == 'test_dhm_items'
+
+    def test_discover_multiple_metric_types(self):
+        from prometheus_client import Counter, Gauge, Histogram
+
+        from drakkar.metrics import discover_handler_metrics
+
+        class MyHandler(BaseDrakkarHandler):
+            parsed = Counter('test_dhm_parsed_total', 'Parsed items')
+            active = Gauge('test_dhm_active', 'Active items')
+            latency = Histogram('test_dhm_latency_seconds', 'Latency')
+
+        handler = MyHandler()
+        discovered = discover_handler_metrics(handler)
+        assert len(discovered) == 3
+        assert set(discovered.keys()) == {'parsed', 'active', 'latency'}
+
+    def test_discover_skips_private_attrs(self):
+        from prometheus_client import Counter
+
+        from drakkar.metrics import discover_handler_metrics
+
+        class MyHandler(BaseDrakkarHandler):
+            _internal = Counter('test_dhm_internal_total', 'Internal')
+            public = Counter('test_dhm_public_total', 'Public')
+
+        handler = MyHandler()
+        discovered = discover_handler_metrics(handler)
+        assert 'public' in discovered
+        assert '_internal' not in discovered
+
+    def test_discover_empty_handler(self):
+        from drakkar.metrics import discover_handler_metrics
+
+        class MyHandler(BaseDrakkarHandler):
+            pass
+
+        handler = MyHandler()
+        discovered = discover_handler_metrics(handler)
+        assert discovered == {}
+
+    def test_discover_inherits_from_parent(self):
+        from prometheus_client import Counter
+
+        from drakkar.metrics import discover_handler_metrics
+
+        class BaseHandler(BaseDrakkarHandler):
+            base_counter = Counter('test_dhm_base_total', 'Base counter')
+
+        class ChildHandler(BaseHandler):
+            child_counter = Counter('test_dhm_child_total', 'Child counter')
+
+        handler = ChildHandler()
+        discovered = discover_handler_metrics(handler)
+        assert 'base_counter' in discovered
+        assert 'child_counter' in discovered
+
+
+class TestCollectAllMetrics:
+    """Tests for collect_all_metrics registry snapshot."""
+
+    def test_returns_framework_metrics(self):
+        from drakkar.metrics import collect_all_metrics
+
+        result = collect_all_metrics()
+        names = [m['name'] for m in result]
+        assert 'drakkar_messages_consumed' in names
+        assert 'drakkar_executor_tasks' in names
+
+    def test_classifies_framework_vs_user(self):
+        from drakkar.metrics import collect_all_metrics
+
+        result = collect_all_metrics()
+        for m in result:
+            if m['name'].startswith('drakkar_'):
+                assert m['source'] == 'framework'
+
+    def test_excludes_python_process_metrics(self):
+        from drakkar.metrics import collect_all_metrics
+
+        result = collect_all_metrics()
+        names = [m['name'] for m in result]
+        for name in names:
+            assert not name.startswith('python_')
+            assert not name.startswith('process_')
+            assert not name.startswith('gc_')
+
+    def test_sorted_framework_first(self):
+        from drakkar.metrics import collect_all_metrics
+
+        result = collect_all_metrics()
+        sources = [m['source'] for m in result]
+        # all framework entries should come before user entries
+        seen_user = False
+        for s in sources:
+            if s == 'user':
+                seen_user = True
+            if s == 'framework' and seen_user:
+                pytest.fail("Framework metric found after user metric — sort is wrong")
+
+    def test_metric_structure(self):
+        from drakkar.metrics import collect_all_metrics
+
+        result = collect_all_metrics()
+        assert len(result) > 0
+        m = result[0]
+        assert 'name' in m
+        assert 'type' in m
+        assert 'help' in m
+        assert 'source' in m
+        assert 'samples' in m
+
+    def test_skips_bucket_and_created_samples(self):
+        from drakkar.metrics import collect_all_metrics
+
+        result = collect_all_metrics()
+        for m in result:
+            for s in m['samples']:
+                assert not s['name'].endswith('_created')
+                assert not s['name'].endswith('_bucket')

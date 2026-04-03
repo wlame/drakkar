@@ -9,6 +9,27 @@
 </div>
 {% endif %}
 
+<!-- ==================== METRICS ==================== -->
+<div class="mb-8">
+    <div class="flex items-center justify-between mb-3">
+        <h2 class="text-xl font-bold text-ink-900">Metrics</h2>
+        <div class="flex items-center gap-3">
+            <label class="text-xs text-gray-500 flex items-center gap-1">
+                <input id="metrics-show-user" type="checkbox" checked class="rounded"> User
+            </label>
+            <label class="text-xs text-gray-500 flex items-center gap-1">
+                <input id="metrics-show-framework" type="checkbox" checked class="rounded"> Framework
+            </label>
+            <button id="metrics-refresh" class="px-3 py-1.5 text-sm rounded border border-cream-300 text-ink-700 hover:bg-cream-100">Refresh</button>
+        </div>
+    </div>
+    <div id="metrics-list">
+        <div class="text-gray-500 text-sm">Loading...</div>
+    </div>
+</div>
+
+<hr class="border-cream-200 mb-6">
+
 <!-- ==================== TRACE ==================== -->
 <div class="mb-8">
     <h2 class="text-xl font-bold text-ink-900 mb-3">Message Trace</h2>
@@ -433,7 +454,139 @@
         });
     };
 
+    // === Metrics ===
+    var metricsListEl = document.getElementById('metrics-list');
+    var metricsShowUser = document.getElementById('metrics-show-user');
+    var metricsShowFramework = document.getElementById('metrics-show-framework');
+    var metricsRefreshBtn = document.getElementById('metrics-refresh');
+    var metricsData = [];
+
+    var typeColors = {counter:'#2563eb', gauge:'#059669', histogram:'#d97706', info:'#7c3aed', summary:'#9333ea'};
+    var sourceColors = {framework:'#6b7280', user:'#0d9488'};
+
+    function fmtVal(v) {
+        if (v === 0) return '0';
+        if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+        if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+        if (Number.isInteger(v)) return v.toString();
+        return v < 0.01 ? v.toExponential(2) : v.toFixed(3);
+    }
+
+    function renderMetrics() {
+        metricsListEl.textContent = '';
+        var showUser = metricsShowUser.checked;
+        var showFw = metricsShowFramework.checked;
+        var filtered = metricsData.filter(function(m) {
+            if (m.source === 'user' && !showUser) return false;
+            if (m.source === 'framework' && !showFw) return false;
+            return true;
+        });
+
+        if (!filtered.length) {
+            var empty = document.createElement('div');
+            empty.className = 'text-gray-500 text-sm py-4 text-center';
+            empty.textContent = metricsData.length ? 'All metrics hidden by filters' : 'No metrics registered';
+            metricsListEl.appendChild(empty);
+            return;
+        }
+
+        // group by source
+        var groups = {user: [], framework: []};
+        filtered.forEach(function(m) { groups[m.source].push(m); });
+
+        ['user', 'framework'].forEach(function(source) {
+            var items = groups[source];
+            if (!items.length) return;
+
+            var section = document.createElement('div');
+            section.className = 'mb-4';
+
+            var hdr = document.createElement('div');
+            hdr.className = 'text-xs font-semibold uppercase tracking-wide mb-2';
+            hdr.style.color = sourceColors[source];
+            hdr.textContent = source + ' metrics (' + items.length + ')';
+            section.appendChild(hdr);
+
+            var table = document.createElement('table');
+            table.className = 'w-full text-sm';
+            var thead = document.createElement('thead');
+            var headTr = document.createElement('tr');
+            headTr.className = 'text-left text-gray-400 text-xs border-b border-cream-200';
+            ['Name', 'Type', 'Description', 'Values'].forEach(function(col) {
+                var th = document.createElement('th');
+                th.className = 'py-2 px-3';
+                th.textContent = col;
+                headTr.appendChild(th);
+            });
+            thead.appendChild(headTr);
+            table.appendChild(thead);
+
+            var tbody = document.createElement('tbody');
+            items.forEach(function(m) {
+                var tr = document.createElement('tr');
+                tr.className = 'border-b border-cream-50 hover:bg-cream-50';
+
+                var tdName = document.createElement('td');
+                tdName.className = 'py-2 px-3 font-mono text-xs';
+                tdName.textContent = m.name;
+
+                var tdType = document.createElement('td');
+                tdType.className = 'py-2 px-3 text-xs font-semibold';
+                tdType.style.color = typeColors[m.type] || '#6b7280';
+                tdType.textContent = m.type;
+
+                var tdHelp = document.createElement('td');
+                tdHelp.className = 'py-2 px-3 text-xs text-gray-500 max-w-xs truncate';
+                tdHelp.title = m.help;
+                tdHelp.textContent = m.help;
+
+                var tdVals = document.createElement('td');
+                tdVals.className = 'py-2 px-3 font-mono text-xs';
+                if (!m.samples.length) {
+                    tdVals.textContent = '-';
+                } else if (m.samples.length === 1 && !Object.keys(m.samples[0].labels).length) {
+                    tdVals.textContent = fmtVal(m.samples[0].value);
+                } else {
+                    m.samples.forEach(function(s) {
+                        var line = document.createElement('div');
+                        var lblStr = Object.keys(s.labels).map(function(k) { return k + '=' + s.labels[k]; }).join(',');
+                        var suffix = s.name.replace(m.name, '').replace(/^_/, '');
+                        var prefix = '';
+                        if (suffix) prefix = suffix + ' ';
+                        if (lblStr) prefix += '{' + lblStr + '} ';
+                        line.textContent = prefix + fmtVal(s.value);
+                        tdVals.appendChild(line);
+                    });
+                }
+
+                tr.append(tdName, tdType, tdHelp, tdVals);
+                tbody.appendChild(tr);
+            });
+            table.appendChild(tbody);
+            section.appendChild(table);
+            metricsListEl.appendChild(section);
+        });
+    }
+
+    function loadMetrics() {
+        fetch('/api/debug/metrics').then(function(r) { return r.json(); }).then(function(data) {
+            metricsData = data;
+            renderMetrics();
+        }).catch(function() {
+            metricsListEl.textContent = '';
+            var err = document.createElement('div');
+            err.className = 'text-red-500 text-sm';
+            err.textContent = 'Failed to load metrics';
+            metricsListEl.appendChild(err);
+        });
+    }
+
+    metricsRefreshBtn.onclick = loadMetrics;
+    metricsShowUser.onchange = renderMetrics;
+    metricsShowFramework.onchange = renderMetrics;
+
     // === Boot ===
+    loadMetrics();
     loadDatabases();
 
     // Handle #trace/P/O deep links

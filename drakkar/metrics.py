@@ -1,8 +1,15 @@
 """Prometheus metrics for Drakkar framework."""
 
-from prometheus_client import Counter, Gauge, Histogram, Info, start_http_server
+from __future__ import annotations
 
-from drakkar.config import MetricsConfig
+from typing import TYPE_CHECKING, Any
+
+from prometheus_client import Counter, Gauge, Histogram, Info, start_http_server
+from prometheus_client.metrics import MetricWrapperBase
+from prometheus_client.registry import REGISTRY
+
+if TYPE_CHECKING:
+    from drakkar.config import MetricsConfig
 
 # --- Worker identity ---
 
@@ -160,3 +167,66 @@ def start_metrics_server(config: MetricsConfig) -> None:
     """Start the Prometheus metrics HTTP server if enabled."""
     if config.enabled:
         start_http_server(config.port)
+
+
+# --- Framework metric names (for classifying framework vs user) ---
+
+FRAMEWORK_PREFIXES = ('drakkar_',)
+
+
+def discover_handler_metrics(handler: object) -> dict[str, MetricWrapperBase]:
+    """Discover prometheus metrics declared as class attributes on a handler.
+
+    Scans the handler's class hierarchy (MRO) for attributes that are
+    instances of prometheus_client MetricWrapperBase (Counter, Gauge,
+    Histogram, Summary, Info). Returns a dict of attribute_name → metric.
+    """
+    metrics: dict[str, MetricWrapperBase] = {}
+    for cls in type(handler).__mro__:
+        for attr_name, attr_value in vars(cls).items():
+            if attr_name.startswith('_'):
+                continue
+            if isinstance(attr_value, MetricWrapperBase) and attr_name not in metrics:
+                metrics[attr_name] = attr_value
+    return metrics
+
+
+def collect_all_metrics() -> list[dict[str, Any]]:
+    """Collect a snapshot of all registered Prometheus metrics.
+
+    Returns a list of dicts with name, type, help, source (framework/user),
+    and current samples (label sets + values). Histograms are summarized
+    as count+sum instead of listing every bucket.
+    """
+    result: list[dict[str, Any]] = []
+    for metric_family in REGISTRY.collect():
+        # skip internal python/process/gc metrics
+        if metric_family.name.startswith(('python_', 'process_', 'gc_')):
+            continue
+
+        is_framework = any(metric_family.name.startswith(p) for p in FRAMEWORK_PREFIXES)
+        source = 'framework' if is_framework else 'user'
+
+        samples: list[dict[str, Any]] = []
+        for sample in metric_family.samples:
+            # skip _created and _bucket samples for compactness
+            if sample.name.endswith('_created'):
+                continue
+            if sample.name.endswith('_bucket'):
+                continue
+            samples.append({
+                'name': sample.name,
+                'labels': dict(sample.labels) if sample.labels else {},
+                'value': sample.value,
+            })
+
+        result.append({
+            'name': metric_family.name,
+            'type': metric_family.type,
+            'help': metric_family.documentation,
+            'source': source,
+            'samples': samples,
+        })
+
+    result.sort(key=lambda m: (0 if m['source'] == 'framework' else 1, m['name']))
+    return result
