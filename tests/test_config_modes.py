@@ -862,7 +862,7 @@ class TestBackpressureEdgeCases:
 
 
 class TestConsumerCallbackModes:
-    def test_consumer_creation_without_callbacks(self):
+    async def test_consumer_creation_without_callbacks(self):
         """KafkaConsumer can be created with no assign/revoke callbacks."""
         from drakkar.consumer import KafkaConsumer
 
@@ -874,7 +874,7 @@ class TestConsumerCallbackModes:
         assert consumer._on_assign_cb is None
         assert consumer._on_revoke_cb is None
 
-    def test_consumer_creation_with_callbacks(self):
+    async def test_consumer_creation_with_callbacks(self):
         from drakkar.consumer import KafkaConsumer
 
         assign_cb = MagicMock()
