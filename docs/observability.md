@@ -53,6 +53,8 @@ metrics:
 | `drakkar_backpressure_active` | Gauge | -- | Whether the consumer is paused due to backpressure. `1` = paused, `0` = flowing |
 | `drakkar_total_queued` | Gauge | -- | Total messages buffered in all partition queues plus in-flight tasks |
 | `drakkar_assigned_partitions` | Gauge | -- | Number of partitions currently assigned to this worker |
+| `drakkar_executor_idle_slot_seconds_total` | Counter | -- | Accumulated slot-seconds of executor idle time while messages are waiting in queues. If 2 slots sit idle for 3 seconds while messages are queued, this increments by 6. Only counts when messages are in queues (not yet dispatched), not when the worker has nothing to do. |
+| `drakkar_consumer_idle_seconds_total` | Counter | -- | Accumulated seconds with no messages available from Kafka and nothing in queues. Measures time the worker has genuinely nothing to do (consumer lag is zero). Does not count time when the consumer is paused due to backpressure. |
 
 #### Consumer
 

@@ -23,7 +23,9 @@ from drakkar.logging import setup_logging
 from drakkar.metrics import (
     assigned_partitions,
     backpressure_active,
+    consumer_idle,
     discover_handler_metrics,
+    executor_idle_waste,
     start_metrics_server,
     total_queued,
     worker_info,
@@ -267,6 +269,10 @@ class DrakkarApp:
         """Total messages buffered across all partition queues + in-flight tasks."""
         return sum(p.queue_size + p.inflight_count for p in self._processors.values())
 
+    def _total_waiting(self) -> int:
+        """Messages waiting in partition queues, not yet dispatched to executors."""
+        return sum(p.queue_size for p in self._processors.values())
+
     def _get_worker_state(self) -> dict:
         """Return current worker state for the recorder's state sync."""
         return {
@@ -286,10 +292,23 @@ class DrakkarApp:
         max_workers = self._config.executor.max_workers
         high_watermark = max_workers * self._config.executor.backpressure_high_multiplier
         low_watermark = max(1, max_workers * self._config.executor.backpressure_low_multiplier)
+        last_tick = time.monotonic()
 
         while self._running:
+            now = time.monotonic()
+            dt = now - last_tick
+            last_tick = now
+
             total = self._total_queued()
             total_queued.set(total)
+
+            # Executor idle waste: slots sitting free while messages wait in queues.
+            # Uses queue_size only (not inflight) — inflight tasks ARE using slots.
+            waiting = self._total_waiting()
+            if waiting > 0:
+                idle_slots = max_workers - self._executor_pool.active_count
+                if idle_slots > 0:
+                    executor_idle_waste.inc(idle_slots * dt)
 
             if self._paused and total <= low_watermark:
                 partition_ids = list(self._processors.keys())
@@ -312,6 +331,10 @@ class DrakkarApp:
                     processor.enqueue(msg)
 
             if not messages:
+                # Consumer idle: no messages from Kafka, nothing queued, not paused.
+                # Measures time with genuinely nothing to do (consumer lag is zero).
+                if total == 0 and not self._paused:
+                    consumer_idle.inc(dt)
                 await asyncio.sleep(0.05)
 
     def _on_assign(self, partition_ids: list[int]) -> None:

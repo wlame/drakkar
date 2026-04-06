@@ -390,8 +390,35 @@ histogram_quantile(0.95, rate(drakkar_handler_duration_seconds_bucket{hook="arra
 
 # collect() duration (should be << task duration)
 histogram_quantile(0.95, rate(drakkar_handler_duration_seconds_bucket{hook="collect"}[5m]))
+
+# Executor idle waste — slot-seconds wasted while messages wait in queues
+rate(drakkar_executor_idle_slot_seconds_total[5m])
+
+# Consumer idle — seconds/second with nothing to do (lag is zero)
+rate(drakkar_consumer_idle_seconds_total[5m])
 ```
 
 If `backpressure_active == 1` consistently, you need more `max_workers`
 or more horizontal workers. If `total_queued` grows unbounded, your
 processing rate is lower than your production rate.
+
+### Efficiency metrics
+
+**`drakkar_executor_idle_slot_seconds_total`** measures wasted executor
+capacity. It accumulates `idle_slots x dt` on every poll loop iteration,
+but **only when messages are waiting in partition queues** (not yet
+dispatched to executors). If the queues are empty, idle slots are
+expected and don't count as waste.
+
+A high `rate(drakkar_executor_idle_slot_seconds_total[5m])` means your
+executor slots are free but messages sit in queues waiting for
+`arrange()` to run. This points to `arrange()` being slow, or
+`window_size` being too large (the framework waits to fill the window
+before calling `arrange()`).
+
+**`drakkar_consumer_idle_seconds_total`** measures time the worker has
+genuinely nothing to do -- Kafka poll returned no messages, partition
+queues are empty, and no tasks are in flight. A high rate means the
+worker is over-provisioned or the source topic has low volume. This
+metric is **not** incremented when the consumer is paused due to
+backpressure (that's deliberate throttling, not idleness).

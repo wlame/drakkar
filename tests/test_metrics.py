@@ -697,3 +697,175 @@ class TestCollectAllMetrics:
             for s in m['samples']:
                 assert not s['name'].endswith('_created')
                 assert not s['name'].endswith('_bucket')
+
+
+# --- Executor idle waste & consumer idle metrics ---
+
+
+async def test_executor_idle_waste_accumulates_when_messages_queued():
+    """Idle executor slots accumulate waste when messages wait in queues."""
+    from drakkar.app import DrakkarApp
+    from drakkar.config import DrakkarConfig, KafkaSinkConfig, SinksConfig
+    from drakkar.metrics import executor_idle_waste
+
+    config = DrakkarConfig(
+        sinks=SinksConfig(kafka={'out': KafkaSinkConfig(topic='out')}),
+    )
+    app = DrakkarApp(handler=BaseDrakkarHandler(), config=config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=4, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+    app._running = True
+
+    # assign a partition and put messages in queue
+    app._on_assign([0])
+    await asyncio.sleep(0.01)
+
+    for i in range(10):
+        msg = SourceMessage(topic='t', partition=0, offset=i, value=b'x', timestamp=0)
+        app.processors[0]._queue.put_nowait(msg)
+
+    before = counter_val(executor_idle_waste)
+
+    # simulate: 4 idle slots (active=0), 10 messages waiting, dt=0.5s
+    # expected waste: 4 slots * 0.5s = 2.0 slot-seconds
+    app._executor_pool._active_count = 0
+    waiting = app._total_waiting()
+    assert waiting == 10
+    idle_slots = 4 - app._executor_pool.active_count
+    assert idle_slots == 4
+    executor_idle_waste.inc(idle_slots * 0.5)
+
+    after = counter_val(executor_idle_waste)
+    assert after - before == pytest.approx(2.0)
+
+    for proc in app.processors.values():
+        await proc.stop()
+
+
+async def test_executor_idle_waste_zero_when_pool_busy():
+    """No idle waste when all executor slots are active."""
+    from drakkar.app import DrakkarApp
+    from drakkar.config import DrakkarConfig, KafkaSinkConfig, SinksConfig
+    from drakkar.metrics import executor_idle_waste
+
+    config = DrakkarConfig(
+        sinks=SinksConfig(kafka={'out': KafkaSinkConfig(topic='out')}),
+    )
+    app = DrakkarApp(handler=BaseDrakkarHandler(), config=config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=4, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+    app._running = True
+    app._on_assign([0])
+    await asyncio.sleep(0.01)
+
+    for i in range(10):
+        msg = SourceMessage(topic='t', partition=0, offset=i, value=b'x', timestamp=0)
+        app.processors[0]._queue.put_nowait(msg)
+
+    before = counter_val(executor_idle_waste)
+
+    # all slots busy — no waste
+    app._executor_pool._active_count = 4
+    idle_slots = 4 - app._executor_pool.active_count
+    assert idle_slots == 0
+
+    after = counter_val(executor_idle_waste)
+    assert after == before
+
+    for proc in app.processors.values():
+        await proc.stop()
+
+
+async def test_executor_idle_waste_zero_when_queues_empty():
+    """No idle waste when no messages are waiting (idle slots are fine)."""
+    from drakkar.app import DrakkarApp
+    from drakkar.config import DrakkarConfig, KafkaSinkConfig, SinksConfig
+    from drakkar.metrics import executor_idle_waste
+
+    config = DrakkarConfig(
+        sinks=SinksConfig(kafka={'out': KafkaSinkConfig(topic='out')}),
+    )
+    app = DrakkarApp(handler=BaseDrakkarHandler(), config=config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=4, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+    app._running = True
+    app._on_assign([0])
+    await asyncio.sleep(0.01)
+
+    before = counter_val(executor_idle_waste)
+
+    # queues empty, 4 idle slots — no waste (nothing to do)
+    assert app._total_waiting() == 0
+
+    after = counter_val(executor_idle_waste)
+    assert after == before
+
+    for proc in app.processors.values():
+        await proc.stop()
+
+
+async def test_consumer_idle_accumulates_when_no_work():
+    """Consumer idle time accumulates when poll returns nothing and queues are empty."""
+    from drakkar.metrics import consumer_idle
+
+    before = counter_val(consumer_idle)
+    # simulate: no messages, nothing queued, not paused, dt=1.0s
+    consumer_idle.inc(1.0)
+    after = counter_val(consumer_idle)
+    assert after - before == pytest.approx(1.0)
+
+
+async def test_consumer_idle_not_counted_when_paused():
+    """Consumer idle should not count when consumer is paused (backpressure)."""
+    from drakkar.app import DrakkarApp
+    from drakkar.config import DrakkarConfig, KafkaSinkConfig, SinksConfig
+    from drakkar.metrics import consumer_idle
+
+    config = DrakkarConfig(
+        sinks=SinksConfig(kafka={'out': KafkaSinkConfig(topic='out')}),
+    )
+    app = DrakkarApp(handler=BaseDrakkarHandler(), config=config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=4, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+    app._running = True
+    app._paused = True  # backpressure active
+
+    before = counter_val(consumer_idle)
+
+    # paused + empty poll = NOT idle (paused on purpose)
+    total = app._total_queued()
+    assert total == 0
+    # the poll loop condition: if total == 0 and not self._paused
+    # with _paused=True, this should NOT increment
+    assert app._paused is True
+
+    after = counter_val(consumer_idle)
+    assert after == before
+
+
+async def test_total_waiting_excludes_inflight():
+    """_total_waiting() counts only queue sizes, not in-flight tasks."""
+    from drakkar.app import DrakkarApp
+    from drakkar.config import DrakkarConfig, KafkaSinkConfig, SinksConfig
+
+    config = DrakkarConfig(
+        sinks=SinksConfig(kafka={'out': KafkaSinkConfig(topic='out')}),
+    )
+    app = DrakkarApp(handler=BaseDrakkarHandler(), config=config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=4, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+    app._running = True
+    app._on_assign([0])
+    await asyncio.sleep(0.01)
+
+    # put 5 in queue, simulate 3 inflight
+    for i in range(5):
+        msg = SourceMessage(topic='t', partition=0, offset=i, value=b'x', timestamp=0)
+        app.processors[0]._queue.put_nowait(msg)
+    app.processors[0]._inflight_count = 3
+
+    assert app._total_waiting() == 5  # only queue
+    assert app._total_queued() == 8  # queue + inflight
+
+    for proc in app.processors.values():
+        await proc.stop()

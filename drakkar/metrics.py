@@ -92,6 +92,19 @@ assigned_partitions = Gauge(
     'Number of partitions currently assigned to this worker',
 )
 
+executor_idle_waste = Counter(
+    'drakkar_executor_idle_slot_seconds_total',
+    'Accumulated slot-seconds of executor idle time while messages are waiting in queues. '
+    'If 2 slots are idle for 3 seconds while messages are queued, this increments by 6.',
+)
+
+consumer_idle = Counter(
+    'drakkar_consumer_idle_seconds_total',
+    'Accumulated seconds with no messages available from Kafka and nothing in queues. '
+    'Measures time the worker has genuinely nothing to do (consumer lag is zero). '
+    'Does not count time when the consumer is paused due to backpressure.',
+)
+
 # --- Consumer errors ---
 
 consumer_errors = Counter(
