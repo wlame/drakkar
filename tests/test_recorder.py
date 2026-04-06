@@ -1954,6 +1954,7 @@ async def test_labels_persisted_to_db(tmp_path):
         row = await cur.fetchone()
     assert row is not None
     import json
+
     assert json.loads(row[0]) == {'request_id': 'req-db', 'env': 'prod'}
     await rec.stop()
 

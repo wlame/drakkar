@@ -46,9 +46,7 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
 
     def message_label(self, msg: dk.SourceMessage) -> str:
         if msg.payload:
-            return (
-                f'{msg.partition}:{msg.offset} [{msg.payload.request_id[:8]}] {msg.payload.pattern}'
-            )
+            return f'{msg.partition}:{msg.offset} [{msg.payload.request_id[:8]}] {msg.payload.pattern}'
         return f'{msg.partition}:{msg.offset}'
 
     async def on_startup(self, config: dk.DrakkarConfig) -> dk.DrakkarConfig:
@@ -85,7 +83,7 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
         Demonstrates on_error='stop' — if the corpus disappears, this
         task logs an error and stops rather than spamming every 30s."""
         if not os.path.isdir('/tmp/search-corpus'):
-            raise RuntimeError("Search corpus directory missing: /tmp/search-corpus")
+            raise RuntimeError('Search corpus directory missing: /tmp/search-corpus')
         await logger.ainfo('health_check_ok', category='periodic')
 
     # -------------------------------------------------------------------
@@ -215,9 +213,7 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
 
         # retry simulated failures, skip everything else
         if error.exit_code == 1 and error.stderr and 'SIMULATED FAILURE' in error.stderr:
-            await logger.ainfo(
-                'retrying_simulated_failure', category='handler', task_id=task.task_id
-            )
+            await logger.ainfo('retrying_simulated_failure', category='handler', task_id=task.task_id)
             return dk.ErrorAction.RETRY
         return dk.ErrorAction.SKIP
 

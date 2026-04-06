@@ -199,9 +199,7 @@ def main():
     sent += remaining
 
     # Phase 8: flood — same volume again, no pauses, create massive consumer lag
-    print(
-        f'\nPhase 8: FLOOD — {TOTAL_MESSAGES} msgs at max speed (creating consumer lag)', flush=True
-    )
+    print(f'\nPhase 8: FLOOD — {TOTAL_MESSAGES} msgs at max speed (creating consumer lag)', flush=True)
     send_batch(producer, TOTAL_MESSAGES, label='flood')
     sent += TOTAL_MESSAGES
 
