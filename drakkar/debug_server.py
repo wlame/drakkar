@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+WS_DRAIN_SLEEP = 0.02  # seconds to sleep when WebSocket event queue is empty
+
 TEMPLATES_DIR = Path(__file__).parent / 'templates'
 
 
@@ -939,7 +941,7 @@ def create_debug_app(
                 except queue_mod.Empty:
                     pass
                 if not batch:
-                    await asyncio.sleep(0.02)
+                    await asyncio.sleep(WS_DRAIN_SLEEP)
                     continue
                 try:
                     for event in batch:

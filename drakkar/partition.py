@@ -39,6 +39,7 @@ CollectCallback = Callable[[CollectResult, int], Awaitable[None]]
 CommitCallback = Callable[[int, int], Awaitable[None]]
 
 MAX_RETRIES = 3  # default, overridden by config.executor.max_retries
+DRAIN_POLL_INTERVAL = 0.05  # seconds between checks when draining in-flight work
 
 
 @dataclass
@@ -152,7 +153,7 @@ class PartitionProcessor:
     async def drain(self) -> None:
         """Wait for all in-flight work and queued messages to complete."""
         while self._queue.qsize() > 0 or self._offset_tracker.has_pending() or self._inflight_count > 0:
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(DRAIN_POLL_INTERVAL)
 
     async def _run(self) -> None:
         log = logger.bind(partition=self._partition_id, category='partition')
@@ -181,7 +182,7 @@ class PartitionProcessor:
 
             # wait for any in-flight tasks to complete
             while self._inflight_count > 0 or self._offset_tracker.has_pending():
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(DRAIN_POLL_INTERVAL)
 
             # final commit
             await self._try_commit()

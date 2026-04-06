@@ -45,6 +45,8 @@ from drakkar.sinks.redis import RedisSink
 
 logger = structlog.get_logger()
 
+POLL_IDLE_SLEEP = 0.05  # seconds to sleep when Kafka poll returns no messages
+
 
 class DrakkarApp:
     """Main application that orchestrates Kafka consumption, subprocess
@@ -335,7 +337,7 @@ class DrakkarApp:
                 # Measures time with genuinely nothing to do (consumer lag is zero).
                 if total == 0 and not self._paused:
                     consumer_idle.inc(dt)
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(POLL_IDLE_SLEEP)
 
     def _on_assign(self, partition_ids: list[int]) -> None:
         """Handle new partition assignments."""
