@@ -6,6 +6,7 @@ payload.path. Creates the file if it doesn't exist. Raises an error
 if the parent directory is missing or not writable.
 """
 
+import os
 import time
 from pathlib import Path
 
@@ -35,6 +36,7 @@ class FileSink(BaseSink[FilePayload]):
     def __init__(self, name: str, config: FileSinkConfig) -> None:
         super().__init__(name, ui_url=config.ui_url)
         self._config = config
+        self._base_path = config.base_path
 
     async def connect(self) -> None:
         """Validate base_path if configured, otherwise no-op."""
@@ -62,7 +64,16 @@ class FileSink(BaseSink[FilePayload]):
         labels = {'sink_type': self.sink_type, 'sink_name': self._name}
         try:
             for payload in payloads:
-                path = Path(payload.path)
+                if self._base_path:
+                    resolved = os.path.realpath(os.path.join(self._base_path, payload.path))
+                    base_real = os.path.realpath(self._base_path)
+                    if not resolved.startswith(base_real + os.sep) and resolved != base_real:
+                        raise ValueError(
+                            f'Path traversal detected: {payload.path!r} resolves outside base_path {self._base_path!r}'
+                        )
+                    path = Path(resolved)
+                else:
+                    path = Path(payload.path)
                 if not path.parent.is_dir():
                     raise FileNotFoundError(f'Parent directory does not exist: {path.parent}')
                 line = payload.data.model_dump_json() + '\n'

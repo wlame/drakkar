@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 import uvicorn
-from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
@@ -101,6 +101,25 @@ def create_debug_app(
         return links
 
     templates.env.globals['get_sink_ui_links'] = _get_sink_ui_links  # ty: ignore[invalid-assignment]
+
+    # --- Auth dependency for sensitive endpoints ---
+
+    async def _require_auth(
+        request: Request,
+        token: str | None = Query(default=None),
+    ) -> None:
+        """Check bearer token for protected endpoints (download, merge).
+
+        Skipped when auth_token is empty (no auth configured).
+        Accepts token via Authorization header or ?token= query parameter.
+        """
+        if not config.auth_token:
+            return
+        auth_header = request.headers.get('authorization', '')
+        header_token = auth_header.removeprefix('Bearer ').strip() if auth_header.startswith('Bearer ') else ''
+        if header_token == config.auth_token or token == config.auth_token:
+            return
+        raise HTTPException(status_code=401, detail='Invalid or missing auth token')
 
     async def _get_lag() -> dict[int, dict]:
         consumer = drakkar_app._consumer
@@ -539,7 +558,7 @@ def create_debug_app(
             },
         )
 
-    @app.get('/api/debug/databases')
+    @app.get('/api/debug/databases', dependencies=[Depends(_require_auth)])
     async def api_debug_databases():
         """List all debug database files in db_dir with stats."""
         from drakkar.merge import scan_directory
@@ -565,7 +584,7 @@ def create_debug_app(
             ]
         )
 
-    @app.post('/api/debug/merge')
+    @app.post('/api/debug/merge', dependencies=[Depends(_require_auth)])
     async def api_debug_merge(request: Request):
         """Merge selected database files into one."""
         import asyncio
@@ -585,6 +604,8 @@ def create_debug_app(
             if '/' in fn or '\\' in fn or fn.startswith('.'):
                 return JSONResponse({'error': f'Invalid filename: {fn}'}, status_code=400)
             full = os.path.join(config.db_dir, fn)
+            if not os.path.realpath(full).startswith(os.path.realpath(config.db_dir) + os.sep):
+                return JSONResponse({'error': f'Invalid path: {fn}'}, status_code=400)
             if not os.path.isfile(full):
                 return JSONResponse({'error': f'File not found: {fn}'}, status_code=404)
             db_paths.append(full)
@@ -622,13 +643,15 @@ def create_debug_app(
 
         return JSONResponse(collect_all_metrics())
 
-    @app.get('/debug/download/{filename}')
+    @app.get('/debug/download/{filename}', dependencies=[Depends(_require_auth)])
     async def debug_download(filename: str):
         """Download a database file from db_dir."""
         # prevent directory traversal
         if '/' in filename or '\\' in filename or filename.startswith('.'):
             return JSONResponse({'error': 'Invalid filename'}, status_code=400)
         full = os.path.join(config.db_dir, filename)
+        if not os.path.realpath(full).startswith(os.path.realpath(config.db_dir) + os.sep):
+            return JSONResponse({'error': 'Invalid path'}, status_code=400)
         if not os.path.isfile(full):
             return JSONResponse({'error': 'File not found'}, status_code=404)
         return FileResponse(
@@ -983,7 +1006,7 @@ class DebugServer:
         )
         uvi_config = uvicorn.Config(
             app=fastapi_app,
-            host='0.0.0.0',
+            host=self._config.host,
             port=self._config.port,
             log_level='warning',
         )

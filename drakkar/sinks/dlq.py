@@ -12,9 +12,10 @@ import structlog
 from confluent_kafka.aio import AIOProducer
 from pydantic import BaseModel
 
-from drakkar.metrics import sink_dlq_messages
+from drakkar.metrics import dlq_send_failures, sink_dlq_messages
 from drakkar.models import DeliveryError
 from drakkar.sinks.base import BaseSink
+from drakkar.utils import redact_url
 
 logger = structlog.get_logger()
 
@@ -90,7 +91,7 @@ class DLQSink(BaseSink[BaseModel]):
             'dlq_sink_connected',
             category='sink',
             topic=self._topic,
-            brokers=self._brokers,
+            brokers=redact_url(self._brokers),
         )
 
     async def deliver(self, payloads: list[BaseModel]) -> None:
@@ -134,6 +135,7 @@ class DLQSink(BaseSink[BaseModel]):
                 payload_count=len(delivery_error.payloads),
             )
         except Exception as e:
+            dlq_send_failures.inc()
             await logger.aerror(
                 'dlq_send_failed',
                 category='sink',

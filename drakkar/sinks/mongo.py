@@ -12,6 +12,7 @@ from drakkar.config import MongoSinkConfig
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
 from drakkar.models import MongoPayload
 from drakkar.sinks.base import BaseSink
+from drakkar.utils import redact_url
 
 logger = structlog.get_logger()
 
@@ -44,7 +45,7 @@ class MongoSink(BaseSink[MongoPayload]):
             'mongo_sink_connected',
             category='sink',
             sink_name=self._name,
-            uri=self._config.uri,
+            uri=redact_url(self._config.uri),
             database=self._config.database,
         )
 

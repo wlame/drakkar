@@ -92,11 +92,11 @@ class RedisSinkConfig(BaseModel):
 class FileSinkConfig(BaseModel):
     """Configuration for a filesystem output sink.
 
-    Writes JSONL lines to files. `base_path` is optional — individual
-    payloads specify their own full paths.
+    Writes JSONL lines to files. `base_path` is required — all payload
+    paths are resolved relative to it and contained within it.
     """
 
-    base_path: str = ''
+    base_path: str = Field(min_length=1)
     ui_url: str = ''
 
 
@@ -219,7 +219,19 @@ class DebugConfig(BaseModel):
     """
 
     enabled: bool = True
+    host: str = Field(
+        default='127.0.0.1',
+        description='Bind address for the debug server. Use 0.0.0.0 to expose on all interfaces.',
+    )
     port: int = Field(default=8080, ge=1, le=65535)
+    auth_token: str = Field(
+        default='',
+        description=(
+            'Bearer token for sensitive debug endpoints (database download, merge). '
+            'When empty, no authentication is required. When set, protected endpoints '
+            'require an Authorization: Bearer <token> header or ?token=<token> query parameter.'
+        ),
+    )
     debug_url: str = ''
     db_dir: str = '/tmp'
     store_events: bool = True

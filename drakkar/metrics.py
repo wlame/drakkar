@@ -166,6 +166,11 @@ sink_dlq_messages = Counter(
     'Total messages sent to the dead letter queue',
 )
 
+dlq_send_failures = Counter(
+    'drakkar_dlq_send_failures_total',
+    'Total failed attempts to send messages to the dead letter queue',
+)
+
 # --- Handler hooks ---
 
 handler_duration = Histogram(

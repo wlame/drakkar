@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+import typing
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -1357,6 +1358,30 @@ class TestApiDebugMetrics:
         assert isinstance(data, list)
 
 
+class TestDownloadRealpathTraversal:
+    """Cover realpath canonicalization in download endpoint."""
+
+    async def test_download_symlink_outside_db_dir_blocked(self, tmp_path, mock_recorder, mock_app):
+        """A symlink inside db_dir pointing outside is blocked by realpath check."""
+        outside_dir = tmp_path / 'outside'
+        outside_dir.mkdir()
+        secret = outside_dir / 'secret.db'
+        secret.write_bytes(b'secret-data')
+
+        db_dir = tmp_path / 'db'
+        db_dir.mkdir()
+        # create symlink inside db_dir pointing outside
+        link = db_dir / 'escape.db'
+        link.symlink_to(secret)
+
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(db_dir))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/debug/download/escape.db')
+        assert resp.status_code == 400
+
+
 class TestDownloadDotPrefixed:
     """Cover download endpoint blocking dot-prefixed files (line 620)."""
 
@@ -1984,3 +2009,89 @@ class TestApiDashboardLagException:
         assert resp.status_code == 200
         data = resp.json()
         assert data['total_lag'] == 0
+
+
+# ---------------------------------------------------------------------------
+# Auth token tests
+# ---------------------------------------------------------------------------
+
+
+class TestAuthToken:
+    """Test auth_token protection on sensitive endpoints."""
+
+    PROTECTED_ROUTES: typing.ClassVar[list[tuple[str, str]]] = [
+        ('GET', '/api/debug/databases'),
+        ('GET', '/debug/download/test.db'),
+    ]
+
+    async def test_protected_routes_require_token(self, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        mock_recorder._config = cfg
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            for method, path in self.PROTECTED_ROUTES:
+                resp = await c.request(method, path)
+                assert resp.status_code == 401, f'{method} {path} should require auth'
+
+    async def test_protected_routes_accept_bearer_header(self, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        mock_recorder._config = cfg
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        headers = {'Authorization': 'Bearer secret-123'}
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/databases', headers=headers)
+            assert resp.status_code == 200
+
+    async def test_protected_routes_accept_query_param(self, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        mock_recorder._config = cfg
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/databases?token=secret-123')
+            assert resp.status_code == 200
+
+    async def test_wrong_token_returns_401(self, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        mock_recorder._config = cfg
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/databases', headers={'Authorization': 'Bearer wrong'})
+            assert resp.status_code == 401
+
+    async def test_no_auth_when_token_empty(self, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='')
+        mock_recorder._config = cfg
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/databases')
+            assert resp.status_code == 200
+
+    async def test_unprotected_routes_always_accessible(self, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        mock_recorder._config = cfg
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            for path in ['/', '/partitions', '/sinks', '/live', '/history', '/debug']:
+                resp = await c.get(path)
+                assert resp.status_code == 200, f'{path} should be accessible without auth'
+
+    async def test_merge_requires_token(self, tmp_path, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
+        mock_recorder._config = cfg
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post('/api/debug/merge', json={'filenames': []})
+            assert resp.status_code == 401
+            resp = await c.post(
+                '/api/debug/merge',
+                json={'filenames': []},
+                headers={'Authorization': 'Bearer secret-123'},
+            )
+            assert resp.status_code != 401

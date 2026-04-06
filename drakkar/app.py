@@ -19,7 +19,7 @@ from drakkar.config import DrakkarConfig, load_config
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
-from drakkar.logging import setup_logging
+from drakkar.logging import close_logging, setup_logging
 from drakkar.metrics import (
     assigned_partitions,
     backpressure_active,
@@ -526,6 +526,7 @@ class DrakkarApp:
             await self._consumer.close()
 
         await log.ainfo('drakkar_stopped', category='lifecycle')
+        close_logging()
 
     async def _drain_all_processors(self) -> None:
         """Wait for all partition processors to finish queued + in-flight work."""

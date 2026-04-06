@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import time
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,7 @@ class ExecutorPool:
         self._active_count = 0
         self._waiting_count = 0
         self._available_slots: list[int] = list(range(max_workers))
+        heapq.heapify(self._available_slots)
 
     @property
     def active_count(self) -> int:
@@ -66,7 +68,7 @@ class ExecutorPool:
         async with self._semaphore:
             self._waiting_count -= 1
             self._active_count += 1
-            slot = self._available_slots.pop(0)
+            slot = heapq.heappop(self._available_slots)
             if recorder:
                 recorder.record_task_started(
                     task,
@@ -78,8 +80,7 @@ class ExecutorPool:
             try:
                 return await self._run_subprocess(task)
             finally:
-                self._available_slots.append(slot)
-                self._available_slots.sort()
+                heapq.heappush(self._available_slots, slot)
                 self._active_count -= 1
 
     def _resolve_binary(self, task: ExecutorTask) -> str:

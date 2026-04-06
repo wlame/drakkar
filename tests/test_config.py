@@ -138,9 +138,11 @@ def test_redis_sink_config_custom():
     assert cfg.key_prefix == 'drakkar:'
 
 
-def test_file_sink_config_defaults():
-    cfg = FileSinkConfig()
-    assert cfg.base_path == ''
+def test_file_sink_config_requires_base_path():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        FileSinkConfig()
 
 
 def test_file_sink_config_custom():
@@ -188,7 +190,7 @@ def test_sinks_config_all_types():
         mongo={'m': MongoSinkConfig(uri='mongodb://x', database='db')},
         http={'h': HttpSinkConfig(url='https://x')},
         redis={'r': RedisSinkConfig()},
-        filesystem={'f': FileSinkConfig()},
+        filesystem={'f': FileSinkConfig(base_path='/data')},
     )
     assert not cfg.is_empty
     assert set(cfg.summary().keys()) == {

@@ -13,6 +13,7 @@ from drakkar.config import RedisSinkConfig
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
 from drakkar.models import RedisPayload
 from drakkar.sinks.base import BaseSink
+from drakkar.utils import redact_url
 
 logger = structlog.get_logger()
 
@@ -42,7 +43,7 @@ class RedisSink(BaseSink[RedisPayload]):
             'redis_sink_connected',
             category='sink',
             sink_name=self._name,
-            url=self._config.url,
+            url=redact_url(self._config.url),
             key_prefix=self._config.key_prefix,
         )
 

@@ -3,23 +3,27 @@
 import logging
 import sys
 from pathlib import Path
-from typing import IO
+from typing import TextIO
 
 import structlog
 
 from drakkar.config import LoggingConfig
+
+_log_file_handle: TextIO | None = None
 
 
 def _resolve_output(
     output: str,
     worker_id: str = '',
     cluster_name: str = '',
-) -> IO:
+) -> TextIO:
     """Resolve the log output destination from config.
 
     "stderr" and "stdout" map to sys streams. Anything else is treated
     as a file path with template variable substitution.
     """
+    global _log_file_handle
+
     if output == 'stderr':
         return sys.stderr
     if output == 'stdout':
@@ -27,7 +31,16 @@ def _resolve_output(
 
     path = output.format(worker_id=worker_id, cluster_name=cluster_name)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    return open(path, 'a', encoding='utf-8')
+    _log_file_handle = open(path, 'a', encoding='utf-8')  # noqa: SIM115
+    return _log_file_handle
+
+
+def close_logging() -> None:
+    """Close the log file handle if one was opened. No-op for stderr/stdout."""
+    global _log_file_handle
+    if _log_file_handle is not None:
+        _log_file_handle.close()
+        _log_file_handle = None
 
 
 def setup_logging(

@@ -7,7 +7,7 @@ import sys
 import structlog
 
 from drakkar.config import LoggingConfig
-from drakkar.logging import _resolve_output, setup_logging
+from drakkar.logging import _resolve_output, close_logging, setup_logging
 
 
 def test_setup_logging_binds_worker_id():
@@ -144,3 +144,43 @@ def test_setup_logging_with_file_writes_json(tmp_path):
 def test_output_default_is_stderr():
     config = LoggingConfig()
     assert config.output == 'stderr'
+
+
+# --- close_logging() tests ---
+
+
+def test_close_logging_closes_file_handle(tmp_path):
+    """close_logging() closes the file handle opened by _resolve_output."""
+    import drakkar.logging as logging_mod
+
+    log_file = str(tmp_path / 'closeable.log')
+    f = _resolve_output(log_file)
+    assert not f.closed
+    assert logging_mod._log_file_handle is f
+
+    close_logging()
+
+    assert f.closed
+    assert logging_mod._log_file_handle is None
+
+
+def test_close_logging_noop_for_stderr():
+    """close_logging() is a no-op when output is stderr (no file handle)."""
+    import drakkar.logging as logging_mod
+
+    _resolve_output('stderr')
+    assert logging_mod._log_file_handle is None
+
+    close_logging()  # should not raise
+    assert logging_mod._log_file_handle is None
+
+
+def test_close_logging_noop_for_stdout():
+    """close_logging() is a no-op when output is stdout (no file handle)."""
+    import drakkar.logging as logging_mod
+
+    _resolve_output('stdout')
+    assert logging_mod._log_file_handle is None
+
+    close_logging()  # should not raise
+    assert logging_mod._log_file_handle is None

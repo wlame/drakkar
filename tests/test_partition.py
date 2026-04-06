@@ -854,3 +854,119 @@ async def test_max_retries_exceeded_logs_warning(failing_pool):
     # With max_retries=1: first attempt fails → RETRY → second attempt fails → exceeds limit
     # Window still completes and offsets are committed
     assert any(c[1] == 1 for c in committed)
+
+
+# --- Concurrent window processing ---
+
+
+async def test_concurrent_windows_offset_watermark():
+    """Offsets commit only after all concurrent windows complete, respecting watermark order.
+
+    Window 1 (offset 0): slow task (0.5s)
+    Window 2 (offset 1): fast task (instant)
+    Window 3 (offset 2): fast task (instant)
+
+    Offset 1 and 2 finish first, but committable offset stays blocked until
+    offset 0 completes. Final commit should be 3 (all three done).
+    """
+    committed = []
+    completion_order = []
+
+    class SlowFirstHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            tasks = []
+            for msg in messages:
+                # offset 0 gets a slow binary, others get fast
+                if msg.offset == 0:
+                    args = ['-c', 'import time; time.sleep(0.5); print("slow")']
+                else:
+                    args = ['-c', 'print("fast")']
+                tasks.append(
+                    ExecutorTask(
+                        task_id=f'cw-{msg.offset}',
+                        args=args,
+                        source_offsets=[msg.offset],
+                    )
+                )
+            return tasks
+
+        async def collect(self, result):
+            completion_order.append(result.task.task_id)
+            return None
+
+    async def on_commit(partition_id: int, offset: int) -> None:
+        committed.append((partition_id, offset))
+
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_workers=4,
+        task_timeout_seconds=10,
+    )
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=SlowFirstHandler(),
+        executor_pool=pool,
+        window_size=1,  # one message per window → 3 concurrent windows
+        on_commit=on_commit,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.enqueue(make_msg(offset=1))
+    proc.enqueue(make_msg(offset=2))
+    proc.start()
+
+    # wait for all three to complete
+    await wait_for(lambda: len(completion_order) >= 3, timeout=10)
+    await proc.stop()
+
+    # fast tasks (offset 1, 2) should finish before slow (offset 0)
+    assert completion_order.index('cw-1') < completion_order.index('cw-0')
+    assert completion_order.index('cw-2') < completion_order.index('cw-0')
+
+    # final committed offset should be 3 (all three offsets: 0, 1, 2 → commit 2+1)
+    assert committed[-1] == (0, 3)
+
+
+async def test_concurrent_windows_pending_context():
+    """arrange() for window N+1 sees in-flight tasks from window N in PendingContext."""
+    seen_pending: list[set[str]] = []
+
+    class TrackPendingHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            seen_pending.append(set(pending.pending_task_ids))
+            tasks = []
+            for msg in messages:
+                tasks.append(
+                    ExecutorTask(
+                        task_id=f'p-{msg.offset}',
+                        args=['-c', 'import time; time.sleep(0.3); print("ok")'] if msg.offset == 0 else ['-c', 'print("ok")'],
+                        source_offsets=[msg.offset],
+                    )
+                )
+            return tasks
+
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_workers=4,
+        task_timeout_seconds=10,
+    )
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=TrackPendingHandler(),
+        executor_pool=pool,
+        window_size=1,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.enqueue(make_msg(offset=1))
+    proc.start()
+
+    await wait_for(lambda: len(seen_pending) >= 2, timeout=10)
+    await proc.stop()
+
+    # first arrange() sees empty pending
+    assert seen_pending[0] == set()
+    # second arrange() sees task from first window still in-flight
+    assert 'p-0' in seen_pending[1]

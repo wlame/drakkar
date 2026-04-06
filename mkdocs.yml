@@ -55,6 +55,7 @@ nav:
   - Executor: executor.md
   - Observability: observability.md
   - Performance: performance.md
+  - Integration Tests: integration.md
   - Data Flow: data-flow.md
 
 markdown_extensions:

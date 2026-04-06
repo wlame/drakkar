@@ -331,7 +331,9 @@ The debug subsystem provides a flight recorder (SQLite-backed event log), a web 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `enabled` | `bool` | `true` | | Enable or disable the entire debug feature. Set to `false` to skip the flight recorder, web UI, and all associated overhead. |
+| `host` | `str` | `'127.0.0.1'` | | Bind address for the debug server. Default `127.0.0.1` (localhost only). Use `0.0.0.0` to expose on all interfaces. |
 | `port` | `int` | `8080` | 1--65535 | Port for the debug web UI (FastAPI server). |
+| `auth_token` | `str` | `''` | | Bearer token for sensitive debug endpoints (database download, merge, database listing). When empty, no authentication is required. When set, protected endpoints require `Authorization: Bearer <token>` header or `?token=<token>` query parameter. Read-only pages (dashboard, live, partitions, sinks, history) are always accessible. |
 | `debug_url` | `str` | `''` | | External URL for the debug UI. Used when workers discover each other -- if set, this URL is advertised instead of the auto-detected `http://{ip}:{port}`. Useful behind load balancers or Kubernetes ingresses. |
 | `db_dir` | `str` | `'/tmp'` | | Directory for SQLite database files. Set to `''` to run without any disk persistence (in-memory only, WebSocket streaming still works). Use a shared filesystem (e.g., NFS, EFS) for cross-worker autodiscovery and merge. |
 

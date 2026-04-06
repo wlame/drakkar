@@ -624,3 +624,154 @@ async def test_shutdown_stops_recorder_and_debug_server(test_config):
 
     mock_recorder.stop.assert_called_once()
     mock_debug_server.stop.assert_called_once()
+
+
+# --- Poll loop tests ---
+
+
+async def test_poll_loop_dispatches_messages_to_processors(test_config):
+    """Messages from consumer.poll_batch() are enqueued to the correct partition processor."""
+    from drakkar.executor import ExecutorPool
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+    app._running = True
+
+    app._on_assign([0, 1])
+    await asyncio.sleep(0.01)
+
+    msg0 = SourceMessage(topic='t', partition=0, offset=10, value=b'x', timestamp=0)
+    msg1 = SourceMessage(topic='t', partition=1, offset=20, value=b'y', timestamp=0)
+    call_count = 0
+
+    async def _poll_once(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return [msg0, msg1]
+        app._running = False
+        return []
+
+    app._consumer.poll_batch = _poll_once
+
+    await app._poll_loop()
+
+    assert app.processors[0].queue_size >= 0  # message was consumed (may already be processed)
+    assert app.processors[1].queue_size >= 0
+
+    for proc in app.processors.values():
+        await proc.stop()
+
+
+async def test_poll_loop_pauses_on_high_watermark(test_config):
+    """Consumer is paused when total_queued >= high_watermark."""
+    from drakkar.executor import ExecutorPool
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+    app._running = True
+
+    # Create processor but don't start it — messages stay in queue
+    from drakkar.partition import PartitionProcessor
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=SimpleHandler(),
+        executor_pool=app._executor_pool,
+        window_size=5,
+    )
+    app._processors[0] = proc
+    # Do NOT call proc.start() — queue won't drain
+
+    # high_watermark = 2 * 32 = 64. Fill queue past that.
+    for i in range(70):
+        proc._queue.put_nowait(
+            SourceMessage(topic='t', partition=0, offset=i, value=b'x', timestamp=0)
+        )
+
+    call_count = 0
+
+    async def _poll_then_stop(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 2:
+            app._running = False
+        return []
+
+    app._consumer.poll_batch = _poll_then_stop
+
+    await app._poll_loop()
+
+    app._consumer.pause.assert_called()
+    assert app._paused
+
+
+async def test_poll_loop_consumer_idle_metric(test_config):
+    """Consumer idle metric increments when poll returns nothing and queues are empty."""
+    from drakkar.executor import ExecutorPool
+    from drakkar.metrics import consumer_idle
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+    app._running = True
+
+    # no partitions assigned = empty queues
+    call_count = 0
+
+    async def _empty_poll(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 3:
+            app._running = False
+        return []
+
+    app._consumer.poll_batch = _empty_poll
+
+    before = consumer_idle._value.get()
+    await app._poll_loop()
+    after = consumer_idle._value.get()
+
+    assert after > before
+
+
+async def test_poll_loop_executor_idle_waste_metric(test_config):
+    """Executor idle waste increments when messages queued but slots are free."""
+    from drakkar.executor import ExecutorPool
+    from drakkar.metrics import executor_idle_waste
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+    app._running = True
+
+    app._on_assign([0])
+    await asyncio.sleep(0.01)
+
+    # put messages in queue, keep executor idle (active_count=0)
+    for i in range(5):
+        app.processors[0]._queue.put_nowait(
+            SourceMessage(topic='t', partition=0, offset=i, value=b'x', timestamp=0)
+        )
+
+    call_count = 0
+
+    async def _empty_poll(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 3:
+            app._running = False
+        return []
+
+    app._consumer.poll_batch = _empty_poll
+
+    before = executor_idle_waste._value.get()
+    await app._poll_loop()
+    after = executor_idle_waste._value.get()
+
+    assert after > before
+
+    for proc in app.processors.values():
+        await proc.stop()

@@ -902,11 +902,12 @@ def test_redis_sink_type(redis_sink_config):
 # =============================================================================
 
 
-async def test_file_sink_connect_no_base_path():
-    from drakkar.sinks.filesystem import FileSink
+def test_file_sink_config_requires_base_path():
+    """base_path is required (min_length=1) — empty string raises ValidationError."""
+    from pydantic import ValidationError
 
-    sink = FileSink('output', FileSinkConfig())
-    await sink.connect()  # no-op, should not raise
+    with pytest.raises(ValidationError):
+        FileSinkConfig(base_path='')
 
 
 async def test_file_sink_connect_valid_base_path(tmp_path):
@@ -927,10 +928,10 @@ async def test_file_sink_connect_invalid_base_path():
 async def test_file_sink_deliver_creates_file(tmp_path):
     from drakkar.sinks.filesystem import FileSink
 
-    sink = FileSink('output', FileSinkConfig())
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
     out_file = tmp_path / 'output.jsonl'
 
-    payload = FilePayload(path=str(out_file), data=SampleOutput(request_id='r1'))
+    payload = FilePayload(path='output.jsonl', data=SampleOutput(request_id='r1'))
     await sink.deliver([payload])
 
     assert out_file.exists()
@@ -942,11 +943,11 @@ async def test_file_sink_deliver_creates_file(tmp_path):
 async def test_file_sink_deliver_appends_to_existing(tmp_path):
     from drakkar.sinks.filesystem import FileSink
 
-    sink = FileSink('output', FileSinkConfig())
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
     out_file = tmp_path / 'output.jsonl'
     out_file.write_text('{"existing":"line"}\n')
 
-    payload = FilePayload(path=str(out_file), data=SampleOutput(request_id='r2'))
+    payload = FilePayload(path='output.jsonl', data=SampleOutput(request_id='r2'))
     await sink.deliver([payload])
 
     lines = out_file.read_text().splitlines()
@@ -958,13 +959,13 @@ async def test_file_sink_deliver_appends_to_existing(tmp_path):
 async def test_file_sink_deliver_batch(tmp_path):
     from drakkar.sinks.filesystem import FileSink
 
-    sink = FileSink('output', FileSinkConfig())
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
     out_file = tmp_path / 'batch.jsonl'
 
     payloads = [
-        FilePayload(path=str(out_file), data=SampleOutput(request_id='r1')),
-        FilePayload(path=str(out_file), data=SampleOutput(request_id='r2')),
-        FilePayload(path=str(out_file), data=SampleOutput(request_id='r3')),
+        FilePayload(path='batch.jsonl', data=SampleOutput(request_id='r1')),
+        FilePayload(path='batch.jsonl', data=SampleOutput(request_id='r2')),
+        FilePayload(path='batch.jsonl', data=SampleOutput(request_id='r3')),
     ]
     await sink.deliver(payloads)
 
@@ -975,67 +976,104 @@ async def test_file_sink_deliver_batch(tmp_path):
 async def test_file_sink_deliver_different_files(tmp_path):
     from drakkar.sinks.filesystem import FileSink
 
-    sink = FileSink('output', FileSinkConfig())
-    file_a = tmp_path / 'a.jsonl'
-    file_b = tmp_path / 'b.jsonl'
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
 
     payloads = [
-        FilePayload(path=str(file_a), data=SampleOutput(request_id='r1')),
-        FilePayload(path=str(file_b), data=SampleOutput(request_id='r2')),
+        FilePayload(path='a.jsonl', data=SampleOutput(request_id='r1')),
+        FilePayload(path='b.jsonl', data=SampleOutput(request_id='r2')),
     ]
     await sink.deliver(payloads)
 
+    file_a = tmp_path / 'a.jsonl'
+    file_b = tmp_path / 'b.jsonl'
     assert file_a.exists()
     assert file_b.exists()
     assert '"r1"' in file_a.read_text()
     assert '"r2"' in file_b.read_text()
 
 
-async def test_file_sink_deliver_empty():
+async def test_file_sink_deliver_empty(tmp_path):
     from drakkar.sinks.filesystem import FileSink
 
-    sink = FileSink('output', FileSinkConfig())
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
     await sink.deliver([])  # should not raise
 
 
 async def test_file_sink_deliver_missing_parent_dir(tmp_path):
     from drakkar.sinks.filesystem import FileSink
 
-    sink = FileSink('output', FileSinkConfig())
-    bad_path = tmp_path / 'nonexistent' / 'output.jsonl'
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
+    bad_path = 'nonexistent/output.jsonl'
 
     with pytest.raises(FileNotFoundError, match='Parent directory does not exist'):
-        await sink.deliver([FilePayload(path=str(bad_path), data=SampleOutput())])
+        await sink.deliver([FilePayload(path=bad_path, data=SampleOutput())])
 
 
 async def test_file_sink_deliver_error_increments_metrics(tmp_path):
     from drakkar.metrics import sink_deliver_errors
     from drakkar.sinks.filesystem import FileSink
 
-    sink = FileSink('output', FileSinkConfig())
-    bad_path = tmp_path / 'nonexistent' / 'output.jsonl'
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
+    bad_path = 'nonexistent/output.jsonl'
 
     labels = {'sink_type': 'filesystem', 'sink_name': 'output'}
     before = sink_deliver_errors.labels(**labels)._value.get()
 
     with pytest.raises(FileNotFoundError):
-        await sink.deliver([FilePayload(path=str(bad_path), data=SampleOutput())])
+        await sink.deliver([FilePayload(path=bad_path, data=SampleOutput())])
 
     assert sink_deliver_errors.labels(**labels)._value.get() == before + 1
 
 
-async def test_file_sink_close():
+async def test_file_sink_close(tmp_path):
     from drakkar.sinks.filesystem import FileSink
 
-    sink = FileSink('output', FileSinkConfig())
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
     await sink.close()  # no-op, should not raise
 
 
-def test_file_sink_type():
+def test_file_sink_type(tmp_path):
     from drakkar.sinks.filesystem import FileSink
 
-    sink = FileSink('output', FileSinkConfig())
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
     assert sink.sink_type == 'filesystem'
+
+
+# --- Path containment tests ---
+
+
+async def test_file_sink_relative_path_works(tmp_path):
+    """Normal relative path within base_path works."""
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
+    payload = FilePayload(path='subdir/output.jsonl', data=SampleOutput(request_id='r1'))
+    (tmp_path / 'subdir').mkdir()
+    await sink.deliver([payload])
+
+    assert (tmp_path / 'subdir' / 'output.jsonl').exists()
+
+
+async def test_file_sink_traversal_dotdot_raises(tmp_path):
+    """../traversal outside base_path raises ValueError."""
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
+    payload = FilePayload(path='../escape.jsonl', data=SampleOutput())
+
+    with pytest.raises(ValueError, match='Path traversal detected'):
+        await sink.deliver([payload])
+
+
+async def test_file_sink_absolute_path_outside_base_raises(tmp_path):
+    """Absolute path outside base_path raises ValueError."""
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
+    payload = FilePayload(path='/etc/passwd', data=SampleOutput())
+
+    with pytest.raises(ValueError, match='Path traversal detected'):
+        await sink.deliver([payload])
 
 
 # =============================================================================
@@ -1126,6 +1164,21 @@ async def test_dlq_sink_send_produce_failure():
 
     # should log error but not raise (DLQ is last resort)
     await sink.send(_sample_delivery_error(), partition_id=0)
+
+
+async def test_dlq_sink_send_failure_increments_counter():
+    """When DLQ send fails, dlq_send_failures counter increments."""
+    from drakkar.metrics import dlq_send_failures
+    from drakkar.sinks.dlq import DLQSink
+
+    sink = DLQSink(topic='dlq', brokers='localhost:9092')
+    mock_producer = AsyncMock()
+    mock_producer.produce.side_effect = RuntimeError('kafka down')
+    sink._producer = mock_producer
+
+    before = dlq_send_failures._value.get()
+    await sink.send(_sample_delivery_error(), partition_id=0)
+    assert dlq_send_failures._value.get() == before + 1
 
 
 async def test_dlq_message_serialization():

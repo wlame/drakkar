@@ -84,6 +84,7 @@ metrics:
 | `drakkar_sink_delivery_retries_total` | Counter | `sink_type`, `sink_name` | Total sink delivery retry attempts |
 | `drakkar_sink_deliveries_skipped_total` | Counter | `sink_type`, `sink_name` | Deliveries skipped via `on_delivery_error` returning SKIP |
 | `drakkar_sink_dlq_messages_total` | Counter | -- | Total messages sent to the dead letter queue |
+| `drakkar_dlq_send_failures_total` | Counter | -- | Total failed attempts to send messages to the DLQ. When both the primary sink and DLQ fail, the payload is lost — alert on this counter. |
 
 #### Handler Hooks
 

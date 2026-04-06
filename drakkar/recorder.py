@@ -505,7 +505,7 @@ class EventRecorder:
             # Defer WS broadcast: only send task_started to live UI if
             # the task is still running after ws_min_duration_ms.
             self._record(entry, skip_ws=True)
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             handle = loop.call_later(
                 ws_threshold_ms / 1000.0,
                 self._send_deferred_start,

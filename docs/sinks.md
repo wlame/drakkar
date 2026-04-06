@@ -167,11 +167,15 @@ Appends a JSON line to a file on the local filesystem.
 **Serialization:** `data.model_dump_json() + '\n'` is appended to the file in JSONL
 format. The file is created if it does not exist. The parent directory must already exist.
 
+**Path containment:** `base_path` is required in the filesystem sink config. All payload
+paths are resolved relative to `base_path` and canonicalized — the framework raises
+`ValueError` if the resolved path escapes the base directory (prevents path traversal).
+
 ```python
 from drakkar import FilePayload
 
 FilePayload(
-    path='/tmp/high-match-results.jsonl',
+    path='high-match-results.jsonl',  # resolved relative to sink's base_path
     data=search_result,
 )
 ```
@@ -377,7 +381,7 @@ only need to specify brokers once for sinks on the same cluster.
 
 **MongoSink** uses motor's `AsyncIOMotorClient` for native asyncio support.
 
-**FileSink** validates that `base_path` exists at connect time (if configured).
+**FileSink** requires `base_path` (non-empty) and validates it exists at connect time. All payload paths are contained within `base_path` — traversal attempts raise `ValueError`.
 Individual payload paths must have existing parent directories.
 
 ---

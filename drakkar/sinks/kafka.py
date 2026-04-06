@@ -15,6 +15,7 @@ from drakkar.config import KafkaSinkConfig
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
 from drakkar.models import KafkaPayload
 from drakkar.sinks.base import BaseSink
+from drakkar.utils import redact_url
 
 logger = structlog.get_logger()
 
@@ -51,7 +52,7 @@ class KafkaSink(BaseSink[KafkaPayload]):
             category='sink',
             sink_name=self._name,
             topic=self._config.topic,
-            brokers=self._brokers,
+            brokers=redact_url(self._brokers),
         )
 
     async def deliver(self, payloads: list[KafkaPayload]) -> None:
