@@ -40,7 +40,7 @@
              style="width: {{ pct }}%"></div>
     </div>
 
-    <h2 class="text-lg font-semibold mb-2 text-ink-800">Timeline <span class="text-sm font-normal text-gray-400">(last 10 min, 2 sec delayed)</span></h2>
+    <h2 class="text-lg font-semibold mb-2 text-ink-800">Timeline <span class="text-sm font-normal text-gray-400">(last 10 min, 2 sec delayed{% if ws_min_duration_ms > 0 %}, tasks &ge; {{ ws_min_duration_ms }}ms{% endif %})</span></h2>
     <div class="flex items-center gap-3 mb-2">
         <div class="flex items-center gap-1">
             <label class="text-xs text-gray-400">Zoom:</label>

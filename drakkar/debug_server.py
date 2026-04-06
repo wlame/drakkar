@@ -403,6 +403,7 @@ def create_debug_app(
                 'pool_waiting': drakkar_app._executor_pool.waiting_count if drakkar_app._executor_pool else 0,
                 'pool_max': drakkar_app._executor_pool.max_workers if drakkar_app._executor_pool else 0,
                 'max_ui_rows': config.max_ui_rows,
+                'ws_min_duration_ms': config.ws_min_duration_ms,
             },
         )
 
@@ -738,7 +739,17 @@ def create_debug_app(
         pool = drakkar_app._executor_pool
         max_lanes = pool.max_workers if pool else 8
 
-        result = [t for t in tasks.values() if t['start_ts']]
+        # Apply ws_min_duration_ms filtering: hide fast completed tasks
+        # from the live UI, same as the WebSocket path. Running tasks
+        # (duration unknown) and failed tasks (always visible) are kept.
+        ws_threshold_s = recorder._config.ws_min_duration_ms / 1000.0
+        result = []
+        for t in tasks.values():
+            if not t['start_ts']:
+                continue
+            if t['status'] == 'completed' and t['duration'] is not None and t['duration'] < ws_threshold_s:
+                continue
+            result.append(t)
         return JSONResponse({'tasks': result, 'lane_count': max_lanes})
 
     @app.get('/api/dashboard')

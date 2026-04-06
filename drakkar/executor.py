@@ -92,7 +92,6 @@ class ExecutorPool:
             raise ExecutorTaskError(
                 error=ExecutorError(task=task, exception=msg),
                 result=ExecutorResult(
-                    task_id=task.task_id,
                     exit_code=-1,
                     stdout='',
                     stderr=msg,
@@ -124,7 +123,6 @@ class ExecutorPool:
 
             pid = proc.pid
             result = ExecutorResult(
-                task_id=task.task_id,
                 exit_code=proc.returncode or 0,
                 stdout=stdout_bytes.decode(errors='replace') if stdout_bytes else '',
                 stderr=stderr_bytes.decode(errors='replace') if stderr_bytes else '',
@@ -164,7 +162,6 @@ class ExecutorPool:
                     pid=timeout_pid,
                 ),
                 result=ExecutorResult(
-                    task_id=task.task_id,
                     exit_code=-1,
                     stdout='',
                     stderr='task timed out',
@@ -182,7 +179,6 @@ class ExecutorPool:
                     exception=str(e),
                 ),
                 result=ExecutorResult(
-                    task_id=task.task_id,
                     exit_code=-1,
                     stdout='',
                     stderr=str(e),

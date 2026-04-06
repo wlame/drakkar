@@ -372,7 +372,6 @@ class PartitionProcessor:
             # still count as completed so the window can progress
             window.results.append(
                 ExecutorResult(
-                    task_id=task.task_id,
                     exit_code=-1,
                     stdout='',
                     stderr=str(e),

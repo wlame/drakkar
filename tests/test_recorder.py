@@ -1,5 +1,6 @@
 """Tests for Drakkar flight recorder."""
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -69,7 +70,6 @@ def make_task(task_id='t1', args=None, offsets=None) -> ExecutorTask:
 def make_result(task_id='t1', task=None) -> ExecutorResult:
     t = task or make_task(task_id)
     return ExecutorResult(
-        task_id=task_id,
         exit_code=0,
         stdout='line1\nline2\n',
         stderr='',
@@ -439,18 +439,23 @@ async def test_rotate_enforces_max_file_count(tmp_path):
 # --- Pool stats in events ---
 
 
-async def test_task_started_includes_pool_stats(recorder):
-    task = make_task('t1')
-    recorder.record_task_started(task, partition=0, pool_active=5, pool_waiting=12)
-    await recorder._flush()
+async def test_task_started_includes_pool_stats(tmp_path):
+    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
 
-    queue = recorder.subscribe()
+    task = make_task('t1')
+    rec.record_task_started(task, partition=0, pool_active=5, pool_waiting=12)
+    await rec._flush()
+
+    queue = rec.subscribe()
     # re-record to check WS event
-    recorder.record_task_started(task, partition=0, pool_active=3, pool_waiting=7)
+    rec.record_task_started(task, partition=0, pool_active=3, pool_waiting=7)
     event = queue.get_nowait()
     assert event['pool_active'] == 3
     assert event['pool_waiting'] == 7
-    recorder.unsubscribe(queue)
+    rec.unsubscribe(queue)
+    await rec.stop()
 
 
 async def test_task_completed_includes_pool_stats(recorder):
@@ -1705,7 +1710,6 @@ def make_fast_result(task_id='t-fast', task=None) -> ExecutorResult:
     """Result with 100ms duration — below default 500ms thresholds."""
     t = task or make_task(task_id)
     return ExecutorResult(
-        task_id=task_id,
         exit_code=0,
         stdout='fast output\n',
         stderr='',
@@ -1718,7 +1722,6 @@ def make_slow_result(task_id='t-slow', task=None) -> ExecutorResult:
     """Result with 1.5s duration — above default 500ms thresholds."""
     t = task or make_task(task_id)
     return ExecutorResult(
-        task_id=task_id,
         exit_code=0,
         stdout='slow output\n',
         stderr='warn',
@@ -1728,13 +1731,19 @@ def make_slow_result(task_id='t-slow', task=None) -> ExecutorResult:
 
 
 async def test_ws_threshold_skips_fast_task(tmp_path):
-    """Fast task completion is not broadcast to WS subscribers."""
+    """Fast task (start + complete before threshold) is invisible to WS.
+
+    ws_min_duration_ms defers task_started; if the task completes before
+    the threshold fires, neither start nor completion reaches WS.
+    """
     config = make_debug_config(tmp_path, ws_min_duration_ms=500)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
     q = rec.subscribe()
-    rec.record_task_completed(make_fast_result(), partition=0)
+    task = make_task('t-fast')
+    rec.record_task_started(task, partition=0)
+    rec.record_task_completed(make_fast_result('t-fast', task=task), partition=0)
 
     assert q.empty()
     rec.unsubscribe(q)
@@ -1742,19 +1751,105 @@ async def test_ws_threshold_skips_fast_task(tmp_path):
 
 
 async def test_ws_threshold_broadcasts_slow_task(tmp_path):
-    """Slow task completion is broadcast to WS subscribers."""
+    """Slow task — deferred start fires, then completion is broadcast too."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=10)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    q = rec.subscribe()
+    task = make_task('t-slow')
+    rec.record_task_started(task, partition=0)
+
+    # wait for the deferred timer to fire (10ms threshold)
+    await asyncio.sleep(0.05)
+
+    rec.record_task_completed(make_slow_result('t-slow', task=task), partition=0)
+
+    events = []
+    while not q.empty():
+        events.append(q.get_nowait())
+    assert len(events) == 2
+    assert events[0]['event'] == 'task_started'
+    assert events[1]['event'] == 'task_completed'
+    rec.unsubscribe(q)
+    await rec.stop()
+
+
+async def test_ws_deferred_start_not_sent_immediately(tmp_path):
+    """With ws_min_duration_ms>0, task_started is NOT sent to WS immediately."""
     config = make_debug_config(tmp_path, ws_min_duration_ms=500)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
     q = rec.subscribe()
-    rec.record_task_completed(make_slow_result(), partition=0)
+    task = make_task('t1')
+    rec.record_task_started(task, partition=0)
+
+    # start event is deferred — WS queue should be empty right after
+    assert q.empty()
+    # but it IS written to the DB buffer
+    assert len(rec._buffer) == 1
+    assert rec._buffer[0]['event'] == 'task_started'
+    rec.unsubscribe(q)
+    await rec.stop()
+
+
+async def test_ws_zero_threshold_sends_start_immediately(tmp_path):
+    """With ws_min_duration_ms=0, task_started goes to WS immediately."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    q = rec.subscribe()
+    task = make_task('t1')
+    rec.record_task_started(task, partition=0)
 
     assert not q.empty()
     event = q.get_nowait()
-    assert event['event'] == 'task_completed'
+    assert event['event'] == 'task_started'
     rec.unsubscribe(q)
     await rec.stop()
+
+
+async def test_ws_deferred_fast_fail_sends_both_events(tmp_path):
+    """Failed tasks always go to WS — even fast ones. Deferred start is flushed first."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=500)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    q = rec.subscribe()
+    task = make_task('t-fail')
+    error = ExecutorError(task=task, exit_code=1, stderr='boom')
+
+    rec.record_task_started(task, partition=0)
+    # still deferred
+    assert q.empty()
+
+    rec.record_task_failed(task, error, partition=0, duration_seconds=0.05)
+
+    # both start and fail should be on WS
+    events = []
+    while not q.empty():
+        events.append(q.get_nowait())
+    assert len(events) == 2
+    assert events[0]['event'] == 'task_started'
+    assert events[1]['event'] == 'task_failed'
+    rec.unsubscribe(q)
+    await rec.stop()
+
+
+async def test_ws_deferred_cleanup_on_stop(tmp_path):
+    """Deferred WS timers are cancelled on recorder stop."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=5000)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-pending')
+    rec.record_task_started(task, partition=0)
+    assert len(rec._deferred_ws) == 1
+
+    await rec.stop()
+    assert len(rec._deferred_ws) == 0
 
 
 async def test_event_threshold_zero_saves_all(tmp_path):
@@ -1886,7 +1981,9 @@ async def test_log_threshold_skips_fast_task(tmp_path):
 
 
 async def test_failed_with_duration_applies_thresholds(tmp_path):
-    """record_task_failed with duration_seconds applies all thresholds."""
+    """record_task_failed with duration_seconds applies db/output thresholds
+    but always sends to WS (failed tasks are never suppressed from live UI).
+    """
     config = make_debug_config(
         tmp_path,
         ws_min_duration_ms=500,
@@ -1900,11 +1997,20 @@ async def test_failed_with_duration_applies_thresholds(tmp_path):
     error = ExecutorError(task=task, exit_code=1, stderr='error output')
     q = rec.subscribe()
 
+    # start the task (deferred) then fail it
+    rec.record_task_started(task, partition=0)
     rec.record_task_failed(task, error, partition=0, duration_seconds=0.1)
 
-    # fast: skipped from buffer and WS
-    assert len(rec._buffer) == 0
-    assert q.empty()
+    # buffer has task_started (always written to DB) but not task_failed
+    # (skipped by event_min_duration_ms=500)
+    assert len(rec._buffer) == 1
+    assert rec._buffer[0]['event'] == 'task_started'
+    events = []
+    while not q.empty():
+        events.append(q.get_nowait())
+    assert len(events) == 2
+    assert events[0]['event'] == 'task_started'
+    assert events[1]['event'] == 'task_failed'
     rec.unsubscribe(q)
     await rec.stop()
 
@@ -2062,7 +2168,6 @@ async def test_threshold_boundary_exact_match(tmp_path):
 
     task = make_task('t-boundary')
     result = ExecutorResult(
-        task_id='t-boundary',
         exit_code=0,
         stdout='boundary\n',
         stderr='',

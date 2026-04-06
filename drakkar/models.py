@@ -83,7 +83,6 @@ class ExecutorTask(BaseModel):
 class ExecutorResult(BaseModel):
     """Result of a completed executor task."""
 
-    task_id: str = Field(description='Task ID matching the originating ExecutorTask.')
     exit_code: int = Field(description='Process exit code. 0 = success; any other value raises ExecutorTaskError.')
     stdout: str = Field(description='Captured stdout from the process, decoded as UTF-8 (errors replaced).')
     stderr: str = Field(description='Captured stderr from the process, decoded as UTF-8 (errors replaced).')

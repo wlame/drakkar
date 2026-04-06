@@ -1392,11 +1392,12 @@ class TestApiEvents:
             )
         await db.commit()
 
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+
         mock_recorder._db = db
         mock_recorder._flush = AsyncMock()
         mock_recorder._buffer = []
-
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        mock_recorder._config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         client = AsyncClient(transport=transport, base_url='http://test')
@@ -1509,11 +1510,12 @@ class TestApiRecentTasks:
         )
         await db.commit()
 
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+
         mock_recorder._db = db
         mock_recorder._flush = AsyncMock()
         mock_recorder._buffer = []
-
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        mock_recorder._config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         client = AsyncClient(transport=transport, base_url='http://test')
@@ -1892,11 +1894,12 @@ class TestApiRecentTasksEdgeCases:
         )
         await db.commit()
 
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+
         mock_recorder._db = db
         mock_recorder._flush = AsyncMock()
         mock_recorder._buffer = []
-
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        mock_recorder._config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -1924,11 +1927,12 @@ class TestApiRecentTasksEdgeCases:
         )
         await db.commit()
 
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+
         mock_recorder._db = db
         mock_recorder._flush = AsyncMock()
         mock_recorder._buffer = []
-
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        mock_recorder._config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:

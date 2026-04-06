@@ -192,6 +192,11 @@ class EventRecorder:
         self._ws_subscribers: set[queue.Queue] = set()
         self._state_provider: Callable[[], dict] | None = None
         self._drakkar_config: DrakkarConfig | None = None
+        # Deferred WS broadcasts: task_started events are held for ws_min_duration_ms
+        # before being sent to WebSocket. If the task completes before the threshold,
+        # neither start nor completion is sent (fast task, invisible to live UI).
+        # Exception: failed tasks always go to WS regardless of duration.
+        self._deferred_ws: dict[str, tuple[dict, asyncio.TimerHandle]] = {}
         # In-memory counters (used for worker_state regardless of store_events)
         self._counters = {
             'consumed': 0,
@@ -264,6 +269,22 @@ class EventRecorder:
                     q.put_nowait(event)
                 except queue.Full:
                     pass
+
+    def _broadcast_ws(self, event: dict) -> None:
+        """Send event to WebSocket subscribers without buffering to DB."""
+        if self._ws_subscribers:
+            for q in self._ws_subscribers:
+                try:
+                    q.put_nowait(event)
+                except queue.Full:
+                    pass
+
+    def _send_deferred_start(self, task_id: str) -> None:
+        """Timer callback: task is still running after ws_min_duration_ms, send its start event."""
+        entry = self._deferred_ws.pop(task_id, None)
+        if entry:
+            event, _ = entry
+            self._broadcast_ws(event)
 
     def _update_live_link(self) -> None:
         """Create or update the {worker}-live.db symlink to the current DB."""
@@ -391,6 +412,11 @@ class EventRecorder:
                 await self._state_task
             except asyncio.CancelledError:
                 pass
+        # cancel any pending deferred WS timers
+        for _, handle in self._deferred_ws.values():
+            handle.cancel()
+        self._deferred_ws.clear()
+
         await self._flush()
         await self._sync_state()
         if self._db:
@@ -454,26 +480,38 @@ class EventRecorder:
         if task.stdin:
             stdin_size = len(task.stdin.encode())
             stdin_lines = task.stdin.count('\n') + (1 if task.stdin and not task.stdin.endswith('\n') else 0)
-        self._record(
-            {
-                'ts': time.time(),
-                'event': 'task_started',
-                'partition': partition,
-                'task_id': task.task_id,
-                'args': json.dumps(task.args),
-                'pool_active': pool_active,
-                'pool_waiting': pool_waiting,
-                'slot': slot,
-                'stdin_lines': stdin_lines,
-                'stdin_size': stdin_size,
-                'metadata': json.dumps(
-                    {
-                        'source_offsets': task.source_offsets,
-                        'slot': slot,
-                    }
-                ),
-            }
-        )
+        entry = {
+            'ts': time.time(),
+            'event': 'task_started',
+            'partition': partition,
+            'task_id': task.task_id,
+            'args': json.dumps(task.args),
+            'pool_active': pool_active,
+            'pool_waiting': pool_waiting,
+            'slot': slot,
+            'stdin_lines': stdin_lines,
+            'stdin_size': stdin_size,
+            'metadata': json.dumps(
+                {
+                    'source_offsets': task.source_offsets,
+                    'slot': slot,
+                }
+            ),
+        }
+        ws_threshold_ms = self._config.ws_min_duration_ms
+        if ws_threshold_ms > 0:
+            # Defer WS broadcast: only send task_started to live UI if
+            # the task is still running after ws_min_duration_ms.
+            self._record(entry, skip_ws=True)
+            loop = asyncio.get_event_loop()
+            handle = loop.call_later(
+                ws_threshold_ms / 1000.0,
+                self._send_deferred_start,
+                task.task_id,
+            )
+            self._deferred_ws[task.task_id] = (entry, handle)
+        else:
+            self._record(entry)
 
     def record_task_completed(
         self,
@@ -485,7 +523,17 @@ class EventRecorder:
         self._counters['completed'] += 1
         duration_ms = result.duration_seconds * 1000
 
-        skip_ws = duration_ms < self._config.ws_min_duration_ms
+        # If the task_started was deferred and the task finished before
+        # the threshold, neither start nor completion goes to WS.
+        # If the threshold already fired (start was sent), send completion too.
+        deferred = self._deferred_ws.pop(result.task.task_id, None)
+        if deferred:
+            _, handle = deferred
+            handle.cancel()
+            skip_ws = True
+        else:
+            skip_ws = False
+
         skip_db = self._config.event_min_duration_ms > 0 and duration_ms < self._config.event_min_duration_ms
         include_output = duration_ms >= self._config.output_min_duration_ms
 
@@ -493,7 +541,7 @@ class EventRecorder:
             'ts': time.time(),
             'event': 'task_completed',
             'partition': partition,
-            'task_id': result.task_id,
+            'task_id': result.task.task_id,
             'exit_code': result.exit_code,
             'duration': result.duration_seconds,
             'stdout_size': len(result.stdout.encode()),
@@ -512,7 +560,7 @@ class EventRecorder:
             logger.info(
                 'slow_task_completed',
                 category='recorder',
-                task_id=result.task_id,
+                task_id=result.task.task_id,
                 duration=result.duration_seconds,
                 partition=partition,
             )
@@ -528,14 +576,21 @@ class EventRecorder:
     ) -> None:
         self._counters['failed'] += 1
 
+        # Failed tasks ALWAYS go to WS regardless of ws_min_duration_ms.
+        # If the task_started was deferred, send it now before the failure event
+        # so the live UI sees the full start→fail sequence.
+        deferred = self._deferred_ws.pop(task.task_id, None)
+        if deferred:
+            start_event, handle = deferred
+            handle.cancel()
+            self._broadcast_ws(start_event)
+
         if duration_seconds is not None:
             duration_ms = duration_seconds * 1000
-            skip_ws = duration_ms < self._config.ws_min_duration_ms
             skip_db = self._config.event_min_duration_ms > 0 and duration_ms < self._config.event_min_duration_ms
             include_output = duration_ms >= self._config.output_min_duration_ms
             should_log = duration_ms >= self._config.log_min_duration_ms
         else:
-            skip_ws = False
             skip_db = False
             include_output = True
             should_log = True
@@ -561,7 +616,7 @@ class EventRecorder:
             entry['args'] = json.dumps(task.args)
         if include_output and self._config.store_output:
             entry['stderr'] = error.stderr
-        self._record(entry, skip_ws=skip_ws, skip_db=skip_db)
+        self._record(entry, skip_ws=False, skip_db=skip_db)
 
         if should_log:
             logger.info(

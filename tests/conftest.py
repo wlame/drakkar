@@ -61,7 +61,6 @@ def executor_task() -> ExecutorTask:
 @pytest.fixture
 def executor_result(executor_task: ExecutorTask) -> ExecutorResult:
     return ExecutorResult(
-        task_id='task-001',
         exit_code=0,
         stdout='result line 1\nresult line 2\n',
         stderr='',

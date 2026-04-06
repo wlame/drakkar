@@ -52,7 +52,7 @@ class EchoHandler(BaseDrakkarHandler):
         ]
 
     async def collect(self, result):
-        self.collect_calls.append(result.task_id)
+        self.collect_calls.append(result.task.task_id)
         return CollectResult(
             kafka=[KafkaPayload(data=_Out(v=result.stdout))],
         )
@@ -692,7 +692,7 @@ async def test_on_error_returns_replacement_tasks(failing_pool, echo_pool):
             ]
 
         async def collect(self, result):
-            collected_task_ids.append(result.task_id)
+            collected_task_ids.append(result.task.task_id)
             return None
 
         async def on_error(self, task, error):

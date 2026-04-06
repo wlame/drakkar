@@ -50,3 +50,4 @@ credentials.json
 # Logs
 *.log
 logs/
+_tmp*
