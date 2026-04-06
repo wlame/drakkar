@@ -24,7 +24,8 @@ htmlcov/
 coverage.xml
 .tox/
 
-docs/
+# MkDocs build output
+site/
 
 # IDE
 .vscode/

@@ -1,0 +1,111 @@
+site_name: Drakkar
+site_description: Kafka subprocess orchestration framework for Python
+site_url: https://wlame.github.io/drakkar
+repo_url: https://github.com/wlame/drakkar
+repo_name: wlame/drakkar
+copyright: Copyright &copy; 2025-2026 wlame
+
+theme:
+  name: material
+  logo: drakkar-logo.png
+  favicon: drakkar-logo.png
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: Inter
+    code: JetBrains Mono
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: slate
+      primary: cyan
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    # Navigation
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    # Search
+    - search.highlight
+    - search.suggest
+    # Content
+    - content.code.copy
+    - content.code.annotate
+    - content.tooltips
+
+nav:
+  - Home: index.md
+  - Handler: handler.md
+  - Configuration: configuration.md
+  - Sinks: sinks.md
+  - Executor: executor.md
+  - Observability: observability.md
+  - Data Flow: data-flow.md
+
+markdown_extensions:
+  # Python Markdown
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+  # PyMdown Extensions
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.mark
+  - pymdownx.tilde
+  - pymdownx.critic
+  - pymdownx.details
+  - pymdownx.keys
+  - pymdownx.smartsymbols
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/wlame/drakkar
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/py-drakkar/
+  generator: false
+
+extra_css:
+  - stylesheets/extra.css
