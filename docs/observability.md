@@ -155,7 +155,7 @@ Metrics are exposed at `:9090/metrics` by default (configurable via `metrics.por
 
 ## Structured Logging
 
-Drakkar uses [structlog](https://www.structlog.org/) for structured, context-rich logging. All log output goes to **stderr** (standard Unix convention -- diagnostics and logs on stderr, data on stdout). Subprocess output is captured via pipes and doesn't touch either stream of the parent worker process, so this is a convention choice rather than a technical necessity.
+Drakkar uses [structlog](https://www.structlog.org/) for structured, context-rich logging. By default, log output goes to **stderr** (standard Unix convention), but you can redirect to stdout or a file.
 
 ### Configuration
 
@@ -163,10 +163,42 @@ Drakkar uses [structlog](https://www.structlog.org/) for structured, context-ric
 logging:
   level: INFO       # DEBUG, INFO, WARNING, ERROR, CRITICAL
   format: json      # json | console
+  output: stderr    # stderr | stdout | file path
 ```
 
 - **`json`** (default) -- produces one JSON object per line, suitable for ingestion by Elasticsearch, Loki, Datadog, or any log aggregator.
 - **`console`** -- human-readable colored output for local development.
+
+### Output Destination
+
+The `output` field controls where logs are written:
+
+| Value | Behavior |
+|-------|----------|
+| `stderr` (default) | Standard error stream |
+| `stdout` | Standard output stream |
+| File path | Append to the specified file (created if missing, parent directories created automatically) |
+
+File paths support template variables:
+
+| Variable | Substitution |
+|----------|-------------|
+| `{worker_id}` | Worker name (from `WORKER_ID` env var or config) |
+| `{cluster_name}` | Cluster name (from config or env var) |
+
+```yaml
+# Examples
+logging:
+  output: stdout
+
+logging:
+  output: /var/log/drakkar/{worker_id}.log
+
+logging:
+  output: /var/log/{cluster_name}/{worker_id}.jsonl
+```
+
+Environment variable override: `DRAKKAR_LOGGING__OUTPUT=/var/log/drakkar/worker.log`
 
 ### Automatic Context Fields
 

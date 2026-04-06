@@ -193,6 +193,14 @@ class LoggingConfig(BaseModel):
 
     level: str = 'INFO'
     format: str = Field(default='json', pattern='^(json|console)$')
+    output: str = Field(
+        default='stderr',
+        description=(
+            'Log output destination. "stderr" (default) or "stdout" for standard streams, '
+            'or a file path for file output. File paths support template variables: '
+            '{worker_id}, {cluster_name}. Example: "/var/log/drakkar/{worker_id}.log"'
+        ),
+    )
 
 
 class DebugConfig(BaseModel):

@@ -111,6 +111,7 @@ class DrakkarApp:
             worker_id=self._worker_id,
             consumer_group=self._config.kafka.consumer_group,
             version=__version__,
+            cluster_name=self._cluster_name,
         )
         asyncio.run(self._async_run())
 

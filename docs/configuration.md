@@ -311,11 +311,13 @@ Structured logging configuration via structlog.
 |-------|------|---------|-------------|-------------|
 | `level` | `str` | `'INFO'` | | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. |
 | `format` | `str` | `'json'` | `json` or `console` | Output format. `json` produces machine-readable structured logs. `console` produces colorized human-readable output for local development. |
+| `output` | `str` | `'stderr'` | | Log destination: `stderr`, `stdout`, or a file path. File paths support `{worker_id}` and `{cluster_name}` template variables. Parent directories are created automatically. |
 
 ```yaml
 logging:
   level: INFO
   format: json
+  output: stderr  # or stdout, or /var/log/drakkar/{worker_id}.log
 ```
 
 ---
@@ -523,6 +525,7 @@ metrics:
 logging:
   level: INFO
   format: json                      # "json" for production, "console" for dev
+  output: stderr                    # stderr | stdout | file path (supports {worker_id}, {cluster_name})
 
 # --- Debug flight recorder ---
 debug:
@@ -593,6 +596,7 @@ Common environment variables and their corresponding YAML paths:
 | `DRAKKAR_METRICS__PORT` | `metrics.port` | `9090` |
 | `DRAKKAR_LOGGING__LEVEL` | `logging.level` | `DEBUG` |
 | `DRAKKAR_LOGGING__FORMAT` | `logging.format` | `console` |
+| `DRAKKAR_LOGGING__OUTPUT` | `logging.output` | `/var/log/drakkar/worker.log` |
 | `DRAKKAR_DEBUG__ENABLED` | `debug.enabled` | `false` |
 | `DRAKKAR_DEBUG__PORT` | `debug.port` | `9000` |
 | `DRAKKAR_DEBUG__DB_DIR` | `debug.db_dir` | `/shared/debug` |

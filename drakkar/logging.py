@@ -2,10 +2,32 @@
 
 import logging
 import sys
+from pathlib import Path
+from typing import IO
 
 import structlog
 
 from drakkar.config import LoggingConfig
+
+
+def _resolve_output(
+    output: str,
+    worker_id: str = '',
+    cluster_name: str = '',
+) -> IO:
+    """Resolve the log output destination from config.
+
+    "stderr" and "stdout" map to sys streams. Anything else is treated
+    as a file path with template variable substitution.
+    """
+    if output == 'stderr':
+        return sys.stderr
+    if output == 'stdout':
+        return sys.stdout
+
+    path = output.format(worker_id=worker_id, cluster_name=cluster_name)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    return open(path, 'a', encoding='utf-8')
 
 
 def setup_logging(
@@ -13,12 +35,19 @@ def setup_logging(
     worker_id: str = '',
     consumer_group: str = '',
     version: str = '',
+    cluster_name: str = '',
 ) -> None:
     """Configure structlog with JSON or console output.
 
     JSON mode produces ECS-compatible logs for Elastic ingestion.
     Global context fields are bound once and appear on every log line.
+
+    The ``config.output`` field controls where logs are written:
+    ``"stderr"`` (default), ``"stdout"``, or a file path with optional
+    template variables ``{worker_id}`` and ``{cluster_name}``.
     """
+    log_output = _resolve_output(config.output, worker_id=worker_id, cluster_name=cluster_name)
+
     shared_processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
@@ -45,7 +74,7 @@ def setup_logging(
             getattr(logging, config.level.upper(), logging.INFO),
         ),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        logger_factory=structlog.PrintLoggerFactory(file=log_output),
         cache_logger_on_first_use=True,
     )
 

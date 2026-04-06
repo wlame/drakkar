@@ -2,11 +2,12 @@
 
 import io
 import json
+import sys
 
 import structlog
 
 from drakkar.config import LoggingConfig
-from drakkar.logging import setup_logging
+from drakkar.logging import _resolve_output, setup_logging
 
 
 def test_setup_logging_binds_worker_id():
@@ -62,3 +63,84 @@ def test_setup_logging_json_output_has_ecs_fields():
             logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
             cache_logger_on_first_use=True,
         )
+
+
+# --- Output destination tests ---
+
+
+def test_resolve_output_stderr():
+    assert _resolve_output('stderr') is sys.stderr
+
+
+def test_resolve_output_stdout():
+    assert _resolve_output('stdout') is sys.stdout
+
+
+def test_resolve_output_file(tmp_path):
+    log_file = str(tmp_path / 'app.log')
+    f = _resolve_output(log_file)
+    try:
+        assert f.name == log_file
+        assert f.mode == 'a'
+        f.write('test\n')
+        f.flush()
+        assert (tmp_path / 'app.log').read_text() == 'test\n'
+    finally:
+        f.close()
+
+
+def test_resolve_output_file_with_template_vars(tmp_path):
+    pattern = str(tmp_path / '{worker_id}-{cluster_name}.log')
+    f = _resolve_output(pattern, worker_id='w1', cluster_name='prod')
+    try:
+        expected = tmp_path / 'w1-prod.log'
+        assert f.name == str(expected)
+    finally:
+        f.close()
+
+
+def test_resolve_output_creates_parent_dirs(tmp_path):
+    log_file = str(tmp_path / 'logs' / 'nested' / 'app.log')
+    f = _resolve_output(log_file)
+    try:
+        assert (tmp_path / 'logs' / 'nested').is_dir()
+    finally:
+        f.close()
+
+
+def test_setup_logging_with_stdout():
+    config = LoggingConfig(level='INFO', format='json', output='stdout')
+    setup_logging(config, worker_id='w-stdout')
+    ctx = structlog.contextvars.get_contextvars()
+    assert ctx['worker_id'] == 'w-stdout'
+    # restore default
+    structlog.configure(
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        cache_logger_on_first_use=True,
+    )
+
+
+def test_setup_logging_with_file_writes_json(tmp_path):
+    log_file = str(tmp_path / 'drakkar.log')
+    config = LoggingConfig(level='INFO', format='json', output=log_file)
+    setup_logging(config, worker_id='w-file')
+
+    structlog.configure(cache_logger_on_first_use=False)
+    try:
+        logger = structlog.get_logger()
+        logger.info('file_test', category='test')
+
+        content = (tmp_path / 'drakkar.log').read_text().strip()
+        data = json.loads(content)
+        assert data['event'] == 'file_test'
+        assert data['worker_id'] == 'w-file'
+    finally:
+        structlog.configure(
+            logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+            cache_logger_on_first_use=True,
+        )
+
+
+def test_output_default_is_stderr():
+    config = LoggingConfig()
+    assert config.output == 'stderr'
