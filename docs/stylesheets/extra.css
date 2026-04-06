@@ -54,3 +54,9 @@
 .md-nav__item {
   padding: 0.1em 0;
 }
+
+/* Scheme-aware diagrams: show light variant by default, dark on slate */
+[data-md-color-scheme="default"] .diagram-dark,
+[data-md-color-scheme="slate"] .diagram-light {
+  display: none;
+}

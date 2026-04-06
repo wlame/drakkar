@@ -155,7 +155,7 @@ Metrics are exposed at `:9090/metrics` by default (configurable via `metrics.por
 
 ## Structured Logging
 
-Drakkar uses [structlog](https://www.structlog.org/) for structured, context-rich logging. All log output goes to stderr.
+Drakkar uses [structlog](https://www.structlog.org/) for structured, context-rich logging. All log output goes to **stderr** (standard Unix convention -- diagnostics and logs on stderr, data on stdout). Subprocess output is captured via pipes and doesn't touch either stream of the parent worker process, so this is a convention choice rather than a technical necessity.
 
 ### Configuration
 

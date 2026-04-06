@@ -7,6 +7,22 @@ the correct sink, serializes the data, and delivers it.
 Drakkar ships with six sink types. You can configure any combination of them, and each type
 supports multiple named instances (e.g., two separate Kafka topics or three Postgres databases).
 
+## Delivery Lifecycle
+
+| Event | When | What happens |
+|-------|------|--------------|
+| `connect()` | Worker startup, after `on_startup()` | Each configured sink opens its connection (Kafka producer, asyncpg pool, motor client, httpx client, Redis connection). If any fails, the worker crashes immediately. |
+| `deliver(payloads)` | After each `collect()` or `on_window_complete()` returns payloads | The framework groups payloads by `(sink_type, sink_name)` and calls `deliver()` once per group. A single `collect()` returning payloads for 3 sinks produces 3 `deliver()` calls. |
+| `on_delivery_error()` | When `deliver()` raises an exception | Your handler decides: `DLQ` (default), `RETRY`, or `SKIP`. Retries re-call `deliver()` up to `executor.max_retries` times. |
+| Offset commit | After **all** sinks confirm delivery for a window | Kafka offsets are committed only when every payload from the window has been successfully delivered (or routed to DLQ/skipped). No partial commits. |
+| `close()` | Worker shutdown | Each sink closes its connection gracefully. Errors are logged but don't block shutdown. |
+
+**Delivery frequency.** For each successful task, `collect()` is called once. If it returns
+payloads for N sink groups (e.g., 1 Kafka + 1 Postgres + 1 Redis = 3 groups), the framework
+makes N independent `deliver()` calls. With `on_window_complete()`, one additional delivery
+round happens per window. The Postgres pool exposed in `on_ready()` is the same pool used by
+the Postgres sink -- you can query it directly for lookups, migrations, or health checks.
+
 ```yaml
 sinks:
   kafka:

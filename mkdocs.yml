@@ -16,7 +16,7 @@ theme:
     code: JetBrains Mono
   palette:
     - media: "(prefers-color-scheme: light)"
-      scheme: slate
+      scheme: default
       primary: cyan
       accent: amber
       toggle:

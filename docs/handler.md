@@ -4,6 +4,23 @@ The handler is the user-facing entry point into Drakkar. You subclass
 `BaseDrakkarHandler`, override hooks, and the framework calls them at the
 right time during the message-processing pipeline.
 
+## Hook Reference
+
+| Hook | When called | Frequency | Returns |
+|------|-------------|-----------|---------|
+| `on_startup(config)` | Before any components are created | Once per worker lifetime | Modified `DrakkarConfig` |
+| `on_ready(config, db_pool)` | After sinks connected, before polling | Once per worker lifetime | `None` |
+| `arrange(messages, pending)` | A window of messages is ready to process | Once per window per partition | `list[ExecutorTask]` |
+| `collect(result)` | A single task completes successfully (exit 0) | Once per successful task | `CollectResult \| None` |
+| `on_window_complete(results, messages)` | All tasks in a window finished | Once per window per partition | `CollectResult \| None` |
+| `on_error(task, error)` | A single task fails (non-zero exit, timeout, crash) | Once per failed task | `ErrorAction \| list[ExecutorTask]` |
+| `on_delivery_error(error)` | A sink's deliver() raises an exception | Once per failed sink delivery batch | `DeliveryAction` |
+| `on_assign(partitions)` | Kafka assigns partitions during rebalance | Once per rebalance event | `None` |
+| `on_revoke(partitions)` | Kafka revokes partitions during rebalance | Once per rebalance event | `None` |
+| `message_label(msg)` | Before logging each message in arrange | Once per message | `str` |
+
+Only `arrange()` is required. All other hooks have safe defaults.
+
 ---
 
 ## BaseDrakkarHandler
@@ -114,9 +131,28 @@ async def arrange(
 ) -> list[ExecutorTask]
 ```
 
-The only **required** hook. Called once per message window (1 to
-`executor.window_size` messages from the same partition). Transforms
-source messages into subprocess tasks.
+The only **required** hook. Transforms source messages into subprocess
+tasks.
+
+**Partition isolation.** Each call receives messages from exactly **one
+Kafka partition**. Drakkar runs an independent pipeline per partition, so
+`arrange()` never mixes messages from different partitions in a single
+call. The maximum number of concurrent `arrange()` invocations equals
+the number of partitions assigned to this worker -- one per partition at
+a time.
+
+**Windowing.** The framework collects up to `executor.window_size`
+messages from the partition queue before calling `arrange()`. A window
+may contain fewer messages if the queue drains before reaching the
+limit. While the tasks from one window are executing, the next window
+can already be collected and `arrange()` called again for the same
+partition -- windows are processed concurrently within a partition.
+
+**When it is called.** The partition processor polls messages into a
+queue. Once enough messages accumulate (or a short timeout passes), they
+are batched into a window, deserialized (if `input_model` is set), and
+passed to `arrange()`. This happens continuously while the worker is
+running and the partition is assigned.
 
 `pending.pending_task_ids` is a `set[str]` of task IDs currently
 in-flight for this partition. Use it for O(1) deduplication:
@@ -151,9 +187,13 @@ marked complete and committed.
 async def collect(self, result: ExecutorResult) -> CollectResult | None
 ```
 
-Called after each task completes successfully. Process the executor
-result and return a `CollectResult` with payloads for one or more sinks,
-or `None` to skip delivery.
+Called after each task completes successfully (exit code 0). Runs in
+the context of the same partition that produced the task via `arrange()`.
+Multiple `collect()` calls from the same window may run concurrently as
+tasks finish in any order.
+
+Process the executor result and return a `CollectResult` with payloads
+for one or more sinks, or `None` to skip delivery.
 
 The `result.task` field carries the original `ExecutorTask`, including
 its `metadata` dict.
@@ -199,8 +239,10 @@ async def on_window_complete(
 ```
 
 Called after **all** tasks in a window have finished (successes and
-failures). Use for cross-task aggregation or batch-level outputs.
-Returns a `CollectResult` or `None`.
+failures). The `results` and `source_messages` belong to the same
+partition and the same window that was passed to `arrange()`. Use for
+cross-task aggregation or batch-level outputs. Returns a `CollectResult`
+or `None`.
 
 ```python
 async def on_window_complete(self, results, source_messages):
@@ -229,7 +271,9 @@ async def on_error(
 ```
 
 Called when a subprocess task fails (non-zero exit, timeout, or launch
-error). Return one of:
+error). Runs in the context of the partition that owns the task.
+Replacement tasks returned here are added to the same window and
+partition. Return one of:
 
 | Return value            | Behavior                                      |
 |-------------------------|-----------------------------------------------|
@@ -307,6 +351,88 @@ async def on_revoke(self, partitions):
     for p in partitions:
         self.partition_cache.pop(p, None)
 ```
+
+---
+
+## Offset Commit Logic
+
+Drakkar uses **watermark-based offset tracking** to guarantee at-least-once
+delivery. Understanding this is important for designing `arrange()` and
+`source_offsets`.
+
+### How it works
+
+Each partition has an `OffsetTracker` that maintains a sorted list of
+offsets and their state (`PENDING` or `COMPLETED`):
+
+1. When messages enter `arrange()`, their offsets are registered as
+   **PENDING**.
+2. When a task finishes and all its sink payloads are delivered (or
+   routed to DLQ/skipped), the offsets from `task.source_offsets` are
+   marked **COMPLETED**.
+3. The framework asks: *what is the highest consecutive completed offset
+   starting from the lowest tracked offset?* That value + 1 is committed
+   to Kafka.
+
+### Example
+
+A window of 5 messages from partition 3 with offsets `[100, 101, 102, 103, 104]`:
+
+```
+Step 1: All registered as PENDING
+  100=PENDING  101=PENDING  102=PENDING  103=PENDING  104=PENDING
+  committable() → None (100 is not completed)
+
+Step 2: Offset 104 finishes first (fastest subprocess)
+  100=PENDING  101=PENDING  102=PENDING  103=PENDING  104=COMPLETED
+  committable() → None (100 is still pending)
+
+Step 3: Offsets 100 and 101 finish
+  100=COMPLETED  101=COMPLETED  102=PENDING  103=PENDING  104=COMPLETED
+  committable() → 102 (consecutive run: 100, 101 → commit 101+1)
+
+Step 4: Offsets 102 and 103 finish
+  100=COMPLETED  101=COMPLETED  102=COMPLETED  103=COMPLETED  104=COMPLETED
+  committable() → 105 (all consecutive → commit 104+1)
+```
+
+The key property: **a fast task finishing before earlier tasks does not
+advance the commit position**. Drakkar will never commit offset 105
+while offset 100 is still in flight. This prevents message loss on
+worker crash — Kafka will redeliver from the last committed offset.
+
+### What this means for your handler
+
+- **`source_offsets` must be accurate.** Every offset in `source_offsets`
+  blocks the commit watermark until its task completes and all payloads
+  are delivered. If you include an offset you don't actually process, it
+  will stall commits for the entire partition.
+
+- **Fewer tasks per window = lower commit latency.** A window of 100
+  messages producing 100 tasks won't commit until the slowest task
+  finishes. If commit latency matters, use a smaller `window_size`.
+
+- **One task can cover multiple offsets.** If your `arrange()` batches
+  several messages into one task, list all their offsets in
+  `source_offsets`. They'll all be marked complete together when the task
+  finishes.
+
+- **Empty arrange = instant commit.** If `arrange()` returns `[]`, all
+  offsets in the window are marked complete immediately and committed.
+
+### When commits happen
+
+Commits are attempted at two points:
+
+1. **After each window completes** — when the last task in a window
+   finishes and all sink deliveries succeed.
+2. **On partition revocation** — pending offsets are drained (up to
+   `executor.drain_timeout_seconds`), then the highest committable
+   offset is committed before the partition is released.
+3. **On shutdown** — same drain + commit as revocation.
+
+Commits are per-partition and asynchronous. They do not block the
+processing loop.
 
 ---
 

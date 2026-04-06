@@ -6,34 +6,73 @@ Drakkar consumes messages from Kafka, runs CPU-intensive external binaries in a 
 
 ## Architecture
 
-```
-                         ┌────────────────────────────────────────────────────┐
-                         │              Drakkar Worker                        │
-                         │                                                    │
-  ┌─────────────┐        │  poll   ┌──────────┐  tasks  ┌──────────────────┐  │
-  │ Kafka source│───────►│────────►│ arrange()│────────►│ Executor Pool    │  │
-  │    topic    │        │         │ (user)   │         │ (subprocess mgmt)│  │
-  └─────────────┘        │         └──────────┘         └────────┬─────────┘  │
-                         │                                       │            │
-                         │         ┌──────────┐  results         │            │
-                         │         │ collect()│◄────────────────┘            │
-                         │         │ (user)   │                              │
-                         │         └─────┬────┘                               │
-                         │               │ payloads                           │
-                         └───────────────┼────────────────────────────────────┘
-                                         │
-               ┌─────────────────────────┼─────────────────────────┐
-               │            │            │           │             │
-               ▼            ▼            ▼           ▼             ▼
-          ┌────────┐  ┌──────────┐  ┌───────┐  ┌───────┐  ┌──────────┐
-          │ Kafka  │  │ Postgres │  │ Mongo │  │ Redis │  │   HTTP   │
-          └────────┘  └──────────┘  └───────┘  └───────┘  └──────────┘
-                                                               ┌───────┐
-                                                               │ Files │
-                                                               └───────┘
-```
+<div class="diagram-light" markdown>
+```mermaid
+flowchart LR
+    K["Kafka\nsource topic"] --> P["poll"]
 
-Each partition runs an independent pipeline: **poll -> arrange -> execute -> collect -> deliver -> commit**. A shared executor pool with semaphore-based concurrency limits subprocess parallelism across all partitions.
+    subgraph worker ["Drakkar Worker"]
+        P --> A["arrange()\n<i>user hook</i>"]
+        A -- "tasks" --> E["Executor Pool\n<i>subprocesses</i>"]
+        E -- "results" --> C["collect()\n<i>user hook</i>"]
+    end
+
+    C --> SK["Kafka"]
+    C --> SP["Postgres"]
+    C --> SM["Mongo"]
+    C --> SR["Redis"]
+    C --> SH["HTTP"]
+    C --> SF["Files"]
+
+    style worker fill:#f0fdfa,stroke:#0d9488,stroke-width:2px,color:#1a1a1a
+    style P fill:#f8fafc,stroke:#64748b,color:#1a1a1a
+    style K fill:#e0f2fe,stroke:#0284c7,color:#1a1a1a
+    style A fill:#fef3c7,stroke:#d97706,color:#1a1a1a
+    style C fill:#fef3c7,stroke:#d97706,color:#1a1a1a
+    style E fill:#f5f3ee,stroke:#6b7280,color:#1a1a1a
+    style SK fill:#d1fae5,stroke:#059669,color:#1a1a1a
+    style SP fill:#d1fae5,stroke:#059669,color:#1a1a1a
+    style SM fill:#d1fae5,stroke:#059669,color:#1a1a1a
+    style SR fill:#d1fae5,stroke:#059669,color:#1a1a1a
+    style SH fill:#d1fae5,stroke:#059669,color:#1a1a1a
+    style SF fill:#d1fae5,stroke:#059669,color:#1a1a1a
+```
+</div>
+
+<div class="diagram-dark" markdown>
+```mermaid
+flowchart LR
+    K["Kafka\nsource topic"] --> P["poll"]
+
+    subgraph worker ["Drakkar Worker"]
+        P --> A["arrange()\n<i>user hook</i>"]
+        A -- "tasks" --> E["Executor Pool\n<i>subprocesses</i>"]
+        E -- "results" --> C["collect()\n<i>user hook</i>"]
+    end
+
+    C --> SK["Kafka"]
+    C --> SP["Postgres"]
+    C --> SM["Mongo"]
+    C --> SR["Redis"]
+    C --> SH["HTTP"]
+    C --> SF["Files"]
+
+    style worker fill:#1a3a3a,stroke:#2dd4bf,stroke-width:2px,color:#e2e8f0
+    style P fill:#1e293b,stroke:#64748b,color:#e2e8f0
+    style K fill:#172554,stroke:#60a5fa,color:#e2e8f0
+    style A fill:#422006,stroke:#f59e0b,color:#fef3c7
+    style C fill:#422006,stroke:#f59e0b,color:#fef3c7
+    style E fill:#1e293b,stroke:#94a3b8,color:#e2e8f0
+    style SK fill:#052e16,stroke:#4ade80,color:#d1fae5
+    style SP fill:#052e16,stroke:#4ade80,color:#d1fae5
+    style SM fill:#052e16,stroke:#4ade80,color:#d1fae5
+    style SR fill:#052e16,stroke:#4ade80,color:#d1fae5
+    style SH fill:#052e16,stroke:#4ade80,color:#d1fae5
+    style SF fill:#052e16,stroke:#4ade80,color:#d1fae5
+```
+</div>
+
+Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execute &rarr; collect &rarr; deliver &rarr; commit**. A shared executor pool with semaphore-based concurrency limits subprocess parallelism across all partitions.
 
 ## Key Features
 
