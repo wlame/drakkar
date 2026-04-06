@@ -54,6 +54,7 @@ nav:
   - Sinks: sinks.md
   - Executor: executor.md
   - Observability: observability.md
+  - Performance: performance.md
   - Data Flow: data-flow.md
 
 markdown_extensions:
