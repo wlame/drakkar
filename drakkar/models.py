@@ -62,6 +62,15 @@ class ExecutorTask(BaseModel):
             'Used for offset watermark tracking — offsets are committed only after all sinks confirm delivery.'
         )
     )
+    labels: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            'User-defined key-value labels displayed in the debug UI alongside task details. '
+            'Use for tracing fields like request_id, user_id, or any domain-specific identifiers '
+            'that help correlate tasks with source messages. Shown on the live timeline, '
+            'task detail page, and debug trace view.'
+        ),
+    )
     binary_path: str | None = Field(
         default=None,
         description=(

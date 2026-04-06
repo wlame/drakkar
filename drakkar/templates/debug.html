@@ -230,6 +230,13 @@ function toggleSection(name) {
                     if (ev.pid) details.push('pid: ' + ev.pid);
                     if (ev.stdout_size) details.push('stdout: ' + ev.stdout_size + 'b');
                     if (ev.metadata) details.push(ev.metadata);
+                    if (ev.labels) {
+                        try {
+                            var lblObj = typeof ev.labels === 'string' ? JSON.parse(ev.labels) : ev.labels;
+                            var lblParts = Object.keys(lblObj).map(function(k) { return k + '=' + lblObj[k]; });
+                            if (lblParts.length) details.push('labels: ' + lblParts.join(', '));
+                        } catch(x) {}
+                    }
                     td6.setAttribute('data-full', details.join('\n'));
                     td6.textContent = details.join(' | ');
 

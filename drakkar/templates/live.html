@@ -74,7 +74,7 @@
         </summary>
         <table class="w-full text-sm mt-2">
             <thead><tr class="text-left text-gray-400 border-b border-cream-200">
-                <th class="py-2 px-3">Task ID</th><th class="py-2 px-3">Partition</th><th class="py-2 px-3">Duration</th><th class="py-2 px-3">CLI Args</th><th class="py-2 px-3">Stdin</th>
+                <th class="py-2 px-3">Task ID</th><th class="py-2 px-3">Partition</th><th class="py-2 px-3">Labels</th><th class="py-2 px-3">Duration</th><th class="py-2 px-3">CLI Args</th><th class="py-2 px-3">Stdin</th>
             </tr></thead>
             <tbody id="running-body"></tbody>
         </table>
@@ -85,7 +85,7 @@
         </summary>
         <table class="w-full text-sm mt-2">
             <thead><tr class="text-left text-gray-400 border-b border-cream-200">
-                <th class="py-2 px-3">Task ID</th><th class="py-2 px-3">Partition</th><th class="py-2 px-3">Status</th><th class="py-2 px-3">Duration</th><th class="py-2 px-3">Time</th><th class="py-2 px-3">CLI Args</th><th class="py-2 px-3">Stdin</th>
+                <th class="py-2 px-3">Task ID</th><th class="py-2 px-3">Partition</th><th class="py-2 px-3">Labels</th><th class="py-2 px-3">Status</th><th class="py-2 px-3">Duration</th><th class="py-2 px-3">Time</th><th class="py-2 px-3">CLI Args</th><th class="py-2 px-3">Stdin</th>
             </tr></thead>
             <tbody id="finished-body"></tbody>
         </table>
@@ -215,6 +215,15 @@ function showTaskDetail(t) {
         var stdinVal = document.createElement('span');
         stdinVal.style.color = '#6b7280'; stdinVal.textContent = fmtStdin(t);
         el.appendChild(stdinVal);
+    }
+    if (t.labels && Object.keys(t.labels).length) {
+        el.appendChild(document.createElement('br'));
+        Object.keys(t.labels).forEach(function(k) {
+            var tag = document.createElement('span');
+            tag.style.cssText = 'display:inline-block;background:#f0fdfa;border:1px solid #99f6e4;color:#0d9488;padding:0 6px;border-radius:3px;margin-right:6px;font-size:11px;';
+            tag.textContent = k + '=' + t.labels[k];
+            el.appendChild(tag);
+        });
     }
 }
 function clearTaskDetail() {
@@ -471,6 +480,20 @@ function renderCollects() {
     }
 }
 
+function makeLabelsTd(labels) {
+    var td = document.createElement('td');
+    td.className = 'py-2 px-3 text-xs';
+    if (labels && Object.keys(labels).length) {
+        Object.keys(labels).forEach(function(k) {
+            var tag = document.createElement('span');
+            tag.style.cssText = 'display:inline-block;background:#f0fdfa;border:1px solid #99f6e4;color:#0d9488;padding:0 3px;border-radius:3px;margin-right:4px;font-family:monospace;';
+            tag.textContent = k + '=' + labels[k];
+            td.appendChild(tag);
+        });
+    }
+    return td;
+}
+
 function renderTaskLists() {
     var now = Date.now() / 1000;
     var running = [], finished = [];
@@ -494,15 +517,16 @@ function renderTaskLists() {
             var ra1 = document.createElement('a'); ra1.href = '/task/' + encodeURIComponent(baseTaskId(rt.task_id));
             ra1.className = 'text-amber-600 hover:underline'; ra1.textContent = rt.task_id; rtd1.appendChild(ra1);
             var rtd2 = document.createElement('td'); rtd2.className = 'py-2 px-3 font-mono'; rtd2.textContent = rt.partition;
+            var rtdL = makeLabelsTd(rt.labels);
             var rtd3 = document.createElement('td'); rtd3.className = 'py-2 px-3 font-mono'; rtd3.textContent = (now - rt.start_ts).toFixed(1) + 's';
             var rtd4 = document.createElement('td'); rtd4.className = 'py-2 px-3 font-mono text-xs text-gray-500 max-w-md truncate expandable cursor-pointer';
             rtd4.title = 'Click to expand'; rtd4.textContent = rt.args || '';
             var rtd5 = document.createElement('td'); rtd5.className = 'py-2 px-3 font-mono text-xs text-gray-400'; rtd5.textContent = fmtStdin(rt);
-            rtr.append(rtd1, rtd2, rtd3, rtd4, rtd5); rb.appendChild(rtr);
+            rtr.append(rtd1, rtd2, rtdL, rtd3, rtd4, rtd5); rb.appendChild(rtr);
         }
         if (!running.length) {
             var etr = document.createElement('tr'); var etd = document.createElement('td');
-            etd.colSpan = 5; etd.className = 'py-3 text-center text-gray-400'; etd.textContent = 'No tasks running';
+            etd.colSpan = 6; etd.className = 'py-3 text-center text-gray-400'; etd.textContent = 'No tasks running';
             etr.appendChild(etd); rb.appendChild(etr);
         }
     }
@@ -520,6 +544,7 @@ function renderTaskLists() {
             fa1.className = 'hover:underline'; fa1.style.color = ft.status === 'completed' ? '#059669' : '#dc2626';
             fa1.textContent = ft.task_id; ftd1.appendChild(fa1);
             var ftd2 = document.createElement('td'); ftd2.className = 'py-2 px-3 font-mono'; ftd2.textContent = ft.partition;
+            var ftdL = makeLabelsTd(ft.labels);
             var ftd3 = document.createElement('td'); ftd3.className = 'py-2 px-3';
             ftd3.style.color = ft.status === 'completed' ? '#059669' : '#dc2626'; ftd3.textContent = ft.status;
             var ftd4 = document.createElement('td'); ftd4.className = 'py-2 px-3 font-mono'; ftd4.textContent = ft.duration ? ft.duration.toFixed(2) + 's' : '';
@@ -527,11 +552,11 @@ function renderTaskLists() {
             var ftd6 = document.createElement('td'); ftd6.className = 'py-2 px-3 font-mono text-xs text-gray-500 max-w-md truncate expandable cursor-pointer';
             ftd6.title = 'Click to expand'; ftd6.textContent = ft.args || '';
             var ftd7 = document.createElement('td'); ftd7.className = 'py-2 px-3 font-mono text-xs text-gray-400'; ftd7.textContent = fmtStdin(ft);
-            ftr.append(ftd1, ftd2, ftd3, ftd4, ftd5, ftd6, ftd7); fb.appendChild(ftr);
+            ftr.append(ftd1, ftd2, ftdL, ftd3, ftd4, ftd5, ftd6, ftd7); fb.appendChild(ftr);
         }
         if (!finished.length) {
             var etr2 = document.createElement('tr'); var etd2 = document.createElement('td');
-            etd2.colSpan = 7; etd2.className = 'py-3 text-center text-gray-400'; etd2.textContent = 'No finished tasks';
+            etd2.colSpan = 8; etd2.className = 'py-3 text-center text-gray-400'; etd2.textContent = 'No finished tasks';
             etr2.appendChild(etd2); fb.appendChild(etr2);
         }
     }
@@ -639,11 +664,14 @@ function connectWS() {
                         delete taskBars[e.task_id];
                     }
                 }
+                var wsLabels = null;
+                if (e.labels) { try { wsLabels = typeof e.labels === 'string' ? JSON.parse(e.labels) : e.labels; } catch(x) {} }
                 allTasks[e.task_id] = {
                     task_id: e.task_id, partition: e.partition, pid: e.pid,
                     start_ts: e.ts, end_ts: null, status: 'running', args: e.args, duration: null,
                     slot: e.slot != null ? e.slot : null,
                     stdin_lines: e.stdin_lines || 0, stdin_size: e.stdin_size || 0,
+                    labels: wsLabels,
                 };
                 ensureBar(allTasks[e.task_id]);
             } else if (e.event === 'task_completed' || e.event === 'task_failed') {

@@ -67,6 +67,21 @@ def test_executor_task_multiple_source_offsets():
     assert len(task.source_offsets) == 3
 
 
+def test_executor_task_labels_default_empty():
+    task = ExecutorTask(task_id='t1', args=[], source_offsets=[0])
+    assert task.labels == {}
+
+
+def test_executor_task_labels():
+    task = ExecutorTask(
+        task_id='t1',
+        args=[],
+        source_offsets=[0],
+        labels={'request_id': 'abc-123', 'user': 'alice'},
+    )
+    assert task.labels == {'request_id': 'abc-123', 'user': 'alice'}
+
+
 # --- ExecutorResult ---
 
 

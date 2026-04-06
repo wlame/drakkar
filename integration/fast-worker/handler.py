@@ -48,6 +48,9 @@ class SymbolCountHandler(dk.BaseDrakkarHandler[CountRequest, CountResult]):
                         'request_id': req.request_id,
                         'file_path': req.file_path,
                     },
+                    labels={
+                        'request_id': req.request_id,
+                    },
                     source_offsets=[msg.offset],
                 )
             )

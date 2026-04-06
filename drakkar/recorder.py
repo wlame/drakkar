@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS events (
     duration    REAL,
     output_topic TEXT,
     metadata    TEXT,
-    pid         INTEGER
+    pid         INTEGER,
+    labels      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_partition_offset ON events(partition, offset);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
@@ -497,6 +498,7 @@ class EventRecorder:
                     'slot': slot,
                 }
             ),
+            'labels': json.dumps(task.labels) if task.labels else None,
         }
         ws_threshold_ms = self._config.ws_min_duration_ms
         if ws_threshold_ms > 0:
@@ -548,6 +550,7 @@ class EventRecorder:
             'pid': result.pid,
             'pool_active': pool_active,
             'pool_waiting': pool_waiting,
+            'labels': json.dumps(result.task.labels) if result.task.labels else None,
         }
         if include_output:
             entry['args'] = json.dumps(result.task.args)
@@ -609,6 +612,7 @@ class EventRecorder:
                     'exception': error.exception,
                 }
             ),
+            'labels': json.dumps(task.labels) if task.labels else None,
         }
         if duration_seconds is not None:
             entry['duration'] = duration_seconds
@@ -1006,6 +1010,7 @@ class EventRecorder:
             'output_topic',
             'metadata',
             'pid',
+            'labels',
         ]
         placeholders = ', '.join(['?'] * len(columns))
         col_names = ', '.join(columns)

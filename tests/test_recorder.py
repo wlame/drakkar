@@ -1852,6 +1852,112 @@ async def test_ws_deferred_cleanup_on_stop(tmp_path):
     assert len(rec._deferred_ws) == 0
 
 
+async def test_labels_stored_in_task_started_event(tmp_path):
+    """Task labels are JSON-encoded in the task_started event buffer entry."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-labeled')
+    task.labels = {'request_id': 'req-abc', 'user': 'alice'}
+    rec.record_task_started(task, partition=0)
+
+    assert len(rec._buffer) == 1
+    entry = rec._buffer[0]
+    assert entry['labels'] == '{"request_id": "req-abc", "user": "alice"}'
+    await rec.stop()
+
+
+async def test_labels_stored_in_task_completed_event(tmp_path):
+    """Task labels propagate from task through to completed event."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-labeled')
+    task.labels = {'request_id': 'req-xyz'}
+    result = make_result(task=task)
+    rec.record_task_completed(result, partition=0)
+
+    entry = rec._buffer[0]
+    assert entry['labels'] == '{"request_id": "req-xyz"}'
+    await rec.stop()
+
+
+async def test_labels_broadcast_via_ws(tmp_path):
+    """Labels appear in WebSocket events for live UI consumption."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    q = rec.subscribe()
+    task = make_task('t-ws-labels')
+    task.labels = {'request_id': 'req-ws'}
+    rec.record_task_started(task, partition=0)
+
+    event = q.get_nowait()
+    assert event['labels'] == '{"request_id": "req-ws"}'
+    rec.unsubscribe(q)
+    await rec.stop()
+
+
+async def test_labels_none_when_empty(tmp_path):
+    """Empty labels dict produces None in the event (no DB bloat)."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-no-labels')
+    rec.record_task_started(task, partition=0)
+
+    entry = rec._buffer[0]
+    assert entry['labels'] is None
+    await rec.stop()
+
+
+async def test_labels_stored_in_task_failed_event(tmp_path):
+    """Task labels propagate to failed events (always sent to WS)."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=500)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-fail-labeled')
+    task.labels = {'request_id': 'req-fail'}
+    error = ExecutorError(task=task, exit_code=1, stderr='boom')
+
+    q = rec.subscribe()
+    rec.record_task_started(task, partition=0)
+    rec.record_task_failed(task, error, partition=0, duration_seconds=0.05)
+
+    events = []
+    while not q.empty():
+        events.append(q.get_nowait())
+    # both start and fail events carry labels
+    assert events[0]['labels'] == '{"request_id": "req-fail"}'
+    assert events[1]['labels'] == '{"request_id": "req-fail"}'
+    rec.unsubscribe(q)
+    await rec.stop()
+
+
+async def test_labels_persisted_to_db(tmp_path):
+    """Labels are written to the SQLite labels column and queryable."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-db-labels')
+    task.labels = {'request_id': 'req-db', 'env': 'prod'}
+    rec.record_task_started(task, partition=0)
+    await rec._flush()
+
+    async with rec._db.execute('SELECT labels FROM events WHERE task_id = ?', ['t-db-labels']) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    import json
+    assert json.loads(row[0]) == {'request_id': 'req-db', 'env': 'prod'}
+    await rec.stop()
+
+
 async def test_event_threshold_zero_saves_all(tmp_path):
     """event_min_duration_ms=0 (default) saves all tasks to buffer."""
     config = make_debug_config(tmp_path, event_min_duration_ms=0)

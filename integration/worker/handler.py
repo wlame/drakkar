@@ -118,6 +118,10 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
                         'file_path': req.file_path,
                         'repeat': req.repeat,
                     },
+                    labels={
+                        'request_id': req.request_id,
+                        'pattern': req.pattern,
+                    },
                     source_offsets=[msg.offset],
                 )
             )
