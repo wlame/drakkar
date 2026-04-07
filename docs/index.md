@@ -100,8 +100,8 @@ Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execut
 
 ## Key Features
 
-- **Per-partition pipelines** -- independent processing with watermark-based [offset tracking](handler.md#offset-commit-logic)
-- **Pluggable sinks** -- Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem; any combination, multiple instances per type
+- **[Per-partition pipelines](data-flow.md#phase-3-window-collection-and-arrangement)** -- independent processing with watermark-based [offset tracking](handler.md#offset-commit-logic)
+- **[Pluggable sinks](sinks.md)** -- Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem; any combination, multiple instances per type
 - **[Dead letter queue](sinks.md#dead-letter-queue)** -- failed deliveries route to a DLQ topic with error metadata
 - **[Backpressure](performance.md#backpressure)** -- Kafka pause/resume keeps memory bounded regardless of consumer lag
 - **[Typed messages](handler.md#typed-messages)** -- Pydantic models for input/output with auto-deserialization
@@ -110,7 +110,7 @@ Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execut
 - **[Structured logging](observability.md#structured-logging)** -- JSON/ECS-compatible via structlog, ready for Elastic
 - **[Periodic tasks](handler.md#periodic-tasks)** -- `@periodic` decorator for recurring background coroutines
 - **[Task labels](handler.md#task-labels)** -- custom [message_label()](handler.md#message_label) for human-readable log/UI identifiers
-- **Error hooks** -- [on_error](handler.md#on_error) for executor failures, [on_delivery_error](handler.md#on_delivery_error) for sink failures (retry, skip, or DLQ)
+- **[Error hooks](handler.md#on_error)** -- [on_error](handler.md#on_error) for executor failures, [on_delivery_error](handler.md#on_delivery_error) for sink failures (retry, skip, or DLQ)
 
 ## Quick Start
 
