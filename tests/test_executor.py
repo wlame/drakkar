@@ -21,7 +21,7 @@ def make_task(task_id: str = 't1', args: list[str] | None = None) -> ExecutorTas
 def echo_pool() -> ExecutorPool:
     return ExecutorPool(
         binary_path='/bin/echo',
-        max_workers=4,
+        max_executors=4,
         task_timeout_seconds=10,
     )
 
@@ -39,7 +39,7 @@ async def test_execute_echo(echo_pool: ExecutorPool):
 async def test_execute_captures_stderr():
     pool = ExecutorPool(
         binary_path=sys.executable,
-        max_workers=2,
+        max_executors=2,
         task_timeout_seconds=10,
     )
     task = make_task(args=['-c', "import sys; sys.stderr.write('err msg')"])
@@ -50,7 +50,7 @@ async def test_execute_captures_stderr():
 async def test_execute_nonzero_exit_raises():
     pool = ExecutorPool(
         binary_path=sys.executable,
-        max_workers=2,
+        max_executors=2,
         task_timeout_seconds=10,
     )
     task = make_task(args=['-c', 'import sys; sys.exit(42)'])
@@ -63,7 +63,7 @@ async def test_execute_nonzero_exit_raises():
 async def test_execute_timeout_kills_process():
     pool = ExecutorPool(
         binary_path=sys.executable,
-        max_workers=2,
+        max_executors=2,
         task_timeout_seconds=1,
     )
     task = make_task(args=['-c', 'import time; time.sleep(30)'])
@@ -75,7 +75,7 @@ async def test_execute_timeout_kills_process():
 async def test_execute_invalid_binary():
     pool = ExecutorPool(
         binary_path='/nonexistent/binary',
-        max_workers=2,
+        max_executors=2,
         task_timeout_seconds=10,
     )
     task = make_task()
@@ -87,7 +87,7 @@ async def test_execute_invalid_binary():
 async def test_execute_concurrency_limit():
     pool = ExecutorPool(
         binary_path=sys.executable,
-        max_workers=2,
+        max_executors=2,
         task_timeout_seconds=10,
     )
     tasks = [make_task(task_id=f't{i}', args=['-c', 'import time; time.sleep(0.2)']) for i in range(4)]
@@ -104,7 +104,7 @@ async def test_execute_concurrency_limit():
             max_active = pool.active_count
 
     await asyncio.gather(*[pool.execute(t) for t in tasks])
-    # with 4 tasks and 2 max_workers, they should run in 2 rounds
+    # with 4 tasks and 2 max_executors, they should run in 2 rounds
     # active_count should have been at most 2 at any point
 
 
@@ -116,14 +116,14 @@ async def test_execute_active_count_tracking(echo_pool: ExecutorPool):
 
 
 async def test_pool_properties(echo_pool: ExecutorPool):
-    assert echo_pool.max_workers == 4
+    assert echo_pool.max_executors == 4
     assert echo_pool.active_count == 0
 
 
 async def test_execute_large_stdout():
     pool = ExecutorPool(
         binary_path=sys.executable,
-        max_workers=2,
+        max_executors=2,
         task_timeout_seconds=10,
     )
     task = make_task(args=['-c', "print('x' * 10000)"])
@@ -135,7 +135,7 @@ async def test_execute_passes_stdin_to_process():
     """stdin field value is written to the process stdin pipe."""
     pool = ExecutorPool(
         binary_path=sys.executable,
-        max_workers=2,
+        max_executors=2,
         task_timeout_seconds=10,
     )
     task = ExecutorTask(
@@ -153,7 +153,7 @@ async def test_execute_none_stdin_does_not_pipe():
     """When stdin is None the process stdin is not connected (no pipe opened)."""
     pool = ExecutorPool(
         binary_path=sys.executable,
-        max_workers=2,
+        max_executors=2,
         task_timeout_seconds=10,
     )
     # A script that checks whether stdin is a pipe; if not piped it should be a tty or closed.
@@ -184,7 +184,7 @@ async def test_task_binary_path_overrides_pool_binary_path():
     """Task-level binary_path takes precedence over pool-level binary_path."""
     pool = ExecutorPool(
         binary_path='/bin/echo',
-        max_workers=2,
+        max_executors=2,
         task_timeout_seconds=10,
     )
     task = ExecutorTask(
@@ -202,7 +202,7 @@ async def test_no_pool_binary_path_uses_task_binary_path():
     """Pool with no binary_path works when task provides one."""
     pool = ExecutorPool(
         binary_path=None,
-        max_workers=2,
+        max_executors=2,
         task_timeout_seconds=10,
     )
     task = ExecutorTask(
@@ -220,7 +220,7 @@ async def test_no_binary_path_anywhere_raises_error():
     """Neither pool nor task has binary_path — raises ExecutorTaskError with clear message."""
     pool = ExecutorPool(
         binary_path=None,
-        max_workers=2,
+        max_executors=2,
         task_timeout_seconds=10,
     )
     task = ExecutorTask(
@@ -239,7 +239,7 @@ async def test_pool_binary_path_none_task_binary_path_none_explicit():
     """Explicit None on both pool and task raises the same clear error."""
     pool = ExecutorPool(
         binary_path=None,
-        max_workers=2,
+        max_executors=2,
         task_timeout_seconds=10,
     )
     task = ExecutorTask(
@@ -257,7 +257,7 @@ async def test_waiting_count_tracks_queued_tasks():
     """waiting_count reflects tasks blocked on the semaphore."""
     pool = ExecutorPool(
         binary_path=sys.executable,
-        max_workers=1,
+        max_executors=1,
         task_timeout_seconds=10,
     )
     assert pool.waiting_count == 0
@@ -285,7 +285,7 @@ async def test_execute_records_task_started_with_recorder():
     """When a recorder is provided, execute() calls record_task_started."""
     from unittest.mock import MagicMock
 
-    pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=5)
+    pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=5)
     task = make_task('rec-1', args=['hello'])
     recorder = MagicMock()
 

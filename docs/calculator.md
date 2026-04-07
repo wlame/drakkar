@@ -90,7 +90,7 @@ function drakkarCalc() {
 
   var p80s = p80 / 1000;
 
-  // max_workers: cores - 20% reserved, capped by partitions per worker
+  // max_executors: cores - 20% reserved, capped by partitions per worker
   var reservedCores = Math.max(2, Math.ceil(cpu * 0.2));
   var maxWorkers = Math.max(1, cpu - reservedCores);
   var partPerWorker = Math.ceil(partitions / workers);
@@ -160,7 +160,7 @@ function drakkarCalc() {
   y += '  heartbeat_interval_ms: ' + heartbeatInterval + '\n';
   y += '  max_poll_interval_ms: ' + maxPollInterval + '\n';
   y += '\nexecutor:\n';
-  y += '  max_workers: ' + maxWorkers + '\n';
+  y += '  max_executors: ' + maxWorkers + '\n';
   y += '  window_size: ' + windowSize + '\n';
   y += '  task_timeout_seconds: ' + taskTimeout + '\n';
   y += '  max_retries: ' + maxRetries + '\n';
@@ -191,7 +191,7 @@ function drakkarCalc() {
   addH3('How each parameter was calculated');
   var dl = addDl();
 
-  addDt(dl, 'max_workers: ' + maxWorkers);
+  addDt(dl, 'max_executors: ' + maxWorkers);
   addDd(dl, cpu + ' cores - ' + reservedCores + ' reserved (20%) = ' + (cpu - reservedCores) + ' available. Capped at ' + partPerWorker + ' partitions/worker * 4 = ' + (partPerWorker * 4) + '. Each slot runs one subprocess. More slots than cores causes context-switch overhead without throughput gain.');
 
   addDt(dl, 'window_size: ' + windowSize);
@@ -205,7 +205,7 @@ function drakkarCalc() {
 
   var bpText = p80s < 0.1 ? 'Fast tasks drain quickly \u2014 small buffer sufficient.' : p80s < 10 ? 'Moderate tasks need room to queue while in-flight work completes.' : 'Long tasks: small buffer prevents over-fetching messages that sit for minutes.';
   addDt(dl, 'backpressure high/low: ' + highMult + '/' + lowMult);
-  addDd(dl, 'High watermark = max_workers * ' + highMult + ' = ' + (maxWorkers * highMult) + '. Low = max_workers * ' + lowMult + ' = ' + Math.max(1, maxWorkers * lowMult) + '. ' + bpText + ' The gap prevents pause/resume flapping.');
+  addDd(dl, 'High watermark = max_executors * ' + highMult + ' = ' + (maxWorkers * highMult) + '. Low = max_executors * ' + lowMult + ' = ' + Math.max(1, maxWorkers * lowMult) + '. ' + bpText + ' The gap prevents pause/resume flapping.');
 
   addDt(dl, 'drain_timeout_seconds: ' + drainTimeout);
   addDd(dl, '2x p80 = ' + drainTimeout + 's. On shutdown, in-flight tasks get this long to finish. If exceeded, their offsets remain uncommitted and Kafka redelivers after restart.');
@@ -251,14 +251,14 @@ understand how well the worker is performing and where to tune further.
 | Metric | Good | Bad | Action |
 |--------|------|-----|--------|
 | `rate(drakkar_messages_consumed_total[5m])` | Stable or matches production rate | Dropping or zero | Check if consumer is paused (backpressure) or partitions were revoked |
-| `drakkar_backpressure_active` | 0 most of the time | Stuck at 1 | Increase `max_workers` or add horizontal workers |
+| `drakkar_backpressure_active` | 0 most of the time | Stuck at 1 | Increase `max_executors` or add horizontal workers |
 | `drakkar_total_queued` | Stable, not growing | Growing over time | Processing rate < production rate. Scale up or batch in `arrange()` |
 
 ### Is the executor pool sized correctly?
 
 | Metric | Good | Bad | Action |
 |--------|------|-----|--------|
-| `drakkar_executor_pool_active` | 50-80% of `max_workers` on average | Pegged at `max_workers` constantly | Add more slots or more workers |
+| `drakkar_executor_pool_active` | 50-80% of `max_executors` on average | Pegged at `max_executors` constantly | Add more slots or more workers |
 | `rate(drakkar_executor_idle_slot_seconds_total[5m])` | Near zero | High (slots idle while messages wait) | `arrange()` is the bottleneck — make it faster or reduce `window_size` |
 | `rate(drakkar_consumer_idle_seconds_total[5m])` | Low when topic has data | High while topic has data | Worker is over-provisioned for this workload |
 
@@ -293,7 +293,7 @@ understand how well the worker is performing and where to tune further.
 2. Run under production-like load for 10+ minutes
 3. Check the tables above
 4. Adjust one parameter at a time, observe for another 10 minutes
-5. Typical iteration cycle: `max_workers` first, then `window_size`,
+5. Typical iteration cycle: `max_executors` first, then `window_size`,
    then debug thresholds last (they affect observability, not throughput)
 
 ---
@@ -304,7 +304,7 @@ The calculator follows these rules to derive each parameter:
 
 ### Executor sizing
 
-**`max_workers`** = available cores - 20% reserved. The reserved cores
+**`max_executors`** = available cores - 20% reserved. The reserved cores
 handle the asyncio event loop, OS, Kafka consumer, and sink I/O. Each
 executor slot runs one subprocess consuming one CPU core. Going beyond
 available cores causes context switching without throughput gain.
@@ -336,7 +336,7 @@ kicks the consumer out of the group and triggers rebalance.
 ### Backpressure
 
 **`backpressure_high_multiplier`** and **`low_multiplier`** control the
-pause/resume hysteresis. `high_watermark = max_workers * high_mult`.
+pause/resume hysteresis. `high_watermark = max_executors * high_mult`.
 Fast tasks drain quickly and need less buffer. Slow tasks need more
 buffer but should not over-fetch (each message is minutes of work).
 The gap between high and low prevents rapid pause/resume cycling.

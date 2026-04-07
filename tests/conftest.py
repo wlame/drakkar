@@ -121,7 +121,7 @@ def full_config_dict() -> dict:
         },
         'executor': {
             'binary_path': '/usr/local/bin/processor',
-            'max_workers': 40,
+            'max_executors': 40,
             'task_timeout_seconds': 300,
             'window_size': 100,
             'max_retries': 5,

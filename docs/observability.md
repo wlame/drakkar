@@ -314,7 +314,7 @@ Overview of all configured sinks with live delivery statistics:
 Real-time view of the processing pipeline, fed by WebSocket (`/ws`). Organized in tabbed sections:
 
 - **Arrange** -- active [arrange()](handler.md#arrange-required) calls with partition, duration, and [message labels](handler.md#message_label).
-- **Executors Timeline** -- visual timeline of running, pending, and recently finished tasks. Slot-based layout matching `max_workers`. Tasks shorter than `ws_min_duration_ms` are hidden (except failures, which are always shown). See [Duration Thresholds](#duration-thresholds) for threshold tuning.
+- **Executors Timeline** -- visual timeline of running, pending, and recently finished tasks. Slot-based layout matching `max_executors`. Tasks shorter than `ws_min_duration_ms` are hidden (except failures, which are always shown). See [Duration Thresholds](#duration-thresholds) for threshold tuning.
 - **Collect** -- recently completed tasks with exit codes and durations.
 
 Pool utilization bar shows active, waiting, and available slot counts.
@@ -384,7 +384,7 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, and `event` for fast qu
 
 #### `worker_config` -- Autodiscovery
 
-Single-row table written at startup (and after each rotation). Contains the full worker identity and configuration: `worker_name`, `cluster_name`, `ip_address`, `debug_port`, `debug_url`, `kafka_brokers`, `source_topic`, `consumer_group`, `binary_path`, `max_workers`, `task_timeout_seconds`, `max_retries`, `window_size`, `sinks_json`, `env_vars_json`.
+Single-row table written at startup (and after each rotation). Contains the full worker identity and configuration: `worker_name`, `cluster_name`, `ip_address`, `debug_port`, `debug_url`, `kafka_brokers`, `source_topic`, `consumer_group`, `binary_path`, `max_executors`, `task_timeout_seconds`, `max_retries`, `window_size`, `sinks_json`, `env_vars_json`.
 
 This table is what enables the worker autodiscovery feature -- other workers scan for it in shared `db_dir`.
 

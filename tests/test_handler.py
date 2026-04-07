@@ -108,7 +108,7 @@ async def test_on_startup_can_modify_config():
                 update={
                     'executor': config.executor.model_copy(
                         update={
-                            'max_workers': cpu_count,
+                            'max_executors': cpu_count,
                         }
                     ),
                 }
@@ -119,10 +119,10 @@ async def test_on_startup_can_modify_config():
 
     handler = TuningHandler()
     config = DrakkarConfig(
-        executor=ExecutorConfig(binary_path='/bin/echo', max_workers=1),
+        executor=ExecutorConfig(binary_path='/bin/echo', max_executors=1),
     )
     result = await handler.on_startup(config)
-    assert result.executor.max_workers == (os.cpu_count() or 4)
+    assert result.executor.max_executors == (os.cpu_count() or 4)
     assert result.executor.binary_path == '/bin/echo'
 
 

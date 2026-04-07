@@ -53,7 +53,7 @@ def test_config() -> DrakkarConfig:
         ),
         executor=ExecutorConfig(
             binary_path='/bin/echo',
-            max_workers=2,
+            max_executors=2,
             task_timeout_seconds=10,
             window_size=5,
         ),
@@ -180,7 +180,7 @@ async def test_app_on_assign_creates_processors(test_config):
 
     from drakkar.executor import ExecutorPool
 
-    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
     app._consumer = MagicMock()
     app._consumer.commit = AsyncMock()
 
@@ -196,7 +196,7 @@ async def test_app_on_revoke_removes_processors(test_config):
 
     from drakkar.executor import ExecutorPool
 
-    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
     app._consumer = AsyncMock()
 
     app._on_assign([0, 1, 2])
@@ -276,7 +276,7 @@ async def test_app_on_startup_hook_can_modify_config(test_config):
         async def on_startup(self, config):
             return config.model_copy(
                 update={
-                    'executor': config.executor.model_copy(update={'max_workers': 99}),
+                    'executor': config.executor.model_copy(update={'max_executors': 99}),
                 }
             )
 
@@ -284,10 +284,10 @@ async def test_app_on_startup_hook_can_modify_config(test_config):
             return []
 
     app = DrakkarApp(handler=ConfigTuningHandler(), config=test_config)
-    assert app.config.executor.max_workers == 2
+    assert app.config.executor.max_executors == 2
 
     app._config = await app._handler.on_startup(app._config)
-    assert app._config.executor.max_workers == 99
+    assert app._config.executor.max_executors == 99
 
 
 async def test_app_on_startup_default_returns_config_unchanged(test_config):
@@ -344,7 +344,7 @@ async def test_app_shutdown_drains_executors(test_config):
 
     from drakkar.executor import ExecutorPool
 
-    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
     app._on_assign([0])
     await asyncio.sleep(0.1)
 
@@ -367,7 +367,7 @@ async def test_stop_processor_handles_arrange_error(test_config):
     app = DrakkarApp(handler=BrokenArrangeHandler(), config=test_config)
     from drakkar.executor import ExecutorPool
 
-    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
     app._consumer = AsyncMock()
 
     app._on_assign([0])
@@ -391,7 +391,7 @@ async def test_safe_call_catches_handler_errors(test_config):
     app = DrakkarApp(handler=ErrorOnAssignHandler(), config=test_config)
     from drakkar.executor import ExecutorPool
 
-    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
     app._consumer = MagicMock()
     app._consumer.commit = AsyncMock()
 
@@ -447,7 +447,7 @@ def test_app_get_worker_state(test_config):
     from drakkar.executor import ExecutorPool
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
 
     state = app._get_worker_state()
     assert 'uptime_seconds' in state
@@ -476,7 +476,7 @@ async def test_app_total_queued_with_processors(test_config):
     from drakkar.executor import ExecutorPool
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
     app._consumer = MagicMock()
     app._consumer.commit = AsyncMock()
 
@@ -502,14 +502,14 @@ async def test_app_backpressure_pauses_and_resumes(test_config):
     from drakkar.executor import ExecutorPool
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
     app._consumer = AsyncMock()
     app._running = True
 
     app._on_assign([0])
     await asyncio.sleep(0.05)
 
-    # config: max_workers=2, high_mult=32, low_mult=4 → high=64, low=8
+    # config: max_executors=2, high_mult=32, low_mult=4 → high=64, low=8
     # Simulate high queue by directly putting messages
     for i in range(65):
         msg = SourceMessage(topic='t', partition=0, offset=i, value=b'x', timestamp=0)
@@ -519,9 +519,9 @@ async def test_app_backpressure_pauses_and_resumes(test_config):
     total = app._total_queued()
     assert total >= 64
 
-    max_workers = app.config.executor.max_workers
-    high_watermark = max_workers * app.config.executor.backpressure_high_multiplier
-    low_watermark = max(1, max_workers * app.config.executor.backpressure_low_multiplier)
+    max_executors = app.config.executor.max_executors
+    high_watermark = max_executors * app.config.executor.backpressure_high_multiplier
+    low_watermark = max(1, max_executors * app.config.executor.backpressure_low_multiplier)
 
     # Simulate pause trigger
     if not app._paused and total >= high_watermark:
@@ -585,7 +585,7 @@ async def test_shutdown_final_commit_failure_is_logged(test_config):
     from drakkar.executor import ExecutorPool
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
 
     mock_consumer = AsyncMock()
     mock_consumer.commit.side_effect = RuntimeError('commit failed during rebalance')
@@ -634,7 +634,7 @@ async def test_poll_loop_dispatches_messages_to_processors(test_config):
     from drakkar.executor import ExecutorPool
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
     app._consumer = AsyncMock()
     app._running = True
 
@@ -669,7 +669,7 @@ async def test_poll_loop_pauses_on_high_watermark(test_config):
     from drakkar.executor import ExecutorPool
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
     app._consumer = AsyncMock()
     app._running = True
 
@@ -712,7 +712,7 @@ async def test_poll_loop_consumer_idle_metric(test_config):
     from drakkar.metrics import consumer_idle
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
     app._consumer = AsyncMock()
     app._running = True
 
@@ -741,7 +741,7 @@ async def test_poll_loop_executor_idle_waste_metric(test_config):
     from drakkar.metrics import executor_idle_waste
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
     app._consumer = AsyncMock()
     app._running = True
 

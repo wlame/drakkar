@@ -172,7 +172,7 @@ class ExecutorConfig(BaseModel):
     """
 
     binary_path: str | None = Field(default=None, min_length=1)
-    max_workers: int = Field(default=4, ge=1)
+    max_executors: int = Field(default=4, ge=1)
     task_timeout_seconds: int = Field(default=120, ge=1)
     window_size: int = Field(default=100, ge=1)
     max_retries: int = Field(default=3, ge=0)
@@ -303,7 +303,7 @@ class DrakkarConfig(BaseSettings):
             identity = f'{identity}/{cluster_name}'
 
         ex = self.executor
-        exec_part = f'{ex.max_workers}w/{ex.window_size}win/{self.kafka.max_poll_records}poll'
+        exec_part = f'{ex.max_executors}w/{ex.window_size}win/{self.kafka.max_poll_records}poll'
         retries_part = f'{ex.max_retries}/{ex.task_timeout_seconds}s'
 
         debug_part = f'on:{self.debug.port}' if self.debug.enabled else 'off'

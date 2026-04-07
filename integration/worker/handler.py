@@ -56,7 +56,7 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
             input_model=self.input_model.__name__ if self.input_model else None,
             output_model=self.output_model.__name__ if self.output_model else None,
             binary=config.executor.binary_path,
-            max_workers=config.executor.max_workers,
+            max_executors=config.executor.max_executors,
             fail_rate=FAIL_RATE,
         )
         return config

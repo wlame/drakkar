@@ -166,7 +166,7 @@ class DrakkarApp:
 
         self._executor_pool = ExecutorPool(
             binary_path=self._config.executor.binary_path,
-            max_workers=self._config.executor.max_workers,
+            max_executors=self._config.executor.max_executors,
             task_timeout_seconds=self._config.executor.task_timeout_seconds,
         )
 
@@ -282,7 +282,7 @@ class DrakkarApp:
             'assigned_partitions': sorted(self._processors.keys()),
             'partition_count': len(self._processors),
             'pool_active': self._executor_pool.active_count if self._executor_pool else 0,
-            'pool_max': self._executor_pool.max_workers if self._executor_pool else 0,
+            'pool_max': self._executor_pool.max_executors if self._executor_pool else 0,
             'total_queued': self._total_queued(),
             'paused': self._paused,
         }
@@ -291,9 +291,9 @@ class DrakkarApp:
         """Main polling loop with backpressure via Kafka pause/resume."""
         assert self._consumer is not None
         assert self._executor_pool is not None
-        max_workers = self._config.executor.max_workers
-        high_watermark = max_workers * self._config.executor.backpressure_high_multiplier
-        low_watermark = max(1, max_workers * self._config.executor.backpressure_low_multiplier)
+        max_executors = self._config.executor.max_executors
+        high_watermark = max_executors * self._config.executor.backpressure_high_multiplier
+        low_watermark = max(1, max_executors * self._config.executor.backpressure_low_multiplier)
         last_tick = time.monotonic()
 
         while self._running:
@@ -308,7 +308,7 @@ class DrakkarApp:
             # Uses queue_size only (not inflight) — inflight tasks ARE using slots.
             waiting = self._total_waiting()
             if waiting > 0:
-                idle_slots = max_workers - self._executor_pool.active_count
+                idle_slots = max_executors - self._executor_pool.active_count
                 if idle_slots > 0:
                     executor_idle_waste.inc(idle_slots * dt)
 

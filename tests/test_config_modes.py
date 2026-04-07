@@ -100,7 +100,7 @@ def make_config(**overrides) -> DrakkarConfig:
     """Build a DrakkarConfig with sensible test defaults, allowing overrides."""
     defaults = {
         'kafka': KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
-        'executor': ExecutorConfig(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10),
+        'executor': ExecutorConfig(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10),
         'sinks': SinksConfig(kafka={'out': KafkaSinkConfig(topic='test-out')}),
         'metrics': MetricsConfig(enabled=False),
         'logging': LoggingConfig(level='WARNING', format='console'),
@@ -149,7 +149,7 @@ class TestDebugModes:
         """Partition assignment works when debug is disabled (recorder=None)."""
         config = make_config(debug=DebugConfig(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
-        app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+        app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
         app._consumer = MagicMock()
         app._consumer.commit = AsyncMock()
 
@@ -164,7 +164,7 @@ class TestDebugModes:
         """Partition revocation works when debug is disabled."""
         config = make_config(debug=DebugConfig(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
-        app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+        app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
         app._consumer = AsyncMock()
 
         app._on_assign([0, 1])
@@ -237,7 +237,7 @@ class TestPartitionProcessorRecorderModes:
 
     async def test_processor_without_recorder_processes_message(self):
         handler = SimpleHandler()
-        pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+        pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
         committed = []
 
         async def on_commit(pid, offset):
@@ -260,7 +260,7 @@ class TestPartitionProcessorRecorderModes:
 
     async def test_processor_with_recorder_processes_message(self, tmp_path):
         handler = SimpleHandler()
-        pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+        pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
         committed = []
 
         async def on_commit(pid, offset):
@@ -436,7 +436,7 @@ class TestExecutorEdgeCases:
     async def test_max_retries_zero_no_retries_happen(self):
         """With max_retries=0, failed tasks are immediately skipped."""
         handler = RetryHandler()
-        pool = ExecutorPool(binary_path=sys.executable, max_workers=2, task_timeout_seconds=10)
+        pool = ExecutorPool(binary_path=sys.executable, max_executors=2, task_timeout_seconds=10)
 
         proc = PartitionProcessor(
             partition_id=0,
@@ -474,7 +474,7 @@ class TestExecutorEdgeCases:
                 return ErrorAction.RETRY
 
         handler = CountingRetryHandler()
-        pool = ExecutorPool(binary_path=sys.executable, max_workers=2, task_timeout_seconds=10)
+        pool = ExecutorPool(binary_path=sys.executable, max_executors=2, task_timeout_seconds=10)
 
         proc = PartitionProcessor(
             partition_id=0,
@@ -495,7 +495,7 @@ class TestExecutorEdgeCases:
     async def test_window_size_one_processes_single_message_per_window(self):
         """With window_size=1, each message forms its own window."""
         handler = SimpleHandler()
-        pool = ExecutorPool(binary_path='/bin/echo', max_workers=4, task_timeout_seconds=10)
+        pool = ExecutorPool(binary_path='/bin/echo', max_executors=4, task_timeout_seconds=10)
         committed = []
 
         async def on_commit(pid, offset):
@@ -524,7 +524,7 @@ class TestExecutorEdgeCases:
         """When neither pool nor task has binary_path, task fails cleanly."""
         from drakkar.executor import ExecutorTaskError
 
-        pool = ExecutorPool(binary_path=None, max_workers=2, task_timeout_seconds=10)
+        pool = ExecutorPool(binary_path=None, max_executors=2, task_timeout_seconds=10)
         task = ExecutorTask(
             task_id='no-binary',
             args=['hello'],
@@ -539,7 +539,7 @@ class TestExecutorEdgeCases:
 
     async def test_task_binary_overrides_pool_binary(self):
         """Per-task binary_path overrides pool-level binary_path."""
-        pool = ExecutorPool(binary_path='/bin/false', max_workers=2, task_timeout_seconds=10)
+        pool = ExecutorPool(binary_path='/bin/false', max_executors=2, task_timeout_seconds=10)
         task = ExecutorTask(
             task_id='override',
             args=['hello'],
@@ -697,7 +697,7 @@ class TestCombinedModes:
         )
         handler = CollectHandler()
         app = DrakkarApp(handler=handler, config=config)
-        app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+        app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
         app._consumer = MagicMock()
         app._consumer.commit = AsyncMock()
         _setup_app_sinks(app)
@@ -722,7 +722,7 @@ class TestCombinedModes:
         config = make_config(
             executor=ExecutorConfig(
                 binary_path='/bin/echo',
-                max_workers=2,
+                max_executors=2,
                 task_timeout_seconds=10,
                 window_size=1,
                 max_retries=0,
@@ -732,7 +732,7 @@ class TestCombinedModes:
         )
         handler = CollectHandler()
         app = DrakkarApp(handler=handler, config=config)
-        app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+        app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
         app._consumer = MagicMock()
         app._consumer.commit = AsyncMock()
         _setup_app_sinks(app)
@@ -758,7 +758,7 @@ class TestCombinedModes:
         config = make_config(
             executor=ExecutorConfig(
                 binary_path=sys.executable,
-                max_workers=2,
+                max_executors=2,
                 task_timeout_seconds=10,
                 max_retries=0,
             ),
@@ -766,7 +766,7 @@ class TestCombinedModes:
         )
         handler = RetryHandler()  # asks for RETRY but max_retries=0 blocks it
         app = DrakkarApp(handler=handler, config=config)
-        app._executor_pool = ExecutorPool(binary_path=sys.executable, max_workers=2, task_timeout_seconds=10)
+        app._executor_pool = ExecutorPool(binary_path=sys.executable, max_executors=2, task_timeout_seconds=10)
         app._consumer = MagicMock()
         app._consumer.commit = AsyncMock()
         _setup_app_sinks(app)
@@ -795,20 +795,20 @@ class TestBackpressureEdgeCases:
         config = make_config(
             executor=ExecutorConfig(
                 binary_path='/bin/echo',
-                max_workers=1,
+                max_executors=1,
                 task_timeout_seconds=10,
                 backpressure_high_multiplier=1,
                 backpressure_low_multiplier=1,
             ),
         )
         app = DrakkarApp(handler=SimpleHandler(), config=config)
-        app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_workers=1, task_timeout_seconds=10)
+        app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=1, task_timeout_seconds=10)
         app._consumer = AsyncMock()
         app._running = True
 
-        max_workers = config.executor.max_workers
-        high_watermark = max_workers * config.executor.backpressure_high_multiplier
-        low_watermark = max(1, max_workers * config.executor.backpressure_low_multiplier)
+        max_executors = config.executor.max_executors
+        high_watermark = max_executors * config.executor.backpressure_high_multiplier
+        low_watermark = max(1, max_executors * config.executor.backpressure_low_multiplier)
 
         # high=1, low=1 — pause/resume thresholds are the same
         assert high_watermark == 1
@@ -884,7 +884,7 @@ class TestProcessorCallbackModes:
     async def test_processor_without_callbacks_processes_message(self):
         """Processor works even without on_collect or on_commit callbacks."""
         handler = SimpleHandler()
-        pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+        pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
 
         proc = PartitionProcessor(
             partition_id=0,
@@ -906,7 +906,7 @@ class TestProcessorCallbackModes:
         """Processor collects results but skips commit when callback is None."""
         collected = []
         handler = CollectHandler()
-        pool = ExecutorPool(binary_path='/bin/echo', max_workers=2, task_timeout_seconds=10)
+        pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
 
         async def on_collect(result, partition_id):
             collected.append(result)
@@ -1004,7 +1004,7 @@ class TestConfigSummary:
         cfg = make_config(
             executor=ExecutorConfig(
                 binary_path='/bin/echo',
-                max_workers=8,
+                max_executors=8,
                 window_size=200,
                 max_retries=5,
                 task_timeout_seconds=300,

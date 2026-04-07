@@ -96,7 +96,7 @@ import os
 
 async def on_startup(self, config: dk.DrakkarConfig) -> dk.DrakkarConfig:
     cpu_count = os.cpu_count() or 4
-    config.executor.max_workers = cpu_count * 2
+    config.executor.max_executors = cpu_count * 2
     return config
 ```
 

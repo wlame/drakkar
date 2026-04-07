@@ -161,7 +161,7 @@ kafka:
 
 executor:
   binary_path: "/usr/local/bin/my-processor"
-  max_workers: 8
+  max_executors: 8
   task_timeout_seconds: 120
   window_size: 20
 
@@ -289,7 +289,7 @@ All config fields support environment variable override with `DRAKKAR_` prefix a
 
 ```bash
 DRAKKAR_KAFKA__BROKERS=kafka:9092
-DRAKKAR_EXECUTOR__MAX_WORKERS=16
+DRAKKAR_EXECUTOR__MAX_EXECUTORS=16
 DRAKKAR_DEBUG__PORT=8081
 ```
 

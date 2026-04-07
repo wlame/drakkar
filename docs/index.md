@@ -173,7 +173,7 @@ kafka:
 
 executor:
   binary_path: "/usr/local/bin/my-tool"
-  max_workers: 8
+  max_executors: 8
   task_timeout_seconds: 60
 
 sinks:
@@ -185,7 +185,7 @@ sinks:
       dsn: "postgresql://user:pass@localhost:5432/mydb"
 ```
 
-All config fields support env var override with `DRAKKAR_` prefix and `__` for nesting (e.g. `DRAKKAR_EXECUTOR__MAX_WORKERS=16`).
+All config fields support env var override with `DRAKKAR_` prefix and `__` for nesting (e.g. `DRAKKAR_EXECUTOR__MAX_EXECUTORS=16`).
 
 ### Run
 

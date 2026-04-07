@@ -31,7 +31,7 @@ After `on_startup`, the framework builds all components in this order:
 
 2. **Creates the ExecutorPool** with:
    - `executor.binary_path` (default: `None` -- each task must then provide its own `binary_path`)
-   - `executor.max_workers` (default: `4`, min: `1`) -- controls the `asyncio.Semaphore` size
+   - `executor.max_executors` (default: `4`, min: `1`) -- controls the `asyncio.Semaphore` size
    - `executor.task_timeout_seconds` (default: `120`, min: `1`) -- per-subprocess wall-clock timeout
 
 3. **Starts the Prometheus metrics server** on `metrics.port` (default: `9090`) if `metrics.enabled` (default: `True`). Publishes `worker_info` with worker_id, version, and consumer_group labels.
@@ -97,8 +97,8 @@ The framework calculates the **total queued count** as the sum of `queue_size + 
 
 Two watermarks control backpressure:
 
-- **High watermark** = `executor.max_workers` (default: `4`) x `executor.backpressure_high_multiplier` (default: `32`) = **128** by default.
-- **Low watermark** = max(1, `executor.max_workers` x `executor.backpressure_low_multiplier` (default: `4`)) = **16** by default.
+- **High watermark** = `executor.max_executors` (default: `4`) x `executor.backpressure_high_multiplier` (default: `32`) = **128** by default.
+- **Low watermark** = max(1, `executor.max_executors` x `executor.backpressure_low_multiplier` (default: `4`)) = **16** by default.
 
 **Pause condition**: If not currently paused AND total queued >= high watermark:
 - Calls `consumer.pause(all_assigned_partition_ids)` -- Kafka stops delivering messages from all partitions.
@@ -244,11 +244,11 @@ For each window:
 
 ### 4.1 Acquiring an Executor Slot
 
-The `ExecutorPool` uses an `asyncio.Semaphore(max_workers)` to limit concurrent subprocess runs across all partitions.
+The `ExecutorPool` uses an `asyncio.Semaphore(max_executors)` to limit concurrent subprocess runs across all partitions.
 
 1. The task enters the **waiting state**: `waiting_count` is incremented.
 2. `async with self._semaphore:` -- blocks until a slot is available.
-3. On acquiring the semaphore: `waiting_count` is decremented, `active_count` is incremented, and a **slot ID** (0 to max_workers-1) is popped from the available slots list.
+3. On acquiring the semaphore: `waiting_count` is decremented, `active_count` is incremented, and a **slot ID** (0 to max_executors-1) is popped from the available slots list.
 4. If the flight recorder is enabled, a `task_started` event is recorded with the current `pool_active` and `pool_waiting` counts and the allocated slot number.
 
 ### 4.2 Launching the Subprocess
@@ -620,7 +620,7 @@ When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
 - **One poll loop** fetches messages and dispatches to partition processors.
 - **One processing loop per partition** collects windows and launches tasks.
 - **Multiple windows per partition** can be in-flight concurrently -- the processor does not wait for window N to complete before starting window N+1.
-- **All partitions share a single ExecutorPool** with a semaphore of size `executor.max_workers`. Tasks from any partition compete for the same slots.
+- **All partitions share a single ExecutorPool** with a semaphore of size `executor.max_executors`. Tasks from any partition compete for the same slots.
 - **Backpressure operates globally** -- pause/resume applies to all partitions simultaneously based on the total queued count across all processors.
 - **Periodic tasks** run as independent async tasks in the same event loop.
 - **Sink delivery** happens inline within the task's async context (not batched across partitions).
@@ -655,13 +655,13 @@ When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
 | Field | Type | Default | Min | Description |
 |-------|------|---------|-----|-------------|
 | `binary_path` | str or None | `None` | 1 char | Default subprocess binary; None requires per-task override |
-| `max_workers` | int | `4` | 1 | Concurrent subprocess limit (semaphore size) |
+| `max_executors` | int | `4` | 1 | Concurrent subprocess limit (semaphore size) |
 | `task_timeout_seconds` | int | `120` | 1 | Per-subprocess wall-clock timeout |
 | `window_size` | int | `100` | 1 | Max messages per arrange() window |
 | `max_retries` | int | `3` | 0 | Max retries per failed task (0 = no retries) |
 | `drain_timeout_seconds` | int | `5` | 1 | Max wait for in-flight tasks during shutdown |
-| `backpressure_high_multiplier` | int | `32` | 1 | Pause threshold = max_workers x this |
-| `backpressure_low_multiplier` | int | `4` | 1 | Resume threshold = max(1, max_workers x this) |
+| `backpressure_high_multiplier` | int | `32` | 1 | Pause threshold = max_executors x this |
+| `backpressure_low_multiplier` | int | `4` | 1 | Resume threshold = max(1, max_executors x this) |
 
 ### `sinks` -- Output Sink Instances
 

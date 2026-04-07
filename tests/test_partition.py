@@ -87,7 +87,7 @@ class ErrorHandler(BaseDrakkarHandler):
 def echo_pool() -> ExecutorPool:
     return ExecutorPool(
         binary_path='/bin/echo',
-        max_workers=4,
+        max_executors=4,
         task_timeout_seconds=10,
     )
 
@@ -96,7 +96,7 @@ def echo_pool() -> ExecutorPool:
 def failing_pool() -> ExecutorPool:
     return ExecutorPool(
         binary_path=sys.executable,
-        max_workers=4,
+        max_executors=4,
         task_timeout_seconds=10,
     )
 
@@ -473,7 +473,7 @@ async def test_full_shutdown_commits_queued_messages(echo_pool):
     # use python as the binary so we can sleep
     slow_pool = ExecutorPool(
         binary_path=sys.executable,
-        max_workers=2,
+        max_executors=2,
         task_timeout_seconds=10,
     )
 
@@ -554,7 +554,7 @@ async def test_active_tasks_set_holds_references():
     """
     slow_pool = ExecutorPool(
         binary_path=sys.executable,
-        max_workers=4,
+        max_executors=4,
         task_timeout_seconds=10,
     )
 
@@ -899,7 +899,7 @@ async def test_concurrent_windows_offset_watermark():
 
     pool = ExecutorPool(
         binary_path=sys.executable,
-        max_workers=4,
+        max_executors=4,
         task_timeout_seconds=10,
     )
 
@@ -950,7 +950,7 @@ async def test_concurrent_windows_pending_context():
 
     pool = ExecutorPool(
         binary_path=sys.executable,
-        max_workers=4,
+        max_executors=4,
         task_timeout_seconds=10,
     )
 

@@ -10,7 +10,7 @@ tasks (5-50ms) on machines with many CPU cores (32-128+).
 
 The table below shows approximate overhead for a specific scenario:
 **a binary that runs in ~30ms, on an 80-core machine with
-`max_workers: 80`**. Your numbers will differ based on hardware, binary
+`max_executors: 80`**. Your numbers will differ based on hardware, binary
 startup cost, message size, and Pydantic model complexity -- but the
 relative proportions hold.
 
@@ -194,7 +194,7 @@ the fast majority.
 
 A minor detail that matters at extreme scale: after each task completes,
 the executor pool runs `self._available_slots.sort()` (line 82 of
-`executor.py`). With `max_workers: 80`, this sorts a list of up to
+`executor.py`). With `max_executors: 80`, this sorts a list of up to
 80 integers on every task completion. At 2,700 completions/sec, that's
 2,700 sorts/sec -- still fast (80-element sort is ~1us), but it's
 there.
@@ -213,11 +213,11 @@ the sum of all partition queue sizes plus all in-flight task counts. Two
 thresholds control the hysteresis:
 
 ```
-high_watermark = max_workers x backpressure_high_multiplier
-low_watermark  = max(1, max_workers x backpressure_low_multiplier)
+high_watermark = max_executors x backpressure_high_multiplier
+low_watermark  = max(1, max_executors x backpressure_low_multiplier)
 ```
 
-With defaults (`max_workers: 4`, `high_multiplier: 32`,
+With defaults (`max_executors: 4`, `high_multiplier: 32`,
 `low_multiplier: 4`):
 
 ```
@@ -247,7 +247,7 @@ For high core count machines, the defaults may be too conservative:
 | 4 workers, 10s tasks | `high_multiplier: 32`, `low_multiplier: 4` -- high=128, low=16 (defaults are fine) |
 
 If `drakkar_backpressure_active == 1` is persistent, either increase
-`max_workers`, add more horizontal workers, or increase the multipliers
+`max_executors`, add more horizontal workers, or increase the multipliers
 to buffer more in memory.
 
 ---
@@ -258,7 +258,7 @@ to buffer more in memory.
 
 ```yaml
 executor:
-  max_workers: 64              # match available cores, leave headroom
+  max_executors: 64              # match available cores, leave headroom
   window_size: 200             # larger windows for batching opportunity
   task_timeout_seconds: 30     # short timeout for fast tasks
   backpressure_high_multiplier: 16
@@ -277,7 +277,7 @@ debug:
 
 | Setting | Rationale |
 |---------|-----------|
-| `max_workers: 64` | On an 80-core machine, leave ~16 cores for the event loop, OS, Kafka consumer, and sink I/O. Going higher adds contention without benefit. |
+| `max_executors: 64` | On an 80-core machine, leave ~16 cores for the event loop, OS, Kafka consumer, and sink I/O. Going higher adds contention without benefit. |
 | `window_size: 200` | With fast tasks, larger windows let `arrange()` batch more messages per subprocess. Even without batching, larger windows reduce `arrange()` call frequency. |
 | `max_poll_records: 500` | Pull more messages per Kafka poll to keep partition queues full. Reduces poll overhead per message. |
 | `ws_min_duration_ms: 100` | Fast tasks flood the WebSocket and live UI. Hiding them reduces event loop work and browser rendering cost. |
@@ -288,7 +288,7 @@ debug:
 
 ```yaml
 executor:
-  max_workers: 8
+  max_executors: 8
   window_size: 20
   task_timeout_seconds: 300
 
@@ -310,7 +310,7 @@ observability.
 
 ```yaml
 executor:
-  max_workers: 16
+  max_executors: 16
   window_size: 5               # small windows -- few tasks in flight at once
   task_timeout_seconds: 120    # generous timeout, but not infinite
   max_retries: 2               # retry on transient failures
@@ -332,7 +332,7 @@ debug:
 
 | Setting | Rationale |
 |---------|-----------|
-| `max_workers: 16` | With 10s tasks, 16 workers means ~1.6 tasks/sec throughput. Adding more workers only helps if you have enough CPU cores. |
+| `max_executors: 16` | With 10s tasks, 16 workers means ~1.6 tasks/sec throughput. Adding more workers only helps if you have enough CPU cores. |
 | `window_size: 5` | Small windows avoid buffering too many 10s tasks. Each window takes ~10s to complete, so commit latency = 10s per window. |
 | `max_poll_records: 20` | Don't fetch 500 messages when each takes 10s to process -- that's 83 minutes of work per poll. |
 | `session_timeout_ms: 60000` | Default 45s may trigger rebalance if the event loop is busy with task completions. 60s gives more headroom. |
@@ -361,7 +361,7 @@ WORKER_ID=worker-4 python main.py &
 
 Each worker gets a subset of partitions and runs its own executor pool.
 The total subprocess capacity across the cluster is
-`worker_count x max_workers`.
+`worker_count x max_executors`.
 
 ---
 
@@ -398,7 +398,7 @@ rate(drakkar_executor_idle_slot_seconds_total[5m])
 rate(drakkar_consumer_idle_seconds_total[5m])
 ```
 
-If `backpressure_active == 1` consistently, you need more `max_workers`
+If `backpressure_active == 1` consistently, you need more `max_executors`
 or more horizontal workers. If `total_queued` grows unbounded, your
 processing rate is lower than your production rate.
 

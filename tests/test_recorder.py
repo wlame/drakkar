@@ -907,7 +907,7 @@ def _make_drakkar_config():
         kafka={'brokers': 'kafka:9092', 'source_topic': 'test-topic', 'consumer_group': 'test-group'},
         executor={
             'binary_path': '/usr/bin/test',
-            'max_workers': 4,
+            'max_executors': 4,
             'task_timeout_seconds': 60,
             'max_retries': 2,
             'window_size': 5,
@@ -936,7 +936,7 @@ async def test_write_config_populates_single_row(tmp_path):
     assert data['source_topic'] == 'test-topic'
     assert data['consumer_group'] == 'test-group'
     assert data['binary_path'] == '/usr/bin/test'
-    assert data['max_workers'] == 4
+    assert data['max_executors'] == 4
     sinks = json.loads(data['sinks_json'])
     assert 'kafka' in sinks
     await rec.stop()
@@ -1271,7 +1271,7 @@ async def test_discover_workers_finds_other_worker(tmp_path):
         await db.execute(
             """INSERT INTO worker_config
                (id, worker_name, ip_address, debug_port, debug_url, kafka_brokers, source_topic,
-                consumer_group, binary_path, max_workers, task_timeout_seconds,
+                consumer_group, binary_path, max_executors, task_timeout_seconds,
                 max_retries, window_size, sinks_json, env_vars_json, created_at, created_at_dt)
                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
@@ -1547,7 +1547,7 @@ async def _create_worker_db(
         await db.execute(
             """INSERT INTO worker_config
                (id, worker_name, cluster_name, ip_address, debug_port, debug_url, kafka_brokers,
-                source_topic, consumer_group, binary_path, max_workers, task_timeout_seconds,
+                source_topic, consumer_group, binary_path, max_executors, task_timeout_seconds,
                 max_retries, window_size, sinks_json, env_vars_json, created_at, created_at_dt)
                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [

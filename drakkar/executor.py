@@ -31,14 +31,14 @@ class ExecutorPool:
     ``binary_path`` on the task returned from ``arrange()``.
     """
 
-    def __init__(self, binary_path: str | None, max_workers: int, task_timeout_seconds: int) -> None:
+    def __init__(self, binary_path: str | None, max_executors: int, task_timeout_seconds: int) -> None:
         self._binary_path = binary_path
-        self._max_workers = max_workers
+        self._max_executors = max_executors
         self._task_timeout = task_timeout_seconds
-        self._semaphore = asyncio.Semaphore(max_workers)
+        self._semaphore = asyncio.Semaphore(max_executors)
         self._active_count = 0
         self._waiting_count = 0
-        self._available_slots: list[int] = list(range(max_workers))
+        self._available_slots: list[int] = list(range(max_executors))
         heapq.heapify(self._available_slots)
 
     @property
@@ -50,8 +50,8 @@ class ExecutorPool:
         return self._waiting_count
 
     @property
-    def max_workers(self) -> int:
-        return self._max_workers
+    def max_executors(self) -> int:
+        return self._max_executors
 
     async def execute(
         self,

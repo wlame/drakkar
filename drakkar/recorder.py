@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS worker_config (
     source_topic    TEXT,
     consumer_group  TEXT,
     binary_path     TEXT,
-    max_workers     INTEGER,
+    max_executors     INTEGER,
     task_timeout_seconds INTEGER,
     max_retries     INTEGER,
     window_size     INTEGER,
@@ -330,7 +330,7 @@ class EventRecorder:
         await self._db.execute(
             """INSERT OR REPLACE INTO worker_config
                (id, worker_name, cluster_name, ip_address, debug_port, debug_url, kafka_brokers,
-                source_topic, consumer_group, binary_path, max_workers, task_timeout_seconds,
+                source_topic, consumer_group, binary_path, max_executors, task_timeout_seconds,
                 max_retries, window_size, sinks_json, env_vars_json, created_at, created_at_dt)
                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
@@ -343,7 +343,7 @@ class EventRecorder:
                 drakkar_config.kafka.source_topic,
                 drakkar_config.kafka.consumer_group,
                 drakkar_config.executor.binary_path,
-                drakkar_config.executor.max_workers,
+                drakkar_config.executor.max_executors,
                 drakkar_config.executor.task_timeout_seconds,
                 drakkar_config.executor.max_retries,
                 drakkar_config.executor.window_size,

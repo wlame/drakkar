@@ -111,7 +111,7 @@ def mock_app():
     pool = MagicMock()
     pool.active_count = 2
     pool.waiting_count = 0
-    pool.max_workers = 8
+    pool.max_executors = 8
     app._executor_pool = pool
 
     app._consumer = None
@@ -392,7 +392,7 @@ class TestApiDebugDatabases:
             """INSERT INTO worker_config
                (id, worker_name, cluster_name, ip_address, debug_port, debug_url,
                 kafka_brokers, source_topic, consumer_group, binary_path,
-                max_workers, task_timeout_seconds, max_retries, window_size,
+                max_executors, task_timeout_seconds, max_retries, window_size,
                 sinks_json, env_vars_json, created_at, created_at_dt)
                VALUES (1, 'worker-1', 'main', '10.0.0.1', 8080, NULL,
                        'kafka:9092', 'topic', 'grp', '/bin/rg',
@@ -854,7 +854,7 @@ async def test_api_debug_databases_lists_files(tmp_path, mock_recorder, mock_app
         """INSERT INTO worker_config
            (id, worker_name, cluster_name, ip_address, debug_port, debug_url,
             kafka_brokers, source_topic, consumer_group, binary_path,
-            max_workers, task_timeout_seconds, max_retries, window_size,
+            max_executors, task_timeout_seconds, max_retries, window_size,
             sinks_json, env_vars_json, created_at, created_at_dt)
            VALUES (1, 'worker-1', 'main', '10.0.0.1', 8080, NULL,
                    'kafka:9092', 'topic', 'grp', '/bin/rg',
@@ -923,7 +923,7 @@ async def test_api_debug_merge(tmp_path, mock_recorder, mock_app):
             """INSERT INTO worker_config
                (id, worker_name, cluster_name, ip_address, debug_port, debug_url,
                 kafka_brokers, source_topic, consumer_group, binary_path,
-                max_workers, task_timeout_seconds, max_retries, window_size,
+                max_executors, task_timeout_seconds, max_retries, window_size,
                 sinks_json, env_vars_json, created_at, created_at_dt)
                VALUES (1, ?, 'main', '10.0.0.1', 8080, NULL,
                        'k:9092', 't', 'g', '/bin/x', 4, 60, 2, 5, '{}', '{}', 1000.0, '1970-01-01 00:16:40.000')""",

@@ -33,7 +33,7 @@ def _create_source_db(
             """INSERT INTO worker_config
                (id, worker_name, cluster_name, ip_address, debug_port, debug_url,
                 kafka_brokers, source_topic, consumer_group, binary_path,
-                max_workers, task_timeout_seconds, max_retries, window_size,
+                max_executors, task_timeout_seconds, max_retries, window_size,
                 sinks_json, env_vars_json, created_at, created_at_dt)
                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
@@ -831,7 +831,7 @@ def test_merge_preserves_worker_config_fields(tmp_path):
     assert w['source_topic'] == 'search-requests'
     assert w['consumer_group'] == 'test-group'
     assert w['binary_path'] == '/usr/bin/rg'
-    assert w['max_workers'] == 4
+    assert w['max_executors'] == 4
     assert w['task_timeout_seconds'] == 120
     assert w['max_retries'] == 3
     assert w['window_size'] == 10

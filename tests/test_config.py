@@ -44,7 +44,7 @@ def test_executor_config_binary_path_defaults_to_none():
 
 def test_executor_config_defaults():
     cfg = ExecutorConfig(binary_path='/usr/bin/echo')
-    assert cfg.max_workers == 4
+    assert cfg.max_executors == 4
     assert cfg.task_timeout_seconds == 120
     assert cfg.window_size == 100
     assert cfg.max_retries == 3
@@ -72,7 +72,7 @@ def test_executor_config_rejects_empty_binary_path():
 
 def test_executor_config_rejects_zero_workers():
     with pytest.raises(ValidationError):
-        ExecutorConfig(binary_path='/bin/echo', max_workers=0)
+        ExecutorConfig(binary_path='/bin/echo', max_executors=0)
 
 
 # --- Sink config models ---
@@ -297,7 +297,7 @@ def test_load_config_from_yaml(config_yaml_file: Path):
     cfg = load_config(config_yaml_file)
     assert cfg.kafka.brokers == 'kafka1:9092,kafka2:9092'
     assert cfg.executor.binary_path == '/usr/local/bin/processor'
-    assert cfg.executor.max_workers == 40
+    assert cfg.executor.max_executors == 40
 
 
 def test_load_config_minimal_yaml(minimal_config_yaml_file: Path):
@@ -340,11 +340,11 @@ def test_load_config_empty_yaml(tmp_path: Path):
 
 def test_drakkar_config_env_nested_delimiter(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('DRAKKAR_EXECUTOR__BINARY_PATH', '/usr/bin/test')
-    monkeypatch.setenv('DRAKKAR_EXECUTOR__MAX_WORKERS', '16')
+    monkeypatch.setenv('DRAKKAR_EXECUTOR__MAX_EXECUTORS', '16')
     monkeypatch.setenv('DRAKKAR_KAFKA__SOURCE_TOPIC', 'my-topic')
     cfg = DrakkarConfig()
     assert cfg.executor.binary_path == '/usr/bin/test'
-    assert cfg.executor.max_workers == 16
+    assert cfg.executor.max_executors == 16
     assert cfg.kafka.source_topic == 'my-topic'
 
 
@@ -373,7 +373,7 @@ def test_config_serialization(config_yaml_file: Path):
     cfg = load_config(config_yaml_file)
     data = cfg.model_dump()
     assert data['kafka']['brokers'] == 'kafka1:9092,kafka2:9092'
-    assert data['executor']['max_workers'] == 40
+    assert data['executor']['max_executors'] == 40
 
 
 def test_deep_merge_recursive():

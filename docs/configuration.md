@@ -34,7 +34,7 @@ app = DrakkarApp(
     handler=MyHandler(),
     config=DrakkarConfig(
         kafka=KafkaConfig(brokers='kafka:9092', source_topic='my-events'),
-        executor=ExecutorConfig(max_workers=8),
+        executor=ExecutorConfig(max_executors=8),
     ),
 )
 ```
@@ -50,8 +50,8 @@ Environment variables use the `DRAKKAR_` prefix with `__` (double underscore) as
 # Override kafka.brokers
 export DRAKKAR_KAFKA__BROKERS=kafka-prod:9092
 
-# Override executor.max_workers
-export DRAKKAR_EXECUTOR__MAX_WORKERS=16
+# Override executor.max_executors
+export DRAKKAR_EXECUTOR__MAX_EXECUTORS=16
 
 # Override debug.port
 export DRAKKAR_DEBUG__PORT=9000
@@ -119,24 +119,24 @@ Controls the subprocess executor pool that runs user-defined binaries.
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `binary_path` | `str \| None` | `None` | min length 1 if set | Default binary path for all tasks. If `None`, each [ExecutorTask](executor.md#executortask) returned by [arrange()](handler.md#arrange-required) must provide its own `binary_path`, otherwise the task fails with a clear error. See [Binary Path Resolution](executor.md#binary-path-resolution). |
-| `max_workers` | `int` | `4` | >= 1 | Maximum number of concurrent subprocesses. Controls the `asyncio.Semaphore` size -- tasks beyond this limit wait in a queue. See [Concurrency and Backpressure](executor.md#concurrency-and-backpressure). |
+| `max_executors` | `int` | `4` | >= 1 | Maximum number of concurrent subprocesses. Controls the `asyncio.Semaphore` size -- tasks beyond this limit wait in a queue. See [Concurrency and Backpressure](executor.md#concurrency-and-backpressure). |
 | `task_timeout_seconds` | `int` | `120` | >= 1 | Wall-clock timeout (seconds) per subprocess. If a process exceeds this, it is killed and treated as a failure. |
 | `window_size` | `int` | `100` | >= 1 | Maximum number of messages collected per [arrange()](handler.md#arrange-required) [window](executor.md#windowing). Larger windows allow more batching in `arrange()`; smaller windows reduce latency. |
 | `max_retries` | `int` | `3` | >= 0 | Maximum number of retry attempts per failed task (0 = no retries). A task can run up to `max_retries + 1` times total. |
 | `drain_timeout_seconds` | `int` | `5` | >= 1 | Maximum time (seconds) to wait for in-flight tasks during shutdown or partition revocation. |
-| `backpressure_high_multiplier` | `int` | `32` | >= 1 | Multiplier for the pause threshold. When total queued messages reach `max_workers * backpressure_high_multiplier`, Kafka consumption is paused. |
-| `backpressure_low_multiplier` | `int` | `4` | >= 1 | Multiplier for the resume threshold. When total queued messages drop to `max(1, max_workers * backpressure_low_multiplier)`, Kafka consumption resumes. |
+| `backpressure_high_multiplier` | `int` | `32` | >= 1 | Multiplier for the pause threshold. When total queued messages reach `max_executors * backpressure_high_multiplier`, Kafka consumption is paused. |
+| `backpressure_low_multiplier` | `int` | `4` | >= 1 | Multiplier for the resume threshold. When total queued messages drop to `max(1, max_executors * backpressure_low_multiplier)`, Kafka consumption resumes. |
 
 ### Backpressure Formula
 
 [Backpressure](performance.md#backpressure) prevents unbounded memory growth by pausing Kafka consumption when too many messages are buffered:
 
 ```
-high_watermark = max_workers * backpressure_high_multiplier
-low_watermark  = max(1, max_workers * backpressure_low_multiplier)
+high_watermark = max_executors * backpressure_high_multiplier
+low_watermark  = max(1, max_executors * backpressure_low_multiplier)
 ```
 
-With defaults (`max_workers=4`):
+With defaults (`max_executors=4`):
 
 - **High watermark** = 4 * 32 = **128** -- pause consumption
 - **Low watermark** = max(1, 4 * 4) = **16** -- resume consumption
@@ -146,7 +146,7 @@ The gap between high and low watermarks prevents rapid pause/resume oscillation 
 ```yaml
 executor:
   binary_path: /usr/local/bin/my-processor
-  max_workers: 8
+  max_executors: 8
   task_timeout_seconds: 300
   window_size: 50
   max_retries: 5
@@ -460,7 +460,7 @@ kafka:
 # --- Executor pool ---
 executor:
   binary_path: /usr/local/bin/search-engine
-  max_workers: 8
+  max_executors: 8
   task_timeout_seconds: 300        # 5 minutes per task
   window_size: 50
   max_retries: 3
@@ -585,7 +585,7 @@ Common environment variables and their corresponding YAML paths:
 | `DRAKKAR_KAFKA__SESSION_TIMEOUT_MS` | `kafka.session_timeout_ms` | `60000` |
 | `DRAKKAR_KAFKA__HEARTBEAT_INTERVAL_MS` | `kafka.heartbeat_interval_ms` | `5000` |
 | `DRAKKAR_EXECUTOR__BINARY_PATH` | `executor.binary_path` | `/usr/bin/my-tool` |
-| `DRAKKAR_EXECUTOR__MAX_WORKERS` | `executor.max_workers` | `16` |
+| `DRAKKAR_EXECUTOR__MAX_EXECUTORS` | `executor.max_executors` | `16` |
 | `DRAKKAR_EXECUTOR__TASK_TIMEOUT_SECONDS` | `executor.task_timeout_seconds` | `300` |
 | `DRAKKAR_EXECUTOR__WINDOW_SIZE` | `executor.window_size` | `50` |
 | `DRAKKAR_EXECUTOR__MAX_RETRIES` | `executor.max_retries` | `5` |

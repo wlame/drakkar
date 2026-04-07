@@ -1,6 +1,6 @@
 # Executor System
 
-Drakkar runs external binaries as subprocesses -- not through a shell, but directly via `asyncio.create_subprocess_exec`. Arguments are passed as a list, making the execution safe from shell injection by design. Concurrency is controlled by an `asyncio.Semaphore` sized to `executor.max_workers`, and each task is bounded by a wall-clock timeout via `asyncio.wait_for`.
+Drakkar runs external binaries as subprocesses -- not through a shell, but directly via `asyncio.create_subprocess_exec`. Arguments are passed as a list, making the execution safe from shell injection by design. Concurrency is controlled by an `asyncio.Semaphore` sized to `executor.max_executors`, and each task is bounded by a wall-clock timeout via `asyncio.wait_for`.
 
 ---
 
@@ -72,7 +72,7 @@ The task enters the waiting state (`waiting_count` incremented). It blocks on `a
 
 ### 2. Acquire Slot
 
-When the semaphore is acquired, `waiting_count` is decremented, `active_count` is incremented, and a slot ID (0 to `max_workers - 1`) is assigned from the available pool.
+When the semaphore is acquired, `waiting_count` is decremented, `active_count` is incremented, and a slot ID (0 to `max_executors - 1`) is assigned from the available pool.
 
 ### 3. Launch Process
 
@@ -178,7 +178,7 @@ class MyHandler(BaseDrakkarHandler):
 
 ### Semaphore-based Concurrency
 
-`executor.max_workers` (default: 4) controls how many subprocesses run in parallel across all partitions. The `ExecutorPool` maintains an `asyncio.Semaphore` of this size. Tasks from any partition compete for the same pool.
+`executor.max_executors` (default: 4) controls how many subprocesses run in parallel across all partitions. The `ExecutorPool` maintains an `asyncio.Semaphore` of this size. Tasks from any partition compete for the same pool.
 
 When all slots are occupied, additional tasks wait in the semaphore queue. The `waiting_count` property tracks how many tasks are queued, while `active_count` tracks how many are running.
 
@@ -186,10 +186,10 @@ When all slots are occupied, additional tasks wait in the semaphore queue. The `
 
 The framework pauses and resumes the Kafka consumer based on total queued work across all partition processors. See [Performance Tuning](performance.md#backpressure) for tuning recommendations. Two watermarks control the behavior:
 
-| Watermark | Formula | Default (max_workers=4) |
+| Watermark | Formula | Default (max_executors=4) |
 |-----------|---------|-------------------------|
-| **High** (pause) | `max_workers` x `backpressure_high_multiplier` | 4 x 32 = **128** |
-| **Low** (resume) | max(1, `max_workers` x `backpressure_low_multiplier`) | max(1, 4 x 4) = **16** |
+| **High** (pause) | `max_executors` x `backpressure_high_multiplier` | 4 x 32 = **128** |
+| **Low** (resume) | max(1, `max_executors` x `backpressure_low_multiplier`) | max(1, 4 x 4) = **16** |
 
 The total queued count is the sum of `queue_size + inflight_count` across all active partition processors.
 
@@ -202,7 +202,7 @@ The gap between high and low watermarks (hysteresis) prevents rapid pause/resume
 
 ```yaml
 executor:
-  max_workers: 8
+  max_executors: 8
   backpressure_high_multiplier: 32   # pause at 8 * 32 = 256 queued
   backpressure_low_multiplier: 4     # resume at 8 * 4 = 32 queued
 ```
@@ -287,29 +287,29 @@ All executor settings live under the `executor` key in your YAML config:
 ```yaml
 executor:
   binary_path: /usr/local/bin/my-worker    # default binary (optional)
-  max_workers: 4                           # concurrent subprocess limit
+  max_executors: 4                           # concurrent subprocess limit
   task_timeout_seconds: 120                # per-task wall-clock timeout
   window_size: 100                         # max messages per arrange() call
   max_retries: 3                           # retry limit per failed task
   drain_timeout_seconds: 5                 # max wait for in-flight tasks on shutdown
-  backpressure_high_multiplier: 32         # pause consumer at max_workers * this
-  backpressure_low_multiplier: 4           # resume consumer at max_workers * this
+  backpressure_high_multiplier: 32         # pause consumer at max_executors * this
+  backpressure_low_multiplier: 4           # resume consumer at max_executors * this
 ```
 
 | Field | Type | Default | Min | Description |
 |-------|------|---------|-----|-------------|
 | `binary_path` | `str \| None` | `None` | 1 char | Default subprocess binary. `None` requires per-task override via `ExecutorTask.binary_path`. |
-| `max_workers` | `int` | `4` | 1 | Concurrent subprocess limit (semaphore size). |
+| `max_executors` | `int` | `4` | 1 | Concurrent subprocess limit (semaphore size). |
 | `task_timeout_seconds` | `int` | `120` | 1 | Per-subprocess wall-clock timeout in seconds. |
 | `window_size` | `int` | `100` | 1 | Max messages per `arrange()` window. |
 | `max_retries` | `int` | `3` | 0 | Max retries per failed task. 0 disables retries. |
 | `drain_timeout_seconds` | `int` | `5` | 1 | Max wait for in-flight tasks during graceful shutdown. |
-| `backpressure_high_multiplier` | `int` | `32` | 1 | Pause threshold = `max_workers` x this. |
-| `backpressure_low_multiplier` | `int` | `4` | 1 | Resume threshold = max(1, `max_workers` x this). |
+| `backpressure_high_multiplier` | `int` | `32` | 1 | Pause threshold = `max_executors` x this. |
+| `backpressure_low_multiplier` | `int` | `4` | 1 | Resume threshold = max(1, `max_executors` x this). |
 
 Environment variable overrides use the `DRAKKAR_EXECUTOR__` prefix:
 
 ```bash
-DRAKKAR_EXECUTOR__MAX_WORKERS=8
+DRAKKAR_EXECUTOR__MAX_EXECUTORS=8
 DRAKKAR_EXECUTOR__TASK_TIMEOUT_SECONDS=300
 ```

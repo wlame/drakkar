@@ -15,7 +15,7 @@ kafka:
 
 executor:
   binary_path: "/usr/local/bin/count-symbols"
-  max_workers: 2
+  max_executors: 2
   task_timeout_seconds: 30
   window_size: 10
   max_retries: 1

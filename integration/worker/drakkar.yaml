@@ -15,7 +15,7 @@ kafka:
 
 executor:
   binary_path: "/usr/local/bin/run-rg"
-  max_workers: 4
+  max_executors: 4
   task_timeout_seconds: 120
   window_size: 10
   max_retries: 3

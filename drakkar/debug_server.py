@@ -308,7 +308,7 @@ def create_debug_app(
                 'partition_count': len(processors),
                 'partitions': partition_ids,
                 'pool_active': pool.active_count if pool else 0,
-                'pool_max': pool.max_workers if pool else 0,
+                'pool_max': pool.max_executors if pool else 0,
                 'total_lag': total_lag,
                 'prom': _build_prometheus_links(),
                 'custom_links': custom_links,
@@ -422,7 +422,7 @@ def create_debug_app(
                 'arranging': arranging,
                 'pool_active': drakkar_app._executor_pool.active_count if drakkar_app._executor_pool else 0,
                 'pool_waiting': drakkar_app._executor_pool.waiting_count if drakkar_app._executor_pool else 0,
-                'pool_max': drakkar_app._executor_pool.max_workers if drakkar_app._executor_pool else 0,
+                'pool_max': drakkar_app._executor_pool.max_executors if drakkar_app._executor_pool else 0,
                 'max_ui_rows': config.max_ui_rows,
                 'ws_min_duration_ms': config.ws_min_duration_ms,
             },
@@ -776,7 +776,7 @@ def create_debug_app(
                         t['pid'] = e['pid']
 
         pool = drakkar_app._executor_pool
-        max_lanes = pool.max_workers if pool else 8
+        max_lanes = pool.max_executors if pool else 8
 
         # Apply ws_min_duration_ms filtering: hide fast completed tasks
         # from the live UI, same as the WebSocket path. Running tasks
@@ -812,7 +812,7 @@ def create_debug_app(
                 'partition_count': len(processors),
                 'partitions': partition_ids,
                 'pool_active': pool.active_count if pool else 0,
-                'pool_max': pool.max_workers if pool else 0,
+                'pool_max': pool.max_executors if pool else 0,
                 'total_lag': total_lag,
             }
         )
@@ -894,7 +894,7 @@ def create_debug_app(
                 'processors': result,
                 'pool_active': pool.active_count if pool else 0,
                 'pool_waiting': pool.waiting_count if pool else 0,
-                'pool_max': pool.max_workers if pool else 0,
+                'pool_max': pool.max_executors if pool else 0,
             }
         )
 
