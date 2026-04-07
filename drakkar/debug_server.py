@@ -699,12 +699,14 @@ def create_debug_app(
             else:
                 t['total_error'] += 1
             if len(t['recent']) < 20:
-                t['recent'].append({
-                    'ts': entry['ts'],
-                    'duration': entry['duration'],
-                    'status': status,
-                    'error': error,
-                })
+                t['recent'].append(
+                    {
+                        'ts': entry['ts'],
+                        'duration': entry['duration'],
+                        'status': status,
+                        'error': error,
+                    }
+                )
 
         result = sorted(tasks.values(), key=lambda t: t['name'])
         return JSONResponse(result)

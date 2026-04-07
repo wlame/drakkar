@@ -4,6 +4,7 @@ Uses confluent_kafka's AIOConsumer for native asyncio integration.
 Rebalance callbacks run on the event loop — no call_soon_threadsafe needed.
 """
 
+import asyncio
 from collections.abc import Callable
 from typing import Any
 
@@ -137,7 +138,6 @@ class KafkaConsumer:
         """Get total consumer lag across all partitions."""
         if not partition_ids:
             return 0
-        import asyncio
 
         tps = [TopicPartition(self._config.source_topic, pid) for pid in partition_ids]
         try:
@@ -162,21 +162,45 @@ class KafkaConsumer:
         return sum(lags)
 
     async def get_partition_lag(self, partition_ids: list[int]) -> dict[int, dict]:
-        """Get committed offset, high watermark, and lag for each partition."""
-        result = {}
-        for pid in partition_ids:
+        """Get committed offset, high watermark, and lag for each partition.
+
+        Batches the committed() call and parallelizes watermark lookups
+        to avoid O(N) sequential Kafka RPCs.
+        """
+        if not partition_ids:
+            return {}
+
+        result: dict[int, dict] = {}
+        tps = [TopicPartition(self._config.source_topic, pid) for pid in partition_ids]
+
+        # single batched committed() call for all partitions
+        committed_map: dict[int, int] = {}
+        try:
+            committed_list = await self._consumer.committed(tps)
+            for tp_result in committed_list or []:
+                if tp_result and tp_result.offset >= 0:
+                    committed_map[tp_result.partition] = tp_result.offset
+        except Exception:
+            pass
+
+        # parallel watermark lookups
+        async def _watermark(pid: int) -> tuple[int, int]:
             try:
                 tp = TopicPartition(self._config.source_topic, pid)
                 _low, high = await self._consumer.get_watermark_offsets(tp)
-                committed_list = await self._consumer.committed([tp])
-                committed_offset = committed_list[0].offset if committed_list and committed_list[0].offset >= 0 else 0
-                result[pid] = {
-                    'committed': committed_offset,
-                    'high_watermark': high,
-                    'lag': high - committed_offset,
-                }
+                return pid, high
             except Exception:
-                result[pid] = {'committed': 0, 'high_watermark': 0, 'lag': 0}
+                return pid, 0
+
+        watermarks = await asyncio.gather(*[_watermark(pid) for pid in partition_ids])
+
+        for pid, high in watermarks:
+            committed = committed_map.get(pid, 0)
+            result[pid] = {
+                'committed': committed,
+                'high_watermark': high,
+                'lag': max(0, high - committed),
+            }
         return result
 
     async def close(self) -> None:

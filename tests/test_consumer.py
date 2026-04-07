@@ -301,7 +301,7 @@ async def test_get_partition_lag(mock_cls, kafka_config):
 
     tp0_committed = TopicPartition(kafka_config.source_topic, 0, 90)
     tp1_committed = TopicPartition(kafka_config.source_topic, 1, 150)
-    mock_inner.committed.side_effect = [[tp0_committed], [tp1_committed]]
+    mock_inner.committed.return_value = [tp0_committed, tp1_committed]
 
     consumer = KafkaConsumer(kafka_config)
     result = await consumer.get_partition_lag([0, 1])

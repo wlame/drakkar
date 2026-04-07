@@ -2140,17 +2140,17 @@ class TestApiPeriodicTasks:
 
         now = time.time()
         await db.execute(
-            "INSERT INTO events (ts, dt, event, task_id, duration, exit_code, metadata) "
+            'INSERT INTO events (ts, dt, event, task_id, duration, exit_code, metadata) '
             "VALUES (?, ?, 'periodic_run', 'refresh_cache', 0.15, 0, ?)",
             (now - 60, '2026-04-07', '{"status": "ok"}'),
         )
         await db.execute(
-            "INSERT INTO events (ts, dt, event, task_id, duration, exit_code, metadata) "
+            'INSERT INTO events (ts, dt, event, task_id, duration, exit_code, metadata) '
             "VALUES (?, ?, 'periodic_run', 'refresh_cache', 0.22, 0, ?)",
             (now - 30, '2026-04-07', '{"status": "ok"}'),
         )
         await db.execute(
-            "INSERT INTO events (ts, dt, event, task_id, duration, exit_code, metadata) "
+            'INSERT INTO events (ts, dt, event, task_id, duration, exit_code, metadata) '
             "VALUES (?, ?, 'periodic_run', 'health_check', 0.01, 1, ?)",
             (now - 10, '2026-04-07', '{"status": "error", "error": "connection refused"}'),
         )

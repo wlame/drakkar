@@ -102,9 +102,7 @@ async def run_periodic_task(
             periodic_task_runs.labels(name=name, status='error').inc()
             periodic_task_duration.labels(name=name).observe(duration)
             if recorder:
-                recorder.record_periodic_run(
-                    name=name, duration=round(duration, 3), status='error', error=str(exc)
-                )
+                recorder.record_periodic_run(name=name, duration=round(duration, 3), status='error', error=str(exc))
             if on_error == 'stop':
                 await log.aexception('periodic_task_failed', category='periodic')
                 await log.awarning('periodic_task_stopped', category='periodic')

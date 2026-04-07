@@ -541,9 +541,7 @@ async def test_periodic_run_records_to_recorder(tmp_path):
         call_count += 1
 
     task = asyncio.create_task(
-        run_periodic_task(
-            name='test_recorded', coro_fn=tracked_task, seconds=0.05, on_error='continue', recorder=rec
-        )
+        run_periodic_task(name='test_recorded', coro_fn=tracked_task, seconds=0.05, on_error='continue', recorder=rec)
     )
     await asyncio.sleep(0.15)
     task.cancel()
