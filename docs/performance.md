@@ -63,13 +63,13 @@ thread. The event loop handles:
 
 - Kafka polling
 - Message deserialization
-- `arrange()` / `collect()` / `on_error()` calls
+- [arrange()](handler.md#arrange-required) / [collect()](handler.md#collect) / [on_error()](handler.md#on_error) calls
 - Subprocess launch and completion callbacks
-- Recorder event buffering
-- Prometheus metric updates
-- Offset tracking and commits
+- [Flight recorder](observability.md#flight-recorder) event buffering
+- [Prometheus metric](observability.md#prometheus-metrics) updates
+- [Offset tracking](handler.md#offset-commit-logic) and commits
 
-Note: the **debug web server runs in a separate thread** with its own
+Note: the **[debug web server](observability.md#debug-ui) runs in a separate thread** with its own
 Uvicorn event loop (`DebugServer` uses `threading.Thread`). It does not
 compete for time on the main event loop. Communication between them uses
 a thread-safe `queue.Queue` for WebSocket event broadcasting.
@@ -129,7 +129,7 @@ instead of 100 launches. For 5ms tasks, this can improve throughput
 
 **2. Use a long-running worker process instead of one-shot binaries.**
 If your binary supports it, start it once and feed work via stdin/stdout
-line protocol. Drakkar's `stdin` field supports this pattern --
+line protocol. Drakkar's [stdin support](executor.md#stdin-support) enables this pattern --
 the process receives input on stdin and writes results to stdout.
 
 **3. Increase `window_size`.**
@@ -151,8 +151,8 @@ blocks the partition pipeline for the duration of that call.
 
 ### Mitigation
 
-- Keep `arrange()` fast -- do lookups in `on_ready()` and cache results
-- If you need per-message lookups, do them in `collect()` instead (runs
+- Keep `arrange()` fast -- do lookups in [on_ready()](handler.md#on_ready) and cache results
+- If you need per-message lookups, do them in [collect()](handler.md#collect) instead (runs
   concurrently per task)
 - Use more partitions to parallelize across partition processors
 
@@ -161,7 +161,7 @@ blocks the partition pipeline for the duration of that call.
 ## Bottleneck: Recorder and Debug UI
 
 With `event_min_duration_ms: 0` (default), every task writes events to
-the SQLite buffer. At 2,700 tasks/sec (80 workers, 30ms tasks), that's
+the SQLite buffer. See [Duration Thresholds](observability.md#duration-thresholds) for the full reference on these settings. At 2,700 tasks/sec (80 workers, 30ms tasks), that's
 ~8,000 events/sec (started + completed + consumed), flushed to SQLite
 every `flush_interval_seconds`. The flush itself is a batch INSERT that
 takes ~10-50ms for 10,000 rows.
@@ -367,7 +367,7 @@ The total subprocess capacity across the cluster is
 
 ## Monitoring Throughput
 
-Key Prometheus queries for identifying bottlenecks:
+Key [Prometheus](observability.md#prometheus-metrics) queries for identifying bottlenecks (use the [Config Calculator](calculator.md) for initial tuning values):
 
 ```promql
 # Messages consumed per second (are we keeping up?)

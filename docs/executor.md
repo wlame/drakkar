@@ -6,15 +6,15 @@ Drakkar runs external binaries as subprocesses -- not through a shell, but direc
 
 ## ExecutorTask
 
-Every subprocess execution starts with an `ExecutorTask` created in your `arrange()` hook. The task carries everything the framework needs to launch the process and track its lifecycle.
+Every subprocess execution starts with an `ExecutorTask` created in your [arrange()](handler.md#arrange-required) hook. The task carries everything the framework needs to launch the process and track its lifecycle.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `task_id` | `str` | (required) | Unique identifier. Use `make_task_id(prefix)` to generate a time-sortable hex ID (e.g., `t-0194a3b2c1d4e5f6-a7c2f1e3`). |
 | `args` | `list[str]` | (required) | CLI arguments appended to the binary path when launching the process. |
-| `source_offsets` | `list[int]` | (required) | Kafka offsets of the source messages that produced this task. Used for offset watermark tracking -- offsets are committed only after all sinks confirm delivery. |
-| `metadata` | `dict` | `{}` | Arbitrary key-value data carried through the pipeline. Accessible in `collect()` via `result.task.metadata`. |
-| `labels` | `dict[str, str]` | `{}` | User-defined key-value labels shown in the debug UI (live timeline, task detail page, trace view). Useful for `request_id`, `user_id`, or other domain identifiers. |
+| `source_offsets` | `list[int]` | (required) | Kafka offsets of the source messages that produced this task. Used for [offset watermark tracking](handler.md#offset-commit-logic) -- offsets are committed only after all sinks confirm delivery. |
+| `metadata` | `dict` | `{}` | Arbitrary key-value data carried through the pipeline. Accessible in [collect()](handler.md#collect) via `result.task.metadata`. |
+| `labels` | `dict[str, str]` | `{}` | User-defined key-value [labels](handler.md#task-labels) shown in the [debug UI](observability.md#debug-ui) (live timeline, task detail page, trace view). Useful for `request_id`, `user_id`, or other domain identifiers. |
 | `binary_path` | `str \| None` | `None` | Per-task binary override. Takes precedence over `executor.binary_path` from config. |
 | `stdin` | `str \| None` | `None` | Optional string piped to the process stdin after launch. When `None`, stdin is not connected. |
 
@@ -96,9 +96,9 @@ The entire `communicate()` call is wrapped in `asyncio.wait_for(timeout=executor
 
 Four outcomes are possible:
 
-**Success (exit code 0)** -- Returns an `ExecutorResult` with captured output. The `collect()` hook is called next.
+**Success (exit code 0)** -- Returns an `ExecutorResult` with captured output. The [collect()](handler.md#collect) hook is called next.
 
-**Non-zero exit** -- Raises `ExecutorTaskError`. The `on_error()` hook decides what to do.
+**Non-zero exit** -- Raises `ExecutorTaskError`. The [on_error()](handler.md#on_error) hook decides what to do.
 
 **Timeout** -- The process is killed (`proc.kill()`), and `ExecutorTaskError` is raised with `stderr='task timed out'`.
 
@@ -127,7 +127,7 @@ Returned on successful execution (exit code 0). Also attached to `ExecutorTaskEr
 
 ## Error Handling (on_error Hook)
 
-When a task fails, the framework calls your `on_error(task, error)` hook. The `error` argument is an `ExecutorError`:
+When a task fails, the framework calls your [on_error()](handler.md#on_error) hook. The `error` argument is an `ExecutorError`:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -184,7 +184,7 @@ When all slots are occupied, additional tasks wait in the semaphore queue. The `
 
 ### Kafka Consumer Backpressure
 
-The framework pauses and resumes the Kafka consumer based on total queued work across all partition processors. Two watermarks control the behavior:
+The framework pauses and resumes the Kafka consumer based on total queued work across all partition processors. See [Performance Tuning](performance.md#backpressure) for tuning recommendations. Two watermarks control the behavior:
 
 | Watermark | Formula | Default (max_workers=4) |
 |-----------|---------|-------------------------|
@@ -211,26 +211,26 @@ executor:
 
 ## Windowing
 
-Messages are collected into windows before being passed to `arrange()`. A window contains 1 to `executor.window_size` (default: 100) messages from a single partition.
+Messages are collected into windows before being passed to [arrange()](handler.md#arrange-required). A window contains 1 to `executor.window_size` (default: 100) messages from a single partition.
 
 ### Window Lifecycle
 
 1. The partition processor waits for the first message (blocks up to 1 second).
 2. It drains any additional messages from the queue without blocking, up to `window_size`.
-3. The window of messages is passed to `arrange()`, which returns `ExecutorTask` objects.
+3. The window of messages is passed to [arrange()](handler.md#arrange-required), which returns `ExecutorTask` objects.
 4. All tasks in the window are launched concurrently.
 5. The window tracks `completed_count` vs `total_tasks` to know when it is done.
-6. On completion, `on_window_complete()` is called, offsets are marked complete, and a commit is attempted.
+6. On completion, [on_window_complete()](handler.md#on_window_complete) is called, offsets are marked complete, and a [commit is attempted](handler.md#offset-commit-logic).
 
 ### Concurrent Windows
 
 Multiple windows can be in-flight concurrently for the same partition. The processor does not wait for window N to complete before starting window N+1. This keeps throughput high when tasks have variable execution times.
 
-Each window's tasks execute independently. Offset commits follow watermark semantics -- offsets are committed only when all preceding messages have been fully processed and delivered. A slow task in window 1 blocks offset advancement even if window 2 has already finished.
+Each window's tasks execute independently. Offset commits follow [watermark semantics](handler.md#offset-commit-logic) -- offsets are committed only when all preceding messages have been fully processed and delivered. A slow task in window 1 blocks offset advancement even if window 2 has already finished.
 
 ### Dynamic Window Growth
 
-If `on_error` returns replacement tasks, the window's `total_tasks` count grows. The window only completes when all tasks -- including dynamically added ones -- have finished.
+If [on_error()](handler.md#on_error) returns replacement tasks, the window's `total_tasks` count grows. The window only completes when all tasks -- including dynamically added ones -- have finished.
 
 ---
 

@@ -1,7 +1,7 @@
 # Integration Tests
 
 The `integration/` directory in the repository contains a full Docker
-Compose environment with all six sink types, multiple worker clusters,
+Compose environment with all six [sink types](sinks.md), multiple worker clusters,
 realistic load patterns, and a chaos test scenario. It is intended for
 **development and testing only** -- not as a production deployment
 reference. Credentials are hardcoded, services run without
@@ -97,14 +97,14 @@ mixed-duration workloads.
 
 Each search message flows through:
 
-1. `arrange()` -- creates a ripgrep task with CLI args
+1. [arrange()](handler.md#arrange-required) -- creates a ripgrep task with CLI args
 2. Executor runs `/usr/local/bin/run-rg` (ripgrep wrapper)
-3. `collect()` routes results based on match count:
+3. [collect()](handler.md#collect) routes results based on match count:
    - **Always**: Kafka (full result), Postgres (metrics row), MongoDB (archive), Redis (cached summary)
    - **match_count > 20**: HTTP webhook notification
    - **match_count > 50**: JSONL file log
-4. 5% simulated executor failures with retry via `on_error()`
-5. Failed deliveries route to DLQ or retry based on sink type
+4. 5% simulated executor failures with retry via [on_error()](handler.md#on_error)
+5. Failed deliveries route to [DLQ](sinks.md#dead-letter-queue) or retry based on sink type
 
 ### Fast Cluster Processing
 
@@ -114,7 +114,7 @@ Same source topic, different consumer group. Each message:
 2. Executor runs `count-symbols.sh` (character counter)
 3. `collect()` -- sends count to `symbol-counts` Kafka topic
 
-Fast tasks finish in milliseconds, demonstrating `ws_min_duration_ms`
+Fast tasks finish in milliseconds, demonstrating [duration threshold](observability.md#duration-thresholds)
 filtering and high-throughput behavior.
 
 ---
@@ -143,12 +143,12 @@ last delivery time and duration.
 
 Three tabs, all WebSocket-powered:
 
-- **Arrange** -- recent `arrange()` calls with message labels, task counts, durations
+- **Arrange** -- recent [arrange()](handler.md#arrange-required) calls with [message labels](handler.md#message_label), task counts, durations
 - **Executors** -- scrollable timeline with task bars (green=completed, yellow=running, red=failed). Hover for task detail. Zoom in/out with +/- buttons.
-- **Collect** -- recent `collect()` completions with output counts
+- **Collect** -- recent [collect()](handler.md#collect) completions with output counts
 
 The pool utilization bar and running/finished task tables update in
-real time. Task labels (`request_id`, `pattern`) appear in the Labels
+real time. [Task labels](handler.md#task-labels) (`request_id`, `pattern`) appear in the Labels
 column and hover detail.
 
 ### History (`/history`)
@@ -163,7 +163,7 @@ Three collapsible sections:
 
 - **Metrics** -- all Prometheus metrics (framework + user), filterable by source
 - **Message Trace** -- enter `partition:offset` to trace a message through the full pipeline, including cross-worker search
-- **Databases** -- SQLite flight recorder files, sortable/filterable, downloadable. Select multiple and merge into one file.
+- **Databases** -- SQLite [flight recorder](observability.md#flight-recorder) files, sortable/filterable, downloadable. Select multiple and merge into one file.
 
 ### Task Detail (`/task/{id}`)
 
@@ -188,9 +188,9 @@ Browse topics in the [Kafka UI](http://localhost:8088).
 
 ## Worker Autodiscovery
 
-All workers write to `/shared` (mounted as a volume). The debug UI
+All workers write to `/shared` (mounted as a volume). The [debug UI](observability.md#debug-ui)
 scans this directory for `*-live.db` symlinks and discovers peer
-workers. Use the worker dropdown in the top-right nav to switch between
+workers via [worker autodiscovery](observability.md#worker-autodiscovery). Use the worker dropdown in the top-right nav to switch between
 workers without remembering ports.
 
 ---

@@ -687,9 +687,7 @@ async def test_poll_loop_pauses_on_high_watermark(test_config):
 
     # high_watermark = 2 * 32 = 64. Fill queue past that.
     for i in range(70):
-        proc._queue.put_nowait(
-            SourceMessage(topic='t', partition=0, offset=i, value=b'x', timestamp=0)
-        )
+        proc._queue.put_nowait(SourceMessage(topic='t', partition=0, offset=i, value=b'x', timestamp=0))
 
     call_count = 0
 
@@ -752,9 +750,7 @@ async def test_poll_loop_executor_idle_waste_metric(test_config):
 
     # put messages in queue, keep executor idle (active_count=0)
     for i in range(5):
-        app.processors[0]._queue.put_nowait(
-            SourceMessage(topic='t', partition=0, offset=i, value=b'x', timestamp=0)
-        )
+        app.processors[0]._queue.put_nowait(SourceMessage(topic='t', partition=0, offset=i, value=b'x', timestamp=0))
 
     call_count = 0
 

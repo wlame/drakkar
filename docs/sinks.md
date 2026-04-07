@@ -1,7 +1,7 @@
 # Sinks
 
-Sinks are pluggable output destinations for processed results. After your `collect()` or
-`on_window_complete()` hook returns a `CollectResult`, the framework routes each payload to
+Sinks are pluggable output destinations for processed results. After your [collect()](handler.md#collect) or
+[on_window_complete()](handler.md#on_window_complete) hook returns a `CollectResult`, the framework routes each payload to
 the correct sink, serializes the data, and delivers it.
 
 Drakkar ships with six sink types. You can configure any combination of them, and each type
@@ -11,16 +11,16 @@ supports multiple named instances (e.g., two separate Kafka topics or three Post
 
 | Event | When | What happens |
 |-------|------|--------------|
-| `connect()` | Worker startup, after `on_startup()` | Each configured sink opens its connection (Kafka producer, asyncpg pool, motor client, httpx client, Redis connection). If any fails, the worker crashes immediately. |
-| `deliver(payloads)` | After each `collect()` or `on_window_complete()` returns payloads | The framework groups payloads by `(sink_type, sink_name)` and calls `deliver()` once per group. A single `collect()` returning payloads for 3 sinks produces 3 `deliver()` calls. |
-| `on_delivery_error()` | When `deliver()` raises an exception | Your handler decides: `DLQ` (default), `RETRY`, or `SKIP`. Retries re-call `deliver()` up to `executor.max_retries` times. |
+| `connect()` | Worker startup, after [on_startup()](handler.md#on_startup) | Each configured sink opens its connection (Kafka producer, asyncpg pool, motor client, httpx client, Redis connection). If any fails, the worker crashes immediately. |
+| `deliver(payloads)` | After each [collect()](handler.md#collect) or [on_window_complete()](handler.md#on_window_complete) returns payloads | The framework groups payloads by `(sink_type, sink_name)` and calls `deliver()` once per group. A single `collect()` returning payloads for 3 sinks produces 3 `deliver()` calls. |
+| [on_delivery_error()](handler.md#on_delivery_error) | When `deliver()` raises an exception | Your handler decides: `DLQ` (default), `RETRY`, or `SKIP`. Retries re-call `deliver()` up to `executor.max_retries` times. |
 | Offset commit | After **all** sinks confirm delivery for a window | Kafka offsets are committed only when every payload from the window has been successfully delivered (or routed to DLQ/skipped). No partial commits. |
 | `close()` | Worker shutdown | Each sink closes its connection gracefully. Errors are logged but don't block shutdown. |
 
-**Delivery frequency.** For each successful task, `collect()` is called once. If it returns
+**Delivery frequency.** For each successful task, [collect()](handler.md#collect) is called once. If it returns
 payloads for N sink groups (e.g., 1 Kafka + 1 Postgres + 1 Redis = 3 groups), the framework
-makes N independent `deliver()` calls. With `on_window_complete()`, one additional delivery
-round happens per window. The Postgres pool exposed in `on_ready()` is the same pool used by
+makes N independent `deliver()` calls. With [on_window_complete()](handler.md#on_window_complete), one additional delivery
+round happens per window. The Postgres pool exposed in [on_ready()](handler.md#on_ready) is the same pool used by
 the Postgres sink -- you can query it directly for lookups, migrations, or health checks.
 
 ```yaml
@@ -41,7 +41,7 @@ sinks:
 ## Payload types
 
 Every sink type has a corresponding payload model. You create payload instances inside
-`collect()` and return them in a `CollectResult`. The `data` field is always a Pydantic
+[collect()](handler.md#collect) and return them in a [CollectResult](#collectresult). The `data` field is always a Pydantic
 `BaseModel` -- the framework handles serialization differently for each sink type.
 
 ### KafkaPayload
@@ -121,7 +121,7 @@ Sends a JSON request to an HTTP endpoint.
 
 **Serialization:** `data.model_dump_json()` becomes the request body with
 `Content-Type: application/json`. Non-2xx responses raise an error routed through
-`on_delivery_error`.
+[on_delivery_error()](handler.md#on_delivery_error).
 
 ```python
 from drakkar import HttpPayload
@@ -250,7 +250,7 @@ any number of sinks in one shot.
 ### Error handling
 
 When a sink's `deliver()` raises an exception, the framework calls your
-`on_delivery_error` hook with a `DeliveryError` containing the sink name, type,
+[on_delivery_error()](handler.md#on_delivery_error) hook with a `DeliveryError` containing the sink name, type,
 error message, and the failed payloads:
 
 ```python
@@ -349,7 +349,7 @@ but never raised, so shutdown proceeds cleanly even if a connection is already l
 ### Sink-specific details
 
 **PostgresSink** exposes the `asyncpg` connection pool via its `pool` property. This
-is available in `on_ready()` for running migrations, loading lookup tables, or any
+is available in [on_ready()](handler.md#on_ready) for running migrations, loading lookup tables, or any
 direct database access needed at startup.
 
 **HttpSink** uses `httpx.AsyncClient` with configurable timeout and headers:
@@ -388,7 +388,7 @@ Individual payload paths must have existing parent directories.
 
 ## CollectResult
 
-`CollectResult` is the return type of `collect()` and `on_window_complete()`. It has
+`CollectResult` is the return type of [collect()](handler.md#collect) and [on_window_complete()](handler.md#on_window_complete). It has
 one list field per sink type. Populate whichever fields match your configured sinks.
 
 ### Complete example
@@ -443,4 +443,4 @@ async def collect(self, result: dk.ExecutorResult) -> dk.CollectResult | None:
 
 Returning `None` from `collect()` skips delivery entirely for that result. The framework
 only commits Kafka offsets after all sinks confirm delivery (or delivery errors are
-handled through `on_delivery_error`).
+handled through [on_delivery_error()](handler.md#on_delivery_error)). See [Offset Commit Logic](handler.md#offset-commit-logic) for details on watermark-based commit tracking.

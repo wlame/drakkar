@@ -1,7 +1,8 @@
 # Config Calculator
 
-Interactive calculator that recommends Drakkar configuration based on your
-hardware and workload characteristics.
+Interactive calculator that recommends Drakkar [configuration](configuration.md) based on your
+hardware and workload characteristics. See [Performance Tuning](performance.md) for
+detailed bottleneck analysis and tuning strategies.
 
 !!! warning "Starting point, not a final answer"
     These are **estimated values** to use as a starting point for tuning.

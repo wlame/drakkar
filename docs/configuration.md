@@ -118,10 +118,10 @@ Controls the subprocess executor pool that runs user-defined binaries.
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `binary_path` | `str \| None` | `None` | min length 1 if set | Default binary path for all tasks. If `None`, each `ExecutorTask` returned by `arrange()` must provide its own `binary_path`, otherwise the task fails with a clear error. |
-| `max_workers` | `int` | `4` | >= 1 | Maximum number of concurrent subprocesses. Controls the `asyncio.Semaphore` size -- tasks beyond this limit wait in a queue. |
+| `binary_path` | `str \| None` | `None` | min length 1 if set | Default binary path for all tasks. If `None`, each [ExecutorTask](executor.md#executortask) returned by [arrange()](handler.md#arrange-required) must provide its own `binary_path`, otherwise the task fails with a clear error. See [Binary Path Resolution](executor.md#binary-path-resolution). |
+| `max_workers` | `int` | `4` | >= 1 | Maximum number of concurrent subprocesses. Controls the `asyncio.Semaphore` size -- tasks beyond this limit wait in a queue. See [Concurrency and Backpressure](executor.md#concurrency-and-backpressure). |
 | `task_timeout_seconds` | `int` | `120` | >= 1 | Wall-clock timeout (seconds) per subprocess. If a process exceeds this, it is killed and treated as a failure. |
-| `window_size` | `int` | `100` | >= 1 | Maximum number of messages collected per `arrange()` window. Larger windows allow more batching in `arrange()`; smaller windows reduce latency. |
+| `window_size` | `int` | `100` | >= 1 | Maximum number of messages collected per [arrange()](handler.md#arrange-required) [window](executor.md#windowing). Larger windows allow more batching in `arrange()`; smaller windows reduce latency. |
 | `max_retries` | `int` | `3` | >= 0 | Maximum number of retry attempts per failed task (0 = no retries). A task can run up to `max_retries + 1` times total. |
 | `drain_timeout_seconds` | `int` | `5` | >= 1 | Maximum time (seconds) to wait for in-flight tasks during shutdown or partition revocation. |
 | `backpressure_high_multiplier` | `int` | `32` | >= 1 | Multiplier for the pause threshold. When total queued messages reach `max_workers * backpressure_high_multiplier`, Kafka consumption is paused. |
@@ -129,7 +129,7 @@ Controls the subprocess executor pool that runs user-defined binaries.
 
 ### Backpressure Formula
 
-Backpressure prevents unbounded memory growth by pausing Kafka consumption when too many messages are buffered:
+[Backpressure](performance.md#backpressure) prevents unbounded memory growth by pausing Kafka consumption when too many messages are buffered:
 
 ```
 high_watermark = max_workers * backpressure_high_multiplier
@@ -159,7 +159,7 @@ executor:
 
 ## Sinks (`sinks:`)
 
-Sinks define where processed results are delivered. Each sink type is a dictionary mapping instance names to their configuration. You can configure multiple instances of the same type (e.g., two Kafka sinks writing to different topics).
+Sinks define where processed results are delivered. See [Sinks](sinks.md) for payload models, [routing](sinks.md#routing), and the [delivery lifecycle](sinks.md#delivery-lifecycle). Each sink type is a dictionary mapping instance names to their configuration. You can configure multiple instances of the same type (e.g., two Kafka sinks writing to different topics).
 
 ### Kafka Sink (`sinks.kafka.<name>`)
 
@@ -271,7 +271,7 @@ sinks:
 
 ## Dead Letter Queue (`dlq:`)
 
-Failed sink deliveries can be routed to a DLQ Kafka topic. The DLQ captures the original payloads, error details, and metadata for later inspection or reprocessing.
+Failed sink deliveries can be routed to a [DLQ](sinks.md#dead-letter-queue) Kafka topic. The DLQ captures the original payloads, error details, and metadata for later inspection or reprocessing.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -324,7 +324,7 @@ logging:
 
 ## Debug / Flight Recorder (`debug:`)
 
-The debug subsystem provides a flight recorder (SQLite-backed event log), a web UI dashboard, WebSocket live streaming, and worker autodiscovery. This is the largest configuration section.
+The debug subsystem provides a [flight recorder](observability.md#flight-recorder) (SQLite-backed event log), a [web UI dashboard](observability.md#debug-ui), WebSocket live streaming, and [worker autodiscovery](observability.md#worker-autodiscovery). This is the largest configuration section.
 
 ### Core Settings
 
@@ -373,7 +373,7 @@ These flags control which tables are created in the SQLite database. All require
 
 ### Duration Thresholds
 
-These thresholds control which events are recorded, logged, and streamed. They help reduce noise in high-throughput systems where most tasks complete quickly.
+These thresholds control which events are recorded, logged, and streamed. See [Duration Thresholds](observability.md#duration-thresholds) for detailed behavior and [Performance Tuning](performance.md) for recommendations. They help reduce noise in high-throughput systems where most tasks complete quickly.
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|

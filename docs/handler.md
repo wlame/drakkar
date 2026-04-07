@@ -2,7 +2,7 @@
 
 The handler is the user-facing entry point into Drakkar. You subclass
 `BaseDrakkarHandler`, override hooks, and the framework calls them at the
-right time during the message-processing pipeline.
+right time during the message-processing pipeline. See [Configuration](configuration.md) for the full YAML reference.
 
 ## Hook Reference
 
@@ -10,10 +10,10 @@ right time during the message-processing pipeline.
 |------|-------------|-----------|---------|
 | `on_startup(config)` | Before any components are created | Once per worker lifetime | Modified `DrakkarConfig` |
 | `on_ready(config, db_pool)` | After sinks connected, before polling | Once per worker lifetime | `None` |
-| `arrange(messages, pending)` | A window of messages is ready to process | Once per window per partition | `list[ExecutorTask]` |
-| `collect(result)` | A single task completes successfully (exit 0) | Once per successful task | `CollectResult \| None` |
-| `on_window_complete(results, messages)` | All tasks in a window finished | Once per window per partition | `CollectResult \| None` |
-| `on_error(task, error)` | A single task fails (non-zero exit, timeout, crash) | Once per failed task | `ErrorAction \| list[ExecutorTask]` |
+| `arrange(messages, pending)` | A window of messages is ready to process | Once per window per partition | `list[`[`ExecutorTask`](executor.md#executortask)`]` |
+| `collect(result)` | A single task completes successfully (exit 0) | Once per successful task | [`CollectResult`](sinks.md#collectresult) `\| None` |
+| `on_window_complete(results, messages)` | All tasks in a window finished | Once per window per partition | [`CollectResult`](sinks.md#collectresult) `\| None` |
+| `on_error(task, error)` | A single task fails (non-zero exit, timeout, crash) | Once per failed task | `ErrorAction \| list[`[`ExecutorTask`](executor.md#executortask)`]` |
 | `on_delivery_error(error)` | A sink's deliver() raises an exception | Once per failed sink delivery batch | `DeliveryAction` |
 | `on_assign(partitions)` | Kafka assigns partitions during rebalance | Once per rebalance event | `None` |
 | `on_revoke(partitions)` | Kafka revokes partitions during rebalance | Once per rebalance event | `None` |
@@ -132,7 +132,7 @@ async def arrange(
 ```
 
 The only **required** hook. Transforms source messages into subprocess
-tasks.
+tasks. See [ExecutorTask](executor.md#executortask) for the full task model reference.
 
 **Partition isolation.** Each call receives messages from exactly **one
 Kafka partition**. Drakkar runs an independent pipeline per partition, so
@@ -141,7 +141,7 @@ call. The maximum number of concurrent `arrange()` invocations equals
 the number of partitions assigned to this worker -- one per partition at
 a time.
 
-**Windowing.** The framework collects up to `executor.window_size`
+**[Windowing](executor.md#windowing).** The framework collects up to `executor.window_size`
 messages from the partition queue before calling `arrange()`. A window
 may contain fewer messages if the queue drains before reaching the
 limit. While the tasks from one window are executing, the next window
@@ -192,10 +192,10 @@ the context of the same partition that produced the task via `arrange()`.
 Multiple `collect()` calls from the same window may run concurrently as
 tasks finish in any order.
 
-Process the executor result and return a `CollectResult` with payloads
-for one or more sinks, or `None` to skip delivery.
+Process the [ExecutorResult](executor.md#executorresult) and return a [CollectResult](sinks.md#collectresult) with payloads
+for one or more sinks, or `None` to skip delivery. See [Sinks](sinks.md) for all available payload types.
 
-The `result.task` field carries the original `ExecutorTask`, including
+The `result.task` field carries the original [ExecutorTask](executor.md#executortask), including
 its `metadata` dict.
 
 ```python
@@ -241,7 +241,7 @@ async def on_window_complete(
 Called after **all** tasks in a window have finished (successes and
 failures). The `results` and `source_messages` belong to the same
 partition and the same window that was passed to `arrange()`. Use for
-cross-task aggregation or batch-level outputs. Returns a `CollectResult`
+cross-task aggregation or batch-level outputs. Returns a [CollectResult](sinks.md#collectresult)
 or `None`.
 
 ```python
@@ -304,13 +304,13 @@ async def on_error(self, task, error):
 async def on_delivery_error(self, error: DeliveryError) -> DeliveryAction
 ```
 
-Called when a sink's `deliver()` raises an exception. The `DeliveryError`
+Called when a sink's `deliver()` raises an exception. See [Delivery Lifecycle](sinks.md#delivery-lifecycle) for the full delivery flow. The `DeliveryError`
 contains the sink name, sink type, error message, and the payloads that
 failed.
 
 | Return value           | Behavior                                           |
 |------------------------|----------------------------------------------------|
-| `DeliveryAction.DLQ`   | Write to dead letter queue (default)               |
+| `DeliveryAction.DLQ`   | Write to [dead letter queue](sinks.md#dead-letter-queue) (default) |
 | `DeliveryAction.RETRY` | Retry delivery (up to `max_retries` from config)   |
 | `DeliveryAction.SKIP`  | Drop the payloads, continue                        |
 
@@ -357,7 +357,7 @@ async def on_revoke(self, partitions):
 ## Offset Commit Logic
 
 Drakkar uses **watermark-based offset tracking** to guarantee at-least-once
-delivery. Understanding this is important for designing `arrange()` and
+delivery. Understanding this is important for designing [arrange()](#arrange-required) and
 `source_offsets`.
 
 ### How it works
@@ -368,7 +368,7 @@ offsets and their state (`PENDING` or `COMPLETED`):
 1. When messages enter `arrange()`, their offsets are registered as
    **PENDING**.
 2. When a task finishes and all its sink payloads are delivered (or
-   routed to DLQ/skipped), the offsets from `task.source_offsets` are
+   routed to [DLQ](sinks.md#dead-letter-queue)/skipped), the offsets from `task.source_offsets` are
    marked **COMPLETED**.
 3. The framework asks: *what is the highest consecutive completed offset
    starting from the lowest tracked offset?* That value + 1 is committed
@@ -494,8 +494,8 @@ def message_label(self, msg):
 
 ## Task Labels
 
-`ExecutorTask.labels` is a `dict[str, str]` of user-defined key-value
-pairs displayed alongside task details in the debug UI. Set them in
+[ExecutorTask](executor.md#executortask)`.labels` is a `dict[str, str]` of user-defined key-value
+pairs displayed alongside task details in the [debug UI](observability.md#debug-ui). Set them in
 `arrange()`:
 
 ```python
@@ -545,7 +545,7 @@ class MyHandler(dk.BaseDrakkarHandler[MyInput, MyOutput]):
 
 ### Behavior
 
-- Periodic tasks start after `on_ready()` completes.
+- Periodic tasks start after [on_ready()](#on_ready) completes.
 - They run in the same async event loop as the rest of the worker.
 - Overlapping runs are prevented -- the next interval starts only after
   the current invocation finishes.
@@ -563,8 +563,8 @@ class MyHandler(dk.BaseDrakkarHandler[MyInput, MyOutput]):
 ## Custom Prometheus Metrics
 
 Declare `prometheus_client` metrics as class attributes on your handler.
-The framework auto-discovers them and exposes them on the debug UI
-metrics page alongside built-in Drakkar metrics.
+The framework auto-discovers them and exposes them on the [debug UI](observability.md#debug-ui)
+metrics page alongside built-in [Drakkar metrics](observability.md#prometheus-metrics).
 
 ```python
 from prometheus_client import Counter, Gauge, Histogram

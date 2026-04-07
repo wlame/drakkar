@@ -100,17 +100,17 @@ Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execut
 
 ## Key Features
 
-- **Per-partition pipelines** -- independent processing with watermark-based offset tracking
+- **Per-partition pipelines** -- independent processing with watermark-based [offset tracking](handler.md#offset-commit-logic)
 - **Pluggable sinks** -- Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem; any combination, multiple instances per type
-- **Dead letter queue** -- failed deliveries route to a DLQ topic with error metadata
-- **Backpressure** -- Kafka pause/resume keeps memory bounded regardless of consumer lag
-- **Typed messages** -- Pydantic models for input/output with auto-deserialization
-- **Debug UI** -- built-in FastAPI dashboard with executor timeline, partition lag, message tracing
-- **Prometheus metrics** -- pipeline, executor, and per-sink counters/histograms
-- **Structured logging** -- JSON/ECS-compatible via structlog, ready for Elastic
-- **Periodic tasks** -- `@periodic` decorator for recurring background coroutines
-- **Task labels** -- custom `message_label()` for human-readable log/UI identifiers
-- **Error hooks** -- `on_error` for executor failures, `on_delivery_error` for sink failures (retry, skip, or DLQ)
+- **[Dead letter queue](sinks.md#dead-letter-queue)** -- failed deliveries route to a DLQ topic with error metadata
+- **[Backpressure](performance.md#backpressure)** -- Kafka pause/resume keeps memory bounded regardless of consumer lag
+- **[Typed messages](handler.md#typed-messages)** -- Pydantic models for input/output with auto-deserialization
+- **[Debug UI](observability.md#debug-ui)** -- built-in FastAPI dashboard with executor timeline, partition lag, message tracing
+- **[Prometheus metrics](observability.md#prometheus-metrics)** -- pipeline, executor, and per-sink counters/histograms
+- **[Structured logging](observability.md#structured-logging)** -- JSON/ECS-compatible via structlog, ready for Elastic
+- **[Periodic tasks](handler.md#periodic-tasks)** -- `@periodic` decorator for recurring background coroutines
+- **[Task labels](handler.md#task-labels)** -- custom [message_label()](handler.md#message_label) for human-readable log/UI identifiers
+- **Error hooks** -- [on_error](handler.md#on_error) for executor failures, [on_delivery_error](handler.md#on_delivery_error) for sink failures (retry, skip, or DLQ)
 
 ## Quick Start
 
@@ -213,4 +213,7 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 | [Sinks](sinks.md) | Sink types, payload models, routing, multi-instance setup |
 | [Executor](executor.md) | Subprocess pool, concurrency, timeouts, retries, binary resolution |
 | [Observability](observability.md) | Debug UI pages, Prometheus metrics, structured logging setup |
+| [Performance](performance.md) | Per-task overhead, bottleneck analysis, tuning recommendations |
+| [Config Calculator](calculator.md) | Interactive calculator for recommended config values |
+| [Integration Tests](integration.md) | Docker Compose test environment, chaos test scenario |
 | [Data Flow](data-flow.md) | End-to-end pipeline walkthrough: poll through commit |

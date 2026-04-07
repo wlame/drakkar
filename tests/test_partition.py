@@ -940,7 +940,9 @@ async def test_concurrent_windows_pending_context():
                 tasks.append(
                     ExecutorTask(
                         task_id=f'p-{msg.offset}',
-                        args=['-c', 'import time; time.sleep(0.3); print("ok")'] if msg.offset == 0 else ['-c', 'print("ok")'],
+                        args=['-c', 'import time; time.sleep(0.3); print("ok")']
+                        if msg.offset == 0
+                        else ['-c', 'print("ok")'],
                         source_offsets=[msg.offset],
                     )
                 )

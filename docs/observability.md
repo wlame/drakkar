@@ -1,6 +1,6 @@
 # Observability
 
-Drakkar provides four integrated observability layers: Prometheus metrics for alerting and dashboards, structured logging for event streams, a browser-based debug UI for real-time inspection, and a SQLite flight recorder for post-mortem analysis. All four are enabled by default and work together -- the debug UI reads from the flight recorder and links out to Prometheus graphs.
+Drakkar provides four integrated observability layers: Prometheus metrics for alerting and dashboards, structured logging for event streams, a browser-based debug UI for real-time inspection, and a SQLite flight recorder for post-mortem analysis. All four are enabled by default and work together -- the debug UI reads from the flight recorder and links out to Prometheus graphs. See [Configuration](configuration.md) for the full YAML reference.
 
 ---
 
@@ -36,7 +36,7 @@ metrics:
 | `drakkar_executor_duration_seconds` | Histogram | -- | Task execution duration. Buckets: 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300 |
 | `drakkar_executor_pool_active` | Gauge | -- | Number of tasks currently running in the executor pool |
 | `drakkar_executor_timeouts_total` | Counter | -- | Total tasks that exceeded `task_timeout_seconds` and were killed |
-| `drakkar_task_retries_total` | Counter | -- | Total tasks retried after failure (via `on_error` returning RETRY) |
+| `drakkar_task_retries_total` | Counter | -- | Total tasks retried after failure (via [on_error](handler.md#on_error) returning RETRY) |
 
 #### Batches
 
@@ -50,7 +50,7 @@ metrics:
 |--------|------|--------|-------------|
 | `drakkar_partition_queue_size` | Gauge | `partition` | Messages waiting in the partition's internal queue |
 | `drakkar_offset_lag` | Gauge | `partition` | Pending (uncommitted) offsets per partition |
-| `drakkar_backpressure_active` | Gauge | -- | Whether the consumer is paused due to backpressure. `1` = paused, `0` = flowing |
+| `drakkar_backpressure_active` | Gauge | -- | Whether the consumer is paused due to [backpressure](performance.md#backpressure). `1` = paused, `0` = flowing |
 | `drakkar_total_queued` | Gauge | -- | Total messages buffered in all partition queues plus in-flight tasks |
 | `drakkar_assigned_partitions` | Gauge | -- | Number of partitions currently assigned to this worker |
 | `drakkar_executor_idle_slot_seconds_total` | Counter | -- | Accumulated slot-seconds of executor idle time while messages are waiting in queues. If 2 slots sit idle for 3 seconds while messages are queued, this increments by 6. Only counts when messages are in queues (not yet dispatched), not when the worker has nothing to do. |
@@ -83,7 +83,7 @@ metrics:
 | `drakkar_sink_payloads_delivered_total` | Counter | `sink_type`, `sink_name` | Total payloads delivered to sinks |
 | `drakkar_sink_delivery_retries_total` | Counter | `sink_type`, `sink_name` | Total sink delivery retry attempts |
 | `drakkar_sink_deliveries_skipped_total` | Counter | `sink_type`, `sink_name` | Deliveries skipped via `on_delivery_error` returning SKIP |
-| `drakkar_sink_dlq_messages_total` | Counter | -- | Total messages sent to the dead letter queue |
+| `drakkar_sink_dlq_messages_total` | Counter | -- | Total messages sent to the [dead letter queue](sinks.md#dead-letter-queue) |
 | `drakkar_dlq_send_failures_total` | Counter | -- | Total failed attempts to send messages to the DLQ. When both the primary sink and DLQ fail, the payload is lost — alert on this counter. |
 
 #### Handler Hooks
@@ -94,7 +94,7 @@ metrics:
 
 ### User-Defined Metrics
 
-You can declare Prometheus metrics as class attributes on your handler. The framework auto-discovers them via `discover_handler_metrics()`, which scans the handler's class hierarchy (MRO) for any `prometheus_client` metric instances (`Counter`, `Gauge`, `Histogram`, `Summary`, `Info`).
+You can declare Prometheus metrics as class attributes on your handler -- see [Custom Prometheus Metrics](handler.md#custom-prometheus-metrics) for the handler-side setup. The framework auto-discovers them via `discover_handler_metrics()`, which scans the handler's class hierarchy (MRO) for any `prometheus_client` metric instances (`Counter`, `Gauge`, `Histogram`, `Summary`, `Info`).
 
 ```python
 from prometheus_client import Counter, Histogram
@@ -313,8 +313,8 @@ Overview of all configured sinks with live delivery statistics:
 
 Real-time view of the processing pipeline, fed by WebSocket (`/ws`). Organized in tabbed sections:
 
-- **Arrange** -- active `arrange()` calls with partition, duration, and message labels.
-- **Executors Timeline** -- visual timeline of running, pending, and recently finished tasks. Slot-based layout matching `max_workers`. Tasks shorter than `ws_min_duration_ms` are hidden (except failures, which are always shown).
+- **Arrange** -- active [arrange()](handler.md#arrange-required) calls with partition, duration, and [message labels](handler.md#message_label).
+- **Executors Timeline** -- visual timeline of running, pending, and recently finished tasks. Slot-based layout matching `max_workers`. Tasks shorter than `ws_min_duration_ms` are hidden (except failures, which are always shown). See [Duration Thresholds](#duration-thresholds) for threshold tuning.
 - **Collect** -- recently completed tasks with exit codes and durations.
 
 Pool utilization bar shows active, waiting, and available slot counts.
@@ -340,7 +340,7 @@ Multi-purpose debug page with:
 Detailed view of a single task's lifecycle:
 
 - **Status** -- running, completed, or failed
-- **Labels** -- user-defined labels from `ExecutorTask.labels`
+- **Labels** -- user-defined [labels](handler.md#task-labels) from [ExecutorTask](executor.md#executortask)`.labels`
 - **Duration** -- wall-clock execution time
 - **PID** -- OS process ID
 - **CLI** -- reconstructed command line (`binary_path` + `args`)
@@ -481,7 +481,7 @@ Each returned event carries a `worker_name` field identifying which worker proce
 
 ## Periodic Tasks
 
-The `@periodic` decorator schedules handler methods to run at fixed intervals alongside the main processing loop.
+The `@periodic` decorator schedules handler methods to run at fixed intervals alongside the main processing loop. See also [Periodic Tasks](handler.md#periodic-tasks) in the handler reference.
 
 ### Declaration
 
@@ -504,7 +504,7 @@ class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
 
 - **Discovery**: at startup, the framework inspects the handler instance for methods decorated with `@periodic`. Only `async` functions are accepted -- decorating a sync function raises `TypeError`.
 - **Scheduling**: each periodic task runs in its own `asyncio.Task` within the main event loop. The loop is: `sleep(seconds)` then `await coro_fn()`. The next interval starts only after the current invocation finishes, preventing overlapping runs.
-- **Lifecycle**: periodic tasks are started after `on_ready()` completes and cancelled during graceful shutdown (before partition processors are drained).
+- **Lifecycle**: periodic tasks are started after [on_ready()](handler.md#on_ready) completes and cancelled during graceful shutdown (before partition processors are drained).
 - **Error handling**:
     - `on_error='continue'` (default) -- the exception is logged, and the task continues scheduling on the next interval.
     - `on_error='stop'` -- the exception is logged, and this specific periodic task is permanently cancelled. Other periodic tasks and the main processing loop are unaffected.
