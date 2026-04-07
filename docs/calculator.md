@@ -3,6 +3,14 @@
 Interactive calculator that recommends Drakkar configuration based on your
 hardware and workload characteristics.
 
+!!! warning "Starting point, not a final answer"
+    These are **estimated values** to use as a starting point for tuning.
+    They are not calibrated against real production workloads. Every
+    deployment is different — binary startup cost, message size, sink
+    latency, and OS scheduling all affect optimal values. Use these
+    recommendations as initial config, then iterate based on the
+    [metrics to watch](#what-to-watch-after-deploying) section below.
+
 <div id="calc" style="font-family: inherit;">
 
 <style>
@@ -118,13 +126,15 @@ function drakkarCalc() {
   var maxPollInterval = Math.max(300000, Math.min(900000, worstWindowSec * 1000 * 2));
 
   // debug thresholds
+  // ws_min_duration_ms: floor at 30ms — below that, fast task WS events
+  // cause buggy timeline rendering and browser performance issues.
   var wsMin, eventMin, outputMin, logMin, storeOutput;
   if (p80 < 50) {
-    wsMin = Math.round(p80 * 2); eventMin = Math.round(p80 / 2);
+    wsMin = Math.max(30, Math.round(p80 * 3)); eventMin = Math.round(p80 / 2);
     outputMin = Math.round(p80 * 2); logMin = Math.round(p80 * 2);
     storeOutput = false;
   } else if (p80 < 500) {
-    wsMin = Math.round(p80 / 2); eventMin = 0;
+    wsMin = Math.max(30, Math.round(p80)); eventMin = 0;
     outputMin = Math.round(p80 / 2); logMin = Math.round(p80 / 2);
     storeOutput = true;
   } else {
@@ -207,7 +217,7 @@ function drakkarCalc() {
   addDd(dl, 'Worst-case window: ' + windowSize + ' tasks * ' + taskTimeout + 's = ' + worstWindowSec + 's. 2x margin = ' + (worstWindowSec * 2) + 's. Kafka kicks the consumer if no poll() within this interval.');
 
   addDt(dl, 'ws_min_duration_ms: ' + wsMin);
-  addDd(dl, wsMin > 0 ? 'Tasks faster than ' + wsMin + 'ms hidden from live UI. Prevents flooding the browser. Failed tasks always shown.' : '0 = show all tasks. Throughput is low enough for the UI to handle.');
+  addDd(dl, wsMin > 0 ? 'Tasks faster than ' + wsMin + 'ms hidden from live UI. Floor is 30ms \u2014 below that, fast task WebSocket events cause buggy timeline rendering and browser performance issues. Failed tasks always shown regardless.' : '0 = show all tasks. With p80=' + p80 + 'ms, task throughput is low enough for the UI to handle.');
 
   addDt(dl, 'event_min_duration_ms: ' + eventMin);
   addDd(dl, eventMin > 0 ? 'Tasks faster than ' + eventMin + 'ms skip SQLite storage. At ~' + Math.round(tasksPerSec) + ' tasks/sec, filtering prevents DB bottleneck.' : '0 = store all events. SQLite handles ~' + Math.round(tasksPerSec) + ' tasks/sec comfortably.');
@@ -227,6 +237,63 @@ function drakkarCalc() {
   addDd(dl2, 'Pauses at ' + (maxWorkers * highMult) + ' queued, resumes at ' + Math.max(1, maxWorkers * lowMult));
 }
 </script>
+
+---
+
+## What to Watch After Deploying
+
+After applying the recommended config, monitor these metrics to
+understand how well the worker is performing and where to tune further.
+
+### Is the worker keeping up?
+
+| Metric | Good | Bad | Action |
+|--------|------|-----|--------|
+| `rate(drakkar_messages_consumed_total[5m])` | Stable or matches production rate | Dropping or zero | Check if consumer is paused (backpressure) or partitions were revoked |
+| `drakkar_backpressure_active` | 0 most of the time | Stuck at 1 | Increase `max_workers` or add horizontal workers |
+| `drakkar_total_queued` | Stable, not growing | Growing over time | Processing rate < production rate. Scale up or batch in `arrange()` |
+
+### Is the executor pool sized correctly?
+
+| Metric | Good | Bad | Action |
+|--------|------|-----|--------|
+| `drakkar_executor_pool_active` | 50-80% of `max_workers` on average | Pegged at `max_workers` constantly | Add more slots or more workers |
+| `rate(drakkar_executor_idle_slot_seconds_total[5m])` | Near zero | High (slots idle while messages wait) | `arrange()` is the bottleneck — make it faster or reduce `window_size` |
+| `rate(drakkar_consumer_idle_seconds_total[5m])` | Low when topic has data | High while topic has data | Worker is over-provisioned for this workload |
+
+### Are tasks healthy?
+
+| Metric | Good | Bad | Action |
+|--------|------|-----|--------|
+| `histogram_quantile(0.95, rate(drakkar_executor_duration_seconds_bucket[5m]))` | Close to expected p95 | Much higher than expected | Binary performance degraded, or resource contention |
+| `rate(drakkar_executor_tasks_total{status="failed"}[5m])` | Near zero or matching expected failure rate | Spiking | Check `on_error()` logic, binary health, input data |
+| `rate(drakkar_executor_timeouts_total[5m])` | Zero | Non-zero | Increase `task_timeout_seconds` or investigate stuck processes |
+| `rate(drakkar_task_retries_total[5m])` | Low | High | Transient failures are frequent — check error patterns |
+
+### Are sinks healthy?
+
+| Metric | Good | Bad | Action |
+|--------|------|-----|--------|
+| `rate(drakkar_sink_deliver_errors_total[5m])` | Zero | Non-zero | Check sink connectivity, credentials, capacity |
+| `histogram_quantile(0.95, rate(drakkar_sink_deliver_duration_seconds_bucket[5m]))` | Low (< 100ms for Kafka/Redis, < 500ms for Postgres/HTTP) | High or spiking | Sink is overloaded or network is degraded |
+| `rate(drakkar_sink_dlq_messages_total[5m])` | Zero | Non-zero | Deliveries are failing and being routed to DLQ — investigate sink errors |
+| `rate(drakkar_dlq_send_failures_total[5m])` | Zero | Non-zero | **Critical** — both sink AND DLQ failed. Data is being lost. |
+
+### Is the handler code fast enough?
+
+| Metric | Good | Bad | Action |
+|--------|------|-----|--------|
+| `histogram_quantile(0.95, rate(drakkar_handler_duration_seconds_bucket{hook="arrange"}[5m]))` | << task duration | Comparable to or exceeding task duration | `arrange()` is the bottleneck — cache lookups, reduce I/O |
+| `histogram_quantile(0.95, rate(drakkar_handler_duration_seconds_bucket{hook="collect"}[5m]))` | << task duration | High | `collect()` is doing too much work — move heavy logic elsewhere |
+
+### Iterating on config
+
+1. Start with calculator values
+2. Run under production-like load for 10+ minutes
+3. Check the tables above
+4. Adjust one parameter at a time, observe for another 10 minutes
+5. Typical iteration cycle: `max_workers` first, then `window_size`,
+   then debug thresholds last (they affect observability, not throughput)
 
 ---
 
