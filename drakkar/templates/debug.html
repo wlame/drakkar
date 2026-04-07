@@ -32,6 +32,21 @@
 
 <hr class="border-cream-200 mb-6">
 
+<!-- ==================== PERIODIC TASKS ==================== -->
+<div class="mb-8">
+    <div class="flex items-center justify-between mb-3">
+        <h2 class="text-xl font-bold text-ink-900 flex items-center gap-2 cursor-pointer select-none" onclick="toggleSection('periodic')"><svg data-chevron="periodic" class="transition-transform duration-150" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>Periodic Tasks</h2>
+        <button id="periodic-refresh" class="px-3 py-1.5 text-sm rounded border border-cream-300 text-ink-700 hover:bg-cream-100">Refresh</button>
+    </div>
+    <div data-section-body="periodic">
+        <div id="periodic-list">
+            <div class="text-gray-500 text-sm">Loading...</div>
+        </div>
+    </div>
+</div>
+
+<hr class="border-cream-200 mb-6">
+
 <!-- ==================== TRACE ==================== -->
 <div class="mb-8">
     <h2 class="text-xl font-bold text-ink-900 mb-3 flex items-center gap-2 cursor-pointer select-none" onclick="toggleSection('trace')"><svg data-chevron="trace" class="transition-transform duration-150" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>Message Trace</h2>
@@ -102,7 +117,7 @@ function toggleSection(name) {
     localStorage.setItem('drakkar-debug-' + name, isVisible ? '0' : '1');
 }
 (function() {
-    ['metrics', 'trace', 'databases'].forEach(function(name) {
+    ['metrics', 'periodic', 'trace', 'databases'].forEach(function(name) {
         var state = localStorage.getItem('drakkar-debug-' + name);
         var body = document.querySelector('[data-section-body="' + name + '"]');
         var chevron = document.querySelector('[data-chevron="' + name + '"]');
@@ -118,6 +133,116 @@ function toggleSection(name) {
 })();
 
 (function() {
+    // === Periodic Tasks ===
+    var periodicListEl = document.getElementById('periodic-list');
+    var periodicRefreshBtn = document.getElementById('periodic-refresh');
+
+    function fmtAgo(ts) {
+        if (!ts) return '-';
+        var secs = Math.floor(Date.now() / 1000 - ts);
+        if (secs < 60) return secs + 's ago';
+        if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+        if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+        return Math.floor(secs / 86400) + 'd ago';
+    }
+
+    function renderPeriodic(tasks) {
+        periodicListEl.textContent = '';
+        if (!tasks.length) {
+            var empty = document.createElement('div');
+            empty.className = 'text-gray-500 text-sm py-4 text-center';
+            empty.textContent = 'No periodic task runs recorded yet';
+            periodicListEl.appendChild(empty);
+            return;
+        }
+
+        var table = document.createElement('table');
+        table.className = 'w-full text-sm';
+        var thead = document.createElement('thead');
+        var headTr = document.createElement('tr');
+        headTr.className = 'text-left text-gray-400 text-xs border-b border-cream-200';
+        ['Task', 'Last Run', 'Duration', 'Status', 'OK', 'Errors', 'Recent'].forEach(function(col) {
+            var th = document.createElement('th');
+            th.className = 'py-2 px-3';
+            th.textContent = col;
+            headTr.appendChild(th);
+        });
+        thead.appendChild(headTr);
+        table.appendChild(thead);
+
+        var tbody = document.createElement('tbody');
+        tasks.forEach(function(t) {
+            var tr = document.createElement('tr');
+            tr.className = 'border-b border-cream-100 hover:bg-cream-50';
+
+            var tdName = document.createElement('td');
+            tdName.className = 'py-2 px-3 font-mono text-xs font-semibold';
+            tdName.textContent = t.name;
+
+            var tdLast = document.createElement('td');
+            tdLast.className = 'py-2 px-3 text-xs text-gray-500';
+            tdLast.textContent = fmtAgo(t.last_run_ts);
+            if (t.last_run_ts) tdLast.title = new Date(t.last_run_ts * 1000).toISOString();
+
+            var tdDur = document.createElement('td');
+            tdDur.className = 'py-2 px-3 font-mono text-xs';
+            tdDur.textContent = t.last_duration != null ? t.last_duration.toFixed(3) + 's' : '-';
+
+            var tdStatus = document.createElement('td');
+            tdStatus.className = 'py-2 px-3 text-xs font-semibold';
+            if (t.last_status === 'ok') {
+                tdStatus.style.color = '#059669';
+                tdStatus.textContent = 'ok';
+            } else {
+                tdStatus.style.color = '#dc2626';
+                tdStatus.textContent = 'error';
+                if (t.last_error) tdStatus.title = t.last_error;
+            }
+
+            var tdOk = document.createElement('td');
+            tdOk.className = 'py-2 px-3 font-mono text-xs';
+            tdOk.style.color = '#059669';
+            tdOk.textContent = t.total_ok;
+
+            var tdErr = document.createElement('td');
+            tdErr.className = 'py-2 px-3 font-mono text-xs';
+            tdErr.style.color = t.total_error > 0 ? '#dc2626' : '#6b7280';
+            tdErr.textContent = t.total_error;
+
+            // sparkline: last 20 runs as colored dots
+            var tdRecent = document.createElement('td');
+            tdRecent.className = 'py-2 px-3';
+            if (t.recent && t.recent.length) {
+                var runs = t.recent.slice().reverse(); // oldest first
+                runs.forEach(function(r) {
+                    var dot = document.createElement('span');
+                    dot.style.cssText = 'display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:2px;';
+                    dot.style.background = r.status === 'ok' ? '#34d399' : '#f87171';
+                    dot.title = (r.status === 'ok' ? 'ok' : 'error: ' + (r.error || '?')) + ' (' + (r.duration ? r.duration.toFixed(3) + 's' : '?') + ')';
+                    tdRecent.appendChild(dot);
+                });
+            }
+
+            tr.append(tdName, tdLast, tdDur, tdStatus, tdOk, tdErr, tdRecent);
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        periodicListEl.appendChild(table);
+    }
+
+    function loadPeriodic() {
+        fetch('/api/debug/periodic').then(function(r) { return r.json(); }).then(renderPeriodic)
+        .catch(function() {
+            periodicListEl.textContent = '';
+            var err = document.createElement('div');
+            err.className = 'text-red-500 text-sm';
+            err.textContent = 'Failed to load periodic tasks';
+            periodicListEl.appendChild(err);
+        });
+    }
+
+    periodicRefreshBtn.onclick = loadPeriodic;
+
     // === Trace ===
     var traceInput = document.getElementById('trace-input');
     var traceBtn = document.getElementById('trace-btn');
@@ -713,6 +838,7 @@ function toggleSection(name) {
 
     // === Boot ===
     loadMetrics();
+    loadPeriodic();
     loadDatabases();
 
     // Handle #trace/P/O deep links

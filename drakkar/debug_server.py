@@ -643,6 +643,72 @@ def create_debug_app(
 
         return JSONResponse(collect_all_metrics())
 
+    @app.get('/api/debug/periodic')
+    async def api_debug_periodic():
+        """Return periodic task run history from the flight recorder.
+
+        Groups events by task name and returns the latest run, total counts,
+        and recent history for each task.
+        """
+        await recorder._flush()
+        if not recorder._db:
+            return JSONResponse([])
+
+        query = """
+            SELECT ts, task_id, duration, exit_code, metadata
+            FROM events
+            WHERE event = 'periodic_run'
+            ORDER BY ts DESC
+            LIMIT 500
+        """
+        try:
+            async with recorder._db.execute(query) as cursor:
+                columns = [d[0] for d in cursor.description]
+                rows = await cursor.fetchall()
+        except Exception:
+            return JSONResponse([])
+
+        # group by task name
+        tasks: dict[str, dict] = {}
+        for row in rows:
+            entry = dict(zip(columns, row, strict=False))
+            name = entry['task_id']
+            meta = {}
+            if entry.get('metadata'):
+                try:
+                    meta = json.loads(entry['metadata'])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            status = meta.get('status', 'ok')
+            error = meta.get('error', '')
+
+            if name not in tasks:
+                tasks[name] = {
+                    'name': name,
+                    'last_run_ts': entry['ts'],
+                    'last_duration': entry['duration'],
+                    'last_status': status,
+                    'last_error': error,
+                    'total_ok': 0,
+                    'total_error': 0,
+                    'recent': [],
+                }
+            t = tasks[name]
+            if status == 'ok':
+                t['total_ok'] += 1
+            else:
+                t['total_error'] += 1
+            if len(t['recent']) < 20:
+                t['recent'].append({
+                    'ts': entry['ts'],
+                    'duration': entry['duration'],
+                    'status': status,
+                    'error': error,
+                })
+
+        result = sorted(tasks.values(), key=lambda t: t['name'])
+        return JSONResponse(result)
+
     @app.get('/debug/download/{filename}', dependencies=[Depends(_require_auth)])
     async def debug_download(filename: str):
         """Download a database file from db_dir."""

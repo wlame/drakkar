@@ -745,6 +745,25 @@ class EventRecorder:
                 }
             )
 
+    def record_periodic_run(
+        self,
+        name: str,
+        duration: float,
+        status: str,
+        error: str = '',
+    ) -> None:
+        """Record a periodic task execution (success or failure)."""
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'periodic_run',
+                'task_id': name,
+                'duration': duration,
+                'exit_code': 0 if status == 'ok' else 1,
+                'metadata': json.dumps({'status': status, 'error': error}) if error else json.dumps({'status': status}),
+            }
+        )
+
     # --- Query methods (for debug UI, reads current DB) ---
 
     async def get_events(

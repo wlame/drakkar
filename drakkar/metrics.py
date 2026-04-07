@@ -181,6 +181,22 @@ handler_duration = Histogram(
 )
 
 
+# --- Periodic tasks ---
+
+periodic_task_runs = Counter(
+    'drakkar_periodic_task_runs_total',
+    'Total periodic task executions by name and outcome',
+    ['name', 'status'],
+)
+
+periodic_task_duration = Histogram(
+    'drakkar_periodic_task_duration_seconds',
+    'Duration of periodic task executions',
+    ['name'],
+    buckets=(0.001, 0.01, 0.1, 0.5, 1, 5, 10, 30, 60),
+)
+
+
 def start_metrics_server(config: MetricsConfig) -> None:
     """Start the Prometheus metrics HTTP server if enabled."""
     if config.enabled:

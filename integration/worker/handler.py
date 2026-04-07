@@ -76,6 +76,7 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
             category='periodic',
             total_collected=self.total_collected,
         )
+        await asyncio.sleep(0.8)  # emulate some async work
 
     @dk.periodic(seconds=30, on_error='stop')
     async def health_check(self):

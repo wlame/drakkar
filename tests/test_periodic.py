@@ -467,3 +467,132 @@ def test_discover_periodic_tasks_skips_broken_descriptor():
     names = {name for name, _, _ in tasks}
     assert 'good_task' in names
     assert 'broken' not in names
+
+
+# --- Metrics and recorder instrumentation ---
+
+
+async def test_periodic_run_increments_metrics():
+    """Successful periodic run increments ok counter and observes duration."""
+    from drakkar.metrics import periodic_task_duration, periodic_task_runs
+
+    call_count = 0
+
+    async def fast_task():
+        nonlocal call_count
+        call_count += 1
+
+    ok_before = periodic_task_runs.labels(name='test_metric_task', status='ok')._value.get()
+    dur_before = periodic_task_duration.labels(name='test_metric_task')._sum.get()
+
+    task = asyncio.create_task(
+        run_periodic_task(name='test_metric_task', coro_fn=fast_task, seconds=0.05, on_error='continue')
+    )
+    await asyncio.sleep(0.15)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert call_count >= 2
+    ok_after = periodic_task_runs.labels(name='test_metric_task', status='ok')._value.get()
+    assert ok_after >= ok_before + 2
+    dur_after = periodic_task_duration.labels(name='test_metric_task')._sum.get()
+    assert dur_after > dur_before
+
+
+async def test_periodic_run_error_increments_error_metric():
+    """Failed periodic run increments error counter."""
+    from drakkar.metrics import periodic_task_runs
+
+    async def failing_task():
+        raise ValueError('boom')
+
+    err_before = periodic_task_runs.labels(name='test_err_metric', status='error')._value.get()
+
+    task = asyncio.create_task(
+        run_periodic_task(name='test_err_metric', coro_fn=failing_task, seconds=0.05, on_error='continue')
+    )
+    await asyncio.sleep(0.12)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    err_after = periodic_task_runs.labels(name='test_err_metric', status='error')._value.get()
+    assert err_after >= err_before + 1
+
+
+async def test_periodic_run_records_to_recorder(tmp_path):
+    """Periodic run records events to the flight recorder."""
+    from drakkar.config import DebugConfig
+    from drakkar.recorder import EventRecorder
+
+    config = DebugConfig(enabled=True, db_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name='test')
+    await rec.start()
+
+    call_count = 0
+
+    async def tracked_task():
+        nonlocal call_count
+        call_count += 1
+
+    task = asyncio.create_task(
+        run_periodic_task(
+            name='test_recorded', coro_fn=tracked_task, seconds=0.05, on_error='continue', recorder=rec
+        )
+    )
+    await asyncio.sleep(0.15)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert call_count >= 2
+    # check buffer has periodic_run events
+    periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
+    assert len(periodic_events) >= 2
+    assert periodic_events[0]['task_id'] == 'test_recorded'
+    assert periodic_events[0]['exit_code'] == 0
+    assert periodic_events[0]['duration'] >= 0
+    await rec.stop()
+
+
+async def test_periodic_run_records_error_to_recorder(tmp_path):
+    """Periodic run records error events with error message."""
+    import json
+
+    from drakkar.config import DebugConfig
+    from drakkar.recorder import EventRecorder
+
+    config = DebugConfig(enabled=True, db_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name='test')
+    await rec.start()
+
+    async def failing_task():
+        raise RuntimeError('test failure')
+
+    task = asyncio.create_task(
+        run_periodic_task(
+            name='test_err_recorded', coro_fn=failing_task, seconds=0.05, on_error='continue', recorder=rec
+        )
+    )
+    await asyncio.sleep(0.12)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
+    assert len(periodic_events) >= 1
+    err_event = periodic_events[0]
+    assert err_event['exit_code'] == 1
+    meta = json.loads(err_event['metadata'])
+    assert meta['status'] == 'error'
+    assert 'test failure' in meta['error']
+    await rec.stop()

@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
+
+from drakkar.metrics import periodic_task_duration, periodic_task_runs
+
+if TYPE_CHECKING:
+    from drakkar.recorder import EventRecorder
 
 logger = structlog.get_logger()
 
@@ -73,6 +79,7 @@ async def run_periodic_task(
     coro_fn: Callable[[], Coroutine[Any, Any, Any]],
     seconds: float,
     on_error: Literal['continue', 'stop'],
+    recorder: EventRecorder | None = None,
 ) -> None:
     """Run a single periodic task in a loop until cancelled."""
     log = logger.bind(periodic_task=name, interval_seconds=seconds)
@@ -80,11 +87,24 @@ async def run_periodic_task(
 
     while True:
         await asyncio.sleep(seconds)
+        start = time.monotonic()
         try:
             await coro_fn()
+            duration = time.monotonic() - start
+            periodic_task_runs.labels(name=name, status='ok').inc()
+            periodic_task_duration.labels(name=name).observe(duration)
+            if recorder:
+                recorder.record_periodic_run(name=name, duration=round(duration, 3), status='ok')
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            duration = time.monotonic() - start
+            periodic_task_runs.labels(name=name, status='error').inc()
+            periodic_task_duration.labels(name=name).observe(duration)
+            if recorder:
+                recorder.record_periodic_run(
+                    name=name, duration=round(duration, 3), status='error', error=str(exc)
+                )
             if on_error == 'stop':
                 await log.aexception('periodic_task_failed', category='periodic')
                 await log.awarning('periodic_task_stopped', category='periodic')

@@ -2095,3 +2095,93 @@ class TestAuthToken:
                 headers={'Authorization': 'Bearer secret-123'},
             )
             assert resp.status_code != 401
+
+
+# ---------------------------------------------------------------------------
+# Periodic tasks API
+# ---------------------------------------------------------------------------
+
+
+class TestApiPeriodicTasks:
+    """Tests for /api/debug/periodic endpoint."""
+
+    async def test_periodic_empty_when_no_events(self, mock_recorder, mock_app):
+        import aiosqlite
+
+        from drakkar.recorder import SCHEMA_EVENTS
+
+        db_path = '/tmp/test-periodic-empty.db'
+        db = await aiosqlite.connect(db_path)
+        await db.executescript(SCHEMA_EVENTS)
+        await db.commit()
+
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp')
+        mock_recorder._db = db
+        mock_recorder._flush = AsyncMock()
+        mock_recorder._buffer = []
+        mock_recorder._config = cfg
+
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/periodic')
+        assert resp.status_code == 200
+        assert resp.json() == []
+        await db.close()
+
+    async def test_periodic_returns_task_runs(self, tmp_path, mock_recorder, mock_app):
+        import aiosqlite
+
+        from drakkar.recorder import SCHEMA_EVENTS
+
+        db_path = str(tmp_path / 'periodic.db')
+        db = await aiosqlite.connect(db_path)
+        await db.executescript(SCHEMA_EVENTS)
+
+        now = time.time()
+        await db.execute(
+            "INSERT INTO events (ts, dt, event, task_id, duration, exit_code, metadata) "
+            "VALUES (?, ?, 'periodic_run', 'refresh_cache', 0.15, 0, ?)",
+            (now - 60, '2026-04-07', '{"status": "ok"}'),
+        )
+        await db.execute(
+            "INSERT INTO events (ts, dt, event, task_id, duration, exit_code, metadata) "
+            "VALUES (?, ?, 'periodic_run', 'refresh_cache', 0.22, 0, ?)",
+            (now - 30, '2026-04-07', '{"status": "ok"}'),
+        )
+        await db.execute(
+            "INSERT INTO events (ts, dt, event, task_id, duration, exit_code, metadata) "
+            "VALUES (?, ?, 'periodic_run', 'health_check', 0.01, 1, ?)",
+            (now - 10, '2026-04-07', '{"status": "error", "error": "connection refused"}'),
+        )
+        await db.commit()
+
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        mock_recorder._db = db
+        mock_recorder._flush = AsyncMock()
+        mock_recorder._buffer = []
+        mock_recorder._config = cfg
+
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/periodic')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 2
+
+        # sorted by name
+        health = next(t for t in data if t['name'] == 'health_check')
+        cache = next(t for t in data if t['name'] == 'refresh_cache')
+
+        assert health['last_status'] == 'error'
+        assert health['last_error'] == 'connection refused'
+        assert health['total_ok'] == 0
+        assert health['total_error'] == 1
+
+        assert cache['last_status'] == 'ok'
+        assert cache['total_ok'] == 2
+        assert cache['total_error'] == 0
+        assert len(cache['recent']) == 2
+
+        await db.close()

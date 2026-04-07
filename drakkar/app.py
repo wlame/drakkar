@@ -248,6 +248,7 @@ class DrakkarApp:
                     coro_fn=method,
                     seconds=meta.seconds,
                     on_error=meta.on_error,
+                    recorder=self._recorder,
                 ),
                 name=f'periodic:{name}',
             )
