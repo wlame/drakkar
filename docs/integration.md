@@ -1,8 +1,11 @@
 # Integration Tests
 
-The `integration/` directory contains a full Docker Compose environment
-with all six sink types, multiple worker clusters, realistic load
-patterns, and a chaos test scenario.
+The `integration/` directory in the repository contains a full Docker
+Compose environment with all six sink types, multiple worker clusters,
+realistic load patterns, and a chaos test scenario. It is intended for
+**development and testing only** -- not as a production deployment
+reference. Credentials are hardcoded, services run without
+authentication, and all data is ephemeral.
 
 ---
 
