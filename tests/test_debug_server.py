@@ -2206,23 +2206,22 @@ class TestApiLabelTrace:
 
         now = time.time()
         await db.execute(
-            "INSERT INTO events (ts, dt, event, partition, task_id, labels) "
+            'INSERT INTO events (ts, dt, event, partition, task_id, labels) '
             "VALUES (?, ?, 'task_started', 0, 'task-a', ?)",
             (now - 20, '2026-04-08', '{"request_id": "req-123", "user": "alice"}'),
         )
         await db.execute(
-            "INSERT INTO events (ts, dt, event, partition, task_id, duration, labels) "
+            'INSERT INTO events (ts, dt, event, partition, task_id, duration, labels) '
             "VALUES (?, ?, 'task_completed', 0, 'task-a', 1.5, ?)",
             (now - 18, '2026-04-08', '{"request_id": "req-123", "user": "alice"}'),
         )
         await db.execute(
-            "INSERT INTO events (ts, dt, event, partition, task_id, labels) "
+            'INSERT INTO events (ts, dt, event, partition, task_id, labels) '
             "VALUES (?, ?, 'task_started', 1, 'task-b', ?)",
             (now - 10, '2026-04-08', '{"request_id": "req-456", "user": "bob"}'),
         )
         await db.execute(
-            "INSERT INTO events (ts, dt, event, partition, task_id) "
-            "VALUES (?, ?, 'task_started', 2, 'task-no-labels')",
+            "INSERT INTO events (ts, dt, event, partition, task_id) VALUES (?, ?, 'task_started', 2, 'task-no-labels')",
             (now - 5, '2026-04-08'),
         )
         await db.commit()

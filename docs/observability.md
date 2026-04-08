@@ -332,7 +332,11 @@ Filterable, paginated event browser across all partitions:
 Multi-purpose debug page with:
 
 - **Metrics viewer** -- live snapshot of all registered Prometheus metrics (framework and user), accessible via the `/api/debug/metrics` JSON endpoint.
-- **Cross-worker message trace** -- enter a partition and offset to trace a message across all workers sharing the same `db_dir`. Searches the current worker first, then other live workers, then rotated historical DB files.
+- **Periodic tasks** -- status of all `@periodic` handler methods: last run time, duration, success/error status, total counts, and a sparkline of recent runs.
+- **Cross-worker message trace** -- two search modes:
+    - **By partition:offset** -- enter `partition:offset` (e.g., `5:42`) to trace a message through the full pipeline.
+    - **By label** -- search inputs are auto-generated for each [label](handler.md#task-labels) key found in the database (e.g., `request_id`, `pattern`). Enter a value to find all tasks and events matching that label. Useful for tracing a specific request across partitions and workers.
+    Both modes search the current worker first, then other live workers in the cluster, then rotated historical DB files.
 - **Database management** -- list all debug database files with event counts and sizes, download individual files, merge multiple files into one, and view per-file breakdown by event type.
 
 #### `/task/{id}` -- Task Detail
@@ -454,28 +458,131 @@ Reduces storage for fast tasks where the output is uninteresting.
 
 ## Worker Autodiscovery
 
-When workers share the same `db_dir` (e.g., a shared NFS mount or a Kubernetes PVC), they can discover each other automatically.
+A shared `db_dir` between workers is **not required** for Drakkar to
+function. Each worker operates independently -- its own Kafka consumer,
+executor pool, sinks, and flight recorder work fine with a local
+directory.
+
+You can also disable the flight recorder database entirely by setting
+`db_dir: ""` (empty string). The debug web UI and WebSocket live
+streaming still work (events are held in memory only), but these
+features are disabled: event history (`/history`), message trace,
+label search, database download/merge, periodic task history, and
+worker autodiscovery. The live pipeline view (`/live`) and dashboard
+counters continue working since they read from in-memory state.
+
+When workers share the same `db_dir` (e.g., a shared NFS mount,
+Kubernetes PVC, or Docker volume), several additional debug features
+become available:
+
+- **Worker switcher** -- jump between worker UIs from a dropdown in the
+  nav bar, without remembering ports or IP addresses
+- **Cross-worker message trace** -- trace a message across all workers
+  in the cluster by partition:offset or by label value
+- **Database merge** -- combine flight recorder files from multiple
+  workers into a single SQLite file for post-mortem analysis
+- **Cluster-wide database browser** -- see all workers' DB files in
+  one view, sorted and filtered
+
+Without a shared `db_dir`, each worker's debug UI only sees its own
+data. All other functionality (processing, sinks, metrics, logging)
+works identically.
 
 ### How It Works
 
-1. Workers with `store_config: true` write their configuration to the `worker_config` table in their SQLite database at startup and after each rotation.
-2. The debug UI scans `db_dir` for `*-live.db` symlinks belonging to other workers.
-3. For each live symlink found, the UI reads the `worker_config` table to get the worker's name, IP address, debug port, and cluster membership.
-4. Workers are grouped by `cluster_name` -- only workers in the same cluster are shown together. Unclustered workers appear in a separate group.
+1. Each worker creates a timestamped SQLite file in `db_dir`
+   (e.g., `worker-1-2026-04-08__14_30_00.db`) and maintains a
+   `{worker_name}-live.db` symlink pointing to the current file.
+2. Workers with `store_config: true` (default) write their
+   configuration -- worker name, IP address, debug port, cluster
+   name, Kafka settings -- to the `worker_config` table at startup
+   and after each DB rotation.
+3. The debug UI scans `db_dir` for `*-live.db` symlinks belonging
+   to other workers.
+4. For each live symlink, the UI reads `worker_config` to get the
+   worker's name, address, and cluster membership.
+5. Workers are grouped by `cluster_name` -- only workers in the same
+   cluster appear together. Unclustered workers show in a separate
+   group.
+6. On graceful shutdown, the `*-live.db` symlink is removed so
+   stopped workers don't appear in the dropdown.
 
 ### Worker Switcher
 
-The debug UI navigation bar includes a worker dropdown that lists all discovered workers. Clicking a worker navigates to its debug UI (using `debug_url` if configured, otherwise `http://{ip_address}:{debug_port}/`).
+The debug UI navigation bar includes a worker dropdown that lists all
+discovered workers, grouped by cluster. Clicking a worker navigates
+to its debug UI (using `debug_url` if configured, otherwise
+`http://{ip_address}:{debug_port}/`). The dropdown refreshes every
+10 seconds.
+
+### Setup
+
+The minimal config for autodiscovery:
+
+```yaml
+# all workers must share the same db_dir path
+debug:
+  db_dir: "/shared"        # mount the same volume on all workers
+  store_config: true       # default, writes worker_config table
+  # optional: set cluster_name to group workers
+cluster_name: "my-cluster"
+```
+
+In Kubernetes, use a shared PVC:
+
+```yaml
+volumes:
+  - name: debug-shared
+    persistentVolumeClaim:
+      claimName: drakkar-debug
+
+# mount on all worker pods at the same path
+volumeMounts:
+  - name: debug-shared
+    mountPath: /shared
+```
+
+In Docker Compose, use a named volume:
+
+```yaml
+volumes:
+  shared: {}
+
+services:
+  worker-1:
+    volumes:
+      - shared:/shared
+  worker-2:
+    volumes:
+      - shared:/shared
+```
 
 ### Cross-Worker Trace
 
-The trace feature on the `/debug` page searches for a message's lifecycle across all workers in the cluster. Given a partition and offset, it searches:
+The trace feature on the `/debug` page searches for a message's lifecycle
+across all workers in the cluster. Two search modes are available:
+
+**By partition:offset** -- given a partition and offset, finds the
+consumed event and all related task events (started, completed, failed,
+collect_completed, produced, committed).
+
+**By label** -- given a label key and value (e.g., `request_id=abc-123`),
+finds all tasks whose [labels](handler.md#task-labels) match and returns
+their full event lifecycle. This is useful when you know a business
+identifier but not which partition or offset it landed on. Label search
+inputs appear automatically on the `/debug` page for each label key
+found in the database.
+
+Both modes search in the same order:
 
 1. The current worker's live database.
 2. Other workers' live databases (same cluster).
 3. Rotated (historical) database files in `db_dir`, newest first.
 
-Each returned event carries a `worker_name` field identifying which worker processed it.
+Each returned event carries a `worker_name` field identifying which
+worker processed it. Labels are stored as JSON in the `labels` column
+with a partial index (`WHERE labels IS NOT NULL`) for efficient
+filtering.
 
 ---
 

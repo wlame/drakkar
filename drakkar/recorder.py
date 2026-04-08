@@ -853,9 +853,7 @@ class EventRecorder:
                                     if self._cluster_name and cfg_row[1] != self._cluster_name:
                                         continue
 
-                    async with db.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name='events'"
-                    ) as cur:
+                    async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='events'") as cur:
                         if not await cur.fetchone():
                             continue
 
