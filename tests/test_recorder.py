@@ -724,7 +724,7 @@ async def test_rotation_new_db_has_schema(tmp_path):
         # verify indexes exist
         async with db.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_events_%'") as cur:
             indexes = await cur.fetchall()
-            assert len(indexes) == 5  # partition_offset, ts, dt, task_id, type
+            assert len(indexes) == 6  # partition_offset, ts, dt, task_id, type, labels
 
     await rec.stop()
 
@@ -1956,6 +1956,74 @@ async def test_labels_persisted_to_db(tmp_path):
     import json
 
     assert json.loads(row[0]) == {'request_id': 'req-db', 'env': 'prod'}
+    await rec.stop()
+
+
+async def test_trace_by_label_finds_matching_tasks(tmp_path):
+    """trace_by_label returns all events for tasks with a matching label."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    # task with labels
+    task1 = make_task('t-labeled-1')
+    task1.labels = {'request_id': 'req-find-me'}
+    rec.record_task_started(task1, partition=0)
+    result1 = make_result(task=task1)
+    rec.record_task_completed(result1, partition=0)
+
+    # task with different label value
+    task2 = make_task('t-labeled-2')
+    task2.labels = {'request_id': 'req-other'}
+    rec.record_task_started(task2, partition=0)
+
+    # task with no labels
+    task3 = make_task('t-no-labels')
+    rec.record_task_started(task3, partition=0)
+
+    await rec._flush()
+
+    events = await rec.trace_by_label('request_id', 'req-find-me')
+    task_ids = {e['task_id'] for e in events}
+    assert 't-labeled-1' in task_ids
+    assert 't-labeled-2' not in task_ids
+    assert 't-no-labels' not in task_ids
+    # should have both started and completed events
+    event_types = {e['event'] for e in events}
+    assert 'task_started' in event_types
+    assert 'task_completed' in event_types
+    await rec.stop()
+
+
+async def test_trace_by_label_returns_empty_for_no_match(tmp_path):
+    """trace_by_label returns empty list when no tasks match."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-x')
+    task.labels = {'user': 'alice'}
+    rec.record_task_started(task, partition=0)
+    await rec._flush()
+
+    events = await rec.trace_by_label('user', 'bob')
+    assert events == []
+    await rec.stop()
+
+
+async def test_trace_by_label_returns_empty_for_unknown_key(tmp_path):
+    """trace_by_label returns empty list for a label key that doesn't exist."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=0)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    task = make_task('t-y')
+    task.labels = {'request_id': 'abc'}
+    rec.record_task_started(task, partition=0)
+    await rec._flush()
+
+    events = await rec.trace_by_label('nonexistent_key', 'abc')
+    assert events == []
     await rec.stop()
 
 

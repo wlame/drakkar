@@ -51,13 +51,14 @@
 <div class="mb-8">
     <h2 class="text-xl font-bold text-ink-900 mb-3 flex items-center gap-2 cursor-pointer select-none" onclick="toggleSection('trace')"><svg data-chevron="trace" class="transition-transform duration-150" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>Message Trace</h2>
     <div data-section-body="trace">
-    <p class="text-xs text-gray-400 mb-3">Trace a Kafka message by partition:offset through the full pipeline. Falls back to other workers in the same cluster.</p>
+    <p class="text-xs text-gray-400 mb-3">Trace a Kafka message through the full pipeline. Search by partition:offset or by label value. Falls back to other workers in the same cluster.</p>
     <div class="flex items-center gap-3 mb-4">
         <label class="text-sm text-gray-500">Partition:Offset</label>
         <input id="trace-input" type="text" placeholder="e.g. 5:42" class="bg-white border border-cream-300 rounded px-3 py-1.5 text-sm font-mono text-ink-700 w-40 focus:border-teal-400 focus:outline-none">
         <button id="trace-btn" class="bg-teal-600 hover:bg-teal-500 text-white px-3 py-1.5 rounded text-sm">Trace</button>
         <span id="trace-status" class="text-sm text-gray-400"></span>
     </div>
+    <div id="label-trace-inputs" class="mb-4"></div>
     <div id="trace-result"></div>
     </div>
 </div>
@@ -380,6 +381,156 @@ function toggleSection(name) {
     traceInput.addEventListener('keydown', function(ev) {
         if (ev.key === 'Enter') loadTrace();
     });
+
+    // === Label Trace ===
+    var labelTraceContainer = document.getElementById('label-trace-inputs');
+
+    function renderTraceEvents(events, statusMsg) {
+        // shared renderer used by both partition:offset and label trace
+        traceResult.textContent = '';
+        if (!events.length) {
+            var msg = document.createElement('p');
+            msg.className = 'text-gray-400 py-4 text-center';
+            msg.textContent = statusMsg || 'No events found';
+            traceResult.appendChild(msg);
+            traceStatus.textContent = '';
+            return;
+        }
+
+        var workerName = events[0].worker_name || '?';
+        traceStatus.textContent = events.length + ' events from ' + workerName;
+
+        var table = document.createElement('table');
+        table.className = 'w-full text-sm';
+        var thead = document.createElement('thead');
+        var headTr = document.createElement('tr');
+        headTr.className = 'text-left text-gray-400 border-b border-cream-200';
+        ['Time', 'Worker', 'Event', 'Task ID', 'Duration', 'Details'].forEach(function(col) {
+            var th = document.createElement('th');
+            th.className = 'py-2 px-3';
+            th.textContent = col;
+            headTr.appendChild(th);
+        });
+        thead.appendChild(headTr);
+        table.appendChild(thead);
+
+        var tbody = document.createElement('tbody');
+        for (var ei = 0; ei < events.length; ei++) {
+            var ev = events[ei];
+            var tr = document.createElement('tr');
+            tr.className = 'border-b border-cream-100 trace-row';
+            if (ev.task_id) tr.setAttribute('data-task-id', ev.task_id);
+            tr.addEventListener('mouseenter', function() {
+                var tid = this.getAttribute('data-task-id');
+                if (!tid) return;
+                document.querySelectorAll('.trace-row').forEach(function(row) {
+                    if (row.getAttribute('data-task-id') === tid) row.style.background = '#e0f2fe';
+                    else row.style.background = '';
+                });
+            });
+            tr.addEventListener('mouseleave', function() {
+                document.querySelectorAll('.trace-row').forEach(function(row) { row.style.background = ''; });
+            });
+
+            var td1 = document.createElement('td');
+            td1.className = 'py-2 px-3 text-xs font-mono';
+            td1.textContent = fmtTimeMs(ev.ts);
+            var td2 = document.createElement('td');
+            td2.className = 'py-2 px-3 text-xs font-mono text-gray-500';
+            td2.textContent = ev.worker_name || '?';
+            var td3 = document.createElement('td');
+            td3.className = 'py-2 px-3 font-mono text-xs font-semibold';
+            td3.style.color = evtColors[ev.event] || '#6b7280';
+            td3.textContent = ev.event;
+            var td4 = document.createElement('td');
+            td4.className = 'py-2 px-3 font-mono text-xs';
+            if (ev.task_id) {
+                var ta = document.createElement('a');
+                ta.href = '/task/' + encodeURIComponent(ev.task_id.split(':r')[0]);
+                ta.className = 'text-teal-600 hover:underline';
+                ta.textContent = ev.task_id;
+                td4.appendChild(ta);
+            }
+            var td5 = document.createElement('td');
+            td5.className = 'py-2 px-3 font-mono text-xs';
+            if (ev.duration) {
+                td5.style.color = durColor(ev.duration);
+                td5.textContent = ev.duration.toFixed(3) + 's';
+            }
+            var td6 = document.createElement('td');
+            td6.className = 'py-2 px-3 text-xs text-gray-500 max-w-lg truncate expandable cursor-pointer';
+            td6.title = 'Click to expand';
+            var details = [];
+            if (ev.args) details.push('args: ' + ev.args);
+            if (ev.exit_code !== null && ev.exit_code !== undefined) details.push('exit: ' + ev.exit_code);
+            if (ev.pid) details.push('pid: ' + ev.pid);
+            if (ev.stdout_size) details.push('stdout: ' + ev.stdout_size + 'b');
+            if (ev.metadata) details.push(ev.metadata);
+            if (ev.labels) {
+                try {
+                    var lblObj = typeof ev.labels === 'string' ? JSON.parse(ev.labels) : ev.labels;
+                    var lblParts = Object.keys(lblObj).map(function(k) { return k + '=' + lblObj[k]; });
+                    if (lblParts.length) details.push('labels: ' + lblParts.join(', '));
+                } catch(x) {}
+            }
+            td6.setAttribute('data-full', details.join('\n'));
+            td6.textContent = details.join(' | ');
+
+            tr.append(td1, td2, td3, td4, td5, td6);
+            tbody.appendChild(tr);
+        }
+        table.appendChild(tbody);
+        traceResult.appendChild(table);
+    }
+
+    function loadLabelTrace(key, value) {
+        traceStatus.textContent = 'searching by ' + key + '=' + value + '...';
+        traceResult.textContent = '';
+        fetch('/api/debug/trace-by-label?key=' + encodeURIComponent(key) + '&value=' + encodeURIComponent(value))
+            .then(function(r) { return r.json(); })
+            .then(function(events) {
+                renderTraceEvents(events, 'No events found for ' + key + '=' + value + ' in any cluster worker');
+            })
+            .catch(function(err) {
+                traceStatus.textContent = 'error: ' + err.message;
+            });
+    }
+
+    function buildLabelInputs(keys) {
+        labelTraceContainer.textContent = '';
+        if (!keys.length) return;
+
+        keys.forEach(function(key) {
+            var row = document.createElement('div');
+            row.className = 'flex items-center gap-3 mb-2';
+            var lbl = document.createElement('label');
+            lbl.className = 'text-sm text-gray-500';
+            lbl.textContent = key;
+            lbl.style.minWidth = '120px';
+            var inp = document.createElement('input');
+            inp.type = 'text';
+            inp.placeholder = 'search by ' + key;
+            inp.className = 'bg-white border border-cream-300 rounded px-3 py-1.5 text-sm font-mono text-ink-700 w-56 focus:border-teal-400 focus:outline-none';
+            inp.dataset.labelKey = key;
+            var btn = document.createElement('button');
+            btn.className = 'bg-teal-600 hover:bg-teal-500 text-white px-3 py-1.5 rounded text-sm';
+            btn.textContent = 'Trace';
+            btn.onclick = function() {
+                var val = inp.value.trim();
+                if (val) loadLabelTrace(key, val);
+            };
+            inp.addEventListener('keydown', function(ev) {
+                if (ev.key === 'Enter') {
+                    var val = inp.value.trim();
+                    if (val) loadLabelTrace(key, val);
+                }
+            });
+            row.append(lbl, inp, btn);
+            labelTraceContainer.appendChild(row);
+        });
+    }
+
+    fetch('/api/debug/label-keys').then(function(r) { return r.json(); }).then(buildLabelInputs).catch(function() {});
 
     // === Databases ===
     var listEl = document.getElementById('db-list');

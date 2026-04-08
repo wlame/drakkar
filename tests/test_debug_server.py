@@ -2185,3 +2185,139 @@ class TestApiPeriodicTasks:
         assert len(cache['recent']) == 2
 
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Label trace API tests
+# ---------------------------------------------------------------------------
+
+
+class TestApiLabelTrace:
+    """Tests for /api/debug/label-keys and /api/debug/trace-by-label endpoints."""
+
+    async def _make_client_with_labeled_events(self, tmp_path, mock_recorder, mock_app):
+        import aiosqlite
+
+        from drakkar.recorder import SCHEMA_EVENTS
+
+        db_path = str(tmp_path / 'labels.db')
+        db = await aiosqlite.connect(db_path)
+        await db.executescript(SCHEMA_EVENTS)
+
+        now = time.time()
+        await db.execute(
+            "INSERT INTO events (ts, dt, event, partition, task_id, labels) "
+            "VALUES (?, ?, 'task_started', 0, 'task-a', ?)",
+            (now - 20, '2026-04-08', '{"request_id": "req-123", "user": "alice"}'),
+        )
+        await db.execute(
+            "INSERT INTO events (ts, dt, event, partition, task_id, duration, labels) "
+            "VALUES (?, ?, 'task_completed', 0, 'task-a', 1.5, ?)",
+            (now - 18, '2026-04-08', '{"request_id": "req-123", "user": "alice"}'),
+        )
+        await db.execute(
+            "INSERT INTO events (ts, dt, event, partition, task_id, labels) "
+            "VALUES (?, ?, 'task_started', 1, 'task-b', ?)",
+            (now - 10, '2026-04-08', '{"request_id": "req-456", "user": "bob"}'),
+        )
+        await db.execute(
+            "INSERT INTO events (ts, dt, event, partition, task_id) "
+            "VALUES (?, ?, 'task_started', 2, 'task-no-labels')",
+            (now - 5, '2026-04-08'),
+        )
+        await db.commit()
+
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        mock_recorder._db = db
+        mock_recorder._flush = AsyncMock()
+        mock_recorder._buffer = []
+        mock_recorder._config = cfg
+        mock_recorder._worker_name = 'test-worker'
+        mock_recorder._cluster_name = ''
+        mock_recorder._db_path = db_path
+
+        # wire cross_trace_by_label to actually query the real DB
+        from drakkar.recorder import _LABEL_TRACE_QUERY
+
+        async def _real_cross_trace(label_key, label_value):
+            json_path = f'$.{label_key}'
+            async with db.execute(_LABEL_TRACE_QUERY, [json_path, label_value]) as cursor:
+                columns = [d[0] for d in cursor.description]
+                rows = await cursor.fetchall()
+                events = [dict(zip(columns, row, strict=False)) for row in rows]
+            for ev in events:
+                ev['worker_name'] = 'test-worker'
+            return events
+
+        mock_recorder.cross_trace_by_label = _real_cross_trace
+
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        client = AsyncClient(transport=transport, base_url='http://test')
+        return client, db
+
+    async def test_label_keys_returns_distinct_keys(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_labeled_events(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/debug/label-keys')
+        assert resp.status_code == 200
+        keys = resp.json()
+        assert 'request_id' in keys
+        assert 'user' in keys
+        assert len(keys) == 2
+        await db.close()
+
+    async def test_label_keys_empty_when_no_labels(self, mock_recorder, mock_app):
+        import aiosqlite
+
+        from drakkar.recorder import SCHEMA_EVENTS
+
+        db = await aiosqlite.connect(':memory:')
+        await db.executescript(SCHEMA_EVENTS)
+
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp')
+        mock_recorder._db = db
+        mock_recorder._flush = AsyncMock()
+        mock_recorder._buffer = []
+        mock_recorder._config = cfg
+
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/label-keys')
+        assert resp.status_code == 200
+        assert resp.json() == []
+        await db.close()
+
+    async def test_trace_by_label_finds_matching_events(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_labeled_events(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/debug/trace-by-label?key=request_id&value=req-123')
+        assert resp.status_code == 200
+        events = resp.json()
+        task_ids = {e['task_id'] for e in events}
+        assert 'task-a' in task_ids
+        assert 'task-b' not in task_ids
+        assert 'task-no-labels' not in task_ids
+        event_types = {e['event'] for e in events}
+        assert 'task_started' in event_types
+        assert 'task_completed' in event_types
+        await db.close()
+
+    async def test_trace_by_label_no_match_returns_empty(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_labeled_events(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/debug/trace-by-label?key=request_id&value=nonexistent')
+        assert resp.status_code == 200
+        assert resp.json() == []
+        await db.close()
+
+    async def test_trace_by_label_user_key(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_labeled_events(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/debug/trace-by-label?key=user&value=bob')
+        assert resp.status_code == 200
+        events = resp.json()
+        assert len(events) >= 1
+        assert all(e['task_id'] == 'task-b' for e in events)
+        await db.close()

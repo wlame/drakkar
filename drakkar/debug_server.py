@@ -636,6 +636,40 @@ def create_debug_app(
         events = await recorder.cross_trace(partition, offset)
         return JSONResponse(events)
 
+    @app.get('/api/debug/label-keys')
+    async def api_debug_label_keys():
+        """Return distinct label keys found in events."""
+        await recorder._flush()
+        if not recorder._db:
+            return JSONResponse([])
+        try:
+            query = """
+                SELECT DISTINCT labels FROM events
+                WHERE labels IS NOT NULL
+                LIMIT 100
+            """
+            async with recorder._db.execute(query) as cursor:
+                rows = await cursor.fetchall()
+            keys: set[str] = set()
+            for (labels_json,) in rows:
+                try:
+                    parsed = json.loads(labels_json)
+                    keys.update(parsed.keys())
+                except (json.JSONDecodeError, TypeError, AttributeError):
+                    pass
+            return JSONResponse(sorted(keys))
+        except Exception:
+            return JSONResponse([])
+
+    @app.get('/api/debug/trace-by-label')
+    async def api_debug_trace_by_label(
+        key: str = Query(),
+        value: str = Query(),
+    ):
+        """Trace tasks by label value across all workers in the cluster."""
+        events = await recorder.cross_trace_by_label(key, value)
+        return JSONResponse(events)
+
     @app.get('/api/debug/metrics')
     async def api_debug_metrics():
         """Return all registered Prometheus metrics with current values."""

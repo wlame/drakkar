@@ -57,6 +57,7 @@ CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_dt ON events(dt);
 CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event);
+CREATE INDEX IF NOT EXISTS idx_events_labels ON events(labels) WHERE labels IS NOT NULL;
 """
 
 SCHEMA_WORKER_CONFIG = """
@@ -112,6 +113,18 @@ _TRACE_QUERY = """
             WHERE e.partition = ? AND e.event = 'task_started'
             AND j.value = ?
         )
+    )
+    ORDER BY id ASC
+"""
+
+
+_LABEL_TRACE_QUERY = """
+    SELECT * FROM events
+    WHERE task_id IN (
+        SELECT DISTINCT task_id FROM events
+        WHERE labels IS NOT NULL
+        AND json_extract(labels, ?) = ?
+        AND task_id IS NOT NULL
     )
     ORDER BY id ASC
 """
@@ -794,6 +807,71 @@ class EventRecorder:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]
+
+    async def trace_by_label(self, label_key: str, label_value: str) -> list[dict]:
+        """Find all events for tasks matching a label key-value pair."""
+        await self._flush()
+        if not self._db or not self._config.store_events:
+            return []
+        json_path = f'$.{label_key}'
+        async with self._db.execute(_LABEL_TRACE_QUERY, [json_path, label_value]) as cursor:
+            columns = [d[0] for d in cursor.description]
+            rows = await cursor.fetchall()
+            return [dict(zip(columns, row, strict=False)) for row in rows]
+
+    async def cross_trace_by_label(self, label_key: str, label_value: str) -> list[dict]:
+        """Trace by label across all workers in the same cluster."""
+        local_events = await self.trace_by_label(label_key, label_value)
+        for ev in local_events:
+            ev['worker_name'] = self._worker_name
+
+        if local_events:
+            return sorted(local_events, key=lambda e: e.get('ts', 0))
+
+        # search other workers' live DBs
+        if not self._config.db_dir:
+            return []
+
+        json_path = f'$.{label_key}'
+        for target in sorted(glob.glob(os.path.join(self._config.db_dir, '*-live.db'))):
+            real = os.path.realpath(target)
+            if real == self._db_path:
+                continue
+            try:
+                async with aiosqlite.connect(f'file:{real}?mode=ro', uri=True) as db:
+                    worker_name = os.path.basename(real)
+                    async with db.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='worker_config'"
+                    ) as cur:
+                        if await cur.fetchone():
+                            async with db.execute(
+                                'SELECT worker_name, cluster_name FROM worker_config WHERE id = 1'
+                            ) as cfg_cur:
+                                cfg_row = await cfg_cur.fetchone()
+                                if cfg_row:
+                                    worker_name = cfg_row[0]
+                                    if self._cluster_name and cfg_row[1] != self._cluster_name:
+                                        continue
+
+                    async with db.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='events'"
+                    ) as cur:
+                        if not await cur.fetchone():
+                            continue
+
+                    async with db.execute(_LABEL_TRACE_QUERY, [json_path, label_value]) as cur:
+                        columns = [d[0] for d in cur.description]
+                        rows = await cur.fetchall()
+                        events = [dict(zip(columns, row, strict=False)) for row in rows]
+
+                    for ev in events:
+                        ev['worker_name'] = worker_name
+                    if events:
+                        return sorted(events, key=lambda e: e.get('ts', 0))
+            except Exception:
+                continue
+
+        return []
 
     async def get_trace(self, partition: int, msg_offset: int) -> list[dict]:
         """Get the full lifecycle of a message by partition and offset."""
