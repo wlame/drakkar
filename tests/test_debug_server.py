@@ -16,6 +16,7 @@ from drakkar.debug_server import (
     _format_ts,
     _format_ts_full,
     _format_ts_ms,
+    _format_uptime,
     _worker_group,
     create_debug_app,
 )
@@ -188,6 +189,41 @@ class TestFormatTs:
         result = _format_ts_full(1000.0)
         assert result != ''
         assert re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$', result)
+
+
+class TestFormatUptime:
+    def test_seconds(self):
+        assert _format_uptime(0) == '0s'
+        assert _format_uptime(45) == '45s'
+        assert _format_uptime(59) == '59s'
+
+    def test_minutes(self):
+        assert _format_uptime(60) == '1m 0s'
+        assert _format_uptime(90) == '1m 30s'
+        assert _format_uptime(3599) == '59m 59s'
+
+    def test_hours(self):
+        assert _format_uptime(3600) == '1h 0m'
+        assert _format_uptime(7200 + 1800) == '2h 30m'
+        assert _format_uptime(86399) == '23h 59m'
+
+    def test_days(self):
+        assert _format_uptime(86400) == '1d 0h'
+        assert _format_uptime(86400 * 3 + 3600 * 5) == '3d 5h'
+        assert _format_uptime(86400 * 29 + 3600 * 23) == '29d 23h'
+
+    def test_months(self):
+        assert _format_uptime(86400 * 30) == '1mo 0d'
+        assert _format_uptime(86400 * 75) == '2mo 15d'
+        assert _format_uptime(86400 * 364) == '12mo 4d'
+
+    def test_years(self):
+        assert _format_uptime(86400 * 365) == '1y 0mo'
+        assert _format_uptime(86400 * 365 * 2 + 86400 * 90) == '2y 3mo'
+
+    def test_fractional_seconds_truncated(self):
+        assert _format_uptime(45.7) == '45s'
+        assert _format_uptime(90.999) == '1m 30s'
 
 
 # ---------------------------------------------------------------------------

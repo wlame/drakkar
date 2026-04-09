@@ -856,6 +856,79 @@ async def test_max_retries_exceeded_logs_warning(failing_pool):
     assert any(c[1] == 1 for c in committed)
 
 
+# --- on_error SKIP with mixed success/failure window ---
+
+
+async def test_skip_in_mixed_window():
+    """In a window with multiple tasks, a SKIP'd failure doesn't block
+    successful tasks: collect() runs for successes, offsets commit for all."""
+    collected_ids: list[str] = []
+    committed: list[tuple[int, int]] = []
+    error_ids: list[str] = []
+
+    class MixedHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            tasks = []
+            for msg in messages:
+                if msg.offset == 2:
+                    # this one fails
+                    args = ['-c', 'import sys; sys.exit(1)']
+                else:
+                    args = ['-c', 'print("ok")']
+                tasks.append(
+                    ExecutorTask(
+                        task_id=f'mix-{msg.offset}',
+                        args=args,
+                        source_offsets=[msg.offset],
+                    )
+                )
+            return tasks
+
+        async def collect(self, result):
+            collected_ids.append(result.task.task_id)
+            return None
+
+        async def on_error(self, task, error):
+            error_ids.append(task.task_id)
+            return ErrorAction.SKIP
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=4,
+        task_timeout_seconds=10,
+    )
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=MixedHandler(),
+        executor_pool=pool,
+        window_size=10,
+        on_commit=on_commit,
+    )
+
+    for i in range(5):
+        proc.enqueue(make_msg(offset=i))
+    proc.start()
+    await wait_for(lambda: len(committed) > 0, timeout=10)
+    await proc.stop()
+
+    # collect() called for 4 successes, NOT for offset 2
+    assert 'mix-0' in collected_ids
+    assert 'mix-1' in collected_ids
+    assert 'mix-3' in collected_ids
+    assert 'mix-4' in collected_ids
+    assert 'mix-2' not in collected_ids
+
+    # on_error called for offset 2
+    assert 'mix-2' in error_ids
+
+    # all 5 offsets committed (including the failed one)
+    assert any(c[1] == 5 for c in committed)
+
+
 # --- Concurrent window processing ---
 
 
