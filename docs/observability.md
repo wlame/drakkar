@@ -380,11 +380,31 @@ Each database file can contain up to three tables, controlled by the `store_even
 
 #### `events` -- Processing Events
 
-Stores every processing event (consumed, arranged, task_started, task_completed, task_failed, collect_completed, produced, committed, assigned, revoked, sink_delivered, sink_error).
+Stores processing events across the full pipeline lifecycle.
 
 Key columns: `ts`, `dt`, `event`, `partition`, `offset`, `task_id`, `args`, `stdout`, `stderr`, `exit_code`, `duration`, `output_topic`, `metadata` (JSON), `pid`, `labels` (JSON).
 
-Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, and `event` for fast queries from the debug UI.
+Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, and `labels` (partial, where not null).
+
+**Event types:**
+
+| Event | When recorded | Key fields |
+|-------|--------------|------------|
+| `consumed` | Message polled from Kafka | `partition`, `offset` |
+| `arranged` | `arrange()` completes for a window | `partition`, `metadata` (message_count, task_count, offsets, message_labels) |
+| `task_started` | Subprocess launched (after semaphore acquired) | `task_id`, `partition`, `args`, `pid`, `labels`, `metadata` (source_offsets, slot) |
+| `task_completed` | Subprocess finished with exit 0 | `task_id`, `duration`, `exit_code`, `stdout`, `stderr`, `pid`, `labels` |
+| `task_failed` | Subprocess failed (non-zero exit, timeout, crash) | `task_id`, `duration`, `exit_code`, `pid`, `labels`, `metadata` (exception) |
+| `collect_completed` | `collect()` hook finishes | `task_id`, `partition`, `duration`, `metadata` (output_message_count) |
+| `produced` | Kafka payload delivered to output topic | `partition`, `offset`, `output_topic` |
+| `sink_delivered` | Sink delivery succeeds | `metadata` (sink_type, sink_name, payload_count, duration) |
+| `sink_error` | Sink delivery fails | `metadata` (sink_type, sink_name, error, attempt) |
+| `committed` | Kafka offset committed | `partition`, `offset` |
+| `assigned` | Partition assigned during rebalance | `partition` |
+| `revoked` | Partition revoked during rebalance | `partition` |
+| `periodic_run` | Periodic task execution completes | `task_id` (task name), `duration`, `exit_code` (0=ok, 1=error), `metadata` (status, error) |
+
+Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`, `stderr` are omitted for fast tasks below `output_min_duration_ms`. Events below `event_min_duration_ms` are not stored at all.
 
 #### `worker_config` -- Autodiscovery
 
@@ -417,6 +437,44 @@ The symlink is removed on graceful shutdown.
 **Rotation**: every `rotation_interval_minutes` (default: 60), the recorder opens a new timestamped DB file before closing the old one (no query gap). The worker config is re-written to the new file and the live symlink is updated.
 
 **Retention**: after rotation, files older than `retention_hours` (default: 24) are deleted. An additional cap limits the total number of files based on `retention_max_events / 10,000`.
+
+### Buffer Mechanics
+
+Events are not written to SQLite immediately. They accumulate in an
+in-memory ring buffer (`collections.deque` with `maxlen=max_buffer`,
+default 50,000). A background task flushes the buffer to disk every
+`flush_interval_seconds` (default: 5) as a batch INSERT. This design:
+
+- Avoids per-event disk I/O (thousands of events/sec would bottleneck SQLite)
+- Keeps the main event loop fast (recording an event is a deque append, ~1us)
+- Provides a short window of recent events even when `db_dir` is empty (in-memory only mode)
+
+If the buffer fills before the next flush (e.g., during a burst),
+oldest events are silently dropped (ring buffer behavior). Increase
+`max_buffer` if you see gaps in event history during high-throughput
+periods.
+
+On shutdown, the buffer is flushed one final time before closing the
+database.
+
+### Merging Databases
+
+The debug UI's database section (`/debug`) allows selecting multiple
+database files and merging them into a single file. This is useful for:
+
+- **Post-mortem analysis** -- combine files from multiple workers and
+  time periods into one queryable database
+- **Cross-worker correlation** -- merged files contain events from
+  all selected workers, with `worker_name` preserved in the
+  `worker_config` table
+- **Archival** -- download a merged file for offline analysis with
+  any SQLite tool
+
+The merge process copies all events from selected files into a new
+timestamped file (`merged-{timestamp}.db`), deduplicates by
+`(ts, event, partition, offset, task_id)`, and creates a combined
+`worker_config` table listing all source workers. The merged file
+appears in the database list and can be downloaded.
 
 ---
 
