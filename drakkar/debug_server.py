@@ -55,6 +55,32 @@ def _format_ts_full(ts: float | None) -> str:
     return datetime.fromtimestamp(ts, tz=UTC).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
 
+def _format_uptime(seconds: float) -> str:
+    """Format uptime as a human-readable string, scaling to the largest unit."""
+    s = int(seconds)
+    if s < 60:
+        return f'{s}s'
+    if s < 3600:
+        return f'{s // 60}m {s % 60}s'
+    if s < 86400:
+        h = s // 3600
+        m = (s % 3600) // 60
+        return f'{h}h {m}m'
+    if s < 86400 * 30:
+        d = s // 86400
+        h = (s % 86400) // 3600
+        return f'{d}d {h}h'
+    if s < 86400 * 365:
+        d = s // 86400
+        mo = d // 30
+        d_rem = d % 30
+        return f'{mo}mo {d_rem}d'
+    d = s // 86400
+    y = d // 365
+    d_rem = d % 365
+    return f'{y}y {d_rem // 30}mo'
+
+
 def _worker_group(name: str) -> str:
     """Derive a group key by stripping trailing numbers and separator.
 
@@ -78,6 +104,7 @@ def create_debug_app(
     templates.env.globals['format_ts'] = _format_ts  # ty: ignore[invalid-assignment]
     templates.env.globals['format_ts_ms'] = _format_ts_ms  # ty: ignore[invalid-assignment]
     templates.env.globals['format_ts_full'] = _format_ts_full  # ty: ignore[invalid-assignment]
+    templates.env.globals['format_uptime'] = _format_uptime  # ty: ignore[invalid-assignment]
 
     def _get_sink_ui_links() -> list[dict[str, str]]:
         """Return deduplicated sink UI links for the nav header."""
