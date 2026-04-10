@@ -168,6 +168,7 @@ class DrakkarApp:
             binary_path=self._config.executor.binary_path,
             max_executors=self._config.executor.max_executors,
             task_timeout_seconds=self._config.executor.task_timeout_seconds,
+            env=self._config.executor.env,
         )
 
         start_metrics_server(self._config.metrics)

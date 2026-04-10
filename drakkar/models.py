@@ -71,6 +71,14 @@ class ExecutorTask(BaseModel):
             'task detail page, and debug trace view.'
         ),
     )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            'Per-task environment variables passed to the subprocess. '
+            'Merged on top of executor.env from config — task values override config values '
+            'on key conflict. Both are merged on top of the parent process environment.'
+        ),
+    )
     binary_path: str | None = Field(
         default=None,
         description=(

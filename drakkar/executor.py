@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+import os
 import time
 from typing import TYPE_CHECKING
 
@@ -31,10 +32,17 @@ class ExecutorPool:
     ``binary_path`` on the task returned from ``arrange()``.
     """
 
-    def __init__(self, binary_path: str | None, max_executors: int, task_timeout_seconds: int) -> None:
+    def __init__(
+        self,
+        binary_path: str | None,
+        max_executors: int,
+        task_timeout_seconds: int,
+        env: dict[str, str] | None = None,
+    ) -> None:
         self._binary_path = binary_path
         self._max_executors = max_executors
         self._task_timeout = task_timeout_seconds
+        self._config_env = env or {}
         self._semaphore = asyncio.Semaphore(max_executors)
         self._active_count = 0
         self._waiting_count = 0
@@ -102,10 +110,24 @@ class ExecutorPool:
             )
         return binary
 
+    def _build_env(self, task: ExecutorTask) -> dict[str, str] | None:
+        """Build merged environment for subprocess: parent env + config env + task env.
+
+        Returns None (inherit parent env) when no custom env vars are configured.
+        Task env overrides config env on key conflict.
+        """
+        if not self._config_env and not task.env:
+            return None
+        merged = dict(os.environ)
+        merged.update(self._config_env)
+        merged.update(task.env)
+        return merged
+
     async def _run_subprocess(self, task: ExecutorTask) -> ExecutorResult:
         binary = self._resolve_binary(task)
         start = time.monotonic()
         proc = None
+        subprocess_env = self._build_env(task)
         try:
             # create_subprocess_exec passes args as list — no shell injection risk
             proc = await asyncio.create_subprocess_exec(
@@ -114,6 +136,7 @@ class ExecutorPool:
                 stdin=asyncio.subprocess.PIPE if task.stdin is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=subprocess_env,
             )
             stdin_bytes = task.stdin.encode() if task.stdin is not None else None
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
