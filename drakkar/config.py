@@ -172,6 +172,14 @@ class ExecutorConfig(BaseModel):
     """
 
     binary_path: str | None = Field(default=None, min_length=1)
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            'Environment variables passed to all executor subprocesses. '
+            'Merged with the parent process environment. Per-task env vars '
+            'from ExecutorTask.env override these on conflict.'
+        ),
+    )
     max_executors: int = Field(default=4, ge=1)
     task_timeout_seconds: int = Field(default=120, ge=1)
     window_size: int = Field(default=100, ge=1)

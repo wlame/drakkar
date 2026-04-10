@@ -15,6 +15,7 @@ Every subprocess execution starts with an `ExecutorTask` created in your [arrang
 | `source_offsets` | `list[int]` | (required) | Kafka offsets of the source messages that produced this task. Used for [offset watermark tracking](handler.md#offset-commit-logic) -- offsets are committed only after all sinks confirm delivery. |
 | `metadata` | `dict` | `{}` | Arbitrary key-value data carried through the pipeline. Accessible in [collect()](handler.md#collect) via `result.task.metadata`. |
 | `labels` | `dict[str, str]` | `{}` | User-defined key-value [labels](handler.md#task-labels) shown in the [debug UI](observability.md#debug-ui) (live timeline, task detail page, trace view). Useful for `request_id`, `user_id`, or other domain identifiers. |
+| `env` | `dict[str, str]` | `{}` | Per-task environment variables. Merged on top of `executor.env` from config (task overrides config on key conflict). See [Environment Variables](#environment-variables). |
 | `binary_path` | `str \| None` | `None` | Per-task binary override. Takes precedence over `executor.binary_path` from config. |
 | `stdin` | `str \| None` | `None` | Optional string piped to the process stdin after launch. When `None`, stdin is not connected. |
 
@@ -277,6 +278,91 @@ print(json.dumps(result))
 ```
 
 When `stdin` is `None` (the default), the process stdin is not connected at all.
+
+---
+
+## Environment Variables
+
+Custom environment variables can be passed to executor subprocesses at
+two levels: globally via config and per-task via `ExecutorTask.env`.
+
+### Merge order
+
+The subprocess environment is built by merging three layers, where
+later layers override earlier ones on key conflict:
+
+1. **Parent process env** -- the worker's own environment (inherited)
+2. **Config env** (`executor.env`) -- applied to all tasks
+3. **Task env** (`ExecutorTask.env`) -- applied to one task, overrides config
+
+When neither config nor task defines custom env vars, the subprocess
+inherits the parent environment directly (no copy overhead).
+
+### Config-level env
+
+Set `executor.env` in your YAML config to pass variables to every task:
+
+```yaml
+executor:
+  binary_path: "/usr/local/bin/my-tool"
+  env:
+    DATABASE_URL: "postgresql://localhost/mydb"
+    LOG_LEVEL: "warn"
+    CORPUS_PATH: "/data/corpus"
+```
+
+These are useful for connection strings, feature flags, or paths that
+are the same for every task but shouldn't be hardcoded in the binary.
+
+Environment variable override: `DRAKKAR_EXECUTOR__ENV='{"KEY": "value"}'`
+
+### Per-task env
+
+Set `env` on `ExecutorTask` in `arrange()` for task-specific values:
+
+```python
+async def arrange(self, messages, pending):
+    tasks = []
+    for msg in messages:
+        tasks.append(ExecutorTask(
+            task_id=make_task_id('proc'),
+            args=['--process'],
+            source_offsets=[msg.offset],
+            env={
+                'REQUEST_ID': msg.payload.request_id,
+                'PRIORITY': str(msg.payload.priority),
+            },
+        ))
+    return tasks
+```
+
+Per-task env is useful when the binary reads configuration from
+environment variables and different messages need different settings.
+
+### Override example
+
+Config sets a default, task overrides it for specific messages:
+
+```yaml
+# drakkar.yaml
+executor:
+  env:
+    MODE: "standard"
+    TIMEOUT: "30"
+```
+
+```python
+# handler.py — arrange()
+ExecutorTask(
+    task_id=make_task_id('proc'),
+    args=['--run'],
+    source_offsets=[msg.offset],
+    env={'MODE': 'turbo'},  # overrides config's "standard"
+    # TIMEOUT: "30" is still inherited from config
+)
+```
+
+The subprocess sees `MODE=turbo` and `TIMEOUT=30`.
 
 ---
 
