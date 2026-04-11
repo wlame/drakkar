@@ -509,6 +509,7 @@ class EventRecorder:
                 {
                     'source_offsets': task.source_offsets,
                     'slot': slot,
+                    **(({'env': task.env}) if task.env else {}),
                 }
             ),
             'labels': json.dumps(task.labels) if task.labels else None,

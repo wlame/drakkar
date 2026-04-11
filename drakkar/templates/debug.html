@@ -355,7 +355,16 @@ function toggleSection(name) {
                     if (ev.exit_code !== null && ev.exit_code !== undefined) details.push('exit: ' + ev.exit_code);
                     if (ev.pid) details.push('pid: ' + ev.pid);
                     if (ev.stdout_size) details.push('stdout: ' + ev.stdout_size + 'b');
-                    if (ev.metadata) details.push(ev.metadata);
+                    if (ev.metadata) {
+                        try {
+                            var metaObj = typeof ev.metadata === 'string' ? JSON.parse(ev.metadata) : ev.metadata;
+                            if (metaObj.env) {
+                                var envParts = Object.keys(metaObj.env).map(function(k) { return k + '=' + metaObj.env[k]; });
+                                if (envParts.length) details.push('env: ' + envParts.join(', '));
+                            }
+                            details.push(typeof ev.metadata === 'string' ? ev.metadata : JSON.stringify(ev.metadata));
+                        } catch(x) { details.push(ev.metadata); }
+                    }
                     if (ev.labels) {
                         try {
                             var lblObj = typeof ev.labels === 'string' ? JSON.parse(ev.labels) : ev.labels;
@@ -465,7 +474,16 @@ function toggleSection(name) {
             if (ev.exit_code !== null && ev.exit_code !== undefined) details.push('exit: ' + ev.exit_code);
             if (ev.pid) details.push('pid: ' + ev.pid);
             if (ev.stdout_size) details.push('stdout: ' + ev.stdout_size + 'b');
-            if (ev.metadata) details.push(ev.metadata);
+            if (ev.metadata) {
+                try {
+                    var metaObj2 = typeof ev.metadata === 'string' ? JSON.parse(ev.metadata) : ev.metadata;
+                    if (metaObj2.env) {
+                        var envParts2 = Object.keys(metaObj2.env).map(function(k) { return k + '=' + metaObj2.env[k]; });
+                        if (envParts2.length) details.push('env: ' + envParts2.join(', '));
+                    }
+                    details.push(typeof ev.metadata === 'string' ? ev.metadata : JSON.stringify(ev.metadata));
+                } catch(x) { details.push(ev.metadata); }
+            }
             if (ev.labels) {
                 try {
                     var lblObj = typeof ev.labels === 'string' ? JSON.parse(ev.labels) : ev.labels;

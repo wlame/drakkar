@@ -470,10 +470,12 @@ def create_debug_app(
         import json
 
         source_offsets = None
+        task_env = None
         if started and started.get('metadata'):
             try:
                 meta = json.loads(started['metadata'])
                 source_offsets = meta.get('source_offsets')
+                task_env = meta.get('env')
             except (json.JSONDecodeError, TypeError):
                 pass
         args = None
@@ -503,6 +505,7 @@ def create_debug_app(
                 'source_offsets': source_offsets,
                 'args': args,
                 'labels': labels,
+                'task_env': task_env,
                 'partition': started['partition'] if started else None,
                 'pid': pid,
                 'binary_path': drakkar_app._config.executor.binary_path,
@@ -870,6 +873,7 @@ def create_debug_app(
                         old['status'] = 'failed'
 
                 slot = None
+                meta = None
                 if e.get('metadata'):
                     try:
                         meta = json.loads(e['metadata'])
@@ -882,6 +886,7 @@ def create_debug_app(
                         labels = json.loads(e['labels'])
                     except (json.JSONDecodeError, TypeError):
                         pass
+                task_env = meta.get('env') if meta else None
                 tasks[tid] = {
                     'task_id': tid,
                     'partition': e.get('partition'),
@@ -893,6 +898,7 @@ def create_debug_app(
                     'pid': e.get('pid'),
                     'slot': slot,
                     'labels': labels,
+                    'env': task_env,
                 }
 
             elif e['event'] in ('task_completed', 'task_failed'):

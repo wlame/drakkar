@@ -79,6 +79,18 @@
 </div>
 {% endif %}
 
+<!-- Environment variables -->
+{% if task_env %}
+<div class="mb-6">
+    <h2 class="text-lg font-semibold mb-2">Environment Variables</h2>
+    <div class="flex flex-wrap gap-2">
+        {% for key, val in task_env.items() %}
+        <span class="bg-amber-50 border border-amber-200 text-amber-800 px-3 py-1 rounded text-sm font-mono">{{ key }}={{ val }}</span>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
 <!-- Source offsets -->
 {% if source_offsets %}
 <div class="mb-6">

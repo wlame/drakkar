@@ -225,6 +225,19 @@ function showTaskDetail(t) {
             el.appendChild(tag);
         });
     }
+    if (t.env && Object.keys(t.env).length) {
+        el.appendChild(document.createElement('br'));
+        var envLbl = document.createElement('span');
+        envLbl.style.cssText = 'color:#9ca3af;margin-right:4px;font-size:11px;';
+        envLbl.textContent = 'env:';
+        el.appendChild(envLbl);
+        Object.keys(t.env).forEach(function(k) {
+            var tag = document.createElement('span');
+            tag.style.cssText = 'display:inline-block;background:#fffbeb;border:1px solid #fde68a;color:#92400e;padding:0 6px;border-radius:3px;margin-right:6px;font-size:11px;';
+            tag.textContent = k + '=' + t.env[k];
+            el.appendChild(tag);
+        });
+    }
 }
 function clearTaskDetail() {
     hoveredTask = null;
@@ -666,12 +679,15 @@ function connectWS() {
                 }
                 var wsLabels = null;
                 if (e.labels) { try { wsLabels = typeof e.labels === 'string' ? JSON.parse(e.labels) : e.labels; } catch(x) {} }
+                var wsEnv = null;
+                if (e.metadata) { try { var wsMeta = typeof e.metadata === 'string' ? JSON.parse(e.metadata) : e.metadata; wsEnv = wsMeta.env || null; } catch(x) {} }
                 allTasks[e.task_id] = {
                     task_id: e.task_id, partition: e.partition, pid: e.pid,
                     start_ts: e.ts, end_ts: null, status: 'running', args: e.args, duration: null,
                     slot: e.slot != null ? e.slot : null,
                     stdin_lines: e.stdin_lines || 0, stdin_size: e.stdin_size || 0,
                     labels: wsLabels,
+                    env: wsEnv,
                 };
                 ensureBar(allTasks[e.task_id]);
             } else if (e.event === 'task_completed' || e.event === 'task_failed') {
