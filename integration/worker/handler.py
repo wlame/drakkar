@@ -121,6 +121,9 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
                         'request_id': req.request_id,
                         'pattern': req.pattern,
                     },
+                    env={
+                        'REQUEST_ID': req.request_id,  # per-task env: overrides config env
+                    },
                     source_offsets=[msg.offset],
                 )
             )

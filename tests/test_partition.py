@@ -870,15 +870,10 @@ async def test_skip_in_mixed_window():
         async def arrange(self, messages, pending):
             tasks = []
             for msg in messages:
-                if msg.offset == 2:
-                    # this one fails
-                    args = ['-c', 'import sys; sys.exit(1)']
-                else:
-                    args = ['-c', 'print("ok")']
                 tasks.append(
                     ExecutorTask(
                         task_id=f'mix-{msg.offset}',
-                        args=args,
+                        args=['-c', 'import sys; sys.exit(1)'] if msg.offset == 2 else ['-c', 'print("ok")'],
                         source_offsets=[msg.offset],
                     )
                 )

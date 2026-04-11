@@ -15,6 +15,9 @@ kafka:
 
 executor:
   binary_path: "/usr/local/bin/run-rg"
+  env:
+    RG_COLORS: "never"              # config-level env var: passed to all ripgrep tasks
+    SEARCH_CORPUS: "/tmp/search-corpus"
   max_executors: 4
   task_timeout_seconds: 120
   window_size: 10

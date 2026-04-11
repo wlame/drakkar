@@ -298,3 +298,110 @@ async def test_execute_records_task_started_with_recorder():
     assert call_args[0][0] is task
     assert call_args[0][1] == 3
     assert call_args[1]['pool_active'] >= 1
+
+
+# --- Environment variable tests ---
+
+
+async def test_no_env_inherits_parent():
+    """When no env is configured, subprocess inherits parent environment."""
+    pool = ExecutorPool(binary_path=sys.executable, max_executors=2, task_timeout_seconds=10)
+    task = make_task(args=['-c', 'import os; print(os.environ.get("PATH", ""))'])
+    result = await pool.execute(task)
+    assert result.exit_code == 0
+    # PATH should be inherited from parent
+    assert result.stdout.strip() != ''
+
+
+async def test_config_env_passed_to_subprocess():
+    """Env vars from executor config are available in the subprocess."""
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+        env={'DRAKKAR_TEST_CONFIG_VAR': 'from_config'},
+    )
+    task = make_task(args=['-c', 'import os; print(os.environ.get("DRAKKAR_TEST_CONFIG_VAR", ""))'])
+    result = await pool.execute(task)
+    assert result.exit_code == 0
+    assert result.stdout.strip() == 'from_config'
+
+
+async def test_task_env_passed_to_subprocess():
+    """Env vars from ExecutorTask.env are available in the subprocess."""
+    pool = ExecutorPool(binary_path=sys.executable, max_executors=2, task_timeout_seconds=10)
+    task = ExecutorTask(
+        task_id='t-env',
+        args=['-c', 'import os; print(os.environ.get("DRAKKAR_TEST_TASK_VAR", ""))'],
+        source_offsets=[0],
+        env={'DRAKKAR_TEST_TASK_VAR': 'from_task'},
+    )
+    result = await pool.execute(task)
+    assert result.exit_code == 0
+    assert result.stdout.strip() == 'from_task'
+
+
+async def test_task_env_overrides_config_env():
+    """Task env overrides config env on key conflict."""
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+        env={'SHARED_VAR': 'from_config', 'CONFIG_ONLY': 'yes'},
+    )
+    task = ExecutorTask(
+        task_id='t-override',
+        args=['-c', 'import os; print(os.environ["SHARED_VAR"], os.environ["CONFIG_ONLY"])'],
+        source_offsets=[0],
+        env={'SHARED_VAR': 'from_task'},
+    )
+    result = await pool.execute(task)
+    assert result.exit_code == 0
+    parts = result.stdout.strip().split()
+    assert parts[0] == 'from_task'  # task overrides config
+    assert parts[1] == 'yes'       # config-only var still present
+
+
+async def test_env_includes_parent_environment():
+    """Merged env includes parent process env vars (like PATH)."""
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+        env={'DRAKKAR_TEST_EXTRA': 'extra'},
+    )
+    task = make_task(args=['-c', 'import os; print(os.environ.get("PATH", "missing"))'])
+    result = await pool.execute(task)
+    assert result.exit_code == 0
+    assert result.stdout.strip() != 'missing'
+
+
+async def test_build_env_returns_none_when_no_custom_env():
+    """_build_env returns None when no config env and no task env."""
+    pool = ExecutorPool(binary_path='/bin/echo', max_executors=1, task_timeout_seconds=10)
+    task = make_task()
+    assert pool._build_env(task) is None
+
+
+async def test_build_env_merges_all_three_layers():
+    """_build_env merges parent + config + task with correct priority."""
+    import os
+
+    pool = ExecutorPool(
+        binary_path='/bin/echo',
+        max_executors=1,
+        task_timeout_seconds=10,
+        env={'A': 'config', 'B': 'config'},
+    )
+    task = ExecutorTask(
+        task_id='t-merge',
+        args=[],
+        source_offsets=[0],
+        env={'B': 'task', 'C': 'task'},
+    )
+    result = pool._build_env(task)
+    assert result is not None
+    assert result['A'] == 'config'         # from config
+    assert result['B'] == 'task'           # task overrides config
+    assert result['C'] == 'task'           # from task only
+    assert result.get('PATH') == os.environ.get('PATH')  # from parent
