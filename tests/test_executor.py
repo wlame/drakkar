@@ -359,7 +359,7 @@ async def test_task_env_overrides_config_env():
     assert result.exit_code == 0
     parts = result.stdout.strip().split()
     assert parts[0] == 'from_task'  # task overrides config
-    assert parts[1] == 'yes'       # config-only var still present
+    assert parts[1] == 'yes'  # config-only var still present
 
 
 async def test_env_includes_parent_environment():
@@ -401,7 +401,7 @@ async def test_build_env_merges_all_three_layers():
     )
     result = pool._build_env(task)
     assert result is not None
-    assert result['A'] == 'config'         # from config
-    assert result['B'] == 'task'           # task overrides config
-    assert result['C'] == 'task'           # from task only
+    assert result['A'] == 'config'  # from config
+    assert result['B'] == 'task'  # task overrides config
+    assert result['C'] == 'task'  # from task only
     assert result.get('PATH') == os.environ.get('PATH')  # from parent
