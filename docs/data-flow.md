@@ -184,6 +184,9 @@ When partitions are revoked (rebalance, scaling event):
 
 Each `PartitionProcessor` runs its own async loop independently. It does not wait for one window to fully complete before starting the next -- multiple windows can be in-flight concurrently.
 
+!!! note "Why one processor per partition?"
+    Kafka tracks and commits offsets per partition, so each `PartitionProcessor` owns an offset watermark and a FIFO queue for its partition alone. Running one `arrange()` coroutine per partition keeps offset bookkeeping and in-partition ordering as local state, and makes rebalances a matter of starting or stopping one task per affected partition -- there is no cross-partition state to untangle when assignments change.
+
 ### 3.1 Collecting a Window
 
 The processor waits for messages from its queue:
