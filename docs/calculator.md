@@ -115,8 +115,8 @@ function drakkarCalc() {
   else if (p80s < 10) { highMult = 32; lowMult = 4; }
   else { highMult = 8; lowMult = 2; }
 
-  // drain_timeout: 2x p80 (floor 5s, cap 120s)
-  var drainTimeout = Math.max(5, Math.min(120, Math.ceil(p80s * 2)));
+  // drain_timeout: 2x p80 (floor 30s to match framework default, cap 120s)
+  var drainTimeout = Math.max(30, Math.min(120, Math.ceil(p80s * 2)));
 
   var maxRetries = p80s < 1 ? 2 : 3;
 

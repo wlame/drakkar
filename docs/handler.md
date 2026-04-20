@@ -427,9 +427,14 @@ Commits are attempted at two points:
 1. **After each window completes** — when the last task in a window
    finishes and all sink deliveries succeed.
 2. **On partition revocation** — pending offsets are drained (up to
-   `executor.drain_timeout_seconds`), then the highest committable
-   offset is committed before the partition is released.
-3. **On shutdown** — same drain + commit as revocation.
+   `executor.drain_timeout_seconds`). **Only if drain completes
+   cleanly** is the highest committable offset committed before the
+   partition is released. If drain times out, the final commit is
+   skipped — in-flight tasks may still be running, and committing past
+   them would silently skip their messages on reassign. Those messages
+   will replay instead (at-least-once).
+3. **On shutdown** — same drain-then-commit-if-clean behavior as
+   revocation.
 
 Commits are per-partition and asynchronous. They do not block the
 processing loop.

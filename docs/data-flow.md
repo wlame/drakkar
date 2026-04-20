@@ -172,8 +172,8 @@ When partitions are revoked (rebalance, scaling event):
    - Removes the processor from `_processors`.
    - Initiates an async stop sequence:
      1. Sets `processor._running = False`.
-     2. Waits up to `executor.drain_timeout_seconds` (default: `5`, min: `1`) for in-flight work to complete.
-     3. Attempts a final offset commit for any completed work.
+     2. Waits up to `executor.drain_timeout_seconds` (default: `30`, min: `1`) for in-flight work to complete.
+     3. **Only if drain completed cleanly**, commits the offset watermark. If drain timed out, in-flight tasks may still be running and committing their offsets would silently skip them on reassign — safer to let at-least-once replay recover them.
      4. Calls `processor.stop()`.
 3. Updates the `assigned_partitions` gauge.
 4. Calls the handler's `on_revoke(partition_ids)` hook asynchronously.
@@ -577,18 +577,19 @@ When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
 - `processor._running = False` for all processors. This causes each processor's main loop to exit after its current window collection.
 
 ### Step 3: Drain All Processors
-- Waits up to `executor.drain_timeout_seconds` (default: `5`) for all processors with:
+- Waits up to `executor.drain_timeout_seconds` (default: `30`) for all processors with:
   - Non-empty queues, OR
   - Pending offset commits, OR
   - In-flight tasks
 
   to finish their work.
 - Each processor drains by: processing remaining queued messages into windows, waiting for in-flight tasks to complete, then doing a final commit.
-- If the timeout expires, logs a warning but continues shutdown.
+- If the timeout expires, logs a warning but continues shutdown. The flag that tracks a clean drain is used by the next step to decide whether committing final offsets is safe.
 
 ### Step 4: Final Offset Commits
-- For each processor, checks `committable()` and commits any remaining offsets.
-- If a commit fails, logs a warning. These offsets will be re-processed on next startup (at-least-once semantics).
+- **Only if Step 3 drained cleanly**, iterates processors and commits any remaining offsets via `committable()`.
+- If drain timed out, final commits are skipped entirely. Tasks may still be running, so committing their watermark would silently skip them on next startup — preferring at-least-once duplication over silent loss.
+- If a commit call itself fails, logs a warning. Those offsets will be re-processed on next startup (at-least-once semantics).
 
 ### Step 5: Stop All Processors
 - Calls `processor.stop()` on each, which:
@@ -596,13 +597,17 @@ When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
   - If it doesn't exit in 10 seconds, force-cancels the task.
 - Clears the processors dict.
 
-### Step 6: Stop the Flight Recorder
+### Step 6: Await Rebalance Background Tasks
+- Any revoke-triggered `_stop_processor`, `on_assign`/`on_revoke` handler hook invocations, and backpressure `pause` calls scheduled as `asyncio.ensure_future` are awaited here (bounded by `drain_timeout_seconds`).
+- This runs **before** the consumer is closed so those tasks can still use `self._consumer` safely. Skipping this step caused use-after-close errors and missed final commits under revoke-then-shutdown sequences.
+
+### Step 7: Stop the Flight Recorder
 - If debug is enabled: flushes any buffered events to SQLite, cancels background tasks (flush, retention, state sync), removes the `-live.db` symlink.
 
-### Step 7: Stop the Debug Server
+### Step 8: Stop the Debug Server
 - If debug is enabled: stops the FastAPI server.
 
-### Step 8: Close All Sinks and DLQ
+### Step 9: Close All Sinks and DLQ
 - `sink_manager.close_all()`: calls `close()` on each sink. Exceptions are caught and logged as warnings (never raised during shutdown).
   - KafkaSink: closes the Kafka producer, sets to None.
   - PostgresSink: closes the asyncpg pool, sets to None.
@@ -612,7 +617,7 @@ When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
   - FileSink: no-op (no persistent connection).
 - DLQ sink closed separately (same pattern).
 
-### Step 9: Close the Kafka Consumer
+### Step 10: Close the Kafka Consumer
 - Closes the confluent_kafka consumer, which triggers a final leave-group request to the Kafka broker.
 
 ---
@@ -662,7 +667,7 @@ When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
 | `task_timeout_seconds` | int | `120` | 1 | Per-subprocess wall-clock timeout |
 | `window_size` | int | `100` | 1 | Max messages per arrange() window |
 | `max_retries` | int | `3` | 0 | Max retries per failed task (0 = no retries) |
-| `drain_timeout_seconds` | int | `5` | 1 | Max wait for in-flight tasks during shutdown |
+| `drain_timeout_seconds` | int | `30` | 1 | Max wait for in-flight tasks during shutdown or partition revocation. On timeout, final commits are skipped (at-least-once replay). |
 | `backpressure_high_multiplier` | int | `32` | 1 | Pause threshold = max_executors x this |
 | `backpressure_low_multiplier` | int | `4` | 1 | Resume threshold = max(1, max_executors x this) |
 

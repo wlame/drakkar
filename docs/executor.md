@@ -291,12 +291,58 @@ two levels: globally via config and per-task via `ExecutorTask.env`.
 The subprocess environment is built by merging three layers, where
 later layers override earlier ones on key conflict:
 
-1. **Parent process env** -- the worker's own environment (inherited)
+1. **Parent process env** -- the worker's own environment, filtered
+   through `executor.env_inherit_deny` (see below)
 2. **Config env** (`executor.env`) -- applied to all tasks
 3. **Task env** (`ExecutorTask.env`) -- applied to one task, overrides config
 
-When neither config nor task defines custom env vars, the subprocess
-inherits the parent environment directly (no copy overhead).
+When neither config nor task defines custom env vars and no deny patterns
+are configured, the subprocess inherits the parent environment directly
+(no copy overhead).
+
+### Parent-env filtering (secrets guard)
+
+By default, the parent environment is **not** passed to subprocesses
+verbatim. A deny-list of `fnmatch` patterns (`executor.env_inherit_deny`)
+is applied case-insensitively to env var names, and matching vars are
+stripped before the subprocess starts. The default patterns are:
+
+```
+DRAKKAR_*        # framework internals (KAFKA__BROKERS, SINKS__*__DSN, ...)
+*PASSWORD*
+*SECRET*
+*TOKEN*
+*_KEY
+*_DSN
+*CREDENTIAL*
+```
+
+This keeps operator-configured secrets — most commonly the `DRAKKAR_*`
+env overrides like `DRAKKAR_SINKS__POSTGRES__MAIN__DSN` — from reaching
+the executor binary where they could be read, logged, or exfiltrated.
+
+Two knobs control the behavior:
+
+```yaml
+executor:
+  env_inherit_parent: true         # false = fully isolated from parent env
+  env_inherit_deny:                # override the default patterns
+    - DRAKKAR_*
+    - '*PASSWORD*'
+    - '*SECRET*'
+    - '*TOKEN*'
+    - '*_KEY'
+    - '*_DSN'
+    - '*CREDENTIAL*'
+```
+
+Set `env_inherit_deny: []` to trust the full parent environment (e.g.,
+if you already gate the process environment externally). Set
+`env_inherit_parent: false` to run subprocesses with **only**
+`executor.env` + `ExecutorTask.env` — nothing from the parent at all.
+The `PATH` and other standard vars are still subject to the deny list;
+if you rely on them, make sure your patterns don't match them (they
+don't with the defaults).
 
 ### Config-level env
 
@@ -377,7 +423,7 @@ executor:
   task_timeout_seconds: 120                # per-task wall-clock timeout
   window_size: 100                         # max messages per arrange() call
   max_retries: 3                           # retry limit per failed task
-  drain_timeout_seconds: 5                 # max wait for in-flight tasks on shutdown
+  drain_timeout_seconds: 30                # max wait for in-flight tasks on shutdown
   backpressure_high_multiplier: 32         # pause consumer at max_executors * this
   backpressure_low_multiplier: 4           # resume consumer at max_executors * this
 ```
@@ -389,7 +435,7 @@ executor:
 | `task_timeout_seconds` | `int` | `120` | 1 | Per-subprocess wall-clock timeout in seconds. |
 | `window_size` | `int` | `100` | 1 | Max messages per `arrange()` window. |
 | `max_retries` | `int` | `3` | 0 | Max retries per failed task. 0 disables retries. |
-| `drain_timeout_seconds` | `int` | `5` | 1 | Max wait for in-flight tasks during graceful shutdown. |
+| `drain_timeout_seconds` | `int` | `30` | 1 | Max wait for in-flight tasks during graceful shutdown. On timeout, offsets of still-in-flight tasks are **not** committed (they replay on restart). |
 | `backpressure_high_multiplier` | `int` | `32` | 1 | Pause threshold = `max_executors` x this. |
 | `backpressure_low_multiplier` | `int` | `4` | 1 | Resume threshold = max(1, `max_executors` x this). |
 

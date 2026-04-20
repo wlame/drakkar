@@ -119,12 +119,14 @@ Controls the subprocess executor pool that runs user-defined binaries.
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `binary_path` | `str \| None` | `None` | min length 1 if set | Default binary path for all tasks. If `None`, each [ExecutorTask](executor.md#executortask) returned by [arrange()](handler.md#arrange-required) must provide its own `binary_path`, otherwise the task fails with a clear error. See [Binary Path Resolution](executor.md#binary-path-resolution). |
-| `env` | `dict[str, str]` | `{}` | | Environment variables passed to all executor subprocesses. Merged on top of the parent process env. Per-task `ExecutorTask.env` overrides these on conflict. See [Environment Variables](executor.md#environment-variables). |
+| `env` | `dict[str, str]` | `{}` | | Environment variables passed to all executor subprocesses. Merged on top of the (filtered) parent process env. Per-task `ExecutorTask.env` overrides these on conflict. See [Environment Variables](executor.md#environment-variables). |
+| `env_inherit_parent` | `bool` | `true` | | When `true`, the parent process env is passed to subprocesses (with `env_inherit_deny` patterns applied). Set `false` to run subprocesses with only `executor.env` + `ExecutorTask.env` — fully isolated from the parent env. |
+| `env_inherit_deny` | `list[str]` | see below | | Case-insensitive `fnmatch` patterns matched against parent env var names. Matching vars are **not** inherited by subprocesses even when `env_inherit_parent` is `true`. Default excludes `DRAKKAR_*` internals and common secret names so operator-configured secrets never leak to executor binaries. Set to `[]` to trust the full parent env. Default patterns: `DRAKKAR_*`, `*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*_KEY`, `*_DSN`, `*CREDENTIAL*`. |
 | `max_executors` | `int` | `4` | >= 1 | Maximum number of concurrent subprocesses. Controls the `asyncio.Semaphore` size -- tasks beyond this limit wait in a queue. See [Concurrency and Backpressure](executor.md#concurrency-and-backpressure). |
 | `task_timeout_seconds` | `int` | `120` | >= 1 | Wall-clock timeout (seconds) per subprocess. If a process exceeds this, it is killed and treated as a failure. |
 | `window_size` | `int` | `100` | >= 1 | Maximum number of messages collected per [arrange()](handler.md#arrange-required) [window](executor.md#windowing). Larger windows allow more batching in `arrange()`; smaller windows reduce latency. |
 | `max_retries` | `int` | `3` | >= 0 | Maximum number of retry attempts per failed task (0 = no retries). A task can run up to `max_retries + 1` times total. |
-| `drain_timeout_seconds` | `int` | `5` | >= 1 | Maximum time (seconds) to wait for in-flight tasks during shutdown or partition revocation. |
+| `drain_timeout_seconds` | `int` | `30` | >= 1 | Maximum time (seconds) to wait for in-flight tasks during shutdown or partition revocation. When drain times out, offsets for still-in-flight tasks are **not** committed — those messages will replay on restart (at-least-once). Tune together with `task_timeout_seconds`. |
 | `backpressure_high_multiplier` | `int` | `32` | >= 1 | Multiplier for the pause threshold. When total queued messages reach `max_executors * backpressure_high_multiplier`, Kafka consumption is paused. |
 | `backpressure_low_multiplier` | `int` | `4` | >= 1 | Multiplier for the resume threshold. When total queued messages drop to `max(1, max_executors * backpressure_low_multiplier)`, Kafka consumption resumes. |
 
@@ -199,12 +201,21 @@ Sends JSON payloads to an HTTP endpoint.
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `url` | `str` | *(required)* | | Target URL for HTTP requests. |
+| `url` | `str` | *(required)* | `http://` or `https://` scheme; non-empty host; must **not** be a cloud metadata endpoint | Target URL for HTTP requests. Validated at config load time. |
 | `method` | `str` | `'POST'` | | HTTP method to use. |
 | `timeout_seconds` | `int` | `30` | >= 1 | Request timeout in seconds. |
 | `headers` | `dict[str, str]` | `{}` | | Additional HTTP headers sent with each request. |
 | `max_retries` | `int` | `3` | >= 0 | Maximum retry attempts for failed HTTP requests. |
 | `ui_url` | `str` | `''` | | URL to a related web UI. |
+
+!!! warning "Cloud metadata endpoints are rejected"
+    To prevent accidental IAM-credential leaks via SSRF-like misconfiguration,
+    the following hosts cannot be used as an HTTP sink target:
+    `169.254.169.254` (AWS / Azure / GCP / Alibaba / OpenStack IMDS),
+    `metadata.google.internal`, `metadata.packet.net`, `100.100.100.200`
+    (Alibaba), `192.0.0.192` (Oracle). Private, loopback, and internal
+    hostnames are **not** blocked — internal webhook services remain
+    legitimate targets.
 
 ### Redis Sink (`sinks.redis.<name>`)
 

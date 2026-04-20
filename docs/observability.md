@@ -412,6 +412,24 @@ Single-row table written at startup (and after each rotation). Contains the full
 
 This table is what enables the worker autodiscovery feature -- other workers scan for it in shared `db_dir`.
 
+!!! warning "Secrets are redacted before they reach disk"
+    The recorder SQLite file is downloadable via the debug UI. To avoid
+    publishing credentials through that path, two redactions are applied
+    before `worker_config` is written:
+
+    - **`kafka_brokers`** — embedded credentials are stripped from SASL
+      URIs. `SASL_SSL://alice:s3cret@host:9094` becomes
+      `SASL_SSL://***:***@host:9094`. Host and port remain visible.
+    - **`env_vars_json`** — values for env var names matching secret
+      patterns (`*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*_KEY`, `*API_KEY*`,
+      `*CREDENTIAL*`, `*_DSN`) are replaced with `***`. For other names,
+      any URL-shaped value has its embedded `user:pass@` credentials
+      stripped.
+
+    This protects operators who add secret-named vars to `expose_env_vars`
+    without thinking, and DSNs passed through otherwise-innocuous var
+    names (`UPSTREAM_URL`, `CACHE_URL`, etc.).
+
 #### `worker_state` -- Periodic Snapshots
 
 Appended every `state_sync_interval_seconds` (default: 10). Captures a point-in-time snapshot: `uptime_seconds`, `assigned_partitions`, `partition_count`, `pool_active`, `pool_max`, `total_queued`, cumulative counters (`consumed_count`, `completed_count`, `failed_count`, `produced_count`, `committed_count`), and `paused` flag.
