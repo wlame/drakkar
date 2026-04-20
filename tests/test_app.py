@@ -657,6 +657,114 @@ async def test_shutdown_final_commit_failure_is_logged(test_config):
     assert len(app.processors) == 0
 
 
+# --- Bug #3: shutdown must await background tasks before closing consumer ---
+
+
+async def test_shutdown_awaits_background_tasks_before_closing_consumer(test_config):
+    """_stop_processor scheduled by _on_revoke runs in the background and
+    uses self._consumer. Shutdown must wait for those tasks to finish
+    before closing the consumer, or commits race with close().
+    """
+    from drakkar.executor import ExecutorPool
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
+
+    order: list[str] = []
+    mock_consumer = AsyncMock()
+
+    async def slow_commit(*args, **kwargs):
+        # simulate real commit work taking time
+        await asyncio.sleep(0.2)
+        order.append('commit')
+
+    async def record_close():
+        order.append('close')
+
+    mock_consumer.commit = slow_commit
+    mock_consumer.close = record_close
+    app._consumer = mock_consumer
+
+    # Simulate a background task like _stop_processor would be:
+    # it awaits commit and must complete before consumer.close().
+    async def fake_background_commit():
+        await mock_consumer.commit({0: 5})
+
+    app._background_tasks.add(asyncio.create_task(fake_background_commit()))
+
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+
+    await app._shutdown()
+
+    # commit MUST appear before close — proving background task completed first
+    assert order == ['commit', 'close'], f'ordering violated: {order}'
+
+
+# --- H2: commit on drain timeout must be skipped to avoid data loss ---
+
+
+async def test_stop_processor_skips_commit_on_drain_timeout(test_config):
+    """When _stop_processor's drain times out, it must NOT commit offsets.
+
+    Tasks may still be in flight; committing their watermark would tell
+    Kafka they are done and on partition reassign the replay would skip
+    them, silently losing data.
+    """
+    from drakkar.executor import ExecutorPool
+    from drakkar.partition import PartitionProcessor
+
+    # tiny drain timeout to force the TimeoutError path
+    test_config.executor.drain_timeout_seconds = 0.05
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+
+    # Build a processor with a stuck drain: non-empty queue, _running stays False
+    # but the offset tracker holds a pending offset so drain() never exits.
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=SimpleHandler(),
+        executor_pool=app._executor_pool,
+        window_size=5,
+    )
+    # register an offset and never complete it — drain() will spin until timeout
+    proc._offset_tracker.register(42)
+
+    await app._stop_processor(proc)
+
+    # After a drain timeout, commit MUST NOT have been called for this partition.
+    # (Consumer may have been called for other reasons earlier — but not commit.)
+    assert app._consumer.commit.call_count == 0, (
+        f'commit should have been skipped after drain timeout, got: {app._consumer.commit.call_args_list}'
+    )
+
+
+async def test_shutdown_skips_commit_on_drain_timeout(test_config):
+    """Same invariant as _stop_processor but for the main _shutdown path."""
+    from drakkar.executor import ExecutorPool
+
+    test_config.executor.drain_timeout_seconds = 0.05
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+
+    app._on_assign([0])
+    # register an offset without completing — drain will hang until timeout
+    app.processors[0]._offset_tracker.register(99)
+
+    await app._shutdown()
+
+    # Commit must not have been called for the hung partition.
+    assert app._consumer.commit.call_count == 0, (
+        f'shutdown committed past in-flight work on timeout: {app._consumer.commit.call_args_list}'
+    )
+
+
 # --- Shutdown: recorder and debug server cleanup ---
 
 

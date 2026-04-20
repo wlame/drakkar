@@ -424,20 +424,40 @@ class DrakkarApp:
             logger.warning('async_callback_failed', category='lifecycle', error=str(e))
 
     async def _stop_processor(self, processor: PartitionProcessor) -> None:
-        """Drain in-flight tasks, commit final offsets, then stop."""
+        """Drain in-flight tasks, commit final offsets, then stop.
+
+        Only commits the watermark when drain completed cleanly. If drain
+        timed out, tasks may still be in flight — committing their offsets
+        now would silently skip them on partition reassign and lose data.
+        Preferring at-least-once duplication over silent loss.
+        """
         try:
             processor._running = False
+            drained_cleanly = False
             try:
                 await asyncio.wait_for(processor.drain(), timeout=self._config.executor.drain_timeout_seconds)
+                drained_cleanly = True
             except TimeoutError:
-                pass
-            committable = processor.offset_tracker.committable()
-            if committable is not None and self._consumer:
-                try:
-                    await self._consumer.commit({processor.partition_id: committable})
-                    processor.offset_tracker.acknowledge_commit(committable)
-                except Exception:
-                    pass
+                logger.warning(
+                    'stop_processor_drain_timeout',
+                    category='lifecycle',
+                    partition=processor.partition_id,
+                    inflight=processor.inflight_count,
+                    queue_size=processor.queue_size,
+                )
+            if drained_cleanly:
+                committable = processor.offset_tracker.committable()
+                if committable is not None and self._consumer:
+                    try:
+                        await self._consumer.commit({processor.partition_id: committable})
+                        processor.offset_tracker.acknowledge_commit(committable)
+                    except Exception as e:
+                        logger.warning(
+                            'stop_processor_commit_failed',
+                            category='kafka',
+                            partition=processor.partition_id,
+                            error=str(e),
+                        )
             await processor.stop()
         except Exception as e:
             logger.warning(
@@ -507,29 +527,62 @@ class DrakkarApp:
         for processor in list(self._processors.values()):
             processor._running = False
 
-        await log.ainfo('draining_executors', category='lifecycle', timeout=5)
+        drain_timeout = self._config.executor.drain_timeout_seconds
+        await log.ainfo('draining_executors', category='lifecycle', timeout=drain_timeout)
+        drained_cleanly = False
         try:
-            await asyncio.wait_for(self._drain_all_processors(), timeout=self._config.executor.drain_timeout_seconds)
+            await asyncio.wait_for(self._drain_all_processors(), timeout=drain_timeout)
+            drained_cleanly = True
             await log.ainfo('executors_drained', category='lifecycle')
         except TimeoutError:
-            await log.awarning('drain_timeout', category='lifecycle', msg='some executors did not finish in 5s')
+            await log.awarning(
+                'drain_timeout',
+                category='lifecycle',
+                msg=f'some executors did not finish in {drain_timeout}s; skipping final commit',
+            )
 
-        for processor in list(self._processors.values()):
-            committable = processor.offset_tracker.committable()
-            if committable is not None and self._consumer:
-                try:
-                    await self._consumer.commit({processor.partition_id: committable})
-                except Exception as e:
-                    await log.awarning(
-                        'final_commit_failed',
-                        category='kafka',
-                        partition=processor.partition_id,
-                        error=str(e),
-                    )
+        # Only commit final offsets if drain succeeded cleanly. After a
+        # timeout we cannot be sure tasks have stopped running, so committing
+        # here would silently skip in-flight work on restart — preferring
+        # at-least-once duplication over silent loss.
+        if drained_cleanly:
+            for processor in list(self._processors.values()):
+                committable = processor.offset_tracker.committable()
+                if committable is not None and self._consumer:
+                    try:
+                        await self._consumer.commit({processor.partition_id: committable})
+                        processor.offset_tracker.acknowledge_commit(committable)
+                    except Exception as e:
+                        await log.awarning(
+                            'final_commit_failed',
+                            category='kafka',
+                            partition=processor.partition_id,
+                            error=str(e),
+                        )
 
         for processor in list(self._processors.values()):
             await processor.stop()
         self._processors.clear()
+
+        # Wait for background tasks scheduled by rebalance callbacks
+        # (_stop_processor from revoke, on_assign/revoke handler hooks,
+        # backpressure pauses) to complete BEFORE we close the consumer.
+        # These tasks hold references to self._consumer; closing it while
+        # they run would cause use-after-close errors and skip their final
+        # commits.
+        if self._background_tasks:
+            bg_snapshot = list(self._background_tasks)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*bg_snapshot, return_exceptions=True),
+                    timeout=drain_timeout,
+                )
+            except TimeoutError:
+                await log.awarning(
+                    'background_task_drain_timeout',
+                    category='lifecycle',
+                    count=len(bg_snapshot),
+                )
 
         if self._recorder:
             await self._recorder.stop()
