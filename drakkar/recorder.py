@@ -49,7 +49,7 @@ _SECRET_ENV_PATTERNS = (
 )
 
 
-def _redact_env_value(name: str, value: str) -> str:
+def _sanitize_env_value(name: str, value: str) -> str:
     """Return a safe-to-store version of an env var value.
 
     Redacts fully when the var name matches a common-secret pattern. For
@@ -369,7 +369,7 @@ class EventRecorder:
         self._drakkar_config = drakkar_config
         if not self._db or not self._config.store_config:
             return
-        env_vars = {name: _redact_env_value(name, os.environ.get(name, '')) for name in self._config.expose_env_vars}
+        env_vars = {name: _sanitize_env_value(name, os.environ.get(name, '')) for name in self._config.expose_env_vars}
         sinks: dict[str, list[str]] = {}
         sinks_cfg = drakkar_config.sinks
         if sinks_cfg:
