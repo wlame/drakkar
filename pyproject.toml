@@ -99,6 +99,10 @@ dev = [
     "ty>=0.0.24",
 ]
 
+[tool.uv]
+# Supply-chain mitigation: do not resolve packages published after this days ago.
+exclude-newer = "7 days"
+
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN"]
 "integration/*" = ["ANN"]

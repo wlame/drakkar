@@ -2,6 +2,10 @@ version = 1
 revision = 3
 requires-python = ">=3.13"
 
+[options]
+exclude-newer = "7 days"
+exclude-newer-span = "P7D"
+
 [[package]]
 name = "aiosqlite"
 version = "0.22.1"
