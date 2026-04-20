@@ -554,6 +554,58 @@ async def test_app_backpressure_pauses_and_resumes(test_config):
         await proc.stop()
 
 
+async def test_newly_assigned_partition_is_paused_when_backpressure_active(test_config):
+    """H5: when _on_assign fires while the consumer is already paused for
+    backpressure, the newly-added partition must be paused immediately.
+
+    Without this, the new partition bypasses the backpressure gate until
+    the next _poll_loop tick, during which the consumer can deliver
+    unbounded messages from it (causing memory spikes and queue overflow).
+    """
+    from drakkar.executor import ExecutorPool
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+
+    # Simulate the poll loop having already entered the paused state.
+    app._paused = True
+    app._on_assign([0])
+    app._on_assign([5, 7])
+
+    # Let the background pause task run.
+    await asyncio.sleep(0.05)
+
+    # The second assign should have triggered a pause on the new partitions.
+    assert any(call.args[0] == [5, 7] for call in app._consumer.pause.call_args_list), (
+        f'expected pause([5,7]), got calls: {app._consumer.pause.call_args_list}'
+    )
+
+    for proc in list(app.processors.values()):
+        await proc.stop()
+
+
+async def test_newly_assigned_partition_not_paused_when_unpaused(test_config):
+    """When backpressure is NOT active, _on_assign must not spuriously pause
+    the new partition — otherwise the consumer would never deliver.
+    """
+    from drakkar.executor import ExecutorPool
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+
+    assert not app._paused
+    app._on_assign([0, 1])
+    await asyncio.sleep(0.05)
+
+    # Pause must NOT have been invoked for these assignments.
+    assert app._consumer.pause.call_count == 0
+
+    for proc in list(app.processors.values()):
+        await proc.stop()
+
+
 # --- Shutdown: periodic task cancellation ---
 
 

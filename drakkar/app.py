@@ -346,6 +346,7 @@ class DrakkarApp:
         assert self._executor_pool is not None
         if self._recorder:
             self._recorder.record_assigned(partition_ids)
+        newly_added: list[int] = []
         for pid in partition_ids:
             if pid not in self._processors:
                 processor = PartitionProcessor(
@@ -360,8 +361,25 @@ class DrakkarApp:
                 )
                 self._processors[pid] = processor
                 processor.start()
+                newly_added.append(pid)
 
         assigned_partitions.set(len(self._processors))
+
+        # If backpressure is active, the poll loop has already paused the
+        # previously-assigned partitions. Newly-assigned partitions were not
+        # in that pause set, so Kafka would deliver messages from them until
+        # the next poll tick re-evaluated the watermark. Pause them now so
+        # the backpressure gate is not bypassed between assignment and the
+        # next _poll_loop iteration.
+        if self._paused and newly_added and self._consumer is not None:
+            consumer = self._consumer
+
+            async def _pause_newly_assigned() -> None:
+                await consumer.pause(newly_added)
+
+            pt = asyncio.ensure_future(self._safe_call(_pause_newly_assigned()))
+            self._background_tasks.add(pt)
+            pt.add_done_callback(self._background_tasks.discard)
 
         async def _on_assign_with_ctx() -> None:
             bind_contextvars(hook='on_assign', partitions=partition_ids)
