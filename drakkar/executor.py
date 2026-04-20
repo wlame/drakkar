@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import heapq
 import os
 import time
@@ -38,11 +39,16 @@ class ExecutorPool:
         max_executors: int,
         task_timeout_seconds: int,
         env: dict[str, str] | None = None,
+        inherit_parent_env: bool = True,
+        inherit_deny_patterns: list[str] | None = None,
     ) -> None:
         self._binary_path = binary_path
         self._max_executors = max_executors
         self._task_timeout = task_timeout_seconds
         self._config_env = env or {}
+        self._inherit_parent_env = inherit_parent_env
+        # Patterns are compared case-insensitively against env var names.
+        self._inherit_deny_patterns = list(inherit_deny_patterns or [])
         self._semaphore = asyncio.Semaphore(max_executors)
         self._active_count = 0
         self._waiting_count = 0
@@ -132,17 +138,40 @@ class ExecutorPool:
         return binary
 
     def _build_env(self, task: ExecutorTask) -> dict[str, str] | None:
-        """Build merged environment for subprocess: parent env + config env + task env.
+        """Build merged environment for subprocess.
 
-        Returns None (inherit parent env) when no custom env vars are configured.
-        Task env overrides config env on key conflict.
+        Precedence: (filtered) parent env → ExecutorConfig.env → ExecutorTask.env.
+
+        Parent-env inheritance is filtered through ``inherit_deny_patterns``
+        to avoid leaking framework-internal config (DRAKKAR_*) and common
+        secrets (passwords, tokens, DSNs, keys) to the executor subprocess.
+
+        Returns None (= inherit parent env verbatim) ONLY in the rare case
+        of: ``inherit_parent_env`` is True, no deny patterns are configured,
+        and no custom env is configured. Any filtering or custom env forces
+        an explicit dict so the subprocess sees exactly what we intend.
         """
-        if not self._config_env and not task.env:
+        has_custom_env = bool(self._config_env or task.env)
+        has_deny = bool(self._inherit_deny_patterns)
+
+        if self._inherit_parent_env and not has_custom_env and not has_deny:
+            # Trivial case: pass through parent env with no transformation.
             return None
-        merged = dict(os.environ)
+
+        merged: dict[str, str] = {}
+        if self._inherit_parent_env:
+            for key, val in os.environ.items():
+                if not self._is_env_key_denied(key):
+                    merged[key] = val
+        # Custom env always wins — operator/handler chose these explicitly.
         merged.update(self._config_env)
         merged.update(task.env)
         return merged
+
+    def _is_env_key_denied(self, key: str) -> bool:
+        """Case-insensitive glob match against any deny pattern."""
+        key_upper = key.upper()
+        return any(fnmatch.fnmatchcase(key_upper, p.upper()) for p in self._inherit_deny_patterns)
 
     async def _run_subprocess(self, task: ExecutorTask) -> ExecutorResult:
         binary = self._resolve_binary(task)

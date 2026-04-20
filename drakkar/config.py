@@ -176,8 +176,36 @@ class ExecutorConfig(BaseModel):
         default_factory=dict,
         description=(
             'Environment variables passed to all executor subprocesses. '
-            'Merged with the parent process environment. Per-task env vars '
-            'from ExecutorTask.env override these on conflict.'
+            'Merged on top of the (filtered) parent process environment. '
+            'Per-task env vars from ExecutorTask.env override these on conflict.'
+        ),
+    )
+    env_inherit_parent: bool = Field(
+        default=True,
+        description=(
+            'When True, the parent process env is passed to subprocesses '
+            '(with deny patterns applied — see env_inherit_deny). Set False '
+            'to run subprocesses with ONLY ExecutorConfig.env + '
+            'ExecutorTask.env — fully isolated from parent env.'
+        ),
+    )
+    env_inherit_deny: list[str] = Field(
+        default_factory=lambda: [
+            'DRAKKAR_*',  # framework internals (SINKS__, KAFKA__, DEBUG__, ...)
+            '*PASSWORD*',
+            '*SECRET*',
+            '*TOKEN*',
+            '*_KEY',
+            '*_DSN',
+            '*CREDENTIAL*',
+        ],
+        description=(
+            'Case-insensitive fnmatch patterns against parent env var names. '
+            'Matching vars are NOT inherited by subprocesses, even when '
+            'env_inherit_parent is True. Default excludes DRAKKAR_* internals '
+            'and common secret names so handler-configured secrets do not '
+            'leak to executor binaries. Set to [] to fully trust the parent '
+            'environment.'
         ),
     )
     max_executors: int = Field(default=4, ge=1)

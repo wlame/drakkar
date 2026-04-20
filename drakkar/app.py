@@ -169,6 +169,8 @@ class DrakkarApp:
             max_executors=self._config.executor.max_executors,
             task_timeout_seconds=self._config.executor.task_timeout_seconds,
             env=self._config.executor.env,
+            inherit_parent_env=self._config.executor.env_inherit_parent,
+            inherit_deny_patterns=self._config.executor.env_inherit_deny,
         )
 
         start_metrics_server(self._config.metrics)

@@ -473,6 +473,117 @@ async def test_cancel_during_execution_does_not_leak_active_count():
 # --- H4: proc.returncode None must not silently be treated as success ---
 
 
+# --- H6: subprocess env leak — deny-list filtering ---
+
+
+async def test_inherit_deny_patterns_filter_drakkar_internals(monkeypatch):
+    """DRAKKAR_* env vars must not leak into the subprocess by default.
+
+    Framework internals (e.g. DRAKKAR_SINKS__POSTGRES__MAIN__DSN) can
+    contain connection strings with embedded credentials. Inheriting them
+    unfiltered exposes those secrets to the executor binary.
+    """
+    monkeypatch.setenv('DRAKKAR_SINKS__POSTGRES__MAIN__DSN', 'postgres://u:p@h/db')
+    monkeypatch.setenv('OTHER_OK_VAR', 'visible')
+
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=1,
+        task_timeout_seconds=10,
+        inherit_deny_patterns=['DRAKKAR_*'],
+    )
+    task = make_task(
+        args=[
+            '-c',
+            (
+                'import os; '
+                'print(os.environ.get("DRAKKAR_SINKS__POSTGRES__MAIN__DSN", "<missing>")); '
+                'print(os.environ.get("OTHER_OK_VAR", "<missing>"))'
+            ),
+        ],
+    )
+    result = await pool.execute(task)
+    lines = result.stdout.strip().splitlines()
+    assert lines[0] == '<missing>', f'DRAKKAR_* var leaked: {lines[0]!r}'
+    assert lines[1] == 'visible', 'non-secret var should still pass through'
+
+
+async def test_inherit_deny_patterns_filter_common_secret_shapes(monkeypatch):
+    """Common secret-name shapes must not leak with the default deny list."""
+    monkeypatch.setenv('DB_PASSWORD', 'supersecret')
+    monkeypatch.setenv('GITHUB_TOKEN', 'ghp_xxx')
+    monkeypatch.setenv('AWS_SECRET_ACCESS_KEY', 'abc')
+    monkeypatch.setenv('NORMAL_VAR', 'ok')
+
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=1,
+        task_timeout_seconds=10,
+        inherit_deny_patterns=['*PASSWORD*', '*TOKEN*', '*SECRET*', '*_KEY'],
+    )
+    task = make_task(
+        args=[
+            '-c',
+            (
+                'import os; '
+                'print("DB_PASSWORD", os.environ.get("DB_PASSWORD", "<missing>")); '
+                'print("GITHUB_TOKEN", os.environ.get("GITHUB_TOKEN", "<missing>")); '
+                'print("AWS_SECRET_ACCESS_KEY", os.environ.get("AWS_SECRET_ACCESS_KEY", "<missing>")); '
+                'print("NORMAL_VAR", os.environ.get("NORMAL_VAR", "<missing>"))'
+            ),
+        ],
+    )
+    result = await pool.execute(task)
+    out = result.stdout
+    assert 'DB_PASSWORD <missing>' in out
+    assert 'GITHUB_TOKEN <missing>' in out
+    assert 'AWS_SECRET_ACCESS_KEY <missing>' in out
+    assert 'NORMAL_VAR ok' in out
+
+
+async def test_inherit_parent_env_false_strips_all_parent_env(monkeypatch):
+    """inherit_parent_env=False makes subprocess env strictly config+task."""
+    monkeypatch.setenv('PARENT_ONLY_VAR', 'from_parent')
+
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=1,
+        task_timeout_seconds=10,
+        env={'FROM_CONFIG': 'config_value'},
+        inherit_parent_env=False,
+    )
+    task = make_task(
+        args=[
+            '-c',
+            (
+                'import os; '
+                'print("P:", os.environ.get("PARENT_ONLY_VAR", "<missing>")); '
+                'print("C:", os.environ.get("FROM_CONFIG", "<missing>"))'
+            ),
+        ],
+    )
+    result = await pool.execute(task)
+    assert 'P: <missing>' in result.stdout, 'parent env must be stripped'
+    assert 'C: config_value' in result.stdout, 'config env must still pass'
+
+
+async def test_is_env_key_denied_is_case_insensitive():
+    """Deny patterns match regardless of casing — env vars vary in convention."""
+    pool = ExecutorPool(
+        binary_path='/bin/echo',
+        max_executors=1,
+        task_timeout_seconds=10,
+        inherit_deny_patterns=['DRAKKAR_*'],
+    )
+    assert pool._is_env_key_denied('DRAKKAR_FOO')
+    assert pool._is_env_key_denied('drakkar_foo')
+    assert not pool._is_env_key_denied('HAS_DRAKKAR_SUFFIX')
+    assert not pool._is_env_key_denied('OTHER')
+
+
+# --- H4: proc.returncode None must not silently be treated as success ---
+
+
 async def test_none_returncode_treated_as_failure(monkeypatch):
     """If `proc.returncode` is None after communicate() (unexpected under
     normal operation but possible under races), the result must be a
