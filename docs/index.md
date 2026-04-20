@@ -22,7 +22,7 @@ flowchart LR
             S0 ~~~ S1 ~~~ S2 ~~~ S3
         end
         A -- "tasks" --> pool
-        pool -- "results" --> C["collect()\n<i>user hook</i>"]
+        pool -- "results" --> C["on_task_complete()\n<i>user hook</i>"]
     end
 
     C --> SK["Kafka"]
@@ -67,7 +67,7 @@ flowchart LR
             S0 ~~~ S1 ~~~ S2 ~~~ S3
         end
         A -- "tasks" --> pool
-        pool -- "results" --> C["collect()\n<i>user hook</i>"]
+        pool -- "results" --> C["on_task_complete()\n<i>user hook</i>"]
     end
 
     C --> SK["Kafka"]
@@ -151,7 +151,7 @@ class MyHandler(BaseDrakkarHandler[JobInput, JobOutput]):
             for msg in messages
         ]
 
-    async def collect(self, result):
+    async def on_task_complete(self, result):
         output = JobOutput(
             job_id=result.task.metadata['job_id'],
             result=result.stdout.strip(),
@@ -208,7 +208,8 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 
 | Page | Contents |
 |------|----------|
-| [Handler](handler.md) | `BaseDrakkarHandler` hooks: `arrange`, `collect`, `on_error`, `on_window_complete`, lifecycle hooks |
+| [Handler](handler.md) | `BaseDrakkarHandler` hooks: `arrange`, `on_task_complete`, `on_message_complete`, `on_window_complete`, `on_error`, lifecycle hooks |
+| [Fan-out](fan-out.md) | One message → many tasks → one aggregate. `MessageGroup`, `on_message_complete`, replacement-chain tracing. |
 | [Configuration](configuration.md) | Full YAML reference, env var overrides, `DrakkarConfig` model |
 | [Sinks](sinks.md) | Sink types, payload models, routing, multi-instance setup |
 | [Executor](executor.md) | Subprocess pool, concurrency, timeouts, retries, binary resolution |

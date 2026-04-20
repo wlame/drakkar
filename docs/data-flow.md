@@ -318,7 +318,7 @@ When a task succeeds (exit_code == 0):
 
 ### 5.2 Collect Hook
 
-The framework calls `handler.collect(result)`:
+The framework calls `handler.on_task_complete(result)`:
 - Receives the full `ExecutorResult` including stdout, stderr, exit_code, duration, and the original `ExecutorTask` (with its metadata dict).
 - **Returns `CollectResult`**: a container with typed payload lists for each sink type:
   - `kafka`: list of `KafkaPayload(sink='', key=b'...', data=MyModel(...))`
@@ -329,11 +329,11 @@ The framework calls `handler.collect(result)`:
   - `files`: list of `FilePayload(sink='', path='output/results.jsonl', data=MyModel(...))`
 - **Returns `None`**: no sink delivery for this result. The result is still tracked in the window.
 
-The `collect` duration is recorded in the `handler_duration` histogram.
+The `on_task_complete` duration is recorded in the `handler_duration` histogram.
 
 ### 5.3 Sink Delivery (via on_collect callback)
 
-If `collect()` returned a non-None `CollectResult` with `has_outputs == True`:
+If `on_task_complete()` returned a non-None `CollectResult` with `has_outputs == True`:
 
 1. **Validation**: `SinkManager.validate_collect(result)` checks that every payload's `sink` field resolves to a configured sink instance:
    - If `sink` is empty and exactly one sink of that type exists: resolves to the default.
@@ -440,7 +440,7 @@ When the window is complete:
    - **Returns `CollectResult`**: additional sink payloads (e.g., aggregated summaries).
    - **Returns `None`**: no additional delivery.
 
-If a `CollectResult` is returned, it goes through the same sink delivery pipeline as `collect()` results.
+If a `CollectResult` is returned, it goes through the same sink delivery pipeline as `on_task_complete()` results.
 
 ### 7.3 Mark Offsets Complete
 

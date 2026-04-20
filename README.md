@@ -16,7 +16,8 @@ Kafka source topic
     +-- poll messages (per-partition pipelines)
     +-- arrange() -> executor tasks (user hook)
     +-- run external binary via subprocess pool
-    +-- collect() -> sink payloads (user hook)
+    +-- on_task_complete() -> sink payloads (user hook)
+    +-- on_message_complete() -> aggregate per source message (user hook, optional)
     +-- deliver to configured sinks (Kafka, Postgres, Mongo, Redis, HTTP, files)
     +-- commit offsets (watermark-based, only after all sinks confirm)
     |
@@ -96,7 +97,7 @@ class MyHandler(BaseDrakkarHandler[InputMessage, ProcessedResult]):
             ))
         return tasks
 
-    async def collect(self, result):
+    async def on_task_complete(self, result):
         output = ProcessedResult(
             request_id=result.task.metadata["request_id"],
             result=result.stdout.strip(),

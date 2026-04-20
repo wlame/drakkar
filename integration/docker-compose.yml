@@ -48,6 +48,28 @@ services:
       timeout: 5s
       retries: 10
 
+  # Second Postgres instance, used to demonstrate routing to a DIFFERENT
+  # database server from the same Drakkar worker. The handler picks
+  # between "archive_results_db" (above) and "hot_recent_matches_db" (here)
+  # via the `sink=` field on PostgresPayload. There is no special
+  # relationship between these two Postgres containers — to Drakkar they
+  # are simply two independent postgres sink instances with different DSNs.
+  postgres-hot:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: drakkar
+      POSTGRES_PASSWORD: drakkar
+      POSTGRES_DB: drakkar_hot
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./infra/init-db-hot.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drakkar -d drakkar_hot"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
   mongo:
     image: mongo:7
     ports:
@@ -131,6 +153,8 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      postgres-hot:
+        condition: service_healthy
       mongo:
         condition: service_healthy
       redis:
@@ -157,6 +181,8 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      postgres-hot:
+        condition: service_healthy
       mongo:
         condition: service_healthy
       redis:
@@ -182,6 +208,8 @@ services:
       kafka-init:
         condition: service_completed_successfully
       postgres:
+        condition: service_healthy
+      postgres-hot:
         condition: service_healthy
       mongo:
         condition: service_healthy

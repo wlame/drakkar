@@ -24,9 +24,34 @@ executor:
   backpressure_low_multiplier: 4
 
 sinks:
+  # --- Kafka sink instances ---
+  #
+  # Two separate Kafka output streams.
+  #
+  # NAMING NOTE: the labels "per_message_counts" and "window_summaries"
+  # below are USER-CHOSEN instance names — they are NOT Drakkar keywords.
+  # You could rename them to anything (e.g. "foo", "bar"); the handler
+  # would just need to reference the new name via `KafkaPayload(sink=...)`.
+  #
+  # The reserved/framework keywords on this tree are only:
+  #   - "sinks"        (top-level section marker)
+  #   - "kafka"        (sink type — one of kafka/postgres/mongo/...)
+  #   - "topic"        (field within a kafka sink instance)
+  #   - "brokers"      (field within a kafka sink instance)
+  #   - "ui_url"       (field within a kafka sink instance)
+  #
+  # Everything at "sinks.kafka.<your-name-here>" is user-chosen.
   kafka:
-    counts:
+    per_message_counts:
+      # Written to by collect(): one record per input message, fine-grained.
       topic: "symbol-counts"
+      ui_url: "http://localhost:8088"
+    window_summaries:
+      # Written to by on_window_complete(): one record per completed
+      # arrange() window, aggregated statistics. Lower rate, wider per
+      # record. Useful for dashboards or downstream batch jobs that don't
+      # need per-file detail.
+      topic: "symbol-count-windows"
       ui_url: "http://localhost:8088"
 
 dlq:

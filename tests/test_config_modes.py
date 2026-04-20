@@ -86,7 +86,7 @@ class CollectHandler(BaseDrakkarHandler):
             for msg in messages
         ]
 
-    async def collect(self, result):
+    async def on_task_complete(self, result):
         return CollectResult(
             kafka=[KafkaPayload(data=_D())],
         )

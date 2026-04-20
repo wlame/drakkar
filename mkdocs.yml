@@ -49,6 +49,7 @@ theme:
 nav:
   - Home: index.md
   - Handler: handler.md
+  - Fan-out (one message → many tasks): fan-out.md
   - Configuration: configuration.md
   - Sinks: sinks.md
   - Executor: executor.md

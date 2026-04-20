@@ -683,22 +683,91 @@ class EventRecorder:
                 partition=partition,
             )
 
-    def record_collect_completed(
+    def record_task_complete(
         self,
         task_id: str,
         partition: int,
         duration: float,
         output_message_count: int,
     ) -> None:
+        """Record that on_task_complete() finished for one successful task.
+
+        Event name is ``task_complete`` (the hook name without ``on_``) —
+        distinct from ``task_completed`` which marks subprocess exit. The
+        two sit next to each other in the pipeline: subprocess ends first
+        (task_completed), then the handler's post-processing and sink
+        routing run, and this event marks the end of that stage.
+        """
         self._record(
             {
                 'ts': time.time(),
-                'event': 'collect_completed',
+                'event': 'task_complete',
                 'task_id': task_id,
                 'partition': partition,
                 'duration': round(duration, 4),
                 'metadata': json.dumps(
                     {
+                        'output_message_count': output_message_count,
+                    }
+                ),
+            }
+        )
+
+    def record_message_complete(
+        self,
+        partition: int,
+        offset: int,
+        duration: float,
+        task_count: int,
+        succeeded: int,
+        failed: int,
+        replaced: int,
+        output_message_count: int,
+    ) -> None:
+        """Record that on_message_complete() finished for one source message.
+
+        Fires once per source message, after every task derived from it
+        has reached a terminal state. The event corresponds 1:1 with a
+        handler ``on_message_complete`` call.
+        """
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'message_complete',
+                'partition': partition,
+                'offset': offset,
+                'duration': round(duration, 4),
+                'metadata': json.dumps(
+                    {
+                        'task_count': task_count,
+                        'succeeded': succeeded,
+                        'failed': failed,
+                        'replaced': replaced,
+                        'output_message_count': output_message_count,
+                    }
+                ),
+            }
+        )
+
+    def record_window_complete(
+        self,
+        partition: int,
+        window_id: int,
+        duration: float,
+        task_count: int,
+        output_message_count: int,
+    ) -> None:
+        """Record that on_window_complete() finished for one arrange() window."""
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'window_complete',
+                'partition': partition,
+                'duration': round(duration, 4),
+                'metadata': json.dumps(
+                    {
+                        'window_id': window_id,
+                        'task_count': task_count,
                         'output_message_count': output_message_count,
                     }
                 ),

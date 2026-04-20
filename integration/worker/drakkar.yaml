@@ -26,18 +26,62 @@ executor:
   backpressure_high_multiplier: 32
   backpressure_low_multiplier: 4
 
+# --- Sinks ---
+#
+# A NOTE ON NAMING in this section:
+#
+# Drakkar splits every sink entry into three parts:
+#
+#     sinks.<SINK_TYPE>.<INSTANCE_NAME>:
+#         <field>: <value>
+#         ...
+#
+#   - <SINK_TYPE> is a Drakkar KEYWORD and must be one of:
+#         kafka, postgres, mongo, redis, http, filesystem
+#   - <INSTANCE_NAME> is a USER-CHOSEN label — pick anything you like.
+#     The handler code refers to it via `Payload(sink="<INSTANCE_NAME>")`
+#     when multiple instances of the same sink type exist.
+#   - The inner field names ("topic", "dsn", "uri", "url", "ui_url",
+#     "brokers", "pool_min", "pool_max", etc.) ARE Drakkar keywords
+#     and are schema-validated by pydantic.
+#
+# Below, "results", "priority_match_notifications",
+# "archive_results_db", "hot_recent_matches_db", "archive", "cache",
+# "webhook", and "logs" are all user-chosen instance labels — nothing
+# special about the names themselves.
 sinks:
   kafka:
+    # Default output — every search result. Referenced as sink="results".
     results:
       topic: "search-results"
       # brokers inherited from kafka.brokers
       ui_url: "http://localhost:8088"
+    # Lower-volume side-channel for the subset of high-match results that
+    # also trigger the HTTP webhook. A separate topic so downstream
+    # consumers interested only in alerts can subscribe without reading
+    # the full result stream.
+    priority_match_notifications:
+      topic: "search-results-priority"
+      ui_url: "http://localhost:8088"
 
   postgres:
-    main:
+    # The long-term archive — every search result lands here. Larger pool
+    # because writes are frequent. Points at the "postgres" service.
+    archive_results_db:
       dsn: "postgresql://drakkar:drakkar@postgres:5432/drakkar"
       pool_min: 1
       pool_max: 5
+    # A second Postgres INSTANCE, pointing at a SEPARATE database server
+    # ("postgres-hot" in docker-compose.yml, DB "drakkar_hot"). Only
+    # high-match results are routed here — the handler decides which
+    # instance to target by setting `sink="hot_recent_matches_db"` on
+    # the PostgresPayload. Small pool: this mirrors a real deployment
+    # where a hot/interactive DB has tighter resource limits than the
+    # archive.
+    hot_recent_matches_db:
+      dsn: "postgresql://drakkar:drakkar@postgres-hot:5432/drakkar_hot"
+      pool_min: 1
+      pool_max: 2
 
   mongo:
     archive:

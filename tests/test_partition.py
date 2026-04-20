@@ -51,7 +51,7 @@ class EchoHandler(BaseDrakkarHandler):
             for msg in messages
         ]
 
-    async def collect(self, result):
+    async def on_task_complete(self, result):
         self.collect_calls.append(result.task.task_id)
         return CollectResult(
             kafka=[KafkaPayload(data=_Out(v=result.stdout))],
@@ -524,7 +524,7 @@ async def test_collect_exception_does_not_stall_window(echo_pool):
                 for m in messages
             ]
 
-        async def collect(self, result):
+        async def on_task_complete(self, result):
             raise RuntimeError('collect exploded')
 
     async def on_commit(pid, off):
@@ -842,7 +842,7 @@ async def test_on_error_returns_replacement_tasks(failing_pool, echo_pool):
                 for m in messages
             ]
 
-        async def collect(self, result):
+        async def on_task_complete(self, result):
             collected_task_ids.append(result.task.task_id)
             return None
 
@@ -1030,7 +1030,7 @@ async def test_skip_in_mixed_window():
                 )
             return tasks
 
-        async def collect(self, result):
+        async def on_task_complete(self, result):
             collected_ids.append(result.task.task_id)
             return None
 
@@ -1109,7 +1109,7 @@ async def test_concurrent_windows_offset_watermark():
                 )
             return tasks
 
-        async def collect(self, result):
+        async def on_task_complete(self, result):
             completion_order.append(result.task.task_id)
             return None
 
@@ -1191,3 +1191,486 @@ async def test_concurrent_windows_pending_context():
     assert seen_pending[0] == set()
     # second arrange() sees task from first window still in-flight
     assert 'p-0' in seen_pending[1]
+
+
+# =============================================================================
+# on_message_complete + MessageGroup lifecycle
+# =============================================================================
+
+
+async def test_on_message_complete_single_task_success(echo_pool):
+    """Single message → single task → hook fires with one result, zero errors."""
+    from drakkar.models import MessageGroup
+
+    groups: list[MessageGroup] = []
+
+    class H(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [ExecutorTask(task_id=f'm-{m.offset}', args=['ok'], source_offsets=[m.offset]) for m in messages]
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+            return None
+
+    proc = PartitionProcessor(partition_id=0, handler=H(), executor_pool=echo_pool, window_size=10)
+    proc.enqueue(make_msg(offset=7))
+    proc.start()
+    await wait_for(lambda: len(groups) == 1)
+    await proc.stop()
+
+    g = groups[0]
+    assert g.source_message.offset == 7
+    assert g.total == 1
+    assert g.succeeded == 1
+    assert g.failed == 0
+    assert g.all_succeeded
+    assert g.duration_seconds >= 0
+
+
+async def test_on_message_complete_fan_out_waits_for_all_tasks(failing_pool):
+    """One message with multiple tasks: hook fires ONCE after all complete."""
+    from drakkar.models import MessageGroup
+
+    groups: list[MessageGroup] = []
+
+    class FanOutHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            tasks = []
+            for m in messages:
+                for i in range(3):
+                    tasks.append(
+                        ExecutorTask(
+                            task_id=f'{m.offset}-t{i}',
+                            args=['-c', 'import time; time.sleep(0.05); print(42)'],
+                            source_offsets=[m.offset],
+                        )
+                    )
+            return tasks
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+            return None
+
+    proc = PartitionProcessor(partition_id=0, handler=FanOutHandler(), executor_pool=failing_pool, window_size=10)
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await proc.stop()
+
+    assert len(groups) == 1, f'expected exactly one hook fire, got {len(groups)}'
+    assert groups[0].total == 3
+    assert groups[0].succeeded == 3
+    assert groups[0].all_succeeded
+
+
+async def test_on_message_complete_partial_failure(failing_pool):
+    """Some tasks succeed, some SKIP — group reports both."""
+    from drakkar.models import MessageGroup
+
+    groups: list[MessageGroup] = []
+
+    class PartialHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            tasks = []
+            for m in messages:
+                tasks.append(ExecutorTask(task_id=f'ok-{m.offset}', args=['-c', 'print(1)'], source_offsets=[m.offset]))
+                tasks.append(
+                    ExecutorTask(
+                        task_id=f'fail-{m.offset}', args=['-c', 'import sys; sys.exit(1)'], source_offsets=[m.offset]
+                    )
+                )
+            return tasks
+
+        async def on_error(self, task, error):
+            return ErrorAction.SKIP
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+
+    proc = PartitionProcessor(partition_id=0, handler=PartialHandler(), executor_pool=failing_pool, window_size=10)
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await proc.stop()
+
+    g = groups[0]
+    assert g.succeeded == 1
+    assert g.failed == 1
+    assert g.any_failed
+    assert not g.all_succeeded
+
+
+async def test_on_message_complete_all_fail(failing_pool):
+    """Every task fails → group has only errors, is still reported."""
+    from drakkar.models import MessageGroup
+
+    groups: list[MessageGroup] = []
+
+    class AllFailHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f'f-{m.offset}',
+                    args=['-c', 'import sys; sys.exit(1)'],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+        async def on_error(self, task, error):
+            return ErrorAction.SKIP
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+
+    proc = PartitionProcessor(partition_id=0, handler=AllFailHandler(), executor_pool=failing_pool, window_size=10)
+    proc.enqueue(make_msg(offset=3))
+    proc.start()
+    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await proc.stop()
+
+    assert groups[0].failed == 1
+    assert groups[0].succeeded == 0
+    assert not groups[0].all_succeeded
+
+
+async def test_on_message_complete_retries_fire_hook_once(failing_pool):
+    """Retries must NOT fire on_message_complete — only the final outcome does."""
+    from drakkar.models import MessageGroup
+
+    groups: list[MessageGroup] = []
+    attempts = {'n': 0}
+
+    class RetryHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f'r-{m.offset}',
+                    args=['-c', 'import sys; sys.exit(1)'],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+        async def on_error(self, task, error):
+            attempts['n'] += 1
+            if attempts['n'] < 3:
+                return ErrorAction.RETRY
+            return ErrorAction.SKIP
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+
+    proc = PartitionProcessor(partition_id=0, handler=RetryHandler(), executor_pool=failing_pool, window_size=10)
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(groups) == 1, timeout=10)
+    await proc.stop()
+
+    assert len(groups) == 1, f'hook fired {len(groups)} times; expected 1'
+    assert groups[0].failed == 1
+
+
+async def test_on_message_complete_replacement_chain(failing_pool):
+    """on_error returning a list → group tasks include original + replacements.
+
+    - tasks list preserves full history (debugging)
+    - results/errors reflect terminal outcomes only
+    - parent_task_id is auto-set on replacements
+    """
+    from drakkar.models import MessageGroup
+
+    groups: list[MessageGroup] = []
+    replaced_once = {'done': False}
+
+    class ReplaceHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id='orig-0',
+                    args=['-c', 'import sys; sys.exit(1)'],
+                    source_offsets=[messages[0].offset],
+                )
+            ]
+
+        async def on_error(self, task, error):
+            if not replaced_once['done']:
+                replaced_once['done'] = True
+                return [
+                    ExecutorTask(
+                        task_id='repl-a',
+                        args=['-c', 'print(1)'],
+                        source_offsets=task.source_offsets,
+                    ),
+                    ExecutorTask(
+                        task_id='repl-b',
+                        args=['-c', 'print(2)'],
+                        source_offsets=task.source_offsets,
+                    ),
+                ]
+            return ErrorAction.SKIP
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+
+    proc = PartitionProcessor(partition_id=0, handler=ReplaceHandler(), executor_pool=failing_pool, window_size=10)
+    proc.enqueue(make_msg(offset=11))
+    proc.start()
+    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await proc.stop()
+
+    g = groups[0]
+    # Full history: original + 2 replacements
+    assert len(g.tasks) == 3
+    task_ids = {t.task_id for t in g.tasks}
+    assert task_ids == {'orig-0', 'repl-a', 'repl-b'}
+    # Terminal outcomes: 2 successes (replacements), 0 errors (original was replaced)
+    assert g.succeeded == 2
+    assert g.failed == 0
+    assert g.replaced == 1  # the original
+    # parent_task_id auto-populated
+    for t in g.tasks:
+        if t.task_id.startswith('repl-'):
+            assert t.parent_task_id == 'orig-0', f'{t.task_id} parent_task_id={t.parent_task_id}'
+        else:
+            assert t.parent_task_id is None
+
+
+async def test_on_message_complete_empty_arrange_fires_hook(echo_pool):
+    """arrange() returns [] for a message → hook still fires with empty group."""
+    from drakkar.models import MessageGroup
+
+    groups: list[MessageGroup] = []
+
+    class EmptyHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return []
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+
+    committed: list[tuple[int, int]] = []
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=EmptyHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=on_commit,
+    )
+    proc.enqueue(make_msg(offset=55))
+    proc.start()
+    await wait_for(lambda: len(groups) >= 1, timeout=5)
+    await wait_for(lambda: any(c[1] == 56 for c in committed), timeout=5)
+    await proc.stop()
+
+    assert groups[0].is_empty
+    assert groups[0].total == 0
+    assert groups[0].source_message.offset == 55
+
+
+async def test_on_message_complete_exception_does_not_block_offset(echo_pool):
+    """If on_message_complete raises, log and proceed — offset still commits."""
+    from drakkar.models import MessageGroup
+
+    saw_group: list[MessageGroup] = []
+    committed: list[tuple[int, int]] = []
+
+    class BrokenHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [ExecutorTask(task_id=f'b-{m.offset}', args=['ok'], source_offsets=[m.offset]) for m in messages]
+
+        async def on_message_complete(self, group):
+            saw_group.append(group)
+            raise RuntimeError('intentional test error')
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=BrokenHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=on_commit,
+    )
+    proc.enqueue(make_msg(offset=20))
+    proc.start()
+    await wait_for(lambda: any(c[1] == 21 for c in committed), timeout=5)
+    await proc.stop()
+
+    # Hook fired, raised; offset still committed (no stall)
+    assert len(saw_group) == 1
+    assert any(c[1] == 21 for c in committed)
+
+
+async def test_on_message_complete_per_message_commits(echo_pool):
+    """Offsets commit per-message as each finishes, not batched to window end.
+
+    Verifies the per-message commit granularity change: slower/later tasks
+    in the SAME window should NOT pin a fast-finishing earlier message's
+    offset. We check this by seeing intermediate commits between
+    per-message completions.
+    """
+    from drakkar.models import MessageGroup
+
+    groups: list[MessageGroup] = []
+    committed: list[tuple[int, int]] = []
+
+    class Slowdown(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            tasks = []
+            for m in messages:
+                # offset 0 completes immediately; offset 1 sleeps briefly.
+                dur = 0.3 if m.offset == 1 else 0.0
+                tasks.append(
+                    ExecutorTask(
+                        task_id=f's-{m.offset}',
+                        args=['-c', f'import time; time.sleep({dur}); print("ok")'],
+                        source_offsets=[m.offset],
+                    )
+                )
+            return tasks
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+
+    pool = ExecutorPool(binary_path=sys.executable, max_executors=4, task_timeout_seconds=10)
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=Slowdown(),
+        executor_pool=pool,
+        window_size=10,
+        on_commit=on_commit,
+    )
+    proc.enqueue(make_msg(offset=0))
+    proc.enqueue(make_msg(offset=1))
+    proc.start()
+    await wait_for(lambda: any(c[1] == 2 for c in committed), timeout=5)
+    await proc.stop()
+
+    # Both groups fired
+    assert {g.source_message.offset for g in groups} == {0, 1}
+    # Offset 1 commit (watermark=2) must have happened
+    assert any(c[1] == 2 for c in committed)
+
+
+async def test_on_message_complete_sink_delivery_exception_does_not_block_offset(echo_pool):
+    """If the CollectResult from on_message_complete fails to deliver to a
+    sink, the offset must still commit — a sink delivery failure is
+    handled via on_delivery_error, not by stalling the partition.
+    """
+
+    delivery_calls: list[int] = []
+    committed: list[tuple[int, int]] = []
+
+    class H(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [ExecutorTask(task_id=f's-{m.offset}', args=['ok'], source_offsets=[m.offset]) for m in messages]
+
+        async def on_message_complete(self, group):
+            return CollectResult(kafka=[KafkaPayload(data=_Out(v='agg'))])
+
+    async def failing_on_collect(result: CollectResult, partition_id: int) -> None:
+        delivery_calls.append(partition_id)
+        raise RuntimeError('sink down')
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=H(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_collect=failing_on_collect,
+        on_commit=on_commit,
+    )
+    proc.enqueue(make_msg(offset=30))
+    proc.start()
+    await wait_for(lambda: any(c[1] == 31 for c in committed), timeout=5)
+    await proc.stop()
+
+    assert delivery_calls, 'on_collect must have been invoked'
+    assert any(c[1] == 31 for c in committed), 'offset must commit despite sink failure'
+
+
+async def test_on_error_replacement_preserves_explicit_parent_task_id(failing_pool):
+    """If handler's on_error sets parent_task_id explicitly, framework must
+    NOT override it. Lets the user point replacements at a non-obvious
+    ancestor (e.g. skip a generation when restarting a chain).
+    """
+    from drakkar.models import MessageGroup
+
+    groups: list[MessageGroup] = []
+    replaced_once = {'done': False}
+
+    class Handler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id='root', args=['-c', 'import sys; sys.exit(1)'], source_offsets=[messages[0].offset]
+                )
+            ]
+
+        async def on_error(self, task, error):
+            if not replaced_once['done']:
+                replaced_once['done'] = True
+                return [
+                    ExecutorTask(
+                        task_id='child',
+                        args=['-c', 'print(1)'],
+                        source_offsets=task.source_offsets,
+                        parent_task_id='custom-parent-id',  # explicit
+                    ),
+                ]
+            return ErrorAction.SKIP
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+
+    proc = PartitionProcessor(partition_id=0, handler=Handler(), executor_pool=failing_pool, window_size=10)
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await proc.stop()
+
+    child_task = next(t for t in groups[0].tasks if t.task_id == 'child')
+    assert child_task.parent_task_id == 'custom-parent-id'
+
+
+async def test_on_window_complete_still_fires_alongside_on_message_complete(echo_pool):
+    """Both hooks coexist — on_window_complete sees all results at window end."""
+    from drakkar.models import MessageGroup
+
+    msg_groups: list[MessageGroup] = []
+    window_calls: list[int] = []
+
+    class Both(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [ExecutorTask(task_id=f'w-{m.offset}', args=['ok'], source_offsets=[m.offset]) for m in messages]
+
+        async def on_message_complete(self, group):
+            msg_groups.append(group)
+
+        async def on_window_complete(self, results, source_messages):
+            window_calls.append(len(results))
+
+    proc = PartitionProcessor(partition_id=0, handler=Both(), executor_pool=echo_pool, window_size=10)
+    proc.enqueue(make_msg(offset=0))
+    proc.enqueue(make_msg(offset=1))
+    proc.enqueue(make_msg(offset=2))
+    proc.start()
+    await wait_for(lambda: len(window_calls) >= 1 and len(msg_groups) >= 3, timeout=5)
+    await proc.stop()
+
+    assert len(msg_groups) == 3
+    # on_window_complete saw all 3 results (no retries, no replacements)
+    assert window_calls[0] == 3

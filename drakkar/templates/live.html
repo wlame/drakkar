@@ -94,7 +94,7 @@
 
 <!-- ==================== COLLECT TAB ==================== -->
 <div class="tab-panel" id="panel-collect" style="display:none;">
-    <p class="text-gray-500 text-sm mb-3">Recent collect() completions <span id="collect-total" class="text-purple-600"></span></p>
+    <p class="text-gray-500 text-sm mb-3">Recent on_task_complete() completions <span id="collect-total" class="text-purple-600"></span></p>
     <table class="w-full text-sm">
         <thead>
             <tr class="text-left text-gray-400 border-b border-cream-200">
@@ -488,7 +488,7 @@ function renderCollects() {
     }
     if (!recentCollects.length) {
         var etr = document.createElement('tr'); var etd = document.createElement('td');
-        etd.colSpan = 5; etd.className = 'py-3 text-center text-gray-400'; etd.textContent = 'No collect() calls yet';
+        etd.colSpan = 5; etd.className = 'py-3 text-center text-gray-400'; etd.textContent = 'No on_task_complete() calls yet';
         etr.appendChild(etd); body.appendChild(etr);
     }
 }
@@ -631,7 +631,7 @@ async function loadArrangeHistory() {
 
 async function loadCollectHistory() {
     try {
-        var r = await fetch('/api/events?event_types=collect_completed&limit=' + MAX_HISTORY);
+        var r = await fetch('/api/events?event_types=task_complete&limit=' + MAX_HISTORY);
         var events = await r.json();
         for (var i = 0; i < events.length; i++) {
             var e = events[i];
@@ -706,7 +706,7 @@ function connectWS() {
                 });
                 if (recentArranges.length > MAX_HISTORY) recentArranges.length = MAX_HISTORY;
                 renderArranges();
-            } else if (e.event === 'collect_completed') {
+            } else if (e.event === 'task_complete') {
                 collectTotal++;
                 var outputCount = 0;
                 try { outputCount = JSON.parse(e.metadata || '{}').output_message_count || 0; } catch(x) {}

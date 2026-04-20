@@ -11,6 +11,7 @@ from drakkar.models import (
     FilePayload,
     HttpPayload,
     KafkaPayload,
+    MessageGroup,
     MongoPayload,
     PendingContext,
     PostgresPayload,
@@ -300,4 +301,90 @@ def test_make_task_id_is_time_sortable():
 
 def test_make_task_id_prefix():
     assert make_task_id('rg').startswith('rg-')
+
+
+# --- MessageGroup properties ---
+
+
+def _msg(offset: int = 0) -> SourceMessage:
+    return SourceMessage(topic='t', partition=0, offset=offset, value=b'v', timestamp=0)
+
+
+def _task(task_id: str, offsets: list[int] | None = None) -> ExecutorTask:
+    return ExecutorTask(task_id=task_id, args=[], source_offsets=offsets or [0])
+
+
+def _result(task: ExecutorTask) -> ExecutorResult:
+    return ExecutorResult(exit_code=0, stdout='', stderr='', duration_seconds=0.1, task=task)
+
+
+def _error(task: ExecutorTask) -> ExecutorError:
+    return ExecutorError(task=task, exit_code=1, stderr='nope')
+
+
+def test_message_group_all_succeeded_counts():
+    t1 = _task('t1')
+    group = MessageGroup(
+        source_message=_msg(), tasks=[t1], results=[_result(t1)], errors=[], started_at=1.0, finished_at=1.5
+    )
+    assert group.succeeded == 1
+    assert group.failed == 0
+    assert group.total == 1
+    assert group.all_succeeded
+    assert not group.any_failed
+    assert group.replaced == 0
+    assert group.duration_seconds == 0.5
+
+
+def test_message_group_partial_failure():
+    t1, t2 = _task('t1'), _task('t2')
+    group = MessageGroup(
+        source_message=_msg(),
+        tasks=[t1, t2],
+        results=[_result(t1)],
+        errors=[_error(t2)],
+        started_at=1.0,
+        finished_at=2.0,
+    )
+    assert group.succeeded == 1
+    assert group.failed == 1
+    assert group.total == 2
+    assert group.any_failed
+    assert not group.all_succeeded
+
+
+def test_message_group_replaced_count_inferred():
+    """replaced = total - (succeeded + failed). History preserves replaced."""
+    t_orig, t_repl = _task('orig'), _task('repl')
+    group = MessageGroup(
+        source_message=_msg(),
+        tasks=[t_orig, t_repl],  # original + replacement in history
+        results=[_result(t_repl)],  # only replacement terminally succeeded
+        errors=[],
+        started_at=0,
+        finished_at=0,
+    )
+    assert group.succeeded == 1
+    assert group.failed == 0
+    assert group.replaced == 1  # the original
+
+
+def test_message_group_empty_is_not_all_succeeded():
+    """A message whose arrange() produced zero tasks is NOT 'all_succeeded'."""
+    group = MessageGroup(source_message=_msg(), tasks=[], results=[], errors=[], started_at=0, finished_at=0)
+    assert group.is_empty
+    assert group.total == 0
+    assert not group.all_succeeded
+    assert not group.any_failed
+
+
+def test_message_group_duration_never_negative():
+    """If finished_at < started_at somehow, duration reports 0."""
+    group = MessageGroup(source_message=_msg(), started_at=10.0, finished_at=5.0)
+    assert group.duration_seconds == 0.0
+
+
+def test_executor_task_parent_task_id_default_is_none():
+    t = _task('t1')
+    assert t.parent_task_id is None
     assert make_task_id('task').startswith('task-')

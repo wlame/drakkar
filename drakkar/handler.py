@@ -1,8 +1,9 @@
 """User hook protocol and base handler for Drakkar framework.
 
 Users extend BaseDrakkarHandler and override hooks to define their
-pipeline logic: arrange() creates executor tasks, collect() processes
-results into sink payloads, and on_delivery_error() handles sink failures.
+pipeline logic: arrange() creates executor tasks, on_task_complete()
+processes each result into sink payloads, and on_delivery_error()
+handles sink failures.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from drakkar.models import (
     ExecutorResult,
     ExecutorTask,
     InputT,
+    MessageGroup,
     OutputT,
     PendingContext,
     SourceMessage,
@@ -38,7 +40,8 @@ class DrakkarHandler(Protocol):
     async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig: ...
     async def on_ready(self, config: DrakkarConfig, db_pool: object) -> None: ...
     async def arrange(self, messages: list[SourceMessage], pending: PendingContext) -> list[ExecutorTask]: ...
-    async def collect(self, result: ExecutorResult) -> CollectResult | None: ...
+    async def on_task_complete(self, result: ExecutorResult) -> CollectResult | None: ...
+    async def on_message_complete(self, group: MessageGroup) -> CollectResult | None: ...
     async def on_window_complete(
         self, results: list[ExecutorResult], source_messages: list[SourceMessage]
     ) -> CollectResult | None: ...
@@ -65,22 +68,37 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
     Users extend this class and must override ``arrange()``.
     All other hooks have sensible defaults.
 
-    Hooks:
+    Hooks (all three output hooks are independent; use any combination):
         arrange(messages, pending) -> list[ExecutorTask]
             Required. Groups source messages into subprocess tasks.
 
-        collect(result) -> CollectResult | None
-            Process each executor result. Return a CollectResult with
-            sink payloads to deliver::
+        on_task_complete(result) -> CollectResult | None
+            Called per successful task. Return a CollectResult with
+            sink payloads for THIS task's result::
 
                 return CollectResult(
                     kafka=[KafkaPayload(data=my_output, key=b"abc")],
                     postgres=[PostgresPayload(table="results", data=my_output)],
                 )
 
+            Use for 1-in → N-out fanout (one result → multiple sink
+            messages with full detail).
+
+        on_message_complete(group) -> CollectResult | None
+            Called once per source message, after ALL tasks derived from
+            that message have reached a terminal state. Receives a
+            ``MessageGroup`` summarising the whole fan-out for that
+            message. Use for N-in → 1-out aggregation (many tasks →
+            single summary row).
+
+            Offsets are committed *after* this hook fires — any sink
+            emissions here are guaranteed delivered-or-failed before
+            Kafka advances the consumer offset for this message.
+
         on_window_complete(results, source_messages) -> CollectResult | None
-            Called after all tasks in a window complete. Use for
-            aggregation across the full window.
+            Called after all tasks in an arrange() window complete.
+            Coarser granularity than on_message_complete: useful for
+            batch-level metrics or summaries that span many messages.
 
         on_error(task, error) -> ErrorAction | list[ExecutorTask]
             Handle executor failures. Return RETRY, SKIP, or new tasks.
@@ -156,7 +174,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
         """
         raise NotImplementedError('arrange() must be implemented by the user')
 
-    async def collect(
+    async def on_task_complete(
         self,
         result: ExecutorResult,
     ) -> CollectResult | None:
@@ -164,7 +182,37 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
 
         Called after each task completes successfully. Return a
         CollectResult with payloads for configured sinks, or None
-        to skip delivery for this result.
+        to skip per-task delivery (e.g. when you aggregate in
+        on_message_complete instead).
+        """
+        return None
+
+    async def on_message_complete(
+        self,
+        group: MessageGroup,
+    ) -> CollectResult | None:
+        """Aggregate outcome for a single source message's task fan-out.
+
+        Fires once per source message AFTER every task derived from that
+        message has reached a terminal state (success, SKIP, retries
+        exhausted, or replaced by a subsequent replacement-chain that
+        itself terminated). Receives a ``MessageGroup`` containing:
+
+          - ``source_message`` — the original SourceMessage
+          - ``tasks`` — full task history (includes replaced tasks)
+          - ``results`` — list[ExecutorResult] for terminal successes
+          - ``errors`` — list[ExecutorError] for terminal failures that
+            the on_error hook chose to stop on (SKIP or retries exhausted).
+            Does NOT include errors whose on_error returned a replacement
+            list — those are not terminal failures of the group.
+          - ``started_at`` / ``finished_at`` — wall-clock timing
+
+        Return a CollectResult to emit aggregate sink payloads, or None.
+
+        Independent of on_task_complete — both can fire for the same
+        tasks (e.g. per-task detail via on_task_complete, per-message
+        rollup via on_message_complete). Offsets are committed
+        immediately after this hook returns.
         """
         return None
 
@@ -173,10 +221,12 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
         results: list[ExecutorResult],
         source_messages: list[SourceMessage],
     ) -> CollectResult | None:
-        """Called after all tasks in a window have completed.
+        """Called after all tasks in an arrange() window have completed.
 
-        Use for aggregation, summary metrics, or batch-level outputs.
-        Return a CollectResult or None.
+        Coarser than on_message_complete — useful for batch-level
+        summaries across messages in the same arrange() call. By the
+        time this fires, each message's offset may already have been
+        committed (see on_message_complete).
         """
         return None
 

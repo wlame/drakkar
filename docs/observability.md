@@ -90,7 +90,7 @@ metrics:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `drakkar_handler_duration_seconds` | Histogram | `hook` (`arrange`, `collect`, `on_error`, `on_window_complete`, etc.) | Duration of user handler hook execution. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30 |
+| `drakkar_handler_duration_seconds` | Histogram | `hook` (`arrange`, `on_task_complete`, `on_message_complete`, `on_error`, `on_window_complete`, etc.) | Duration of user handler hook execution. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30 |
 
 ### User-Defined Metrics
 
@@ -111,7 +111,7 @@ class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
         'Time spent parsing executor output',
     )
 
-    async def collect(self, result):
+    async def on_task_complete(self, result):
         with self.parse_duration.time():
             items = parse_output(result.stdout)
         self.items_parsed.inc(len(items))
@@ -221,7 +221,7 @@ Every log line includes these fields, bound once at startup:
 The framework binds additional fields for specific operations using `structlog.contextvars`. These appear on all log lines within that context:
 
 - `partition` -- bound during partition processing
-- `hook` -- bound during handler hook execution (e.g., `arrange`, `collect`)
+- `hook` -- bound during handler hook execution (e.g., `arrange`, `on_task_complete`, `on_message_complete`)
 - `task_id` -- bound during task execution and result handling
 
 ### Usage in Handler Code
@@ -350,7 +350,7 @@ Detailed view of a single task's lifecycle:
 - **CLI** -- reconstructed command line (`binary_path` + `args`)
 - **stdout/stderr** -- captured process output (subject to `output_min_duration_ms` threshold)
 - **Source offsets** -- which Kafka offsets this task covers
-- **Event timeline** -- chronological list of all events for this task_id (started, completed/failed, collect_completed)
+- **Event timeline** -- chronological list of all events for this task_id (started, completed/failed, task_complete)
 
 ---
 
@@ -395,7 +395,9 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, and `labels` (
 | `task_started` | Subprocess launched (after semaphore acquired) | `task_id`, `partition`, `args`, `pid`, `labels`, `metadata` (source_offsets, slot) |
 | `task_completed` | Subprocess finished with exit 0 | `task_id`, `duration`, `exit_code`, `stdout`, `stderr`, `pid`, `labels` |
 | `task_failed` | Subprocess failed (non-zero exit, timeout, crash) | `task_id`, `duration`, `exit_code`, `pid`, `labels`, `metadata` (exception) |
-| `collect_completed` | `collect()` hook finishes | `task_id`, `partition`, `duration`, `metadata` (output_message_count) |
+| `task_complete` | `on_task_complete()` hook finishes for one task | `task_id`, `partition`, `duration`, `metadata` (output_message_count) |
+| `message_complete` | `on_message_complete()` hook finishes for one source message | `partition`, `offset`, `duration`, `metadata` (task_count, succeeded, failed, replaced, output_message_count) |
+| `window_complete` | `on_window_complete()` hook finishes for one arrange() window | `partition`, `duration`, `metadata` (window_id, task_count, output_message_count) |
 | `produced` | Kafka payload delivered to output topic | `partition`, `offset`, `output_topic` |
 | `sink_delivered` | Sink delivery succeeds | `metadata` (sink_type, sink_name, payload_count, duration) |
 | `sink_error` | Sink delivery fails | `metadata` (sink_type, sink_name, error, attempt) |
@@ -639,8 +641,8 @@ The trace feature on the `/debug` page searches for a message's lifecycle
 across all workers in the cluster. Two search modes are available:
 
 **By partition:offset** -- given a partition and offset, finds the
-consumed event and all related task events (started, completed, failed,
-collect_completed, produced, committed).
+consumed event and all related events (task_started, task_completed,
+task_failed, task_complete, message_complete, produced, committed).
 
 **By label** -- given a label key and value (e.g., `request_id=abc-123`),
 finds all tasks whose [labels](handler.md#task-labels) match and returns

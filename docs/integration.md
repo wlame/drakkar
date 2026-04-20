@@ -99,7 +99,7 @@ Each search message flows through:
 
 1. [arrange()](handler.md#arrange-required) -- creates a ripgrep task with CLI args
 2. Executor runs `/usr/local/bin/run-rg` (ripgrep wrapper)
-3. [collect()](handler.md#collect) routes results based on match count:
+3. [on_task_complete()](handler.md#on_task_complete) routes results based on match count:
    - **Always**: Kafka (full result), Postgres (metrics row), MongoDB (archive), Redis (cached summary)
    - **match_count > 20**: HTTP webhook notification
    - **match_count > 50**: JSONL file log
@@ -112,7 +112,7 @@ Same source topic, different consumer group. Each message:
 
 1. `arrange()` -- creates a symbol-count task
 2. Executor runs `count-symbols.sh` (character counter)
-3. `collect()` -- sends count to `symbol-counts` Kafka topic
+3. `on_task_complete()` -- sends count to `symbol-counts` Kafka topic
 
 Fast tasks finish in milliseconds, demonstrating [duration threshold](observability.md#duration-thresholds)
 filtering and high-throughput behavior.
@@ -145,7 +145,7 @@ Three tabs, all WebSocket-powered:
 
 - **Arrange** -- recent [arrange()](handler.md#arrange-required) calls with [message labels](handler.md#message_label), task counts, durations
 - **Executors** -- scrollable timeline with task bars (green=completed, yellow=running, red=failed). Hover for task detail. Zoom in/out with +/- buttons.
-- **Collect** -- recent [collect()](handler.md#collect) completions with output counts
+- **Collect** -- recent [on_task_complete()](handler.md#on_task_complete) completions with output counts
 
 The pool utilization bar and running/finished task tables update in
 real time. [Task labels](handler.md#task-labels) (`request_id`, `pattern`) appear in the Labels

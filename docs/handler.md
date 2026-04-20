@@ -181,25 +181,28 @@ async def arrange(self, messages, pending):
 If `arrange()` returns an empty list, all message offsets are immediately
 marked complete and committed.
 
-### collect
+### on_task_complete
 
 ```python
-async def collect(self, result: ExecutorResult) -> CollectResult | None
+async def on_task_complete(self, result: ExecutorResult) -> CollectResult | None
 ```
 
 Called after each task completes successfully (exit code 0). Runs in
 the context of the same partition that produced the task via `arrange()`.
-Multiple `collect()` calls from the same window may run concurrently as
-tasks finish in any order.
+Multiple `on_task_complete()` calls from the same window may run concurrently
+as tasks finish in any order.
 
-Process the [ExecutorResult](executor.md#executorresult) and return a [CollectResult](sinks.md#collectresult) with payloads
-for one or more sinks, or `None` to skip delivery. See [Sinks](sinks.md) for all available payload types.
+Process the [ExecutorResult](executor.md#executorresult) and return a
+[CollectResult](sinks.md#collectresult) with payloads for one or more
+sinks, or `None` to skip per-task delivery (for example when you
+aggregate in [`on_message_complete`](#on_message_complete) instead).
+See [Sinks](sinks.md) for all available payload types.
 
 The `result.task` field carries the original [ExecutorTask](executor.md#executortask), including
 its `metadata` dict.
 
 ```python
-async def collect(self, result: dk.ExecutorResult) -> dk.CollectResult | None:
+async def on_task_complete(self, result: dk.ExecutorResult) -> dk.CollectResult | None:
     meta = result.task.metadata
     matches = result.stdout.strip().splitlines()
 
@@ -227,6 +230,69 @@ async def collect(self, result: dk.ExecutorResult) -> dk.CollectResult | None:
 
     return sinks
 ```
+
+### on_message_complete
+
+```python
+async def on_message_complete(self, group: MessageGroup) -> CollectResult | None
+```
+
+Called **once per source message**, after every task derived from that
+message has reached a terminal state. Receives a
+[MessageGroup](#messagegroup) summarising the whole fan-out — use for
+N-in → 1-out aggregation where one message produces many subprocess
+tasks but you want a single aggregated record as output.
+
+Offsets are committed **after** this hook fires — any sink emissions
+here are guaranteed delivered-or-failed before the consumer offset
+advances for this message.
+
+```python
+async def on_message_complete(self, group: dk.MessageGroup) -> dk.CollectResult | None:
+    req: SearchRequest = group.source_message.payload
+    if req is None or group.is_empty:
+        return None
+
+    total_matches = sum(
+        sum(1 for line in r.stdout.split('\n') if line)
+        for r in group.results
+    )
+
+    aggregate = RequestSummary(
+        request_id=req.request_id,
+        total_tasks=group.total,
+        succeeded=group.succeeded,
+        failed=group.failed,
+        total_matches=total_matches,
+    )
+
+    return dk.CollectResult(
+        kafka=[dk.KafkaPayload(data=aggregate, key=req.request_id.encode(), sink='summaries')],
+    )
+```
+
+See the [Fan-out](fan-out.md) page for a complete walkthrough, the full
+`MessageGroup` schema with properties, error-path semantics,
+replacement-chain tracing via `parent_task_id`, and offset commit
+ordering.
+
+### MessageGroup
+
+Passed to `on_message_complete`. Contains every task scheduled for a
+single source message, the terminal outcomes, and the wall-clock timing.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `source_message` | `SourceMessage` | the original Kafka input |
+| `tasks` | `list[ExecutorTask]` | full history — includes replaced tasks |
+| `results` | `list[ExecutorResult]` | terminal successes |
+| `errors` | `list[ExecutorError]` | terminal failures (SKIP / retries exhausted) |
+| `started_at`, `finished_at` | `float` | monotonic timestamps |
+
+Convenience properties: `succeeded`, `failed`, `total`, `replaced`,
+`all_succeeded`, `any_failed`, `is_empty`, `duration_seconds`.
+
+Full details and examples on the [Fan-out](fan-out.md) page.
 
 ### on_window_complete
 
@@ -524,7 +590,7 @@ Labels appear on:
 - The debug trace view
 
 Labels are purely for display. Use `metadata` for data you need in
-`collect()` or `on_error()`.
+`on_task_complete()`, `on_message_complete()`, or `on_error()`.
 
 ---
 
@@ -589,7 +655,7 @@ class MyHandler(dk.BaseDrakkarHandler[MyInput, MyOutput]):
         buckets=(0, 1, 5, 10, 50, 100, 500),
     )
 
-    async def collect(self, result):
+    async def on_task_complete(self, result):
         self.items_processed.inc()
         self.match_count.observe(len(result.stdout.splitlines()))
         ...

@@ -15,8 +15,9 @@ PayloadT = TypeVar('PayloadT', bound=BaseModel)
 class BaseSink(ABC, Generic[PayloadT]):
     """Abstract base class for all sink implementations.
 
-    A sink receives payloads from the framework after collect() or
-    on_window_complete() and delivers them to an external system.
+    A sink receives payloads from the framework after on_task_complete(),
+    on_message_complete(), or on_window_complete() and delivers them to
+    an external system.
 
     Lifecycle:
         1. __init__(name, config) — store configuration

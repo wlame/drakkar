@@ -250,7 +250,7 @@ function toggleSection(name) {
     var traceStatus = document.getElementById('trace-status');
     var traceResult = document.getElementById('trace-result');
 
-    var evtColors = {consumed:'#2563eb', arranged:'#0d9488', task_started:'#d97706', task_completed:'#059669', task_failed:'#dc2626', collect_completed:'#7c3aed', produced:'#9333ea', committed:'#6b7280'};
+    var evtColors = {consumed:'#2563eb', arranged:'#0d9488', task_started:'#d97706', task_completed:'#059669', task_failed:'#dc2626', task_complete:'#7c3aed', message_complete:'#a855f7', window_complete:'#c084fc', produced:'#9333ea', committed:'#6b7280'};
 
     function fmtTimeMs(ts) { return ts ? new Date(ts * 1000).toISOString().substring(11, 23) : ''; }
     function durColor(d) { return d > 1 ? '#dc2626' : d > 0.1 ? '#d97706' : '#059669'; }

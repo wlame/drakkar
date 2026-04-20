@@ -50,7 +50,7 @@ detailed bottleneck analysis and tuning strategies.
 <div class="row">
   <label>Sink count</label>
   <input type="number" id="in-sinks" value="2" min="1" max="10">
-  <span class="hint">distinct sinks in collect()</span>
+  <span class="hint">distinct sinks in on_task_complete()</span>
 </div>
 <div class="row">
   <label>Avg stdout size (KB)</label>
@@ -285,7 +285,7 @@ understand how well the worker is performing and where to tune further.
 | Metric | Good | Bad | Action |
 |--------|------|-----|--------|
 | `histogram_quantile(0.95, rate(drakkar_handler_duration_seconds_bucket{hook="arrange"}[5m]))` | << task duration | Comparable to or exceeding task duration | `arrange()` is the bottleneck — cache lookups, reduce I/O |
-| `histogram_quantile(0.95, rate(drakkar_handler_duration_seconds_bucket{hook="collect"}[5m]))` | << task duration | High | `collect()` is doing too much work — move heavy logic elsewhere |
+| `histogram_quantile(0.95, rate(drakkar_handler_duration_seconds_bucket{hook="on_task_complete"}[5m]))` | << task duration | High | `on_task_complete()` is doing too much work — move heavy logic elsewhere |
 
 ### Iterating on config
 

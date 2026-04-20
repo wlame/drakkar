@@ -54,7 +54,7 @@ class ExecutorTask(BaseModel):
     )
     metadata: dict = Field(
         default_factory=dict,
-        description='Arbitrary key-value data carried through the pipeline. Accessible in collect().',
+        description='Arbitrary key-value data carried through the pipeline. Accessible in on_task_complete().',
     )
     source_offsets: list[int] = Field(
         description=(
@@ -95,6 +95,17 @@ class ExecutorTask(BaseModel):
             'When None, the process stdin is not connected.'
         ),
     )
+    parent_task_id: str | None = Field(
+        default=None,
+        description=(
+            'task_id of the task this one was created to REPLACE. Set by the '
+            'framework automatically when on_error returns a replacement list '
+            '(unless the handler already set it explicitly). None for tasks '
+            'produced directly by arrange(). Useful in on_message_complete '
+            'to walk the replacement chain: task.parent_task_id -> original '
+            'failure -> its parent -> ... up to the arrange()-produced root.'
+        ),
+    )
 
 
 class ExecutorResult(BaseModel):
@@ -107,7 +118,7 @@ class ExecutorResult(BaseModel):
         description='Wall-clock time from process start to completion, rounded to 3 decimal places.'
     )
     task: ExecutorTask = Field(
-        description='The originating ExecutorTask, available for context in collect() and on_error().'
+        description='The originating ExecutorTask, available for context in on_task_complete() and on_error().'
     )
     pid: int | None = Field(
         default=None,
@@ -150,6 +161,101 @@ class PendingContext(BaseModel):
         default_factory=set,
         description='Set of in-flight task IDs. Used for O(1) membership checks.',
     )
+
+
+class MessageGroup(BaseModel):
+    """All tasks and outcomes derived from a single source message.
+
+    Passed to ``BaseDrakkarHandler.on_message_complete`` after every task
+    scheduled from one SourceMessage has reached a terminal state.
+
+    Terminal means: succeeded, SKIP'd via ``on_error``, or exhausted
+    its retry budget. When ``on_error`` returns a replacement list,
+    the original task is considered "replaced" (not terminal) and the
+    replacements take its place in the lifecycle — the group only
+    completes when the replacement chain itself terminates.
+
+    Note on membership:
+      - ``tasks`` is the FULL scheduled history for this message,
+        including tasks that were later replaced via on_error list-return.
+        Kept for debuggability — a user may want to inspect what was
+        attempted even if the final outcome came from a replacement.
+      - ``results`` and ``errors`` count only TERMINAL outcomes. A task
+        replaced via on_error contributes to neither (its successors do).
+        So ``len(tasks)`` may exceed ``len(results) + len(errors)``; the
+        difference is the count of replaced tasks.
+
+    See also: ``SourceGroup`` (a future, not-yet-implemented extension
+    for aggregating across multiple source messages).
+    """
+
+    source_message: SourceMessage = Field(description='The originating Kafka message.')
+    tasks: list[ExecutorTask] = Field(
+        default_factory=list,
+        description=(
+            'Every task that was scheduled for this message, including '
+            'tasks later replaced via on_error list-return. Full history.'
+        ),
+    )
+    results: list[ExecutorResult] = Field(
+        default_factory=list,
+        description='Terminal successes, in completion order.',
+    )
+    errors: list[ExecutorError] = Field(
+        default_factory=list,
+        description=(
+            'Terminal failures (SKIP or retries exhausted). Does not '
+            'include originals that were replaced via on_error — those '
+            'are not considered terminal failures of the group.'
+        ),
+    )
+    started_at: float = Field(
+        description='Monotonic timestamp when arrange() produced the first task of this group.',
+    )
+    finished_at: float = Field(
+        default=0.0,
+        description='Monotonic timestamp when the last task reached a terminal state.',
+    )
+
+    @property
+    def succeeded(self) -> int:
+        """Number of tasks in this group that terminally succeeded."""
+        return len(self.results)
+
+    @property
+    def failed(self) -> int:
+        """Number of tasks in this group that terminally failed."""
+        return len(self.errors)
+
+    @property
+    def total(self) -> int:
+        """Total tasks ever scheduled for this group (includes replaced)."""
+        return len(self.tasks)
+
+    @property
+    def replaced(self) -> int:
+        """Tasks that were replaced via on_error — the delta between scheduled and terminal."""
+        return max(0, self.total - self.succeeded - self.failed)
+
+    @property
+    def all_succeeded(self) -> bool:
+        """True if at least one task existed and every terminal outcome was a success."""
+        return self.failed == 0 and self.succeeded > 0
+
+    @property
+    def any_failed(self) -> bool:
+        """True if any task ended in a terminal failure state."""
+        return self.failed > 0
+
+    @property
+    def is_empty(self) -> bool:
+        """True if arrange() produced no tasks for this message."""
+        return self.total == 0
+
+    @property
+    def duration_seconds(self) -> float:
+        """Wall-clock duration from first task scheduled to last terminal outcome."""
+        return max(0.0, self.finished_at - self.started_at)
 
 
 # --- Sink payload models ---
@@ -252,7 +358,8 @@ class FilePayload(BaseModel):
 
 
 class CollectResult(BaseModel):
-    """Result returned by collect() and on_window_complete() hooks.
+    """Result returned by on_task_complete(), on_message_complete(), and
+    on_window_complete() hooks.
 
     Each field holds payloads destined for a specific sink type.
     The framework routes each payload to the matching configured sink,
@@ -264,7 +371,7 @@ class CollectResult(BaseModel):
     Example::
 
         class MyHandler(BaseDrakkarHandler):
-            async def collect(self, result):
+            async def on_task_complete(self, result):
                 output = MyOutput(request_id="abc", answer="42")
                 return CollectResult(
                     kafka=[KafkaPayload(data=output, key=b"abc")],

@@ -149,7 +149,7 @@ class SinkManager:
                 return candidates[0]
             if len(candidates) == 0:
                 raise SinkNotConfiguredError(
-                    f'No {sink_type!r} sink configured, but collect() returned {sink_type} payloads'
+                    f'No {sink_type!r} sink configured, but the handler returned {sink_type} payloads'
                 )
             names = [s.name for s in candidates]
             raise AmbiguousSinkError(
@@ -159,7 +159,7 @@ class SinkManager:
         key = (sink_type, sink_name)
         if key not in self._sinks:
             raise SinkNotConfiguredError(
-                f'Sink {sink_type!r}/{sink_name!r} not configured, but collect() returned a payload targeting it'
+                f'Sink {sink_type!r}/{sink_name!r} not configured, but the handler returned a payload targeting it'
             )
         return self._sinks[key]
 
@@ -192,7 +192,8 @@ class SinkManager:
         the returned action (DLQ, RETRY, SKIP).
 
         Args:
-            result: The CollectResult from collect() or on_window_complete().
+            result: The CollectResult from on_task_complete(),
+                on_message_complete(), or on_window_complete().
             on_delivery_error: Handler callback for delivery failures.
             partition_id: Source partition (for DLQ metadata).
             max_retries: Max delivery retry attempts before falling through to DLQ.

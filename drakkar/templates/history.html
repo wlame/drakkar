@@ -15,10 +15,10 @@
 <div class="mb-4">
     <label class="block text-xs text-gray-400 mb-2">Event types</label>
     <div class="flex flex-wrap gap-3">
-        {% for et in ['consumed', 'arranged', 'task_started', 'task_completed', 'task_failed', 'collect_completed', 'produced', 'committed'] %}
+        {% for et in ['consumed', 'arranged', 'task_started', 'task_completed', 'task_failed', 'task_complete', 'message_complete', 'window_complete', 'produced', 'committed'] %}
         <label class="flex items-center gap-1 text-sm cursor-pointer">
             <input type="checkbox" class="evt-cb" value="{{ et }}" checked onchange="applyFilters()">
-            <span class="{% if et == 'task_completed' %}text-emerald-600{% elif et == 'task_failed' %}text-red-600{% elif et == 'task_started' %}text-amber-600{% elif et == 'collect_completed' %}text-purple-600{% elif et == 'arranged' %}text-teal-600{% else %}text-gray-500{% endif %}">{{ et }}</span>
+            <span class="{% if et == 'task_completed' %}text-emerald-600{% elif et == 'task_failed' %}text-red-600{% elif et == 'task_started' %}text-amber-600{% elif et == 'task_complete' %}text-purple-600{% elif et == 'message_complete' %}text-purple-500{% elif et == 'window_complete' %}text-purple-400{% elif et == 'arranged' %}text-teal-600{% else %}text-gray-500{% endif %}">{{ et }}</span>
         </label>
         {% endfor %}
     </div>
@@ -70,7 +70,8 @@ function fmtTimeMs(ts) {
 var evtColors = {
     consumed:'text-blue-600', arranged:'text-teal-600', task_started:'text-amber-600',
     task_completed:'text-emerald-600', task_failed:'text-red-600',
-    collect_completed:'text-purple-600', produced:'text-purple-500', committed:'text-gray-500'
+    task_complete:'text-purple-600', message_complete:'text-purple-500', window_complete:'text-purple-400',
+    produced:'text-purple-500', committed:'text-gray-500'
 };
 
 function createRow(e) {

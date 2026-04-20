@@ -29,9 +29,9 @@ relative proportions hold.
 | **Pipe read** | Read stdout/stderr from pipes, decode UTF-8 | ~10-50us (depends on output size) |
 | **Pydantic model creation** | Build `ExecutorResult` model | ~10us |
 | **record_task_completed** | JSON-encode, buffer event, deferred WS check | ~20us |
-| **collect()** | Your hook -- builds CollectResult with payloads | User-defined |
+| **on_task_complete()** | Your hook -- builds CollectResult with payloads | User-defined |
 | **Sink delivery** | Send payloads to Kafka/Postgres/Mongo/etc. | ~0.5-5ms per sink (network I/O) |
-| **record_collect_completed** | Buffer event | ~10us |
+| **record_task_complete** | Buffer event | ~10us |
 | **Offset tracking** | Mark offsets complete, check committable watermark | ~5us |
 | **Offset commit** | `consumer.commit()` to Kafka | ~5-20ms (but async, non-blocking) |
 
@@ -63,7 +63,7 @@ thread. The event loop handles:
 
 - Kafka polling
 - Message deserialization
-- [arrange()](handler.md#arrange-required) / [collect()](handler.md#collect) / [on_error()](handler.md#on_error) calls
+- [arrange()](handler.md#arrange-required) / [on_task_complete()](handler.md#on_task_complete) / [on_error()](handler.md#on_error) calls
 - Subprocess launch and completion callbacks
 - [Flight recorder](observability.md#flight-recorder) event buffering
 - [Prometheus metric](observability.md#prometheus-metrics) updates
@@ -79,21 +79,21 @@ completions per second hitting the event loop. Each completion triggers:
 
 1. Subprocess completion handling (~5us)
 2. `record_task_completed()` (~20us)
-3. `collect()` (user code)
-4. `record_collect_completed()` (~10us)
+3. `on_task_complete()` (user code)
+4. `record_task_complete()` (~10us)
 5. Sink delivery dispatch (~5us to queue, actual I/O is async)
 6. Offset complete + committable scan (~5us)
 7. Prometheus metric updates (~10us)
 8. `asyncio.Task` cleanup (~5us)
 
-Total event loop time per completion: **~60us + collect() duration**.
+Total event loop time per completion: **~60us + on_task_complete() duration**.
 At 2,700/sec, that's ~160ms/sec of event loop time -- well within
 budget for a single core. **The event loop is not the bottleneck** for
 most workloads.
 
 It becomes the bottleneck when:
 
-- `arrange()` or `collect()` do heavy CPU work (avoid this -- keep them fast)
+- `arrange()` or `on_task_complete()` do heavy CPU work (avoid this -- keep them fast)
 - You run 200+ executors with sub-5ms tasks (>40,000 completions/sec)
 - Debug recording is enabled with `event_min_duration_ms: 0` and very high throughput
 
@@ -152,7 +152,7 @@ blocks the partition pipeline for the duration of that call.
 ### Mitigation
 
 - Keep `arrange()` fast -- do lookups in [on_ready()](handler.md#on_ready) and cache results
-- If you need per-message lookups, do them in [collect()](handler.md#collect) instead (runs
+- If you need per-message lookups, do them in [on_task_complete()](handler.md#on_task_complete) instead (runs
   concurrently per task)
 - Use more partitions to parallelize across partition processors
 
@@ -388,8 +388,8 @@ histogram_quantile(0.95, rate(drakkar_executor_duration_seconds_bucket[5m]))
 # arrange() duration (should be << task duration)
 histogram_quantile(0.95, rate(drakkar_handler_duration_seconds_bucket{hook="arrange"}[5m]))
 
-# collect() duration (should be << task duration)
-histogram_quantile(0.95, rate(drakkar_handler_duration_seconds_bucket{hook="collect"}[5m]))
+# on_task_complete() duration (should be << task duration)
+histogram_quantile(0.95, rate(drakkar_handler_duration_seconds_bucket{hook="on_task_complete"}[5m]))
 
 # Executor idle waste — slot-seconds wasted while messages wait in queues
 rate(drakkar_executor_idle_slot_seconds_total[5m])

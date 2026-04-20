@@ -33,11 +33,11 @@ async def test_base_handler_arrange_raises(
         await handler.arrange([source_message], PendingContext())
 
 
-async def test_base_handler_collect_returns_none(
+async def test_base_handler_on_task_complete_returns_none(
     handler: BaseDrakkarHandler,
     executor_result: ExecutorResult,
 ):
-    result = await handler.collect(executor_result)
+    result = await handler.on_task_complete(executor_result)
     assert result is None
 
 

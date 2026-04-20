@@ -566,7 +566,7 @@ async def test_all_event_types_persisted(recorder):
     recorder.record_task_started(task, partition=1, pool_active=2, pool_waiting=3, slot=0)
     recorder.record_task_completed(result, partition=1, pool_active=1, pool_waiting=0)
     recorder.record_task_failed(task, error, partition=1)
-    recorder.record_collect_completed(task_id='t-all', partition=1, duration=0.05, output_message_count=2)
+    recorder.record_task_complete(task_id='t-all', partition=1, duration=0.05, output_message_count=2)
     recorder.record_produced(out_msg, source_partition=1, source_offset=10)
     recorder.record_committed(partition=1, offset=11)
     recorder.record_assigned([1, 2])
@@ -585,7 +585,7 @@ async def test_all_event_types_persisted(recorder):
         'task_started',
         'task_completed',
         'task_failed',
-        'collect_completed',
+        'task_complete',
         'produced',
         'committed',
         'assigned',
@@ -596,12 +596,12 @@ async def test_all_event_types_persisted(recorder):
     assert event_types == expected, f'missing: {expected - event_types}, extra: {event_types - expected}'
 
 
-async def test_collect_completed_persisted(recorder):
-    """collect_completed event stores task_id, duration, and output_message_count."""
-    recorder.record_collect_completed(task_id='t-cc', partition=2, duration=0.123, output_message_count=5)
+async def test_task_complete_persisted(recorder):
+    """task_complete event stores task_id, duration, and output_message_count."""
+    recorder.record_task_complete(task_id='t-cc', partition=2, duration=0.123, output_message_count=5)
     await recorder._flush()
 
-    events = await recorder.get_events(event_type='collect_completed')
+    events = await recorder.get_events(event_type='task_complete')
     assert len(events) == 1
     e = events[0]
     assert e['task_id'] == 't-cc'
@@ -612,6 +612,62 @@ async def test_collect_completed_persisted(recorder):
 
     meta = json.loads(e['metadata'])
     assert meta['output_message_count'] == 5
+
+
+async def test_message_complete_persisted(recorder):
+    """message_complete event stores the per-message aggregate snapshot."""
+    recorder.record_message_complete(
+        partition=3,
+        offset=42,
+        duration=0.5,
+        task_count=6,
+        succeeded=4,
+        failed=1,
+        replaced=1,
+        output_message_count=2,
+    )
+    await recorder._flush()
+
+    events = await recorder.get_events(event_type='message_complete')
+    assert len(events) == 1
+    e = events[0]
+    assert e['partition'] == 3
+    assert e['offset'] == 42
+    assert e['duration'] == 0.5
+
+    import json
+
+    meta = json.loads(e['metadata'])
+    assert meta['task_count'] == 6
+    assert meta['succeeded'] == 4
+    assert meta['failed'] == 1
+    assert meta['replaced'] == 1
+    assert meta['output_message_count'] == 2
+
+
+async def test_window_complete_persisted(recorder):
+    """window_complete event stores the per-window task count + duration."""
+    recorder.record_window_complete(
+        partition=7,
+        window_id=11,
+        duration=1.25,
+        task_count=10,
+        output_message_count=0,
+    )
+    await recorder._flush()
+
+    events = await recorder.get_events(event_type='window_complete')
+    assert len(events) == 1
+    e = events[0]
+    assert e['partition'] == 7
+    assert e['duration'] == 1.25
+
+    import json
+
+    meta = json.loads(e['metadata'])
+    assert meta['window_id'] == 11
+    assert meta['task_count'] == 10
+    assert meta['output_message_count'] == 0
 
 
 # --- Rotation smoothness ---

@@ -287,15 +287,15 @@ async def test_handler_arrange_duration_observed():
     await proc.stop()
 
 
-async def test_handler_collect_duration_observed():
-    """collect() hook execution time is observed in handler_duration(hook=collect)."""
+async def test_handler_on_task_complete_duration_observed():
+    """on_task_complete() hook execution time is observed in handler_duration(hook=on_task_complete)."""
     pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
 
     class CollectHandler(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
             return [ExecutorTask(task_id=f'c-{m.offset}', args=['x'], source_offsets=[m.offset]) for m in messages]
 
-        async def collect(self, result):
+        async def on_task_complete(self, result):
             from pydantic import BaseModel as BM
 
             class _Out(BM):
@@ -310,10 +310,10 @@ async def test_handler_collect_duration_observed():
         window_size=10,
     )
 
-    before = histogram_sum(handler_duration, hook='collect')
+    before = histogram_sum(handler_duration, hook='on_task_complete')
     proc.enqueue(make_msg(partition=91, offset=0))
     proc.start()
-    await wait_for(lambda: histogram_sum(handler_duration, hook='collect') > before)
+    await wait_for(lambda: histogram_sum(handler_duration, hook='on_task_complete') > before)
     await proc.stop()
 
 

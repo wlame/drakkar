@@ -89,11 +89,23 @@ def make_repeat() -> int:
 
 
 def make_message() -> dict:
-    req = random.choice(SEARCH_REQUESTS)
+    """One SearchRequest with multiple patterns and files.
+
+    Each request fans out to len(patterns) x len(file_paths) subprocess
+    tasks in the worker. The worker's on_message_complete then emits a
+    single aggregate record once all those tasks finish.
+
+    Shape chosen to match the handler's min/max=1-3 patterns, 1-2 files.
+    """
+    num_patterns = random.choices([1, 2, 3], weights=[2, 3, 2])[0]
+    num_paths = random.choices([1, 2], weights=[3, 2])[0]
+    picks = random.sample(SEARCH_REQUESTS, k=max(num_patterns, num_paths))
+    patterns = list({p['pattern'] for p in picks[:num_patterns]})
+    file_paths = list({p['file_path'] for p in picks[:num_paths]})
     return {
         'request_id': str(uuid.uuid4()),
-        'pattern': req['pattern'],
-        'file_path': req['file_path'],
+        'patterns': patterns,
+        'file_paths': file_paths,
         'repeat': make_repeat(),
     }
 

@@ -2,7 +2,7 @@
 
 These are user-defined metrics specific to this pipeline, not framework
 metrics. Define them at module level so they're registered once on import.
-Use them in handler hooks like collect() and on_error().
+Use them in handler hooks like on_task_complete(), on_message_complete(), and on_error().
 """
 
 from prometheus_client import Counter, Histogram

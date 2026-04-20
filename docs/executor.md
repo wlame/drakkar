@@ -13,7 +13,7 @@ Every subprocess execution starts with an `ExecutorTask` created in your [arrang
 | `task_id` | `str` | (required) | Unique identifier. Use `make_task_id(prefix)` to generate a time-sortable hex ID (e.g., `t-0194a3b2c1d4e5f6-a7c2f1e3`). |
 | `args` | `list[str]` | (required) | CLI arguments appended to the binary path when launching the process. |
 | `source_offsets` | `list[int]` | (required) | Kafka offsets of the source messages that produced this task. Used for [offset watermark tracking](handler.md#offset-commit-logic) -- offsets are committed only after all sinks confirm delivery. |
-| `metadata` | `dict` | `{}` | Arbitrary key-value data carried through the pipeline. Accessible in [collect()](handler.md#collect) via `result.task.metadata`. |
+| `metadata` | `dict` | `{}` | Arbitrary key-value data carried through the pipeline. Accessible in [on_task_complete()](handler.md#on_task_complete) via `result.task.metadata`. |
 | `labels` | `dict[str, str]` | `{}` | User-defined key-value [labels](handler.md#task-labels) shown in the [debug UI](observability.md#debug-ui) (live timeline, task detail page, trace view). Useful for `request_id`, `user_id`, or other domain identifiers. |
 | `env` | `dict[str, str]` | `{}` | Per-task environment variables. Merged on top of `executor.env` from config (task overrides config on key conflict). See [Environment Variables](#environment-variables). |
 | `binary_path` | `str \| None` | `None` | Per-task binary override. Takes precedence over `executor.binary_path` from config. |
@@ -97,7 +97,7 @@ The entire `communicate()` call is wrapped in `asyncio.wait_for(timeout=executor
 
 Four outcomes are possible:
 
-**Success (exit code 0)** -- Returns an `ExecutorResult` with captured output. The [collect()](handler.md#collect) hook is called next.
+**Success (exit code 0)** -- Returns an `ExecutorResult` with captured output. The [on_task_complete()](handler.md#on_task_complete) hook is called next.
 
 **Non-zero exit** -- Raises `ExecutorTaskError`. The [on_error()](handler.md#on_error) hook decides what to do.
 
