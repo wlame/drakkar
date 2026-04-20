@@ -11,7 +11,8 @@ right time during the message-processing pipeline. See [Configuration](configura
 | `on_startup(config)` | Before any components are created | Once per worker lifetime | Modified `DrakkarConfig` |
 | `on_ready(config, db_pool)` | After sinks connected, before polling | Once per worker lifetime | `None` |
 | `arrange(messages, pending)` | A window of messages is ready to process | Once per window per partition | `list[`[`ExecutorTask`](executor.md#executortask)`]` |
-| `collect(result)` | A single task completes successfully (exit 0) | Once per successful task | [`CollectResult`](sinks.md#collectresult) `\| None` |
+| `on_task_complete(result)` | A single task completes successfully (exit 0) | Once per successful task | [`CollectResult`](sinks.md#collectresult) `\| None` |
+| `on_message_complete(group)` | All tasks derived from a single source message reached a terminal state | Once per source message | [`CollectResult`](sinks.md#collectresult) `\| None` |
 | `on_window_complete(results, messages)` | All tasks in a window finished | Once per window per partition | [`CollectResult`](sinks.md#collectresult) `\| None` |
 | `on_error(task, error)` | A single task fails (non-zero exit, timeout, crash) | Once per failed task | `ErrorAction \| list[`[`ExecutorTask`](executor.md#executortask)`]` |
 | `on_delivery_error(error)` | A sink's deliver() raises an exception | Once per failed sink delivery batch | `DeliveryAction` |

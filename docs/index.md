@@ -96,7 +96,7 @@ flowchart LR
 ```
 </div>
 
-Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execute &rarr; collect &rarr; deliver &rarr; commit**. A shared executor pool with semaphore-based concurrency limits subprocess parallelism across all partitions.
+Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execute &rarr; on_task_complete &rarr; on_message_complete &rarr; deliver &rarr; commit** (with `on_window_complete` firing at window boundaries for coarser aggregation). A shared executor pool with semaphore-based concurrency limits subprocess parallelism across all partitions.
 
 ## Key Features
 

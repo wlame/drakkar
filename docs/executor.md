@@ -221,7 +221,7 @@ Messages are collected into windows before being passed to [arrange()](handler.m
 3. The window of messages is passed to [arrange()](handler.md#arrange-required), which returns `ExecutorTask` objects.
 4. All tasks in the window are launched concurrently.
 5. The window tracks `completed_count` vs `total_tasks` to know when it is done.
-6. On completion, [on_window_complete()](handler.md#on_window_complete) is called, offsets are marked complete, and a [commit is attempted](handler.md#offset-commit-logic).
+6. As each source message's tasks all reach a terminal state, [on_message_complete()](handler.md#on_message_complete) is called for that message, the offset is marked complete, and a [commit is attempted](handler.md#offset-commit-logic). When every task in the window has finished, [on_window_complete()](handler.md#on_window_complete) fires once for the whole batch.
 
 ### Concurrent Windows
 

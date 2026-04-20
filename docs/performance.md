@@ -18,7 +18,7 @@ relative proportions hold.
 |------|-------------|-----------------|
 | **Kafka poll** | `consumer.consume()` returns batch of messages | ~1ms per batch (amortized across `max_poll_records` messages) |
 | **Enqueue** | Message placed in partition asyncio.Queue, `record_consumed()` event, Prometheus counter increment | ~5us per message |
-| **Window collect** | Drain up to `window_size` messages from queue (non-blocking after first) | ~10us per window |
+| **Window gather** | Drain up to `window_size` messages from the partition queue (non-blocking after first) | ~10us per window |
 | **Deserialize** | `model_validate_json(msg.value)` for each message (if typed handler) | ~10-50us per message (depends on model complexity) |
 | **arrange()** | Your hook -- builds ExecutorTask list | User-defined |
 | **Record arranged** | JSON-encode metadata, write to event buffer | ~20us |
@@ -40,12 +40,12 @@ relative proportions hold.
 ```
 Process launch:      ~3ms    (9% of task wall time)
 Actual work:         ~30ms   (the binary)
-Framework overhead:  ~0.2ms  (arrange + collect + recording + tracking)
+Framework overhead:  ~0.2ms  (arrange + on_task_complete + recording + tracking)
 Sink delivery:       ~1-5ms  (network, per sink, async)
 ```
 
 For a 30ms task, process launch is ~9% overhead -- noticeable but
-manageable. **The framework's own overhead** (arrange, collect,
+manageable. **The framework's own overhead** (arrange, on_task_complete,
 recording, offset tracking) **is negligible at ~200us total.** Sink
 delivery is I/O-bound and runs concurrently with the next task's
 execution.
@@ -63,7 +63,7 @@ thread. The event loop handles:
 
 - Kafka polling
 - Message deserialization
-- [arrange()](handler.md#arrange-required) / [on_task_complete()](handler.md#on_task_complete) / [on_error()](handler.md#on_error) calls
+- [arrange()](handler.md#arrange-required) / [on_task_complete()](handler.md#on_task_complete) / [on_message_complete()](handler.md#on_message_complete) / [on_window_complete()](handler.md#on_window_complete) / [on_error()](handler.md#on_error) calls
 - Subprocess launch and completion callbacks
 - [Flight recorder](observability.md#flight-recorder) event buffering
 - [Prometheus metric](observability.md#prometheus-metrics) updates

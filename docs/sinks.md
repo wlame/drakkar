@@ -1,8 +1,8 @@
 # Sinks
 
-Sinks are pluggable output destinations for processed results. After your [on_task_complete()](handler.md#on_task_complete) or
-[on_window_complete()](handler.md#on_window_complete) hook returns a `CollectResult`, the framework routes each payload to
-the correct sink, serializes the data, and delivers it.
+Sinks are pluggable output destinations for processed results. After your [on_task_complete()](handler.md#on_task_complete),
+[on_message_complete()](handler.md#on_message_complete), or [on_window_complete()](handler.md#on_window_complete) hook
+returns a `CollectResult`, the framework routes each payload to the correct sink, serializes the data, and delivers it.
 
 Drakkar ships with six sink types. You can configure any combination of them, and each type
 supports multiple named instances (e.g., two separate Kafka topics or three Postgres databases).
@@ -388,7 +388,7 @@ Individual payload paths must have existing parent directories.
 
 ## CollectResult
 
-`CollectResult` is the return type of [on_task_complete()](handler.md#on_task_complete) and [on_window_complete()](handler.md#on_window_complete). It has
+`CollectResult` is the return type of [on_task_complete()](handler.md#on_task_complete), [on_message_complete()](handler.md#on_message_complete), and [on_window_complete()](handler.md#on_window_complete). It has
 one list field per sink type. Populate whichever fields match your configured sinks.
 
 ### Complete example

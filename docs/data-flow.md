@@ -2,7 +2,7 @@
 
 ## Architecture Overview
 
-Drakkar is a Python 3.13+ framework that consumes messages from a Kafka topic, fans them out to per-partition async processors, runs user-defined logic as subprocesses, and delivers results to one or more output sinks (Kafka, PostgreSQL, MongoDB, HTTP, Redis, filesystem). The architecture follows a pipeline model: **poll -> partition -> window -> arrange -> execute -> collect -> deliver -> commit**. A single Drakkar worker runs one async event loop (`asyncio.run`) that hosts all partition processors, a shared subprocess executor pool with semaphore-based concurrency control, a sink manager, a dead-letter queue (DLQ), optional Prometheus metrics, and an optional debug flight recorder with a web UI. The user implements a handler class with hooks (`arrange`, `collect`, `on_error`, `on_window_complete`, `on_delivery_error`) that define the application-specific logic; everything else -- Kafka consumption, offset tracking, backpressure, retries, subprocess lifecycle, sink connections, and graceful shutdown -- is managed by the framework.
+Drakkar is a Python 3.13+ framework that consumes messages from a Kafka topic, fans them out to per-partition async processors, runs user-defined logic as subprocesses, and delivers results to one or more output sinks (Kafka, PostgreSQL, MongoDB, HTTP, Redis, filesystem). The architecture follows a pipeline model: **poll -> partition -> window -> arrange -> execute -> on_task_complete -> on_message_complete -> on_window_complete -> deliver -> commit**. A single Drakkar worker runs one async event loop (`asyncio.run`) that hosts all partition processors, a shared subprocess executor pool with semaphore-based concurrency control, a sink manager, a dead-letter queue (DLQ), optional Prometheus metrics, and an optional debug flight recorder with a web UI. The user implements a handler class with hooks (`arrange`, `on_task_complete`, `on_message_complete`, `on_window_complete`, `on_error`, `on_delivery_error`, plus lifecycle hooks like `on_startup`/`on_ready`/`on_assign`/`on_revoke`) that define the application-specific logic; everything else -- Kafka consumption, offset tracking, backpressure, retries, subprocess lifecycle, sink connections, and graceful shutdown -- is managed by the framework. See [Fan-out](fan-out.md) for a dedicated walkthrough of the per-task / per-message / per-window hook trio.
 
 Configuration is loaded from a YAML file (path via `config_path` argument or `DRAKKAR_CONFIG` env var) with environment variable overrides using the `DRAKKAR_` prefix and `__` as a nesting delimiter (e.g., `DRAKKAR_KAFKA__BROKERS`). Environment variables are deep-merged on top of YAML values. The root configuration object is `DrakkarConfig`, a Pydantic `BaseSettings` model. All config fields referenced below are part of this hierarchy.
 
@@ -316,7 +316,7 @@ When a task succeeds (exit_code == 0):
 - `executor_duration` histogram observes the `duration_seconds`.
 - Flight recorder records a `task_completed` event with pool utilization stats.
 
-### 5.2 Collect Hook
+### 5.2 on_task_complete Hook
 
 The framework calls `handler.on_task_complete(result)`:
 - Receives the full `ExecutorResult` including stdout, stderr, exit_code, duration, and the original `ExecutorTask` (with its metadata dict).
@@ -327,11 +327,11 @@ The framework calls `handler.on_task_complete(result)`:
   - `http`: list of `HttpPayload(sink='', data=MyModel(...))`
   - `redis`: list of `RedisPayload(sink='', key='cache:123', data=MyModel(...), ttl=3600)`
   - `files`: list of `FilePayload(sink='', path='output/results.jsonl', data=MyModel(...))`
-- **Returns `None`**: no sink delivery for this result. The result is still tracked in the window.
+- **Returns `None`**: no per-task sink delivery for this result. The result is still tracked in the `MessageGroup` and available to `on_message_complete`.
 
-The `on_task_complete` duration is recorded in the `handler_duration` histogram.
+The hook's duration is recorded in the `handler_duration{hook="on_task_complete"}` histogram and a `task_complete` event lands in the flight recorder.
 
-### 5.3 Sink Delivery (via on_collect callback)
+### 5.3 Sink Delivery
 
 If `on_task_complete()` returned a non-None `CollectResult` with `has_outputs == True`:
 
@@ -343,9 +343,16 @@ If `on_task_complete()` returned a non-None `CollectResult` with `has_outputs ==
 
 2. **Grouping**: payloads are grouped by `(sink_type, sink_name)` for batched delivery.
 
-3. **Delivery per sink** (see Phase 7 for full delivery details).
+3. **Delivery per sink** (see Phase 8 for full delivery details).
 
-The result is appended to the window's `results` list.
+The result is appended to the window's `results` list AND to the per-message `MessageGroup.results` list for every offset in `task.source_offsets`.
+
+### 5.4 Message-Group Tracking Update
+
+Per-task outcome updates the tracker for every source message this task belongs to (usually just one; multi-offset fan-in tasks update multiple):
+
+- For each offset in `task.source_offsets`, decrement `tracker.remaining` and append the `ExecutorResult` to `tracker.results`.
+- If `tracker.remaining == 0` for any message, its `MessageGroup` is complete — transition to [Phase 7: Message Completion](#phase-7-message-completion).
 
 ---
 
@@ -417,9 +424,43 @@ After every task run (success, failure, or unexpected error), except when return
 
 ---
 
-## Phase 7: Window Completion and Sink Delivery
+## Phase 7: Message Completion
 
-### 7.1 Window Completion Check
+Per-source-message aggregation and per-message offset commit. Fires before any window-level hook, potentially many times within one window as individual messages finish.
+
+### 7.1 Message Completion Check
+
+Each terminal outcome (success, SKIP, retry-exhaustion, replacement) decrements `tracker.remaining` for every message the task contributes to. When a tracker hits zero, the message's `MessageGroup` is ready to fire.
+
+A `_MessageTracker.completion_fired` guard prevents double-firing in any pathological race.
+
+### 7.2 on_message_complete Hook
+
+When a message's tracker settles:
+
+1. `tracker.finished_at` is stamped with `time.monotonic()`.
+2. The framework builds a `MessageGroup(source_message, tasks, results, errors, started_at, finished_at)`.
+3. Calls `handler.on_message_complete(group)`:
+   - **Returns `CollectResult`**: the aggregate sink payloads for this request (e.g. one summary row per message).
+   - **Returns `None`**: no per-message delivery (relies on `on_task_complete` or `on_window_complete`).
+   - **Raises**: logged at ERROR level with full context; offset commit still proceeds (hook bugs must not stall the partition).
+4. The hook duration is recorded in `handler_duration{hook="on_message_complete"}` and a `message_complete` event lands in the recorder with fields: `task_count`, `succeeded`, `failed`, `replaced`, `output_message_count`.
+
+### 7.3 Message-Level Sink Delivery
+
+If `on_message_complete()` returned a non-None `CollectResult`, it flows through the same validation → grouping → `SinkManager.deliver_all` path as `on_task_complete` output (see Phase 8). A delivery failure here is logged but does NOT block the offset from committing — sink retries go through `on_delivery_error` as usual.
+
+### 7.4 Offset Completion and Commit
+
+After `on_message_complete` returns (success or raise), the message's offset is marked complete on the partition's `OffsetTracker`, a commit is attempted, and the tracker entry is removed.
+
+This is **per-message commit granularity**: a fast-finishing message does not wait for slower messages in the same window. When a partition is revoked or the worker shuts down, offsets for already-finished messages are already committed; only in-flight messages' offsets remain uncommitted (expected, drives the at-least-once replay on restart).
+
+---
+
+## Phase 8: Window Completion and Sink Delivery
+
+### 8.1 Window Completion Check
 
 After each task's finally block, the framework checks `window.is_complete`:
 
@@ -429,7 +470,9 @@ completed_count >= total_tasks AND total_tasks > 0
 
 Note: `total_tasks` can grow dynamically if `on_error` returns replacement tasks, so the window only completes when ALL tasks (including dynamically added ones) have finished.
 
-### 7.2 on_window_complete Hook
+By the time `window.is_complete` fires, every message in the window has already had its `on_message_complete` called and its offset committed — this phase is purely about the window-level aggregation hook.
+
+### 8.2 on_window_complete Hook
 
 When the window is complete:
 
@@ -442,11 +485,11 @@ When the window is complete:
 
 If a `CollectResult` is returned, it goes through the same sink delivery pipeline as `on_task_complete()` results.
 
-### 7.3 Mark Offsets Complete
+### 8.3 Offset State at Window End
 
-All source message offsets in the window are marked as COMPLETED in the `OffsetTracker`. The `offset_lag` gauge is updated with the remaining pending offset count.
+By the time `on_window_complete` fires, every message in the window has already had its offset marked COMPLETE (in Phase 7.4). The `offset_lag` gauge already reflects the post-window state. This section is kept for historical reference — the actual state transition now happens per-message, not per-window.
 
-### 7.4 Sink Delivery Details
+### 8.4 Sink Delivery Details
 
 The `SinkManager.deliver_all()` method handles delivery to all sinks:
 
@@ -523,9 +566,9 @@ After successful delivery, the framework also records `produced` events in the f
 
 ---
 
-## Phase 8: Offset Commit
+## Phase 9: Offset Commit
 
-### 8.1 Watermark Calculation
+### 9.1 Watermark Calculation
 
 The `OffsetTracker` maintains a sorted list of registered offsets, each in state PENDING or COMPLETED. The `committable()` method returns the **highest consecutive completed offset + 1** from the beginning of the sorted list:
 
@@ -538,17 +581,17 @@ The `OffsetTracker` maintains a sorted list of registered offsets, each in state
 
 This watermark design ensures that Kafka offsets are only committed when ALL preceding messages have been fully processed and their results delivered to sinks.
 
-### 8.2 Commit Triggers
+### 9.2 Commit Triggers
 
 Offset commits are attempted at these points:
 
-1. **After every window completes** (all tasks in window finished).
-2. **On idle iterations** (no messages received for 1 second) -- catches any lagging commits.
-3. **When arrange returns no tasks** -- offsets are immediately committable.
-4. **During shutdown** -- final commit for each partition.
-5. **During partition revocation** -- commit before releasing the partition.
+1. **After every `on_message_complete`** — the most common trigger; fires once per source message as each settles.
+2. **On idle iterations** (no messages received for 1 second) — catches any lagging commits.
+3. **When arrange returns no tasks** — offsets are immediately committable after the empty-arrange `on_message_complete` calls.
+4. **During shutdown** — final commit for each partition.
+5. **During partition revocation** — commit before releasing the partition, only if drain completed cleanly.
 
-### 8.3 Commit Flow
+### 9.3 Commit Flow
 
 When `committable()` returns a non-None offset:
 
@@ -564,7 +607,7 @@ When `committable()` returns a non-None offset:
 
 ---
 
-## Phase 9: Graceful Shutdown
+## Phase 10: Graceful Shutdown
 
 When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
 
