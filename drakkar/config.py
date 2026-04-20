@@ -250,7 +250,18 @@ class ExecutorConfig(BaseModel):
     task_timeout_seconds: int = Field(default=120, ge=1)
     window_size: int = Field(default=100, ge=1)
     max_retries: int = Field(default=3, ge=0)
-    drain_timeout_seconds: int = Field(default=5, ge=1)
+    drain_timeout_seconds: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            'Maximum seconds to wait for in-flight executor tasks to finish '
+            'during graceful shutdown or partition revocation. Set lower to '
+            'speed up shutdown; set at least as high as task_timeout_seconds '
+            'if you rely on clean final commits for every in-flight task. '
+            'When drain times out, offsets for in-flight tasks are NOT '
+            'committed (those messages will replay on restart — at-least-once).'
+        ),
+    )
     backpressure_high_multiplier: int = Field(default=32, ge=1)
     backpressure_low_multiplier: int = Field(default=4, ge=1)
 

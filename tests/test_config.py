@@ -48,7 +48,10 @@ def test_executor_config_defaults():
     assert cfg.task_timeout_seconds == 120
     assert cfg.window_size == 100
     assert cfg.max_retries == 3
-    assert cfg.drain_timeout_seconds == 5
+    # drain_timeout default raised to 30 so graceful shutdown has a reasonable
+    # chance of finishing in-flight subprocess tasks rather than hard-killing
+    # them and relying on at-least-once replay.
+    assert cfg.drain_timeout_seconds == 30
     assert cfg.backpressure_high_multiplier == 32
     assert cfg.backpressure_low_multiplier == 4
 
