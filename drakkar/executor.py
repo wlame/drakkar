@@ -71,25 +71,46 @@ class ExecutorPool:
 
         Records task_started AFTER acquiring the semaphore slot, so the
         timestamp reflects actual execution start, not queue entry time.
+
+        Cancellation safety: every counter and pool-slot increment is paired
+        with a decrement in a `finally` so that ``asyncio.CancelledError``
+        (raised during shutdown or rebalance) cannot leak slots. A leak here
+        would permanently shrink effective pool capacity.
         """
         self._waiting_count += 1
-        async with self._semaphore:
-            self._waiting_count -= 1
-            self._active_count += 1
-            slot = heapq.heappop(self._available_slots)
-            if recorder:
-                recorder.record_task_started(
-                    task,
-                    partition_id,
-                    pool_active=self._active_count,
-                    pool_waiting=self._waiting_count,
-                    slot=slot,
-                )
+        waiting_decremented = False
+        try:
+            # `async with` would also work, but we need to guarantee
+            # waiting_count rollback when cancellation fires before acquire.
+            await self._semaphore.acquire()
             try:
-                return await self._run_subprocess(task)
+                # Transition from "waiting" to "active". These two lines run
+                # with no `await` between them, so they are atomic w.r.t.
+                # cancellation on a single event loop.
+                self._waiting_count -= 1
+                waiting_decremented = True
+                self._active_count += 1
+                slot = heapq.heappop(self._available_slots)
+                try:
+                    if recorder:
+                        recorder.record_task_started(
+                            task,
+                            partition_id,
+                            pool_active=self._active_count,
+                            pool_waiting=self._waiting_count,
+                            slot=slot,
+                        )
+                    return await self._run_subprocess(task)
+                finally:
+                    heapq.heappush(self._available_slots, slot)
+                    self._active_count -= 1
             finally:
-                heapq.heappush(self._available_slots, slot)
-                self._active_count -= 1
+                self._semaphore.release()
+        finally:
+            if not waiting_decremented:
+                # Cancelled before (or while) acquiring — the increment above
+                # was never paired with the inner decrement. Rollback now.
+                self._waiting_count -= 1
 
     def _resolve_binary(self, task: ExecutorTask) -> str:
         binary = task.binary_path or self._binary_path
@@ -146,8 +167,14 @@ class ExecutorPool:
             duration = time.monotonic() - start
 
             pid = proc.pid
+            # After `communicate()` returns normally the process has exited and
+            # returncode is set. If it isn't (unexpected), treat the task as
+            # failed rather than silently masking None as success with `or 0` —
+            # that pattern previously let abnormal terminations look like exit
+            # code 0 and advance offset commits past a broken task.
+            exit_code = proc.returncode if proc.returncode is not None else -1
             result = ExecutorResult(
-                exit_code=proc.returncode or 0,
+                exit_code=exit_code,
                 stdout=stdout_bytes.decode(errors='replace') if stdout_bytes else '',
                 stderr=stderr_bytes.decode(errors='replace') if stderr_bytes else '',
                 duration_seconds=round(duration, 3),

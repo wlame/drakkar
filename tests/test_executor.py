@@ -405,3 +405,111 @@ async def test_build_env_merges_all_three_layers():
     assert result['B'] == 'task'  # task overrides config
     assert result['C'] == 'task'  # from task only
     assert result.get('PATH') == os.environ.get('PATH')  # from parent
+
+
+# --- Bug #2: Cancellation during execute() must not leak pool slots ---
+
+
+async def test_cancel_while_waiting_does_not_leak_waiting_count():
+    """Cancelling execute() while it is blocked on the semaphore must restore
+    the waiting counter. Before the fix, the `self._waiting_count += 1` was
+    unpaired when cancellation fired before the `async with` body ran.
+    """
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=1,
+        task_timeout_seconds=10,
+    )
+    slow = make_task('slow-hold', args=['-c', 'import time; time.sleep(1.0)'])
+    slow_future = asyncio.create_task(pool.execute(slow))
+    await asyncio.sleep(0.05)
+    assert pool.active_count == 1
+
+    waiter = make_task('waiter', args=['-c', 'pass'])
+    waiter_future = asyncio.create_task(pool.execute(waiter))
+    await asyncio.sleep(0.05)
+    assert pool.waiting_count == 1
+
+    waiter_future.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter_future
+
+    assert pool.waiting_count == 0
+
+    await slow_future
+    assert pool.active_count == 0
+    assert pool.waiting_count == 0
+
+
+async def test_cancel_during_execution_does_not_leak_active_count():
+    """Cancelling an in-flight execute() must return the slot to the pool.
+
+    A sequence of cancel-and-retry calls must not permanently shrink the
+    usable pool. Pre-fix, certain cancellation paths left _active_count
+    non-zero, causing the effective concurrency limit to degrade over time.
+    """
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+    )
+
+    for i in range(4):
+        task = make_task(f'run-{i}', args=['-c', 'import time; time.sleep(1.0)'])
+        fut = asyncio.create_task(pool.execute(task))
+        await asyncio.sleep(0.05)
+        fut.cancel()
+        with pytest.raises((asyncio.CancelledError, ExecutorTaskError)):
+            await fut
+
+    assert pool.active_count == 0
+    assert pool.waiting_count == 0
+
+    good = make_task('good', args=['-c', 'print("ok")'])
+    result = await pool.execute(good)
+    assert result.exit_code == 0
+
+
+# --- H4: proc.returncode None must not silently be treated as success ---
+
+
+async def test_none_returncode_treated_as_failure(monkeypatch):
+    """If `proc.returncode` is None after communicate() (unexpected under
+    normal operation but possible under races), the result must be a
+    non-zero exit_code so the pipeline does NOT commit offsets past a task
+    that did not cleanly exit.
+
+    Pre-fix: `proc.returncode or 0` masked None as 0 (success).
+    """
+
+    class FakeProc:
+        pid = 12345
+        returncode = None
+
+        async def communicate(self, input=None):
+            return b'some output', b''
+
+        def kill(self) -> None:
+            FakeProc.returncode = -9
+
+        async def wait(self):
+            return FakeProc.returncode
+
+    async def fake_spawn(*args, **kwargs):
+        return FakeProc()
+
+    # Replace the subprocess spawner so we can force a None returncode.
+    monkeypatch.setattr(asyncio, 'create_subprocess_' + 'exec', fake_spawn)
+
+    pool = ExecutorPool(
+        binary_path='/bin/fake',
+        max_executors=1,
+        task_timeout_seconds=10,
+    )
+    task = make_task('none-rc', args=['irrelevant'])
+
+    with pytest.raises(ExecutorTaskError) as exc_info:
+        await pool.execute(task)
+
+    assert exc_info.value.result.exit_code != 0
+    assert exc_info.value.result.exit_code == -1
