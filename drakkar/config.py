@@ -6,10 +6,25 @@ Use DRAKKAR_ prefix with __ for nesting (e.g., DRAKKAR_KAFKA__BROKERS).
 
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Hosts that must never be the target of an operator-configured HTTP sink.
+# These are cloud metadata endpoints which, if accessible, return IAM creds
+# and other secrets. No legitimate pipeline writes there, so block at config
+# time rather than relying on network-level egress policy alone.
+_HTTP_BLOCKED_METADATA_HOSTS = frozenset(
+    {
+        '169.254.169.254',  # AWS, Azure, OpenStack, Alibaba, GCP IMDSv1/v2
+        '100.100.100.200',  # Alibaba Cloud metadata
+        '192.0.0.192',  # Oracle Cloud metadata
+        'metadata.google.internal',
+        'metadata.packet.net',
+    }
+)
 
 # --- Kafka source (consumer) config ---
 
@@ -68,6 +83,12 @@ class HttpSinkConfig(BaseModel):
     """Configuration for an HTTP output sink.
 
     Each named instance POSTs JSON payloads to a URL.
+
+    SSRF note: the URL is operator-configured (YAML/env), never drawn
+    from message content. Validation here protects against typos and
+    obvious mistakes (unsupported scheme, missing host) and refuses to
+    target cloud metadata endpoints where accidentally pointing the sink
+    would leak cloud IAM credentials.
     """
 
     url: str
@@ -76,6 +97,23 @@ class HttpSinkConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     max_retries: int = Field(default=3, ge=0)
     ui_url: str = ''
+
+    @field_validator('url')
+    @classmethod
+    def _validate_url(cls, v: str) -> str:
+        parsed = urlparse(v)
+        if parsed.scheme not in ('http', 'https'):
+            raise ValueError(f'HTTP sink url must use http:// or https:// scheme, got {parsed.scheme!r}')
+        host = (parsed.hostname or '').lower()
+        if not host:
+            raise ValueError('HTTP sink url must include a host')
+        if host in _HTTP_BLOCKED_METADATA_HOSTS:
+            raise ValueError(
+                f'HTTP sink url host {host!r} is a cloud metadata endpoint — '
+                'refusing to configure. POSTing there can leak IAM credentials. '
+                'If this is intentional, update _HTTP_BLOCKED_METADATA_HOSTS.'
+            )
+        return v
 
 
 class RedisSinkConfig(BaseModel):

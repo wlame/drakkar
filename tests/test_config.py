@@ -127,6 +127,60 @@ def test_http_sink_config_custom():
     assert cfg.headers['Authorization'] == 'Bearer xxx'
 
 
+# --- H8: HttpSinkConfig.url validation ---
+
+
+def test_http_sink_config_rejects_non_http_scheme():
+    from pydantic import ValidationError
+
+    for bad_url in ('file:///etc/passwd', 'ftp://host/x', 'gopher://host', ''):
+        with pytest.raises(ValidationError):
+            HttpSinkConfig(url=bad_url)
+
+
+def test_http_sink_config_rejects_url_without_host():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        HttpSinkConfig(url='http:///no-host')
+
+
+def test_http_sink_config_rejects_metadata_endpoints():
+    """Known cloud metadata hosts must be refused. POSTing there can leak
+    IAM credentials (AWS/Azure/GCP/Alibaba IMDS all live at 169.254.169.254
+    or similar well-known addresses).
+    """
+    from pydantic import ValidationError
+
+    for url in (
+        'http://169.254.169.254/latest/meta-data',
+        'https://metadata.google.internal/computeMetadata/v1/',
+        'http://100.100.100.200/',  # Alibaba
+        'http://192.0.0.192/',  # Oracle
+    ):
+        with pytest.raises(ValidationError) as exc_info:
+            HttpSinkConfig(url=url)
+        # Error message must explain why (operator needs to understand).
+        assert 'metadata' in str(exc_info.value).lower()
+
+
+def test_http_sink_config_accepts_normal_urls():
+    """Loopback, private, and public http(s) URLs all remain allowed — the
+    URL is operator-configured and many legitimate deployments target
+    internal webhook services.
+    """
+    ok_urls = [
+        'http://localhost:8000/webhook',
+        'http://127.0.0.1:3000/',
+        'http://10.0.0.5/api',
+        'https://api.example.com/v1/ingest',
+        'http://internal-webhook.mycompany.local/',
+    ]
+    for url in ok_urls:
+        cfg = HttpSinkConfig(url=url)
+        assert cfg.url == url
+
+
 def test_redis_sink_config_defaults():
     cfg = RedisSinkConfig()
     assert cfg.url == 'redis://localhost:6379/0'
