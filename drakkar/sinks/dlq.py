@@ -106,8 +106,16 @@ class DLQSink(BaseSink[BaseModel]):
     ) -> None:
         """Write a failed delivery to the DLQ topic.
 
-        Wraps the error in a DLQMessage with metadata and produces
-        it to the configured DLQ Kafka topic.
+        Wraps the error in a DLQMessage with metadata and produces it to the
+        configured DLQ Kafka topic. Does NOT raise on failure — the DLQ is
+        the last resort and propagating the exception would cause the
+        partition pipeline to stall with no safe recovery. Failures are
+        instead reported via:
+          - the ``dlq_send_failures`` Prometheus counter (alert on this!)
+          - a CRITICAL-severity structured log entry with full context
+
+        Operators MUST configure alerting on ``drakkar_dlq_send_failures_total``
+        — a non-zero value means messages are being silently lost.
         """
         if self._producer is None:
             await logger.awarning('dlq_send_skipped_not_connected', category='sink')
@@ -118,12 +126,17 @@ class DLQSink(BaseSink[BaseModel]):
             partition_id=partition_id,
             attempt_count=attempt_count,
         )
+        serialized = msg.serialize()
         try:
+            # Produce enqueues the message and returns a future that resolves
+            # on the delivery report. Awaiting the future alone is sufficient
+            # — the AIOProducer flushes its internal queue as needed. An
+            # explicit flush() would only mask delivery-report failures
+            # behind a generic "flush failed" exception with less context.
             future = await self._producer.produce(
                 topic=self._topic,
-                value=msg.serialize(),
+                value=serialized,
             )
-            await self._producer.flush()
             await future
             sink_dlq_messages.inc()
             await logger.ainfo(
@@ -136,11 +149,23 @@ class DLQSink(BaseSink[BaseModel]):
             )
         except Exception as e:
             dlq_send_failures.inc()
-            await logger.aerror(
+            # CRITICAL: the DLQ itself has failed after the original sink
+            # already failed. These payloads are effectively lost until the
+            # operator intervenes. Include full context so alerting tools
+            # surface enough to act on without a dashboard dive.
+            await logger.acritical(
                 'dlq_send_failed',
                 category='sink',
                 error=str(e),
-                sink_name=delivery_error.sink_name,
+                error_type=type(e).__name__,
+                dlq_topic=self._topic,
+                source_sink_type=delivery_error.sink_type,
+                source_sink_name=delivery_error.sink_name,
+                partition=partition_id,
+                payload_count=len(delivery_error.payloads),
+                payload_bytes=len(serialized),
+                attempt_count=attempt_count,
+                action='ALERT: message lost — investigate DLQ producer/broker',
             )
 
     async def close(self) -> None:

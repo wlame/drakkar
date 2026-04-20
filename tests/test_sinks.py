@@ -1181,6 +1181,55 @@ async def test_dlq_sink_send_failure_increments_counter():
     assert dlq_send_failures._value.get() == before + 1
 
 
+async def test_dlq_sink_send_delivery_report_failure_increments_counter():
+    """H3: produce() can succeed while the delivery-report future rejects
+    (e.g. broker ACK timeout, topic authorization denied). This mode must
+    be caught and reflected in the failure metric — not silently lost.
+
+    The pre-fix code relied on flush() to raise, which masked delivery-
+    report failures under a generic "flush failed" path with less context.
+    """
+    from drakkar.metrics import dlq_send_failures, sink_dlq_messages
+    from drakkar.sinks.dlq import DLQSink
+
+    sink = DLQSink(topic='dlq', brokers='localhost:9092')
+
+    # produce() succeeds and returns a future that will REJECT.
+    async def produce_returns_failed_future(**kwargs):
+        f = asyncio.get_event_loop().create_future()
+        f.set_exception(RuntimeError('delivery report: broker ack timeout'))
+        return f
+
+    mock_producer = AsyncMock()
+    mock_producer.produce.side_effect = produce_returns_failed_future
+    sink._producer = mock_producer
+
+    failures_before = dlq_send_failures._value.get()
+    successes_before = sink_dlq_messages._value.get()
+
+    # Must NOT raise — DLQ is last-resort; caller should keep going.
+    await sink.send(_sample_delivery_error(), partition_id=7)
+
+    # Delivery-report failure must be observable via the counter.
+    assert dlq_send_failures._value.get() == failures_before + 1
+    # And the success counter must NOT have incremented.
+    assert sink_dlq_messages._value.get() == successes_before
+
+
+async def test_dlq_sink_send_no_longer_calls_flush():
+    """H3: flush() before `await future` made the future a no-op and the
+    failure path less specific. send() now awaits the delivery-report
+    future directly — flush() must NOT be invoked on the happy path.
+    """
+    sink, mock_producer = _make_dlq_sink()
+    await sink.send(_sample_delivery_error(), partition_id=0)
+
+    mock_producer.produce.assert_called_once()
+    # The redundant flush is gone — the delivery future alone represents
+    # the delivery outcome.
+    mock_producer.flush.assert_not_called()
+
+
 async def test_dlq_message_serialization():
     from drakkar.sinks.dlq import DLQMessage
 
