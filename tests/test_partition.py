@@ -355,6 +355,157 @@ async def test_max_retries_exceeded(failing_pool):
     assert any(c[1] == 1 for c in committed)
 
 
+# --- Bug #1: RETRY must not drive _inflight_count negative ---
+
+
+async def test_retry_inflight_count_does_not_go_negative(failing_pool):
+    """Each RETRY must not double-decrement _inflight_count via the finally block.
+
+    Before the fix, the unconditional finally ran on the early return of the
+    RETRY branch, popping the pending_tasks entry and decrementing inflight.
+    The retry coroutine would then decrement again on its own finally, driving
+    the counter below zero. This made drain() exit while retries were still
+    pending.
+    """
+    error_calls = 0
+
+    class RetryOnceThenSkipHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f'neg-{m.offset}',
+                    args=['-c', 'import sys; sys.exit(1)'],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+        async def on_error(self, task, error):
+            nonlocal error_calls
+            error_calls += 1
+            # first call: RETRY; retry also fails → second call: SKIP
+            if error_calls == 1:
+                return ErrorAction.RETRY
+            return ErrorAction.SKIP
+
+    committed: list[tuple[int, int]] = []
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=RetryOnceThenSkipHandler(),
+        executor_pool=failing_pool,
+        window_size=10,
+        on_commit=on_commit,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(committed) > 0, timeout=10)
+    await proc.stop()
+
+    assert error_calls == 2
+    # After full completion the counter must be exactly 0 — never negative.
+    assert proc.inflight_count == 0, f'inflight_count leaked: {proc.inflight_count}'
+    # pending_tasks must be empty; the retry should have popped its own entry.
+    assert proc._pending_tasks == {}, f'pending leaked: {proc._pending_tasks}'
+
+
+async def test_retry_exhaustion_leaves_inflight_at_zero(failing_pool):
+    """Exhausting MAX_RETRIES must leave inflight_count at exactly 0.
+
+    With the bug, each RETRY→return path double-decremented. For MAX_RETRIES=3
+    the counter ended at -3 after a single task fully exhausted retries.
+    """
+
+    class AlwaysRetryHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f'ex-{m.offset}',
+                    args=['-c', 'import sys; sys.exit(1)'],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+        async def on_error(self, task, error):
+            return ErrorAction.RETRY
+
+    committed: list[tuple[int, int]] = []
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=AlwaysRetryHandler(),
+        executor_pool=failing_pool,
+        window_size=10,
+        on_commit=on_commit,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(committed) > 0, timeout=10)
+    await proc.stop()
+
+    assert proc.inflight_count == 0, f'inflight_count leaked: {proc.inflight_count}'
+    assert proc._pending_tasks == {}
+
+
+async def test_retry_keeps_inflight_positive_during_retry_chain(failing_pool):
+    """While retries are still pending, inflight_count must stay at >=1.
+
+    Before the fix, the finally decrement ran on the RETRY early return, so
+    between the original's exit and the retry coroutine acquiring the
+    executor slot, inflight_count could drop to 0 or negative. drain() would
+    then observe the zero and exit while the retry was still about to run.
+    """
+    inflight_observations: list[int] = []
+    errors_seen = 0
+
+    class ObservingRetryHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f'obs-{m.offset}',
+                    args=['-c', 'import sys; sys.exit(1)'],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+        async def on_error(self, task, error):
+            nonlocal errors_seen
+            errors_seen += 1
+            # snapshot the counter AT the moment on_error runs — before the
+            # RETRY branch schedules its successor and the finally would run.
+            inflight_observations.append(proc.inflight_count)
+            if errors_seen < 3:
+                return ErrorAction.RETRY
+            return ErrorAction.SKIP
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=ObservingRetryHandler(),
+        executor_pool=failing_pool,
+        window_size=10,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: errors_seen >= 3, timeout=10)
+    await proc.stop()
+
+    # Every observation must see inflight >= 1 (the task currently failing)
+    assert all(v >= 1 for v in inflight_observations), f'inflight dropped during retry chain: {inflight_observations}'
+    assert proc.inflight_count == 0
+    assert proc._pending_tasks == {}
+
+
 # --- I1: Unhandled exception in collect should not stall window ---
 
 

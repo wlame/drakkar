@@ -292,6 +292,13 @@ class PartitionProcessor:
         executor_tasks.labels(status='started').inc()
         executor_pool_active.set(self._executor_pool.active_count)
 
+        # When on_error returns RETRY, this invocation hands the task to a newly
+        # scheduled retry coroutine that owns the in-flight slot and pending_tasks
+        # entry. Must NOT decrement the inflight counter or pop from pending here,
+        # or the retry would see inflight go negative and pending_tasks mutated
+        # under it — causing drain()/stop() to exit while work is still in flight.
+        handed_off_to_retry = False
+
         try:
             result = await self._executor_pool.execute(task, self._recorder, self._partition_id)
             executor_tasks.labels(status='completed').inc()
@@ -353,8 +360,11 @@ class PartitionProcessor:
                     t.add_done_callback(self._active_tasks.discard)
             elif action == ErrorAction.RETRY and retry_count < self._max_retries:
                 task_retries.inc()
-                # don't decrement inflight or increment completed — the retry
-                # reuses this slot, so we just re-enter with same task
+                # The retry coroutine reuses this invocation's inflight slot and
+                # pending_tasks entry — the finally below must skip cleanup, and
+                # window.completed_count must not advance here. The retry is what
+                # eventually completes (or exhausts retries and completes).
+                handed_off_to_retry = True
                 t = asyncio.create_task(self._execute_and_track(task, window, retry_count + 1))
                 self._active_tasks.add(t)
                 t.add_done_callback(self._active_tasks.discard)
@@ -382,16 +392,22 @@ class PartitionProcessor:
             )
 
         finally:
-            removed = self._pending_tasks.pop(task.task_id, None)
-            self._inflight_count -= 1
-            executor_pool_active.set(self._executor_pool.active_count)
-            if removed is None:
-                await log.awarning(
-                    'task_not_in_pending_on_cleanup',
-                    task_id=task.task_id,
-                    retry_count=retry_count,
-                    pending_keys=list(self._pending_tasks.keys())[:5],
-                )
+            if not handed_off_to_retry:
+                removed = self._pending_tasks.pop(task.task_id, None)
+                self._inflight_count -= 1
+                executor_pool_active.set(self._executor_pool.active_count)
+                if removed is None:
+                    await log.awarning(
+                        'task_not_in_pending_on_cleanup',
+                        task_id=task.task_id,
+                        retry_count=retry_count,
+                        pending_keys=list(self._pending_tasks.keys())[:5],
+                    )
+
+        if handed_off_to_retry:
+            # The retry coroutine owns this slot now — it will advance
+            # window.completed_count when it ultimately finishes.
+            return
 
         window.completed_count += 1
 
