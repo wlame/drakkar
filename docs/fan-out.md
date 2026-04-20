@@ -329,9 +329,130 @@ three source messages), it participates in THREE `MessageGroup`s. Its
 terminal outcome is reported to all of them. Each group only completes
 when every task it has a stake in has reached a terminal state.
 
-This is uncommon but legitimate — e.g. deduplication or cross-message
-work. The tracking is transparent; nothing special is needed in the
-handler.
+This is uncommon but legitimate — deduplication, batched external API
+calls covering multiple messages at once, or cross-message aggregation
+work that makes one subprocess cheaper than N. The tracking is
+transparent; no new field is needed beyond the existing list-typed
+`source_offsets`.
+
+### Example: dedupe identical queries across a window
+
+A window of messages sometimes contains duplicate (pattern, file_path)
+combinations. Instead of running the same search subprocess many times,
+combine them into one task and let its result feed every message that
+asked the same question:
+
+```python
+async def arrange(self, messages, pending):
+    # Group messages by the actual search key.
+    groups: dict[tuple[str, str], list[SourceMessage]] = {}
+    for msg in messages:
+        key = (msg.payload.pattern, msg.payload.file_path)
+        groups.setdefault(key, []).append(msg)
+
+    tasks = []
+    for (pattern, file_path), msgs in groups.items():
+        tasks.append(
+            dk.ExecutorTask(
+                task_id=dk.make_task_id('rg'),
+                args=[pattern, file_path],
+                # ONE task for every message that asked the same question.
+                # When the task completes, its result lands in EACH of those
+                # messages' MessageGroups, so every request_id is answered.
+                source_offsets=[m.offset for m in msgs],
+                metadata={
+                    'pattern': pattern,
+                    'file_path': file_path,
+                    'request_ids': [m.payload.request_id for m in msgs],
+                },
+            )
+        )
+    return tasks
+
+async def on_message_complete(self, group):
+    # Even though a shared task produced group.results[0], each group
+    # fires independently so the handler gets one callback per message.
+    # The request_id comes from the source_message, not the task.
+    req = group.source_message.payload
+    return dk.CollectResult(
+        kafka=[
+            dk.KafkaPayload(
+                data=Aggregate(request_id=req.request_id, ...),
+                key=req.request_id.encode(),
+                sink='results',
+            ),
+        ],
+    )
+```
+
+### Example: single validation task shared across the window
+
+Some pipelines want to run a quick validation pass once per window (e.g.
+a schema check, a rate-limit probe) whose outcome applies to every
+message that arrive in that batch. Express this as a single task tied
+to every offset:
+
+```python
+async def arrange(self, messages, pending):
+    tasks = [
+        dk.ExecutorTask(
+            task_id='validate',
+            args=['--check-health'],
+            source_offsets=[m.offset for m in messages],
+        ),
+    ]
+    for msg in messages:
+        tasks.append(
+            dk.ExecutorTask(
+                task_id=dk.make_task_id('proc'),
+                args=['--process', msg.payload.data],
+                source_offsets=[msg.offset],
+            )
+        )
+    return tasks
+```
+
+Each message's `MessageGroup` will have `total = 2`: the shared
+validation result plus that message's own processing task. The shared
+task's `ExecutorResult` appears in all groups' `results` lists — the
+same instance, so treat it as read-only.
+
+### Gotchas
+
+1. **Same partition only.** All offsets in `source_offsets` must be
+   from the current partition (a `PartitionProcessor` only knows about
+   its own partition's messages). Cross-partition offsets are silently
+   skipped because no tracker exists for them. If you need
+   cross-partition fan-in, run a downstream worker that consumes the
+   output of this one.
+
+2. **Replacements must inherit the multi-offset list.** If your
+   `on_error` returns replacement tasks for a fan-in task, each
+   replacement should carry the same `source_offsets` (or an intentional
+   subset) — otherwise some groups will hang waiting on a task that no
+   longer exists:
+
+   ```python
+   async def on_error(self, task, error):
+       return [
+           dk.ExecutorTask(
+               task_id=dk.make_task_id('retry'),
+               args=[...],
+               source_offsets=task.source_offsets,  # INHERIT
+           ),
+       ]
+   ```
+
+3. **Shared results are shared objects.** `group.results` may hold the
+   same `ExecutorResult` instance for multiple message groups when a
+   fan-in task contributed to each. Treat results as immutable; if you
+   need to annotate, build a new model in `on_message_complete`.
+
+4. **Silent skip for bogus offsets.** If `source_offsets` includes an
+   offset that isn't currently tracked (e.g. from a previous window or
+   a handler bug), the framework silently ignores it rather than
+   crashing. The task still runs; its outcome just isn't reported to a
+   non-existent group.
 
 ---
 

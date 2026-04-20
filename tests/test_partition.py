@@ -1674,3 +1674,171 @@ async def test_on_window_complete_still_fires_alongside_on_message_complete(echo
     assert len(msg_groups) == 3
     # on_window_complete saw all 3 results (no retries, no replacements)
     assert window_calls[0] == 3
+
+
+# =============================================================================
+# Fan-IN: one task belonging to multiple source messages
+# =============================================================================
+
+
+async def test_fan_in_single_task_reported_to_all_groups(echo_pool):
+    """A task with source_offsets=[a, b, c] belongs to THREE MessageGroups.
+
+    When that task succeeds, its ExecutorResult must appear in all three
+    groups' results lists, and each group must fire on_message_complete
+    once (not once-per-group-per-task).
+    """
+    from drakkar.models import MessageGroup
+
+    groups: list[MessageGroup] = []
+
+    class FanInHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            # ONE task for the whole window — covers every message.
+            offsets = [m.offset for m in messages]
+            return [ExecutorTask(task_id='batched', args=['shared'], source_offsets=offsets)]
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+
+    proc = PartitionProcessor(partition_id=0, handler=FanInHandler(), executor_pool=echo_pool, window_size=10)
+    proc.enqueue(make_msg(offset=100))
+    proc.enqueue(make_msg(offset=101))
+    proc.enqueue(make_msg(offset=102))
+    proc.start()
+    await wait_for(lambda: len(groups) == 3, timeout=5)
+    await proc.stop()
+
+    # All three messages saw the SAME task and the SAME result.
+    offsets_seen = {g.source_message.offset for g in groups}
+    assert offsets_seen == {100, 101, 102}
+    for g in groups:
+        assert g.total == 1, f'expected 1 task per group, got {g.total} for offset {g.source_message.offset}'
+        assert g.succeeded == 1
+        assert g.tasks[0].task_id == 'batched'
+    # All three saw the same result instance (same task -> same ExecutorResult)
+    result_ids = {id(g.results[0]) for g in groups}
+    assert len(result_ids) == 1, 'all groups should share the same ExecutorResult instance'
+
+
+async def test_fan_in_task_failure_reported_to_all_groups(failing_pool):
+    """A fan-in task that terminally fails must land in errors of every
+    group it belongs to — each group reports the same failure once.
+    """
+    from drakkar.models import MessageGroup
+
+    groups: list[MessageGroup] = []
+
+    class FanInFailHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id='shared-fail',
+                    args=['-c', 'import sys; sys.exit(1)'],
+                    source_offsets=[m.offset for m in messages],
+                )
+            ]
+
+        async def on_error(self, task, error):
+            return ErrorAction.SKIP
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+
+    proc = PartitionProcessor(partition_id=0, handler=FanInFailHandler(), executor_pool=failing_pool, window_size=10)
+    proc.enqueue(make_msg(offset=5))
+    proc.enqueue(make_msg(offset=6))
+    proc.start()
+    await wait_for(lambda: len(groups) == 2, timeout=5)
+    await proc.stop()
+
+    for g in groups:
+        assert g.failed == 1
+        assert g.succeeded == 0
+
+
+async def test_fan_in_mixed_with_fan_out_waits_for_all(failing_pool):
+    """Realistic mix: a window has BOTH a shared task (fan-in) and
+    per-message tasks (fan-out). Each message's group must wait for
+    BOTH kinds to finish before on_message_complete fires.
+    """
+    from drakkar.models import MessageGroup
+
+    groups: list[MessageGroup] = []
+    completion_order: list[int] = []
+
+    class MixedHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            tasks = []
+            # Fan-in: one shared task for ALL messages (fast)
+            tasks.append(
+                ExecutorTask(
+                    task_id='shared-fast',
+                    args=['-c', 'print("shared")'],
+                    source_offsets=[m.offset for m in messages],
+                )
+            )
+            # Fan-out: per-message task (slower)
+            for m in messages:
+                tasks.append(
+                    ExecutorTask(
+                        task_id=f'own-{m.offset}',
+                        args=['-c', 'import time; time.sleep(0.15); print("own")'],
+                        source_offsets=[m.offset],
+                    )
+                )
+            return tasks
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+            completion_order.append(group.source_message.offset)
+
+    proc = PartitionProcessor(partition_id=0, handler=MixedHandler(), executor_pool=failing_pool, window_size=10)
+    proc.enqueue(make_msg(offset=20))
+    proc.enqueue(make_msg(offset=21))
+    proc.start()
+    await wait_for(lambda: len(groups) == 2, timeout=5)
+    await proc.stop()
+
+    for g in groups:
+        # Each message saw BOTH the shared task and its own per-message task.
+        assert g.total == 2, f'expected 2 tasks per group, got {g.total}'
+        assert g.succeeded == 2
+        task_ids = {t.task_id for t in g.tasks}
+        assert 'shared-fast' in task_ids
+        assert f'own-{g.source_message.offset}' in task_ids
+
+
+async def test_fan_in_offsets_outside_window_silently_ignored(echo_pool):
+    """Defensive: if a task lists source_offsets that AREN'T in the current
+    tracker set (e.g. stale offset from a previous window, or a handler bug),
+    the framework silently skips them rather than crashing. This is the
+    documented behavior — worth pinning.
+    """
+    from drakkar.models import MessageGroup
+
+    groups: list[MessageGroup] = []
+
+    class StrangeHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id='over-reaching',
+                    args=['ok'],
+                    # offsets 500 and 501 are NOT in the current window
+                    source_offsets=[m.offset for m in messages] + [500, 501],
+                )
+            ]
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+
+    proc = PartitionProcessor(partition_id=0, handler=StrangeHandler(), executor_pool=echo_pool, window_size=10)
+    proc.enqueue(make_msg(offset=7))
+    proc.start()
+    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await proc.stop()
+
+    # Real tracker got its outcome; bogus 500/501 offsets silently ignored.
+    assert groups[0].source_message.offset == 7
+    assert groups[0].succeeded == 1

@@ -88,20 +88,53 @@ def make_repeat() -> int:
     return random.randint(1, 15)
 
 
+# "Hot" queries that many messages reference, driving visible fan-IN in
+# the worker: when two messages in the same arrange() window share a
+# (pattern, file_path) pair, the handler dedupes them into one
+# multi-offset task. The hot set is small so collisions are likely within
+# a 10-message window.
+HOT_QUERIES = [
+    {'pattern': r'async def', 'file_path': '/project/drakkar/partition.py'},
+    {'pattern': r'error', 'file_path': '/project/drakkar/app.py'},
+    {'pattern': r'import', 'file_path': '/project/drakkar'},
+]
+
+
 def make_message() -> dict:
     """One SearchRequest with multiple patterns and files.
 
     Each request fans out to len(patterns) x len(file_paths) subprocess
-    tasks in the worker. The worker's on_message_complete then emits a
-    single aggregate record once all those tasks finish.
+    tasks in the worker. Some fraction of messages draw from HOT_QUERIES
+    so that within an arrange() window there's a good chance of two
+    messages requesting the same (pattern, file_path) — triggering
+    framework-level fan-IN dedup in the worker.
 
-    Shape chosen to match the handler's min/max=1-3 patterns, 1-2 files.
+    Shape matches the handler's 1-3 patterns, 1-2 files constraint.
     """
-    num_patterns = random.choices([1, 2, 3], weights=[2, 3, 2])[0]
-    num_paths = random.choices([1, 2], weights=[3, 2])[0]
-    picks = random.sample(SEARCH_REQUESTS, k=max(num_patterns, num_paths))
-    patterns = list({p['pattern'] for p in picks[:num_patterns]})
-    file_paths = list({p['file_path'] for p in picks[:num_paths]})
+    # ~30% of messages draw one (pattern, file_path) pair from HOT_QUERIES
+    # so fan-in is frequent enough to be visible in the debug UI.
+    use_hot = random.random() < 0.30
+    if use_hot:
+        hot = random.choice(HOT_QUERIES)
+        hot_patterns = [hot['pattern']]
+        hot_paths = [hot['file_path']]
+        # Optionally extend with random extras (still 1-3 patterns, 1-2 paths)
+        extra_picks = random.sample(SEARCH_REQUESTS, k=2)
+        if random.random() < 0.4:
+            hot_patterns.append(extra_picks[0]['pattern'])
+        if random.random() < 0.3:
+            hot_patterns.append(extra_picks[1]['pattern'])
+        if random.random() < 0.3:
+            hot_paths.append(extra_picks[0]['file_path'])
+        patterns = list(dict.fromkeys(hot_patterns))[:3]
+        file_paths = list(dict.fromkeys(hot_paths))[:2]
+    else:
+        num_patterns = random.choices([1, 2, 3], weights=[2, 3, 2])[0]
+        num_paths = random.choices([1, 2], weights=[3, 2])[0]
+        picks = random.sample(SEARCH_REQUESTS, k=max(num_patterns, num_paths))
+        patterns = list({p['pattern'] for p in picks[:num_patterns]})
+        file_paths = list({p['file_path'] for p in picks[:num_paths]})
+
     return {
         'request_id': str(uuid.uuid4()),
         'patterns': patterns,

@@ -42,7 +42,21 @@ FAIL_RATE = '0.05'
 
 
 class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
-    """Searches source files using ripgrep with FAN-OUT per request.
+    """Searches source files using ripgrep with FAN-OUT and FAN-IN.
+
+    FAN-OUT: one SearchRequest with N patterns xM file_paths produces up
+    to N*M subprocess tasks (before dedup). Every task for one message
+    stamps its source_offsets with that message's offset.
+
+    FAN-IN: when multiple messages IN THE SAME WINDOW request the same
+    (pattern, file_path) pair, arrange() combines them into ONE task
+    whose source_offsets lists EVERY contributing message. The framework
+    reports that single task's result to every corresponding
+    MessageGroup — both messages' on_message_complete sees the shared
+    result. Dedupes redundant subprocess work; keeps per-request
+    downstream output intact (the shared result still lands in each
+    request's aggregate). Look for the "fan_in_count" label in the debug
+    UI to see it happening.
 
     Per-task (on_task_complete, one call per subprocess outcome):
       - Kafka "results" topic: full SearchResult
@@ -50,8 +64,9 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
       - MongoDB: full document archive
       - Redis: cached per-(request, pattern, file) summary (1h TTL)
 
-    Per-request (on_message_complete, one call per SearchRequest
-    after all its (pattern x file) tasks finish):
+    Per-request (on_message_complete, one call per SearchRequest after
+    all its tasks finish — a task shared with other requests still
+    counts toward each one's completion):
       - Kafka "priority_match_notifications" topic: ONE SearchAggregate
       - Postgres hot_recent_matches_db: if total_matches > 20
       - HTTP webhook: if total_matches > 20 (one alert per request)
@@ -110,46 +125,73 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
         messages: list[dk.SourceMessage],
         pending: dk.PendingContext,
     ) -> list[dk.ExecutorTask]:
+        """Build the task set for this window, with BOTH fan-out AND fan-in:
+
+        - Fan-out: one message xN patterns xM file_paths → N*M tasks
+          (tasks share that message's source_offset).
+        - Fan-IN: if two messages in the SAME WINDOW both request the same
+          (pattern, file_path) pair — not rare given the producer hot set —
+          run the subprocess ONCE and stamp its source_offsets with every
+          message that asked. Both messages' MessageGroups receive the
+          same ExecutorResult. Saves duplicate work; demonstrates
+          framework-level dedup.
+        """
         # simulate slow IO-bound preparation (e.g. DB lookup, HTTP call)
         await asyncio.sleep(random.uniform(0.05, 0.5))
 
-        tasks = []
+        # Bucket every (pattern, file_path) pair across ALL messages in the
+        # window. Key = (pattern, file_path); value = list of contributing
+        # messages (with their request_ids for metadata).
+        by_key: dict[tuple[str, str], list[dk.SourceMessage]] = {}
         for msg in messages:
             req: SearchRequest = msg.payload
             if req is None:
                 continue
-
-            # Fan out ONE incoming message into len(patterns) x len(file_paths)
-            # subprocess tasks. Every produced task shares this message's
-            # source_offsets, so they all belong to the same MessageGroup —
-            # on_message_complete will fire exactly once after they all
-            # finish (or reach a terminal state via on_error).
             for pattern in req.patterns:
                 for file_path in req.file_paths:
-                    task_id = dk.make_task_id('rg')
-                    if task_id in pending.pending_task_ids:
-                        continue
-                    tasks.append(
-                        dk.ExecutorTask(
-                            task_id=task_id,
-                            args=[str(req.repeat), pattern, file_path, f'--fail={FAIL_RATE}'],
-                            metadata={
-                                'request_id': req.request_id,
-                                'pattern': pattern,
-                                'file_path': file_path,
-                                'repeat': req.repeat,
-                            },
-                            labels={
-                                'request_id': req.request_id,
-                                'pattern': pattern,
-                                'file': file_path,
-                            },
-                            env={
-                                'REQUEST_ID': req.request_id,
-                            },
-                            source_offsets=[msg.offset],
-                        )
-                    )
+                    by_key.setdefault((pattern, file_path), []).append(msg)
+
+        tasks = []
+        for (pattern, file_path), contributing_msgs in by_key.items():
+            task_id = dk.make_task_id('rg')
+            if task_id in pending.pending_task_ids:
+                continue
+            # Representative repeat: max(repeat) so the subprocess does
+            # at least as much work as anyone asked for (a merge policy).
+            merged_repeat = max((m.payload.repeat for m in contributing_msgs), default=1)
+            request_ids = [m.payload.request_id for m in contributing_msgs]
+            offsets = [m.offset for m in contributing_msgs]
+            tasks.append(
+                dk.ExecutorTask(
+                    task_id=task_id,
+                    args=[str(merged_repeat), pattern, file_path, f'--fail={FAIL_RATE}'],
+                    metadata={
+                        # First contributor's request_id is "primary" — used
+                        # as the Kafka key for per-task output. The full
+                        # list is in fan_in_request_ids for downstream debug.
+                        'request_id': request_ids[0],
+                        'fan_in_request_ids': request_ids,
+                        'pattern': pattern,
+                        'file_path': file_path,
+                        'repeat': merged_repeat,
+                    },
+                    labels={
+                        # Label shows fan-in count so the debug UI makes it
+                        # visible at a glance (e.g. "2-way fan-in").
+                        'fan_in_count': str(len(contributing_msgs)),
+                        'pattern': pattern,
+                        'file': file_path,
+                    },
+                    env={
+                        'REQUEST_ID': request_ids[0],
+                    },
+                    # THE FAN-IN: this single task is tied to every source
+                    # message that requested this (pattern, file_path) pair.
+                    # The framework reports its terminal outcome to every
+                    # corresponding MessageGroup.
+                    source_offsets=offsets,
+                )
+            )
         return tasks
 
     async def on_task_complete(self, result: dk.ExecutorResult) -> dk.CollectResult | None:
