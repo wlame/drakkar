@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import glob
 import json
 import os
@@ -26,11 +27,40 @@ from drakkar.models import (
     ExecutorTask,
     SourceMessage,
 )
+from drakkar.utils import redact_url
 
 if TYPE_CHECKING:
     from drakkar.config import DrakkarConfig
 
 logger = structlog.get_logger()
+
+# Env var name patterns whose values get redacted before being written to the
+# recorder SQLite file. Applied case-insensitively. The recorder DB can be
+# downloaded via the debug UI, so writing raw secrets would effectively
+# publish them — this filter is the last line of defence.
+_SECRET_ENV_PATTERNS = (
+    '*PASSWORD*',
+    '*SECRET*',
+    '*TOKEN*',
+    '*_KEY',
+    '*API_KEY*',
+    '*CREDENTIAL*',
+    '*_DSN',
+)
+
+
+def _redact_env_value(name: str, value: str) -> str:
+    """Return a safe-to-store version of an env var value.
+
+    Redacts fully when the var name matches a common-secret pattern. For
+    other values, strips embedded credentials from URL-shaped strings
+    (handles DSNs, HTTP-with-basic-auth, Kafka SASL_SSL, etc.).
+    """
+    name_upper = name.upper()
+    if any(fnmatch.fnmatchcase(name_upper, p.upper()) for p in _SECRET_ENV_PATTERNS):
+        return '***' if value else ''
+    return redact_url(value)
+
 
 SCHEMA_EVENTS = """
 CREATE TABLE IF NOT EXISTS events (
@@ -327,11 +357,19 @@ class EventRecorder:
     # --- Worker config (autodiscovery) ---
 
     async def write_config(self, drakkar_config: DrakkarConfig) -> None:
-        """Write worker configuration to worker_config table."""
+        """Write worker configuration to worker_config table.
+
+        Security note: this SQLite file is downloadable via the debug UI.
+        Any value written here is effectively public to anyone who can
+        reach that endpoint. Redact secrets before insertion:
+        - kafka_brokers: strip credentials from SASL URIs.
+        - env_vars: redact values of any secret-named var; URL-shape
+          values have embedded credentials stripped.
+        """
         self._drakkar_config = drakkar_config
         if not self._db or not self._config.store_config:
             return
-        env_vars = {name: os.environ.get(name, '') for name in self._config.expose_env_vars}
+        env_vars = {name: _redact_env_value(name, os.environ.get(name, '')) for name in self._config.expose_env_vars}
         sinks: dict[str, list[str]] = {}
         sinks_cfg = drakkar_config.sinks
         if sinks_cfg:
@@ -352,7 +390,7 @@ class EventRecorder:
                 detect_worker_ip(),
                 self._config.port,
                 self._config.debug_url or None,
-                drakkar_config.kafka.brokers,
+                redact_url(drakkar_config.kafka.brokers),
                 drakkar_config.kafka.source_topic,
                 drakkar_config.kafka.consumer_group,
                 drakkar_config.executor.binary_path,

@@ -1014,6 +1014,106 @@ async def test_write_config_captures_env_vars(tmp_path, monkeypatch):
     await rec.stop()
 
 
+# --- H7: secrets in recorder must be redacted ---
+
+
+async def test_write_config_redacts_sasl_kafka_brokers(tmp_path):
+    """Kafka brokers with SASL credentials must be stripped before writing
+    to the recorder DB. The SQLite file is downloadable via the debug UI,
+    so storing raw user:pass URLs publishes them to anyone with access.
+    """
+    from drakkar.config import DrakkarConfig
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    drakkar_cfg = DrakkarConfig(
+        kafka={
+            'brokers': 'SASL_SSL://alice:s3cret@kafka-1.example.com:9094',
+            'source_topic': 't',
+            'consumer_group': 'g',
+        },
+        executor={'binary_path': '/bin/echo'},
+        sinks={'kafka': {'out': {'topic': 'results'}}},
+    )
+    await rec.write_config(drakkar_cfg)
+
+    async with rec._db.execute('SELECT kafka_brokers FROM worker_config WHERE id = 1') as cur:
+        row = await cur.fetchone()
+    stored = row[0]
+    assert 'alice' not in stored
+    assert 's3cret' not in stored
+    assert '***:***' in stored
+    # host and port are still visible — operators need these for debugging.
+    assert 'kafka-1.example.com:9094' in stored
+    await rec.stop()
+
+
+async def test_write_config_redacts_secret_named_env_vars(tmp_path, monkeypatch):
+    """Even when the operator explicitly adds a secret-named env var to
+    expose_env_vars, the VALUE must be redacted before it hits disk.
+    """
+    monkeypatch.setenv('DB_PASSWORD', 'supersecret')
+    monkeypatch.setenv('GITHUB_TOKEN', 'ghp_abc123')
+    monkeypatch.setenv('AWS_SECRET_ACCESS_KEY', 'wxyz')
+    monkeypatch.setenv('MY_API_KEY', 'k1')
+    monkeypatch.setenv('SERVICE_NAME', 'my-service')  # NOT a secret
+
+    config = make_debug_config(
+        tmp_path,
+        expose_env_vars=['DB_PASSWORD', 'GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY', 'MY_API_KEY', 'SERVICE_NAME'],
+    )
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    await rec.write_config(_make_drakkar_config())
+
+    import json
+
+    async with rec._db.execute('SELECT env_vars_json FROM worker_config WHERE id = 1') as cur:
+        row = await cur.fetchone()
+    env = json.loads(row[0])
+
+    assert env['DB_PASSWORD'] == '***'
+    assert env['GITHUB_TOKEN'] == '***'
+    assert env['AWS_SECRET_ACCESS_KEY'] == '***'
+    assert env['MY_API_KEY'] == '***'
+    # Non-secret names pass through.
+    assert env['SERVICE_NAME'] == 'my-service'
+    await rec.stop()
+
+
+async def test_write_config_redacts_url_credentials_in_env_values(tmp_path, monkeypatch):
+    """Env vars that aren't named like secrets but hold a DSN/URL with
+    embedded credentials must still be redacted.
+    """
+    monkeypatch.setenv('UPSTREAM_URL', 'https://alice:pw@api.example.com/endpoint')
+    monkeypatch.setenv('CACHE_URL', 'redis://:rediskey@cache:6379/0')
+
+    config = make_debug_config(tmp_path, expose_env_vars=['UPSTREAM_URL', 'CACHE_URL'])
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    await rec.write_config(_make_drakkar_config())
+
+    import json
+
+    async with rec._db.execute('SELECT env_vars_json FROM worker_config WHERE id = 1') as cur:
+        row = await cur.fetchone()
+    env = json.loads(row[0])
+
+    assert 'alice' not in env['UPSTREAM_URL']
+    assert 'pw' not in env['UPSTREAM_URL']
+    assert '***:***' in env['UPSTREAM_URL']
+    assert 'api.example.com/endpoint' in env['UPSTREAM_URL']
+
+    assert 'rediskey' not in env['CACHE_URL']
+    assert '***:***' in env['CACHE_URL']
+    assert 'cache:6379' in env['CACHE_URL']
+    await rec.stop()
+
+
 async def test_write_config_idempotent(tmp_path):
     """Calling write_config twice replaces the row (INSERT OR REPLACE)."""
     config = make_debug_config(tmp_path)
