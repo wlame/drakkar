@@ -576,14 +576,33 @@ function renderTaskLists() {
 }
 
 // === Data loading ===
+// Grace period (seconds) before reconciling a locally-"running" task that the
+// server has no record of. Longer than the framework's default task_timeout so
+// that genuinely long-running subprocesses don't get falsely reconciled — they
+// WOULD appear in the API as 'running' entries and not match this condition.
+var STALE_RUNNING_SEC = 180;
+
 async function syncFromAPI() {
-    // API sync merges data — it never deletes WS-created tasks.
-    // Only adds tasks we don't know about yet (e.g. from before page load).
-    // Removes only tasks that aged out of the timeline window.
+    // API sync merges data. It:
+    //   - adds tasks from the server we don't know yet (pre-page-load history)
+    //   - updates WS-running tasks when the server already has them finished
+    //     (WS dropped the completion event — queue full, backgrounded tab, etc.)
+    //   - reconciles "stuck running" tasks: local says running but the server
+    //     has no record at all AND the start_ts is old enough that the
+    //     recorder has definitely flushed — drop them to stop the Running
+    //     count drifting upward
+    //   - trims tasks that aged out of the timeline window
     try {
         var r = await fetch('/api/recent-tasks?minutes=' + TIMELINE_MINUTES);
         var data = await r.json();
         var tasks = data.tasks || [];
+
+        // Build a lookup of server-known task ids for the reconcile step below.
+        var apiIds = Object.create(null);
+        for (var i = 0; i < tasks.length; i++) {
+            apiIds[tasks[i].task_id] = true;
+        }
+
         for (var i = 0; i < tasks.length; i++) {
             var apiTask = tasks[i];
             var existing = allTasks[apiTask.task_id];
@@ -599,6 +618,30 @@ async function syncFromAPI() {
             }
             // otherwise keep the WS-maintained version (it has fresher data)
         }
+
+        // Reconcile "stuck running" tasks. If local has a task flagged as
+        // running but the server's authoritative view has no record of it
+        // (task_started event never made it to the DB, or it's already been
+        // rotated out of the recent window), AND the start_ts is old enough
+        // that it would have flushed long ago, remove it from local state.
+        // Without this the Running counter and lane bars creep upward whenever
+        // WS drops a task_completed under load (queue full, browser-backgrounded
+        // tab throttled, brief disconnect window).
+        var staleCutoffTs = Date.now() / 1000 - STALE_RUNNING_SEC;
+        var localIds = Object.keys(allTasks);
+        for (var j = 0; j < localIds.length; j++) {
+            var id = localIds[j];
+            var lt = allTasks[id];
+            if (
+                lt.status === 'running' &&
+                !apiIds[id] &&
+                lt.start_ts &&
+                lt.start_ts < staleCutoffTs
+            ) {
+                delete allTasks[id];
+            }
+        }
+
         // trim tasks that aged out of the visible timeline window
         var cutoff = Date.now() / 1000 - TIMELINE_MINUTES * 60;
         var keys = Object.keys(allTasks);
@@ -653,6 +696,19 @@ function connectWS() {
     ws.onopen = function() {
         var b = document.getElementById('ws-badge');
         if (b) { b.textContent = 'WS: connected'; b.style.background = '#d1fae5'; b.style.color = '#065f46'; b.style.border = '1px solid #6ee7b7'; }
+        // Any events emitted during the disconnect window are not buffered
+        // for us — they were delivered to no-one. Pull fresh state from the
+        // DB so the reconcile loop can drop any tasks we think are still
+        // running that actually finished while we were offline.
+        if (!frozen) {
+            syncFromAPI().then(function() {
+                var ids = Object.keys(allTasks);
+                for (var i = 0; i < ids.length; i++) {
+                    if (!taskBars[ids[i]]) ensureBar(allTasks[ids[i]]);
+                }
+                pruneOldBars();
+            });
+        }
     };
     ws.onclose = function() {
         var b = document.getElementById('ws-badge');

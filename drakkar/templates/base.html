@@ -100,12 +100,16 @@
     }
     applyWidth(localStorage.getItem('drakkar-wide') === '1');
     document.addEventListener('keydown', function(e) {
-        if (e.key === 'f' || e.key === 'F') {
-            var tag = (e.target.tagName || '').toLowerCase();
-            if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) return;
-            e.preventDefault();
-            toggleWidth();
-        }
+        if (e.key !== 'f' && e.key !== 'F') return;
+        // Don't intercept browser / OS shortcuts. Cmd+F (macOS) and Ctrl+F
+        // (Linux / Windows) open the browser's find-in-page; Alt+F opens
+        // the application menu on some platforms. Only plain "f" / "F"
+        // (optionally with Shift) toggles the wide layout.
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        var tag = (e.target.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) return;
+        e.preventDefault();
+        toggleWidth();
     });
     </script>
     <script>

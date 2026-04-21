@@ -42,9 +42,10 @@ FAIL_RATE = '0.05'
 
 
 class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
-    """Searches source files using ripgrep with FAN-OUT and FAN-IN.
+    """Searches source files using ripgrep with FAN-OUT, FAN-IN, and a
+    precomputed-result fast-track that skips the subprocess on cache hits.
 
-    FAN-OUT: one SearchRequest with N patterns xM file_paths produces up
+    FAN-OUT: one SearchRequest with N patterns x M file_paths produces up
     to N*M subprocess tasks (before dedup). Every task for one message
     stamps its source_offsets with that message's offset.
 
@@ -52,26 +53,38 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
     (pattern, file_path) pair, arrange() combines them into ONE task
     whose source_offsets lists EVERY contributing message. The framework
     reports that single task's result to every corresponding
-    MessageGroup — both messages' on_message_complete sees the shared
-    result. Dedupes redundant subprocess work; keeps per-request
-    downstream output intact (the shared result still lands in each
-    request's aggregate). Look for the "fan_in_count" label in the debug
-    UI to see it happening.
+    MessageGroup. Look for the "fan_in_count" label in the debug UI.
 
-    Per-task (on_task_complete, one call per subprocess outcome):
+    PRECOMPUTED FAST-TRACK: the handler maintains an in-memory cache of
+    recent successful ripgrep stdout keyed by (pattern, file_path, repeat).
+    If the next arrange() sees the same key, it attaches a
+    PrecomputedResult to the task — the framework skips the subprocess
+    entirely, synthesises an ExecutorResult, and feeds it through
+    on_task_complete as if the subprocess had run. Cache hits show up in
+    the debug UI with ``source=cache`` in task labels and with
+    ``metadata.precomputed=true`` in recorder events. The
+    ``drakkar_tasks_precomputed_total`` counter tracks the short-circuit
+    volume. With the producer's HOT_QUERIES driving frequent repeats,
+    you should see a steady stream of cache hits after the first minute.
+
+    Per-task (on_task_complete, one call per subprocess outcome OR cache
+    hit — handler can't tell the difference):
       - Kafka "results" topic: full SearchResult
       - Postgres archive_results_db: compact per-task row
       - MongoDB: full document archive
       - Redis: cached per-(request, pattern, file) summary (1h TTL)
 
     Per-request (on_message_complete, one call per SearchRequest after
-    all its tasks finish — a task shared with other requests still
-    counts toward each one's completion):
+    all its tasks finish):
       - Kafka "priority_match_notifications" topic: ONE SearchAggregate
       - Postgres hot_recent_matches_db: if total_matches > 20
       - HTTP webhook: if total_matches > 20 (one alert per request)
       - Filesystem JSONL: if total_matches > 50
     """
+
+    # Max entries in the in-memory result cache. Keyed by
+    # (pattern, file_path, repeat); evicts oldest when full.
+    MAX_CACHE_ENTRIES = 256
 
     def message_label(self, msg: dk.SourceMessage) -> str:
         if msg.payload:
@@ -94,18 +107,36 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
 
     async def on_ready(self, config: dk.DrakkarConfig, db_pool: object) -> None:
         self.total_collected = 0
+        # In-memory result cache for the precomputed fast-track.
+        # Populated from on_task_complete after successful subprocess runs,
+        # consulted in arrange() before creating subprocess tasks. Using
+        # dict preserves insertion order so we can FIFO-evict the oldest
+        # entry when the cache exceeds MAX_CACHE_ENTRIES.
+        self._result_cache: dict[tuple[str, str, int], str] = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     # -- Periodic tasks -------------------------------------------------
 
     @dk.periodic(seconds=10)
     async def log_stats(self):
         """Log pipeline stats every 10 seconds. Demonstrates a recurring
-        background task that accesses handler state set during processing."""
+        background task that accesses handler state set during processing.
+
+        Also reports precomputed-cache hit-rate so the short-circuit
+        activity is visible in worker logs without opening Grafana.
+        """
         periodic_stats_runs_total.inc()
+        attempts = self._cache_hits + self._cache_misses
+        hit_rate = self._cache_hits / attempts if attempts else 0.0
         await logger.ainfo(
             'periodic_stats',
             category='periodic',
             total_collected=self.total_collected,
+            cache_size=len(self._result_cache),
+            cache_hits=self._cache_hits,
+            cache_misses=self._cache_misses,
+            cache_hit_rate=round(hit_rate, 3),
         )
         await asyncio.sleep(0.8)  # emulate some async work
 
@@ -161,6 +192,50 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
             merged_repeat = max((m.payload.repeat for m in contributing_msgs), default=1)
             request_ids = [m.payload.request_id for m in contributing_msgs]
             offsets = [m.offset for m in contributing_msgs]
+
+            # PRECOMPUTED FAST-TRACK — check the in-memory cache before
+            # scheduling a subprocess. A cache hit becomes a PrecomputedResult
+            # attached to the task; the framework will skip the subprocess
+            # entirely and feed the cached stdout to on_task_complete. The
+            # debug UI marks these tasks with ``source=cache`` and the event
+            # recorder sets ``metadata.precomputed=true``.
+            cache_key = (pattern, file_path, merged_repeat)
+            cached_stdout = self._result_cache.get(cache_key)
+            if cached_stdout is not None:
+                self._cache_hits += 1
+                tasks.append(
+                    dk.ExecutorTask(
+                        task_id=task_id,
+                        # args is empty — no subprocess will run. Kept visible
+                        # in metadata for debugging what would have run.
+                        metadata={
+                            'request_id': request_ids[0],
+                            'fan_in_request_ids': request_ids,
+                            'pattern': pattern,
+                            'file_path': file_path,
+                            'repeat': merged_repeat,
+                            'would_have_run': [str(merged_repeat), pattern, file_path],
+                        },
+                        labels={
+                            'source': 'cache',
+                            'fan_in_count': str(len(contributing_msgs)),
+                            'pattern': pattern,
+                            'file': file_path,
+                        },
+                        source_offsets=offsets,
+                        precomputed=dk.PrecomputedResult(
+                            stdout=cached_stdout,
+                            # Small non-zero duration reflects the cache lookup
+                            # itself so the UI histogram isn't cluttered with
+                            # zeros; also makes the "hit" visible on timelines.
+                            duration_seconds=0.0005,
+                        ),
+                    ),
+                )
+                continue
+
+            # Cache miss: build a normal subprocess task.
+            self._cache_misses += 1
             tasks.append(
                 dk.ExecutorTask(
                     task_id=task_id,
@@ -176,6 +251,7 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
                         'repeat': merged_repeat,
                     },
                     labels={
+                        'source': 'subprocess',
                         # Label shows fan-in count so the debug UI makes it
                         # visible at a glance (e.g. "2-way fan-in").
                         'fan_in_count': str(len(contributing_msgs)),
@@ -201,6 +277,11 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
         a scalar summary to the Postgres archive (one row per task), and
         a cached summary to Redis. Request-level aggregation happens
         later in on_message_complete.
+
+        Also populates the handler's in-memory result cache for
+        subsequent arrange() fast-track hits. We only cache genuinely-run
+        subprocess results (pid is not None) so we don't loop cached
+        results back into the cache.
         """
         self.total_collected += 1
         # simulate post-processing (e.g. parsing, enrichment)
@@ -208,6 +289,20 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
 
         matches = [line for line in result.stdout.strip().split('\n') if line]
         meta = result.task.metadata
+
+        # Populate the precomputed-fast-track cache with this task's stdout
+        # so subsequent windows with the same (pattern, file_path, repeat)
+        # skip the subprocess. Skip the store when THIS result itself came
+        # from the cache (pid is None for precomputed results) — no point
+        # re-inserting what's already there, and it keeps the FIFO insertion
+        # order meaningful for eviction.
+        if result.pid is not None:
+            cache_key = (meta['pattern'], meta['file_path'], meta['repeat'])
+            self._result_cache[cache_key] = result.stdout
+            # FIFO eviction to bound memory.
+            while len(self._result_cache) > self.MAX_CACHE_ENTRIES:
+                oldest = next(iter(self._result_cache))
+                del self._result_cache[oldest]
 
         # build typed output models
         output = SearchResult(
