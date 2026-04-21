@@ -791,6 +791,11 @@ class CacheEngine:
         # the flush task. Runs on its own (typically slower) cadence and
         # reclaims space by deleting rows whose ``expires_at_ms`` is past.
         self._cleanup_task: asyncio.Task | None = None
+        # Task reference for the periodic peer-sync loop. Same lifecycle
+        # as flush/cleanup; only scheduled when peer sync is effectively
+        # enabled (both config flag on AND debug.store_config=True). None
+        # when disabled so there's no wakeup cost.
+        self._sync_task: asyncio.Task | None = None
         # Whether peer-sync is *effectively* enabled — i.e. both the config
         # flag is on and the startup gating rules passed. Set during
         # ``start()``: peer-sync needs ``debug.store_config`` (to read peer
@@ -806,6 +811,23 @@ class CacheEngine:
         # small SELECT), but on a large fleet the N^2 read pattern adds up
         # without this short-lived cache.
         self._peer_cluster_cache: dict[str, tuple[str, float]] = {}
+        # Per-peer sync cursors. Maps peer worker_name → max ``updated_at_ms``
+        # pulled so far. The next cycle's pull uses ``WHERE updated_at_ms > ?``
+        # with this value so we never re-read rows we've already processed.
+        #
+        # Advancement rules (see ``_advance_cursor`` / ``_sync_once``):
+        #  - zero rows     → cursor unchanged (no progress, retry next cycle)
+        #  - partial batch → cursor jumps to now_ms (caught up; small
+        #                    optimization, prevents stuck cursor on clock
+        #                    drift since partial batches never regress)
+        #  - full batch    → cursor advances to last row's ``updated_at_ms``
+        #                    so the next cycle picks up the tail
+        #
+        # Cursor state is in-memory only. A worker restart resets cursors to
+        # zero and the next cycle re-pulls everything from peers — bounded by
+        # TTL cleanup and LWW rejection, so no runaway work. Persisting
+        # cursors across restarts is a follow-up (marked as such in the plan).
+        self._peer_cursors: dict[str, int] = {}
 
     def attach_cache(self, cache: Cache) -> None:
         """Associate the handler-facing Cache instance with this engine.
@@ -1009,6 +1031,24 @@ class CacheEngine:
             name='cache.cleanup',
         )
 
+        # Schedule the periodic peer-sync loop — but only when peer sync
+        # is effectively enabled. When disabled we skip registration
+        # entirely so there's zero wakeup cost on workers that don't
+        # participate in cross-worker cache sharing (including workers
+        # where ``debug.store_config=False`` silently downgraded sync).
+        if self._peer_sync_enabled:
+            self._sync_task = asyncio.create_task(
+                run_periodic_task(
+                    name='cache.sync',
+                    coro_fn=self._sync_once,
+                    seconds=self._config.peer_sync.interval_seconds,
+                    on_error='continue',
+                    recorder=self._recorder,
+                    system=True,
+                ),
+                name='cache.sync',
+            )
+
         await logger.ainfo(
             'cache_engine_started',
             category='cache',
@@ -1045,11 +1085,17 @@ class CacheEngine:
         None checks. Matches the recorder's stop() contract so app
         shutdown can call both unconditionally.
         """
-        # Step 1 + 2: stop the periodic flush + cleanup tasks cleanly.
-        # Cancel cleanup first — it typically runs on a slower cadence and
-        # is side-effect-free with respect to the dirty map, so we can
-        # drain ordering around flush: flush's final drain needs the writer
-        # connection, cleanup does not add writes we care about preserving.
+        # Step 1 + 2: stop the periodic sync + cleanup + flush tasks cleanly.
+        # Cancel sync and cleanup first — they're side-effect-free with
+        # respect to the dirty map. Flush's final drain below needs the
+        # writer connection open, so we save flush for last.
+        if self._sync_task is not None:
+            self._sync_task.cancel()
+            try:
+                await self._sync_task
+            except asyncio.CancelledError:
+                pass
+            self._sync_task = None
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()
             try:
@@ -1405,6 +1451,7 @@ class CacheEngine:
         scope_sql: str,
         scope_params: tuple,
         batch_size: int,
+        cursor_ms: int,
     ) -> list[tuple]:
         """Open an ephemeral read-only connection to the peer DB and pull rows.
 
@@ -1421,6 +1468,11 @@ class CacheEngine:
         a newer ``updated_at_ms``, only for cleanup to reap them soon
         after).
 
+        Also filters by the per-peer cursor (``updated_at_ms > cursor_ms``)
+        so we skip rows we've already read. Callers pass the current cursor
+        from ``_peer_cursors``; on the first sync cycle the cursor is 0 and
+        nothing is filtered out.
+
         Args:
             peer_db_path: resolved path to the peer's cache DB (``.actual``
                 file, not the symlink — caller already resolved).
@@ -1428,6 +1480,8 @@ class CacheEngine:
                 ``'scope IN (?, ?)'``.
             scope_params: parameters for ``scope_sql``.
             batch_size: maximum rows to fetch this cycle.
+            cursor_ms: only rows with ``updated_at_ms > cursor_ms`` are
+                returned; pass 0 on the first cycle.
 
         Returns:
             A list of row tuples in the same column order as the SELECT.
@@ -1441,10 +1495,11 @@ class CacheEngine:
             'FROM cache_entries '
             f'WHERE {scope_sql} '
             'AND (expires_at_ms IS NULL OR expires_at_ms > ?) '
+            'AND updated_at_ms > ? '
             'ORDER BY updated_at_ms ASC '
             'LIMIT ?'
         )
-        params = (*scope_params, now_ms, batch_size)
+        params = (*scope_params, now_ms, cursor_ms, batch_size)
         async with (
             aiosqlite.connect(f'file:{peer_db_path}?mode=ro', uri=True) as db,
             db.execute(query, params) as cur,
@@ -1455,17 +1510,45 @@ class CacheEngine:
             # about cursor lifetime after the ``async with`` closes.
             return [tuple(row) for row in await cur.fetchall()]
 
+    def _advance_cursor(self, *, rows_count: int, batch_size: int, rows: list[tuple]) -> int | None:
+        """Compute the new cursor value for a peer after a pull, or ``None``
+        if it should stay where it is.
+
+        Rules (see ``_peer_cursors`` docstring in ``__init__``):
+
+        * Zero rows returned → return ``None`` (caller leaves cursor
+          unchanged). This prevents a single empty cycle from skipping
+          over late-arriving rows whose ``updated_at_ms`` is between
+          the old cursor and "now".
+        * Full batch (``rows_count == batch_size``) → return the last
+          row's ``updated_at_ms``. The peer has more we haven't read;
+          next cycle picks up from here.
+        * Partial batch (``0 < rows_count < batch_size``) → return the
+          current wall-clock ms. We've caught up on anything the peer
+          had below this moment; moving to "now-ish" also protects
+          against stuck cursors if peer clocks drift backward — partial
+          batches never regress.
+        """
+        if rows_count == 0:
+            return None
+        if rows_count >= batch_size:
+            # Rows are ordered by updated_at_ms ASC, so row[-1] has the
+            # largest timestamp. Column index 5 is updated_at_ms (see the
+            # SELECT list in ``_pull_peer_rows``).
+            return int(rows[-1][5])
+        return _now_ms()
+
     async def _sync_once(self) -> None:
         """Pull one batch of entries from every discovered peer and apply
         them to the local DB via LWW UPSERT.
 
         Task 11 scope: discovery + per-peer pull with scope-aware filter.
-        Task 12 (this change): apply the pulled rows to the local DB via
-        the shared ``LWW_UPSERT_SQL`` constant, invalidate any cached
-        in-memory entries for the upserted keys, and tick the
+        Task 12: apply the pulled rows to the local DB via the shared
+        ``LWW_UPSERT_SQL`` constant, invalidate any cached in-memory
+        entries for the upserted keys, and tick the
         ``sync_entries_fetched`` / ``sync_entries_upserted`` counters.
-        Task 13 will add cursor-based incremental pulls and per-peer
-        error isolation.
+        Task 13 (this change): cursor-based incremental pulls and
+        per-peer error isolation.
 
         Apply step details:
 
@@ -1483,6 +1566,15 @@ class CacheEngine:
           matching the "count throughput, not applied rows" semantics of
           ``cache_flush_entries``. That way operators see sync cost even
           on idle clusters where LWW rejects most rows.
+
+        Per-peer error isolation:
+
+        One bad peer (corrupt DB, missing file, read timeout) must not
+        break the whole cycle. Each peer's pull + apply is wrapped in a
+        try/except; on failure we log a warning with the peer name and
+        error, increment ``drakkar_cache_sync_errors_total{peer}``, and
+        continue to the next peer. The failing peer's cursor is left
+        untouched so the next cycle retries the same range.
 
         Fast paths:
         - Engine not started / disabled (``_writer_db is None``) → return.
@@ -1505,15 +1597,19 @@ class CacheEngine:
             return
 
         batch_size = self._config.peer_sync.batch_size
-        # Iterate peers. One bad peer should not break the whole cycle —
-        # the outer try/except gives per-peer isolation. Task 13 will add
-        # dedicated error-metric wiring; here we keep the error path simple:
-        # any exception inside the per-peer block is logged and we move on.
+        # Iterate peers. One bad peer must not break the whole sync cycle —
+        # isolation is part of the peer-sync contract. Any exception inside
+        # the per-peer block: log, tick the error counter, leave the
+        # cursor untouched, continue to the next peer.
         async for peer_name, peer_db_path in discover_peer_dbs(
             db_dir,
             '-cache.db',
             self._worker_id,
         ):
+            # Cursor: 0 on first encounter, otherwise the last successful
+            # advance. A failing peer keeps its previous cursor so next
+            # cycle retries the same range.
+            cursor_ms = self._peer_cursors.get(peer_name, 0)
             try:
                 peer_cluster = await self._resolve_peer_cluster(peer_name, db_dir)
                 scope_sql, scope_params = self._peer_scope_filter(peer_cluster)
@@ -1522,20 +1618,34 @@ class CacheEngine:
                     scope_sql=scope_sql,
                     scope_params=scope_params,
                     batch_size=batch_size,
+                    cursor_ms=cursor_ms,
                 )
                 self._last_pulled_rows[peer_name] = rows
                 # Apply step — UPSERT pulled rows into our local DB.
                 # _apply_peer_rows handles the zero-row fast path internally
                 # so we don't branch here.
                 await self._apply_peer_rows(peer_name=peer_name, rows=rows)
-            except Exception:
-                # Per-peer isolation placeholder — Task 13 will add a
-                # dedicated error metric and warning event alongside this.
-                await logger.aexception(
-                    'cache_peer_sync_pull_failed',
+                # Advance cursor on success. Zero rows → no change; rules
+                # live in ``_advance_cursor``.
+                next_cursor = self._advance_cursor(
+                    rows_count=len(rows),
+                    batch_size=batch_size,
+                    rows=rows,
+                )
+                if next_cursor is not None:
+                    self._peer_cursors[peer_name] = next_cursor
+            except Exception as exc:
+                # Per-peer isolation: log warning, tick error metric,
+                # leave cursor untouched. The sync loop itself continues
+                # to the next peer — one bad peer cannot break the whole
+                # cycle, and a failing peer can recover on next cycle.
+                metrics.cache_sync_errors.labels(peer=peer_name).inc()
+                await logger.awarning(
+                    'cache_peer_sync_failed',
                     category='cache',
                     peer=peer_name,
                     db=peer_db_path,
+                    error=str(exc),
                 )
 
     async def _apply_peer_rows(self, *, peer_name: str, rows: list[tuple]) -> None:

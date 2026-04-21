@@ -444,7 +444,7 @@ class Cache:
 - Modify: `drakkar/cache.py`
 - Create: `tests/test_cache_sync_cursor.py`
 
-- [ ] write tests in `tests/test_cache_sync_cursor.py`:
+- [x] write tests in `tests/test_cache_sync_cursor.py`:
   - per-peer cursor `_peer_cursors: dict[str, int]` starts at 0 on worker startup
   - after successful pull, cursor advances to max `updated_at_ms` of returned rows
   - if rows returned == batch_size, cursor advances to last row's `updated_at_ms` (next cycle picks up remaining)
@@ -453,13 +453,13 @@ class Cache:
   - peer error (connection refused / timeout / corrupt DB / missing file) → warning logged with peer name + error, `drakkar_cache_sync_errors_total{peer}` incremented, loop continues to next peer, worker keeps running
   - **cross-worker `delete` behavior:** key deleted locally, then peer has same key with newer `updated_at_ms` → next sync re-pulls the peer's value (LWW). Documents the "delete is local-only" sharp edge as an explicit regression test.
   - `cache.sync` registered as system periodic task via `run_periodic_task(system=True)`
-- [ ] implement `_peer_cursors` tracking in `_sync_once`; advance correctly per the rules above
-- [ ] wrap per-peer logic in try/except; emit warn + metric on failure
-- [ ] register sync loop in `CacheEngine.start()`: `asyncio.create_task(run_periodic_task(name='cache.sync', ..., system=True))`
-- [ ] short comment on cursor-in-memory choice: "Cursor resets to 0 on worker restart — we re-pull everything from peers once. Bounded by TTL cleanup and LWW rejection, so no runaway work."
-- [ ] short comment on per-peer try/except: "One bad peer must not break the whole sync cycle — isolation is part of the peer-sync contract."
-- [ ] run `uv run pytest tests/test_cache_sync_*.py` — all pass
-- [ ] ruff + ty clean
+- [x] implement `_peer_cursors` tracking in `_sync_once`; advance correctly per the rules above
+- [x] wrap per-peer logic in try/except; emit warn + metric on failure
+- [x] register sync loop in `CacheEngine.start()`: `asyncio.create_task(run_periodic_task(name='cache.sync', ..., system=True))`
+- [x] short comment on cursor-in-memory choice: "Cursor resets to 0 on worker restart — we re-pull everything from peers once. Bounded by TTL cleanup and LWW rejection, so no runaway work."
+- [x] short comment on per-peer try/except: "One bad peer must not break the whole sync cycle — isolation is part of the peer-sync contract."
+- [x] run `uv run pytest tests/test_cache_sync_*.py` — all pass
+- [x] ruff + ty clean
 
 ### Task 14: Prometheus metrics wiring
 

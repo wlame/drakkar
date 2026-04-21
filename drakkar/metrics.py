@@ -255,6 +255,17 @@ cache_sync_entries_upserted = Counter(
     ['peer'],
 )
 
+# Peer-sync error counter introduced alongside Task 13. Labelled by peer so
+# operators can alert on a specific misbehaving worker (corrupt DB, missing
+# file, read timeout, etc.) without parsing logs. One increment per failed
+# per-peer cycle; the sync loop itself keeps running so one bad peer cannot
+# break the whole worker.
+cache_sync_errors = Counter(
+    'drakkar_cache_sync_errors_total',
+    'Total per-peer failures during the cache peer-sync cycle',
+    ['peer'],
+)
+
 # DB-size gauges refreshed by the cleanup loop. Counting DB rows on every
 # ``set``/``get`` would defeat the running-sum design used for the in-memory
 # gauges, so the DB view is updated at cleanup cadence (default 60s). Since
