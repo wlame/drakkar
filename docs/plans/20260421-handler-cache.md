@@ -355,7 +355,7 @@ class Cache:
 - Modify: `drakkar/cache.py`
 - Modify: `tests/test_cache_api.py`
 
-- [ ] extend `tests/test_cache_api.py`:
+- [x] extend `tests/test_cache_api.py`:
   - `get` memory hit returns value (no DB access — assert via mocked reader connection)
   - `get` memory miss + DB hit returns value AND warms memory (with LRU-bump behavior if cap is set)
   - `get` memory miss + DB miss returns None
@@ -365,11 +365,11 @@ class Cache:
   - `get` warm-on-read respects `max_memory_entries` — triggers LRU eviction if cap would be exceeded
   - reader connection used only for reads, writer only for writes (assert no cross-contamination via test doubles)
   - concurrent `get` while flush in progress completes without waiting (assert via event ordering in test)
-- [ ] add a second `aiosqlite` connection (`_reader_db`) in `CacheEngine.start()`; close in `stop()`
-- [ ] short comment on the writer/reader split: "Two connections so `get()` DB fallback never queues behind a flush/cleanup/sync commit. aiosqlite spawns one worker thread per connection, and WAL mode lets the reader see consistent snapshots during concurrent writes."
-- [ ] implement `async Cache.get(key, *, as_type=None)` — check memory + expiration → on miss query DB via `_reader_db` → on DB hit deserialize (Pydantic-aware via `as_type`) → insert into memory (with eviction if needed) → return
-- [ ] run `uv run pytest tests/test_cache_api.py` — all pass
-- [ ] ruff + ty clean
+- [x] add a second `aiosqlite` connection (`_reader_db`) in `CacheEngine.start()`; close in `stop()`
+- [x] short comment on the writer/reader split: "Two connections so `get()` DB fallback never queues behind a flush/cleanup/sync commit. aiosqlite spawns one worker thread per connection, and WAL mode lets the reader see consistent snapshots during concurrent writes."
+- [x] implement `async Cache.get(key, *, as_type=None)` — check memory + expiration → on miss query DB via `_reader_db` → on DB hit deserialize (Pydantic-aware via `as_type`) → insert into memory (with eviction if needed) → return
+- [x] run `uv run pytest tests/test_cache_api.py` — all pass
+- [x] ruff + ty clean
 
 ### Task 10: Cleanup loop
 

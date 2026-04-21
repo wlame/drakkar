@@ -318,6 +318,13 @@ class Cache:
         self._dirty: dict[str, DirtyOp] = {}
         self._origin_worker_id = origin_worker_id
         self._max_memory_entries = max_memory_entries
+        # Reader-only aiosqlite connection. ``CacheEngine.start()`` wires
+        # this in via ``attach_reader_db`` so ``get()`` can fall through to
+        # SQLite on a memory miss without touching the writer connection —
+        # the writer's flush/cleanup/sync commits and the reader's SELECTs
+        # run on separate aiosqlite worker threads, and WAL mode lets the
+        # reader see consistent snapshots concurrent with writes.
+        self._reader_db: aiosqlite.Connection | None = None
 
     # -- sync API -------------------------------------------------------------
 
@@ -408,6 +415,107 @@ class Cache:
         # access → MRU bump
         self._memory.move_to_end(key)
         return _decode(entry.value)
+
+    def attach_reader_db(self, reader_db: aiosqlite.Connection | None) -> None:
+        """Wire the engine's reader aiosqlite connection into this Cache.
+
+        Called by ``CacheEngine.start()`` after the reader connection is
+        opened, and by ``CacheEngine.stop()`` (with ``None``) so follow-up
+        ``get()`` calls short-circuit instead of hitting a closed connection.
+        Keeping the reference on the Cache rather than routing every ``get``
+        through the engine avoids a method-dispatch hop on the hot path.
+        """
+        self._reader_db = reader_db
+
+    async def get[T: BaseModel](self, key: str, *, as_type: type[T] | None = None) -> Any | None:
+        """Return the value for ``key``, falling through to SQLite on a memory miss.
+
+        The lookup order:
+
+        1. **Memory hit** — if the key exists in ``_memory`` and has not
+           expired, return it without any DB access. LRU position bumps
+           to MRU.
+        2. **DB fallback** — on a memory miss (including after LRU eviction
+           or a worker restart), run a SELECT on the reader connection.
+           The SQL filter ``expires_at_ms IS NULL OR expires_at_ms > now``
+           excludes expired rows from the DB layer too.
+        3. **Warm memory** — on a DB hit, rebuild the ``CacheEntry`` from
+           the row and insert it into ``_memory`` with MRU position. If
+           ``max_memory_entries`` is set, this may trigger an LRU eviction.
+
+        Args:
+            key: the lookup key.
+            as_type: optional Pydantic model class. When provided, the
+                decoded JSON value is revived via ``model_validate`` for
+                a typed return value; otherwise ``get`` returns the raw
+                ``json.loads`` result (primitives / lists / dicts).
+
+        Returns:
+            The decoded (and optionally typed) value, or ``None`` if the
+            key is absent or expired.
+
+        Notes:
+            - No DB access on a memory hit — the writer's flush/cleanup/
+              sync traffic and the reader's SELECTs do not cross paths.
+            - The reader connection is opened in ``CacheEngine.start()``;
+              if the engine is disabled, ``_reader_db`` stays None and
+              the DB-fallback branch is skipped.
+        """
+        # --- memory fast path ---
+        entry = self._memory.get(key)
+        if entry is not None:
+            if self._is_expired(entry):
+                # Mirror peek()'s opportunistic eviction on stale reads.
+                self._memory.pop(key, None)
+                # Do NOT consult the DB — if the memory entry is expired,
+                # the DB row (if any) will also have expires_at_ms <= now.
+                return None
+            # access → MRU bump
+            self._memory.move_to_end(key)
+            return _decode(entry.value, as_type=as_type) if as_type is not None else _decode(entry.value)
+
+        # --- DB fallback ---
+        if self._reader_db is None:
+            # Engine disabled or not yet started — treat as a miss.
+            return None
+
+        now_ms = _now_ms()
+        cursor = await self._reader_db.execute(
+            # SELECT only the columns we need to reconstruct a CacheEntry;
+            # the WHERE clause filters out expired rows at the DB layer so
+            # we don't have to post-filter in Python.
+            'SELECT key, scope, value, size_bytes, created_at_ms, '
+            'updated_at_ms, expires_at_ms, origin_worker_id '
+            'FROM cache_entries '
+            'WHERE key = ? AND (expires_at_ms IS NULL OR expires_at_ms > ?)',
+            (key, now_ms),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+
+        # Rebuild the CacheEntry from the row and warm memory with it — a
+        # subsequent get() for the same key will hit the memory fast path.
+        db_key, db_scope, db_value, db_size, db_created, db_updated, db_expires, db_origin = row
+        warmed = CacheEntry(
+            key=db_key,
+            scope=CacheScope(db_scope),
+            value=db_value,
+            size_bytes=db_size,
+            created_at_ms=db_created,
+            updated_at_ms=db_updated,
+            expires_at_ms=db_expires,
+            origin_worker_id=db_origin,
+        )
+        # Warm-on-read puts the key at MRU in the OrderedDict; the
+        # _maybe_evict call below respects the cap (may drop an older key,
+        # but preserves its dirty op if any — same invariant as set()).
+        self._memory[db_key] = warmed
+        self._memory.move_to_end(db_key)
+        self._maybe_evict()
+
+        return _decode(warmed.value, as_type=as_type) if as_type is not None else _decode(warmed.value)
 
     def delete(self, key: str) -> bool:
         """Remove ``key`` from memory and schedule a DB row deletion on next flush.
@@ -641,6 +749,13 @@ class CacheEngine:
         # Nil when the engine is disabled (config.enabled=False or no
         # db_dir resolution) or has not been started yet.
         self._writer_db: aiosqlite.Connection | None = None
+        # Reader connection. Second aiosqlite connection to the same DB
+        # file, opened in read-only mode. Used exclusively by ``Cache.get``
+        # for DB fallback. aiosqlite spawns one worker thread per
+        # connection, so SELECTs run off the event loop and never queue
+        # behind a flush/cleanup/sync commit on the writer. WAL mode lets
+        # the reader see a consistent snapshot while the writer commits.
+        self._reader_db: aiosqlite.Connection | None = None
         # Resolved DB file path — stored so ``stop()`` can remove the
         # symlink without re-resolving the dir.
         self._db_path: str = ''
@@ -669,8 +784,14 @@ class CacheEngine:
         Idempotent in the sense that passing the same cache twice is
         a no-op; passing a different cache replaces the binding — tests
         sometimes re-attach a fresh cache after reconfiguring.
+
+        If the engine is already started (reader connection open), we
+        also wire the reader through so a late-attached Cache can still
+        fall through to the DB on ``get()`` misses.
         """
         self._cache = cache
+        if self._reader_db is not None:
+            cache.attach_reader_db(self._reader_db)
 
     def _resolve_db_dir(self) -> str:
         """Return the directory the cache DB should live in, or ''.
@@ -782,6 +903,22 @@ class CacheEngine:
         self._db_path = _cache_db_file_path(db_dir, self._worker_id)
         self._writer_db = await aiosqlite.connect(self._db_path)
         await self._create_schema()
+
+        # Open the reader connection on a read-only URI. ``file:…?mode=ro``
+        # tells SQLite to reject any write attempt, and aiosqlite spawns a
+        # fresh worker thread for this connection — so DB-fallback SELECTs
+        # from ``Cache.get`` never queue behind a flush/cleanup/sync commit
+        # on the writer's thread. WAL mode (set on the writer above) lets
+        # the reader see consistent snapshots while the writer commits.
+        reader_uri = f'file:{self._db_path}?mode=ro'
+        self._reader_db = await aiosqlite.connect(reader_uri, uri=True)
+        # If a Cache has already been attached (typical — engine.attach_cache
+        # happens before start()), wire the reader through now; if it gets
+        # attached later, the caller is responsible for calling
+        # ``attach_reader_db`` themselves.
+        if self._cache is not None:
+            self._cache.attach_reader_db(self._reader_db)
+
         self._update_live_link()
 
         # Schedule the periodic flush loop. It runs as a framework-system
@@ -811,7 +948,7 @@ class CacheEngine:
 
     async def stop(self) -> None:
         """Cancel the periodic flush, drain any remaining dirty ops,
-        close the writer connection, and remove the live symlink.
+        close both DB connections, and remove the live symlink.
 
         Ordering inside this method is deliberate:
 
@@ -827,7 +964,10 @@ class CacheEngine:
            reaches the DB here.
         4. **Close the writer connection** only after the drain commits,
            so the drain's UPSERT/DELETE sees an open connection.
-        5. **Remove the live symlink** last — the row-level data is safe,
+        5. **Detach the reader from the Cache then close it** — future
+           ``Cache.get`` calls short-circuit rather than hitting a closed
+           connection.
+        6. **Remove the live symlink** last — the row-level data is safe,
            and peers can stop pulling from us once the symlink is gone.
 
         Safe to call when ``start()`` never ran or when the engine was in
@@ -867,7 +1007,16 @@ class CacheEngine:
             await self._writer_db.close()
             self._writer_db = None
 
-        # Step 5: tell peers we're gone.
+        # Step 5: close the reader. Detach from the Cache first so a
+        # post-stop Cache.get() call returns None instead of crashing on
+        # a closed connection.
+        if self._reader_db is not None:
+            if self._cache is not None:
+                self._cache.attach_reader_db(None)
+            await self._reader_db.close()
+            self._reader_db = None
+
+        # Step 6: tell peers we're gone.
         self._remove_live_link()
         await logger.ainfo(
             'cache_engine_stopped',

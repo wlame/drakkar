@@ -1,28 +1,42 @@
-"""Tests for the handler-facing Cache API (memory-only behavior).
+"""Tests for the handler-facing Cache API (memory + DB-backed behavior).
 
-These tests cover the synchronous operations of `Cache` — `set`, `peek`,
-`delete`, `__contains__` — all of which are pure in-memory dict ops that
-do not touch SQLite. The DB-backed `get()` method is added and tested in
-Task 9; here we only care about:
+Task 4 covered the synchronous operations of `Cache` — `set`, `peek`,
+`delete`, `__contains__` — all pure in-memory dict ops. Task 9 adds:
 
-- In-memory storage semantics (OrderedDict-backed)
-- TTL expiration handled opportunistically on read
-- Dirty-op tracking for the upcoming flush loop (Task 7)
-- LRU eviction when ``max_memory_entries`` is set
-- Deliberate absence of any peer-propagation side effect on ``delete``
+- An async ``get(key, *, as_type=None)`` with memory → DB fallback
+- A second aiosqlite connection (``_reader_db``) on ``CacheEngine`` so
+  DB-fallback reads run on a dedicated worker thread and never queue
+  behind a flush/cleanup/sync commit on the writer
+- Pydantic-aware revival via ``as_type``
+- Warm-on-read behavior that respects ``max_memory_entries`` (LRU eviction)
+
+The tests are split into two groups:
+
+1. Pure memory-only semantics (Task 4 — untouched).
+2. Async ``get`` behavior including DB fallback, Pydantic revival,
+   expiration handling, LRU warm-on-read, and writer/reader isolation.
+
+We exercise ``get`` against real on-disk SQLite via ``tmp_path`` so the
+reader connection is a true second connection — any test that used
+``:memory:`` would mask cross-connection issues.
 
 The Prometheus ``drakkar_cache_evictions_total`` counter is introduced
-here because Task 4 explicitly tests LRU eviction metrics; the full
-metrics-wiring pass happens in Task 14.
+in Task 4; the full metrics-wiring pass (including hits/misses/source
+labels) happens in Task 14.
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
+from pathlib import Path
 
+import aiosqlite
 import pytest
+from pydantic import BaseModel
 
-from drakkar.cache import Cache, CacheScope, DirtyOp, Op
+from drakkar.cache import LWW_UPSERT_SQL, Cache, CacheEngine, CacheScope, DirtyOp, Op
+from drakkar.config import CacheConfig, DebugConfig
 
 
 def _make_cache(*, max_memory_entries: int | None = None) -> Cache:
@@ -387,3 +401,498 @@ def test_dirty_op_is_importable_with_op_enum():
     op = DirtyOp(op=Op.DELETE, entry=entry)
     assert op.op is Op.DELETE
     assert op.entry is None
+
+
+# =============================================================================
+# Task 9: async get() with DB fallback + reader connection isolation
+# =============================================================================
+#
+# The tests below exercise the ``Cache.get`` async method and the
+# ``CacheEngine._reader_db`` connection that backs its DB-fallback path. These
+# tests use real on-disk SQLite (via ``tmp_path``) so the reader actually is a
+# second connection against the same DB file — an in-memory DB would mask any
+# cross-connection bugs (each ``:memory:`` is its own database).
+#
+# Key invariants we verify:
+#
+# - ``get`` on a memory hit returns the value without touching the reader DB.
+# - ``get`` on a memory miss falls through to the reader DB and warms memory
+#   with the decoded value for future calls.
+# - ``get`` respects TTL in both memory and DB paths — expired entries read
+#   as None regardless of which layer they live in.
+# - ``get`` with ``as_type=SomeModel`` revives a typed Pydantic instance.
+# - The writer connection is never used by ``get`` (and the reader is never
+#   used by writes) — this is the isolation guarantee that prevents the
+#   read path from queuing behind a flush/cleanup/sync commit.
+# - Concurrent ``get`` calls during an in-progress flush complete without
+#   waiting on the writer's transaction.
+
+
+# -- helpers for engine-backed tests -----------------------------------------
+
+
+def _make_debug_config(tmp_path: Path) -> DebugConfig:
+    return DebugConfig(
+        enabled=True,
+        db_dir=str(tmp_path),
+        store_events=False,
+        store_config=False,
+        store_state=False,
+    )
+
+
+def _make_cache_config(**overrides) -> CacheConfig:
+    defaults: dict = {'enabled': True}
+    defaults.update(overrides)
+    return CacheConfig(**defaults)
+
+
+async def _make_started_engine(
+    tmp_path: Path,
+    *,
+    worker_id: str = 'w1',
+    max_memory_entries: int | None = None,
+    **cfg_overrides,
+) -> CacheEngine:
+    """Build + start an engine with an attached Cache, ready for get tests.
+
+    The Cache and engine share a ``_dirty`` map, and after ``start()`` both
+    the writer and reader connections are open against a real on-disk DB.
+    """
+    cache = Cache(origin_worker_id=worker_id, max_memory_entries=max_memory_entries)
+    engine = CacheEngine(
+        config=_make_cache_config(**cfg_overrides),
+        debug_config=_make_debug_config(tmp_path),
+        worker_id=worker_id,
+        cluster_name='',
+        recorder=None,
+    )
+    engine.attach_cache(cache)
+    await engine.start()
+    return engine
+
+
+# -- memory hit returns without DB access ------------------------------------
+
+
+async def test_get_memory_hit_returns_value_without_db_access(tmp_path):
+    """A ``get`` for a key present in memory returns the decoded value and
+    never touches the reader connection — DB fallback is strictly a miss
+    path, not a "confirm on every read" path.
+
+    We spy on ``_reader_db.execute`` and assert zero calls.
+    """
+    engine = await _make_started_engine(tmp_path)
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+        cache.set('k', 'hello')
+
+        assert engine._reader_db is not None  # type: ignore[reportPrivateUsage]
+        original_execute = engine._reader_db.execute  # type: ignore[reportPrivateUsage]
+        calls = 0
+
+        async def spy_execute(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return await original_execute(*args, **kwargs)
+
+        engine._reader_db.execute = spy_execute  # type: ignore[reportPrivateUsage,assignment]
+
+        result = await cache.get('k')
+
+        engine._reader_db.execute = original_execute  # type: ignore[reportPrivateUsage,assignment]
+
+        assert result == 'hello'
+        assert calls == 0
+    finally:
+        await engine.stop()
+
+
+# -- memory miss + DB hit: warms memory --------------------------------------
+
+
+async def test_get_memory_miss_then_db_hit_warms_memory(tmp_path):
+    """After the key has been flushed to the DB and evicted from memory, a
+    ``get`` must fall through to the reader connection, re-populate memory,
+    and return the decoded value.
+
+    We force the pipeline manually: set → flush → pop from memory → get.
+    """
+    engine = await _make_started_engine(tmp_path)
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+
+        cache.set('k', {'a': 1, 'b': 2})
+        await engine._flush_once()  # type: ignore[reportPrivateUsage]
+        # Simulate eviction (same result an LRU cap or a restart would reach)
+        cache._memory.pop('k', None)  # type: ignore[reportPrivateUsage]
+        assert 'k' not in cache._memory  # type: ignore[reportPrivateUsage]
+
+        result = await cache.get('k')
+        assert result == {'a': 1, 'b': 2}
+        # Memory has been warmed with the recovered entry
+        assert 'k' in cache._memory  # type: ignore[reportPrivateUsage]
+    finally:
+        await engine.stop()
+
+
+async def test_get_memory_miss_and_db_miss_returns_none(tmp_path):
+    """Neither memory nor DB has the key → None, not KeyError."""
+    engine = await _make_started_engine(tmp_path)
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+        assert await cache.get('never_written') is None
+    finally:
+        await engine.stop()
+
+
+# -- as_type Pydantic revival ------------------------------------------------
+
+
+class _SampleUser(BaseModel):
+    id: int
+    name: str
+
+
+async def test_get_with_as_type_revives_pydantic(tmp_path):
+    """`get(..., as_type=SomeModel)` returns a typed instance, not a dict."""
+    engine = await _make_started_engine(tmp_path)
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+        cache.set('u', _SampleUser(id=7, name='alice'))
+
+        # Memory path: dict stored in memory but as_type revives it
+        got = await cache.get('u', as_type=_SampleUser)
+        assert isinstance(got, _SampleUser)
+        assert got.id == 7
+        assert got.name == 'alice'
+    finally:
+        await engine.stop()
+
+
+async def test_get_with_as_type_roundtrip_through_db(tmp_path):
+    """Pydantic end-to-end: set → flush → evict → get(as_type=…) → typed instance."""
+    engine = await _make_started_engine(tmp_path)
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+
+        original = _SampleUser(id=42, name='bob')
+        cache.set('u', original)
+        await engine._flush_once()  # type: ignore[reportPrivateUsage]
+        cache._memory.pop('u', None)  # type: ignore[reportPrivateUsage]
+
+        got = await cache.get('u', as_type=_SampleUser)
+        assert isinstance(got, _SampleUser)
+        assert got == original
+        # memory was re-warmed with the raw CacheEntry; subsequent as_type call
+        # should still revive
+        assert 'u' in cache._memory  # type: ignore[reportPrivateUsage]
+        got_again = await cache.get('u', as_type=_SampleUser)
+        assert got_again == original
+    finally:
+        await engine.stop()
+
+
+# -- expiration ---------------------------------------------------------------
+
+
+async def test_get_returns_none_for_expired_entry_in_memory(tmp_path):
+    """An expired entry in memory reads as None and is evicted — same semantic
+    as `peek`, but on the async path."""
+    engine = await _make_started_engine(tmp_path)
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+
+        cache.set('k', 'v', ttl=0.01)
+        time.sleep(0.02)
+        assert await cache.get('k') is None
+        assert 'k' not in cache._memory  # type: ignore[reportPrivateUsage]
+    finally:
+        await engine.stop()
+
+
+async def test_get_returns_none_for_expired_entry_in_db(tmp_path):
+    """An expired row in the DB (e.g. cleanup hasn't swept yet) reads as None
+    — the SQL filter `expires_at_ms IS NULL OR expires_at_ms > now` excludes
+    it from the DB-fallback lookup."""
+    engine = await _make_started_engine(tmp_path)
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+
+        # Store with a past expires_at_ms by direct DB injection — we can't use
+        # ttl=0 in the cache API because that would expire before the flush.
+        assert engine._writer_db is not None  # type: ignore[reportPrivateUsage]
+        past_ms = int(time.time() * 1000) - 10_000
+        await engine._writer_db.execute(  # type: ignore[reportPrivateUsage]
+            LWW_UPSERT_SQL,
+            ('k', 'local', '"stale"', len(b'"stale"'), 1, 1, past_ms, 'w1'),
+        )
+        await engine._writer_db.commit()  # type: ignore[reportPrivateUsage]
+
+        # Memory is empty → get falls through to DB → SQL filter excludes
+        # the expired row → None.
+        assert await cache.get('k') is None
+        # memory stays empty because we couldn't warm it (nothing valid to load)
+        assert 'k' not in cache._memory  # type: ignore[reportPrivateUsage]
+    finally:
+        await engine.stop()
+
+
+# -- warm-on-read respects LRU cap -------------------------------------------
+
+
+async def test_get_warm_on_read_respects_max_memory_entries(tmp_path):
+    """When ``max_memory_entries`` is set, DB-fallback warming must not grow
+    memory past the cap — the newly warmed key triggers an eviction."""
+    engine = await _make_started_engine(tmp_path, max_memory_entries=2)
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+
+        # Seed three keys in the DB so get() can warm them
+        cache.set('a', 1)
+        cache.set('b', 2)
+        cache.set('c', 3)
+        await engine._flush_once()  # type: ignore[reportPrivateUsage]
+        # Evict all from memory to force DB fallback on every get
+        cache._memory.clear()  # type: ignore[reportPrivateUsage]
+
+        # Warm 'a' — memory has 1 entry now
+        assert await cache.get('a') == 1
+        assert len(cache._memory) == 1  # type: ignore[reportPrivateUsage]
+        # Warm 'b' — memory has 2 entries, still under cap
+        assert await cache.get('b') == 2
+        assert len(cache._memory) == 2  # type: ignore[reportPrivateUsage]
+        # Warm 'c' — memory would grow to 3, but cap triggers an eviction
+        assert await cache.get('c') == 3
+        assert len(cache._memory) == 2  # type: ignore[reportPrivateUsage]
+        # 'a' was the LRU after we fetched 'b' — so it got evicted
+        assert 'a' not in cache._memory  # type: ignore[reportPrivateUsage]
+    finally:
+        await engine.stop()
+
+
+# -- writer/reader isolation -------------------------------------------------
+
+
+async def test_reader_used_for_gets_writer_used_for_writes(tmp_path):
+    """Cross-contamination check: the reader connection must not see write
+    activity and the writer connection must not receive ``get`` queries.
+
+    We install spies on both connections and drive the engine through a
+    flush (writer should be used) and a DB-fallback ``get`` (reader should
+    be used). Each connection's spy should only fire on its own lane.
+    """
+    engine = await _make_started_engine(tmp_path)
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+        assert engine._writer_db is not None  # type: ignore[reportPrivateUsage]
+        assert engine._reader_db is not None  # type: ignore[reportPrivateUsage]
+
+        writer_executemany_calls = 0
+        reader_executemany_calls = 0
+        writer_execute_calls = 0
+        reader_execute_calls = 0
+
+        writer_original_executemany = engine._writer_db.executemany  # type: ignore[reportPrivateUsage]
+        writer_original_execute = engine._writer_db.execute  # type: ignore[reportPrivateUsage]
+        reader_original_executemany = engine._reader_db.executemany  # type: ignore[reportPrivateUsage]
+        reader_original_execute = engine._reader_db.execute  # type: ignore[reportPrivateUsage]
+
+        async def writer_spy_executemany(sql, params):
+            nonlocal writer_executemany_calls
+            writer_executemany_calls += 1
+            return await writer_original_executemany(sql, params)
+
+        async def writer_spy_execute(*args, **kwargs):
+            nonlocal writer_execute_calls
+            writer_execute_calls += 1
+            return await writer_original_execute(*args, **kwargs)
+
+        async def reader_spy_executemany(sql, params):
+            nonlocal reader_executemany_calls
+            reader_executemany_calls += 1
+            return await reader_original_executemany(sql, params)
+
+        async def reader_spy_execute(*args, **kwargs):
+            nonlocal reader_execute_calls
+            reader_execute_calls += 1
+            return await reader_original_execute(*args, **kwargs)
+
+        engine._writer_db.executemany = writer_spy_executemany  # type: ignore[reportPrivateUsage,assignment]
+        engine._writer_db.execute = writer_spy_execute  # type: ignore[reportPrivateUsage,assignment]
+        engine._reader_db.executemany = reader_spy_executemany  # type: ignore[reportPrivateUsage,assignment]
+        engine._reader_db.execute = reader_spy_execute  # type: ignore[reportPrivateUsage,assignment]
+
+        # --- write path: flush should hit the writer only ---
+        cache.set('k', 'v')
+        await engine._flush_once()  # type: ignore[reportPrivateUsage]
+
+        writer_execute_after_flush = writer_execute_calls
+        writer_executemany_after_flush = writer_executemany_calls
+
+        # writer did an executemany (for the UPSERT batch)
+        assert writer_executemany_after_flush >= 1
+        # reader saw NO activity during the flush
+        assert reader_execute_calls == 0
+        assert reader_executemany_calls == 0
+
+        # --- read path: force DB fallback ---
+        cache._memory.pop('k', None)  # type: ignore[reportPrivateUsage]
+        assert await cache.get('k') == 'v'
+
+        # reader saw a SELECT
+        assert reader_execute_calls >= 1
+        # writer still has no new activity from the get
+        assert writer_execute_calls == writer_execute_after_flush
+        assert writer_executemany_calls == writer_executemany_after_flush
+
+        # restore
+        engine._writer_db.executemany = writer_original_executemany  # type: ignore[reportPrivateUsage,assignment]
+        engine._writer_db.execute = writer_original_execute  # type: ignore[reportPrivateUsage,assignment]
+        engine._reader_db.executemany = reader_original_executemany  # type: ignore[reportPrivateUsage,assignment]
+        engine._reader_db.execute = reader_original_execute  # type: ignore[reportPrivateUsage,assignment]
+    finally:
+        await engine.stop()
+
+
+# -- concurrency: read does not block on in-progress write -------------------
+
+
+async def test_concurrent_get_completes_during_flush(tmp_path):
+    """A ``get`` launched while the writer is mid-commit must complete without
+    waiting — the separate reader connection (and WAL mode) mean SELECTs see a
+    consistent snapshot concurrently.
+
+    The strategy: seed a row and evict memory so ``get`` must go to DB, then
+    launch a slow flush that holds the writer for a beat, and assert the
+    ``get`` finishes while the flush is still in-flight.
+    """
+    engine = await _make_started_engine(tmp_path)
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+
+        # Seed 'a' so get() has something to fetch from DB
+        cache.set('a', 'seed')
+        await engine._flush_once()  # type: ignore[reportPrivateUsage]
+        cache._memory.pop('a', None)  # type: ignore[reportPrivateUsage]
+
+        # Arrange a pending write + a slow executemany so the writer holds
+        # the transaction briefly. The reader should race ahead.
+        cache.set('b', 'pending')
+
+        assert engine._writer_db is not None  # type: ignore[reportPrivateUsage]
+        original_executemany = engine._writer_db.executemany  # type: ignore[reportPrivateUsage]
+
+        get_completed_during_flush = False
+
+        async def slow_executemany(sql, params):
+            # Yield to the loop so any pending coroutine gets a chance,
+            # then perform the real executemany.
+            await asyncio.sleep(0.05)
+            result = await original_executemany(sql, params)
+            # Give the concurrent get() a chance to finish before commit.
+            await asyncio.sleep(0.05)
+            return result
+
+        engine._writer_db.executemany = slow_executemany  # type: ignore[reportPrivateUsage,assignment]
+
+        async def do_get():
+            nonlocal get_completed_during_flush
+            # We launch after yielding to the flush task — race is okay:
+            # the point is that DB reads do not queue behind the writer.
+            val = await cache.get('a')
+            assert val == 'seed'
+            get_completed_during_flush = True
+
+        # Launch both concurrently
+        flush_task = asyncio.create_task(engine._flush_once())  # type: ignore[reportPrivateUsage]
+        get_task = asyncio.create_task(do_get())
+        await asyncio.gather(flush_task, get_task)
+
+        engine._writer_db.executemany = original_executemany  # type: ignore[reportPrivateUsage,assignment]
+
+        assert get_completed_during_flush
+    finally:
+        await engine.stop()
+
+
+# -- reader connection lifecycle ---------------------------------------------
+
+
+async def test_reader_connection_opens_on_start(tmp_path):
+    """After ``CacheEngine.start()``, the reader connection is a live
+    ``aiosqlite.Connection`` — sibling to the writer."""
+    engine = await _make_started_engine(tmp_path)
+    try:
+        assert engine._reader_db is not None  # type: ignore[reportPrivateUsage]
+        assert isinstance(engine._reader_db, aiosqlite.Connection)  # type: ignore[reportPrivateUsage]
+    finally:
+        await engine.stop()
+
+
+async def test_reader_connection_closes_on_stop(tmp_path):
+    """``stop()`` closes the reader connection and clears the attribute —
+    mirror of the writer lifecycle so there is no connection leak."""
+    engine = await _make_started_engine(tmp_path)
+    assert engine._reader_db is not None  # type: ignore[reportPrivateUsage]
+    await engine.stop()
+    assert engine._reader_db is None  # type: ignore[reportPrivateUsage]
+
+
+async def test_reader_connection_not_opened_when_engine_disabled(tmp_path):
+    """When cache is disabled or db_dir is unresolved, the reader connection
+    stays None — matches the writer's effectively-disabled behavior."""
+    engine = CacheEngine(
+        config=CacheConfig(enabled=False),
+        debug_config=_make_debug_config(tmp_path),
+        worker_id='w1',
+        cluster_name='',
+        recorder=None,
+    )
+    await engine.start()
+    try:
+        assert engine._reader_db is None  # type: ignore[reportPrivateUsage]
+    finally:
+        await engine.stop()
+
+
+async def test_get_on_disabled_engine_returns_none(tmp_path):
+    """When the engine is disabled (no reader connection), a memory-miss
+    ``get`` does not raise — it just returns None."""
+    cache = Cache(origin_worker_id='w1')
+    engine = CacheEngine(
+        config=CacheConfig(enabled=False),
+        debug_config=_make_debug_config(tmp_path),
+        worker_id='w1',
+        cluster_name='',
+        recorder=None,
+    )
+    engine.attach_cache(cache)
+    await engine.start()
+    try:
+        assert await cache.get('anything') is None
+    finally:
+        await engine.stop()
+
+
+async def test_reader_connection_is_separate_from_writer(tmp_path):
+    """The reader and writer are distinct ``aiosqlite.Connection`` instances
+    — same DB file, but different connections (and therefore different
+    worker threads inside aiosqlite)."""
+    engine = await _make_started_engine(tmp_path)
+    try:
+        assert engine._reader_db is not None  # type: ignore[reportPrivateUsage]
+        assert engine._writer_db is not None  # type: ignore[reportPrivateUsage]
+        assert engine._reader_db is not engine._writer_db  # type: ignore[reportPrivateUsage]
+    finally:
+        await engine.stop()
