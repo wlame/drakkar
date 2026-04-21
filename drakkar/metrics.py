@@ -203,6 +203,26 @@ cache_evictions = Counter(
     'Total entries evicted from the in-memory cache dict due to the LRU cap',
 )
 
+# Flush-loop counter introduced alongside Task 7. The full metrics wiring
+# pass (Task 14) adds hits/misses/writes/sync/cleanup — but the flush
+# counters land here now so the flush path can report op-by-op activity
+# from the first cycle it runs.
+#
+# Labels:
+#   op='set'     — rows UPSERTed via ``LWW_UPSERT_SQL``
+#   op='delete'  — rows removed via local-only DELETE
+#
+# The counter measures the number of op intents drained from ``_dirty``
+# per flush, not the number of rows actually changed — a SET whose LWW
+# lost to a newer row still counts, because the flush "did the work" of
+# attempting the UPSERT. Treat the counter as "flush throughput per op
+# type", not "rows successfully modified".
+cache_flush_entries = Counter(
+    'drakkar_cache_flush_entries_total',
+    'Total cache entries drained from the dirty map to SQLite per op type',
+    ['op'],
+)
+
 
 # --- Periodic tasks ---
 

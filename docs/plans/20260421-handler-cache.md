@@ -314,7 +314,7 @@ class Cache:
 - Modify: `drakkar/cache.py`
 - Create: `tests/test_cache_flush.py`
 
-- [ ] write tests in `tests/test_cache_flush.py`:
+- [x] write tests in `tests/test_cache_flush.py`:
   - `_flush_once()` with one SET op inserts a row via LWW UPSERT
   - `_flush_once()` with one DELETE op removes existing row
   - batch: N sets + M deletes → exactly N+M rows touched in one transaction (assert via event log or connection spy)
@@ -323,16 +323,16 @@ class Cache:
   - LWW UPSERT tiebreak: equal `updated_at_ms`, lexicographically smaller `origin_worker_id` wins
   - empty `_dirty` → flush is a no-op (no SQL executed, no metric increments)
   - `size_bytes` populated correctly on UPSERT
-- [ ] implement `_flush_once` in `CacheEngine`:
+- [x] implement `_flush_once` in `CacheEngine`:
   - atomic swap `snapshot, self._dirty = self._dirty, {}`
   - split snapshot into SET ops (rows to UPSERT) and DELETE ops (keys to DELETE)
   - one `executemany` per op type inside a single transaction
   - emit `drakkar_cache_flush_entries_total{op}` counters
-- [ ] populate `LWW_UPSERT_SQL` module constant with the UPSERT statement using the `WHERE excluded.updated_at_ms > ... OR (equal AND origin_worker_id <)` guard
-- [ ] short comment on `LWW_UPSERT_SQL`: "Identical SQL used by local flush (Task 7) and peer sync (Task 12). Single source of truth for LWW semantics."
-- [ ] short comment on atomic swap: "Tuple assignment swaps dirty→snapshot atomically under GIL. Any `set` landing during flush goes to the fresh `_dirty` dict and is picked up next cycle — no writes lost."
-- [ ] run `uv run pytest tests/test_cache_flush.py` — all pass
-- [ ] ruff + ty clean
+- [x] populate `LWW_UPSERT_SQL` module constant with the UPSERT statement using the `WHERE excluded.updated_at_ms > ... OR (equal AND origin_worker_id <)` guard
+- [x] short comment on `LWW_UPSERT_SQL`: "Identical SQL used by local flush (Task 7) and peer sync (Task 12). Single source of truth for LWW semantics."
+- [x] short comment on atomic swap: "Tuple assignment swaps dirty→snapshot atomically under GIL. Any `set` landing during flush goes to the fresh `_dirty` dict and is picked up next cycle — no writes lost."
+- [x] run `uv run pytest tests/test_cache_flush.py` — all pass
+- [x] ruff + ty clean
 
 ### Task 8: Register flush loop as system periodic + final drain on stop
 

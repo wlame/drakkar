@@ -503,14 +503,31 @@ CREATE INDEX IF NOT EXISTS idx_cache_scope_updated
     ON cache_entries(scope, updated_at_ms);
 """
 
-# LWW UPSERT — populated fully in Task 7.
+# LWW UPSERT — Last-Write-Wins conflict resolution for the cache_entries
+# table. Single source of truth: this same SQL runs from the local flush
+# path (Task 7) and the peer-sync apply path (Task 12), so a local write
+# and a peer-supplied write cannot take different routes through the
+# resolution logic — they resolve identically.
 #
-# Placeholder kept as a module-level constant so tests and downstream tasks
-# can import it now. Task 7 replaces the body with the real UPSERT that
-# resolves conflicts by (updated_at_ms DESC, origin_worker_id ASC).
-# Single source of truth: this same SQL runs from the local flush path
-# (Task 7) and the peer-sync apply path (Task 12), guaranteeing the LWW
-# semantics are identical for local writes and cross-worker sync.
+# Conflict rules (the WHERE clause on the UPDATE branch):
+#
+# 1. If the incoming row's ``updated_at_ms`` is strictly greater than the
+#    stored row's, accept the incoming row (it is "newer").
+# 2. If the two ``updated_at_ms`` values are equal, the row whose
+#    ``origin_worker_id`` is lexicographically smaller wins — a stable,
+#    deterministic tiebreak so two workers observing the same conflict
+#    independently converge on the same survivor. This matters during
+#    peer-sync where both sides apply the same UPSERT.
+# 3. Otherwise (older, or equal-ts with larger origin), the stored row
+#    is kept — the UPDATE branch's WHERE clause evaluates to false, so
+#    the ON CONFLICT effectively becomes a no-op for that row. This is
+#    the expected behavior: SQLite does not raise when the WHERE excludes
+#    the row; the INSERT simply does not take effect.
+#
+# Why not a pure INSERT OR REPLACE? REPLACE drops existing rows
+# unconditionally, losing the LWW guarantee: a peer with a stale row
+# would clobber our fresh write as soon as it synced. The guarded UPSERT
+# above is the minimum SQL needed for eventual consistency under LWW.
 LWW_UPSERT_SQL = """
 INSERT INTO cache_entries
     (key, scope, value, size_bytes, created_at_ms, updated_at_ms, expires_at_ms, origin_worker_id)
@@ -621,6 +638,27 @@ class CacheEngine:
         # Resolved DB file path — stored so ``stop()`` can remove the
         # symlink without re-resolving the dir.
         self._db_path: str = ''
+        # The handler-facing Cache that feeds this engine's flush/sync
+        # pipelines. Wired in via ``attach_cache`` — the app does this
+        # at startup before scheduling the periodic loops. We keep the
+        # relation one-to-one because a single worker has a single
+        # cache-DB file, and splitting caches across engines would make
+        # the ``_dirty`` swap (see ``_flush_once``) ambiguous.
+        self._cache: Cache | None = None
+
+    def attach_cache(self, cache: Cache) -> None:
+        """Associate the handler-facing Cache instance with this engine.
+
+        The engine owns the SQLite side; the Cache owns the in-memory
+        side. ``_flush_once`` reads from ``cache._dirty`` (atomic swap)
+        and writes to ``_writer_db``. App startup wires these together
+        before scheduling the flush periodic (Task 8).
+
+        Idempotent in the sense that passing the same cache twice is
+        a no-op; passing a different cache replaces the binding — tests
+        sometimes re-attach a fresh cache after reconfiguring.
+        """
+        self._cache = cache
 
     def _resolve_db_dir(self) -> str:
         """Return the directory the cache DB should live in, or ''.
@@ -756,3 +794,107 @@ class CacheEngine:
             category='cache',
             worker_id=self._worker_id,
         )
+
+    # ---- flush loop ---------------------------------------------------------
+
+    async def _flush_once(self) -> None:
+        """Drain one batch of pending mutations from the Cache's dirty map
+        to the local SQLite DB.
+
+        The method is the worker body that Task 8's ``run_periodic_task``
+        wraps. A single flush cycle does the following:
+
+        1. **Atomic swap** — snapshot the current ``_dirty`` map and
+           reset it to an empty dict in one tuple-assign operation. Under
+           CPython's GIL this is atomic: any ``Cache.set`` /
+           ``Cache.delete`` landing during the swap either wrote to the
+           now-snapshotted dict (and will be flushed this cycle) or to
+           the fresh empty dict (picked up next cycle). No writes lost.
+
+        2. **Split by op type** — ``Op.SET`` entries go through
+           ``LWW_UPSERT_SQL`` as an ``executemany``; ``Op.DELETE`` keys
+           go through ``DELETE FROM cache_entries WHERE key = ?`` as a
+           separate ``executemany``. Splitting reduces SQLite round trips
+           to at most two regardless of batch size — one per op type.
+
+        3. **Single transaction** — all ops land between two ``commit()``
+           boundaries so a crash mid-flush leaves the DB in a consistent
+           prior-to-this-cycle state; we never half-apply a batch.
+
+        4. **Metric ticks** — ``drakkar_cache_flush_entries_total{op=...}``
+           counter advances by the number of op intents drained, not by
+           the number of rows actually modified. A SET that loses LWW to
+           a newer existing row still ticks the counter (the flush did
+           real work; the rejection is a legitimate outcome, not a skip).
+
+        No-op fast paths:
+
+        - Engine not started / disabled (``_writer_db is None``) → return
+          immediately; leave ``_dirty`` untouched (next start will pick
+          it up if the engine is re-enabled, which is not currently a
+          supported transition but is also harmless).
+        - No cache attached (``_cache is None``) → return; the engine was
+          constructed but never wired to a Cache (tests of pure lifecycle).
+        - Empty snapshot after swap → return before any SQL is issued.
+          This keeps the idle-engine cost at O(1).
+        """
+        if self._writer_db is None or self._cache is None:
+            return
+
+        # Atomic swap: tuple assignment is single-opcode under CPython's
+        # GIL, so any ``Cache.set`` landing after this line sees the fresh
+        # empty dict and will be drained on the next flush cycle —
+        # nothing lost, no locking needed for in-memory coherence.
+        snapshot: dict[str, DirtyOp] = self._cache._dirty
+        self._cache._dirty = {}
+
+        if not snapshot:
+            return
+
+        # Partition ops. We keep the split simple: two lists, one for
+        # UPSERTs, one for DELETEs. Order inside each list follows the
+        # snapshot's dict-iteration order, which is insertion order under
+        # CPython — so a SET followed by a DELETE on the same key would
+        # collapse (DELETE overrides in the dirty map itself), and
+        # overwrites are already LWW-resolved at the SQL level below.
+        upsert_rows: list[tuple] = []
+        delete_keys: list[tuple[str]] = []
+        for key, op in snapshot.items():
+            if op.op is Op.SET:
+                entry = op.entry
+                assert entry is not None, 'Op.SET must carry a CacheEntry'
+                upsert_rows.append(
+                    (
+                        entry.key,
+                        str(entry.scope),  # StrEnum → raw 'local'/'cluster'/'global'
+                        entry.value,
+                        entry.size_bytes,
+                        entry.created_at_ms,
+                        entry.updated_at_ms,
+                        entry.expires_at_ms,
+                        entry.origin_worker_id,
+                    )
+                )
+            else:  # Op.DELETE
+                delete_keys.append((key,))
+
+        # Execute under a single transaction. aiosqlite's default isolation
+        # starts an implicit transaction on the first DML statement, and
+        # ``commit()`` closes it — so the two ``executemany`` calls land
+        # together.
+        if upsert_rows:
+            await self._writer_db.executemany(LWW_UPSERT_SQL, upsert_rows)
+        if delete_keys:
+            await self._writer_db.executemany(
+                'DELETE FROM cache_entries WHERE key = ?',
+                delete_keys,
+            )
+        await self._writer_db.commit()
+
+        # Metric ticks — one label per op type. Incremented even for
+        # LWW-rejected UPSERTs (see docstring point 4): the flush did
+        # real work.
+        if upsert_rows:
+            metrics.cache_flush_entries.labels(op='set').inc(len(upsert_rows))
+        if delete_keys:
+            metrics.cache_flush_entries.labels(op='delete').inc(len(delete_keys))
