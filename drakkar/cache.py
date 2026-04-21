@@ -46,15 +46,25 @@ through ``model_validate`` rather than returning a plain dict.
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum, StrEnum
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
+import aiosqlite
+import structlog
 from pydantic import BaseModel
 
 from drakkar import metrics
+
+if TYPE_CHECKING:
+    from drakkar.config import CacheConfig, DebugConfig
+    from drakkar.recorder import EventRecorder
+
+logger = structlog.get_logger()
 
 # ---- scope enum -------------------------------------------------------------
 
@@ -456,3 +466,293 @@ class Cache:
             # recently-touched keys at the tail)
             self._memory.popitem(last=False)
             metrics.cache_evictions.inc()
+
+
+# ---- SQLite schema + SQL constants -----------------------------------------
+
+# `cache_entries` is the single table backing every worker's cache DB file.
+# The schema mirrors `CacheEntry` one-to-one so the flush path (Task 7) can
+# bind dataclass fields directly to SQL parameters without translation. The
+# CHECK on `scope` keeps `CacheScope` values enforced at the DB layer too —
+# a corrupt peer that tried to write a bogus scope would be rejected at
+# UPSERT time rather than silently corrupting our store.
+#
+# Two indexes:
+#
+# - ``idx_cache_expires`` is partial (only rows with a TTL), to speed up the
+#   cleanup loop's "DELETE WHERE expires_at_ms < now" without widening the
+#   index to cover NULL rows that never expire.
+# - ``idx_cache_scope_updated`` is composite; the peer-sync loop filters
+#   rows by ``scope IN (...)`` and orders them by ``updated_at_ms`` for
+#   cursor-based pagination. Having both columns in one index means the
+#   planner can walk rows in exactly the cursor order.
+SCHEMA_CACHE_ENTRIES = """
+CREATE TABLE IF NOT EXISTS cache_entries (
+    key               TEXT    NOT NULL PRIMARY KEY,
+    scope             TEXT    NOT NULL CHECK(scope IN ('local','cluster','global')),
+    value             TEXT    NOT NULL,
+    size_bytes        INTEGER NOT NULL,
+    created_at_ms     INTEGER NOT NULL,
+    updated_at_ms     INTEGER NOT NULL,
+    expires_at_ms     INTEGER,
+    origin_worker_id  TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cache_expires
+    ON cache_entries(expires_at_ms) WHERE expires_at_ms IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_cache_scope_updated
+    ON cache_entries(scope, updated_at_ms);
+"""
+
+# LWW UPSERT — populated fully in Task 7.
+#
+# Placeholder kept as a module-level constant so tests and downstream tasks
+# can import it now. Task 7 replaces the body with the real UPSERT that
+# resolves conflicts by (updated_at_ms DESC, origin_worker_id ASC).
+# Single source of truth: this same SQL runs from the local flush path
+# (Task 7) and the peer-sync apply path (Task 12), guaranteeing the LWW
+# semantics are identical for local writes and cross-worker sync.
+LWW_UPSERT_SQL = """
+INSERT INTO cache_entries
+    (key, scope, value, size_bytes, created_at_ms, updated_at_ms, expires_at_ms, origin_worker_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(key) DO UPDATE SET
+    scope = excluded.scope,
+    value = excluded.value,
+    size_bytes = excluded.size_bytes,
+    created_at_ms = excluded.created_at_ms,
+    updated_at_ms = excluded.updated_at_ms,
+    expires_at_ms = excluded.expires_at_ms,
+    origin_worker_id = excluded.origin_worker_id
+WHERE
+    excluded.updated_at_ms > cache_entries.updated_at_ms
+    OR (
+        excluded.updated_at_ms = cache_entries.updated_at_ms
+        AND excluded.origin_worker_id < cache_entries.origin_worker_id
+    )
+"""
+
+
+# ---- engine lifecycle -------------------------------------------------------
+
+
+def _cache_link_path(db_dir: str, worker_id: str) -> str:
+    """Return the peer-discovery symlink path: ``<db_dir>/<worker>-cache.db``.
+
+    This is the *symlink* name, scanned by ``discover_peer_dbs(...,
+    suffix='-cache.db')``. Peers find us by reading this symlink and
+    following it to the underlying DB file (see ``_cache_db_file_path``).
+    """
+    return str(Path(db_dir) / f'{worker_id}-cache.db')
+
+
+def _cache_db_file_path(db_dir: str, worker_id: str) -> str:
+    """Return the actual DB file path: ``<db_dir>/<worker>-cache.db.actual``.
+
+    The cache DB file lives under a ``.actual`` suffix so the stable
+    ``<worker>-cache.db`` name can be reserved as a symlink target — the
+    same convention peer discovery uses for recorder live links. Since
+    the cache does not rotate files in v1, the ``.actual`` file is
+    effectively permanent; the indirection exists purely so peer
+    discovery's ``os.path.islink`` filter works identically for recorder
+    and cache.
+    """
+    return str(Path(db_dir) / f'{worker_id}-cache.db.actual')
+
+
+class CacheEngine:
+    """Owns the SQLite backing store and periodic loops for a single worker's cache.
+
+    Two connections (added in later tasks): a **writer** for flush/cleanup/
+    sync-UPSERT, and a **reader** for ``Cache.get()`` DB fallback. aiosqlite
+    spawns a dedicated OS thread per connection, so SQLite operations run
+    off the event loop; WAL mode allows the reader to see consistent
+    snapshots while the writer commits.
+
+    Task 6 (current scope): writer connection lifecycle, schema init,
+    symlink creation, graceful stop. The flush loop lands in Task 7/8, the
+    reader + async ``get`` in Task 9, cleanup in Task 10, peer-sync in
+    Tasks 11-13.
+
+    The engine is constructed by the app during startup; ``start()`` opens
+    the DB and prepares the periodic loops. If neither ``cache.db_dir`` nor
+    ``debug.db_dir`` is set, ``start()`` logs a warning and puts the engine
+    into an *effectively disabled* state — no connection is opened, no file
+    is created, and subsequent flush/sync/cleanup calls become no-ops. The
+    handler still sees a ``Cache`` instance; it just never persists.
+    """
+
+    def __init__(
+        self,
+        config: CacheConfig,
+        debug_config: DebugConfig,
+        worker_id: str,
+        cluster_name: str,
+        recorder: EventRecorder | None = None,
+    ) -> None:
+        """Wire up an engine without opening any resources.
+
+        Args:
+            config: cache-specific settings (enabled flag, intervals,
+                peer-sync, memory cap, optional dedicated db_dir).
+            debug_config: referenced only for its ``db_dir`` fallback when
+                ``config.db_dir`` is empty. The engine does NOT otherwise
+                reach into debug settings.
+            worker_id: stable identifier for this worker — used for the
+                DB filename, the symlink name, peer-discovery self-filter,
+                and the ``origin_worker_id`` column on every write.
+            cluster_name: used later by peer-sync to decide whether to
+                pull ``cluster``-scoped rows from a given peer. Stored
+                here on construction so the info is available without
+                re-reading config.
+            recorder: optional event recorder the periodic loops feed
+                ``periodic_run`` events into. Kept None in tests that
+                only care about lifecycle / schema, so the flush path
+                (Task 7+) can avoid requiring the recorder's presence.
+        """
+        self._config = config
+        self._debug_config = debug_config
+        self._worker_id = worker_id
+        self._cluster_name = cluster_name
+        self._recorder = recorder
+        # Writer connection. Opened in ``start()``, closed in ``stop()``.
+        # Nil when the engine is disabled (config.enabled=False or no
+        # db_dir resolution) or has not been started yet.
+        self._writer_db: aiosqlite.Connection | None = None
+        # Resolved DB file path — stored so ``stop()`` can remove the
+        # symlink without re-resolving the dir.
+        self._db_path: str = ''
+
+    def _resolve_db_dir(self) -> str:
+        """Return the directory the cache DB should live in, or ''.
+
+        Precedence:
+        1. ``cache.db_dir`` if set (operator explicitly isolated the
+           cache DB from the event recorder DB).
+        2. ``debug.db_dir`` otherwise (default operational setup — cache
+           piggybacks on the debug directory).
+        3. Empty string → engine runs in disabled mode.
+        """
+        return self._config.db_dir or self._debug_config.db_dir
+
+    def _update_live_link(self) -> None:
+        """Create/refresh the ``<worker>-cache.db`` symlink pointing at the DB file.
+
+        Uses the atomic-rename pattern (write ``.tmp`` symlink, os.replace
+        into place) mirrored from the recorder's ``_update_live_link`` —
+        this avoids windows where a concurrent peer discovery scan sees
+        a half-created link.
+
+        Silently swallows ``OSError`` — on filesystems that don't support
+        symlinks (rare on Linux, possible on exotic mounts) the missing
+        link just means peers can't discover us, not a fatal error.
+        """
+        if not self._db_path:
+            return
+        db_dir = os.path.dirname(self._db_path)
+        link = _cache_link_path(db_dir, self._worker_id)
+        target = os.path.basename(self._db_path)
+        try:
+            tmp = link + '.tmp'
+            # clean up stale tmp leftover from a crashed prior run
+            try:
+                os.remove(tmp)
+            except FileNotFoundError:
+                pass
+            os.symlink(target, tmp)
+            os.replace(tmp, link)
+        except OSError:
+            pass
+
+    def _remove_live_link(self) -> None:
+        """Remove the peer-discovery symlink on graceful shutdown.
+
+        Mirrors the recorder's shutdown hygiene so peers don't keep trying
+        to pull from a shut-down worker's cache DB. Safe to call when the
+        link doesn't exist or the filesystem doesn't support symlinks.
+        """
+        if not self._db_path:
+            return
+        db_dir = os.path.dirname(self._db_path)
+        link = _cache_link_path(db_dir, self._worker_id)
+        try:
+            if os.path.islink(link):
+                os.remove(link)
+        except OSError:
+            pass
+
+    async def _create_schema(self) -> None:
+        """Apply the cache schema to the writer connection.
+
+        Uses ``executescript`` so the full DDL block — table + both
+        indexes — lands in one round trip. ``CREATE TABLE IF NOT EXISTS``
+        makes the operation a no-op against an existing cache DB, so a
+        restarted worker picks up the previous rows on the next call to
+        ``get()`` (reader connection, Task 9) or flush (Task 7).
+        """
+        assert self._writer_db is not None, 'writer DB not open'
+        await self._writer_db.executescript(SCHEMA_CACHE_ENTRIES)
+        # WAL mode must be set per-connection; applied here so the writer
+        # is in WAL before any writes. Subsequent reader connections
+        # (Task 9) and peer-opened ephemeral connections will see WAL
+        # files already on disk.
+        await self._writer_db.execute('PRAGMA journal_mode = WAL')
+        await self._writer_db.commit()
+
+    async def start(self) -> None:
+        """Open the writer connection and apply the schema.
+
+        Idempotent: calling ``start()`` on an already-started engine is
+        a no-op (the second call would otherwise re-run schema DDL, which
+        is safe but wasteful). Returns without opening resources when the
+        cache is disabled or no db_dir can be resolved — the engine stays
+        in effectively-disabled mode with ``_writer_db = None``.
+        """
+        # already started — keep the existing connection
+        if self._writer_db is not None:
+            return
+        # disabled by config — nothing to do
+        if not self._config.enabled:
+            return
+
+        db_dir = self._resolve_db_dir()
+        if not db_dir:
+            # Warn-and-continue (not fail-at-startup) per the plan. The
+            # handler will still get a Cache instance; it just won't
+            # persist. Peer-sync is automatically disabled because it
+            # needs the writer connection to apply UPSERTs.
+            await logger.awarning(
+                'cache_engine_disabled_no_db_dir',
+                category='cache',
+                worker_id=self._worker_id,
+                reason='cache.db_dir empty and debug.db_dir empty',
+            )
+            return
+
+        os.makedirs(db_dir, exist_ok=True)
+        self._db_path = _cache_db_file_path(db_dir, self._worker_id)
+        self._writer_db = await aiosqlite.connect(self._db_path)
+        await self._create_schema()
+        self._update_live_link()
+        await logger.ainfo(
+            'cache_engine_started',
+            category='cache',
+            worker_id=self._worker_id,
+            db_path=self._db_path,
+        )
+
+    async def stop(self) -> None:
+        """Close the writer connection and remove the live symlink.
+
+        Safe to call when start() never ran or when the engine was in
+        disabled mode (no connection opened). Matches the recorder's
+        stop() contract so app shutdown can call both unconditionally.
+        """
+        if self._writer_db is not None:
+            await self._writer_db.close()
+            self._writer_db = None
+        self._remove_live_link()
+        await logger.ainfo(
+            'cache_engine_stopped',
+            category='cache',
+            worker_id=self._worker_id,
+        )

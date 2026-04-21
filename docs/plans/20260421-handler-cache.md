@@ -290,7 +290,7 @@ class Cache:
 - Modify: `drakkar/cache.py`
 - Create: `tests/test_cache_engine_lifecycle.py`
 
-- [ ] write tests in `tests/test_cache_engine_lifecycle.py`:
+- [x] write tests in `tests/test_cache_engine_lifecycle.py`:
   - `CacheEngine.start()` with `tmp_path` db_dir opens an aiosqlite writer connection, creates the `<worker>-cache.db` file + `<worker>-cache-live.db` symlink
   - schema applied: `cache_entries` table exists with correct columns + both indexes
   - `PRAGMA journal_mode = WAL` set
@@ -298,15 +298,15 @@ class Cache:
   - `stop()` closes the writer connection cleanly
   - `start()` with `db_dir=''` (unresolved) logs warning and marks engine as effectively disabled
   - schema init is a no-op against an existing DB (subsequent startups pick up existing data)
-- [ ] add `CacheEngine` class skeleton in `drakkar/cache.py` with:
+- [x] add `CacheEngine` class skeleton in `drakkar/cache.py` with:
   - `__init__(config, debug_config, worker_id, cluster_name, recorder)` storing refs
   - `async start()` — open writer `aiosqlite.Connection`, set WAL pragma, CREATE TABLE IF NOT EXISTS + indexes, ensure symlink
   - `async stop()` — close writer connection (flush loop added in Task 8)
   - `_resolve_db_dir()` helper — uses `config.db_dir or debug_config.db_dir`; returns empty on miss
   - a module-level constant `LWW_UPSERT_SQL` placeholder (populated in Task 7)
-- [ ] short comment on the symlink pattern — same convention as recorder's `*-live.db`
-- [ ] run `uv run pytest tests/test_cache_engine_lifecycle.py` — all pass
-- [ ] ruff + ty clean
+- [x] short comment on the symlink pattern — same convention as recorder's `*-live.db`
+- [x] run `uv run pytest tests/test_cache_engine_lifecycle.py` — all pass
+- [x] ruff + ty clean
 
 ### Task 7: Flush loop with LWW UPSERT helper
 
