@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from drakkar.metrics import tasks_precomputed
 from drakkar.models import ExecutorError, ExecutorResult, ExecutorTask
 
 if TYPE_CHECKING:
@@ -82,7 +83,20 @@ class ExecutorPool:
         with a decrement in a `finally` so that ``asyncio.CancelledError``
         (raised during shutdown or rebalance) cannot leak slots. A leak here
         would permanently shrink effective pool capacity.
+
+        Fast track — precomputed tasks: if ``task.precomputed`` is set, the
+        handler has supplied the outcome itself (cache hit, lookup-table
+        answer, deterministic shortcut). We skip the semaphore AND the
+        subprocess entirely, synthesise an ExecutorResult, record synthetic
+        events marked ``precomputed=true``, and treat non-zero exit codes
+        the same as a real subprocess failure (raise ExecutorTaskError so
+        on_error fires). This path intentionally does NOT contribute to
+        pool-utilisation metrics or the executor_duration histogram — it
+        does no pool work.
         """
+        if task.precomputed is not None:
+            return self._execute_precomputed(task, recorder, partition_id)
+
         self._waiting_count += 1
         waiting_decremented = False
         try:
@@ -117,6 +131,63 @@ class ExecutorPool:
                 # Cancelled before (or while) acquiring — the increment above
                 # was never paired with the inner decrement. Rollback now.
                 self._waiting_count -= 1
+
+    def _execute_precomputed(
+        self,
+        task: ExecutorTask,
+        recorder: EventRecorder | None,
+        partition_id: int,
+    ) -> ExecutorResult:
+        """Synthesise an ExecutorResult from ``task.precomputed`` without
+        running a subprocess.
+
+        Does not acquire the semaphore or a slot — a precomputed task does
+        no pool work so counting it against pool capacity would misreport
+        utilisation. Records synthetic task_started/task_completed events
+        with ``precomputed=true`` metadata so the timeline is coherent and
+        operators can filter precomputed outcomes in the debug UI.
+        """
+        assert task.precomputed is not None
+        pre = task.precomputed
+        result = ExecutorResult(
+            exit_code=pre.exit_code,
+            stdout=pre.stdout,
+            stderr=pre.stderr,
+            duration_seconds=round(pre.duration_seconds, 3),
+            task=task,
+            pid=None,
+        )
+        tasks_precomputed.inc()
+        if recorder:
+            recorder.record_task_started(
+                task,
+                partition_id,
+                pool_active=self._active_count,
+                pool_waiting=self._waiting_count,
+                slot=-1,  # sentinel: no slot used
+                precomputed=True,
+            )
+            recorder.record_task_completed(
+                result,
+                partition_id,
+                pool_active=self._active_count,
+                pool_waiting=self._waiting_count,
+                precomputed=True,
+            )
+        if result.exit_code != 0:
+            # Same on_error semantics as a real subprocess failure — the
+            # framework must not distinguish "real failure" from
+            # "precomputed failure" to the handler.
+            raise ExecutorTaskError(
+                error=ExecutorError(
+                    task=task,
+                    exit_code=result.exit_code,
+                    stderr=result.stderr,
+                    pid=None,
+                ),
+                result=result,
+            )
+        return result
 
     def _resolve_binary(self, task: ExecutorTask) -> str:
         binary = task.binary_path or self._binary_path

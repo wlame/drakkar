@@ -15,6 +15,7 @@ from drakkar.models import (
     MongoPayload,
     PendingContext,
     PostgresPayload,
+    PrecomputedResult,
     RedisPayload,
     SourceMessage,
     make_task_id,
@@ -387,4 +388,44 @@ def test_message_group_duration_never_negative():
 def test_executor_task_parent_task_id_default_is_none():
     t = _task('t1')
     assert t.parent_task_id is None
+
+
+# --- PrecomputedResult + ExecutorTask.precomputed ---
+
+
+def test_precomputed_result_defaults():
+    pr = PrecomputedResult()
+    assert pr.stdout == ''
+    assert pr.stderr == ''
+    assert pr.exit_code == 0
+    assert pr.duration_seconds == 0.0
+
+
+def test_precomputed_result_with_values():
+    pr = PrecomputedResult(stdout='hello', stderr='warn', exit_code=2, duration_seconds=0.05)
+    assert pr.stdout == 'hello'
+    assert pr.stderr == 'warn'
+    assert pr.exit_code == 2
+    assert pr.duration_seconds == 0.05
+
+
+def test_executor_task_precomputed_default_none():
+    t = _task('t-default')
+    assert t.precomputed is None
+
+
+def test_executor_task_args_defaults_to_empty_list():
+    """args no longer required — defaults to [] so precomputed tasks don't
+    need to specify args the subprocess would never see.
+    """
+    t = ExecutorTask(task_id='t-noargs', source_offsets=[0])
+    assert t.args == []
+
+
+def test_executor_task_with_precomputed_result():
+    pr = PrecomputedResult(stdout='cached payload', exit_code=0)
+    t = ExecutorTask(task_id='t-pc', source_offsets=[42], precomputed=pr)
+    assert t.precomputed is pr
+    assert t.args == []  # unused when precomputed
+    assert t.precomputed.stdout == 'cached payload'
     assert make_task_id('task').startswith('task-')

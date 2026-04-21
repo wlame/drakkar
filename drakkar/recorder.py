@@ -526,12 +526,24 @@ class EventRecorder:
         pool_active: int = 0,
         pool_waiting: int = 0,
         slot: int = 0,
+        precomputed: bool = False,
     ) -> None:
         stdin_lines = 0
         stdin_size = 0
         if task.stdin:
             stdin_size = len(task.stdin.encode())
             stdin_lines = task.stdin.count('\n') + (1 if task.stdin and not task.stdin.endswith('\n') else 0)
+        metadata: dict = {
+            'source_offsets': task.source_offsets,
+            'slot': slot,
+        }
+        if task.env:
+            metadata['env'] = task.env
+        if precomputed:
+            # Neutral marker: a result was supplied by the handler and no
+            # subprocess ran. The framework does not classify the reason
+            # (cache, lookup, deterministic shortcut, ...).
+            metadata['precomputed'] = True
         entry = {
             'ts': time.time(),
             'event': 'task_started',
@@ -543,13 +555,7 @@ class EventRecorder:
             'slot': slot,
             'stdin_lines': stdin_lines,
             'stdin_size': stdin_size,
-            'metadata': json.dumps(
-                {
-                    'source_offsets': task.source_offsets,
-                    'slot': slot,
-                    **(({'env': task.env}) if task.env else {}),
-                }
-            ),
+            'metadata': json.dumps(metadata),
             'labels': json.dumps(task.labels) if task.labels else None,
         }
         ws_threshold_ms = self._config.ws_min_duration_ms
@@ -573,6 +579,7 @@ class EventRecorder:
         partition: int,
         pool_active: int = 0,
         pool_waiting: int = 0,
+        precomputed: bool = False,
     ) -> None:
         self._counters['completed'] += 1
         duration_ms = result.duration_seconds * 1000
@@ -604,6 +611,11 @@ class EventRecorder:
             'pool_waiting': pool_waiting,
             'labels': json.dumps(result.task.labels) if result.task.labels else None,
         }
+        if precomputed:
+            # Mirrored on the completion event so downstream queries /
+            # dashboards can filter precomputed outcomes without joining
+            # to task_started.
+            entry['metadata'] = json.dumps({'precomputed': True})
         if include_output:
             entry['args'] = json.dumps(result.task.args)
         if include_output and self._config.store_output:

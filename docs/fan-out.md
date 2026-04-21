@@ -476,6 +476,22 @@ are worked out.
 
 ---
 
+## Precomputed tasks in a fan-out group
+
+Any task in the fan-out — shared or per-message — can supply a
+[`PrecomputedResult`](handler.md#precomputed-task-results-skip-the-subprocess)
+instead of running a subprocess. Mixing precomputed and real tasks in
+the same `MessageGroup` works transparently: `group.results` may
+contain results from both sources. Tell them apart via
+`result.pid is None` (precomputed) versus a numeric pid (real subprocess).
+
+Common shape: cache-hit per-message task plus a real shared validation
+task. The fan-in lookup runs once (cheap), and each message's
+`on_message_complete` sees both its own cached result and the shared
+one.
+
+---
+
 ## Events emitted by the recorder
 
 Each hook completion produces a distinct event in the flight recorder,

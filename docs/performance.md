@@ -137,6 +137,18 @@ Larger windows mean more messages per `arrange()` call, enabling larger
 batches. With `window_size: 500` and batching in `arrange()`, you
 amortize process launch across hundreds of messages.
 
+**4. Skip the subprocess entirely with `PrecomputedResult`.**
+When the handler already knows the answer — from a cache, lookup table,
+or deterministic logic — attach a [`PrecomputedResult`](handler.md#precomputed-task-results-skip-the-subprocess)
+to the task in `arrange()`. The framework skips the semaphore AND the
+subprocess, invoking `on_task_complete` directly with the synthesised
+result. On cache-hit-heavy workloads this removes the entire
+process-launch cost from the hot path and the effective throughput
+ceiling is no longer capped by `max_executors`. Track the short-circuit
+rate via `drakkar_tasks_precomputed_total` (compare to
+`drakkar_executor_tasks_total{status="completed"}` to see the fraction
+served from cache).
+
 ---
 
 ## Bottleneck: Window Serialization

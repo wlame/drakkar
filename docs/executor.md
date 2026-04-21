@@ -11,13 +11,15 @@ Every subprocess execution starts with an `ExecutorTask` created in your [arrang
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `task_id` | `str` | (required) | Unique identifier. Use `make_task_id(prefix)` to generate a time-sortable hex ID (e.g., `t-0194a3b2c1d4e5f6-a7c2f1e3`). |
-| `args` | `list[str]` | (required) | CLI arguments appended to the binary path when launching the process. |
+| `args` | `list[str]` | `[]` | CLI arguments appended to the binary path when launching the process. May be empty, especially when `precomputed` is set and no subprocess will run. |
 | `source_offsets` | `list[int]` | (required) | Kafka offsets of the source messages that produced this task. Used for [offset watermark tracking](handler.md#offset-commit-logic) -- offsets are committed only after all sinks confirm delivery. |
 | `metadata` | `dict` | `{}` | Arbitrary key-value data carried through the pipeline. Accessible in [on_task_complete()](handler.md#on_task_complete) via `result.task.metadata`. |
 | `labels` | `dict[str, str]` | `{}` | User-defined key-value [labels](handler.md#task-labels) shown in the [debug UI](observability.md#debug-ui) (live timeline, task detail page, trace view). Useful for `request_id`, `user_id`, or other domain identifiers. |
 | `env` | `dict[str, str]` | `{}` | Per-task environment variables. Merged on top of `executor.env` from config (task overrides config on key conflict). See [Environment Variables](#environment-variables). |
 | `binary_path` | `str \| None` | `None` | Per-task binary override. Takes precedence over `executor.binary_path` from config. |
 | `stdin` | `str \| None` | `None` | Optional string piped to the process stdin after launch. When `None`, stdin is not connected. |
+| `precomputed` | `PrecomputedResult \| None` | `None` | If set, the framework SKIPS subprocess execution entirely and synthesises an `ExecutorResult` from the precomputed values. Use for cache hits, lookup-table answers, or any deterministic shortcut. See [Precomputed task results](handler.md#precomputed-task-results-skip-the-subprocess). |
+| `parent_task_id` | `str \| None` | `None` | `task_id` of the task this one was created to REPLACE. Auto-populated by the framework on `on_error` list-returned tasks; the handler can override. Useful for walking the replacement chain in `on_message_complete`. |
 
 ### Generating Task IDs
 

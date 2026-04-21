@@ -83,6 +83,7 @@ metrics:
 | `drakkar_sink_payloads_delivered_total` | Counter | `sink_type`, `sink_name` | Total payloads delivered to sinks |
 | `drakkar_sink_delivery_retries_total` | Counter | `sink_type`, `sink_name` | Total sink delivery retry attempts |
 | `drakkar_sink_deliveries_skipped_total` | Counter | `sink_type`, `sink_name` | Deliveries skipped via `on_delivery_error` returning SKIP |
+| `drakkar_tasks_precomputed_total` | Counter | -- | Tasks whose result was supplied by the handler via `ExecutorTask.precomputed`, bypassing the subprocess. Framework is agnostic to the reason (cache hit, lookup, deterministic shortcut). Compare to `drakkar_executor_tasks_total{status="completed"}` for the short-circuit rate. |
 | `drakkar_sink_dlq_messages_total` | Counter | -- | Total messages sent to the [dead letter queue](sinks.md#dead-letter-queue) |
 | `drakkar_dlq_send_failures_total` | Counter | -- | Total failed attempts to send messages to the DLQ. When both the primary sink and DLQ fail, the payload is lost — alert on this counter. |
 

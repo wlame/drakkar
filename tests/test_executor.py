@@ -6,7 +6,7 @@ import sys
 import pytest
 
 from drakkar.executor import ExecutorPool, ExecutorTaskError
-from drakkar.models import ExecutorTask
+from drakkar.models import ExecutorTask, PrecomputedResult
 
 
 def make_task(task_id: str = 't1', args: list[str] | None = None) -> ExecutorTask:
@@ -624,3 +624,173 @@ async def test_none_returncode_treated_as_failure(monkeypatch):
 
     assert exc_info.value.result.exit_code != 0
     assert exc_info.value.result.exit_code == -1
+
+
+# =============================================================================
+# Precomputed fast track — no subprocess, no pool slot
+# =============================================================================
+
+
+async def test_precomputed_success_returns_result_without_subprocess():
+    """When task.precomputed is set, execute() must not spawn a subprocess.
+    It returns an ExecutorResult built from the precomputed fields.
+    """
+    # Deliberately use a bogus binary — if the fast track broke, the
+    # subprocess spawn would fail with ENOENT and this test would raise.
+    pool = ExecutorPool(
+        binary_path='/nonexistent/binary/should-never-run',
+        max_executors=1,
+        task_timeout_seconds=10,
+    )
+    task = ExecutorTask(
+        task_id='pc-1',
+        source_offsets=[42],
+        precomputed=PrecomputedResult(
+            stdout='hello from cache',
+            stderr='',
+            exit_code=0,
+            duration_seconds=0.002,
+        ),
+    )
+
+    result = await pool.execute(task)
+
+    assert result.exit_code == 0
+    assert result.stdout == 'hello from cache'
+    assert result.duration_seconds == 0.002
+    assert result.task is task
+    assert result.pid is None
+
+
+async def test_precomputed_non_zero_exit_raises_executor_task_error():
+    """Precomputed with exit_code != 0 raises ExecutorTaskError — identical
+    semantics to a real subprocess failure, so on_error fires as usual.
+    """
+    pool = ExecutorPool(
+        binary_path='/nonexistent/binary',
+        max_executors=1,
+        task_timeout_seconds=10,
+    )
+    task = ExecutorTask(
+        task_id='pc-fail',
+        source_offsets=[0],
+        precomputed=PrecomputedResult(
+            stdout='',
+            stderr='cached-failure-stderr',
+            exit_code=7,
+        ),
+    )
+
+    with pytest.raises(ExecutorTaskError) as exc_info:
+        await pool.execute(task)
+
+    assert exc_info.value.result.exit_code == 7
+    assert exc_info.value.error.stderr == 'cached-failure-stderr'
+    assert exc_info.value.error.pid is None
+
+
+async def test_precomputed_does_not_consume_pool_slot():
+    """Precomputed tasks don't use semaphore slots — running N precomputed
+    tasks on a max_executors=1 pool must not serialise them (no slot wait).
+    """
+    pool = ExecutorPool(
+        binary_path='/nonexistent/binary',
+        max_executors=1,
+        task_timeout_seconds=10,
+    )
+
+    # Hold the ONE real slot with a slow real task so any precomputed call
+    # that mistakenly waits on the semaphore would deadlock the test.
+    import time
+
+    hold_pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=1,
+        task_timeout_seconds=10,
+    )
+    blocker = asyncio.create_task(hold_pool.execute(make_task('blocker', args=['-c', 'import time; time.sleep(0.8)'])))
+    await asyncio.sleep(0.05)
+    assert hold_pool.active_count == 1
+
+    # Run 5 precomputed tasks on a DIFFERENT pool whose semaphore is size 1.
+    # If they went through the slot path they'd serialise; here they must
+    # all complete in parallel without touching the semaphore at all.
+    started = time.monotonic()
+    precomputed_results = await asyncio.gather(
+        *[
+            pool.execute(
+                ExecutorTask(
+                    task_id=f'pc-parallel-{i}',
+                    source_offsets=[i],
+                    precomputed=PrecomputedResult(stdout=f'result-{i}'),
+                ),
+            )
+            for i in range(5)
+        ]
+    )
+    elapsed = time.monotonic() - started
+
+    # No pool contention → all 5 finish essentially instantly (< 100ms),
+    # not serialised behind anything.
+    assert elapsed < 0.2, f'precomputed tasks appear to have serialised: {elapsed}s for 5 tasks'
+    assert [r.stdout for r in precomputed_results] == [f'result-{i}' for i in range(5)]
+    # active_count never moved on the precomputed pool.
+    assert pool.active_count == 0
+    assert pool.waiting_count == 0
+
+    await blocker
+
+
+async def test_precomputed_preserves_duration_when_user_sets_it():
+    """If the user supplies a non-zero duration_seconds (e.g. to reflect
+    the cache lookup cost), it flows through into the ExecutorResult —
+    it is not zeroed by the framework.
+    """
+    pool = ExecutorPool(binary_path='/bin/true', max_executors=1, task_timeout_seconds=10)
+    task = ExecutorTask(
+        task_id='pc-dur',
+        source_offsets=[0],
+        precomputed=PrecomputedResult(stdout='x', duration_seconds=0.123),
+    )
+    result = await pool.execute(task)
+    assert result.duration_seconds == 0.123
+
+
+async def test_precomputed_increments_tasks_precomputed_counter():
+    """drakkar_tasks_precomputed_total increments ONCE per precomputed
+    task and NOT for normal subprocess executions.
+    """
+    from drakkar.metrics import tasks_precomputed
+
+    pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
+
+    before = tasks_precomputed._value.get()
+    # Normal subprocess should NOT increment the counter.
+    await pool.execute(make_task('normal', args=['hi']))
+    assert tasks_precomputed._value.get() == before
+
+    # Precomputed SHOULD increment it.
+    await pool.execute(
+        ExecutorTask(
+            task_id='pc-m',
+            source_offsets=[0],
+            precomputed=PrecomputedResult(stdout='x'),
+        )
+    )
+    assert tasks_precomputed._value.get() == before + 1
+
+
+async def test_precomputed_works_without_binary_path():
+    """A precomputed task can have no binary_path on the task AND no
+    pool-level binary_path — nothing ever runs, so the binary is irrelevant.
+    """
+    # Pool without binary_path — would normally error when running a task
+    # without its own binary_path. Should be fine for precomputed.
+    pool = ExecutorPool(binary_path=None, max_executors=1, task_timeout_seconds=10)
+    task = ExecutorTask(
+        task_id='pc-nobinary',
+        source_offsets=[0],
+        precomputed=PrecomputedResult(stdout='ok'),
+    )
+    result = await pool.execute(task)
+    assert result.stdout == 'ok'

@@ -55,6 +55,15 @@ task_retries = Counter(
     'Total executor tasks retried after failure',
 )
 
+tasks_precomputed = Counter(
+    'drakkar_tasks_precomputed_total',
+    (
+        'Total tasks whose result was supplied by the handler via '
+        'ExecutorTask.precomputed, skipping subprocess execution. '
+        'The framework is agnostic to the reason (cache hit, lookup, etc.).'
+    ),
+)
+
 # --- Windows/batches ---
 
 batch_duration = Histogram(

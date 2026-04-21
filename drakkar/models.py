@@ -45,12 +45,61 @@ class SourceMessage(BaseModel):
     )
 
 
+class PrecomputedResult(BaseModel):
+    """A subprocess outcome supplied by the handler instead of being produced
+    by running the binary.
+
+    When a handler already knows what a task would output — whether from a
+    cache, a lookup table, deterministic logic, or any other source — it
+    can attach a ``PrecomputedResult`` to the ``ExecutorTask`` returned
+    from ``arrange()``. The framework skips the subprocess entirely and
+    synthesises an ``ExecutorResult`` from these values.
+
+    The framework is agnostic to WHY the subprocess was skipped; this
+    type just carries the outcome. Observability marks the resulting
+    events with ``precomputed=true`` so operators can tell them apart
+    from real executions, but the label does not imply any specific
+    source (cache, lookup, etc.).
+    """
+
+    stdout: str = Field(
+        default='',
+        description='Process stdout that the framework would have captured.',
+    )
+    stderr: str = Field(
+        default='',
+        description='Process stderr that the framework would have captured.',
+    )
+    exit_code: int = Field(
+        default=0,
+        description=(
+            'Exit code. Non-zero triggers the same on_error flow as a real '
+            'subprocess failure — the handler can RETRY, SKIP, or return '
+            'replacement tasks just as it would for a subprocess failure.'
+        ),
+    )
+    duration_seconds: float = Field(
+        default=0.0,
+        description=(
+            'Apparent duration of the "execution". Defaults to 0 for an '
+            'instantaneous result; set explicitly if you want the recorder / '
+            'UI to show a non-zero duration (e.g. to reflect the cache '
+            'lookup time).'
+        ),
+    )
+
+
 class ExecutorTask(BaseModel):
     """A task to be executed by the subprocess executor pool."""
 
     task_id: str = Field(description='Unique identifier for this task. See make_task_id().')
     args: list[str] = Field(
-        description='Command-line arguments appended to the binary path when launching the process.'
+        default_factory=list,
+        description=(
+            'Command-line arguments appended to the binary path when launching '
+            'the process. May be empty, especially when ``precomputed`` is set '
+            'and no subprocess will run.'
+        ),
     )
     metadata: dict = Field(
         default_factory=dict,
@@ -93,6 +142,18 @@ class ExecutorTask(BaseModel):
             'Optional string written to the process stdin immediately after launch. '
             'Equivalent to redirecting a file with < in a shell. '
             'When None, the process stdin is not connected.'
+        ),
+    )
+    precomputed: PrecomputedResult | None = Field(
+        default=None,
+        description=(
+            'If set, the framework does NOT run a subprocess for this task. '
+            'It synthesises an ExecutorResult from the precomputed values and '
+            'feeds it straight through on_task_complete / on_message_complete. '
+            'Use for any short-circuit that avoids the subprocess: cache hits, '
+            'lookup-table answers, deterministic shortcuts. The framework is '
+            'agnostic to the reason — only observability marks the outcome as '
+            '``precomputed=true`` in events and increments a dedicated counter.'
         ),
     )
     parent_task_id: str | None = Field(

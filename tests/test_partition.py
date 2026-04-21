@@ -1842,3 +1842,178 @@ async def test_fan_in_offsets_outside_window_silently_ignored(echo_pool):
     # Real tracker got its outcome; bogus 500/501 offsets silently ignored.
     assert groups[0].source_message.offset == 7
     assert groups[0].succeeded == 1
+
+
+# =============================================================================
+# Precomputed tasks flow through the full pipeline
+# =============================================================================
+
+
+async def test_precomputed_task_flows_through_on_task_complete(echo_pool):
+    """A precomputed ExecutorTask must reach on_task_complete with the
+    synthesized result — handler never sees a difference from a real
+    subprocess outcome (other than result.pid is None).
+    """
+    from drakkar.models import MessageGroup, PrecomputedResult
+
+    collected: list = []
+    groups: list[MessageGroup] = []
+
+    class H(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f'pc-{m.offset}',
+                    source_offsets=[m.offset],
+                    precomputed=PrecomputedResult(stdout=f'cached-{m.offset}'),
+                )
+                for m in messages
+            ]
+
+        async def on_task_complete(self, result):
+            collected.append(result)
+            return None
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+
+    proc = PartitionProcessor(partition_id=0, handler=H(), executor_pool=echo_pool, window_size=10)
+    proc.enqueue(make_msg(offset=40))
+    proc.enqueue(make_msg(offset=41))
+    proc.start()
+    await wait_for(lambda: len(groups) == 2, timeout=5)
+    await proc.stop()
+
+    # Both results delivered to on_task_complete.
+    assert {r.stdout for r in collected} == {'cached-40', 'cached-41'}
+    # And both came through as successful completions in the message groups.
+    for g in groups:
+        assert g.succeeded == 1
+        assert g.failed == 0
+        assert g.results[0].pid is None  # marker: no real subprocess
+        assert g.results[0].task.precomputed is not None
+
+
+async def test_precomputed_mixed_with_real_subprocess_in_one_window(failing_pool):
+    """A single window may contain both precomputed and real-subprocess
+    tasks. The message's on_message_complete sees both terminal outcomes
+    and waits for BOTH before firing.
+    """
+    from drakkar.models import MessageGroup, PrecomputedResult
+
+    groups: list[MessageGroup] = []
+
+    class Mixed(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            tasks = []
+            for m in messages:
+                # Each message produces TWO tasks: one precomputed,
+                # one real-subprocess — both tied to the same offset.
+                tasks.append(
+                    ExecutorTask(
+                        task_id=f'pc-{m.offset}',
+                        source_offsets=[m.offset],
+                        precomputed=PrecomputedResult(stdout='from-cache'),
+                    )
+                )
+                tasks.append(
+                    ExecutorTask(
+                        task_id=f'rs-{m.offset}',
+                        args=['-c', 'print("from-subprocess")'],
+                        source_offsets=[m.offset],
+                    )
+                )
+            return tasks
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+
+    proc = PartitionProcessor(partition_id=0, handler=Mixed(), executor_pool=failing_pool, window_size=10)
+    proc.enqueue(make_msg(offset=50))
+    proc.start()
+    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await proc.stop()
+
+    g = groups[0]
+    assert g.total == 2
+    assert g.succeeded == 2
+    # Exactly one result came from the precomputed path (pid is None),
+    # the other from the real subprocess (pid is not None).
+    pids = {r.pid for r in g.results}
+    assert None in pids
+    assert any(p is not None for p in pids)
+
+
+async def test_precomputed_fan_in_across_multiple_messages(echo_pool):
+    """A precomputed task with source_offsets=[a, b, c] delivers the
+    synthesized result to each of the three message groups — fan-in
+    semantics work identically for precomputed and real tasks.
+    """
+    from drakkar.models import MessageGroup, PrecomputedResult
+
+    groups: list[MessageGroup] = []
+
+    class FanInPC(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id='shared-pc',
+                    source_offsets=[m.offset for m in messages],
+                    precomputed=PrecomputedResult(stdout='shared-cached-answer'),
+                )
+            ]
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+
+    proc = PartitionProcessor(partition_id=0, handler=FanInPC(), executor_pool=echo_pool, window_size=10)
+    proc.enqueue(make_msg(offset=60))
+    proc.enqueue(make_msg(offset=61))
+    proc.enqueue(make_msg(offset=62))
+    proc.start()
+    await wait_for(lambda: len(groups) == 3, timeout=5)
+    await proc.stop()
+
+    # All three groups saw the SAME precomputed result.
+    for g in groups:
+        assert g.succeeded == 1
+        assert g.results[0].stdout == 'shared-cached-answer'
+        assert g.results[0].pid is None
+
+
+async def test_precomputed_failure_routes_through_on_error(failing_pool):
+    """A precomputed task with exit_code != 0 must trigger on_error,
+    letting the handler RETRY, SKIP, or return replacements exactly
+    as it would for a real subprocess failure.
+    """
+    from drakkar.models import MessageGroup, PrecomputedResult
+
+    groups: list[MessageGroup] = []
+    error_hook_calls: list[str] = []
+
+    class H(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id='pc-fail',
+                    source_offsets=[messages[0].offset],
+                    precomputed=PrecomputedResult(stdout='', stderr='boom', exit_code=3),
+                )
+            ]
+
+        async def on_error(self, task, error):
+            error_hook_calls.append(task.task_id)
+            return ErrorAction.SKIP
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+
+    proc = PartitionProcessor(partition_id=0, handler=H(), executor_pool=failing_pool, window_size=10)
+    proc.enqueue(make_msg(offset=70))
+    proc.start()
+    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await proc.stop()
+
+    assert error_hook_calls == ['pc-fail']
+    assert groups[0].failed == 1
+    assert groups[0].succeeded == 0

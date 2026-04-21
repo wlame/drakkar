@@ -182,6 +182,80 @@ async def arrange(self, messages, pending):
 If `arrange()` returns an empty list, all message offsets are immediately
 marked complete and committed.
 
+#### Precomputed task results (skip the subprocess)
+
+Sometimes the handler already knows what a task would output — from a
+cache, a lookup table, deterministic logic, or any other shortcut.
+Attach a [`PrecomputedResult`](#precomputedresult) to the task via the
+`precomputed` field and the framework will skip the subprocess entirely:
+
+```python
+async def arrange(self, messages, pending):
+    tasks = []
+    for msg in messages:
+        cached = self.cache.get(msg.payload.request_id)
+        if cached is not None:
+            # Short-circuit: handler supplies the outcome directly.
+            tasks.append(dk.ExecutorTask(
+                task_id=dk.make_task_id('direct'),
+                source_offsets=[msg.offset],
+                metadata={'request_id': msg.payload.request_id},
+                precomputed=dk.PrecomputedResult(stdout=cached),
+            ))
+        else:
+            tasks.append(dk.ExecutorTask(
+                task_id=dk.make_task_id('run'),
+                args=['--process', msg.payload.request_id],
+                source_offsets=[msg.offset],
+            ))
+    return tasks
+```
+
+**Semantics:**
+
+- The framework synthesises an `ExecutorResult` from the precomputed
+  `stdout` / `stderr` / `exit_code` / `duration_seconds` and invokes
+  `on_task_complete` immediately. Downstream hooks (`on_message_complete`,
+  `on_window_complete`) see the result indistinguishably from a real
+  subprocess outcome — except `result.pid is None` and
+  `result.task.precomputed is not None` if they want to distinguish.
+- **No pool slot is consumed.** Precomputed tasks bypass the executor
+  semaphore entirely; a cache-hit-heavy workload is not capped by
+  `max_executors`. A separate counter
+  (`drakkar_tasks_precomputed_total`) tracks the volume.
+- **Non-zero `exit_code` routes through `on_error`** exactly like a real
+  subprocess failure — `RETRY`, `SKIP`, and replacement-list return
+  values all work. This lets the handler cache error outcomes too
+  (uncommon but valid).
+- `args` is not required when `precomputed` is set (it defaults to `[]`
+  and the subprocess never runs).
+- **Framework-agnostic about the source.** `precomputed` says "a result
+  was supplied in `arrange()`"; the framework does NOT interpret it as
+  "cache hit" specifically. The debug-UI event metadata is marked
+  `precomputed=true`, not `cached=true`.
+
+**Observability:**
+
+- `task_started` and `task_completed` events still fire (with
+  `metadata.precomputed=true`) so the flight recorder timeline stays
+  coherent.
+- `executor_duration` histogram is **not** observed for precomputed
+  tasks — their duration is artificial and would skew the distribution.
+- `drakkar_tasks_precomputed_total` increments once per precomputed
+  task; operators can chart it against
+  `drakkar_executor_tasks_total{status="completed"}` to see the
+  short-circuit rate.
+
+**When to use it:**
+
+| Situation | Fit |
+|---|---|
+| Previously computed result in Redis / in-memory LRU | Direct fit — attach to tasks in `arrange()` |
+| Deterministic input → deterministic output (no binary needed) | Direct fit — compute in Python, wrap in PrecomputedResult |
+| Lookup table / enrichment where subprocess would add nothing | Direct fit |
+| Expensive subprocess that's rarely worth running | Direct fit — decide in `arrange()` |
+| Async I/O you don't want to do in `arrange()` | Less good — moves cache lookup into arrange's hot path; consider prefetching in `on_ready()` instead |
+
 ### on_task_complete
 
 ```python
@@ -294,6 +368,20 @@ Convenience properties: `succeeded`, `failed`, `total`, `replaced`,
 `all_succeeded`, `any_failed`, `is_empty`, `duration_seconds`.
 
 Full details and examples on the [Fan-out](fan-out.md) page.
+
+### PrecomputedResult
+
+Attached to an `ExecutorTask` via `precomputed=` when the handler
+already knows what the subprocess would have produced. See
+[Precomputed task results](#precomputed-task-results-skip-the-subprocess)
+above for the full story.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `stdout` | `str` | `''` | stdout the framework would have captured |
+| `stderr` | `str` | `''` | stderr the framework would have captured |
+| `exit_code` | `int` | `0` | non-zero routes through `on_error` like a real failure |
+| `duration_seconds` | `float` | `0.0` | set if you want the UI / recorder to show a non-zero duration (e.g. reflect a cache lookup time) |
 
 ### on_window_complete
 
