@@ -234,7 +234,7 @@ class Cache:
 - Modify: `drakkar/cache.py`
 - Create: `tests/test_cache_api.py`
 
-- [ ] write tests in `tests/test_cache_api.py` for memory-only behavior:
+- [x] write tests in `tests/test_cache_api.py` for memory-only behavior:
   - `set` stores in memory, `peek` returns value
   - `peek` returns None for missing key
   - `peek` returns None for expired entry (and opportunistically evicts)
@@ -252,17 +252,17 @@ class Cache:
     - evicted entries do not lose their dirty-tracking entry (still flushed to DB)
     - `drakkar_cache_evictions_total` metric incremented
     - `max_memory_entries=None` → no eviction, dict grows unbounded
-- [ ] in `drakkar/cache.py`, add `Cache` class with:
+- [x] in `drakkar/cache.py`, add `Cache` class with:
   - `_memory: OrderedDict[str, CacheEntry]` (for LRU), `_dirty: dict[str, DirtyOp]`
   - `_origin_worker_id`, `_max_memory_entries`
   - `set`, `peek`, `delete`, `__contains__` — all sync, GIL-safe dict ops only
   - `peek` and `get` (Task 9) bump LRU position via `_memory.move_to_end(key)`
   - `_maybe_evict()` private method called at end of `set` — pops LRU if over cap; evictions do NOT remove the dirty entry (flush still needs to persist the value)
   - expiration check inline in `peek` / `__contains__` (entry can expire between cleanup cycles)
-- [ ] short comment on the dirty-tracking pattern explaining the upcoming atomic-swap in flush
-- [ ] short comment on eviction-keeps-dirty: "Evicting from memory is safe because the DB is the source of truth; but we must not drop the dirty op — otherwise the set would be lost before flush persists it."
-- [ ] run `uv run pytest tests/test_cache_api.py tests/test_cache_models.py` — all pass
-- [ ] ruff + ty clean
+- [x] short comment on the dirty-tracking pattern explaining the upcoming atomic-swap in flush
+- [x] short comment on eviction-keeps-dirty: "Evicting from memory is safe because the DB is the source of truth; but we must not drop the dirty op — otherwise the set would be lost before flush persists it."
+- [x] run `uv run pytest tests/test_cache_api.py tests/test_cache_models.py` — all pass
+- [x] ruff + ty clean
 
 ### Task 5: `run_periodic_task` + recorder gain `system` flag
 

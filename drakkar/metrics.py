@@ -190,6 +190,20 @@ handler_duration = Histogram(
 )
 
 
+# --- Cache ---
+#
+# The full cache metrics suite (hits/misses/writes/flush/sync/cleanup gauges)
+# lands in Task 14. This counter is introduced here because the in-memory
+# Cache API (Task 4) drives LRU eviction and we want a first-class metric
+# for it from day one — otherwise the caller has no visibility into whether
+# their `max_memory_entries` cap is being hit.
+
+cache_evictions = Counter(
+    'drakkar_cache_evictions_total',
+    'Total entries evicted from the in-memory cache dict due to the LRU cap',
+)
+
+
 # --- Periodic tasks ---
 
 periodic_task_runs = Counter(

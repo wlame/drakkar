@@ -46,11 +46,15 @@ through ``model_validate`` rather than returning a plain dict.
 from __future__ import annotations
 
 import json
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import Enum, StrEnum
 from typing import Any
 
 from pydantic import BaseModel
+
+from drakkar import metrics
 
 # ---- scope enum -------------------------------------------------------------
 
@@ -173,3 +177,282 @@ def _decode[T: BaseModel](json_text: str, *, as_type: type[T] | None = None) -> 
     if as_type is not None:
         return as_type.model_validate(parsed)
     return parsed
+
+
+# ---- dirty-op tracking ------------------------------------------------------
+#
+# The Cache accumulates pending writes in a ``_dirty`` map keyed by cache
+# key. Each entry records what the next flush should do: either UPSERT a
+# value (``Op.SET`` with the current ``CacheEntry`` payload) or DELETE a
+# row (``Op.DELETE``, no payload needed — the key is enough for SQL).
+#
+# Flush (added in Task 7) swaps the ``_dirty`` map atomically under the
+# GIL:
+#
+#     snapshot, self._dirty = self._dirty, {}
+#
+# Any ``set`` or ``delete`` that lands **during** the flush writes into the
+# fresh empty dict and gets picked up by the next cycle — no locking needed
+# for in-memory coherence because Python dict ops are single-operation atomic
+# under CPython's GIL. (If we ever run on a free-threaded interpreter, we'd
+# wrap mutation in a lock; that's out of scope for v1.)
+
+
+class Op(Enum):
+    """What the flush worker should do with a dirty key.
+
+    ``SET`` → upsert the attached ``CacheEntry`` into ``cache_entries``
+    via the ``LWW_UPSERT_SQL`` (Task 7).
+
+    ``DELETE`` → remove the row from ``cache_entries`` by key. Local-only:
+    deletes do not propagate to peers (documented sharp edge — see plan
+    "Delete is deliberately local-only").
+    """
+
+    SET = 'set'
+    DELETE = 'delete'
+
+
+@dataclass(slots=True)
+class DirtyOp:
+    """One pending mutation awaiting flush to the local SQLite DB.
+
+    Fields:
+        op: the operation kind — SET or DELETE.
+        entry: the ``CacheEntry`` to upsert for SET ops; ``None`` for DELETE
+            (the row removal only needs the key, which is the dict key of
+            the dirty map itself).
+
+    The entry reference is kept so flush can serialize the current value
+    without another ``_memory`` lookup — necessary because the entry may
+    have been LRU-evicted from ``_memory`` between the mutation and the
+    flush. The DB is the source of truth, but the dirty map is the pipeline
+    that gets writes there; losing a dirty op because the entry was evicted
+    from memory would silently drop the write.
+    """
+
+    op: Op
+    entry: CacheEntry | None
+
+
+# ---- handler-facing cache ---------------------------------------------------
+
+
+def _now_ms() -> int:
+    """Wall-clock milliseconds since epoch.
+
+    Used for ``created_at_ms`` / ``updated_at_ms`` / ``expires_at_ms``.
+    Wall-clock is deliberate (not ``time.monotonic``): these timestamps
+    participate in LWW resolution across workers, where each worker's
+    monotonic clock has a different zero. Comparing wall-clock across
+    workers assumes NTP-sync'd hosts — good enough for eventual consistency,
+    and the usual baseline for LWW-based designs.
+    """
+    return int(time.time() * 1000)
+
+
+class Cache:
+    """In-memory key/value cache surfaced to handlers as ``self.cache``.
+
+    This class covers the **synchronous**, memory-only operations of the
+    cache contract: ``set``, ``peek``, ``delete``, ``__contains__``. All of
+    these are GIL-safe dict manipulations; no I/O happens on these calls.
+
+    The async DB-backed ``get()`` (with memory-miss → DB fallback) lands in
+    Task 9 together with the reader connection. Flush to SQLite (Task 7)
+    and peer sync (Tasks 11-13) read from the ``_dirty`` map this class
+    populates.
+
+    Why ``OrderedDict``?
+    --------------------
+    LRU eviction (when ``max_memory_entries`` is set) relies on access
+    order. ``OrderedDict.move_to_end(key)`` is O(1) and the class preserves
+    insertion order by contract — regular ``dict`` makes insertion order
+    guarantees too, but lacks the ``move_to_end`` primitive, so we'd
+    otherwise have to pop-and-reinsert. OrderedDict is the canonical fit.
+
+    Eviction policy
+    ---------------
+    When ``max_memory_entries`` is set and the dict would grow past the
+    cap, we pop the LRU key (the first item in iteration order). The
+    evicted key's dirty-op is **preserved** — the DB is the source of
+    truth, and any pending SET still needs to reach it via flush. Losing
+    the dirty entry would silently drop the write. Evicted entries fall
+    through to the DB on next read; the DB will re-warm ``_memory`` in
+    ``get()`` (Task 9).
+    """
+
+    def __init__(
+        self,
+        *,
+        origin_worker_id: str,
+        max_memory_entries: int | None = None,
+    ) -> None:
+        """Construct a Cache for a single handler.
+
+        Args:
+            origin_worker_id: the stable identifier for this worker, stored
+                on every written entry for LWW tiebreaks during peer sync.
+            max_memory_entries: optional LRU cap. ``None`` (default) means
+                unbounded — the dict grows at the caller's discretion.
+        """
+        # insertion-ordered; ``move_to_end`` bumps a key to MRU position
+        self._memory: OrderedDict[str, CacheEntry] = OrderedDict()
+        # pending mutations for the next flush (Task 7 consumes this)
+        self._dirty: dict[str, DirtyOp] = {}
+        self._origin_worker_id = origin_worker_id
+        self._max_memory_entries = max_memory_entries
+
+    # -- sync API -------------------------------------------------------------
+
+    def set(
+        self,
+        key: str,
+        value: Any,
+        *,
+        ttl: float | None = None,
+        scope: CacheScope = CacheScope.LOCAL,
+    ) -> None:
+        """Store ``value`` under ``key`` in memory and mark it dirty for flush.
+
+        Args:
+            key: unique key within the worker's cache namespace.
+            value: any JSON-serializable object, or a Pydantic model
+                (serialized via ``model_dump_json``). See ``_encode``.
+            ttl: optional time-to-live in **seconds**; ``None`` means
+                "never expires". Internally we convert to a wall-clock
+                ``expires_at_ms`` so downstream comparisons are trivial.
+            scope: visibility for peer sync (default LOCAL — safe choice;
+                LOCAL entries never leave this worker).
+
+        Side effects:
+            - Writes to ``_memory`` (creates or overwrites).
+            - Writes to ``_dirty`` with an ``Op.SET`` referencing the entry.
+            - Bumps the key to MRU position in the OrderedDict.
+            - May trigger LRU eviction if ``max_memory_entries`` is set
+              and the cap is now exceeded.
+        """
+        encoded, size_bytes = _encode(value)
+        now_ms = _now_ms()
+        expires_at_ms = now_ms + int(ttl * 1000) if ttl is not None else None
+
+        # Preserve ``created_at_ms`` across overwrites — the column is
+        # "when did this key first appear", not "when was this value
+        # written". ``updated_at_ms`` is the one that changes every set.
+        existing = self._memory.get(key)
+        created_at_ms = existing.created_at_ms if existing is not None else now_ms
+
+        entry = CacheEntry(
+            key=key,
+            scope=scope,
+            value=encoded,
+            size_bytes=size_bytes,
+            created_at_ms=created_at_ms,
+            updated_at_ms=now_ms,
+            expires_at_ms=expires_at_ms,
+            origin_worker_id=self._origin_worker_id,
+        )
+
+        # Place in memory and bump to MRU. If the key already existed,
+        # OrderedDict's insertion replaces the value but keeps its slot —
+        # we then explicitly move_to_end so overwrites also count as a
+        # recency bump (consistent with typical LRU intuition).
+        self._memory[key] = entry
+        self._memory.move_to_end(key)
+
+        # Track dirty op. A SET overrides any prior DELETE for the same
+        # key — that's the expected last-write-wins at the dirty-map level,
+        # matching the SQL LWW at the DB level.
+        self._dirty[key] = DirtyOp(op=Op.SET, entry=entry)
+
+        self._maybe_evict()
+
+    def peek(self, key: str) -> Any | None:
+        """Return the decoded value if present **and** unexpired, else None.
+
+        Pure memory lookup — no DB access. If the entry is expired, we
+        opportunistically evict it so stale data doesn't linger until the
+        cleanup cycle runs. ``peek`` also bumps the key to MRU position
+        (the call counts as an access for LRU bookkeeping).
+
+        Returns ``None`` for missing or expired keys. To distinguish the
+        two cases, use ``__contains__`` — but usually callers don't need
+        to.
+        """
+        entry = self._memory.get(key)
+        if entry is None:
+            return None
+        if self._is_expired(entry):
+            # Opportunistic eviction. The dirty map is untouched: if there
+            # was a pending SET, letting it flush and then be cleaned up
+            # by the expiration cleanup cycle is cheaper than trying to
+            # untangle it here. A pending DELETE stays as-is.
+            self._memory.pop(key, None)
+            return None
+        # access → MRU bump
+        self._memory.move_to_end(key)
+        return _decode(entry.value)
+
+    def delete(self, key: str) -> bool:
+        """Remove ``key`` from memory and schedule a DB row deletion on next flush.
+
+        Returns True if the key was present in memory, False otherwise.
+        The dirty-op is always recorded (``Op.DELETE``) regardless of
+        presence in memory — because the DB may still hold a row for this
+        key that we can't see from memory alone.
+
+        **Local-only**: this does NOT propagate to peers. A peer who synced
+        our value before the delete still has its own copy and may re-push
+        it back via LWW if its ``updated_at_ms`` is newer. See the "delete
+        is deliberately local-only" note in the plan for the full edge
+        discussion — use TTL for cross-worker invalidation.
+        """
+        present = key in self._memory
+        self._memory.pop(key, None)
+        # A DELETE op overwrites any prior SET; flush will see the final
+        # state only. Entry is None since the row is going away.
+        self._dirty[key] = DirtyOp(op=Op.DELETE, entry=None)
+        return present
+
+    def __contains__(self, key: str) -> bool:
+        """Membership test including TTL check.
+
+        Returns True if the key is in memory and unexpired; False otherwise.
+        An expired entry is not a member. We do **not** bump LRU here —
+        membership is a probe, not an access.
+        """
+        entry = self._memory.get(key)
+        if entry is None:
+            return False
+        return not self._is_expired(entry)
+
+    # -- internals ------------------------------------------------------------
+
+    @staticmethod
+    def _is_expired(entry: CacheEntry) -> bool:
+        """True iff the entry has a TTL that has already elapsed."""
+        if entry.expires_at_ms is None:
+            return False
+        return _now_ms() >= entry.expires_at_ms
+
+    def _maybe_evict(self) -> None:
+        """Drop the LRU key if the memory dict exceeds ``max_memory_entries``.
+
+        Called after every ``set``. Evicts at most one entry per call —
+        since we never bulk-insert without calls to ``set``, that matches
+        the growth rate. The evicted key's dirty-op is preserved: the DB
+        is the source of truth, and losing a pending SET before flush
+        would silently drop the user's write.
+
+        Note on ``popitem(last=False)``: OrderedDict's popitem pops the
+        first inserted (i.e. least-recently-touched after our move_to_end
+        calls), which is exactly LRU.
+        """
+        cap = self._max_memory_entries
+        if cap is None:
+            return
+        while len(self._memory) > cap:
+            # pop oldest by access order (move_to_end in set/peek keeps
+            # recently-touched keys at the tail)
+            self._memory.popitem(last=False)
+            metrics.cache_evictions.inc()
