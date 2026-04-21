@@ -397,7 +397,7 @@ class Cache:
 - Modify: `drakkar/cache.py`
 - Create: `tests/test_cache_sync_pull.py`
 
-- [ ] write tests in `tests/test_cache_sync_pull.py` (use mocked filesystem + aiosqlite `:memory:` for "peer" DBs):
+- [x] write tests in `tests/test_cache_sync_pull.py` (use mocked filesystem + aiosqlite `:memory:` for "peer" DBs):
   - `_sync_once` calls `discover_peer_dbs(db_dir, '-cache.db', self_worker_id)` with the expected args
   - per-peer: resolves cluster_name from cached map; on first encounter reads peer's `-live.db` `worker_config` table
   - peer in same cluster as self → query uses `scope IN ('cluster','global')`
@@ -407,15 +407,15 @@ class Cache:
   - peer without `worker_config` table → skipped with warn
   - disabled `peer_sync.enabled=false` at startup → `_sync_once` is a no-op (zero file opens)
   - `debug.store_config=false` at startup → peer sync silently disabled (effective-disable logged once at startup)
-- [ ] implement `_sync_once` skeleton in `CacheEngine`:
+- [x] implement `_sync_once` skeleton in `CacheEngine`:
   - short-circuit if peer sync not effectively enabled
   - call `discover_peer_dbs(db_dir, '-cache.db', self_worker_id)`
   - for each peer: resolve cluster_name (cache hit or SELECT from peer's `-live.db`)
   - open ephemeral read-only aiosqlite connection, run scope-aware query, collect rows (no UPSERT yet — Task 12)
-- [ ] short comment on ephemeral connection: "Read-only URI (`file:…?mode=ro`). aiosqlite spawns a fresh worker thread for this connection — isolates peer-read cost from our writer/reader."
-- [ ] short comment on in-process cluster_name cache (300s TTL, not config-exposed): "Hardcoded — peer recorder DBs change cluster_name rarely in practice. Follow-up can expose if needed."
-- [ ] run `uv run pytest tests/test_cache_sync_pull.py` — all pass
-- [ ] ruff + ty clean
+- [x] short comment on ephemeral connection: "Read-only URI (`file:…?mode=ro`). aiosqlite spawns a fresh worker thread for this connection — isolates peer-read cost from our writer/reader."
+- [x] short comment on in-process cluster_name cache (300s TTL, not config-exposed): "Hardcoded — peer recorder DBs change cluster_name rarely in practice. Follow-up can expose if needed."
+- [x] run `uv run pytest tests/test_cache_sync_pull.py` — all pass
+- [x] ruff + ty clean
 
 ### Task 12: Peer sync — LWW UPSERT to local DB + memory invalidation
 

@@ -61,6 +61,11 @@ from pydantic import BaseModel
 
 from drakkar import metrics
 
+# Imported at module scope for the same monkeypatch reason — tests replace
+# this helper with a fake that yields canned ``(worker_name, target_path)``
+# tuples so peer sync can be exercised without a real filesystem.
+from drakkar.peer_discovery import discover_peer_dbs
+
 # Imported at module scope (not inside ``start()``) so that tests can
 # ``monkeypatch.setattr(cache_module, 'run_periodic_task', ...)`` — a local
 # import would bind to the concrete function each call and defeat the spy.
@@ -617,6 +622,16 @@ CREATE INDEX IF NOT EXISTS idx_cache_scope_updated
     ON cache_entries(scope, updated_at_ms);
 """
 
+# Hardcoded TTL (seconds) for the in-process peer-cluster_name lookup cache.
+# When peer-sync encounters a new peer, it reads the peer's ``-live.db``
+# ``worker_config`` row to learn the peer's ``cluster_name``. That read is
+# cached for this long, after which the next sync cycle re-reads. Operators
+# rarely change cluster_name at runtime — exposing the TTL as a config knob
+# would add surface without real benefit. YAGNI; bump if someone actually
+# needs it.
+PEER_CLUSTER_CACHE_TTL_SECONDS = 300.0
+
+
 # LWW UPSERT — Last-Write-Wins conflict resolution for the cache_entries
 # table. Single source of truth: this same SQL runs from the local flush
 # path (Task 7) and the peer-sync apply path (Task 12), so a local write
@@ -776,6 +791,21 @@ class CacheEngine:
         # the flush task. Runs on its own (typically slower) cadence and
         # reclaims space by deleting rows whose ``expires_at_ms`` is past.
         self._cleanup_task: asyncio.Task | None = None
+        # Whether peer-sync is *effectively* enabled — i.e. both the config
+        # flag is on and the startup gating rules passed. Set during
+        # ``start()``: peer-sync needs ``debug.store_config`` (to read peer
+        # cluster_names from their ``worker_config`` tables) and a writable
+        # local DB, so startup may silently downgrade to disabled even if
+        # ``config.peer_sync.enabled=True``. ``_sync_once`` short-circuits
+        # on this flag to keep the idle-engine cost at O(1).
+        self._peer_sync_enabled: bool = False
+        # In-process cache of peer ``cluster_name`` values keyed by peer
+        # worker_name. Populated lazily from each peer's ``-live.db``
+        # ``worker_config`` row and refreshed when the entry's age exceeds
+        # ``PEER_CLUSTER_CACHE_TTL_SECONDS``. A cache miss is cheap (one
+        # small SELECT), but on a large fleet the N^2 read pattern adds up
+        # without this short-lived cache.
+        self._peer_cluster_cache: dict[str, tuple[str, float]] = {}
 
     def attach_cache(self, cache: Cache) -> None:
         """Associate the handler-facing Cache instance with this engine.
@@ -924,6 +954,26 @@ class CacheEngine:
             self._cache.attach_reader_db(self._reader_db)
 
         self._update_live_link()
+
+        # Gate peer-sync on both config flags. ``peer_sync.enabled=False``
+        # (the explicit off-switch) always wins. Otherwise peer-sync also
+        # needs ``debug.store_config=True`` — we pull each peer's
+        # ``cluster_name`` from their ``worker_config`` table, which only
+        # exists when the peer's recorder has ``store_config=True``.
+        # Logging once at startup (per the plan) keeps operators aware of
+        # the effective state without spamming the sync loop.
+        if not self._config.peer_sync.enabled:
+            self._peer_sync_enabled = False
+        elif not self._debug_config.store_config:
+            self._peer_sync_enabled = False
+            await logger.awarning(
+                'cache_peer_sync_disabled_no_store_config',
+                category='cache',
+                worker_id=self._worker_id,
+                reason='peer_sync needs debug.store_config=True to read peer cluster_names',
+            )
+        else:
+            self._peer_sync_enabled = True
 
         # Schedule the periodic flush loop. It runs as a framework-system
         # task (``system=True``) so the debug UI can render a [system] badge
@@ -1252,3 +1302,215 @@ class CacheEngine:
 
         if removed > 0:
             metrics.cache_cleanup_removed.inc(removed)
+
+    # ---- peer sync ----------------------------------------------------------
+
+    async def _resolve_peer_cluster(self, peer_worker_name: str, db_dir: str) -> str | None:
+        """Return the peer's ``cluster_name``, or ``None`` if it cannot be read.
+
+        Reads ``<db_dir>/<peer>-live.db``'s ``worker_config`` table. Results
+        are cached in process for ``PEER_CLUSTER_CACHE_TTL_SECONDS`` keyed
+        by peer worker name, so we don't re-open the recorder DB on every
+        sync cycle. On a miss (missing symlink, missing table, read error)
+        we return ``None`` and the caller treats the peer as "unknown cluster"
+        — conservative, since we only want to pull ``scope='global'`` rows
+        in that case.
+
+        Args:
+            peer_worker_name: the peer's stable identifier from the cache
+                symlink basename.
+            db_dir: shared directory holding the peer's recorder DBs.
+
+        Returns:
+            The peer's ``cluster_name`` string (possibly empty — some
+            deployments run without a cluster label) or ``None`` if the
+            information is not currently readable. The empty-string case
+            is cached like any other value.
+        """
+        # Per-peer in-process cache with TTL. A missing entry or a stale
+        # one falls through to the recorder-DB read below.
+        now = time.time()
+        cached = self._peer_cluster_cache.get(peer_worker_name)
+        if cached is not None:
+            cluster_name, stored_at = cached
+            if now - stored_at < PEER_CLUSTER_CACHE_TTL_SECONDS:
+                return cluster_name
+
+        # The cache DB lives at ``<peer>-cache.db``; the recorder DB lives
+        # at ``<peer>-live.db`` alongside it. We open the recorder DB
+        # read-only to avoid any chance of writes to a peer's file.
+        live_link = str(Path(db_dir) / f'{peer_worker_name}-live.db')
+        if not os.path.exists(live_link):
+            # Peer's recorder may be down or not configured with
+            # ``store_config=True``. Don't populate the cache so next
+            # cycle can retry.
+            return None
+
+        try:
+            async with aiosqlite.connect(f'file:{live_link}?mode=ro', uri=True) as db:
+                async with db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='worker_config'"
+                ) as cur:
+                    if not await cur.fetchone():
+                        # Peer exists but didn't enable store_config. Treat
+                        # as "no cluster info available" — pull only
+                        # ``scope='global'`` rows.
+                        await logger.awarning(
+                            'cache_peer_missing_worker_config',
+                            category='cache',
+                            peer=peer_worker_name,
+                            db=live_link,
+                        )
+                        return None
+                async with db.execute('SELECT cluster_name FROM worker_config WHERE id = 1') as cur:
+                    row = await cur.fetchone()
+                    cluster_name = (row[0] if row is not None and row[0] is not None else '') or ''
+        except Exception:
+            # Corrupt / inaccessible peer DB — log and move on. Don't
+            # cache the failure; next cycle retries.
+            await logger.aexception(
+                'cache_peer_cluster_resolve_failed',
+                category='cache',
+                peer=peer_worker_name,
+                db=live_link,
+            )
+            return None
+
+        self._peer_cluster_cache[peer_worker_name] = (cluster_name, now)
+        return cluster_name
+
+    def _peer_scope_filter(self, peer_cluster_name: str | None) -> tuple[str, tuple]:
+        """Build the ``scope`` predicate + params used when pulling from a peer.
+
+        Rules (per plan):
+        - Peer in the same cluster as us → pull ``scope IN ('cluster','global')``.
+        - Peer in a different cluster → pull ``scope = 'global'`` only.
+        - Peer with unknown cluster (read failure) → pull ``scope = 'global'``
+          only (conservative — we won't assume a same-cluster match without
+          evidence).
+        - ``scope='local'`` is never pulled; LOCAL entries stay on the
+          originating worker by contract.
+
+        Returns a ``(sql_fragment, params)`` pair ready to splice into the
+        larger SELECT in ``_sync_once`` via parameterized binding.
+        """
+        if peer_cluster_name is not None and peer_cluster_name == self._cluster_name:
+            return ('scope IN (?, ?)', (CacheScope.CLUSTER.value, CacheScope.GLOBAL.value))
+        return ('scope = ?', (CacheScope.GLOBAL.value,))
+
+    async def _pull_peer_rows(
+        self,
+        *,
+        peer_db_path: str,
+        scope_sql: str,
+        scope_params: tuple,
+        batch_size: int,
+    ) -> list[tuple]:
+        """Open an ephemeral read-only connection to the peer DB and pull rows.
+
+        Each peer sync gets its own short-lived aiosqlite connection. This
+        is deliberate: aiosqlite spawns a fresh OS worker thread per
+        connection, so peer reads never queue behind our writer's
+        flush/cleanup/sync-UPSERT commits. We use a ``file:...?mode=ro`` URI
+        so even a misconfigured peer DB can never be written to through our
+        connection.
+
+        Filters out expired rows at the DB layer — no point pulling
+        already-dead entries across the network boundary just to reject
+        them during UPSERT (LWW would let them in if they happened to have
+        a newer ``updated_at_ms``, only for cleanup to reap them soon
+        after).
+
+        Args:
+            peer_db_path: resolved path to the peer's cache DB (``.actual``
+                file, not the symlink — caller already resolved).
+            scope_sql: the scope predicate, e.g. ``'scope = ?'`` or
+                ``'scope IN (?, ?)'``.
+            scope_params: parameters for ``scope_sql``.
+            batch_size: maximum rows to fetch this cycle.
+
+        Returns:
+            A list of row tuples in the same column order as the SELECT.
+            Empty list on any error reading the peer (logged by the caller
+            via the surrounding try/except — see Task 13's isolation).
+        """
+        now_ms = _now_ms()
+        query = (
+            'SELECT key, scope, value, size_bytes, created_at_ms, '
+            'updated_at_ms, expires_at_ms, origin_worker_id '
+            'FROM cache_entries '
+            f'WHERE {scope_sql} '
+            'AND (expires_at_ms IS NULL OR expires_at_ms > ?) '
+            'ORDER BY updated_at_ms ASC '
+            'LIMIT ?'
+        )
+        params = (*scope_params, now_ms, batch_size)
+        async with (
+            aiosqlite.connect(f'file:{peer_db_path}?mode=ro', uri=True) as db,
+            db.execute(query, params) as cur,
+        ):
+            # aiosqlite's ``fetchall`` returns ``Iterable[Row]``; we materialize
+            # to a concrete tuple-list so callers can index by column position
+            # (keys come back at row[0], scope at row[1], etc.) without worrying
+            # about cursor lifetime after the ``async with`` closes.
+            return [tuple(row) for row in await cur.fetchall()]
+
+    async def _sync_once(self) -> None:
+        """Pull one batch of entries from every discovered peer into our DB.
+
+        Task 11 scope: discovery + per-peer pull with scope-aware filter.
+        Tasks 12-13 add the LWW UPSERT step and cursor-based incremental
+        sync; until those land, this method collects rows and stashes them
+        on ``self._last_pulled_rows`` so tests can observe the pull
+        behavior in isolation.
+
+        Fast paths:
+        - Engine not started / disabled (``_writer_db is None``) → return.
+        - Peer sync disabled (``_peer_sync_enabled=False``) → return with
+          zero filesystem reads. This makes the ``peer_sync.enabled=False``
+          path essentially free at runtime.
+        """
+        # Save pulled rows keyed by peer for test inspection and for
+        # Task 12's UPSERT step. A production run with Task 12 integrated
+        # consumes this immediately; in Task 11 isolation tests read it
+        # back after a sync to verify per-peer filtering.
+        self._last_pulled_rows: dict[str, list[tuple]] = {}
+
+        if self._writer_db is None or not self._peer_sync_enabled:
+            return
+
+        # Resolve the dir once per cycle — both peer-discovery and cluster-
+        # name resolution (below) use it, so avoid recomputing.
+        db_dir = self._resolve_db_dir()
+        if not db_dir:
+            return
+
+        batch_size = self._config.peer_sync.batch_size
+        # Iterate peers. One bad peer should not break the whole cycle —
+        # the outer try/except (Task 13) gives per-peer isolation. For
+        # Task 11 we keep the error path simple: any exception inside the
+        # per-peer block is logged and we move on.
+        async for peer_name, peer_db_path in discover_peer_dbs(
+            db_dir,
+            '-cache.db',
+            self._worker_id,
+        ):
+            try:
+                peer_cluster = await self._resolve_peer_cluster(peer_name, db_dir)
+                scope_sql, scope_params = self._peer_scope_filter(peer_cluster)
+                rows = await self._pull_peer_rows(
+                    peer_db_path=peer_db_path,
+                    scope_sql=scope_sql,
+                    scope_params=scope_params,
+                    batch_size=batch_size,
+                )
+                self._last_pulled_rows[peer_name] = rows
+            except Exception:
+                # Per-peer isolation placeholder — Task 13 will add a
+                # dedicated error metric and warning event alongside this.
+                await logger.aexception(
+                    'cache_peer_sync_pull_failed',
+                    category='cache',
+                    peer=peer_name,
+                    db=peer_db_path,
+                )
