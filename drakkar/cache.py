@@ -772,6 +772,10 @@ class CacheEngine:
         # engine is effectively disabled (no writer connection) since
         # there's nothing to flush.
         self._flush_task: asyncio.Task | None = None
+        # Task reference for the periodic cleanup loop — same lifecycle as
+        # the flush task. Runs on its own (typically slower) cadence and
+        # reclaims space by deleting rows whose ``expires_at_ms`` is past.
+        self._cleanup_task: asyncio.Task | None = None
 
     def attach_cache(self, cache: Cache) -> None:
         """Associate the handler-facing Cache instance with this engine.
@@ -939,6 +943,22 @@ class CacheEngine:
             name='cache.flush',
         )
 
+        # Schedule the periodic cleanup loop. Same system/error policy as
+        # flush — a bad cleanup cycle logs and retries; it never kills the
+        # worker. Runs on its own (typically slower) cadence since row
+        # expiration is a background reclaim job, not on the write path.
+        self._cleanup_task = asyncio.create_task(
+            run_periodic_task(
+                name='cache.cleanup',
+                coro_fn=self._cleanup_once,
+                seconds=self._config.cleanup_interval_seconds,
+                on_error='continue',
+                recorder=self._recorder,
+                system=True,
+            ),
+            name='cache.cleanup',
+        )
+
         await logger.ainfo(
             'cache_engine_started',
             category='cache',
@@ -975,7 +995,18 @@ class CacheEngine:
         None checks. Matches the recorder's stop() contract so app
         shutdown can call both unconditionally.
         """
-        # Step 1 + 2: stop the periodic flush cleanly.
+        # Step 1 + 2: stop the periodic flush + cleanup tasks cleanly.
+        # Cancel cleanup first — it typically runs on a slower cadence and
+        # is side-effect-free with respect to the dirty map, so we can
+        # drain ordering around flush: flush's final drain needs the writer
+        # connection, cleanup does not add writes we care about preserving.
+        if self._cleanup_task is not None:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._cleanup_task = None
         if self._flush_task is not None:
             self._flush_task.cancel()
             try:
@@ -1127,3 +1158,97 @@ class CacheEngine:
             metrics.cache_flush_entries.labels(op='set').inc(len(upsert_rows))
         if delete_keys:
             metrics.cache_flush_entries.labels(op='delete').inc(len(delete_keys))
+
+    # ---- cleanup loop -------------------------------------------------------
+
+    async def _cleanup_once(self) -> None:
+        """Reclaim space by removing expired entries from the DB, memory,
+        and the dirty map — and refresh DB-size gauges.
+
+        Expiration is wall-clock relative: a row's ``expires_at_ms`` is
+        compared to the current wall-clock milliseconds. Rows with
+        ``expires_at_ms IS NULL`` (no TTL) are never cleaned up; rows with
+        a future TTL are preserved; rows with a past TTL are removed.
+
+        Four jobs per cycle:
+
+        1. **DB purge.** ``DELETE FROM cache_entries WHERE expires_at_ms IS
+           NOT NULL AND expires_at_ms < ?`` — one round trip, one commit.
+           The partial index ``idx_cache_expires`` (only indexes non-null
+           ``expires_at_ms``) makes this a focused scan rather than a full
+           table sweep.
+
+        2. **Memory sweep.** Walk ``Cache._memory`` for entries whose
+           ``expires_at_ms`` is past, and pop them. Without this, expired
+           keys would linger in memory until ``peek``/``get``/``__contains__``
+           opportunistically evicts them — cleanup gives us a deterministic
+           upper bound on staleness.
+
+        3. **Dirty-map pruning** for expired keys with a pending ``Op.SET``.
+           Leaving a pending SET would resurrect a row we just deleted on
+           the next flush cycle. We explicitly drop ``Op.SET`` entries for
+           expired keys — but leave ``Op.DELETE`` entries alone, since a
+           pending DELETE on an expired key is still semantically correct
+           (the row is going away either way) and simpler to leave through.
+
+        4. **DB-gauge refresh.** ``drakkar_cache_entries_in_db`` and
+           ``drakkar_cache_bytes_in_db`` are updated from a single SELECT.
+           Counting DB rows on every ``set``/``get`` would defeat the
+           running-sum design used for the in-memory gauges; refreshing at
+           cleanup cadence (default 60s) gives operators an approximate but
+           bounded-staleness DB view.
+
+        No-op fast paths:
+
+        - Engine not started / disabled (``_writer_db is None``) → return
+          immediately without touching anything.
+        - No cache attached (``_cache is None``) → DB purge still runs, but
+          the memory/dirty-map steps short-circuit. This supports
+          lifecycle tests that only want to exercise DB behavior.
+        """
+        if self._writer_db is None:
+            return
+
+        now_ms = _now_ms()
+
+        # Step 1: DB purge. Count the rows first via ``rowcount`` on the
+        # cursor so we can increment the ``cleanup_removed`` counter by
+        # the real number of rows affected.
+        cursor = await self._writer_db.execute(
+            'DELETE FROM cache_entries WHERE expires_at_ms IS NOT NULL AND expires_at_ms < ?',
+            (now_ms,),
+        )
+        removed = cursor.rowcount if cursor.rowcount is not None else 0
+        await cursor.close()
+        await self._writer_db.commit()
+
+        # Step 2 + 3: memory sweep + dirty-map pruning for expired SETs.
+        # If an expired entry had a pending set, drop it — otherwise the
+        # next flush would revive a row we just deleted.
+        if self._cache is not None:
+            # Snapshot keys first to avoid "dict changed during iteration".
+            expired_keys: list[str] = []
+            for key, entry in self._cache._memory.items():  # type: ignore[reportPrivateUsage]
+                if entry.expires_at_ms is not None and entry.expires_at_ms < now_ms:
+                    expired_keys.append(key)
+            for key in expired_keys:
+                self._cache._memory.pop(key, None)  # type: ignore[reportPrivateUsage]
+                # Drop only pending SET ops — DELETEs are still the correct
+                # action (row is going away either way) and simpler to leave.
+                pending = self._cache._dirty.get(key)  # type: ignore[reportPrivateUsage]
+                if pending is not None and pending.op is Op.SET:
+                    self._cache._dirty.pop(key, None)  # type: ignore[reportPrivateUsage]
+
+        # Step 4: refresh DB-size gauges with a single aggregate query. We
+        # use ``coalesce(sum(size_bytes), 0)`` so an empty table yields 0
+        # rather than NULL.
+        cursor = await self._writer_db.execute('SELECT count(*), coalesce(sum(size_bytes), 0) FROM cache_entries')
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is not None:
+            db_count, db_bytes = row
+            metrics.cache_entries_in_db.set(db_count)
+            metrics.cache_bytes_in_db.set(db_bytes)
+
+        if removed > 0:
+            metrics.cache_cleanup_removed.inc(removed)

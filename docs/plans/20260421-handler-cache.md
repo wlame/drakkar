@@ -377,7 +377,7 @@ class Cache:
 - Modify: `drakkar/cache.py`
 - Create: `tests/test_cache_cleanup.py`
 
-- [ ] write tests in `tests/test_cache_cleanup.py`:
+- [x] write tests in `tests/test_cache_cleanup.py`:
   - `_cleanup_once` deletes DB rows where `expires_at_ms < now_ms`
   - preserves rows where `expires_at_ms IS NULL` (never expire)
   - preserves rows where `expires_at_ms > now_ms`
@@ -386,10 +386,10 @@ class Cache:
   - refreshes DB gauges `drakkar_cache_entries_in_db` + `drakkar_cache_bytes_in_db` (asserted via the Prometheus collector or a gauge-spy)
   - `cache.cleanup` registered as system periodic task via `run_periodic_task(system=True)`
   - cleanup error → warning + continue (via `run_periodic_task` error handling)
-- [ ] implement `_cleanup_once` in `CacheEngine`; register via `asyncio.create_task(run_periodic_task(name='cache.cleanup', ..., system=True))` in `start()`
-- [ ] short comment on the dirty-pop: "If an expired entry had a pending set, drop it — otherwise the next flush would revive a row we just deleted."
-- [ ] run `uv run pytest tests/test_cache_cleanup.py` — all pass
-- [ ] ruff + ty clean
+- [x] implement `_cleanup_once` in `CacheEngine`; register via `asyncio.create_task(run_periodic_task(name='cache.cleanup', ..., system=True))` in `start()`
+- [x] short comment on the dirty-pop: "If an expired entry had a pending set, drop it — otherwise the next flush would revive a row we just deleted."
+- [x] run `uv run pytest tests/test_cache_cleanup.py` — all pass
+- [x] ruff + ty clean
 
 ### Task 11: Peer sync — discovery + single-peer pull with scope filter
 

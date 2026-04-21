@@ -223,6 +223,28 @@ cache_flush_entries = Counter(
     ['op'],
 )
 
+# Cleanup-loop counter introduced alongside Task 10. The cleanup loop deletes
+# every row whose ``expires_at_ms < now_ms``; this counter advances by the
+# number of rows actually removed per cycle. Operators use it to spot TTL
+# mis-sizing — a sudden spike means many entries are expiring together.
+cache_cleanup_removed = Counter(
+    'drakkar_cache_cleanup_removed_total',
+    'Total cache entries removed from SQLite by the cleanup loop',
+)
+
+# DB-size gauges refreshed by the cleanup loop. Counting DB rows on every
+# ``set``/``get`` would defeat the running-sum design used for the in-memory
+# gauges, so the DB view is updated at cleanup cadence (default 60s). Since
+# cleanup is where rows leave the DB, this is a natural point to refresh.
+cache_entries_in_db = Gauge(
+    'drakkar_cache_entries_in_db',
+    'Current number of entries persisted in the local cache SQLite DB',
+)
+cache_bytes_in_db = Gauge(
+    'drakkar_cache_bytes_in_db',
+    'Sum of size_bytes across entries persisted in the local cache SQLite DB',
+)
+
 
 # --- Periodic tasks ---
 

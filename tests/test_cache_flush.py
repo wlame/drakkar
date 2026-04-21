@@ -670,19 +670,24 @@ async def test_start_registers_flush_task_as_system_periodic(tmp_path, monkeypat
     spy that records the kwargs it was called with, then assert on them.
     The spy returns a coroutine that awaits a cancellation so the
     ``asyncio.create_task`` call still gets a real task.
+
+    Since the engine now schedules multiple system tasks (flush + cleanup,
+    and later sync), we collect all invocations and pick out the one whose
+    ``name`` is ``cache.flush`` — otherwise a later call would clobber the
+    dict and we'd misread the assertion target.
     """
     import asyncio as _asyncio
 
     from drakkar import cache as cache_module
 
-    captured: dict = {}
+    captured: list[dict] = []
 
     async def spy_run_periodic_task(**kwargs):
         # Capture the call shape and then block until cancelled — that
         # way the scheduled task exists for the duration of the test but
         # doesn't actually run _flush_once repeatedly (we test the worker
         # body separately via direct _flush_once invocations).
-        captured.update(kwargs)
+        captured.append(kwargs)
         try:
             while True:
                 await _asyncio.sleep(3600)
@@ -694,17 +699,18 @@ async def test_start_registers_flush_task_as_system_periodic(tmp_path, monkeypat
     engine = await _make_engine(tmp_path, worker_id='w1')
     await engine.start()
     try:
-        # A tick for the spawned task to run and populate `captured`.
+        # A tick for the spawned tasks to run and populate `captured`.
         await _asyncio.sleep(0)
-        assert captured, 'run_periodic_task was not invoked by start()'
-        assert captured.get('name') == 'cache.flush'
-        assert captured.get('system') is True
+        flush_calls = [c for c in captured if c.get('name') == 'cache.flush']
+        assert flush_calls, 'run_periodic_task was not invoked with name=cache.flush'
+        flush_kwargs = flush_calls[0]
+        assert flush_kwargs.get('system') is True
         # The interval comes from config (default flush_interval_seconds=3.0)
-        assert captured.get('seconds') == engine._config.flush_interval_seconds  # type: ignore[reportPrivateUsage]
+        assert flush_kwargs.get('seconds') == engine._config.flush_interval_seconds  # type: ignore[reportPrivateUsage]
         # Error policy: flush errors should not stop the whole engine.
-        assert captured.get('on_error') == 'continue'
+        assert flush_kwargs.get('on_error') == 'continue'
         # The wrapped callable must be the engine's bound _flush_once.
-        assert captured.get('coro_fn') == engine._flush_once  # type: ignore[reportPrivateUsage]
+        assert flush_kwargs.get('coro_fn') == engine._flush_once  # type: ignore[reportPrivateUsage]
     finally:
         await engine.stop()
 
