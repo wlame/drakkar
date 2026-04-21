@@ -340,14 +340,14 @@ class Cache:
 - Modify: `drakkar/cache.py`
 - Modify: `tests/test_cache_flush.py`
 
-- [ ] extend `tests/test_cache_flush.py`:
+- [x] extend `tests/test_cache_flush.py`:
   - `CacheEngine.start()` launches a task for `cache.flush` via `run_periodic_task(name='cache.flush', ..., system=True)` (assert task registration against a spy)
   - `CacheEngine.stop()` performs one final `_flush_once` before closing the writer connection (tested: put entry in `_dirty`, call stop, verify DB has the row)
   - flush loop error → warning logged, existing `periodic_task_runs{name="cache.flush",status="error"}` metric incremented, loop continues (handled by `run_periodic_task`)
-- [ ] in `CacheEngine.start()`: after schema init, `asyncio.create_task(run_periodic_task(name='cache.flush', coro_fn=self._flush_once, seconds=self._config.flush_interval_seconds, on_error='continue', recorder=self._recorder, system=True))`
-- [ ] in `CacheEngine.stop()`: cancel the flush task, `await` its completion (which final-drains via `run_periodic_task`'s cancel handling — confirm or adjust), then call one last `_flush_once` defensively, then close connection
-- [ ] run `uv run pytest tests/test_cache_flush.py tests/test_cache_engine_lifecycle.py` — all pass
-- [ ] ruff + ty clean
+- [x] in `CacheEngine.start()`: after schema init, `asyncio.create_task(run_periodic_task(name='cache.flush', coro_fn=self._flush_once, seconds=self._config.flush_interval_seconds, on_error='continue', recorder=self._recorder, system=True))`
+- [x] in `CacheEngine.stop()`: cancel the flush task, `await` its completion (which final-drains via `run_periodic_task`'s cancel handling — confirm or adjust), then call one last `_flush_once` defensively, then close connection
+- [x] run `uv run pytest tests/test_cache_flush.py tests/test_cache_engine_lifecycle.py` — all pass
+- [x] ruff + ty clean
 
 ### Task 9: Reader connection + async `get()` with DB fallback
 

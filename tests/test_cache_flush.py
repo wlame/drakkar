@@ -29,6 +29,7 @@ code path and inspect the resulting rows.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import aiosqlite
@@ -646,3 +647,201 @@ def test_lww_upsert_sql_has_conflict_guard():
     # the WHERE clause with the (newer ts) OR (equal ts AND smaller origin) guard
     assert 'excluded.updated_at_ms > cache_entries.updated_at_ms' in sql
     assert 'excluded.origin_worker_id < cache_entries.origin_worker_id' in sql
+
+
+# --- Task 8: periodic task registration + final drain ---------------------
+
+# The flush loop is registered via ``asyncio.create_task(run_periodic_task(...,
+# name='cache.flush', system=True))`` during ``CacheEngine.start``. These
+# tests cover three properties:
+#
+# 1. start() actually launches the flush task with the expected call arguments.
+# 2. The task the engine creates is a real asyncio.Task that's pending after
+#    start() (i.e. actually scheduled, not just awaited once).
+# 3. stop() performs a final drain: anything still in the dirty map at
+#    shutdown lands in the DB before the writer connection closes.
+
+
+async def test_start_registers_flush_task_as_system_periodic(tmp_path, monkeypatch):
+    """``start()`` wraps ``_flush_once`` via ``run_periodic_task`` with
+    ``name='cache.flush'`` and ``system=True``.
+
+    We patch ``run_periodic_task`` on the ``drakkar.cache`` module with a
+    spy that records the kwargs it was called with, then assert on them.
+    The spy returns a coroutine that awaits a cancellation so the
+    ``asyncio.create_task`` call still gets a real task.
+    """
+    import asyncio as _asyncio
+
+    from drakkar import cache as cache_module
+
+    captured: dict = {}
+
+    async def spy_run_periodic_task(**kwargs):
+        # Capture the call shape and then block until cancelled — that
+        # way the scheduled task exists for the duration of the test but
+        # doesn't actually run _flush_once repeatedly (we test the worker
+        # body separately via direct _flush_once invocations).
+        captured.update(kwargs)
+        try:
+            while True:
+                await _asyncio.sleep(3600)
+        except _asyncio.CancelledError:
+            raise
+
+    monkeypatch.setattr(cache_module, 'run_periodic_task', spy_run_periodic_task)
+
+    engine = await _make_engine(tmp_path, worker_id='w1')
+    await engine.start()
+    try:
+        # A tick for the spawned task to run and populate `captured`.
+        await _asyncio.sleep(0)
+        assert captured, 'run_periodic_task was not invoked by start()'
+        assert captured.get('name') == 'cache.flush'
+        assert captured.get('system') is True
+        # The interval comes from config (default flush_interval_seconds=3.0)
+        assert captured.get('seconds') == engine._config.flush_interval_seconds  # type: ignore[reportPrivateUsage]
+        # Error policy: flush errors should not stop the whole engine.
+        assert captured.get('on_error') == 'continue'
+        # The wrapped callable must be the engine's bound _flush_once.
+        assert captured.get('coro_fn') == engine._flush_once  # type: ignore[reportPrivateUsage]
+    finally:
+        await engine.stop()
+
+
+async def test_start_creates_pending_flush_task(tmp_path):
+    """``start()`` records the flush task on the engine so ``stop()`` can
+    cancel it. After ``start()`` the task must be a real
+    ``asyncio.Task`` that isn't done yet."""
+    engine = await _make_engine(tmp_path, worker_id='w1')
+    await engine.start()
+    try:
+        task = engine._flush_task  # type: ignore[reportPrivateUsage]
+        assert task is not None, 'engine did not record the flush asyncio.Task'
+        assert isinstance(task, asyncio.Task)
+        assert not task.done()
+    finally:
+        await engine.stop()
+
+
+async def test_stop_cancels_flush_task(tmp_path):
+    """After ``stop()`` the flush task must be cancelled or otherwise
+    completed — the engine must not leak a running task."""
+    engine = await _make_engine(tmp_path, worker_id='w1')
+    await engine.start()
+    task = engine._flush_task  # type: ignore[reportPrivateUsage]
+    assert task is not None
+    await engine.stop()
+    # After stop the task is done (cancelled) and the attribute is cleared.
+    assert task.done()
+    assert engine._flush_task is None  # type: ignore[reportPrivateUsage]
+
+
+async def test_stop_performs_final_drain(tmp_path):
+    """Entries in the dirty map at shutdown time must reach SQLite before
+    the writer connection closes.
+
+    Without the final drain in ``stop()``, fast shutdowns could silently
+    drop the most recent writes — the flush loop is periodic, so the
+    interval between the last ``set`` and the shutdown is a write-loss
+    window. We eliminate it by calling ``_flush_once`` one last time
+    from ``stop()`` before ``close()``.
+    """
+    engine = await _make_engine(tmp_path, worker_id='w1', flush_interval_seconds=3600.0)
+    await engine.start()
+    cache = engine._cache  # type: ignore[reportPrivateUsage]
+    # Populate dirty right before shutdown; with a 1-hour flush interval,
+    # no scheduled flush will fire in the test's lifetime, so only the
+    # final drain can land the row.
+    cache.set('k', 'last_write')
+    assert 'k' in cache._dirty  # type: ignore[reportPrivateUsage]
+
+    await engine.stop()
+
+    # Reconnect to the DB and verify the row is there.
+    db_path = tmp_path / 'w1-cache.db.actual'
+    row = await _fetch_row(db_path, 'k')
+    assert row is not None, 'final drain did not persist the dirty entry'
+    assert row[2] == '"last_write"'
+
+
+async def test_stop_final_drain_safe_when_dirty_empty(tmp_path):
+    """If the dirty map is empty at shutdown, the final drain must still
+    run cleanly as a no-op — not raise, not deadlock."""
+    engine = await _make_engine(tmp_path, worker_id='w1', flush_interval_seconds=3600.0)
+    await engine.start()
+    assert engine._cache._dirty == {}  # type: ignore[reportPrivateUsage]
+    await engine.stop()
+    # No row should have been created from an empty drain.
+    db_path = tmp_path / 'w1-cache.db.actual'
+    assert await _count_rows(db_path) == 0
+
+
+async def test_stop_final_drain_runs_before_writer_close(tmp_path):
+    """The final ``_flush_once`` in ``stop()`` must happen BEFORE the
+    writer connection is closed — otherwise the drain would fail with
+    "cannot operate on a closed database".
+
+    We assert the ordering indirectly: if the writer connection were closed
+    first, flushing a dirty entry would raise or be swallowed, and the
+    final DB row would not appear. The presence of the row proves the
+    drain ran first.
+    """
+    engine = await _make_engine(tmp_path, worker_id='w1', flush_interval_seconds=3600.0)
+    await engine.start()
+    engine._cache.set('proof', 'present')  # type: ignore[reportPrivateUsage]
+    await engine.stop()
+    # Writer must now be closed
+    assert engine._writer_db is None  # type: ignore[reportPrivateUsage]
+    # But the row must be present — proving drain → close ordering
+    db_path = tmp_path / 'w1-cache.db.actual'
+    row = await _fetch_row(db_path, 'proof')
+    assert row is not None
+
+
+async def test_stop_without_start_does_not_touch_flush_task(tmp_path):
+    """``stop()`` called on an engine that never started must not raise
+    from attempting to cancel a non-existent flush task.
+
+    Matches the existing ``test_stop_without_start_is_safe`` lifecycle
+    invariant but specifically covers the Task 8 additions."""
+    engine = await _make_engine(tmp_path, worker_id='w1')
+    # no start() call
+    await engine.stop()  # must not raise
+    assert engine._flush_task is None  # type: ignore[reportPrivateUsage]
+
+
+async def test_flush_loop_error_does_not_stop_engine(tmp_path, monkeypatch):
+    """A raising ``_flush_once`` should be caught by ``run_periodic_task``'s
+    ``on_error='continue'`` policy — the error counter ticks, the loop
+    keeps running, and the engine stays alive.
+
+    We don't verify the log line directly; the behaviour is covered by
+    the existing ``test_run_periodic_task_on_error_continue`` in
+    tests/test_periodic.py. What we verify here is the integration:
+    the engine must pass ``on_error='continue'`` to the wrapper so a
+    buggy flush can't crash the worker.
+    """
+    import asyncio as _asyncio
+
+    from drakkar import cache as cache_module
+
+    recorded_kwargs: dict = {}
+
+    async def spy_run_periodic_task(**kwargs):
+        recorded_kwargs.update(kwargs)
+        try:
+            while True:
+                await _asyncio.sleep(3600)
+        except _asyncio.CancelledError:
+            raise
+
+    monkeypatch.setattr(cache_module, 'run_periodic_task', spy_run_periodic_task)
+
+    engine = await _make_engine(tmp_path, worker_id='w1')
+    await engine.start()
+    try:
+        await _asyncio.sleep(0)
+        assert recorded_kwargs.get('on_error') == 'continue'
+    finally:
+        await engine.stop()

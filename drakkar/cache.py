@@ -45,6 +45,7 @@ through ``model_validate`` rather than returning a plain dict.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -59,6 +60,11 @@ import structlog
 from pydantic import BaseModel
 
 from drakkar import metrics
+
+# Imported at module scope (not inside ``start()``) so that tests can
+# ``monkeypatch.setattr(cache_module, 'run_periodic_task', ...)`` — a local
+# import would bind to the concrete function each call and defeat the spy.
+from drakkar.periodic import run_periodic_task
 
 if TYPE_CHECKING:
     from drakkar.config import CacheConfig, DebugConfig
@@ -645,6 +651,12 @@ class CacheEngine:
         # cache-DB file, and splitting caches across engines would make
         # the ``_dirty`` swap (see ``_flush_once``) ambiguous.
         self._cache: Cache | None = None
+        # Task reference for the periodic flush loop. Set in ``start()``
+        # after ``run_periodic_task`` is scheduled; cleared in ``stop()``
+        # once the task has been cancelled and awaited. None when the
+        # engine is effectively disabled (no writer connection) since
+        # there's nothing to flush.
+        self._flush_task: asyncio.Task | None = None
 
     def attach_cache(self, cache: Cache) -> None:
         """Associate the handler-facing Cache instance with this engine.
@@ -771,6 +783,25 @@ class CacheEngine:
         self._writer_db = await aiosqlite.connect(self._db_path)
         await self._create_schema()
         self._update_live_link()
+
+        # Schedule the periodic flush loop. It runs as a framework-system
+        # task (``system=True``) so the debug UI can render a [system] badge
+        # alongside user-defined ``@periodic`` handlers, and errors use the
+        # "continue" policy — a bad flush cycle must not kill the worker, it
+        # just logs and retries next tick. The recorder (if present) logs
+        # each run to the event timeline so operators see cache health.
+        self._flush_task = asyncio.create_task(
+            run_periodic_task(
+                name='cache.flush',
+                coro_fn=self._flush_once,
+                seconds=self._config.flush_interval_seconds,
+                on_error='continue',
+                recorder=self._recorder,
+                system=True,
+            ),
+            name='cache.flush',
+        )
+
         await logger.ainfo(
             'cache_engine_started',
             category='cache',
@@ -779,15 +810,64 @@ class CacheEngine:
         )
 
     async def stop(self) -> None:
-        """Close the writer connection and remove the live symlink.
+        """Cancel the periodic flush, drain any remaining dirty ops,
+        close the writer connection, and remove the live symlink.
 
-        Safe to call when start() never ran or when the engine was in
-        disabled mode (no connection opened). Matches the recorder's
-        stop() contract so app shutdown can call both unconditionally.
+        Ordering inside this method is deliberate:
+
+        1. **Cancel the flush task** so it doesn't race with the final
+           drain — otherwise the periodic loop might hit the writer DB
+           concurrently with our explicit ``_flush_once`` and interleave.
+        2. **Await the cancelled task** — ``run_periodic_task`` re-raises
+           ``CancelledError``; ``return_exceptions=True`` on a single task
+           would be overkill, so we just ``except CancelledError``.
+        3. **Final drain** via ``_flush_once`` — this is what prevents the
+           "writes lost on shutdown" window. Any entry sitting in
+           ``cache._dirty`` between the last scheduled flush and stop()
+           reaches the DB here.
+        4. **Close the writer connection** only after the drain commits,
+           so the drain's UPSERT/DELETE sees an open connection.
+        5. **Remove the live symlink** last — the row-level data is safe,
+           and peers can stop pulling from us once the symlink is gone.
+
+        Safe to call when ``start()`` never ran or when the engine was in
+        disabled mode (no connection opened): every step short-circuits on
+        None checks. Matches the recorder's stop() contract so app
+        shutdown can call both unconditionally.
         """
+        # Step 1 + 2: stop the periodic flush cleanly.
+        if self._flush_task is not None:
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                # Expected — run_periodic_task re-raises on cancel.
+                pass
+            self._flush_task = None
+
+        # Step 3: final drain — catches any dirty ops that accumulated
+        # after the last scheduled flush fired, so shutdown isn't a
+        # write-loss window.
+        if self._writer_db is not None:
+            try:
+                await self._flush_once()
+            except Exception:
+                # A final drain that fails is logged but must not prevent
+                # stop() from proceeding — otherwise a faulty DB would
+                # deadlock shutdown. The loop's continue-on-error policy
+                # has already written any error we could report.
+                await logger.aexception(
+                    'cache_final_drain_failed',
+                    category='cache',
+                    worker_id=self._worker_id,
+                )
+
+        # Step 4: close writer.
         if self._writer_db is not None:
             await self._writer_db.close()
             self._writer_db = None
+
+        # Step 5: tell peers we're gone.
         self._remove_live_link()
         await logger.ainfo(
             'cache_engine_stopped',
