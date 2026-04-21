@@ -423,7 +423,7 @@ class Cache:
 - Modify: `drakkar/cache.py`
 - Create: `tests/test_cache_sync_apply.py`
 
-- [ ] write tests in `tests/test_cache_sync_apply.py`:
+- [x] write tests in `tests/test_cache_sync_apply.py`:
   - UPSERT uses the same `LWW_UPSERT_SQL` constant as local flush (assert via mock)
   - peer row with older `updated_at_ms` than local → rejected by LWW
   - peer row with newer `updated_at_ms` than local → accepted, local row updated
@@ -432,11 +432,11 @@ class Cache:
   - zero-row peer pull → no UPSERT executed
   - `drakkar_cache_sync_entries_fetched_total{peer}` counts rows pulled; `sync_entries_upserted_total{peer}` counts rows that passed LWW (may be less than fetched)
   - `size_bytes` in upserted rows equals `len(value)` from peer (no re-encoding)
-- [ ] extend `_sync_once` with the LWW UPSERT step using `LWW_UPSERT_SQL` via the writer connection
-- [ ] implement memory invalidation: for each key we attempted to UPSERT, `self._cache._memory.pop(key, None)` (note: pop only, don't try to reason about whether UPSERT actually applied — simpler is safer)
-- [ ] short comment on the memory invalidation: "We don't know per-row whether LWW accepted; simpler is: drop from memory, let next `get` fall through to DB. Cheaper than a SELECT-back-and-compare."
-- [ ] run `uv run pytest tests/test_cache_sync_apply.py tests/test_cache_sync_pull.py` — all pass
-- [ ] ruff + ty clean
+- [x] extend `_sync_once` with the LWW UPSERT step using `LWW_UPSERT_SQL` via the writer connection
+- [x] implement memory invalidation: for each key we attempted to UPSERT, `self._cache._memory.pop(key, None)` (note: pop only, don't try to reason about whether UPSERT actually applied — simpler is safer)
+- [x] short comment on the memory invalidation: "We don't know per-row whether LWW accepted; simpler is: drop from memory, let next `get` fall through to DB. Cheaper than a SELECT-back-and-compare."
+- [x] run `uv run pytest tests/test_cache_sync_apply.py tests/test_cache_sync_pull.py` — all pass
+- [x] ruff + ty clean
 
 ### Task 13: Peer sync — cursor advancement, error isolation, register as system periodic
 

@@ -232,6 +232,29 @@ cache_cleanup_removed = Counter(
     'Total cache entries removed from SQLite by the cleanup loop',
 )
 
+# Peer-sync counters introduced alongside Task 12 (UPSERT apply step). Both
+# are labelled by peer worker name so operators can spot uneven sync
+# throughput or a single misbehaving peer.
+#
+#   fetched  — rows read from the peer's cache DB via the scoped SELECT.
+#   upserted — rows the engine *attempted* to UPSERT into the local DB.
+#
+# Under our conventions ``upserted`` increments once per fetched row
+# regardless of whether the LWW guard accepted it — the counter measures
+# pipeline throughput, not DB state transitions, matching
+# ``cache_flush_entries``. This way operators can see sync cost even on
+# idle clusters where LWW rejects most rows.
+cache_sync_entries_fetched = Counter(
+    'drakkar_cache_sync_entries_fetched_total',
+    'Total cache entries pulled from a peer cache DB by the sync loop',
+    ['peer'],
+)
+cache_sync_entries_upserted = Counter(
+    'drakkar_cache_sync_entries_upserted_total',
+    'Total cache entries the sync loop attempted to UPSERT into the local DB',
+    ['peer'],
+)
+
 # DB-size gauges refreshed by the cleanup loop. Counting DB rows on every
 # ``set``/``get`` would defeat the running-sum design used for the in-memory
 # gauges, so the DB view is updated at cleanup cadence (default 60s). Since

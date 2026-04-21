@@ -1456,13 +1456,33 @@ class CacheEngine:
             return [tuple(row) for row in await cur.fetchall()]
 
     async def _sync_once(self) -> None:
-        """Pull one batch of entries from every discovered peer into our DB.
+        """Pull one batch of entries from every discovered peer and apply
+        them to the local DB via LWW UPSERT.
 
         Task 11 scope: discovery + per-peer pull with scope-aware filter.
-        Tasks 12-13 add the LWW UPSERT step and cursor-based incremental
-        sync; until those land, this method collects rows and stashes them
-        on ``self._last_pulled_rows`` so tests can observe the pull
-        behavior in isolation.
+        Task 12 (this change): apply the pulled rows to the local DB via
+        the shared ``LWW_UPSERT_SQL`` constant, invalidate any cached
+        in-memory entries for the upserted keys, and tick the
+        ``sync_entries_fetched`` / ``sync_entries_upserted`` counters.
+        Task 13 will add cursor-based incremental pulls and per-peer
+        error isolation.
+
+        Apply step details:
+
+        - UPSERTs go through the **same** ``LWW_UPSERT_SQL`` used by the
+          local flush path (Task 7). Single source of truth for conflict
+          resolution — a local write and a peer-supplied write cannot
+          diverge in their LWW rules.
+        - Memory is invalidated unconditionally for every key we attempted
+          to UPSERT. We don't know per-row whether LWW accepted, so the
+          simpler invariant is: drop from memory, let the next ``get``
+          fall through to the DB. Cheaper than a SELECT-back-and-compare.
+        - The ``sync_entries_upserted{peer}`` counter advances by the number
+          of UPSERT *attempts*, not the rows actually modified. A peer row
+          whose LWW lost to a newer local row still ticks the counter —
+          matching the "count throughput, not applied rows" semantics of
+          ``cache_flush_entries``. That way operators see sync cost even
+          on idle clusters where LWW rejects most rows.
 
         Fast paths:
         - Engine not started / disabled (``_writer_db is None``) → return.
@@ -1470,10 +1490,9 @@ class CacheEngine:
           zero filesystem reads. This makes the ``peer_sync.enabled=False``
           path essentially free at runtime.
         """
-        # Save pulled rows keyed by peer for test inspection and for
-        # Task 12's UPSERT step. A production run with Task 12 integrated
-        # consumes this immediately; in Task 11 isolation tests read it
-        # back after a sync to verify per-peer filtering.
+        # Save pulled rows keyed by peer for test inspection. A production
+        # run consumes this immediately via the UPSERT step below; tests
+        # read it back to verify per-peer filtering.
         self._last_pulled_rows: dict[str, list[tuple]] = {}
 
         if self._writer_db is None or not self._peer_sync_enabled:
@@ -1487,9 +1506,9 @@ class CacheEngine:
 
         batch_size = self._config.peer_sync.batch_size
         # Iterate peers. One bad peer should not break the whole cycle —
-        # the outer try/except (Task 13) gives per-peer isolation. For
-        # Task 11 we keep the error path simple: any exception inside the
-        # per-peer block is logged and we move on.
+        # the outer try/except gives per-peer isolation. Task 13 will add
+        # dedicated error-metric wiring; here we keep the error path simple:
+        # any exception inside the per-peer block is logged and we move on.
         async for peer_name, peer_db_path in discover_peer_dbs(
             db_dir,
             '-cache.db',
@@ -1505,6 +1524,10 @@ class CacheEngine:
                     batch_size=batch_size,
                 )
                 self._last_pulled_rows[peer_name] = rows
+                # Apply step — UPSERT pulled rows into our local DB.
+                # _apply_peer_rows handles the zero-row fast path internally
+                # so we don't branch here.
+                await self._apply_peer_rows(peer_name=peer_name, rows=rows)
             except Exception:
                 # Per-peer isolation placeholder — Task 13 will add a
                 # dedicated error metric and warning event alongside this.
@@ -1514,3 +1537,59 @@ class CacheEngine:
                     peer=peer_name,
                     db=peer_db_path,
                 )
+
+    async def _apply_peer_rows(self, *, peer_name: str, rows: list[tuple]) -> None:
+        """UPSERT a batch of peer-supplied rows into the local DB via the
+        shared LWW SQL, then invalidate memory for the affected keys.
+
+        The incoming tuple order mirrors the SELECT in ``_pull_peer_rows``:
+        ``(key, scope, value, size_bytes, created_at_ms, updated_at_ms,
+        expires_at_ms, origin_worker_id)`` — which happens to be the exact
+        binding order ``LWW_UPSERT_SQL`` expects, so no translation is
+        needed.
+
+        Metric ticks:
+        - ``cache_sync_entries_fetched{peer}`` += len(rows) — every row that
+          crossed the wire, regardless of LWW outcome.
+        - ``cache_sync_entries_upserted{peer}`` += len(rows) — every row we
+          *attempted* to UPSERT, regardless of whether LWW accepted. See
+          the ``_sync_once`` docstring for why we count attempts, not
+          applied rows.
+
+        Memory invalidation: every key we attempted gets popped from
+        ``Cache._memory``. We don't know per-row whether LWW accepted, so
+        the simpler invariant is: drop from memory, let the next ``get``
+        fall through to the DB. This keeps memory coherent with the DB
+        without a SELECT-back-and-compare per row.
+
+        No-op fast paths:
+        - Empty ``rows`` → return after counting fetched==0 (no counter
+          increment, no writer round-trip).
+        - Writer connection gone (engine stopped mid-cycle) → return.
+        """
+        if not rows:
+            return
+        if self._writer_db is None:
+            return
+
+        # Fetch/upsert counters — labelled by peer so operators can spot a
+        # single misbehaving source. Both are ticked for every row
+        # irrespective of LWW outcome (see docstring).
+        metrics.cache_sync_entries_fetched.labels(peer=peer_name).inc(len(rows))
+
+        # executemany over LWW_UPSERT_SQL — one SQLite round trip for the
+        # whole batch. aiosqlite's default isolation opens an implicit
+        # transaction on the first DML; the commit() below closes it.
+        await self._writer_db.executemany(LWW_UPSERT_SQL, rows)
+        await self._writer_db.commit()
+
+        metrics.cache_sync_entries_upserted.labels(peer=peer_name).inc(len(rows))
+
+        # Memory invalidation: unconditional pop for every key we
+        # attempted. Simpler than per-row LWW-result bookkeeping, and any
+        # caller that needs the freshest value will hit the DB on the next
+        # ``get`` which already includes the merged LWW result.
+        if self._cache is not None:
+            for row in rows:
+                key = row[0]
+                self._cache._memory.pop(key, None)  # type: ignore[reportPrivateUsage]
