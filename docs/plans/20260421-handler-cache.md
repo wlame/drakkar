@@ -217,16 +217,16 @@ class Cache:
 - Create: `drakkar/cache.py`
 - Create: `tests/test_cache_models.py`
 
-- [ ] write tests in `tests/test_cache_models.py`:
+- [x] write tests in `tests/test_cache_models.py`:
   - `CacheScope` has exactly `LOCAL`/`CLUSTER`/`GLOBAL` with string values `'local'`/`'cluster'`/`'global'`
   - `CacheEntry` dataclass: required fields, `size_bytes` populated at construction from serialized-length
   - `_encode(primitive)` returns JSON string + size; `_encode(pydantic_model)` calls `model_dump_json()`
   - `_decode(json_str, as_type=None)` returns parsed value; `_decode(json_str, as_type=PydanticModel)` returns model instance via `model_validate`
   - `_decode` with `as_type=None` on a dict-shaped JSON returns a plain dict (no magic revival)
-- [ ] create `drakkar/cache.py` with `CacheScope` (str Enum), `CacheEntry` dataclass, `_encode`/`_decode` helpers
-- [ ] add a short comment on `_encode` explaining the JSON-only choice (portable across workers, inspectable in debug UI, avoids the security and version-fragility of binary serializers for peer-synced data)
-- [ ] run `uv run pytest tests/test_cache_models.py` — all pass
-- [ ] `uvx ruff check drakkar/cache.py tests/test_cache_models.py`
+- [x] create `drakkar/cache.py` with `CacheScope` (str Enum), `CacheEntry` dataclass, `_encode`/`_decode` helpers
+- [x] add a short comment on `_encode` explaining the JSON-only choice (portable across workers, inspectable in debug UI, avoids the security and version-fragility of binary serializers for peer-synced data)
+- [x] run `uv run pytest tests/test_cache_models.py` — all pass
+- [x] `uvx ruff check drakkar/cache.py tests/test_cache_models.py`
 
 ### Task 4: Cache API (memory-only, with LRU) — no DB yet
 
