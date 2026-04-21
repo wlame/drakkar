@@ -342,6 +342,58 @@ class DebugConfig(BaseModel):
     custom_links: list[dict[str, str]] = Field(default_factory=list)
 
 
+# --- Cache config ---
+
+
+class CachePeerSyncConfig(BaseModel):
+    """Peer-sync settings for the handler cache.
+
+    Controls the periodic loop that pulls entries from sibling workers' cache
+    DBs. Disable by setting ``enabled=false`` — flush/cleanup continue to run,
+    but no cross-worker propagation happens.
+
+    ``peer_resolution_cache_seconds`` is intentionally NOT exposed as a knob
+    in v1 (hardcoded 300s). Operators rarely change cluster_name at runtime,
+    so exposing it would add config surface without real benefit. YAGNI —
+    expose later if someone actually needs it.
+    """
+
+    enabled: bool = True
+    interval_seconds: float = Field(default=30.0, gt=0)
+    batch_size: int = Field(default=500, ge=1)
+    timeout_seconds: float = Field(default=5.0, gt=0)
+
+
+class CacheConfig(BaseModel):
+    """Handler-accessible key/value cache, memory-backed with write-behind SQLite.
+
+    When ``enabled=true``, every handler gains a ``self.cache`` attribute for
+    sync ``set``/``peek``/``delete``/``__contains__`` and async ``get`` with
+    DB fallback. Entries are periodically flushed to ``<worker>-cache.db``
+    under ``db_dir`` (falls back to ``debug.db_dir`` when empty) and
+    optionally pulled from sibling workers via the peer-sync loop.
+
+    ``max_memory_entries`` defaults to ``None`` (unbounded); when set, the
+    in-memory dict uses LRU eviction and falls through to the DB on miss —
+    the DB is the source of truth, so eviction never loses data.
+
+    Gating rules (warn-and-continue, not fail-at-startup):
+    - ``enabled=true`` but no ``db_dir`` anywhere → warning + effective-disable
+    - ``peer_sync.enabled=true`` but ``debug.store_config=false`` → peer sync
+      silently disabled (autodiscovery needs ``store_config``)
+    """
+
+    enabled: bool = False
+    # empty → engine init falls back to debug.db_dir. Kept empty in config layer
+    # so the config is pure data — resolution happens when the engine spins up.
+    db_dir: str = ''
+    flush_interval_seconds: float = Field(default=3.0, gt=0)
+    cleanup_interval_seconds: float = Field(default=60.0, gt=0)
+    # None = unbounded memory dict; when set, LRU eviction kicks in at N entries.
+    max_memory_entries: int | None = Field(default=None, ge=1)
+    peer_sync: CachePeerSyncConfig = Field(default_factory=CachePeerSyncConfig)
+
+
 # --- Root config ---
 
 
@@ -376,6 +428,7 @@ class DrakkarConfig(BaseSettings):
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
+    cache: CacheConfig = Field(default_factory=CacheConfig)
 
     def config_summary(self, worker_id: str = '', cluster_name: str = '') -> str:
         """One-line human-readable config summary for startup logging and debug UI.
@@ -392,6 +445,21 @@ class DrakkarConfig(BaseSettings):
         retries_part = f'{ex.max_retries}/{ex.task_timeout_seconds}s'
 
         debug_part = f'on:{self.debug.port}' if self.debug.enabled else 'off'
+
+        # Cache summary: 'off' when disabled; otherwise 'on:f=Ns/s=Ns|off/c=Ns[/max=N]'.
+        # :g format trims trailing zeros on integer-valued floats (3.0 → '3'), keeping
+        # the common case compact while still rendering fractional intervals readably.
+        if not self.cache.enabled:
+            cache_part = 'off'
+        else:
+            flush = f'{self.cache.flush_interval_seconds:g}s'
+            sync = f'{self.cache.peer_sync.interval_seconds:g}s' if self.cache.peer_sync.enabled else 'off'
+            cleanup = f'{self.cache.cleanup_interval_seconds:g}s'
+            cache_tokens = [f'f={flush}', f's={sync}', f'c={cleanup}']
+            if self.cache.max_memory_entries is not None:
+                cache_tokens.append(f'max={self.cache.max_memory_entries}')
+            cache_part = 'on:' + '/'.join(cache_tokens)
+
         metrics_part = str(self.metrics.port) if self.metrics.enabled else 'off'
 
         dlq_topic = self.dlq.topic or f'{self.kafka.source_topic}_dlq'
@@ -418,6 +486,7 @@ class DrakkarConfig(BaseSettings):
             f' exec={exec_part}'
             f' retries={retries_part}'
             f' debug={debug_part}'
+            f' cache={cache_part}'
             f' metrics={metrics_part}'
             f' dlq={dlq_part}'
             f' sinks=[{sinks_str}]'

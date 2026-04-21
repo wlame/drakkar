@@ -192,24 +192,24 @@ class Cache:
 - Modify: `tests/test_config.py` (or wherever `DrakkarConfig`/`config_summary` tests live — discover at task start)
 - Create: `tests/test_cache_config.py`
 
-- [ ] write tests in `tests/test_cache_config.py` first:
+- [x] write tests in `tests/test_cache_config.py` first:
   - defaults: `CacheConfig().enabled is False`, intervals match spec, peer_sync defaults applied
   - env override: `DRAKKAR_CACHE__ENABLED=true` flips the flag
   - nested env: `DRAKKAR_CACHE__PEER_SYNC__INTERVAL_SECONDS=60` sets peer sync interval
   - invalid: `flush_interval_seconds=0` rejected by pydantic; `batch_size=-1` rejected; `max_memory_entries=0` rejected
   - `db_dir` empty stays empty (resolution happens at engine init, not config load)
   - confirm `CacheConfig` has NO `preload_on_start`, `preload_limit`, or `peer_resolution_cache_seconds` fields (those are v1 cuts — enforcement test against future-creep)
-- [ ] write tests in `tests/test_config.py` for the summary token — **cover both integer and fractional intervals**:
+- [x] write tests in `tests/test_config.py` for the summary token — **cover both integer and fractional intervals**:
   - `cache=off` when disabled
   - `cache=on:f=3s/s=30s/c=60s` when enabled with defaults (integer-second intervals render cleanly via `:g`)
   - `cache=on:f=0.5s/s=30s/c=60s` when `flush_interval_seconds=0.5` (fractional renders with decimal)
   - `cache=on:f=3s/s=off/c=60s` when peer_sync disabled
   - `cache=on:...max=N` when `max_memory_entries` set, absent otherwise
-- [ ] add `CachePeerSyncConfig` and `CacheConfig` classes in `drakkar/config.py` after `DebugConfig`
-- [ ] add `cache: CacheConfig = Field(default_factory=CacheConfig)` to `DrakkarConfig`
-- [ ] extend `config_summary()` at `drakkar/config.py:380` — add `cache_part` block between `debug_part` and `metrics_part`, use `:g` float format
-- [ ] run `uv run pytest tests/test_cache_config.py tests/test_config.py` — all pass
-- [ ] `uvx ruff check drakkar/config.py tests/test_cache_config.py`
+- [x] add `CachePeerSyncConfig` and `CacheConfig` classes in `drakkar/config.py` after `DebugConfig`
+- [x] add `cache: CacheConfig = Field(default_factory=CacheConfig)` to `DrakkarConfig`
+- [x] extend `config_summary()` at `drakkar/config.py:380` — add `cache_part` block between `debug_part` and `metrics_part`, use `:g` float format
+- [x] run `uv run pytest tests/test_cache_config.py tests/test_config.py` — all pass
+- [x] `uvx ruff check drakkar/config.py tests/test_cache_config.py`
 
 ### Task 3: Cache models + serialization
 

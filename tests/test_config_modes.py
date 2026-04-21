@@ -1014,3 +1014,54 @@ class TestConfigSummary:
         summary = cfg.config_summary(worker_id='w')
         assert 'exec=8w/200win/50poll' in summary
         assert 'retries=5/300s' in summary
+
+    def test_summary_cache_off_by_default(self):
+        """Disabled cache renders as 'cache=off' — minimal footprint in logs."""
+        from drakkar.config import CacheConfig
+
+        cfg = make_config(cache=CacheConfig(enabled=False))
+        summary = cfg.config_summary(worker_id='w')
+        assert 'cache=off' in summary
+
+    def test_summary_cache_on_with_default_intervals(self):
+        """Enabled cache with integer-second defaults renders as
+        'cache=on:f=3s/s=30s/c=60s' — :g format keeps integer intervals clean.
+        """
+        from drakkar.config import CacheConfig
+
+        cfg = make_config(cache=CacheConfig(enabled=True))
+        summary = cfg.config_summary(worker_id='w')
+        assert 'cache=on:f=3s/s=30s/c=60s' in summary
+
+    def test_summary_cache_on_with_fractional_flush(self):
+        """Fractional intervals render with decimal via :g format — e.g. 0.5 → '0.5s'."""
+        from drakkar.config import CacheConfig
+
+        cfg = make_config(cache=CacheConfig(enabled=True, flush_interval_seconds=0.5))
+        summary = cfg.config_summary(worker_id='w')
+        assert 'cache=on:f=0.5s/s=30s/c=60s' in summary
+
+    def test_summary_cache_on_with_peer_sync_disabled(self):
+        """peer_sync.enabled=false renders the sync slot as 'off' instead of an interval."""
+        from drakkar.config import CacheConfig, CachePeerSyncConfig
+
+        cfg = make_config(
+            cache=CacheConfig(
+                enabled=True,
+                peer_sync=CachePeerSyncConfig(enabled=False),
+            )
+        )
+        summary = cfg.config_summary(worker_id='w')
+        assert 'cache=on:f=3s/s=off/c=60s' in summary
+
+    def test_summary_cache_on_with_max_memory_entries(self):
+        """max_memory_entries renders as 'max=N' when set, absent otherwise."""
+        from drakkar.config import CacheConfig
+
+        cfg_with = make_config(cache=CacheConfig(enabled=True, max_memory_entries=5000))
+        summary_with = cfg_with.config_summary(worker_id='w')
+        assert 'max=5000' in summary_with
+
+        cfg_without = make_config(cache=CacheConfig(enabled=True))
+        summary_without = cfg_without.config_summary(worker_id='w')
+        assert 'max=' not in summary_without
