@@ -272,17 +272,17 @@ class Cache:
 - Modify: `tests/test_periodic.py`
 - Modify: `tests/test_recorder.py` (or wherever `record_periodic_run` tests live)
 
-- [ ] write tests in `tests/test_periodic.py` (extend existing):
+- [x] write tests in `tests/test_periodic.py` (extend existing):
   - `run_periodic_task(system=True, ...)` passes `system=True` through to `recorder.record_periodic_run`
   - default `system=False` preserves existing behavior
-- [ ] write tests for recorder:
+- [x] write tests for recorder:
   - `record_periodic_run(name=..., duration=..., status=..., system=True)` stores `"system": true` in the event's `metadata` JSON
   - `system=False` (default) **OMITS the `system` key entirely** from metadata — keeps existing event rows byte-identical, no schema diff for rows written before this change
-- [ ] add `system: bool = False` kwarg to `run_periodic_task()` in `drakkar/periodic.py:77`
-- [ ] add `system: bool = False` param to `EventRecorder.record_periodic_run()`; merge into metadata JSON **only when True** (omit when False)
-- [ ] short comment on the flag explaining it distinguishes framework-internal loops from user `@periodic` handler methods; comment on omit-when-false preserves backwards-compat of existing event rows
-- [ ] run `uv run pytest tests/test_periodic.py tests/test_recorder*.py` — all pass
-- [ ] ruff + ty clean
+- [x] add `system: bool = False` kwarg to `run_periodic_task()` in `drakkar/periodic.py:77`
+- [x] add `system: bool = False` param to `EventRecorder.record_periodic_run()`; merge into metadata JSON **only when True** (omit when False)
+- [x] short comment on the flag explaining it distinguishes framework-internal loops from user `@periodic` handler methods; comment on omit-when-false preserves backwards-compat of existing event rows
+- [x] run `uv run pytest tests/test_periodic.py tests/test_recorder*.py` — all pass
+- [x] ruff + ty clean
 
 ### Task 6: SQLite schema + writer connection + start/stop lifecycle
 

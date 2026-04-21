@@ -885,8 +885,21 @@ class EventRecorder:
         duration: float,
         status: str,
         error: str = '',
+        system: bool = False,
     ) -> None:
-        """Record a periodic task execution (success or failure)."""
+        """Record a periodic task execution (success or failure).
+
+        The ``system`` flag distinguishes framework-internal periodic loops
+        (``cache.flush``, ``cache.sync``, ``cache.cleanup``) from user-defined
+        ``@periodic`` handler methods. It is omitted from the metadata JSON
+        when False so existing event rows remain byte-identical to those written
+        before the flag was introduced — avoids a metadata schema diff.
+        """
+        metadata: dict[str, str | bool] = {'status': status}
+        if error:
+            metadata['error'] = error
+        if system:
+            metadata['system'] = True
         self._record(
             {
                 'ts': time.time(),
@@ -894,7 +907,7 @@ class EventRecorder:
                 'task_id': name,
                 'duration': duration,
                 'exit_code': 0 if status == 'ok' else 1,
-                'metadata': json.dumps({'status': status, 'error': error}) if error else json.dumps({'status': status}),
+                'metadata': json.dumps(metadata),
             }
         )
 

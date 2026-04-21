@@ -594,3 +594,151 @@ async def test_periodic_run_records_error_to_recorder(tmp_path):
     assert meta['status'] == 'error'
     assert 'test failure' in meta['error']
     await rec.stop()
+
+
+# --- System flag propagation (framework-internal periodic tasks) ---
+
+
+async def test_run_periodic_task_system_flag_propagates_to_recorder(tmp_path):
+    """run_periodic_task(system=True) stores `system: true` in event metadata."""
+    import json
+
+    from drakkar.config import DebugConfig
+    from drakkar.recorder import EventRecorder
+
+    config = DebugConfig(enabled=True, db_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name='test')
+    await rec.start()
+
+    async def task():
+        pass
+
+    t = asyncio.create_task(
+        run_periodic_task(
+            name='cache.flush',
+            coro_fn=task,
+            seconds=0.05,
+            on_error='continue',
+            recorder=rec,
+            system=True,
+        )
+    )
+    await asyncio.sleep(0.12)
+    t.cancel()
+    try:
+        await t
+    except asyncio.CancelledError:
+        pass
+
+    periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
+    assert len(periodic_events) >= 1
+    ev = periodic_events[0]
+    meta = json.loads(ev['metadata'])
+    assert meta.get('system') is True
+    await rec.stop()
+
+
+async def test_run_periodic_task_system_flag_default_omitted(tmp_path):
+    """run_periodic_task without system=True (default False) omits the key from metadata.
+
+    Default behaviour must leave metadata byte-identical to pre-flag rows so existing
+    event consumers keep working.
+    """
+    import json
+
+    from drakkar.config import DebugConfig
+    from drakkar.recorder import EventRecorder
+
+    config = DebugConfig(enabled=True, db_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name='test')
+    await rec.start()
+
+    async def task():
+        pass
+
+    t = asyncio.create_task(
+        run_periodic_task(
+            name='user.task',
+            coro_fn=task,
+            seconds=0.05,
+            on_error='continue',
+            recorder=rec,
+        )
+    )
+    await asyncio.sleep(0.12)
+    t.cancel()
+    try:
+        await t
+    except asyncio.CancelledError:
+        pass
+
+    periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
+    assert len(periodic_events) >= 1
+    ev = periodic_events[0]
+    meta = json.loads(ev['metadata'])
+    assert 'system' not in meta
+    await rec.stop()
+
+
+def test_recorder_record_periodic_run_system_true_stores_in_metadata(tmp_path):
+    """EventRecorder.record_periodic_run(system=True) embeds `system: true` in metadata JSON."""
+    import json
+
+    from drakkar.config import DebugConfig
+    from drakkar.recorder import EventRecorder
+
+    config = DebugConfig(enabled=True, db_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name='test')
+    rec.record_periodic_run(name='cache.flush', duration=0.01, status='ok', system=True)
+
+    periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
+    assert len(periodic_events) == 1
+    meta = json.loads(periodic_events[0]['metadata'])
+    assert meta['system'] is True
+    assert meta['status'] == 'ok'
+
+
+def test_recorder_record_periodic_run_system_false_omits_key(tmp_path):
+    """EventRecorder.record_periodic_run with default system=False omits the key entirely.
+
+    Keeping the metadata row byte-identical to pre-flag rows — no schema drift.
+    """
+    import json
+
+    from drakkar.config import DebugConfig
+    from drakkar.recorder import EventRecorder
+
+    config = DebugConfig(enabled=True, db_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name='test')
+    rec.record_periodic_run(name='user.task', duration=0.01, status='ok')
+
+    periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
+    assert len(periodic_events) == 1
+    meta = json.loads(periodic_events[0]['metadata'])
+    assert 'system' not in meta
+    assert meta['status'] == 'ok'
+
+
+def test_recorder_record_periodic_run_system_true_with_error(tmp_path):
+    """system=True combines cleanly with the error case."""
+    import json
+
+    from drakkar.config import DebugConfig
+    from drakkar.recorder import EventRecorder
+
+    config = DebugConfig(enabled=True, db_dir=str(tmp_path))
+    rec = EventRecorder(config, worker_name='test')
+    rec.record_periodic_run(
+        name='cache.sync',
+        duration=0.05,
+        status='error',
+        error='boom',
+        system=True,
+    )
+
+    periodic_events = [e for e in rec._buffer if e['event'] == 'periodic_run']
+    assert len(periodic_events) == 1
+    meta = json.loads(periodic_events[0]['metadata'])
+    assert meta['system'] is True
+    assert meta['status'] == 'error'
+    assert meta['error'] == 'boom'

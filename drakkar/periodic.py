@@ -80,8 +80,15 @@ async def run_periodic_task(
     seconds: float,
     on_error: Literal['continue', 'stop'],
     recorder: EventRecorder | None = None,
+    system: bool = False,
 ) -> None:
-    """Run a single periodic task in a loop until cancelled."""
+    """Run a single periodic task in a loop until cancelled.
+
+    The ``system`` flag marks the task as framework-internal (e.g. cache
+    flush/sync/cleanup loops) rather than a user-defined ``@periodic`` handler
+    method. It propagates to ``EventRecorder.record_periodic_run`` so the
+    debug UI can render a "[system]" badge next to these rows.
+    """
     log = logger.bind(periodic_task=name, interval_seconds=seconds)
     await log.ainfo('periodic_task_started', category='periodic')
 
@@ -94,7 +101,12 @@ async def run_periodic_task(
             periodic_task_runs.labels(name=name, status='ok').inc()
             periodic_task_duration.labels(name=name).observe(duration)
             if recorder:
-                recorder.record_periodic_run(name=name, duration=round(duration, 3), status='ok')
+                recorder.record_periodic_run(
+                    name=name,
+                    duration=round(duration, 3),
+                    status='ok',
+                    system=system,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -102,7 +114,13 @@ async def run_periodic_task(
             periodic_task_runs.labels(name=name, status='error').inc()
             periodic_task_duration.labels(name=name).observe(duration)
             if recorder:
-                recorder.record_periodic_run(name=name, duration=round(duration, 3), status='error', error=str(exc))
+                recorder.record_periodic_run(
+                    name=name,
+                    duration=round(duration, 3),
+                    status='error',
+                    error=str(exc),
+                    system=system,
+                )
             if on_error == 'stop':
                 await log.aexception('periodic_task_failed', category='periodic')
                 await log.awarning('periodic_task_stopped', category='periodic')
