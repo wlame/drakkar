@@ -497,20 +497,20 @@ class Cache:
 - Modify: `drakkar/cache.py` (add NoOpCache stub)
 - Create: `tests/test_handler_cache.py`
 
-- [ ] write tests in `tests/test_handler_cache.py`:
+- [x] write tests in `tests/test_handler_cache.py`:
   - handler gains a `cache` attribute (not None) after framework wires it
   - when `cache.enabled=false`, `handler.cache` is a `NoOpCache` stub: `peek`/`get` return None, `set`/`delete` discard silently, `__contains__` returns False
   - NoOpCache's `get` is still a coroutine (awaitable) for API parity with real Cache
   - cache is available from inside `arrange`, `on_task_complete`, `on_message_complete`, `on_window_complete`, `on_error` (test each hook sees the same instance)
   - Pydantic roundtrip end-to-end: handler `set(PrecomputedResult(...))` → `get(..., as_type=PrecomputedResult)` returns typed object
   - **shutdown ordering test:** when `DrakkarApp.stop()` runs, `CacheEngine.stop()` is awaited **before** `EventRecorder.stop()`, so the final flush's `periodic_run` event still records. Asserted via mocked stop ordering in a spy.
-- [ ] add `cache` attribute to `BaseDrakkarHandler` (and inherit on `DrakkarHandler`); framework sets it before first hook is called
-- [ ] add `NoOpCache` class in `drakkar/cache.py` with the same method signatures, all returning None/False/void (`get` is async, returns None)
-- [ ] in `drakkar/app.py`: construct `CacheEngine` alongside the recorder during startup (`DrakkarApp.start`) when `cache.enabled`; attach its `Cache` to the handler; schedule `engine.stop()` in shutdown **before** `recorder.stop()`. Otherwise attach `NoOpCache`.
-- [ ] short comment on the stub rationale: "No-op stub means handlers can call `self.cache.set(...)` unconditionally — no `if self.cache is not None` guards in user code."
-- [ ] short comment on shutdown order: "Cache engine stops first so its final flush can still record a periodic_run event to the recorder. Stopping recorder first would drop that row."
-- [ ] run `uv run pytest tests/test_handler_cache.py tests/test_app*.py` — all pass
-- [ ] ruff + ty clean
+- [x] add `cache` attribute to `BaseDrakkarHandler` (and inherit on `DrakkarHandler`); framework sets it before first hook is called
+- [x] add `NoOpCache` class in `drakkar/cache.py` with the same method signatures, all returning None/False/void (`get` is async, returns None)
+- [x] in `drakkar/app.py`: construct `CacheEngine` alongside the recorder during startup (`DrakkarApp.start`) when `cache.enabled`; attach its `Cache` to the handler; schedule `engine.stop()` in shutdown **before** `recorder.stop()`. Otherwise attach `NoOpCache`.
+- [x] short comment on the stub rationale: "No-op stub means handlers can call `self.cache.set(...)` unconditionally — no `if self.cache is not None` guards in user code."
+- [x] short comment on shutdown order: "Cache engine stops first so its final flush can still record a periodic_run event to the recorder. Stopping recorder first would drop that row."
+- [x] run `uv run pytest tests/test_handler_cache.py tests/test_app*.py` — all pass
+- [x] ruff + ty clean
 
 ### Task 16: Debug UI — cache page + `/api/debug/periodic` system badge
 

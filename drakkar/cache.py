@@ -652,6 +652,64 @@ class Cache:
             metrics.cache_bytes_in_memory.set(self._bytes_sum)
 
 
+# ---- no-op cache stub -------------------------------------------------------
+
+
+class NoOpCache:
+    """Cache-shaped stub used when ``cache.enabled=false``.
+
+    The stub lets handler code call ``self.cache.set(...)`` / ``self.cache.get(...)``
+    unconditionally — no ``if self.cache is not None`` guards in user code.
+    Every method mirrors the real ``Cache`` signature but does nothing:
+
+    - ``peek`` / ``get`` always return ``None``
+    - ``set`` / ``delete`` silently discard
+    - ``__contains__`` always returns ``False``
+
+    ``get`` remains a coroutine (not a plain function) for API parity with
+    the real ``Cache.get`` — a user who ``await``s the result on either flavour
+    sees identical behaviour aside from the value. If it weren't async, a
+    caller switching from disabled to enabled would have to add ``await``.
+
+    The stub does not touch any metrics or counters — a disabled cache is
+    invisible in observability, which matches the "pay for what you use"
+    contract.
+    """
+
+    def set(
+        self,
+        key: str,
+        value: Any,
+        *,
+        ttl: float | None = None,
+        scope: CacheScope = CacheScope.LOCAL,
+    ) -> None:
+        """No-op: the real Cache would store the value; we discard it."""
+        # Deliberate no-op. Signature mirrors Cache.set so the handler API is
+        # identical across enabled/disabled states.
+        return None
+
+    def peek(self, key: str) -> Any | None:
+        """No-op: always reports "not present"."""
+        return None
+
+    def delete(self, key: str) -> bool:
+        """No-op: always reports "nothing to delete"."""
+        return False
+
+    def __contains__(self, key: str) -> bool:
+        """No-op: always reports "not a member"."""
+        return False
+
+    async def get[T: BaseModel](self, key: str, *, as_type: type[T] | None = None) -> Any | None:
+        """No-op: always reports a miss.
+
+        Kept async to mirror ``Cache.get`` — switching a handler between
+        enabled and disabled cache must not require code changes at call sites.
+        """
+        return None
+
+
 # ---- SQLite schema + SQL constants -----------------------------------------
 
 # `cache_entries` is the single table backing every worker's cache DB file.

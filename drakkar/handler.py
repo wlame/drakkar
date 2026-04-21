@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Generic, Protocol, get_args
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
+    from drakkar.cache import Cache, NoOpCache
     from drakkar.config import DrakkarConfig
 
 from drakkar.models import (
@@ -35,6 +36,10 @@ class DrakkarHandler(Protocol):
 
     input_model: type[BaseModel] | None
     output_model: type[BaseModel] | None
+    # Handler-facing cache. Always non-None by the time user hooks are called:
+    # either a real Cache (when cache.enabled=true) or a NoOpCache stub
+    # (disabled path). See BaseDrakkarHandler.cache for the default stub.
+    cache: Cache | NoOpCache
 
     def message_label(self, msg: SourceMessage) -> str: ...
     async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig: ...
@@ -117,6 +122,29 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
 
     input_model: type[BaseModel] | None = None
     output_model: type[BaseModel] | None = None
+
+    # Handler-facing cache attribute. The framework reassigns this to either
+    # a real ``Cache`` (when ``config.cache.enabled=true``) or leaves the
+    # NoOpCache default in place. Initialized here so tests and user code can
+    # call ``self.cache.<method>`` unconditionally without a None guard —
+    # even in test cases that never run the full DrakkarApp startup path.
+    #
+    # Import is local (inside the class-body initializer) to avoid a circular
+    # import between handler.py and cache.py at module load time. The cache
+    # module imports from peer_discovery/metrics/etc. — none of which touch
+    # handler — so the one-time local import keeps the boundary clean.
+    @classmethod
+    def _default_cache(cls):  # noqa: ANN206
+        from drakkar.cache import NoOpCache
+
+        return NoOpCache()
+
+    # Instance attribute is set in __init__ so every handler instance gets
+    # its own stub — sharing one class-level NoOpCache across instances would
+    # technically be fine (stateless) but makes the framework-wired replacement
+    # path more awkward (would need isinstance checks).
+    def __init__(self) -> None:
+        self.cache: Cache | NoOpCache = self._default_cache()
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)

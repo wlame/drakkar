@@ -15,6 +15,7 @@ import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import __version__
+from drakkar.cache import Cache, CacheEngine
 from drakkar.config import DrakkarConfig, load_config
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
@@ -80,6 +81,11 @@ class DrakkarApp:
         self._dlq_sink: DLQSink | None = None
         self._recorder: EventRecorder | None = None
         self._debug_server = None
+        # Framework cache — constructed in _async_run when cache.enabled=true,
+        # else the handler keeps its default NoOpCache stub. Held here so
+        # _shutdown can stop the engine in the correct order (before recorder,
+        # so the final flush's periodic_run event still records).
+        self._cache_engine: CacheEngine | None = None
 
         self._processors: dict[int, PartitionProcessor] = {}
         self._running = False
@@ -208,6 +214,33 @@ class DrakkarApp:
                 app=self,
             )
             await self._debug_server.start()
+
+        # Framework cache. Constructed after the recorder so the cache
+        # engine can pass it as the sink for its periodic_run events. If
+        # cache.enabled=false, we leave the handler's default NoOpCache stub
+        # in place — user code can call self.cache.<method>(...) unconditionally.
+        if self._config.cache.enabled:
+            self._cache_engine = CacheEngine(
+                config=self._config.cache,
+                debug_config=self._config.debug,
+                worker_id=self._worker_id,
+                cluster_name=self._cluster_name,
+                recorder=self._recorder,
+            )
+            # The handler-facing Cache: origin_worker_id is this worker's
+            # id so LWW tiebreaks during peer-sync can identify our writes.
+            handler_cache = Cache(
+                origin_worker_id=self._worker_id,
+                max_memory_entries=self._config.cache.max_memory_entries,
+            )
+            # Wire the Cache to the engine BEFORE start() so the engine's
+            # reader connection is attached atomically as part of start().
+            self._cache_engine.attach_cache(handler_cache)
+            await self._cache_engine.start()
+            # Replace the handler's default NoOpCache with the real one.
+            # Users access via self.cache regardless of which variant is
+            # installed — signatures are identical.
+            self._handler.cache = handler_cache
 
         # build and connect sinks
         self._build_sinks()
@@ -585,6 +618,17 @@ class DrakkarApp:
                     category='lifecycle',
                     count=len(bg_snapshot),
                 )
+
+        # Stop the cache engine BEFORE the recorder so the engine's final
+        # flush (``_flush_once`` called inside ``CacheEngine.stop()``) can
+        # still record its ``periodic_run`` event through the recorder. If
+        # we stopped the recorder first, that last event would be dropped —
+        # users lose observability on the most critical flush of the
+        # lifecycle (the one that persists whatever was in memory when
+        # shutdown signalled).
+        if self._cache_engine is not None:
+            await self._cache_engine.stop()
+            self._cache_engine = None
 
         if self._recorder:
             await self._recorder.stop()
