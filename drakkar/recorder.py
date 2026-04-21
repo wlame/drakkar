@@ -27,6 +27,7 @@ from drakkar.models import (
     ExecutorTask,
     SourceMessage,
 )
+from drakkar.peer_discovery import discover_peer_dbs
 from drakkar.utils import redact_url
 
 if TYPE_CHECKING:
@@ -1164,20 +1165,22 @@ class EventRecorder:
     # --- Autodiscovery ---
 
     async def discover_workers(self) -> list[dict]:
-        """Scan db_dir for other workers' -live.db symlinks, read their worker_config."""
+        """Scan db_dir for other workers' -live.db symlinks, read their worker_config.
+
+        Symlink scanning is delegated to :func:`discover_peer_dbs`
+        (shared with the cache peer-sync loop). We keep the recorder-specific
+        step — reading the `worker_config` row out of each resolved DB —
+        right here; the cache will supply its own row-reader in a later task.
+        """
         if not self._config.db_dir or not self._config.store_config:
             return []
-        pattern = os.path.join(self._config.db_dir, '*-live.db')
         workers: list[dict] = []
-        for link_path in glob.glob(pattern):
-            if not os.path.islink(link_path):
-                continue
-            link_name = os.path.basename(link_path)
-            worker_name = link_name.removesuffix('-live.db')
-            if worker_name == self._worker_name:
-                continue
+        async for _worker_name, target in discover_peer_dbs(
+            self._config.db_dir,
+            '-live.db',
+            self._worker_name,
+        ):
             try:
-                target = os.path.realpath(link_path)
                 async with aiosqlite.connect(f'file:{target}?mode=ro', uri=True) as db:
                     async with db.execute(
                         "SELECT name FROM sqlite_master WHERE type='table' AND name='worker_config'"
