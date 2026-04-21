@@ -192,15 +192,71 @@ handler_duration = Histogram(
 
 # --- Cache ---
 #
-# The full cache metrics suite (hits/misses/writes/flush/sync/cleanup gauges)
-# lands in Task 14. This counter is introduced here because the in-memory
-# Cache API (Task 4) drives LRU eviction and we want a first-class metric
-# for it from day one — otherwise the caller has no visibility into whether
-# their `max_memory_entries` cap is being hit.
+# The cache metrics suite covers the full lifecycle of a cached entry —
+# read (hits/misses), write (sets/deletes/evictions), DB persistence
+# (flush entries), cross-worker replication (sync fetched/upserted/errors),
+# and space reclaim (cleanup). Memory gauges track the live in-memory state
+# and are maintained as running sums (never walked on scrape).
 
+# Read-path counters. Every call into ``Cache.get`` lands in exactly one of
+# ``hits{source=...}`` or ``misses`` — operators can compute hit rate as
+# ``sum(hits) / (sum(hits) + misses)`` and inspect which source (memory
+# fast-path vs SQLite fallback) is dominant for a given workload.
+#
+# The ``source`` label on hits distinguishes:
+#   source='memory' — the value was served from the in-memory ``_memory`` dict
+#   source='db'     — memory miss fell through to the reader SQLite connection
+#                    and the row was revived + warmed back into memory
+#
+# Separate label values (rather than two counters) keeps the `hit rate` math
+# a straightforward sum and matches the Prometheus convention for partition
+# labels on a shared semantic.
+cache_hits = Counter(
+    'drakkar_cache_hits_total',
+    'Total cache reads served without reaching the DB fallback miss branch',
+    ['source'],
+)
+cache_misses = Counter(
+    'drakkar_cache_misses_total',
+    'Total cache reads that returned None (key absent / expired in both memory and DB)',
+)
+
+# Write-path counters. ``writes{scope}`` ticks on every ``Cache.set`` (one
+# counter per ``CacheScope`` value). ``deletes`` ticks on every
+# ``Cache.delete`` call regardless of whether the key was present — the
+# counter measures user intent, not row-affected count, matching the
+# "throughput not state transitions" convention used by flush / sync.
+cache_writes = Counter(
+    'drakkar_cache_writes_total',
+    'Total cache writes (Cache.set) labelled by entry scope',
+    ['scope'],
+)
+cache_deletes = Counter(
+    'drakkar_cache_deletes_total',
+    'Total cache deletes (Cache.delete calls)',
+)
+
+# LRU eviction counter introduced alongside Task 4. Increments once per entry
+# popped from memory when ``max_memory_entries`` is exceeded — operators
+# watch this to spot cap-undersizing or hot-key churn.
 cache_evictions = Counter(
     'drakkar_cache_evictions_total',
     'Total entries evicted from the in-memory cache dict due to the LRU cap',
+)
+
+# Memory gauges — "live" view of what's sitting in the Cache's in-memory
+# dict right now. Both are maintained as **running sums**: set/delete/evict
+# each adjusts the counter by one (or by size_bytes for the bytes gauge).
+# We never walk the dict on scrape — doing so would turn a zero-cost
+# scrape into an O(N) scan, which defeats the whole point of
+# ``bytes_in_memory`` as a cheap observability signal.
+cache_entries_in_memory = Gauge(
+    'drakkar_cache_entries_in_memory',
+    'Current number of entries held in the in-memory cache dict',
+)
+cache_bytes_in_memory = Gauge(
+    'drakkar_cache_bytes_in_memory',
+    'Sum of size_bytes across entries held in the in-memory cache dict',
 )
 
 # Flush-loop counter introduced alongside Task 7. The full metrics wiring

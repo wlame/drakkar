@@ -330,6 +330,11 @@ class Cache:
         # run on separate aiosqlite worker threads, and WAL mode lets the
         # reader see consistent snapshots concurrent with writes.
         self._reader_db: aiosqlite.Connection | None = None
+        # Running sum for the ``drakkar_cache_bytes_in_memory`` gauge.
+        # Adjusted on mutation — Prometheus scrape reads a single int,
+        # never walks the dict. Without this, a scrape on a large cache
+        # would turn observability into an O(N) cost.
+        self._bytes_sum: int = 0
 
     # -- sync API -------------------------------------------------------------
 
@@ -381,6 +386,14 @@ class Cache:
             origin_worker_id=self._origin_worker_id,
         )
 
+        # Running-sum bookkeeping for ``bytes_in_memory``. If this is an
+        # overwrite, first subtract the old entry's size (we're about to
+        # replace it). Then add the new size. Keeping the sum in sync per
+        # mutation is cheaper than walking the dict on scrape.
+        if existing is not None:
+            self._bytes_sum -= existing.size_bytes
+        self._bytes_sum += size_bytes
+
         # Place in memory and bump to MRU. If the key already existed,
         # OrderedDict's insertion replaces the value but keeps its slot —
         # we then explicitly move_to_end so overwrites also count as a
@@ -392,6 +405,15 @@ class Cache:
         # key — that's the expected last-write-wins at the dirty-map level,
         # matching the SQL LWW at the DB level.
         self._dirty[key] = DirtyOp(op=Op.SET, entry=entry)
+
+        # Write-path metrics. ``writes{scope}`` ticks once per user intent
+        # — we count the call, not row transitions (matches the "throughput
+        # not state" semantics used by flush/sync counters). Memory gauges
+        # reflect the post-set state; ``_maybe_evict`` may tick them back
+        # down if the cap is exceeded.
+        metrics.cache_writes.labels(scope=str(scope)).inc()
+        metrics.cache_entries_in_memory.set(len(self._memory))
+        metrics.cache_bytes_in_memory.set(self._bytes_sum)
 
         self._maybe_evict()
 
@@ -406,6 +428,14 @@ class Cache:
         Returns ``None`` for missing or expired keys. To distinguish the
         two cases, use ``__contains__`` — but usually callers don't need
         to.
+
+        Note on metrics: ``peek`` is a pure memory probe with zero DB
+        fallback, so we deliberately do NOT increment the hit/miss
+        counters here. Hit/miss semantics are scoped to ``get()`` — where
+        the memory-vs-db distinction matters. Counting peek as a hit
+        would double-count if a caller does peek-then-get, and counting
+        it as a miss would overcount memory pressure. Keep peek out of
+        the cache-hit-rate math.
         """
         entry = self._memory.get(key)
         if entry is None:
@@ -416,6 +446,9 @@ class Cache:
             # by the expiration cleanup cycle is cheaper than trying to
             # untangle it here. A pending DELETE stays as-is.
             self._memory.pop(key, None)
+            self._bytes_sum -= entry.size_bytes
+            metrics.cache_entries_in_memory.set(len(self._memory))
+            metrics.cache_bytes_in_memory.set(self._bytes_sum)
             return None
         # access → MRU bump
         self._memory.move_to_end(key)
@@ -472,16 +505,22 @@ class Cache:
             if self._is_expired(entry):
                 # Mirror peek()'s opportunistic eviction on stale reads.
                 self._memory.pop(key, None)
+                self._bytes_sum -= entry.size_bytes
+                metrics.cache_entries_in_memory.set(len(self._memory))
+                metrics.cache_bytes_in_memory.set(self._bytes_sum)
                 # Do NOT consult the DB — if the memory entry is expired,
                 # the DB row (if any) will also have expires_at_ms <= now.
+                metrics.cache_misses.inc()
                 return None
             # access → MRU bump
             self._memory.move_to_end(key)
+            metrics.cache_hits.labels(source='memory').inc()
             return _decode(entry.value, as_type=as_type) if as_type is not None else _decode(entry.value)
 
         # --- DB fallback ---
         if self._reader_db is None:
             # Engine disabled or not yet started — treat as a miss.
+            metrics.cache_misses.inc()
             return None
 
         now_ms = _now_ms()
@@ -498,6 +537,7 @@ class Cache:
         row = await cursor.fetchone()
         await cursor.close()
         if row is None:
+            metrics.cache_misses.inc()
             return None
 
         # Rebuild the CacheEntry from the row and warm memory with it — a
@@ -518,8 +558,12 @@ class Cache:
         # but preserves its dirty op if any — same invariant as set()).
         self._memory[db_key] = warmed
         self._memory.move_to_end(db_key)
+        self._bytes_sum += warmed.size_bytes
+        metrics.cache_entries_in_memory.set(len(self._memory))
+        metrics.cache_bytes_in_memory.set(self._bytes_sum)
         self._maybe_evict()
 
+        metrics.cache_hits.labels(source='db').inc()
         return _decode(warmed.value, as_type=as_type) if as_type is not None else _decode(warmed.value)
 
     def delete(self, key: str) -> bool:
@@ -536,11 +580,22 @@ class Cache:
         is deliberately local-only" note in the plan for the full edge
         discussion — use TTL for cross-worker invalidation.
         """
-        present = key in self._memory
-        self._memory.pop(key, None)
+        existing = self._memory.pop(key, None)
+        present = existing is not None
+        # Adjust running sum + gauges for the removed memory entry (if any).
+        # The dirty-map DELETE still records — the DB may have a row we
+        # can't see from memory alone, and flush needs to drop it.
+        if existing is not None:
+            self._bytes_sum -= existing.size_bytes
+            metrics.cache_entries_in_memory.set(len(self._memory))
+            metrics.cache_bytes_in_memory.set(self._bytes_sum)
         # A DELETE op overwrites any prior SET; flush will see the final
         # state only. Entry is None since the row is going away.
         self._dirty[key] = DirtyOp(op=Op.DELETE, entry=None)
+        # User intent counter — ticks once per delete call regardless of
+        # whether the key was actually in memory (mirrors the "throughput
+        # not state" semantics used by flush/sync).
+        metrics.cache_deletes.inc()
         return present
 
     def __contains__(self, key: str) -> bool:
@@ -567,24 +622,34 @@ class Cache:
     def _maybe_evict(self) -> None:
         """Drop the LRU key if the memory dict exceeds ``max_memory_entries``.
 
-        Called after every ``set``. Evicts at most one entry per call —
-        since we never bulk-insert without calls to ``set``, that matches
-        the growth rate. The evicted key's dirty-op is preserved: the DB
-        is the source of truth, and losing a pending SET before flush
-        would silently drop the user's write.
+        Called after every ``set`` (and after warm-on-read in ``get()``).
+        Evicts at most one entry per call in the common case — since
+        ``set``/``get`` add at most one entry, a single evict per call
+        matches the growth rate. The evicted key's dirty-op is preserved:
+        the DB is the source of truth, and losing a pending SET before
+        flush would silently drop the user's write.
 
         Note on ``popitem(last=False)``: OrderedDict's popitem pops the
         first inserted (i.e. least-recently-touched after our move_to_end
         calls), which is exactly LRU.
+
+        Gauge bookkeeping: each popped entry's ``size_bytes`` is deducted
+        from the running sum so ``bytes_in_memory`` stays accurate.
         """
         cap = self._max_memory_entries
         if cap is None:
             return
+        evicted_any = False
         while len(self._memory) > cap:
             # pop oldest by access order (move_to_end in set/peek keeps
             # recently-touched keys at the tail)
-            self._memory.popitem(last=False)
+            _, evicted_entry = self._memory.popitem(last=False)
+            self._bytes_sum -= evicted_entry.size_bytes
             metrics.cache_evictions.inc()
+            evicted_any = True
+        if evicted_any:
+            metrics.cache_entries_in_memory.set(len(self._memory))
+            metrics.cache_bytes_in_memory.set(self._bytes_sum)
 
 
 # ---- SQLite schema + SQL constants -----------------------------------------
@@ -1328,12 +1393,23 @@ class CacheEngine:
                 if entry.expires_at_ms is not None and entry.expires_at_ms < now_ms:
                     expired_keys.append(key)
             for key in expired_keys:
-                self._cache._memory.pop(key, None)  # type: ignore[reportPrivateUsage]
+                # Pop + decrement the running sum for the bytes_in_memory
+                # gauge. Walking the dict here is unavoidable (cleanup is
+                # the cadence-bound sweep), but the gauge read stays O(1)
+                # because the sum is maintained on mutation.
+                evicted = self._cache._memory.pop(key, None)  # type: ignore[reportPrivateUsage]
+                if evicted is not None:
+                    self._cache._bytes_sum -= evicted.size_bytes  # type: ignore[reportPrivateUsage]
                 # Drop only pending SET ops — DELETEs are still the correct
                 # action (row is going away either way) and simpler to leave.
                 pending = self._cache._dirty.get(key)  # type: ignore[reportPrivateUsage]
                 if pending is not None and pending.op is Op.SET:
                     self._cache._dirty.pop(key, None)  # type: ignore[reportPrivateUsage]
+            # Refresh gauges once after the sweep — cheaper than setting
+            # them per-eviction when many entries expire together.
+            if expired_keys:
+                metrics.cache_entries_in_memory.set(len(self._cache._memory))  # type: ignore[reportPrivateUsage]
+                metrics.cache_bytes_in_memory.set(self._cache._bytes_sum)  # type: ignore[reportPrivateUsage]
 
         # Step 4: refresh DB-size gauges with a single aggregate query. We
         # use ``coalesce(sum(size_bytes), 0)`` so an empty table yields 0
@@ -1700,6 +1776,16 @@ class CacheEngine:
         # caller that needs the freshest value will hit the DB on the next
         # ``get`` which already includes the merged LWW result.
         if self._cache is not None:
+            invalidated_any = False
             for row in rows:
                 key = row[0]
-                self._cache._memory.pop(key, None)  # type: ignore[reportPrivateUsage]
+                # Pop the memory entry; if present, subtract its bytes
+                # from the running sum so the bytes_in_memory gauge
+                # stays accurate after sync invalidates entries.
+                popped = self._cache._memory.pop(key, None)  # type: ignore[reportPrivateUsage]
+                if popped is not None:
+                    self._cache._bytes_sum -= popped.size_bytes  # type: ignore[reportPrivateUsage]
+                    invalidated_any = True
+            if invalidated_any:
+                metrics.cache_entries_in_memory.set(len(self._cache._memory))  # type: ignore[reportPrivateUsage]
+                metrics.cache_bytes_in_memory.set(self._cache._bytes_sum)  # type: ignore[reportPrivateUsage]

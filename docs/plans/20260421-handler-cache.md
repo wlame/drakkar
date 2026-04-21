@@ -468,7 +468,7 @@ class Cache:
 - Modify: `drakkar/cache.py`
 - Create: `tests/test_cache_metrics.py`
 
-- [ ] write tests in `tests/test_cache_metrics.py`:
+- [x] write tests in `tests/test_cache_metrics.py`:
   - `get` memory hit increments `hits_total{source="memory"}` by 1
   - `get` DB hit increments `hits_total{source="db"}` by 1
   - `get` miss increments `misses_total`
@@ -482,12 +482,12 @@ class Cache:
   - memory gauges: `entries_in_memory` and `bytes_in_memory` reflect live state after set/delete/evict — `bytes_in_memory` is a **running sum** (assert no full-dict walk happens on scrape via a spy)
   - `size_bytes` on entry equals `len(serialized_json)` exactly
   - DB gauges refreshed on cleanup cycle (not on hot path)
-- [ ] add all cache metric definitions to `drakkar/metrics.py` (counters + gauges per spec)
-- [ ] wire inline increments in `Cache` (set/get/delete/evict) and `CacheEngine` (flush/sync/cleanup)
-- [ ] `bytes_in_memory` accounting: maintain a running `_bytes_sum: int` on `Cache`; `+= entry.size_bytes` on set, `-= entry.size_bytes` on delete/evict/cleanup; gauge reads from this field
-- [ ] short comment: "Running sum, adjusted on mutation — Prometheus scrape reads a single int, never walks the dict."
-- [ ] run `uv run pytest tests/test_cache_metrics.py` — all pass
-- [ ] ruff + ty clean
+- [x] add all cache metric definitions to `drakkar/metrics.py` (counters + gauges per spec)
+- [x] wire inline increments in `Cache` (set/get/delete/evict) and `CacheEngine` (flush/sync/cleanup)
+- [x] `bytes_in_memory` accounting: maintain a running `_bytes_sum: int` on `Cache`; `+= entry.size_bytes` on set, `-= entry.size_bytes` on delete/evict/cleanup; gauge reads from this field
+- [x] short comment: "Running sum, adjusted on mutation — Prometheus scrape reads a single int, never walks the dict."
+- [x] run `uv run pytest tests/test_cache_metrics.py` — all pass
+- [x] ruff + ty clean
 
 ### Task 15: Handler integration + app wiring + no-op stub + shutdown ordering
 
