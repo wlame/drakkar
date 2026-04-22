@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from '_kafka_ui_icon.html' import kafka_ui_icon %}
 {% block title %}Task {{ task_id }} — Drakkar Debug{% endblock %}
 
 {% block content %}
@@ -97,9 +98,10 @@
     <h2 class="text-lg font-semibold mb-2">Source Message Offsets</h2>
     <div class="flex flex-wrap gap-2">
         {% for off in source_offsets %}
-        <a href="/debug#trace/{{ partition }}/{{ off }}" class="bg-cream-200 hover:bg-cream-300 px-3 py-1 rounded text-sm font-mono text-teal-600">
-            {{ partition }}:{{ off }}
-        </a>
+        <span class="bg-cream-200 hover:bg-cream-300 px-3 py-1 rounded text-sm font-mono inline-flex items-center gap-1">
+            <a href="/debug#trace/{{ partition }}/{{ off }}" class="text-teal-600">{{ partition }}:{{ off }}</a>
+            {{ kafka_ui_icon(kafka_source_topic, partition, off) }}
+        </span>
         {% endfor %}
     </div>
 </div>

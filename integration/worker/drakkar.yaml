@@ -12,6 +12,14 @@ kafka:
   max_poll_interval_ms: 300000
   session_timeout_ms: 10000
   heartbeat_interval_ms: 2000
+  # Kafka-UI deep-link config. The Debug UI renders a small Kafka icon
+  # next to every <partition:offset> link; clicking it opens Kafka-UI
+  # pre-filtered on (source_topic, partition, offset) in a new tab. Both
+  # ui_url and ui_cluster_name must be set for the icon to appear; the
+  # cluster_name must match the value Kafka-UI is itself configured with
+  # (see docker-compose: KAFKA_CLUSTERS_0_NAME=drakkar-local).
+  ui_url: "http://localhost:8088"
+  ui_cluster_name: "drakkar-local"
 
 executor:
   binary_path: "/usr/local/bin/run-rg"

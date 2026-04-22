@@ -738,6 +738,188 @@ async def test_websocket_cleanup_on_disconnect(debug_config, mock_recorder, mock
     assert len(real_recorder._ws_subscribers) == 0
 
 
+# --- /api/live/arrange-tasks (Arrange tab state lookup) ---
+#
+# The endpoint queries the recorder's SQLite for a specific set of
+# task_ids, ignoring the ws_min_duration_ms filter and the 10-minute
+# timeline window that /api/recent-tasks applies. The Arrange tab uses
+# it to keep the sidebar fresh for batches outside the timeline window.
+
+
+async def _start_live_recorder(tmp_path):
+    """Spin up a real EventRecorder with on-disk SQLite for endpoint tests.
+
+    Short flush interval so buffered events land in the DB before the
+    endpoint reads — the endpoint itself also ``await recorder._flush()``s
+    defensively, but the fixture helper avoids relying on that alone.
+    """
+    from drakkar.recorder import EventRecorder
+
+    cfg = DebugConfig(enabled=True, db_dir=str(tmp_path), flush_interval_seconds=60)
+    rec = EventRecorder(cfg, worker_name='test-arrange-tasks')
+    await rec.start()
+    return rec
+
+
+async def test_arrange_tasks_empty_ids_returns_empty_map(mock_recorder, mock_app, debug_config):
+    """POST with no task_ids → empty map, no recorder flush/query."""
+    fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.post('/api/live/arrange-tasks', json={'task_ids': []})
+    assert resp.status_code == 200
+    assert resp.json() == {}
+
+
+async def test_arrange_tasks_returns_running_state(tmp_path, mock_app, debug_config):
+    """task_started with no completion → status='running', duration=None."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        from drakkar.models import ExecutorTask
+
+        task = ExecutorTask(
+            task_id='rg-running-1',
+            args=['--x', '1'],
+            source_offsets=[42, 43],
+        )
+        rec.record_task_started(task, partition=7)
+
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post('/api/live/arrange-tasks', json={'task_ids': ['rg-running-1']})
+        body = resp.json()
+        assert 'rg-running-1' in body
+        t = body['rg-running-1']
+        assert t['status'] == 'running'
+        assert t['partition'] == 7
+        assert t['source_offsets'] == [42, 43]
+        assert t['end_ts'] is None
+        assert t['duration'] is None
+    finally:
+        await rec.stop()
+
+
+async def test_arrange_tasks_returns_completed_state(tmp_path, mock_app, debug_config):
+    """task_started + task_completed collapses to status='completed' with duration."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        from drakkar.models import ExecutorResult, ExecutorTask
+
+        task = ExecutorTask(task_id='rg-done-1', args=['--x', '1'], source_offsets=[100])
+        rec.record_task_started(task, partition=3)
+        result = ExecutorResult(
+            exit_code=0,
+            stdout='ok',
+            stderr='',
+            duration_seconds=0.123,
+            task=task,
+        )
+        rec.record_task_completed(result, partition=3)
+
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post('/api/live/arrange-tasks', json={'task_ids': ['rg-done-1']})
+        body = resp.json()
+        t = body['rg-done-1']
+        assert t['status'] == 'completed'
+        assert t['duration'] == 0.123
+        assert t['partition'] == 3
+        assert t['source_offsets'] == [100]
+        assert t['end_ts'] is not None
+    finally:
+        await rec.stop()
+
+
+async def test_arrange_tasks_returns_failed_state(tmp_path, mock_app, debug_config):
+    """task_failed → status='failed' with exit_code surfaced."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        from drakkar.models import ExecutorError, ExecutorTask
+
+        task = ExecutorTask(task_id='rg-fail-1', args=['--fail'], source_offsets=[200])
+        rec.record_task_started(task, partition=9)
+        err = ExecutorError(
+            exit_code=2,
+            stderr='boom',
+            stdout='',
+            duration_seconds=0.05,
+            task=task,
+        )
+        rec.record_task_failed(task, err, partition=9)
+
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post('/api/live/arrange-tasks', json={'task_ids': ['rg-fail-1']})
+        body = resp.json()
+        t = body['rg-fail-1']
+        assert t['status'] == 'failed'
+        assert t['partition'] == 9
+        assert t['exit_code'] == 2
+    finally:
+        await rec.stop()
+
+
+async def test_arrange_tasks_unknown_id_absent_from_response(tmp_path, mock_app, debug_config):
+    """IDs not in the DB aren't fabricated — just absent from the map."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post(
+                '/api/live/arrange-tasks',
+                json={'task_ids': ['never-recorded-1', 'never-recorded-2']},
+            )
+        assert resp.status_code == 200
+        assert resp.json() == {}
+    finally:
+        await rec.stop()
+
+
+async def test_arrange_tasks_batch_lookup_mixed_states(tmp_path, mock_app, debug_config):
+    """Multiple task_ids in one request return correct per-task state —
+    running / completed / failed / unknown all in the same response."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        from drakkar.models import ExecutorError, ExecutorResult, ExecutorTask
+
+        t_run = ExecutorTask(task_id='rg-mix-running', args=[], source_offsets=[1])
+        t_ok = ExecutorTask(task_id='rg-mix-ok', args=[], source_offsets=[2])
+        t_fail = ExecutorTask(task_id='rg-mix-fail', args=[], source_offsets=[3])
+        rec.record_task_started(t_run, partition=0)
+        rec.record_task_started(t_ok, partition=0)
+        rec.record_task_started(t_fail, partition=0)
+        rec.record_task_completed(
+            ExecutorResult(exit_code=0, stdout='', stderr='', duration_seconds=0.5, task=t_ok),
+            partition=0,
+        )
+        rec.record_task_failed(
+            t_fail,
+            ExecutorError(exit_code=1, stderr='x', stdout='', duration_seconds=0.1, task=t_fail),
+            partition=0,
+        )
+
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post(
+                '/api/live/arrange-tasks',
+                json={
+                    'task_ids': ['rg-mix-running', 'rg-mix-ok', 'rg-mix-fail', 'rg-mix-missing'],
+                },
+            )
+        body = resp.json()
+        assert body['rg-mix-running']['status'] == 'running'
+        assert body['rg-mix-ok']['status'] == 'completed'
+        assert body['rg-mix-fail']['status'] == 'failed'
+        assert 'rg-mix-missing' not in body
+    finally:
+        await rec.stop()
+
+
 # --- Sinks page and API ---
 
 

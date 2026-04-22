@@ -11,16 +11,28 @@ import time
 from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 import structlog
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 
 from drakkar.config import DebugConfig
 from drakkar.metrics import cache_gauge_snapshot
 from drakkar.recorder import EventRecorder
+
+
+# ``/api/live/arrange-tasks`` request body — kept at module scope so
+# FastAPI's automatic "single Pydantic param = request body" detection
+# fires. Nested class definitions inside the ``create_debug_app`` factory
+# don't trigger the same heuristic and end up being treated as query
+# parameters (surfaces as 422 "Field required" responses).
+class _ArrangeTaskLookupRequest(BaseModel):
+    task_ids: list[str] = Field(default_factory=list, max_length=5000)
+
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
@@ -142,6 +154,33 @@ def create_debug_app(
 
     templates.env.globals['is_cache_enabled'] = _is_cache_enabled  # ty: ignore[invalid-assignment]
 
+    # --- Kafka-UI deep-link helper ---
+    #
+    # Builds a URL that opens Kafka-UI (the provectus tool) filtered to a
+    # single Kafka message. Requires both ``kafka.ui_url`` and
+    # ``kafka.ui_cluster_name`` in config — returns '' when either is
+    # missing so callers (Jinja templates and JS) can treat it as a feature
+    # toggle. The ``%3A%3A`` literal is the URL-encoded form of ``::``
+    # that Kafka-UI expects in the seekTo parameter.
+
+    def _kafka_ui_message_url(topic: str, partition: int, offset: int) -> str:
+        kcfg = drakkar_app._config.kafka
+        if not kcfg.ui_url or not kcfg.ui_cluster_name or not topic:
+            return ''
+        base = kcfg.ui_url.rstrip('/')
+        cluster = quote(kcfg.ui_cluster_name, safe='')
+        topic_q = quote(str(topic), safe='')
+        seek = f'{int(partition)}%3A%3A{int(offset)}'
+        return f'{base}/ui/clusters/{cluster}/all-topics/{topic_q}/messages?seekType=OFFSET&seekTo={seek}&limit=1'
+
+    templates.env.globals['kafka_ui_message_url'] = _kafka_ui_message_url  # ty: ignore[invalid-assignment]
+    templates.env.globals['kafka_source_topic'] = drakkar_app._config.kafka.source_topic  # ty: ignore[invalid-assignment]
+    # The JS-rendered pages (history, live) need to build these URLs too.
+    # Expose the raw bits so the templates can inject them into a JS
+    # constants block once and let the renderers compose URLs per-row.
+    templates.env.globals['kafka_ui_base'] = drakkar_app._config.kafka.ui_url.rstrip('/')  # ty: ignore[invalid-assignment]
+    templates.env.globals['kafka_ui_cluster'] = drakkar_app._config.kafka.ui_cluster_name  # ty: ignore[invalid-assignment]
+
     # --- Auth dependency for sensitive endpoints ---
 
     async def _require_auth(
@@ -211,7 +250,6 @@ def create_debug_app(
         cf = _expand(config.prometheus_cluster_label) if config.prometheus_cluster_label else ''
 
         def _graph_url(expr: str, range_input: str = '1h') -> str:
-            from urllib.parse import quote
 
             return f'{prom_url}/graph?g0.expr={quote(expr)}&g0.tab=0&g0.range_input={range_input}'
 
@@ -1135,6 +1173,93 @@ def create_debug_app(
                 continue
             result.append(t)
         return JSONResponse({'tasks': result, 'lane_count': max_lanes})
+
+    # Lookup-by-task-ID endpoint for the Arrange tab. Unlike /api/recent-tasks
+    # this does NOT filter by ``minutes`` and does NOT apply the
+    # ``ws_min_duration_ms`` threshold — callers pass exactly the task_ids
+    # they want state for, and we return whatever the recorder has within
+    # its retention window (default 24h). This fills the gap where batches
+    # in the Arrange tab are older than the 10-min timeline window but
+    # their task state is still authoritative in the DB.
+    @app.post('/api/live/arrange-tasks')
+    async def api_live_arrange_tasks(req: _ArrangeTaskLookupRequest):
+        """Return the current state of specific task_ids as a map.
+
+        Used by the Arrange tab's sidebar + list row progress. Payload:
+        ``{"task_ids": ["rg-...", "rg-..."]}``. Response: ``{"<task_id>":
+        {status, start_ts, end_ts, duration, partition, source_offsets,
+        pid, labels, exit_code}}``. Unknown IDs are simply absent from
+        the response map — callers treat missing keys as "not in DB yet".
+        """
+        task_ids = [t for t in req.task_ids if t]
+        if not task_ids:
+            return JSONResponse({})
+        await recorder._flush()
+        if not recorder._db or not recorder._config.store_events:
+            return JSONResponse({})
+
+        placeholders = ','.join(['?'] * len(task_ids))
+        query = f"""
+            SELECT task_id, event, ts, duration, partition, metadata,
+                   exit_code, pid, args, labels
+            FROM events
+            WHERE task_id IN ({placeholders})
+              AND event IN ('task_started', 'task_completed', 'task_failed')
+            ORDER BY task_id, id ASC
+        """
+        async with recorder._db.execute(query, task_ids) as cursor:
+            columns = [d[0] for d in cursor.description]
+            rows = await cursor.fetchall()
+            events = [dict(zip(columns, row, strict=False)) for row in rows]
+
+        result: dict[str, dict] = {}
+        for e in events:
+            tid = e['task_id']
+            t = result.setdefault(
+                tid,
+                {
+                    'task_id': tid,
+                    'status': 'unknown',
+                    'start_ts': None,
+                    'end_ts': None,
+                    'duration': None,
+                    'partition': None,
+                    'source_offsets': None,
+                    'pid': None,
+                    'args': None,
+                    'labels': None,
+                    'exit_code': None,
+                },
+            )
+            if e['event'] == 'task_started':
+                t['start_ts'] = e['ts']
+                # ``running`` is provisional — overwritten on the next row
+                # if a completion event exists for the same task_id.
+                if t['status'] == 'unknown':
+                    t['status'] = 'running'
+                t['partition'] = e.get('partition')
+                t['pid'] = e.get('pid')
+                t['args'] = e.get('args')
+                if e.get('metadata'):
+                    try:
+                        meta = json.loads(e['metadata'])
+                        t['source_offsets'] = meta.get('source_offsets')
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if e.get('labels'):
+                    try:
+                        t['labels'] = json.loads(e['labels'])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            elif e['event'] in ('task_completed', 'task_failed'):
+                t['end_ts'] = e['ts']
+                t['status'] = 'completed' if e['event'] == 'task_completed' else 'failed'
+                t['duration'] = e.get('duration')
+                t['exit_code'] = e.get('exit_code')
+                if e.get('pid'):
+                    t['pid'] = e['pid']
+
+        return JSONResponse(result)
 
     @app.get('/api/dashboard')
     async def api_dashboard():

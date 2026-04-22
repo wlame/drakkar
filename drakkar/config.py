@@ -39,6 +39,14 @@ class KafkaConfig(BaseModel):
     max_poll_interval_ms: int = 300_000
     session_timeout_ms: int = 45_000
     heartbeat_interval_ms: int = 3_000
+    # Kafka-UI (https://github.com/provectus/kafka-ui) deep-link config.
+    # When both fields are set, the debug UI renders a small Kafka icon
+    # next to every <partition:offset> display; the icon opens Kafka-UI
+    # filtered on (source_topic, partition, offset) in a new tab.
+    # Both must be set for the icon to appear; empty values disable the
+    # feature silently.
+    ui_url: str = ''
+    ui_cluster_name: str = ''
 
 
 # --- Sink config models ---

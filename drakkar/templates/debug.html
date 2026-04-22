@@ -1298,6 +1298,13 @@
         pageNext.disabled = offset + PAGE_SIZE >= total;
     }
 
+    // Open state for click-outside-to-close. Flipped in open/close; the
+    // document-level click listener below uses it to decide whether a
+    // stray click should dismiss the panel. Using a boolean rather than
+    // reading panel.style.transform because style-reads depend on the
+    // inline vs Tailwind-class state of the element.
+    var cacheDetailOpen = false;
+
     function openDetail(key) {
         detailBody.textContent = '';
         var loading = document.createElement('div');
@@ -1305,6 +1312,7 @@
         loading.textContent = 'Loading...';
         detailBody.appendChild(loading);
         detailPanel.style.transform = 'translateX(0)';
+        cacheDetailOpen = true;
 
         fetch('/api/debug/cache/entry/' + encodeURIComponent(key)).then(function(r) {
             if (r.status === 404) throw new Error('Entry not found');
@@ -1354,7 +1362,22 @@
 
     window.closeCacheDetail = function() {
         detailPanel.style.transform = 'translateX(100%)';
+        cacheDetailOpen = false;
     };
+
+    // Click-outside-to-close for the Cache sidebar. Mirrors the Arrange
+    // sidebar pattern in live.html. Clicks inside the panel keep it open
+    // (obviously); clicks inside the Cache tab panel — including the
+    // entries table, filter bar, and stats cards — also keep it open,
+    // so filter changes and row-to-row navigation work naturally. Clicks
+    // outside (other tab buttons, nav, page body) dismiss the sidebar.
+    document.addEventListener('click', function(ev) {
+        if (!cacheDetailOpen) return;
+        if (detailPanel.contains(ev.target)) return;
+        var tabPanel = document.querySelector('[data-tab-panel="cache"]');
+        if (tabPanel && tabPanel.contains(ev.target)) return;
+        window.closeCacheDetail();
+    });
 
     applyBtn.onclick = function() {
         offset = 0;

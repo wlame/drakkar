@@ -212,12 +212,15 @@ Worker name is read from the `WORKER_ID` environment variable by default (config
 | `on_startup(config)` | Before components start | Modify config (e.g., auto-detect CPU count) |
 | `on_ready(config, db_pool)` | After sinks connected | Initialize state from DB, run migrations |
 | `arrange(messages, pending)` | Window of messages received | Transform messages into executor tasks |
-| `collect(result)` | Each task completes | Process result into sink payloads |
+| `on_task_complete(result)` | Each task completes | Process per-task result into sink payloads |
+| `on_message_complete(group)` | All tasks for one source message finish | Aggregate per-message results (fan-out → fan-in) |
 | `on_window_complete(results, messages)` | All tasks in a window done | Aggregate results across a window |
 | `on_error(task, error)` | Task fails | Return `RETRY`, `SKIP`, or replacement tasks |
 | `on_delivery_error(error)` | Sink delivery fails | Return `DLQ` (default), `RETRY`, or `SKIP` |
 | `on_assign(partitions)` | Partitions assigned | Initialize per-partition state |
 | `on_revoke(partitions)` | Partitions revoked | Cleanup per-partition state |
+
+See [`docs/handler.md`](docs/handler.md) for hook semantics and [`docs/fan-out.md`](docs/fan-out.md) for the fan-out → fan-in pattern with `on_message_complete`.
 
 ## Periodic tasks
 
@@ -303,10 +306,12 @@ Enabled by default at `:8080`. Pages:
 
 - `/` -- dashboard with partition tiles, pool utilization, event counters
 - `/partitions` -- per-partition stats
-- `/live` -- tabbed live view: Arrange, Executors (timeline), Collect, Trace
+- `/live` -- tabbed live view: Arrange (with filter, progress bars, and a right-side batch-detail sidebar), Executors (timeline), Collect
+- `/debug` -- tabbed tools: Metrics, Periodic Tasks, Message Trace, Cache (when enabled), Databases. Deep-link `#trace/<partition>/<offset>` opens the Trace tab pre-filled.
 - `/history` -- filterable event browser with partition and event type toggles
-- `/trace/{partition}/{offset}` -- full lifecycle of a single message
 - `/task/{task_id}` -- task detail with PID, duration, CLI command, stdout/stderr
+
+Optional: set `kafka.ui_url` and `kafka.ui_cluster_name` in config to render a small Kafka-UI icon next to every `<partition:offset>` link; clicking the icon opens the corresponding message in Kafka-UI (provectus).
 
 ### Prometheus metrics
 
@@ -350,22 +355,28 @@ Services and web UIs:
 
 | URL | Service |
 |-----|---------|
-| `http://localhost:8081` | Worker 1 debug UI |
+| `http://localhost:8081` | Worker 1 debug UI (primary workers, shared consumer group) |
 | `http://localhost:8082` | Worker 2 debug UI |
 | `http://localhost:8083` | Worker 3 debug UI |
+| `http://localhost:8084` | Fast-worker 1 debug UI (separate consumer group, `on_window_complete` aggregation) |
+| `http://localhost:8085` | Fast-worker 2 debug UI |
+| `http://localhost:8087` | Redis Commander |
 | `http://localhost:8088` | Kafka UI |
 | `http://localhost:8089` | MongoDB Express |
-| `http://localhost:8087` | Redis Commander |
+| `http://localhost:9099` | Prometheus |
 
 The integration scenario:
-- 3 workers consuming from 50-partition topic
+- 3 primary workers consuming from a 50-partition topic (main pipeline)
+- 2 fast-workers on a separate consumer group demonstrating `on_window_complete` window aggregation
 - Each result goes to Kafka + Postgres + MongoDB + Redis (always)
+- Two Postgres sink instances (`postgres.main` + `postgres.hot`) showing multiple-sinks-of-same-type routing
+- Framework cache (`self.cache`) is enabled with `scope=CLUSTER` — peer sync propagates entries between primary workers (see the Cache tab in `/debug`)
 - High-match results (>20) trigger HTTP webhook
 - Very high-match results (>50) write to JSONL file
 - 5% simulated executor failures with retry via `on_error()`
 - Failed deliveries route to DLQ or retry based on sink type
 
-Debug databases are stored in `integration/shared/` with per-worker filenames and automatic timestamping (e.g. `worker-1-2026-03-23__14_55_00.db`). A `{worker}-live.db` symlink points to the current database while running. Files persist across restarts and are rotated automatically. See `integration/shared/README.md` for details.
+Debug recorder databases and per-worker cache databases both live in `integration/shared/`, which is mounted into every worker container as `/shared`. Recorder files are per-worker timestamped (`worker-1-2026-03-23__14_55_00.db` with a `{worker}-live.db` symlink). Cache files are single per-worker (`worker-1-cache.db.actual` with a `{worker}-cache.db` symlink used for peer discovery). See `integration/shared/README.md` for details.
 
 ## Development
 

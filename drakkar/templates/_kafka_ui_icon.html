@@ -1,0 +1,26 @@
+{#
+  Kafka-UI deep-link icon macro.
+
+  Renders a small Kafka SVG anchor that opens Kafka-UI (provectus) filtered
+  to one message in a new tab. Returns nothing (empty) when the feature is
+  not configured, so callers don't need to guard their own code.
+
+  Usage:
+      {% from '_kafka_ui_icon.html' import kafka_ui_icon %}
+      {{ kafka_ui_icon(topic, partition, offset) }}
+
+  The SVG path matches the one in base.html's nav header for visual
+  consistency. Sized at 14px (smaller than the 20px nav icon) so inline
+  placement next to a monospace <partition:offset> label doesn't dominate
+  the line.
+#}
+{% macro kafka_ui_icon(topic, partition, offset) -%}
+    {%- set url = kafka_ui_message_url(topic, partition, offset) -%}
+    {%- if url -%}
+    <a href="{{ url }}" target="_blank" rel="noopener" title="Open in Kafka-UI ({{ topic }} {{ partition }}:{{ offset }})" class="inline-block align-middle ml-1 text-gray-400 hover:text-ink-800">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="display:inline-block;vertical-align:-2px;">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15.5v-2.04c-1.73-.23-3.23-1.2-4.07-2.63l1.5-1.12c.6 1.03 1.52 1.76 2.57 1.97V9.62c-2.28-.46-4-2.5-4-4.93h2c0 1.66 1.12 3.05 2.64 3.46l.36.08V4h2v4.23l.36-.08C14.88 7.74 16 6.35 16 4.69h2c0 2.43-1.72 4.47-4 4.93v4.06c1.05-.21 1.97-.94 2.57-1.97l1.5 1.12c-.84 1.43-2.34 2.4-4.07 2.63v2.04h-2z"/>
+        </svg>
+    </a>
+    {%- endif -%}
+{%- endmacro %}

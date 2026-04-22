@@ -204,6 +204,49 @@ var recentArranges = [];
 var recentCollects = [];
 var MAX_HISTORY = {{ max_ui_rows }};
 var arrangeTotal = 0, collectTotal = 0;
+
+// Kafka-UI deep-link config. Empty strings = feature disabled, so
+// makeKafkaUiIcon returns null and callers skip the icon without extra
+// guards. Matches the server-side ``kafka_ui_message_url`` helper.
+var KAFKA_UI_BASE = {{ kafka_ui_base | tojson }};
+var KAFKA_UI_CLUSTER = {{ kafka_ui_cluster | tojson }};
+var KAFKA_SOURCE_TOPIC = {{ kafka_source_topic | tojson }};
+// Constant SVG path — matches the Kafka icon in base.html's nav header.
+var KAFKA_SVG_PATH = 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15.5v-2.04c-1.73-.23-3.23-1.2-4.07-2.63l1.5-1.12c.6 1.03 1.52 1.76 2.57 1.97V9.62c-2.28-.46-4-2.5-4-4.93h2c0 1.66 1.12 3.05 2.64 3.46l.36.08V4h2v4.23l.36-.08C14.88 7.74 16 6.35 16 4.69h2c0 2.43-1.72 4.47-4 4.93v4.06c1.05-.21 1.97-.94 2.57-1.97l1.5 1.12c-.84 1.43-2.34 2.4-4.07 2.63v2.04h-2z';
+
+function buildKafkaUiUrl(topic, partition, offset) {
+    if (!KAFKA_UI_BASE || !KAFKA_UI_CLUSTER || !topic) return '';
+    return KAFKA_UI_BASE + '/ui/clusters/' + encodeURIComponent(KAFKA_UI_CLUSTER)
+        + '/all-topics/' + encodeURIComponent(topic)
+        + '/messages?seekType=OFFSET&seekTo=' + partition + '%3A%3A' + offset + '&limit=1';
+}
+
+function makeKafkaUiIcon(topic, partition, offset) {
+    // Returns null when Kafka-UI isn't configured so callers can skip
+    // append without re-checking the feature flag. Built via DOM APIs
+    // (no innerHTML) so a strict-CSP/Trusted-Types env stays happy.
+    var url = buildKafkaUiUrl(topic, partition, offset);
+    if (!url) return null;
+    var a = document.createElement('a');
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.title = 'Open in Kafka-UI (' + topic + ' ' + partition + ':' + offset + ')';
+    a.className = 'inline-block align-middle ml-1 text-gray-400 hover:text-ink-800';
+    a.onclick = function(ev) { ev.stopPropagation(); };  // don't trigger row/sidebar handlers
+    var SVG_NS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('width', '14');
+    svg.setAttribute('height', '14');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'currentColor');
+    svg.style.cssText = 'display:inline-block;vertical-align:-2px;';
+    var path = document.createElementNS(SVG_NS, 'path');
+    path.setAttribute('d', KAFKA_SVG_PATH);
+    svg.appendChild(path);
+    a.appendChild(svg);
+    return a;
+}
 // === Helpers ===
 function scrollToEnd() { tlFollowing = true; }
 function fmtTime(ts) { return new Date(ts * 1000).toISOString().substring(11, 19); }
@@ -473,13 +516,13 @@ function initBars() {
 
 // === Tab renderers ===
 
-// Arrange-tab state. The list cap is 3 x partition_count so the Live view
+// Arrange-tab state. The list cap is 10 x partition_count so the Live view
 // stays stable-sized regardless of how many partitions the broker has
 // assigned to this worker. Template passes partition_count in server-side
-// context. Floor at 3 so the list is never empty even during startup or
+// context. Floor at 10 so the list is never empty even during startup or
 // rebalance when no partitions are assigned yet.
 var PARTITION_COUNT = {{ partition_count|default(0) }};
-var ARRANGE_CAP = Math.max(3 * PARTITION_COUNT, 3);
+var ARRANGE_CAP = Math.max(10 * PARTITION_COUNT, 10);
 // A batch is considered "unsettled" if any of its tasks are still running
 // and start_ts is older than this threshold. Used for the "Issues only"
 // filter toggle so long-unsettled batches surface even without failures.
@@ -559,27 +602,31 @@ function makeProgressBar(stats) {
     return bar;
 }
 
-// "12✅/15  2▶  1❌" — only non-zero segments render, keeps the cell compact.
-// Color matches the bar. No ANSI tricks — plain spans.
+// Compact status-count cell. Plain colored numbers, no emoji or symbols —
+// the color encodes the category (green=done, orange=running, red=failed,
+// grey=unknown). Zero-count categories are omitted so the cell stays
+// uncluttered. Hover title gives the plain-English label for each number.
+// A trailing ``/ N`` (grey) shows the total so ``12 / 15`` reads naturally.
 function makeStatusCounts(stats) {
     var wrap = document.createElement('span');
     wrap.className = 'font-mono text-xs';
-    function part(count, symbol, color, title) {
+    function part(count, color, bold, label) {
         if (!count) return;
         var s = document.createElement('span');
-        s.style.cssText = 'color:' + color + ';margin-right:6px;';
-        s.textContent = count + symbol;
-        s.title = title;
+        s.style.cssText = 'color:' + color + ';margin-right:10px;' + (bold ? 'font-weight:700;' : '');
+        s.textContent = count;
+        s.title = count + ' ' + label;
         wrap.appendChild(s);
     }
-    part(stats.done, '✅', '#059669', 'completed');
-    part(stats.running, '▶', '#d97706', 'running');
-    part(stats.failed, '❌', '#dc2626', 'failed');
-    part(stats.unknown, '○', '#9ca3af', 'not yet seen (WS lag)');
+    part(stats.done, '#059669', true, 'completed');
+    part(stats.running, '#d97706', true, 'running');
+    part(stats.failed, '#dc2626', true, 'failed');
+    part(stats.unknown, '#9ca3af', false, 'not yet seen (WS lag / outside timeline window)');
     if (stats.total) {
         var tot = document.createElement('span');
         tot.style.cssText = 'color:#9ca3af;';
         tot.textContent = '/ ' + stats.total;
+        tot.title = stats.total + ' total tasks in batch';
         wrap.appendChild(tot);
     }
     return wrap;
@@ -631,7 +678,7 @@ function renderArranges() {
     if (el) el.textContent = '(total: ' + arrangeTotal + ')';
     var capHint = document.getElementById('arrange-cap-hint');
     if (capHint) {
-        capHint.textContent = ' — last ' + ARRANGE_CAP + ' (3 × ' + PARTITION_COUNT + ' partitions)';
+        capHint.textContent = ' — last ' + ARRANGE_CAP + ' (10 × ' + PARTITION_COUNT + ' partitions)';
     }
 
     updatePartitionFilterOptions();
@@ -656,7 +703,17 @@ function renderArranges() {
             tr.style.background = '#e0f2fe';
         }
         (function(batch) {
-            tr.onclick = function() { openArrangeDetail(batch); };
+            tr.onclick = function(ev) {
+                // Stop propagation so the document-level click-outside-
+                // to-close listener doesn't see this event. Without this,
+                // ``openArrangeDetail`` triggers ``renderArranges`` which
+                // rebuilds the tbody — the clicked row becomes detached
+                // from the DOM, ``panel.contains(ev.target)`` returns
+                // false for the now-orphaned row, and the outside-click
+                // handler incorrectly closes the sidebar we just opened.
+                ev.stopPropagation();
+                openArrangeDetail(batch);
+            };
         })(a);
 
         var td1 = document.createElement('td'); td1.className = 'py-2 px-3 font-mono';
@@ -741,6 +798,21 @@ function closeArrangeDetail() {
     renderArranges();
 }
 window.closeArrangeDetail = closeArrangeDetail;
+
+// Click-outside-to-close for the Arrange sidebar. We use the bubbling
+// click phase so a row's own onclick (openArrangeDetail) runs first and
+// sets selectedArrangeKey — then this handler sees target inside
+// #panel-arrange and does NOT close, so the sidebar stays open for the
+// newly-selected row. Clicks outside the Arrange tab (nav bar, other
+// tab buttons, page body) close the sidebar.
+document.addEventListener('click', function(ev) {
+    if (!selectedArrangeKey) return;
+    var panel = document.getElementById('arrange-detail-panel');
+    if (panel && panel.contains(ev.target)) return;
+    var tabPanel = document.getElementById('panel-arrange');
+    if (tabPanel && tabPanel.contains(ev.target)) return;
+    closeArrangeDetail();
+});
 
 function percentile(sorted, p) {
     if (!sorted.length) return 0;
@@ -837,33 +909,58 @@ function renderArrangeDetail() {
         body.appendChild(noMsg);
     }
 
-    // Pre-compute per-offset task mapping: which tasks list THIS offset among
-    // their source_offsets. task.source_offsets comes from the task_started
-    // WS metadata and from /api/recent-tasks — authoritative both paths.
-    // Without it (lag or not-yet-seen task) we fall back to attaching the
-    // task to the first offset so it still shows in the tree.
-    var taskByOffset = {};  // offset -> array of {task_id, task, shared}
+    // Pre-compute per-offset task mapping. Three cases per task_id:
+    //
+    // 1. task in allTasks AND its source_offsets overlap this batch's
+    //    offsets: render under each overlapping message. Fan-in case gets
+    //    a "shared(N)" badge where N = count of other messages the task
+    //    also covers (within this batch — we only count overlap here).
+    //
+    // 2. task in allTasks but its source_offsets do NOT overlap this
+    //    batch's offsets: unusual but legal (the task was mapped to
+    //    offsets outside the recorded arrange-metadata offsets list —
+    //    e.g. a user's arrange() returned a task with source_offsets for
+    //    a different window). Render in a separate "Other tasks" block
+    //    with the task's actual offsets listed.
+    //
+    // 3. task NOT in allTasks (pruned after 10min timeline window, or
+    //    WS/sync never caught up): we genuinely don't know its offsets.
+    //    Render in a "Unknown tasks" block, no offset attribution —
+    //    attaching it to offsets[0] was misleading because clicking the
+    //    link could reveal a completely different partition/offset in
+    //    the task-detail page (which queries the recorder's 24h history).
+    var offsetSet = Object.create(null);
+    for (var oi = 0; oi < offsets.length; oi++) offsetSet[offsets[oi]] = true;
+
+    var taskByOffset = {};    // offset -> array of {task_id, task, shared}
+    var otherTasks = [];      // task in allTasks but no offset overlap
+    var unknownTasks = [];    // task not in allTasks
+
     for (var ti = 0; ti < ids.length; ti++) {
         var t2 = allTasks[ids[ti]];
-        var covered = (t2 && Array.isArray(t2.source_offsets) && t2.source_offsets.length)
-            ? t2.source_offsets
-            : null;
-        if (!covered) {
-            // Unknown coverage: drop the task under the first offset so it
-            // doesn't disappear. No "shared" badge since we genuinely can't
-            // tell — better than falsely implying fan-in.
-            var fallback = offsets[0];
-            if (fallback != null) {
-                (taskByOffset[fallback] = taskByOffset[fallback] || []).push({
-                    task_id: ids[ti], task: t2 || null, shared: 0,
-                });
-            }
+        if (!t2) {
+            unknownTasks.push({task_id: ids[ti], task: null});
             continue;
         }
-        var sharedCount = Math.max(0, covered.length - 1);
+        var covered = Array.isArray(t2.source_offsets) ? t2.source_offsets : [];
+        // Intersect with this batch's offsets — the task only belongs under
+        // a message row if its source_offsets includes that message's offset.
+        var hits = [];
         for (var ci = 0; ci < covered.length; ci++) {
-            var off = covered[ci];
-            (taskByOffset[off] = taskByOffset[off] || []).push({
+            if (offsetSet[covered[ci]]) hits.push(covered[ci]);
+        }
+        if (!hits.length) {
+            // Task exists but doesn't overlap any of the batch's offsets.
+            // Could mean: recorder metadata was truncated, or the user's
+            // arrange() emitted source_offsets that aren't in the arranged
+            // event's offsets list. Render separately so the sidebar is
+            // honest about where the task sits.
+            otherTasks.push({task_id: ids[ti], task: t2});
+            continue;
+        }
+        var sharedCount = Math.max(0, hits.length - 1);
+        for (var hi = 0; hi < hits.length; hi++) {
+            (taskByOffset[hits[hi]] = taskByOffset[hits[hi]] || []).push({
                 task_id: ids[ti], task: t2, shared: sharedCount,
             });
         }
@@ -888,6 +985,8 @@ function renderArrangeDetail() {
         offLink.textContent = off;
         offLink.title = 'Open message trace in Debug view';
         left.append(offLabel, offLink);
+        var kIcon = makeKafkaUiIcon(KAFKA_SOURCE_TOPIC, batch.partition, off);
+        if (kIcon) left.appendChild(kIcon);
         head.appendChild(left);
         msgBox.appendChild(head);
 
@@ -895,9 +994,21 @@ function renderArrangeDetail() {
         taskList.className = 'space-y-1';
         var tasksForMsg = taskByOffset[off] || [];
         if (!tasksForMsg.length) {
+            // Two distinct empty cases worth telling apart:
+            //   (a) The whole batch produced zero tasks — arrange() returned [].
+            //       Rare but legitimate (e.g. a message was filtered at the user's
+            //       arrange() layer).
+            //   (b) The batch does have tasks, but none list this message's
+            //       offset in their source_offsets — common with fan-in where a
+            //       single task covers one representative offset and the others
+            //       land in "Other tasks" below.
             var noTasks = document.createElement('div');
             noTasks.className = 'text-xs text-gray-400';
-            noTasks.textContent = '(no tasks generated)';
+            if (!ids.length) {
+                noTasks.textContent = '(arrange() returned no tasks for this batch)';
+            } else {
+                noTasks.textContent = '(no tasks list this offset as a source — see "Other tasks" below)';
+            }
             taskList.appendChild(noTasks);
         }
         for (var tix = 0; tix < tasksForMsg.length; tix++) {
@@ -949,6 +1060,90 @@ function renderArrangeDetail() {
         msgBox.appendChild(taskList);
         body.appendChild(msgBox);
     }
+
+    // --- Tasks that don't map to any message in this batch ---
+    //
+    // "Other tasks" = task is in allTasks (we know its state) but its
+    // source_offsets don't overlap the batch's offsets. Usually means
+    // the arranged-event metadata was recorded with a truncated offsets
+    // list or the user's arrange() returned tasks whose source_offsets
+    // don't match the messages that triggered the call — either way the
+    // sidebar shouldn't silently attribute them to one of the visible
+    // messages.
+    //
+    // "Unknown tasks" = task is not in allTasks. Either pruned after the
+    // 10-minute timeline window, or WS/sync hasn't delivered the
+    // task_started event yet. We don't know its partition/offsets at all.
+    // Clicking into the task-detail page queries the recorder's 24h DB
+    // and shows the authoritative data.
+
+    function renderAuxTaskSection(heading, items, subtitle) {
+        if (!items.length) return;
+        var box = document.createElement('div');
+        box.className = 'mt-4 p-2 rounded border border-cream-200';
+        box.style.background = '#fff';
+
+        var hdr = document.createElement('div');
+        hdr.className = 'text-xs uppercase tracking-wide text-gray-500 mb-1';
+        hdr.textContent = heading + ' (' + items.length + ')';
+        box.appendChild(hdr);
+
+        if (subtitle) {
+            var sub = document.createElement('div');
+            sub.className = 'text-xs text-gray-400 mb-2';
+            sub.textContent = subtitle;
+            box.appendChild(sub);
+        }
+
+        var list = document.createElement('div');
+        list.className = 'space-y-1';
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i];
+            var row = document.createElement('div');
+            row.className = 'flex items-center gap-2 text-xs font-mono';
+
+            var dot = document.createElement('span');
+            dot.style.cssText = 'display:inline-block;width:8px;height:8px;border-radius:50%;';
+            var status = it.task ? it.task.status : 'unknown';
+            dot.style.background = status === 'completed' ? '#34d399'
+                : status === 'failed' ? '#f87171'
+                : status === 'running' ? '#fbbf24'
+                : '#e5e7eb';
+            row.appendChild(dot);
+
+            var tLink = document.createElement('a');
+            tLink.href = '/task/' + encodeURIComponent(baseTaskId(it.task_id));
+            tLink.className = 'text-ink-800 hover:underline';
+            tLink.textContent = it.task_id;
+            row.appendChild(tLink);
+
+            var stat = document.createElement('span');
+            stat.style.cssText = statusCss(status);
+            stat.textContent = status;
+            row.appendChild(stat);
+
+            if (it.task && Array.isArray(it.task.source_offsets) && it.task.source_offsets.length) {
+                var off = document.createElement('span');
+                off.className = 'text-gray-500';
+                off.textContent = 'source offsets: ' + it.task.source_offsets.join(', ');
+                row.appendChild(off);
+            }
+            list.appendChild(row);
+        }
+        box.appendChild(list);
+        body.appendChild(box);
+    }
+
+    renderAuxTaskSection(
+        'Other tasks',
+        otherTasks,
+        "In this batch's task_ids, but their source_offsets don't overlap the message offsets above.",
+    );
+    renderAuxTaskSection(
+        'Unknown tasks',
+        unknownTasks,
+        'No live state (pruned after the 10-minute timeline window, or not yet delivered via WS). Click through for authoritative data from the recorder.',
+    );
 }
 
 function renderCollects() {
@@ -1112,6 +1307,83 @@ async function syncFromAPI() {
     } catch(e) {}
 }
 
+// Fetch authoritative task state from the recorder DB for a specific set
+// of task_ids. Used by the Arrange tab to fill in state for tasks that
+// aged out of the 10-minute timeline window (/api/recent-tasks cut-off)
+// or were filtered by ws_min_duration_ms on the WS path. Called both on
+// initial load and on every 5s resync; payload is the union of task_ids
+// across currently-visible batches.
+async function fetchArrangeTaskStates(ids) {
+    if (!ids || !ids.length) return {};
+    try {
+        var r = await fetch('/api/live/arrange-tasks', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({task_ids: ids}),
+        });
+        if (!r.ok) return {};
+        return await r.json();
+    } catch(ex) {
+        return {};
+    }
+}
+
+// Collect the union of task_ids from all visible arrange batches. The cap
+// at ARRANGE_CAP matches what the sidebar actually renders, so we never
+// fetch state for batches the user can't see.
+function collectVisibleArrangeTaskIds() {
+    var ids = [];
+    var seen = Object.create(null);
+    var n = Math.min(recentArranges.length, ARRANGE_CAP);
+    for (var i = 0; i < n; i++) {
+        var batchIds = recentArranges[i].task_ids || [];
+        for (var j = 0; j < batchIds.length; j++) {
+            var tid = batchIds[j];
+            if (!tid || seen[tid]) continue;
+            seen[tid] = true;
+            ids.push(tid);
+        }
+    }
+    return ids;
+}
+
+// Merge rules for DB-sourced task state into allTasks:
+//  - Missing in allTasks → insert verbatim
+//  - Running in allTasks but DB has end_ts → upgrade to final state
+//    (catches WS-dropped completion events + ws_min_duration filtered ones)
+//  - Missing source_offsets / partition locally but DB has them → fill in
+//  - Otherwise keep WS-maintained state (always fresher than DB flush)
+function mergeArrangeTaskStates(states) {
+    for (var tid in states) {
+        var api = states[tid];
+        var existing = allTasks[tid];
+        if (!existing) {
+            allTasks[tid] = api;
+            continue;
+        }
+        if (existing.status === 'running' && api.end_ts) {
+            existing.end_ts = api.end_ts;
+            existing.status = api.status;
+            existing.duration = api.duration;
+            existing.exit_code = api.exit_code;
+            if (api.pid) existing.pid = api.pid;
+        }
+        if (!existing.source_offsets && api.source_offsets) {
+            existing.source_offsets = api.source_offsets;
+        }
+        if (existing.partition == null && api.partition != null) {
+            existing.partition = api.partition;
+        }
+    }
+}
+
+async function refreshArrangeTaskStates() {
+    var ids = collectVisibleArrangeTaskIds();
+    if (!ids.length) return;
+    var states = await fetchArrangeTaskStates(ids);
+    mergeArrangeTaskStates(states);
+}
+
 async function loadArrangeHistory() {
     try {
         var r = await fetch('/api/events?event_types=arranged&limit=' + MAX_HISTORY);
@@ -1256,6 +1528,17 @@ function connectWS() {
                 });
                 if (recentArranges.length > MAX_HISTORY) recentArranges.length = MAX_HISTORY;
                 renderArranges();
+                // Fan-in batches can arrive with task_ids whose task_started
+                // hasn't been delivered yet via WS — or was filtered out by
+                // ws_min_duration_ms. Fire a targeted lookup for just this
+                // batch's task_ids so the sidebar isn't blank on first open.
+                if (arrMeta.task_ids && arrMeta.task_ids.length) {
+                    fetchArrangeTaskStates(arrMeta.task_ids).then(function(states) {
+                        mergeArrangeTaskStates(states);
+                        renderArranges();
+                        if (selectedArrangeKey) renderArrangeDetail();
+                    });
+                }
             } else if (e.event === 'task_complete') {
                 collectTotal++;
                 var outputCount = 0;
@@ -1317,6 +1600,10 @@ function initArrangeTab() {
 (async function() {
     ensureAnchor();
     await Promise.all([syncFromAPI(), loadArrangeHistory(), loadCollectHistory()]);
+    // Right after loading arranged batches, fetch the authoritative state
+    // of their task_ids. Without this, any batch older than 10 minutes
+    // would render with "unknown" tasks until the next 5s resync.
+    await refreshArrangeTaskStates();
     initFromHash();
     initBars();
     rebuildAxis();
@@ -1328,7 +1615,9 @@ function initArrangeTab() {
     requestAnimationFrame(animateTimeline);
     // task list tables (running/finished) — update every 500ms
     setInterval(function() { if (!frozen) renderTaskLists(); }, 500);
-    // prune old bars + API sync + axis ticks every 5s
+    // prune old bars + API sync + axis ticks every 5s. Also refresh the
+    // Arrange tab's task-state lookup so the sidebar doesn't stay stale
+    // for batches outside the 10-minute /api/recent-tasks window.
     setInterval(function() {
         if (frozen) return;
         rebuildAxis();
@@ -1339,6 +1628,7 @@ function initArrangeTab() {
             }
             pruneOldBars();
         });
+        refreshArrangeTaskStates();
     }, 5000);
 })();
 

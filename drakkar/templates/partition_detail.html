@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from '_kafka_ui_icon.html' import kafka_ui_icon %}
 {% block title %}Partition {{ partition_id }} — Drakkar Debug{% endblock %}
 
 {% block content %}
@@ -39,7 +40,7 @@
             </td>
             <td class="py-2 px-3 font-mono">
                 {% if e.offset is not none %}
-                <a href="/debug#trace/{{ partition_id }}/{{ e.offset }}" class="text-teal-600 hover:underline">{{ e.offset }}</a>
+                <a href="/debug#trace/{{ partition_id }}/{{ e.offset }}" class="text-teal-600 hover:underline">{{ e.offset }}</a>{{ kafka_ui_icon(kafka_source_topic, partition_id, e.offset) }}
                 {% endif %}
             </td>
             <td class="py-2 px-3 font-mono text-xs">{% if e.task_id %}<a href="/task/{{ e.task_id }}" class="text-teal-600 hover:underline">{{ e.task_id }}</a>{% endif %}</td>
