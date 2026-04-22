@@ -43,7 +43,7 @@ FAIL_RATE = '0.05'
 
 class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
     """Searches source files using ripgrep with FAN-OUT, FAN-IN, and a
-    precomputed-result fast-track that skips the subprocess on cache hits.
+    precomputed-result fast-track driven by the framework cache.
 
     FAN-OUT: one SearchRequest with N patterns x M file_paths produces up
     to N*M subprocess tasks (before dedup). Every task for one message
@@ -55,17 +55,26 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
     reports that single task's result to every corresponding
     MessageGroup. Look for the "fan_in_count" label in the debug UI.
 
-    PRECOMPUTED FAST-TRACK: the handler maintains an in-memory cache of
-    recent successful ripgrep stdout keyed by (pattern, file_path, repeat).
-    If the next arrange() sees the same key, it attaches a
-    PrecomputedResult to the task — the framework skips the subprocess
-    entirely, synthesises an ExecutorResult, and feeds it through
-    on_task_complete as if the subprocess had run. Cache hits show up in
-    the debug UI with ``source=cache`` in task labels and with
-    ``metadata.precomputed=true`` in recorder events. The
-    ``drakkar_tasks_precomputed_total`` counter tracks the short-circuit
-    volume. With the producer's HOT_QUERIES driving frequent repeats,
-    you should see a steady stream of cache hits after the first minute.
+    PRECOMPUTED FAST-TRACK: the handler memoizes recent successful
+    ripgrep stdout in the framework-provided ``self.cache`` (keyed by a
+    string built from ``pattern``, ``file_path``, and ``repeat``). On the
+    next arrange() window:
+
+      - ``self.cache.peek(cache_key)`` gives a synchronous memory hit —
+        no event-loop work, safe inside the tight arrange() loop.
+      - If memory missed, ``await self.cache.get(cache_key)`` checks the
+        local SQLite file (where the periodic flush has persisted
+        earlier writes), and also reaches cross-worker values that
+        peer-sync has pulled into our DB.
+
+    A cache hit becomes a PrecomputedResult attached to the task — the
+    framework skips the subprocess, synthesises an ExecutorResult, and
+    feeds it through on_task_complete exactly like a real run. Cache
+    hits show up in the debug UI with ``source=cache`` in task labels,
+    ``metadata.precomputed=true`` in recorder events, and increment the
+    ``drakkar_tasks_precomputed_total`` counter. Framework-level cache
+    metrics (``drakkar_cache_hits_total`` etc.) give the hit-rate view
+    previously carried by hand-rolled counters on this handler.
 
     Per-task (on_task_complete, one call per subprocess outcome OR cache
     hit — handler can't tell the difference):
@@ -81,10 +90,6 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
       - HTTP webhook: if total_matches > 20 (one alert per request)
       - Filesystem JSONL: if total_matches > 50
     """
-
-    # Max entries in the in-memory result cache. Keyed by
-    # (pattern, file_path, repeat); evicts oldest when full.
-    MAX_CACHE_ENTRIES = 256
 
     def message_label(self, msg: dk.SourceMessage) -> str:
         if msg.payload:
@@ -106,15 +111,12 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
         return config
 
     async def on_ready(self, config: dk.DrakkarConfig, db_pool: object) -> None:
+        # Nothing handler-local to bootstrap for caching any more —
+        # ``self.cache`` is wired by the framework before the first hook
+        # fires (either a real Cache when ``config.cache.enabled=true``
+        # or a NoOpCache stub when disabled). Handler code can call the
+        # cache unconditionally.
         self.total_collected = 0
-        # In-memory result cache for the precomputed fast-track.
-        # Populated from on_task_complete after successful subprocess runs,
-        # consulted in arrange() before creating subprocess tasks. Using
-        # dict preserves insertion order so we can FIFO-evict the oldest
-        # entry when the cache exceeds MAX_CACHE_ENTRIES.
-        self._result_cache: dict[tuple[str, str, int], str] = {}
-        self._cache_hits = 0
-        self._cache_misses = 0
 
     # -- Periodic tasks -------------------------------------------------
 
@@ -123,20 +125,16 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
         """Log pipeline stats every 10 seconds. Demonstrates a recurring
         background task that accesses handler state set during processing.
 
-        Also reports precomputed-cache hit-rate so the short-circuit
-        activity is visible in worker logs without opening Grafana.
+        Cache hit-rate is intentionally NOT logged here any more: the
+        framework emits ``drakkar_cache_hits_total`` / ``_misses_total``
+        counters, so the same information is available in Prometheus /
+        Grafana without the handler having to hand-roll counters.
         """
         periodic_stats_runs_total.inc()
-        attempts = self._cache_hits + self._cache_misses
-        hit_rate = self._cache_hits / attempts if attempts else 0.0
         await logger.ainfo(
             'periodic_stats',
             category='periodic',
             total_collected=self.total_collected,
-            cache_size=len(self._result_cache),
-            cache_hits=self._cache_hits,
-            cache_misses=self._cache_misses,
-            cache_hit_rate=round(hit_rate, 3),
         )
         await asyncio.sleep(0.8)  # emulate some async work
 
@@ -193,16 +191,31 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
             request_ids = [m.payload.request_id for m in contributing_msgs]
             offsets = [m.offset for m in contributing_msgs]
 
-            # PRECOMPUTED FAST-TRACK — check the in-memory cache before
+            # PRECOMPUTED FAST-TRACK — consult the framework cache before
             # scheduling a subprocess. A cache hit becomes a PrecomputedResult
             # attached to the task; the framework will skip the subprocess
             # entirely and feed the cached stdout to on_task_complete. The
             # debug UI marks these tasks with ``source=cache`` and the event
             # recorder sets ``metadata.precomputed=true``.
-            cache_key = (pattern, file_path, merged_repeat)
-            cached_stdout = self._result_cache.get(cache_key)
+            #
+            # The cache key is a pipe-delimited string (the framework cache
+            # stores strings, not tuples). ``match|...`` prefix namespaces
+            # these entries so other features of this handler can cohabit
+            # the same cache DB without key collisions in the future.
+            cache_key = f'match|{pattern}|{file_path}|{merged_repeat}'
+
+            # Two-tier lookup: peek() is synchronous and hits the in-memory
+            # dict only — ideal for the tight arrange() loop. If memory
+            # misses, fall back to await self.cache.get() which checks
+            # the local SQLite file (populated by the background flush
+            # loop and by peer-sync pulls from other workers). This is
+            # how we now see values persisted across worker restarts
+            # AND values produced by peers — neither of which the
+            # hand-rolled dict cache could do.
+            cached_stdout = self.cache.peek(cache_key)
+            if cached_stdout is None:
+                cached_stdout = await self.cache.get(cache_key)
             if cached_stdout is not None:
-                self._cache_hits += 1
                 tasks.append(
                     dk.ExecutorTask(
                         task_id=task_id,
@@ -235,7 +248,6 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
                 continue
 
             # Cache miss: build a normal subprocess task.
-            self._cache_misses += 1
             tasks.append(
                 dk.ExecutorTask(
                     task_id=task_id,
@@ -278,10 +290,12 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
         a cached summary to Redis. Request-level aggregation happens
         later in on_message_complete.
 
-        Also populates the handler's in-memory result cache for
-        subsequent arrange() fast-track hits. We only cache genuinely-run
-        subprocess results (pid is not None) so we don't loop cached
-        results back into the cache.
+        Also populates the framework cache with this task's stdout so
+        subsequent arrange() windows fast-track the same (pattern,
+        file_path, repeat) combination. We only store genuinely-run
+        subprocess results (``result.pid is not None``) — precomputed
+        cache hits already sit in the cache, so re-writing them would
+        spin needlessly through the flush loop.
         """
         self.total_collected += 1
         # simulate post-processing (e.g. parsing, enrichment)
@@ -290,19 +304,20 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
         matches = [line for line in result.stdout.strip().split('\n') if line]
         meta = result.task.metadata
 
-        # Populate the precomputed-fast-track cache with this task's stdout
-        # so subsequent windows with the same (pattern, file_path, repeat)
-        # skip the subprocess. Skip the store when THIS result itself came
-        # from the cache (pid is None for precomputed results) — no point
-        # re-inserting what's already there, and it keeps the FIFO insertion
-        # order meaningful for eviction.
+        # Persist into the framework cache for subsequent fast-track
+        # hits. ``scope=LOCAL`` keeps the value on this worker only —
+        # peers will compute their own; change to CLUSTER to share
+        # across workers in the same cluster (LWW merges via the
+        # periodic peer-sync loop). TTL cleans old entries out of the
+        # on-disk DB automatically.
         if result.pid is not None:
-            cache_key = (meta['pattern'], meta['file_path'], meta['repeat'])
-            self._result_cache[cache_key] = result.stdout
-            # FIFO eviction to bound memory.
-            while len(self._result_cache) > self.MAX_CACHE_ENTRIES:
-                oldest = next(iter(self._result_cache))
-                del self._result_cache[oldest]
+            cache_key = f'match|{meta["pattern"]}|{meta["file_path"]}|{meta["repeat"]}'
+            self.cache.set(
+                cache_key,
+                result.stdout,
+                ttl=3600,
+                scope=dk.CacheScope.LOCAL,
+            )
 
         # build typed output models
         output = SearchResult(

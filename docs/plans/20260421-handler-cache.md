@@ -545,20 +545,20 @@ class Cache:
 - Modify: `integration/worker/handler.py`
 - Modify: `integration/worker/drakkar.yaml`
 
-- [ ] in `integration/worker/handler.py`:
+- [x] in `integration/worker/handler.py`:
   - remove `_result_cache`, `_cache_hits`, `_cache_misses`, `MAX_CACHE_ENTRIES`, FIFO eviction block at lines 115–117 and 293–305
   - replace `arrange()` cache-check block (lines 202–238) with `self.cache.peek(cache_key)` fast-path + `await self.cache.get(cache_key)` DB fallback
   - replace `on_task_complete()` cache-populate block with `self.cache.set(cache_key, result.stdout, ttl=3600, scope=CacheScope.LOCAL)`
   - rebuild `cache_key` as a string: `f"match|{pattern}|{file_path}|{repeat}"`
   - drop `cache_size` / `cache_hits` / `cache_misses` fields from log-interval output (now via Prometheus)
   - keep the `source: cache|subprocess` task label — still handler-level semantics
-- [ ] in `integration/worker/drakkar.yaml`:
+- [x] in `integration/worker/drakkar.yaml`:
   - rename the redis sink instance from `cache` to `hot_match_cache` (so `redis.cache` → `redis.hot_match_cache`)
   - add top-level `cache:` section enabling the framework cache with verbose naming in comments per `feedback/verbose_naming_in_examples`
-- [ ] `grep -r "redis\.cache\|redis/cache" integration/ drakkar/ docs/` — confirm no stray references to the old sink instance name remain after rename
-- [ ] run `uvx ruff check integration/worker/` + `uv run ty check integration/worker/`
-- [ ] **run full regression: `uv run pytest tests/`** — no unit tests should regress from the handler rename or yaml changes
-- [ ] *(integration demo has docker-compose smoke tests, not unit tests — docker verification happens in Post-Completion)*
+- [x] `grep -r "redis\.cache\|redis/cache" integration/ drakkar/ docs/` — confirm no stray references to the old sink instance name remain after rename
+- [x] run `uvx ruff check integration/worker/` + `uv run ty check integration/worker/`
+- [x] **run full regression: `uv run pytest tests/`** — no unit tests should regress from the handler rename or yaml changes
+- [x] *(integration demo has docker-compose smoke tests, not unit tests — docker verification happens in Post-Completion)*
 
 ### Task 18: Documentation — dedicated `docs/cache.md` + cross-links
 

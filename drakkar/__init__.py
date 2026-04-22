@@ -3,6 +3,7 @@
 __version__ = '0.9.4'
 
 from drakkar.app import DrakkarApp
+from drakkar.cache import CacheScope
 from drakkar.config import DrakkarConfig, load_config
 from drakkar.handler import BaseDrakkarHandler, DrakkarHandler
 from drakkar.models import (
@@ -29,6 +30,7 @@ from drakkar.periodic import periodic
 
 __all__ = [
     'BaseDrakkarHandler',
+    'CacheScope',
     'CollectResult',
     'DeliveryAction',
     'DeliveryError',

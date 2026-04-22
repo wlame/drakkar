@@ -46,9 +46,19 @@ executor:
 #     and are schema-validated by pydantic.
 #
 # Below, "results", "priority_match_notifications",
-# "archive_results_db", "hot_recent_matches_db", "archive", "cache",
-# "webhook", and "logs" are all user-chosen instance labels — nothing
-# special about the names themselves.
+# "archive_results_db", "hot_recent_matches_db", "archive",
+# "hot_match_cache", "webhook", and "logs" are all user-chosen instance
+# labels — nothing special about the names themselves.
+#
+# NOTE on "hot_match_cache" vs the top-level `cache:` section further
+# down: the redis instance below is a SINK (external Redis server where
+# the handler pushes per-task summaries, unrelated to the framework's
+# in-process cache). The top-level `cache:` block configures the
+# framework's own key/value cache (memory + per-worker SQLite + peer
+# sync) that handlers access via `self.cache.<method>(...)`. The two
+# features happen to share the "cache" word and nothing else — this
+# file uses the verbose name `hot_match_cache` so it's obvious they're
+# distinct.
 sinks:
   kafka:
     # Default output — every search result. Referenced as sink="results".
@@ -90,7 +100,12 @@ sinks:
       ui_url: "http://localhost:8089"
 
   redis:
-    cache:
+    # External Redis sink for per-task summaries (1h TTL) — this is
+    # a downstream cache consumed by other services, NOT the framework's
+    # in-process cache. Verbose instance name makes it clear at a
+    # glance that this is "the redis-backed per-task hot match cache",
+    # distinct from the framework cache configured under `cache:` below.
+    hot_match_cache:
       url: "redis://redis:6379/0"
       key_prefix: "drakkar:"
       ui_url: "http://localhost:8087"
@@ -142,3 +157,49 @@ debug:
   custom_links:
     - name: "Drakkar GitHub"
       url: "https://github.com/wlame/drakkar?from={worker_id}"
+
+# --- Framework cache ---
+#
+# The handler-facing key/value cache surfaced as `self.cache` on every
+# handler. Backed by an in-memory dict for hot reads and a per-worker
+# SQLite file (`<WORKER_ID>-cache.db`) for durability across restarts,
+# with a periodic peer-sync loop that pulls from other workers'
+# cache DBs for cross-worker visibility.
+#
+# This is completely separate from the `sinks.redis.hot_match_cache`
+# instance above — that is an *external* Redis service used by
+# downstream consumers; this section configures the framework's
+# *in-process* cache which the handler consults inside arrange() and
+# populates inside on_task_complete().
+cache:
+  # Master switch. When false, every handler.cache call becomes a no-op
+  # stub (peek/get return None, set/delete silently discard) — handler
+  # code runs unchanged.
+  enabled: true
+  # Empty db_dir falls back to debug.db_dir above. Keeping them on the
+  # same shared volume lets the peer-sync loop discover other workers'
+  # cache DBs alongside their -live.db recorder files.
+  db_dir: ""
+  # Memory → SQLite flush cadence. Shorter = less data lost on a crash;
+  # longer = fewer SQLite transactions per worker. 3s matches the
+  # recorder's own flush interval for operational consistency.
+  flush_interval_seconds: 3.0
+  # Expired-row removal cadence. 60s is fine — TTLs are checked inline
+  # on every read, so expired rows are invisible to handlers even
+  # between cleanup cycles; this loop only reclaims disk space.
+  cleanup_interval_seconds: 60.0
+  # Bound the in-memory dict with LRU eviction. The SQLite file is the
+  # source of truth, so evictions don't lose data — a subsequent get()
+  # on an evicted key falls through to the DB. Leave unset for
+  # unbounded growth (fine for small workers; set a cap in production).
+  max_memory_entries: 10000
+  # Peer-sync loop: pulls recent rows from other workers' `-cache.db`
+  # files via read-only SQLite connections, LWW-merges into our local
+  # DB, and invalidates overlapping memory entries so the next read
+  # sees the newer value. Requires debug.store_config=true above so
+  # peers can discover our cluster_name.
+  peer_sync:
+    enabled: true
+    interval_seconds: 30.0
+    batch_size: 500
+    timeout_seconds: 5.0
