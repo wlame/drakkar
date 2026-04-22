@@ -129,6 +129,18 @@ def create_debug_app(
 
     templates.env.globals['get_sink_ui_links'] = _get_sink_ui_links  # ty: ignore[invalid-assignment]
 
+    def _is_cache_enabled() -> bool:
+        """Template helper — returns True when the cache page should be visible.
+
+        Used by ``base.html`` to conditionally render the Cache nav link.
+        Keeping this as a lambda-style getter (not a captured boolean) so
+        that a cache engine that's swapped in/out at runtime (unit tests
+        frequently do this) is reflected immediately without a page reload.
+        """
+        return drakkar_app.cache_engine is not None
+
+    templates.env.globals['is_cache_enabled'] = _is_cache_enabled  # ty: ignore[invalid-assignment]
+
     # --- Auth dependency for sensitive endpoints ---
 
     async def _require_auth(
@@ -588,6 +600,187 @@ def create_debug_app(
             },
         )
 
+    # --- Cache page + JSON API ---
+    #
+    # All cache routes 404 when the cache is disabled (``cache_engine`` is
+    # None). This keeps stale bookmarks / open browser tabs from rendering a
+    # half-broken page after a config change. The reader connection on the
+    # engine is shared with ``Cache.get`` fallback — no additional thread is
+    # spun up for UI queries; SELECTs run on the same aiosqlite worker thread.
+
+    @app.get('/debug/cache', response_class=HTMLResponse)
+    async def debug_cache_page(request: Request):
+        """Render the cache page. 404 when the cache is not active."""
+        if drakkar_app.cache_engine is None:
+            raise HTTPException(status_code=404, detail='Cache is disabled')
+        return templates.TemplateResponse(
+            request,
+            'cache.html',
+            {
+                'worker_id': drakkar_app._worker_id,
+                'cluster_name': drakkar_app._cluster_name or '',
+            },
+        )
+
+    def _cache_reader_or_404():
+        """Fetch the shared reader connection or raise 404.
+
+        All cache JSON endpoints funnel through this so we have a single
+        source of truth for "cache not active". Returns the aiosqlite
+        connection; the caller uses it like any other reader DB.
+        """
+        engine = drakkar_app.cache_engine
+        if engine is None or engine._reader_db is None:
+            raise HTTPException(status_code=404, detail='Cache is disabled')
+        return engine._reader_db
+
+    @app.get('/api/debug/cache/entries')
+    async def api_debug_cache_entries(
+        limit: int = Query(default=100),
+        offset: int = Query(default=0, ge=0),
+        scope: str | None = Query(default=None),
+        prefix: str | None = Query(default=None),
+        expired_only: bool = Query(default=False),
+    ):
+        """Paginated listing of cache rows with optional filters.
+
+        Query params:
+          limit         — rows per page (default 100, clamped to [0, 1000])
+          offset        — pagination offset
+          scope         — exact scope match (``local``/``cluster``/``global``)
+          prefix        — match keys starting with this prefix
+          expired_only  — show only expired rows (``expires_at_ms < now_ms``)
+
+        Returns ``{entries, total, limit, offset}``; ``total`` is the count
+        matching the filters (not the clamped-page length), so the UI can
+        render "N of M" pagination without a second round-trip.
+        """
+        reader = _cache_reader_or_404()
+        # Clamp limit on read — keeps the UI from accidentally requesting a
+        # million rows. 0 is a valid "count only" case (common for the UI's
+        # filter-summary badge): we still run the COUNT(*) and return []
+        # without a LIMIT 0 query.
+        clamped_limit = max(0, min(limit, 1000))
+
+        conditions: list[str] = []
+        params: list = []
+        if scope is not None:
+            conditions.append('scope = ?')
+            params.append(scope)
+        if prefix:
+            # SQL LIKE with a prefix-only pattern. User-typed input can
+            # contain literal ``%`` or ``_`` which LIKE would otherwise
+            # interpret as wildcards. We pick ``|`` as the ESCAPE char
+            # (not ``\`` — SQLite + Python string-escaping gets brittle
+            # with backslashes) and prefix each wildcard char with it.
+            conditions.append("key LIKE ? ESCAPE '|'")
+            safe_prefix = prefix.replace('|', '||').replace('%', '|%').replace('_', '|_')
+            params.append(safe_prefix + '%')
+        if expired_only:
+            now_ms = int(time.time() * 1000)
+            conditions.append('expires_at_ms IS NOT NULL AND expires_at_ms < ?')
+            params.append(now_ms)
+
+        where = f'WHERE {" AND ".join(conditions)}' if conditions else ''
+
+        # total count for pagination
+        try:
+            async with reader.execute(f'SELECT COUNT(*) FROM cache_entries {where}', params) as cursor:
+                row = await cursor.fetchone()
+                total = row[0] if row else 0
+        except Exception:
+            total = 0
+
+        entries: list[dict] = []
+        if clamped_limit > 0:
+            query = (
+                'SELECT key, scope, value, size_bytes, created_at_ms, updated_at_ms, '
+                'expires_at_ms, origin_worker_id FROM cache_entries '
+                f'{where} ORDER BY updated_at_ms DESC LIMIT ? OFFSET ?'
+            )
+            try:
+                async with reader.execute(query, [*params, clamped_limit, offset]) as cursor:
+                    columns = [d[0] for d in cursor.description]
+                    rows = await cursor.fetchall()
+                for r in rows:
+                    entries.append(dict(zip(columns, r, strict=False)))
+            except Exception:
+                entries = []
+
+        return JSONResponse(
+            {
+                'entries': entries,
+                'total': total,
+                'limit': clamped_limit,
+                'offset': offset,
+            }
+        )
+
+    @app.get('/api/debug/cache/entry/{key:path}')
+    async def api_debug_cache_entry(key: str):
+        """Return a single entry by exact key, with the value decoded from JSON.
+
+        Uses ``{key:path}`` so colons (a common separator in cache keys) and
+        other URL-special chars pass through unchanged. 404 when the key
+        doesn't exist. On JSON decode failure (corruption / legacy data),
+        the ``raw_value`` field carries the original string for the UI to
+        display as-is.
+        """
+        reader = _cache_reader_or_404()
+        try:
+            async with reader.execute(
+                'SELECT key, scope, value, size_bytes, created_at_ms, updated_at_ms, '
+                'expires_at_ms, origin_worker_id FROM cache_entries WHERE key = ?',
+                (key,),
+            ) as cursor:
+                columns = [d[0] for d in cursor.description]
+                row = await cursor.fetchone()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f'Failed to read cache entry: {exc}') from exc
+
+        if row is None:
+            raise HTTPException(status_code=404, detail='Cache entry not found')
+
+        entry = dict(zip(columns, row, strict=False))
+        # Try to decode the JSON value; on failure carry the raw string so
+        # the UI can show something rather than 500ing the request.
+        raw_value = entry.pop('value')
+        try:
+            entry['value'] = json.loads(raw_value)
+            entry['raw_value'] = raw_value
+        except (json.JSONDecodeError, TypeError):
+            entry['value'] = None
+            entry['raw_value'] = raw_value
+
+        return JSONResponse(entry)
+
+    @app.get('/api/debug/cache/stats')
+    async def api_debug_cache_stats():
+        """Return a snapshot of the four cache gauges.
+
+        Values come from the live Prometheus gauges — same numbers you'd
+        see in the /metrics scrape, just wrapped in a JSON envelope for
+        the UI's stat cards. Reading a gauge is O(1); we never walk the
+        DB or memory dict here.
+        """
+        if drakkar_app.cache_engine is None:
+            raise HTTPException(status_code=404, detail='Cache is disabled')
+        from drakkar.metrics import (
+            cache_bytes_in_db,
+            cache_bytes_in_memory,
+            cache_entries_in_db,
+            cache_entries_in_memory,
+        )
+
+        return JSONResponse(
+            {
+                'entries_in_memory': int(cache_entries_in_memory._value.get()),
+                'bytes_in_memory': int(cache_bytes_in_memory._value.get()),
+                'entries_in_db': int(cache_entries_in_db._value.get()),
+                'bytes_in_db': int(cache_bytes_in_db._value.get()),
+            }
+        )
+
     @app.get('/api/debug/databases', dependencies=[Depends(_require_auth)])
     async def api_debug_databases():
         """List all debug database files in db_dir with stats."""
@@ -732,7 +925,13 @@ def create_debug_app(
         except Exception:
             return JSONResponse([])
 
-        # group by task name
+        # group by task name. We also surface a per-task ``system: bool``
+        # derived from the event's ``metadata.system``. Framework-internal
+        # loops (cache.flush / cache.sync / cache.cleanup, etc.) set this to
+        # True so the debug UI can render a [system] pill and operators can
+        # distinguish them from user-defined ``@periodic`` handler methods.
+        # When the key is absent (older rows, user tasks) we default to False
+        # — the field is always present in the response for UI simplicity.
         tasks: dict[str, dict] = {}
         for row in rows:
             entry = dict(zip(columns, row, strict=False))
@@ -745,6 +944,10 @@ def create_debug_app(
                     pass
             status = meta.get('status', 'ok')
             error = meta.get('error', '')
+            # system flag: latest value wins if events disagree (shouldn't
+            # happen under normal use, but we iterate ts-DESC so first seen
+            # == latest event for the task)
+            is_system = bool(meta.get('system', False))
 
             if name not in tasks:
                 tasks[name] = {
@@ -753,6 +956,7 @@ def create_debug_app(
                     'last_duration': entry['duration'],
                     'last_status': status,
                     'last_error': error,
+                    'system': is_system,
                     'total_ok': 0,
                     'total_error': 0,
                     'recent': [],

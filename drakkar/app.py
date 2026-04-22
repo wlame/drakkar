@@ -111,6 +111,17 @@ class DrakkarApp:
         return self._sink_manager
 
     @property
+    def cache_engine(self) -> CacheEngine | None:
+        """Return the framework-managed CacheEngine when cache.enabled=True.
+
+        The debug UI reads this to decide whether to render the Cache nav
+        link and the /debug/cache page. None when the cache is disabled —
+        debug server routes should gracefully 404 in that state rather
+        than attempting to query a non-existent reader connection.
+        """
+        return self._cache_engine
+
+    @property
     def config_summary(self) -> str:
         return self._config_summary
 

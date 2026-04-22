@@ -521,7 +521,7 @@ class Cache:
 - Modify: `drakkar/templates/debug.html`
 - Create: `tests/test_debug_server_cache.py`
 
-- [ ] write tests in `tests/test_debug_server_cache.py`:
+- [x] write tests in `tests/test_debug_server_cache.py`:
   - `GET /debug/cache` renders template with 200 status when cache enabled; 404 or redirect when disabled
   - `GET /api/debug/cache/entries?limit=100&offset=0` returns paginated JSON; defaults: `limit=100` (max 1000), `offset=0`
   - supports `scope` filter (single scope), `prefix` filter (key LIKE prefix%), `expired_only=true` filter
@@ -530,14 +530,14 @@ class Cache:
   - `GET /api/debug/periodic` surfaces `system: bool` field derived from `metadata.system` for each task (default False when key absent from metadata)
   - nav link to /debug/cache is present in `base.html` only when cache enabled
   - pagination edge cases: `limit=0` → empty, `limit=2000` → clamped to 1000, `offset` beyond total → empty
-- [ ] add the four new routes to `drakkar/debug_server.py` reading from the reader aiosqlite connection for listings; pagination via `limit`/`offset` query params with clamp to 1000
-- [ ] modify `/api/debug/periodic` endpoint at `drakkar/debug_server.py:710` to pass `metadata.system` through as top-level `system` field (default False when key absent)
-- [ ] create `drakkar/templates/cache.html` with header stats + filter bar + entries table + detail side panel
-- [ ] modify `drakkar/templates/debug.html` at line 38 area — render a small `[system]` pill next to task names where `system` is true
-- [ ] modify `drakkar/templates/base.html` — add "Cache" nav link, conditionally hidden
-- [ ] short comment on the reader-connection reuse in API handlers: "Reader connection is shared with Cache.get fallback — no additional thread for UI queries."
-- [ ] run `uv run pytest tests/test_debug_server_cache.py tests/test_debug_server*.py` — all pass
-- [ ] ruff + ty clean
+- [x] add the four new routes to `drakkar/debug_server.py` reading from the reader aiosqlite connection for listings; pagination via `limit`/`offset` query params with clamp to 1000
+- [x] modify `/api/debug/periodic` endpoint at `drakkar/debug_server.py:710` to pass `metadata.system` through as top-level `system` field (default False when key absent)
+- [x] create `drakkar/templates/cache.html` with header stats + filter bar + entries table + detail side panel
+- [x] modify `drakkar/templates/debug.html` at line 38 area — render a small `[system]` pill next to task names where `system` is true
+- [x] modify `drakkar/templates/base.html` — add "Cache" nav link, conditionally hidden
+- [x] short comment on the reader-connection reuse in API handlers: "Reader connection is shared with Cache.get fallback — no additional thread for UI queries."
+- [x] run `uv run pytest tests/test_debug_server_cache.py tests/test_debug_server*.py` — all pass
+- [x] ruff + ty clean
 
 ### Task 17: Integration demo migration
 

@@ -1,0 +1,319 @@
+{% extends "base.html" %}
+{% block title %}Cache — Drakkar Debug{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-bold mb-6 text-ink-900">Cache</h1>
+
+<!-- ==================== STATS ==================== -->
+<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+    <div class="p-4 rounded-lg border border-cream-200" style="background:#fff;">
+        <div class="text-xs text-gray-500 uppercase tracking-wide">Entries (memory)</div>
+        <div class="text-2xl font-bold text-teal-600" id="stat-entries-mem">-</div>
+    </div>
+    <div class="p-4 rounded-lg border border-cream-200" style="background:#fff;">
+        <div class="text-xs text-gray-500 uppercase tracking-wide">Bytes (memory)</div>
+        <div class="text-2xl font-bold text-teal-600" id="stat-bytes-mem">-</div>
+    </div>
+    <div class="p-4 rounded-lg border border-cream-200" style="background:#fff;">
+        <div class="text-xs text-gray-500 uppercase tracking-wide">Entries (DB)</div>
+        <div class="text-2xl font-bold text-ink-800" id="stat-entries-db">-</div>
+    </div>
+    <div class="p-4 rounded-lg border border-cream-200" style="background:#fff;">
+        <div class="text-xs text-gray-500 uppercase tracking-wide">Bytes (DB)</div>
+        <div class="text-2xl font-bold text-ink-800" id="stat-bytes-db">-</div>
+    </div>
+</div>
+
+<!-- ==================== FILTER BAR ==================== -->
+<div class="flex flex-wrap items-center gap-3 mb-4">
+    <label class="text-sm text-gray-500">Scope</label>
+    <select id="filter-scope" class="bg-white border border-cream-300 rounded px-2 py-1 text-sm text-ink-700 focus:border-teal-400 focus:outline-none">
+        <option value="">All</option>
+        <option value="local">local</option>
+        <option value="cluster">cluster</option>
+        <option value="global">global</option>
+    </select>
+    <label class="text-sm text-gray-500">Prefix</label>
+    <input id="filter-prefix" type="text" placeholder="e.g. user:" class="bg-white border border-cream-300 rounded px-3 py-1.5 text-sm font-mono text-ink-700 w-48 focus:border-teal-400 focus:outline-none">
+    <label class="text-xs text-gray-500 flex items-center gap-1">
+        <input id="filter-expired" type="checkbox" class="rounded"> Expired only
+    </label>
+    <button id="filter-apply" class="bg-teal-600 hover:bg-teal-500 text-white px-3 py-1.5 rounded text-sm">Apply</button>
+    <span id="entries-status" class="text-xs text-gray-500 ml-auto"></span>
+</div>
+
+<!-- ==================== ENTRIES TABLE ==================== -->
+<div class="rounded-lg border border-cream-200 overflow-hidden" style="background:#fff;">
+    <table class="w-full text-sm">
+        <thead>
+            <tr class="text-left text-gray-400 text-xs border-b border-cream-200" style="background:#f5f3ee;">
+                <th class="py-2 px-3">Key</th>
+                <th class="py-2 px-3">Scope</th>
+                <th class="py-2 px-3">Size</th>
+                <th class="py-2 px-3">Updated</th>
+                <th class="py-2 px-3">Expires</th>
+                <th class="py-2 px-3">Origin</th>
+            </tr>
+        </thead>
+        <tbody id="entries-body">
+            <tr><td colspan="6" class="py-4 px-3 text-center text-gray-400">Loading...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- Pagination -->
+<div class="flex items-center justify-between mt-3 text-sm">
+    <div class="text-gray-500" id="page-info"></div>
+    <div class="flex items-center gap-2">
+        <button id="page-prev" class="px-3 py-1 rounded border border-cream-300 text-ink-700 hover:bg-cream-100 disabled:opacity-40" disabled>Prev</button>
+        <button id="page-next" class="px-3 py-1 rounded border border-cream-300 text-ink-700 hover:bg-cream-100 disabled:opacity-40" disabled>Next</button>
+    </div>
+</div>
+
+<!-- ==================== DETAIL SIDE PANEL ==================== -->
+<div id="detail-panel" class="fixed top-0 right-0 h-full w-full md:w-1/2 lg:w-1/3 bg-white border-l border-cream-200 shadow-lg transform translate-x-full transition-transform z-40 overflow-y-auto" style="background:#fff;">
+    <div class="p-4 border-b border-cream-200 flex items-center justify-between" style="background:#f5f3ee;">
+        <h3 class="font-semibold text-ink-800">Entry Detail</h3>
+        <button onclick="closeDetail()" class="text-gray-400 hover:text-ink-800 text-xl leading-none">&times;</button>
+    </div>
+    <div class="p-4" id="detail-body">
+        <div class="text-gray-400">Select an entry...</div>
+    </div>
+</div>
+
+<script>
+(function() {
+    var statEntriesMem = document.getElementById('stat-entries-mem');
+    var statBytesMem = document.getElementById('stat-bytes-mem');
+    var statEntriesDb = document.getElementById('stat-entries-db');
+    var statBytesDb = document.getElementById('stat-bytes-db');
+
+    var filterScope = document.getElementById('filter-scope');
+    var filterPrefix = document.getElementById('filter-prefix');
+    var filterExpired = document.getElementById('filter-expired');
+    var applyBtn = document.getElementById('filter-apply');
+
+    var entriesBody = document.getElementById('entries-body');
+    var entriesStatus = document.getElementById('entries-status');
+    var pageInfo = document.getElementById('page-info');
+    var pagePrev = document.getElementById('page-prev');
+    var pageNext = document.getElementById('page-next');
+
+    var detailPanel = document.getElementById('detail-panel');
+    var detailBody = document.getElementById('detail-body');
+
+    var PAGE_SIZE = 50;
+    var offset = 0;
+    var total = 0;
+
+    function formatBytes(n) {
+        if (n == null) return '-';
+        if (n < 1024) return n + ' B';
+        if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+        return (n / 1048576).toFixed(1) + ' MB';
+    }
+
+    function formatTsMs(ms) {
+        if (!ms) return '-';
+        return new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
+    }
+
+    function loadStats() {
+        fetch('/api/debug/cache/stats').then(function(r) { return r.json(); }).then(function(s) {
+            statEntriesMem.textContent = s.entries_in_memory != null ? s.entries_in_memory : '-';
+            statBytesMem.textContent = formatBytes(s.bytes_in_memory);
+            statEntriesDb.textContent = s.entries_in_db != null ? s.entries_in_db : '-';
+            statBytesDb.textContent = formatBytes(s.bytes_in_db);
+        }).catch(function() {});
+    }
+
+    function buildQuery() {
+        var params = new URLSearchParams();
+        params.set('limit', PAGE_SIZE);
+        params.set('offset', offset);
+        if (filterScope.value) params.set('scope', filterScope.value);
+        if (filterPrefix.value.trim()) params.set('prefix', filterPrefix.value.trim());
+        if (filterExpired.checked) params.set('expired_only', 'true');
+        return params.toString();
+    }
+
+    function loadEntries() {
+        entriesBody.textContent = '';
+        var loading = document.createElement('tr');
+        var loadingTd = document.createElement('td');
+        loadingTd.setAttribute('colspan', '6');
+        loadingTd.className = 'py-4 px-3 text-center text-gray-400';
+        loadingTd.textContent = 'Loading...';
+        loading.appendChild(loadingTd);
+        entriesBody.appendChild(loading);
+
+        fetch('/api/debug/cache/entries?' + buildQuery()).then(function(r) { return r.json(); }).then(function(body) {
+            total = body.total || 0;
+            renderEntries(body.entries || []);
+            updatePagination();
+        }).catch(function() {
+            entriesBody.textContent = '';
+            var err = document.createElement('tr');
+            var errTd = document.createElement('td');
+            errTd.setAttribute('colspan', '6');
+            errTd.className = 'py-4 px-3 text-center text-red-500';
+            errTd.textContent = 'Failed to load entries';
+            err.appendChild(errTd);
+            entriesBody.appendChild(err);
+        });
+    }
+
+    function renderEntries(entries) {
+        entriesBody.textContent = '';
+        if (!entries.length) {
+            var empty = document.createElement('tr');
+            var emptyTd = document.createElement('td');
+            emptyTd.setAttribute('colspan', '6');
+            emptyTd.className = 'py-4 px-3 text-center text-gray-400';
+            emptyTd.textContent = total ? 'No entries on this page' : 'No cache entries';
+            empty.appendChild(emptyTd);
+            entriesBody.appendChild(empty);
+            return;
+        }
+        var now = Date.now();
+        entries.forEach(function(e) {
+            var tr = document.createElement('tr');
+            tr.className = 'border-b border-cream-100 hover:bg-cream-50 cursor-pointer';
+            tr.onclick = function() { openDetail(e.key); };
+
+            var tdKey = document.createElement('td');
+            tdKey.className = 'py-2 px-3 font-mono text-xs';
+            tdKey.textContent = e.key;
+            tdKey.title = e.key;
+
+            var tdScope = document.createElement('td');
+            tdScope.className = 'py-2 px-3 text-xs';
+            var scopePill = document.createElement('span');
+            scopePill.className = 'px-2 py-0.5 rounded text-xs font-semibold';
+            if (e.scope === 'local') { scopePill.style.background = '#fef3c7'; scopePill.style.color = '#92400e'; }
+            else if (e.scope === 'cluster') { scopePill.style.background = '#dbeafe'; scopePill.style.color = '#1e40af'; }
+            else { scopePill.style.background = '#d1fae5'; scopePill.style.color = '#065f46'; }
+            scopePill.textContent = e.scope;
+            tdScope.appendChild(scopePill);
+
+            var tdSize = document.createElement('td');
+            tdSize.className = 'py-2 px-3 font-mono text-xs';
+            tdSize.textContent = formatBytes(e.size_bytes);
+
+            var tdUpdated = document.createElement('td');
+            tdUpdated.className = 'py-2 px-3 text-xs text-gray-500';
+            tdUpdated.textContent = formatTsMs(e.updated_at_ms);
+
+            var tdExpires = document.createElement('td');
+            tdExpires.className = 'py-2 px-3 text-xs';
+            if (e.expires_at_ms == null) {
+                tdExpires.style.color = '#6b7280';
+                tdExpires.textContent = 'never';
+            } else if (e.expires_at_ms < now) {
+                tdExpires.style.color = '#dc2626';
+                tdExpires.textContent = 'expired';
+                tdExpires.title = formatTsMs(e.expires_at_ms);
+            } else {
+                tdExpires.style.color = '#6b7280';
+                tdExpires.textContent = formatTsMs(e.expires_at_ms);
+            }
+
+            var tdOrigin = document.createElement('td');
+            tdOrigin.className = 'py-2 px-3 font-mono text-xs text-gray-500';
+            tdOrigin.textContent = e.origin_worker_id;
+
+            tr.append(tdKey, tdScope, tdSize, tdUpdated, tdExpires, tdOrigin);
+            entriesBody.appendChild(tr);
+        });
+    }
+
+    function updatePagination() {
+        var start = Math.min(offset + 1, total);
+        var end = Math.min(offset + PAGE_SIZE, total);
+        pageInfo.textContent = total ? (start + '-' + end + ' of ' + total) : '';
+        entriesStatus.textContent = total + ' matching entries';
+        pagePrev.disabled = offset <= 0;
+        pageNext.disabled = offset + PAGE_SIZE >= total;
+    }
+
+    function openDetail(key) {
+        detailBody.textContent = '';
+        var loading = document.createElement('div');
+        loading.className = 'text-gray-400';
+        loading.textContent = 'Loading...';
+        detailBody.appendChild(loading);
+        detailPanel.style.transform = 'translateX(0)';
+
+        fetch('/api/debug/cache/entry/' + encodeURIComponent(key)).then(function(r) {
+            if (r.status === 404) throw new Error('Entry not found');
+            return r.json();
+        }).then(function(entry) {
+            detailBody.textContent = '';
+            var field = function(label, value) {
+                var row = document.createElement('div');
+                row.className = 'mb-3';
+                var lbl = document.createElement('div');
+                lbl.className = 'text-xs text-gray-500 uppercase tracking-wide';
+                lbl.textContent = label;
+                var val = document.createElement('div');
+                val.className = 'font-mono text-sm break-all text-ink-800';
+                val.textContent = value;
+                row.append(lbl, val);
+                return row;
+            };
+            detailBody.appendChild(field('Key', entry.key));
+            detailBody.appendChild(field('Scope', entry.scope));
+            detailBody.appendChild(field('Size', formatBytes(entry.size_bytes)));
+            detailBody.appendChild(field('Created', formatTsMs(entry.created_at_ms)));
+            detailBody.appendChild(field('Updated', formatTsMs(entry.updated_at_ms)));
+            detailBody.appendChild(field('Expires', entry.expires_at_ms == null ? 'never' : formatTsMs(entry.expires_at_ms)));
+            detailBody.appendChild(field('Origin Worker', entry.origin_worker_id));
+
+            var valueLbl = document.createElement('div');
+            valueLbl.className = 'text-xs text-gray-500 uppercase tracking-wide mt-2';
+            valueLbl.textContent = 'Value';
+            detailBody.appendChild(valueLbl);
+            var pre = document.createElement('pre');
+            pre.className = 'bg-cream-100 p-3 rounded text-xs font-mono break-all whitespace-pre-wrap';
+            if (entry.value != null) {
+                pre.textContent = JSON.stringify(entry.value, null, 2);
+            } else {
+                pre.textContent = entry.raw_value || '';
+            }
+            detailBody.appendChild(pre);
+        }).catch(function(err) {
+            detailBody.textContent = '';
+            var errDiv = document.createElement('div');
+            errDiv.className = 'text-red-500';
+            errDiv.textContent = err.message || 'Failed to load entry';
+            detailBody.appendChild(errDiv);
+        });
+    }
+
+    window.closeDetail = function() {
+        detailPanel.style.transform = 'translateX(100%)';
+    };
+
+    applyBtn.onclick = function() {
+        offset = 0;
+        loadEntries();
+    };
+    filterPrefix.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { offset = 0; loadEntries(); }
+    });
+
+    pagePrev.onclick = function() {
+        offset = Math.max(0, offset - PAGE_SIZE);
+        loadEntries();
+    };
+    pageNext.onclick = function() {
+        offset += PAGE_SIZE;
+        loadEntries();
+    };
+
+    loadStats();
+    loadEntries();
+    setInterval(loadStats, 5000);
+})();
+</script>
+{% endblock %}

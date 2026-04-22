@@ -26,6 +26,9 @@
                 <a href="/sinks" class="text-gray-400 hover:text-white text-sm">Sinks</a>
                 <a href="/live" class="text-gray-400 hover:text-white text-sm">Live <span class="live-dot" style="color:#ef4444;font-size:32px;vertical-align:middle;line-height:0;position:relative;top:-2px;">&bull;</span></a>
                 <a href="/debug" class="text-gray-400 hover:text-white text-sm">Debug</a>
+                {% if is_cache_enabled() %}
+                <a href="/debug/cache" class="text-gray-400 hover:text-white text-sm">Cache</a>
+                {% endif %}
                 <a href="/history" class="text-gray-400 hover:text-white text-sm">History</a>
             </div>
             {% set sink_links = get_sink_ui_links() %}
