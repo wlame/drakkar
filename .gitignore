@@ -41,6 +41,8 @@ Thumbs.db
 # Claude / Serena / AI tools
 .claude/
 .serena/
+.remember/
+docs/plans/
 
 # Environment and secrets
 .env
