@@ -93,6 +93,31 @@ metrics:
 |--------|------|--------|-------------|
 | `drakkar_handler_duration_seconds` | Histogram | `hook` (`arrange`, `on_task_complete`, `on_message_complete`, `on_error`, `on_window_complete`, etc.) | Duration of user handler hook execution. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30 |
 
+#### Cache
+
+Emitted only when [`cache.enabled=true`](cache.md). Memory gauges are maintained as running sums — Prometheus scrape reads a single int, never walks the in-memory dict. DB gauges are refreshed by the `cache.cleanup` loop (default every 60s).
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `drakkar_cache_hits_total` | Counter | `source` (`memory`, `db`) | Cache reads served from memory or from the DB fallback. `peek()` is **not** counted — only `get()` increments this. |
+| `drakkar_cache_misses_total` | Counter | -- | Cache reads that returned `None` (key absent or expired in both memory and DB). |
+| `drakkar_cache_writes_total` | Counter | `scope` (`local`, `cluster`, `global`) | Total `Cache.set()` calls, labelled by the entry's scope. |
+| `drakkar_cache_deletes_total` | Counter | -- | Total `Cache.delete()` calls regardless of whether the key was present. Note: delete is local-only — see [sharp edge](cache.md#delete-is-local-only-the-main-sharp-edge). |
+| `drakkar_cache_evictions_total` | Counter | -- | Entries popped from the in-memory dict due to the LRU cap (`max_memory_entries`). Sustained high rate signals cap undersizing. |
+| `drakkar_cache_flush_entries_total` | Counter | `op` (`set`, `delete`) | Entries drained from the dirty map to SQLite per flush cycle, by op type. Measures flush throughput, not rows actually modified (LWW may reject a SET). |
+| `drakkar_cache_cleanup_removed_total` | Counter | -- | Rows removed from the SQLite DB by the cleanup loop (entries whose TTL elapsed). A sudden spike means many entries expiring together. |
+| `drakkar_cache_sync_entries_fetched_total` | Counter | `peer` | Rows pulled from a peer worker's cache DB by the sync loop, per peer. |
+| `drakkar_cache_sync_entries_upserted_total` | Counter | `peer` | Rows the sync loop attempted to UPSERT into the local DB. Equals or less than `sync_entries_fetched_total` when LWW rejects some. |
+| `drakkar_cache_sync_errors_total` | Counter | `peer` | Per-peer failures during the sync cycle (connection refused, corrupt DB, timeout). One increment per failed cycle; sync loop keeps running. |
+| `drakkar_cache_entries_in_memory` | Gauge | -- | Entries currently in the in-memory dict. Running sum, adjusted per set/delete/evict/cleanup. |
+| `drakkar_cache_bytes_in_memory` | Gauge | -- | Sum of `size_bytes` across in-memory entries. Running sum (see above). |
+| `drakkar_cache_entries_in_db` | Gauge | -- | Rows in the local `<worker>-cache.db`. Refreshed by the cleanup loop. |
+| `drakkar_cache_bytes_in_db` | Gauge | -- | Sum of `size_bytes` across DB rows. Refreshed by the cleanup loop. |
+
+Cache flush/sync/cleanup loop durations are captured by the existing
+`periodic_task_duration{name="cache.flush|cache.sync|cache.cleanup"}`
+histogram — no dedicated cache-only timing histograms.
+
 ### User-Defined Metrics
 
 You can declare Prometheus metrics as class attributes on your handler -- see [Custom Prometheus Metrics](handler.md#custom-prometheus-metrics) for the handler-side setup. The framework auto-discovers them via `discover_handler_metrics()`, which scans the handler's class hierarchy (MRO) for any `prometheus_client` metric instances (`Counter`, `Gauge`, `Histogram`, `Summary`, `Info`).

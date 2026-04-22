@@ -32,6 +32,7 @@ Configured sinks (any combination)
 - **Backpressure** via Kafka pause/resume -- memory stays bounded regardless of consumer lag
 - **Subprocess executor pool** with semaphore-based concurrency limiting
 - **Typed message models** -- define Pydantic schemas for input/output, get auto-deserialization
+- **Cache (optional)** -- `self.cache` key/value store with memory + write-behind SQLite + eventually-consistent peer sync across workers ([docs](docs/cache.md))
 - **Built-in debug UI** (FastAPI) with executor timeline, partition lag, message tracing
 - **Flight recorder** -- SQLite event log with retention and rotation
 - **Prometheus metrics** -- pipeline, executor, and per-sink metrics

@@ -572,7 +572,7 @@ class Cache:
 - Modify: `docs/index.md`
 - Modify: `README.md`
 
-- [ ] create `docs/cache.md` following `feedback/docs_depth` structure:
+- [x] create `docs/cache.md` following `feedback/docs_depth` structure:
   - concept + problem it solves
   - mermaid diagram of memory → flush → SQLite → peer sync
   - minimal copy-pasteable handler example using `self.cache` for result memoization
@@ -588,15 +588,15 @@ class Cache:
   - LRU eviction explained when `max_memory_entries` is set
   - debug UI walkthrough: cache page, system badge on periodic tasks, metric table
   - cross-links to `handler.md`, `observability.md`, `performance.md`, `integration.md`
-- [ ] add `- Cache: cache.md` to `mkdocs.yml` nav (position appropriately, probably after handler.md)
-- [ ] in `docs/handler.md`: add "The cache" subsection under `arrange()` with a snippet and link to `cache.md`
-- [ ] in `docs/observability.md`: add rows to the metric table for all new cache metrics
-- [ ] in `docs/performance.md`: add "Caching" bullet under throughput mitigations, linking to `cache.md`
-- [ ] in `docs/data-flow.md`: mention cache interaction at the arrange + on_task_complete phases
-- [ ] in `docs/index.md`: add cache feature bullet
-- [ ] in `README.md`: add "Cache (optional)" to feature list
-- [ ] run `uvx mkdocs build --strict` (or `uv run mkdocs build --strict`) — must pass with zero broken-link or missing-nav warnings
-- [ ] *(docs task — no unit tests; `mkdocs build --strict` is the gate)*
+- [x] add `- Cache: cache.md` to `mkdocs.yml` nav (position appropriately, probably after handler.md)
+- [x] in `docs/handler.md`: add "The cache" subsection under `arrange()` with a snippet and link to `cache.md`
+- [x] in `docs/observability.md`: add rows to the metric table for all new cache metrics
+- [x] in `docs/performance.md`: add "Caching" bullet under throughput mitigations, linking to `cache.md`
+- [x] in `docs/data-flow.md`: mention cache interaction at the arrange + on_task_complete phases
+- [x] in `docs/index.md`: add cache feature bullet
+- [x] in `README.md`: add "Cache (optional)" to feature list
+- [x] run `uvx mkdocs build --strict` (or `uv run mkdocs build --strict`) — must pass with zero broken-link or missing-nav warnings
+- [x] *(docs task — no unit tests; `mkdocs build --strict` is the gate)*
 
 ### Task 19: Verify acceptance criteria
 

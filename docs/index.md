@@ -105,6 +105,7 @@ Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execut
 - **[Dead letter queue](sinks.md#dead-letter-queue)** -- failed deliveries route to a DLQ topic with error metadata
 - **[Backpressure](performance.md#backpressure)** -- Kafka pause/resume keeps memory bounded regardless of consumer lag
 - **[Typed messages](handler.md#typed-messages)** -- Pydantic models for input/output with auto-deserialization
+- **[Cache (optional)](cache.md)** -- `self.cache` key/value store with memory + write-behind SQLite + eventually-consistent peer sync across workers
 - **[Debug UI](observability.md#debug-ui)** -- built-in FastAPI dashboard with executor timeline, partition lag, message tracing
 - **[Prometheus metrics](observability.md#prometheus-metrics)** -- pipeline, executor, and per-sink counters/histograms
 - **[Structured logging](observability.md#structured-logging)** -- JSON/ECS-compatible via structlog, ready for Elastic
@@ -209,6 +210,7 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 | Page | Contents |
 |------|----------|
 | [Handler](handler.md) | `BaseDrakkarHandler` hooks: `arrange`, `on_task_complete`, `on_message_complete`, `on_window_complete`, `on_error`, lifecycle hooks |
+| [Cache](cache.md) | `self.cache` API, scope rules, peer sync, LWW semantics, "delete is local-only" sharp edge |
 | [Fan-out](fan-out.md) | One message → many tasks → one aggregate. `MessageGroup`, `on_message_complete`, replacement-chain tracing. |
 | [Configuration](configuration.md) | Full YAML reference, env var overrides, `DrakkarConfig` model |
 | [Sinks](sinks.md) | Sink types, payload models, routing, multi-instance setup |

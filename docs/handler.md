@@ -383,6 +383,55 @@ above for the full story.
 | `exit_code` | `int` | `0` | non-zero routes through `on_error` like a real failure |
 | `duration_seconds` | `float` | `0.0` | set if you want the UI / recorder to show a non-zero duration (e.g. reflect a cache lookup time) |
 
+### The cache (`self.cache`)
+
+When `cache.enabled=true` in config, every handler instance gains a
+`self.cache` attribute — a framework-provided key/value cache,
+memory-backed and periodically flushed to a per-worker SQLite file. It
+pairs naturally with [PrecomputedResult](#precomputedresult) for the
+classic memoization pattern:
+
+```python
+async def arrange(self, messages, pending):
+    tasks = []
+    for msg in messages:
+        cache_key = f'search|{msg.payload.pattern}'
+
+        # Fast path: synchronous memory peek (zero I/O)
+        cached = self.cache.peek(cache_key)
+        if cached is None:
+            # Slower path: memory miss, check SQLite (local + peer-synced)
+            cached = await self.cache.get(cache_key)
+
+        if cached is not None:
+            tasks.append(dk.ExecutorTask(
+                task_id=dk.make_task_id('search'),
+                source_offsets=[msg.offset],
+                precomputed=dk.PrecomputedResult(stdout=cached),
+            ))
+        else:
+            tasks.append(dk.ExecutorTask(
+                task_id=dk.make_task_id('search'),
+                args=[msg.payload.pattern],
+                source_offsets=[msg.offset],
+            ))
+    return tasks
+
+async def on_task_complete(self, result):
+    if result.pid is not None:   # skip precomputed — already cached
+        cache_key = f'search|{result.task.args[0]}'
+        self.cache.set(cache_key, result.stdout, ttl=3600)
+    # ... return CollectResult as usual
+```
+
+When `cache.enabled=false` (the default), `self.cache` is a no-op stub
+— `peek`/`get` return `None`, `set`/`delete` silently discard. Handler
+code can call the cache unconditionally.
+
+Full API, cross-worker sync behavior, scope rules (`LOCAL` /
+`CLUSTER` / `GLOBAL`), and the documented "delete is local-only" sharp
+edge are covered on the dedicated [Cache](cache.md) page.
+
 ### on_window_complete
 
 ```python

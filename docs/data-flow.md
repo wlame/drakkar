@@ -230,6 +230,9 @@ For each window:
 
    The framework records the `arrange_duration` in the `handler_duration` Prometheus histogram and in the flight recorder.
 
+   !!! tip "Cache interaction in arrange()"
+       If `cache.enabled=true` ([Cache](cache.md)), `arrange()` can consult `self.cache.peek(key)` (synchronous memory probe, zero I/O) or `await self.cache.get(key)` (memory → SQLite fallback) to short-circuit tasks. On a hit, attach the cached output to the task via [`precomputed=PrecomputedResult(...)`](handler.md#precomputed-task-results-skip-the-subprocess) — the framework skips the semaphore and subprocess entirely and feeds the result straight to `on_task_complete`.
+
 6. **If arrange returns an empty list**: all message offsets are immediately marked COMPLETED, an offset commit is attempted, and the processor moves to the next window. No tasks are run.
 
 7. **If arrange returns tasks**: for each task:
@@ -330,6 +333,9 @@ The framework calls `handler.on_task_complete(result)`:
 - **Returns `None`**: no per-task sink delivery for this result. The result is still tracked in the `MessageGroup` and available to `on_message_complete`.
 
 The hook's duration is recorded in the `handler_duration{hook="on_task_complete"}` histogram and a `task_complete` event lands in the flight recorder.
+
+!!! tip "Cache interaction in on_task_complete()"
+    This is where handlers typically **persist** results back into `self.cache` via `self.cache.set(key, result.stdout, ttl=...)` — the write lands in the in-memory dict immediately and is flushed to `<worker>-cache.db` on the next flush cycle. Skip the set when `result.pid is None` (precomputed fast-path) — those results came from the cache in the first place. See [Cache](cache.md) for the full API.
 
 ### 5.3 Sink Delivery
 
