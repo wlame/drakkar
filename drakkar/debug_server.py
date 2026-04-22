@@ -625,45 +625,25 @@ def create_debug_app(
             raise HTTPException(status_code=404, detail='Cache is disabled')
         return engine.reader_db
 
-    @app.get('/debug/cache', response_class=HTMLResponse)
-    async def debug_cache_page(request: Request):
-        """Render the cache page. 404 when the cache is not active.
-
-        Funnels through ``_cache_reader_or_404`` — same gate every JSON
-        endpoint uses — so a stale bookmark against a cache whose reader
-        never opened (or has been torn down) returns 404 instead of
-        rendering a page whose JS would immediately get 404s from the
-        API it calls.
-        """
-        _cache_reader_or_404()
-        return templates.TemplateResponse(
-            request,
-            'cache.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'cluster_name': drakkar_app._cluster_name or '',
-            },
-        )
-
     @app.get('/api/debug/cache/entries')
     async def api_debug_cache_entries(
         # ``ge=0, le=1000`` enforces the bounds at the FastAPI layer —
         # requests outside the range get a 422 response instead of reaching
-        # the handler. Default 100 mirrors the UI page size.
-        limit: int = Query(default=100, ge=0, le=1000),
+        # the handler. Default 200 mirrors the UI page size.
+        limit: int = Query(default=200, ge=0, le=1000),
         offset: int = Query(default=0, ge=0),
         scope: str | None = Query(default=None),
-        prefix: str | None = Query(default=None),
+        search: str | None = Query(default=None),
         expired_only: bool = Query(default=False),
     ):
         """Paginated listing of cache rows with optional filters.
 
         Query params:
-          limit         — rows per page (default 100, enforced [0, 1000])
+          limit         — rows per page (default 200, enforced [0, 1000])
           offset        — pagination offset
           scope         — exact scope match (``local``/``cluster``/``global``)
-          prefix        — match keys starting with this prefix
-          expired_only  — show only expired rows (``expires_at_ms < now_ms``)
+          search        — substring match against key (case-sensitive)
+          expired_only  — show only expired rows (``expires_at_ms <= now_ms``)
 
         Returns ``{entries, total, limit, offset}``; ``total`` is the count
         matching the filters (not the clamped-page length), so the UI can
@@ -676,15 +656,16 @@ def create_debug_app(
         if scope is not None:
             conditions.append('scope = ?')
             params.append(scope)
-        if prefix:
-            # SQL LIKE with a prefix-only pattern. User-typed input can
-            # contain literal ``%`` or ``_`` which LIKE would otherwise
-            # interpret as wildcards. We pick ``|`` as the ESCAPE char
-            # (not ``\`` — SQLite + Python string-escaping gets brittle
-            # with backslashes) and prefix each wildcard char with it.
+        if search:
+            # SQL LIKE with a substring pattern (``%search%``). User-typed
+            # input can contain literal ``%`` or ``_`` which LIKE would
+            # otherwise interpret as wildcards. We pick ``|`` as the ESCAPE
+            # char (not ``\`` — SQLite + Python string-escaping gets
+            # brittle with backslashes) and prefix each wildcard char
+            # with it.
             conditions.append("key LIKE ? ESCAPE '|'")
-            safe_prefix = prefix.replace('|', '||').replace('%', '|%').replace('_', '|_')
-            params.append(safe_prefix + '%')
+            safe_search = search.replace('|', '||').replace('%', '|%').replace('_', '|_')
+            params.append('%' + safe_search + '%')
         if expired_only:
             now_ms = int(time.time() * 1000)
             # ``<= ?`` matches the inclusive cleanup convention in

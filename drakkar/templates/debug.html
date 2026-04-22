@@ -9,10 +9,21 @@
 </div>
 {% endif %}
 
-<!-- ==================== METRICS ==================== -->
-<div class="mb-8">
+<!-- ==================== TAB BAR ==================== -->
+<div class="flex gap-1 mb-6 border-b border-cream-200" role="tablist">
+    <button class="tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-ink-800 transition-colors" data-tab="metrics" role="tab">Metrics</button>
+    <button class="tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-ink-800 transition-colors" data-tab="periodic" role="tab">Periodic Tasks</button>
+    <button class="tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-ink-800 transition-colors" data-tab="trace" role="tab">Message Trace</button>
+    {% if is_cache_enabled() %}
+    <button class="tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-ink-800 transition-colors" data-tab="cache" role="tab">Cache</button>
+    {% endif %}
+    <button class="tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-ink-800 transition-colors" data-tab="databases" role="tab">Databases</button>
+</div>
+
+<!-- ==================== METRICS TAB ==================== -->
+<div data-tab-panel="metrics">
     <div class="flex items-center justify-between mb-3">
-        <h2 class="text-xl font-bold text-ink-900 flex items-center gap-2 cursor-pointer select-none" onclick="toggleSection('metrics')"><svg data-chevron="metrics" class="transition-transform duration-150" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>Metrics</h2>
+        <h2 class="text-xl font-bold text-ink-900">Metrics</h2>
         <div class="flex items-center gap-3">
             <label class="text-xs text-gray-500 flex items-center gap-1">
                 <input id="metrics-show-user" type="checkbox" checked class="rounded"> User
@@ -23,34 +34,25 @@
             <button id="metrics-refresh" class="px-3 py-1.5 text-sm rounded border border-cream-300 text-ink-700 hover:bg-cream-100">Refresh</button>
         </div>
     </div>
-    <div data-section-body="metrics">
-        <div id="metrics-list">
-            <div class="text-gray-500 text-sm">Loading...</div>
-        </div>
+    <div id="metrics-list">
+        <div class="text-gray-500 text-sm">Loading...</div>
     </div>
 </div>
 
-<hr class="border-cream-200 mb-6">
-
-<!-- ==================== PERIODIC TASKS ==================== -->
-<div class="mb-8">
+<!-- ==================== PERIODIC TASKS TAB ==================== -->
+<div data-tab-panel="periodic">
     <div class="flex items-center justify-between mb-3">
-        <h2 class="text-xl font-bold text-ink-900 flex items-center gap-2 cursor-pointer select-none" onclick="toggleSection('periodic')"><svg data-chevron="periodic" class="transition-transform duration-150" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>Periodic Tasks</h2>
+        <h2 class="text-xl font-bold text-ink-900">Periodic Tasks</h2>
         <button id="periodic-refresh" class="px-3 py-1.5 text-sm rounded border border-cream-300 text-ink-700 hover:bg-cream-100">Refresh</button>
     </div>
-    <div data-section-body="periodic">
-        <div id="periodic-list">
-            <div class="text-gray-500 text-sm">Loading...</div>
-        </div>
+    <div id="periodic-list">
+        <div class="text-gray-500 text-sm">Loading...</div>
     </div>
 </div>
 
-<hr class="border-cream-200 mb-6">
-
-<!-- ==================== TRACE ==================== -->
-<div class="mb-8">
-    <h2 class="text-xl font-bold text-ink-900 mb-3 flex items-center gap-2 cursor-pointer select-none" onclick="toggleSection('trace')"><svg data-chevron="trace" class="transition-transform duration-150" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>Message Trace</h2>
-    <div data-section-body="trace">
+<!-- ==================== MESSAGE TRACE TAB ==================== -->
+<div data-tab-panel="trace">
+    <h2 class="text-xl font-bold text-ink-900 mb-3">Message Trace</h2>
     <p class="text-xs text-gray-400 mb-3">Trace a Kafka message through the full pipeline. Search by partition:offset or by label value. Falls back to other workers in the same cluster.</p>
     <div class="flex items-center gap-3 mb-4">
         <label class="text-sm text-gray-500">Partition:Offset</label>
@@ -60,77 +62,173 @@
     </div>
     <div id="label-trace-inputs" class="mb-4"></div>
     <div id="trace-result"></div>
+</div>
+
+{% if is_cache_enabled() %}
+<!-- ==================== CACHE TAB ==================== -->
+<div data-tab-panel="cache">
+    <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold text-ink-900">Cache</h2>
     </div>
-</div>
 
-<hr class="border-cream-200 mb-6">
-
-<!-- ==================== DATABASES ==================== -->
-<div class="flex items-center justify-between mb-3">
-    <h2 class="text-xl font-bold text-ink-900 flex items-center gap-2 cursor-pointer select-none" onclick="toggleSection('databases')"><svg data-chevron="databases" class="transition-transform duration-150" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>Databases</h2>
-    <div class="flex items-center gap-3">
-        <button id="btn-merge" disabled
-                class="px-4 py-2 text-sm font-medium rounded disabled:opacity-40"
-                style="background:#2a2a2a;color:white;">
-            Merge Selected
-        </button>
-        <button id="btn-refresh" class="px-3 py-2 text-sm rounded border border-cream-300 text-ink-700 hover:bg-cream-100">
-            Refresh
-        </button>
-    </div>
-</div>
-
-<div data-section-body="databases">
-<div class="flex items-center gap-3 mb-4">
-    <label class="text-xs text-gray-500">Worker:</label>
-    <select id="db-worker-filter" class="bg-white border border-cream-300 rounded px-2 py-1 text-sm text-ink-700 focus:border-teal-400 focus:outline-none">
-        <option value="">All workers</option>
-    </select>
-    <span id="db-count" class="text-xs text-gray-400 ml-auto"></span>
-</div>
-<div id="db-list" class="space-y-6">
-    <div class="text-gray-500">Loading...</div>
-</div>
-
-<!-- merge result banner -->
-<div id="merge-result" class="hidden mt-4 p-4 rounded border border-green-300 bg-green-50">
-    <div class="flex items-center justify-between">
-        <div>
-            <span class="font-semibold text-green-800" id="merge-msg"></span>
+    <!-- Stats cards -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        <div class="p-4 rounded-lg border border-cream-200" style="background:#fff;">
+            <div class="text-xs text-gray-500 uppercase tracking-wide">Entries (memory)</div>
+            <div class="text-2xl font-bold text-teal-600" id="stat-entries-mem">-</div>
         </div>
-        <a id="merge-download" href="#" class="px-3 py-1 text-sm rounded font-medium"
-           style="background:#2a2a2a;color:white;">
-            Download
-        </a>
+        <div class="p-4 rounded-lg border border-cream-200" style="background:#fff;">
+            <div class="text-xs text-gray-500 uppercase tracking-wide">Bytes (memory)</div>
+            <div class="text-2xl font-bold text-teal-600" id="stat-bytes-mem">-</div>
+        </div>
+        <div class="p-4 rounded-lg border border-cream-200" style="background:#fff;">
+            <div class="text-xs text-gray-500 uppercase tracking-wide">Entries (DB)</div>
+            <div class="text-2xl font-bold text-ink-800" id="stat-entries-db">-</div>
+        </div>
+        <div class="p-4 rounded-lg border border-cream-200" style="background:#fff;">
+            <div class="text-xs text-gray-500 uppercase tracking-wide">Bytes (DB)</div>
+            <div class="text-2xl font-bold text-ink-800" id="stat-bytes-db">-</div>
+        </div>
+    </div>
+
+    <!-- Filter bar -->
+    <div class="flex flex-wrap items-center gap-3 mb-4">
+        <label class="text-sm text-gray-500">Scope</label>
+        <select id="cache-filter-scope" class="bg-white border border-cream-300 rounded px-2 py-1 text-sm text-ink-700 focus:border-teal-400 focus:outline-none">
+            <option value="">All</option>
+            <option value="local">local</option>
+            <option value="cluster">cluster</option>
+            <option value="global">global</option>
+        </select>
+        <label class="text-sm text-gray-500">Search</label>
+        <input id="cache-filter-search" type="text" placeholder="substring in key" class="bg-white border border-cream-300 rounded px-3 py-1.5 text-sm font-mono text-ink-700 w-48 focus:border-teal-400 focus:outline-none">
+        <label class="text-xs text-gray-500 flex items-center gap-1">
+            <input id="cache-filter-expired" type="checkbox" class="rounded"> Expired only
+        </label>
+        <button id="cache-filter-apply" class="bg-teal-600 hover:bg-teal-500 text-white px-3 py-1.5 rounded text-sm">Apply</button>
+        <span id="cache-entries-status" class="text-xs text-gray-500 ml-auto"></span>
+    </div>
+
+    <!-- Entries table -->
+    <div class="rounded-lg border border-cream-200 overflow-hidden" style="background:#fff;">
+        <table class="w-full text-sm">
+            <thead>
+                <tr class="text-left text-gray-400 text-xs border-b border-cream-200" style="background:#f5f3ee;">
+                    <th class="py-2 px-3">Key</th>
+                    <th class="py-2 px-3">Scope</th>
+                    <th class="py-2 px-3">Size</th>
+                    <th class="py-2 px-3">Updated</th>
+                    <th class="py-2 px-3">Expires</th>
+                    <th class="py-2 px-3">Origin</th>
+                </tr>
+            </thead>
+            <tbody id="cache-entries-body">
+                <tr><td colspan="6" class="py-4 px-3 text-center text-gray-400">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Pagination -->
+    <div class="flex items-center justify-between mt-3 text-sm">
+        <div class="text-gray-500" id="cache-page-info"></div>
+        <div class="flex items-center gap-2">
+            <button id="cache-page-prev" class="px-3 py-1 rounded border border-cream-300 text-ink-700 hover:bg-cream-100 disabled:opacity-40" disabled>Prev</button>
+            <button id="cache-page-next" class="px-3 py-1 rounded border border-cream-300 text-ink-700 hover:bg-cream-100 disabled:opacity-40" disabled>Next</button>
+        </div>
     </div>
 </div>
+
+<!-- Cache entry detail side panel (fixed-position; rendered once, independent of tab) -->
+<div id="cache-detail-panel" class="fixed top-0 right-0 h-full w-full md:w-1/2 lg:w-1/3 bg-white border-l border-cream-200 shadow-lg transform translate-x-full transition-transform z-40 overflow-y-auto" style="background:#fff;">
+    <div class="p-4 border-b border-cream-200 flex items-center justify-between" style="background:#f5f3ee;">
+        <h3 class="font-semibold text-ink-800">Entry Detail</h3>
+        <button onclick="closeCacheDetail()" class="text-gray-400 hover:text-ink-800 text-xl leading-none">&times;</button>
+    </div>
+    <div class="p-4" id="cache-detail-body">
+        <div class="text-gray-400">Select an entry...</div>
+    </div>
+</div>
+{% endif %}
+
+<!-- ==================== DATABASES TAB ==================== -->
+<div data-tab-panel="databases">
+    <div class="flex items-center justify-between mb-3">
+        <h2 class="text-xl font-bold text-ink-900">Databases</h2>
+        <div class="flex items-center gap-3">
+            <button id="btn-merge" disabled
+                    class="px-4 py-2 text-sm font-medium rounded disabled:opacity-40"
+                    style="background:#2a2a2a;color:white;">
+                Merge Selected
+            </button>
+            <button id="btn-refresh" class="px-3 py-2 text-sm rounded border border-cream-300 text-ink-700 hover:bg-cream-100">
+                Refresh
+            </button>
+        </div>
+    </div>
+
+    <div class="flex items-center gap-3 mb-4">
+        <label class="text-xs text-gray-500">Worker:</label>
+        <select id="db-worker-filter" class="bg-white border border-cream-300 rounded px-2 py-1 text-sm text-ink-700 focus:border-teal-400 focus:outline-none">
+            <option value="">All workers</option>
+        </select>
+        <span id="db-count" class="text-xs text-gray-400 ml-auto"></span>
+    </div>
+    <div id="db-list" class="space-y-6">
+        <div class="text-gray-500">Loading...</div>
+    </div>
+
+    <!-- merge result banner -->
+    <div id="merge-result" class="hidden mt-4 p-4 rounded border border-green-300 bg-green-50">
+        <div class="flex items-center justify-between">
+            <div>
+                <span class="font-semibold text-green-800" id="merge-msg"></span>
+            </div>
+            <a id="merge-download" href="#" class="px-3 py-1 text-sm rounded font-medium"
+               style="background:#2a2a2a;color:white;">
+                Download
+            </a>
+        </div>
+    </div>
 </div>
 
 <script>
-// === Section collapse/expand ===
-function toggleSection(name) {
-    var body = document.querySelector('[data-section-body="' + name + '"]');
-    var chevron = document.querySelector('[data-chevron="' + name + '"]');
-    if (!body) return;
-    var isVisible = body.style.display !== 'none';
-    body.style.display = isVisible ? 'none' : '';
-    chevron.style.transform = isVisible ? '' : 'rotate(90deg)';
-    localStorage.setItem('drakkar-debug-' + name, isVisible ? '0' : '1');
-}
+// === Tab switching ===
+// Pure UI show/hide — data for each tab is fetched on initial page load (see
+// the IIFE further down). Tab state persists via localStorage and supports
+// the legacy ``#trace/P/O`` deep-link which auto-selects the Trace tab.
 (function() {
-    ['metrics', 'periodic', 'trace', 'databases'].forEach(function(name) {
-        var state = localStorage.getItem('drakkar-debug-' + name);
-        var body = document.querySelector('[data-section-body="' + name + '"]');
-        var chevron = document.querySelector('[data-chevron="' + name + '"]');
-        if (!body || !chevron) return;
-        if (state === '1') {
-            // explicitly opened — show expanded
-            chevron.style.transform = 'rotate(90deg)';
-        } else {
-            // default or explicitly collapsed — fold
-            body.style.display = 'none';
-        }
+    var AVAILABLE_TABS = Array.from(document.querySelectorAll('[data-tab-panel]'))
+        .map(function(p) { return p.dataset.tabPanel; });
+
+    function showTab(name) {
+        if (AVAILABLE_TABS.indexOf(name) === -1) name = AVAILABLE_TABS[0] || 'metrics';
+        document.querySelectorAll('[data-tab-panel]').forEach(function(p) {
+            p.style.display = p.dataset.tabPanel === name ? '' : 'none';
+        });
+        document.querySelectorAll('.tab-btn').forEach(function(b) {
+            var active = b.dataset.tab === name;
+            // Active = teal underline + dark text; inactive = transparent border + gray.
+            b.classList.toggle('border-teal-500', active);
+            b.classList.toggle('text-ink-800', active);
+            b.classList.toggle('border-transparent', !active);
+            b.classList.toggle('text-gray-500', !active);
+        });
+        localStorage.setItem('drakkar-debug-tab', name);
+    }
+    // expose for use from inside other IIFEs (e.g. trace deep-link)
+    window.drakkarShowDebugTab = showTab;
+
+    document.querySelectorAll('.tab-btn').forEach(function(b) {
+        b.onclick = function() { showTab(b.dataset.tab); };
     });
+
+    // Initial tab: URL hash → localStorage → first available.
+    var hash = location.hash.slice(1);
+    var initial;
+    if (hash.startsWith('trace/')) initial = 'trace';
+    else if (hash && AVAILABLE_TABS.indexOf(hash) !== -1) initial = hash;
+    else initial = localStorage.getItem('drakkar-debug-tab') || AVAILABLE_TABS[0];
+    showTab(initial);
 })();
 
 (function() {
@@ -606,7 +704,7 @@ function toggleSection(name) {
 
     function sortIndicator(key) {
         if (dbSortCol !== key) return '';
-        return dbSortAsc ? ' \u25B2' : ' \u25BC';
+        return dbSortAsc ? ' ▲' : ' ▼';
     }
 
     function makeHeaderRow() {
@@ -1023,12 +1121,14 @@ function toggleSection(name) {
     loadPeriodic();
     loadDatabases();
 
-    // Handle #trace/P/O deep links
+    // Handle #trace/P/O deep links — activates the Trace tab and runs the
+    // trace immediately. Works both on initial page load and later hashchange.
     function initFromHash() {
         var hash = location.hash.slice(1);
         if (hash.startsWith('trace/')) {
             var parts = hash.split('/');
             if (parts.length >= 3) {
+                if (window.drakkarShowDebugTab) window.drakkarShowDebugTab('trace');
                 traceInput.value = parts[1] + ':' + parts[2];
                 loadTrace();
             }
@@ -1037,5 +1137,246 @@ function toggleSection(name) {
     initFromHash();
     window.addEventListener('hashchange', initFromHash);
 })();
+
+{% if is_cache_enabled() %}
+// === Cache tab ===
+// Runs only when the cache feature is enabled. Scoped IDs (``cache-*``)
+// prevent collision with other tab IDs; the detail side panel lives at
+// document root so its fixed positioning is unaffected by the tab's
+// display:none toggling.
+(function() {
+    var statEntriesMem = document.getElementById('stat-entries-mem');
+    var statBytesMem = document.getElementById('stat-bytes-mem');
+    var statEntriesDb = document.getElementById('stat-entries-db');
+    var statBytesDb = document.getElementById('stat-bytes-db');
+
+    var filterScope = document.getElementById('cache-filter-scope');
+    var filterSearch = document.getElementById('cache-filter-search');
+    var filterExpired = document.getElementById('cache-filter-expired');
+    var applyBtn = document.getElementById('cache-filter-apply');
+
+    var entriesBody = document.getElementById('cache-entries-body');
+    var entriesStatus = document.getElementById('cache-entries-status');
+    var pageInfo = document.getElementById('cache-page-info');
+    var pagePrev = document.getElementById('cache-page-prev');
+    var pageNext = document.getElementById('cache-page-next');
+
+    var detailPanel = document.getElementById('cache-detail-panel');
+    var detailBody = document.getElementById('cache-detail-body');
+
+    var PAGE_SIZE = 200;
+    var offset = 0;
+    var total = 0;
+
+    function formatBytes(n) {
+        if (n == null) return '-';
+        if (n < 1024) return n + ' B';
+        if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+        return (n / 1048576).toFixed(1) + ' MB';
+    }
+
+    function formatTsMs(ms) {
+        if (!ms) return '-';
+        return new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
+    }
+
+    function loadStats() {
+        fetch('/api/debug/cache/stats').then(function(r) { return r.json(); }).then(function(s) {
+            statEntriesMem.textContent = s.entries_in_memory != null ? s.entries_in_memory : '-';
+            statBytesMem.textContent = formatBytes(s.bytes_in_memory);
+            statEntriesDb.textContent = s.entries_in_db != null ? s.entries_in_db : '-';
+            statBytesDb.textContent = formatBytes(s.bytes_in_db);
+        }).catch(function() {});
+    }
+
+    function buildQuery() {
+        var params = new URLSearchParams();
+        params.set('limit', PAGE_SIZE);
+        params.set('offset', offset);
+        if (filterScope.value) params.set('scope', filterScope.value);
+        if (filterSearch.value.trim()) params.set('search', filterSearch.value.trim());
+        if (filterExpired.checked) params.set('expired_only', 'true');
+        return params.toString();
+    }
+
+    function loadEntries() {
+        entriesBody.textContent = '';
+        var loading = document.createElement('tr');
+        var loadingTd = document.createElement('td');
+        loadingTd.setAttribute('colspan', '6');
+        loadingTd.className = 'py-4 px-3 text-center text-gray-400';
+        loadingTd.textContent = 'Loading...';
+        loading.appendChild(loadingTd);
+        entriesBody.appendChild(loading);
+
+        fetch('/api/debug/cache/entries?' + buildQuery()).then(function(r) { return r.json(); }).then(function(body) {
+            total = body.total || 0;
+            renderEntries(body.entries || []);
+            updatePagination();
+        }).catch(function() {
+            entriesBody.textContent = '';
+            var err = document.createElement('tr');
+            var errTd = document.createElement('td');
+            errTd.setAttribute('colspan', '6');
+            errTd.className = 'py-4 px-3 text-center text-red-500';
+            errTd.textContent = 'Failed to load entries';
+            err.appendChild(errTd);
+            entriesBody.appendChild(err);
+        });
+    }
+
+    function renderEntries(entries) {
+        entriesBody.textContent = '';
+        if (!entries.length) {
+            var empty = document.createElement('tr');
+            var emptyTd = document.createElement('td');
+            emptyTd.setAttribute('colspan', '6');
+            emptyTd.className = 'py-4 px-3 text-center text-gray-400';
+            emptyTd.textContent = total ? 'No entries on this page' : 'No cache entries';
+            empty.appendChild(emptyTd);
+            entriesBody.appendChild(empty);
+            return;
+        }
+        var now = Date.now();
+        entries.forEach(function(e) {
+            var tr = document.createElement('tr');
+            tr.className = 'border-b border-cream-100 hover:bg-cream-50 cursor-pointer';
+            tr.onclick = function() { openDetail(e.key); };
+
+            var tdKey = document.createElement('td');
+            tdKey.className = 'py-2 px-3 font-mono text-xs';
+            tdKey.textContent = e.key;
+            tdKey.title = e.key;
+
+            var tdScope = document.createElement('td');
+            tdScope.className = 'py-2 px-3 text-xs';
+            var scopePill = document.createElement('span');
+            scopePill.className = 'px-2 py-0.5 rounded text-xs font-semibold';
+            if (e.scope === 'local') { scopePill.style.background = '#fef3c7'; scopePill.style.color = '#92400e'; }
+            else if (e.scope === 'cluster') { scopePill.style.background = '#dbeafe'; scopePill.style.color = '#1e40af'; }
+            else { scopePill.style.background = '#d1fae5'; scopePill.style.color = '#065f46'; }
+            scopePill.textContent = e.scope;
+            tdScope.appendChild(scopePill);
+
+            var tdSize = document.createElement('td');
+            tdSize.className = 'py-2 px-3 font-mono text-xs';
+            tdSize.textContent = formatBytes(e.size_bytes);
+
+            var tdUpdated = document.createElement('td');
+            tdUpdated.className = 'py-2 px-3 text-xs text-gray-500';
+            tdUpdated.textContent = formatTsMs(e.updated_at_ms);
+
+            var tdExpires = document.createElement('td');
+            tdExpires.className = 'py-2 px-3 text-xs';
+            if (e.expires_at_ms == null) {
+                tdExpires.style.color = '#6b7280';
+                tdExpires.textContent = 'never';
+            } else if (e.expires_at_ms < now) {
+                tdExpires.style.color = '#dc2626';
+                tdExpires.textContent = 'expired';
+                tdExpires.title = formatTsMs(e.expires_at_ms);
+            } else {
+                tdExpires.style.color = '#6b7280';
+                tdExpires.textContent = formatTsMs(e.expires_at_ms);
+            }
+
+            var tdOrigin = document.createElement('td');
+            tdOrigin.className = 'py-2 px-3 font-mono text-xs text-gray-500';
+            tdOrigin.textContent = e.origin_worker_id;
+
+            tr.append(tdKey, tdScope, tdSize, tdUpdated, tdExpires, tdOrigin);
+            entriesBody.appendChild(tr);
+        });
+    }
+
+    function updatePagination() {
+        var start = Math.min(offset + 1, total);
+        var end = Math.min(offset + PAGE_SIZE, total);
+        pageInfo.textContent = total ? (start + '-' + end + ' of ' + total) : '';
+        entriesStatus.textContent = total + ' matching entries';
+        pagePrev.disabled = offset <= 0;
+        pageNext.disabled = offset + PAGE_SIZE >= total;
+    }
+
+    function openDetail(key) {
+        detailBody.textContent = '';
+        var loading = document.createElement('div');
+        loading.className = 'text-gray-400';
+        loading.textContent = 'Loading...';
+        detailBody.appendChild(loading);
+        detailPanel.style.transform = 'translateX(0)';
+
+        fetch('/api/debug/cache/entry/' + encodeURIComponent(key)).then(function(r) {
+            if (r.status === 404) throw new Error('Entry not found');
+            return r.json();
+        }).then(function(entry) {
+            detailBody.textContent = '';
+            var field = function(label, value) {
+                var row = document.createElement('div');
+                row.className = 'mb-3';
+                var lbl = document.createElement('div');
+                lbl.className = 'text-xs text-gray-500 uppercase tracking-wide';
+                lbl.textContent = label;
+                var val = document.createElement('div');
+                val.className = 'font-mono text-sm break-all text-ink-800';
+                val.textContent = value;
+                row.append(lbl, val);
+                return row;
+            };
+            detailBody.appendChild(field('Key', entry.key));
+            detailBody.appendChild(field('Scope', entry.scope));
+            detailBody.appendChild(field('Size', formatBytes(entry.size_bytes)));
+            detailBody.appendChild(field('Created', formatTsMs(entry.created_at_ms)));
+            detailBody.appendChild(field('Updated', formatTsMs(entry.updated_at_ms)));
+            detailBody.appendChild(field('Expires', entry.expires_at_ms == null ? 'never' : formatTsMs(entry.expires_at_ms)));
+            detailBody.appendChild(field('Origin Worker', entry.origin_worker_id));
+
+            var valueLbl = document.createElement('div');
+            valueLbl.className = 'text-xs text-gray-500 uppercase tracking-wide mt-2';
+            valueLbl.textContent = 'Value';
+            detailBody.appendChild(valueLbl);
+            var pre = document.createElement('pre');
+            pre.className = 'bg-cream-100 p-3 rounded text-xs font-mono break-all whitespace-pre-wrap';
+            if (entry.value != null) {
+                pre.textContent = JSON.stringify(entry.value, null, 2);
+            } else {
+                pre.textContent = entry.raw_value || '';
+            }
+            detailBody.appendChild(pre);
+        }).catch(function(err) {
+            detailBody.textContent = '';
+            var errDiv = document.createElement('div');
+            errDiv.className = 'text-red-500';
+            errDiv.textContent = err.message || 'Failed to load entry';
+            detailBody.appendChild(errDiv);
+        });
+    }
+
+    window.closeCacheDetail = function() {
+        detailPanel.style.transform = 'translateX(100%)';
+    };
+
+    applyBtn.onclick = function() {
+        offset = 0;
+        loadEntries();
+    };
+    filterSearch.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { offset = 0; loadEntries(); }
+    });
+
+    pagePrev.onclick = function() {
+        offset = Math.max(0, offset - PAGE_SIZE);
+        loadEntries();
+    };
+    pageNext.onclick = function() {
+        offset += PAGE_SIZE;
+        loadEntries();
+    };
+
+    loadStats();
+    loadEntries();
+    setInterval(loadStats, 5000);
+})();
+{% endif %}
 </script>
 {% endblock %}

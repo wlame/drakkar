@@ -305,18 +305,20 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
         meta = result.task.metadata
 
         # Persist into the framework cache for subsequent fast-track
-        # hits. ``scope=LOCAL`` keeps the value on this worker only —
-        # peers will compute their own; change to CLUSTER to share
-        # across workers in the same cluster (LWW merges via the
-        # periodic peer-sync loop). TTL cleans old entries out of the
-        # on-disk DB automatically.
+        # hits. ``scope=CLUSTER`` shares across all workers in the same
+        # cluster (cluster_name) — the periodic peer-sync loop pulls
+        # recent rows from peer ``-cache.db`` files and LWW-merges. This
+        # demonstrates cross-worker cache sharing in the integration
+        # scenario; switch to LOCAL to keep per-worker caches isolated,
+        # or GLOBAL to share across clusters. TTL cleans old entries
+        # out of the on-disk DB automatically.
         if result.pid is not None:
             cache_key = f'match|{meta["pattern"]}|{meta["file_path"]}|{meta["repeat"]}'
             self.cache.set(
                 cache_key,
                 result.stdout,
                 ttl=3600,
-                scope=dk.CacheScope.LOCAL,
+                scope=dk.CacheScope.CLUSTER,
             )
 
         # build typed output models

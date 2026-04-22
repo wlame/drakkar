@@ -1,10 +1,14 @@
-"""Tests for the debug UI cache page and cache API endpoints.
+"""Tests for the cache tab within the /debug page and cache API endpoints.
 
-Task 16 adds four debug-UI surfaces for the framework cache:
+The cache UI lives as a tab inside the ``/debug`` page (alongside Metrics,
+Periodic Tasks, Message Trace, and Databases). There is no standalone
+``/debug/cache`` route — the cache tab is conditionally rendered in
+``debug.html`` based on the ``is_cache_enabled()`` Jinja global.
 
-- ``GET /debug/cache`` — HTML page with stats, filter bar, entries table
+Endpoints tested:
+
 - ``GET /api/debug/cache/entries`` — paginated JSON listing of rows, with
-  scope/prefix/expired_only filters
+  scope/search/expired_only filters
 - ``GET /api/debug/cache/entry/{key}`` — single row with decoded value
   and full metadata (used by the detail side panel)
 - ``GET /api/debug/cache/stats`` — snapshot of the Prometheus cache
@@ -15,9 +19,9 @@ Plus a related modification:
 - ``GET /api/debug/periodic`` now surfaces ``system: bool`` on each task
   entry (derived from ``metadata.system``, default False when absent)
 
-When ``cache.enabled=false`` the HTML page returns 404 and the nav link
-in ``base.html`` is hidden — tested here via both the /debug/cache endpoint
-and by rendering the dashboard and checking for the Cache nav link.
+Tab visibility: when the cache engine is absent, the Cache tab button and
+panel are omitted from the rendered /debug page (checked by looking for
+``data-tab="cache"`` in the HTML).
 
 Isolation: ``tmp_path`` for DB files, ``AsyncMock`` for the recorder,
 ``MagicMock`` for DrakkarApp. A real ``CacheEngine`` is only stood up in
@@ -203,35 +207,56 @@ class TestApiPeriodicSystemField:
 
 
 # ---------------------------------------------------------------------------
-# 2. /debug/cache HTML page — 200 when enabled, 404 when disabled
+# 2. Cache tab inside /debug page — present when engine live, absent otherwise
 # ---------------------------------------------------------------------------
 
 
-class TestCachePageRoute:
-    """The /debug/cache HTML page renders when the cache is enabled and
-    returns 404 when it's disabled (so stale browser tabs don't show a
-    half-broken page)."""
+class TestCacheTabInDebugPage:
+    """The /debug page renders the Cache tab conditionally based on whether
+    the cache engine is active. Standalone /debug/cache route was removed —
+    cache UI now lives as a tab inside /debug."""
 
-    async def test_cache_page_404_when_engine_none(self, mock_recorder, debug_config):
-        """No cache_engine → 404. This covers both ``cache.enabled=false``
-        and the "engine failed to start" case (both result in None)."""
+    async def test_cache_tab_absent_when_engine_none(self, mock_recorder, debug_config):
+        """No cache_engine → /debug renders without the Cache tab button or panel."""
         fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=None))
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/debug/cache')
-        assert resp.status_code == 404
+            resp = await c.get('/debug')
+        assert resp.status_code == 200
+        # The tab button carries data-tab="cache"; the panel carries data-tab-panel="cache".
+        # Neither should appear when the engine is None.
+        assert 'data-tab="cache"' not in resp.text
+        assert 'data-tab-panel="cache"' not in resp.text
 
-    async def test_cache_page_200_when_engine_present(self, tmp_path, mock_recorder, debug_config):
-        """A live cache engine → 200 with the cache template rendered."""
+    async def test_cache_tab_present_when_engine_live(self, tmp_path, mock_recorder, debug_config):
+        """A live cache engine → /debug includes the Cache tab button + panel."""
+        engine = await _start_live_engine(tmp_path)
+        try:
+            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            transport = ASGITransport(app=fastapi_app)
+            async with AsyncClient(transport=transport, base_url='http://test') as c:
+                resp = await c.get('/debug')
+            assert resp.status_code == 200
+            assert 'data-tab="cache"' in resp.text
+            assert 'data-tab-panel="cache"' in resp.text
+            # Stats cards (memory/DB) should be present inside the panel
+            assert 'stat-entries-mem' in resp.text
+        finally:
+            await engine.stop()
+
+    async def test_standalone_cache_route_removed(self, tmp_path, mock_recorder, debug_config):
+        """The old /debug/cache HTML route no longer exists — it 404s even
+        when the engine is live (content moved into /debug as a tab)."""
         engine = await _start_live_engine(tmp_path)
         try:
             fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/debug/cache')
-            assert resp.status_code == 200
-            # Basic smoke: the cache template must land under 'Cache' heading
-            assert 'Cache' in resp.text
+            # FastAPI returns 404 for unknown paths — this confirms the route
+            # was dropped and is not accidentally resurrected by a Jinja
+            # template resolution or similar.
+            assert resp.status_code == 404
         finally:
             await engine.stop()
 
@@ -336,12 +361,12 @@ class TestApiCacheEntries:
         finally:
             await engine.stop()
 
-    async def test_default_limit_is_100(self, tmp_path, mock_recorder, debug_config):
-        """Default limit is 100 per the plan spec."""
+    async def test_default_limit_is_200(self, tmp_path, mock_recorder, debug_config):
+        """Default limit is 200 — matches the UI page size."""
         engine = await _start_live_engine(tmp_path)
         try:
-            # Insert 150 entries so we can see the limit kick in
-            for i in range(150):
+            # Insert 250 entries so we can see the limit kick in
+            for i in range(250):
                 await _write_entry(engine, key=f'k{i:03d}', value=f'"v{i}"')
 
             fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
@@ -349,8 +374,8 @@ class TestApiCacheEntries:
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entries')
             body = resp.json()
-            assert len(body['entries']) == 100  # default clamp
-            assert body['total'] == 150  # total unfiltered
+            assert len(body['entries']) == 200  # default clamp
+            assert body['total'] == 250  # total unfiltered
         finally:
             await engine.stop()
 
@@ -435,20 +460,40 @@ class TestApiCacheEntries:
         finally:
             await engine.stop()
 
-    async def test_filter_by_prefix(self, tmp_path, mock_recorder, debug_config):
+    async def test_filter_by_search(self, tmp_path, mock_recorder, debug_config):
         engine = await _start_live_engine(tmp_path)
         try:
             await _write_entry(engine, key='user:alice', value='"v"')
             await _write_entry(engine, key='user:bob', value='"v"')
             await _write_entry(engine, key='session:xyz', value='"v"')
+            await _write_entry(engine, key='job:users:42', value='"v"')
             fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
-                resp = await c.get('/api/debug/cache/entries?prefix=user:')
+                # Substring match — 'user' hits both 'user:*' entries AND 'job:users:42'
+                # (which a prefix match would miss).
+                resp = await c.get('/api/debug/cache/entries?search=user')
             body = resp.json()
-            assert body['total'] == 2
+            assert body['total'] == 3
             keys = {e['key'] for e in body['entries']}
-            assert keys == {'user:alice', 'user:bob'}
+            assert keys == {'user:alice', 'user:bob', 'job:users:42'}
+        finally:
+            await engine.stop()
+
+    async def test_filter_by_search_escapes_wildcards(self, tmp_path, mock_recorder, debug_config):
+        """Literal % or _ in the search query must not be interpreted as LIKE wildcards."""
+        engine = await _start_live_engine(tmp_path)
+        try:
+            await _write_entry(engine, key='user:alice', value='"v"')
+            await _write_entry(engine, key='user%bob', value='"v"')  # literal %
+            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            transport = ASGITransport(app=fastapi_app)
+            async with AsyncClient(transport=transport, base_url='http://test') as c:
+                resp = await c.get('/api/debug/cache/entries?search=%25')  # URL-encoded %
+            body = resp.json()
+            # Only the key containing a literal % should match, not all keys.
+            assert body['total'] == 1
+            assert body['entries'][0]['key'] == 'user%bob'
         finally:
             await engine.stop()
 
@@ -584,8 +629,13 @@ class TestApiCacheStats:
 # ---------------------------------------------------------------------------
 
 
-class TestCacheNavLink:
-    async def test_nav_shows_cache_link_when_enabled(self, tmp_path, mock_recorder, debug_config):
+class TestTopLevelNavHasNoCache:
+    """Top-level nav in base.html no longer carries a dedicated Cache link —
+    cache is reached via the Cache tab inside /debug (see
+    ``TestCacheTabInDebugPage``). These tests pin that removal so a future
+    regression restoring the link is caught."""
+
+    async def test_dashboard_nav_has_no_cache_link_even_when_enabled(self, tmp_path, mock_recorder, debug_config):
         engine = await _start_live_engine(tmp_path)
         try:
             fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
@@ -593,17 +643,15 @@ class TestCacheNavLink:
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/')
             assert resp.status_code == 200
-            # 'Cache' nav link anchored to /debug/cache must appear
-            assert '/debug/cache' in resp.text
-            assert 'Cache' in resp.text
+            # No href pointing at a standalone /debug/cache page
+            assert '/debug/cache' not in resp.text
         finally:
             await engine.stop()
 
-    async def test_nav_hides_cache_link_when_disabled(self, mock_recorder, debug_config):
+    async def test_dashboard_nav_has_no_cache_link_when_disabled(self, mock_recorder, debug_config):
         fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=None))
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/')
         assert resp.status_code == 200
-        # The Cache nav entry should not appear when the engine is absent
         assert '/debug/cache' not in resp.text
