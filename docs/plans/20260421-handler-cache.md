@@ -600,15 +600,15 @@ class Cache:
 
 ### Task 19: Verify acceptance criteria
 
-- [ ] full test run: `uv run pytest tests/ -v`
-- [ ] coverage report: `uv run pytest tests/ --cov=drakkar --cov-report=term --cov-report=html` — verify ≥90% on all new `drakkar/cache.py` / `drakkar/peer_discovery.py`; project floor ≥75%
-- [ ] ruff clean: `uvx ruff check drakkar/ tests/ integration/`
-- [ ] ty clean: `uv run ty check drakkar/`
-- [ ] verify every Overview bullet is implemented
-- [ ] verify graceful degradation paths: cache disabled, peer sync disabled, no db_dir, `debug.store_config=false`, single peer down, all peers down, LRU cap reached
-- [ ] verify Pydantic roundtrip end-to-end (create a `PrecomputedResult`, set, get with as_type, assert equality)
-- [ ] verify `cache=` token appears correctly in startup log summary across configurations (cache off, cache on all intervals, cache on sync off, cache on max set)
-- [ ] verify the documented "delete is local-only" sharp edge: write a test that syncs key to peer, deletes locally, runs sync, confirms peer's key still present and is re-pulled
+- [x] full test run: `uv run pytest tests/ -v` — 1146 tests pass
+- [x] coverage report: `uv run pytest tests/ --cov=drakkar --cov-report=term --cov-report=html` — `drakkar/cache.py` 97%, `drakkar/peer_discovery.py` 100%, project total 93.90% (floor ≥75% met)
+- [x] ruff clean: `uvx ruff check drakkar/ tests/ integration/` — all checks passed
+- [x] ty clean: `uv run ty check drakkar/` — all checks passed
+- [x] verify every Overview bullet is implemented — `self.cache` on handler (Task 15), memory+SQLite write-behind (Tasks 4/6/7/8), peer sync via symlinks (Tasks 1/11/12/13), debug UI inspection (Task 16), Prometheus metrics (Task 14), shared peer discovery helper (Task 1), `run_periodic_task(system=True)` loops (Tasks 5/8/10/13). Handler short-circuit via `self.cache.peek()` wired in integration demo (Task 17).
+- [x] verify graceful degradation paths: cache disabled (`tests/test_handler_cache.py::test_noop_cache_*`), peer sync disabled (`tests/test_cache_sync_pull.py::test_sync_once_noop_when_peer_sync_disabled`), no db_dir (`tests/test_cache_engine_lifecycle.py::test_start_without_db_dir_logs_warning_and_disables`), `debug.store_config=false` (`tests/test_cache_sync_pull.py::test_store_config_disabled_effective_disables_sync`), single peer down (`tests/test_cache_sync_cursor.py::test_peer_error_does_not_affect_other_peers`), all peers down (`tests/test_cache_sync_cursor.py::test_peer_error_variants_isolate_and_continue`), LRU cap reached (`tests/test_cache_api.py::test_lru_eviction_*`)
+- [x] verify Pydantic roundtrip end-to-end — `tests/test_handler_cache.py::test_pydantic_roundtrip_via_handler_cache` covers `PrecomputedResult` set → get with `as_type`
+- [x] verify `cache=` token appears correctly in startup log summary across configurations — `tests/test_config_modes.py` covers cache=off, cache=on with defaults, fractional intervals, sync=off, max_memory_entries set
+- [x] verify the documented "delete is local-only" sharp edge — `tests/test_cache_sync_cursor.py::test_delete_is_local_only_peer_copy_survives_and_is_repulled` tests full syncs-key-to-peer → deletes-locally → re-pulled flow; also `tests/test_cache_api.py::test_delete_is_local_only_no_peer_propagation_mechanism` covers the API-level guarantee
 
 ### Task 20: Move plan to completed
 
