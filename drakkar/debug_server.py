@@ -34,6 +34,54 @@ class _ArrangeTaskLookupRequest(BaseModel):
     task_ids: list[str] = Field(default_factory=list, max_length=5000)
 
 
+# ``/api/live/sink-breakdown`` request body — also at module scope for the
+# same reason. Aggregates ``produced`` events by ``output_topic`` (sink
+# name) for a given (partition, offsets[]) tuple. Called from the
+# completion-hook sidebars (Task Results, Message Results, Window
+# Results) to show per-sink-type output counts on demand.
+class _SinkBreakdownRequest(BaseModel):
+    partition: int
+    offsets: list[int] = Field(default_factory=list, max_length=5000)
+
+
+def _hook_flags(handler: object) -> dict[str, bool]:
+    """Detect which completion hooks the user's handler overrides.
+
+    The Live view uses this to render only the tabs that actually have
+    semantic meaning for this handler — an empty "Window Results" tab on
+    a handler that never implements ``on_window_complete`` is just noise.
+
+    We compare bound-method identity against the base class's no-op
+    implementation. A subclass that overrides the hook has a different
+    function object reachable via ``type(handler).on_*``; one that
+    inherits the default shares the same object. This works for:
+
+      * standard subclasses of BaseDrakkarHandler (common case)
+      * handlers that implement DrakkarHandler directly without
+        subclassing — their on_* methods aren't the base class's, so
+        they also register as "implemented"
+
+    Handlers that use composition or decorators that wrap the method
+    will still register as "implemented" — we err on the side of showing
+    the tab rather than hiding it.
+    """
+    # Import here to avoid a circular import; handler imports debug_server
+    # only via app.py's wiring, but the other direction is live.
+    from drakkar.handler import BaseDrakkarHandler
+
+    cls = type(handler)
+    # ``getattr`` on the class (not the instance) so we compare unbound
+    # function objects — bound methods would wrap with a different id
+    # per-instance and break the identity check. A handler that somehow
+    # lacks one of these attributes (shouldn't happen given Protocol
+    # conformance) is treated as "not implemented".
+    return {
+        'task_complete': getattr(cls, 'on_task_complete', None) is not BaseDrakkarHandler.on_task_complete,
+        'message_complete': getattr(cls, 'on_message_complete', None) is not BaseDrakkarHandler.on_message_complete,
+        'window_complete': getattr(cls, 'on_window_complete', None) is not BaseDrakkarHandler.on_window_complete,
+    }
+
+
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
 
@@ -492,6 +540,8 @@ def create_debug_app(
         # ``partition_count`` powers the Arrange tab's "last N batches" cap
         # (3 x partition_count) so the live list stays stable-sized regardless
         # of how many partitions the broker has assigned to this worker.
+        # ``hook_flags`` hides completion-hook tabs (Task/Message/Window
+        # Results) for hooks the handler doesn't implement.
         return templates.TemplateResponse(
             request,
             'live.html',
@@ -507,6 +557,13 @@ def create_debug_app(
                 'partition_count': len(drakkar_app.processors),
                 'max_ui_rows': config.max_ui_rows,
                 'ws_min_duration_ms': config.ws_min_duration_ms,
+                'hook_flags': _hook_flags(drakkar_app.handler)
+                if drakkar_app.handler
+                else {
+                    'task_complete': False,
+                    'message_complete': False,
+                    'window_complete': False,
+                },
             },
         )
 
@@ -1260,6 +1317,231 @@ def create_debug_app(
                     t['pid'] = e['pid']
 
         return JSONResponse(result)
+
+    # ------------------------------------------------------------------
+    # Completion-hook result feeds for the Live view's three new tabs:
+    #   * Task Results     — one row per on_task_complete()  call
+    #   * Message Results  — one row per on_message_complete() call
+    #   * Window Results   — one row per on_window_complete() call
+    # Each endpoint returns the most recent N rows ordered by ts DESC.
+    # No joins: all the user-visible columns are already in the event's
+    # metadata JSON (see recorder.record_task_complete etc.). Sink-type
+    # breakdown is fetched lazily by the sidebar via /api/live/sink-breakdown.
+    # ------------------------------------------------------------------
+
+    async def _fetch_events(event_name: str, limit: int) -> list[dict]:
+        """Common helper for the three completion-hook endpoints.
+
+        Returns raw events (ts DESC, limited) as list of dicts, or empty
+        list when recorder storage is disabled. Callers parse metadata
+        themselves because each event type has different metadata shape.
+        """
+        await recorder._flush()
+        if not recorder._db or not recorder._config.store_events:
+            return []
+        query = (
+            'SELECT ts, task_id, partition, offset, duration, metadata '
+            'FROM events WHERE event = ? ORDER BY id DESC LIMIT ?'
+        )
+        async with recorder._db.execute(query, (event_name, limit)) as cur:
+            columns = [d[0] for d in cur.description]
+            rows = await cur.fetchall()
+            return [dict(zip(columns, row, strict=False)) for row in rows]
+
+    def _parse_meta(raw: str | None) -> dict:
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    @app.get('/api/live/task-results')
+    async def api_live_task_results(limit: int = Query(default=200, ge=0, le=5000)):
+        """Latest N ``task_complete`` events with their matching exec state.
+
+        For each task_complete row we pair the subprocess-level outcome
+        (task_completed or task_failed) by task_id so the UI can surface
+        both the exec duration (how long the subprocess ran) and the hook
+        duration (how long on_task_complete took). Exec state comes from
+        a single extra SELECT with ``task_id IN (...)`` — one round-trip
+        per page, not per row.
+        """
+        events = await _fetch_events('task_complete', limit)
+        task_ids = [e['task_id'] for e in events if e.get('task_id')]
+        # Batch lookup across three related event types in one query —
+        # task_started carries ``source_offsets`` in metadata (essential
+        # for rendering the message source in the UI), while
+        # task_completed/task_failed carry the subprocess exit status.
+        aux_by_id: dict[str, dict] = {}
+        if task_ids and recorder._db:
+            placeholders = ','.join(['?'] * len(task_ids))
+            q = (
+                f'SELECT task_id, event, duration, exit_code, metadata '
+                f'FROM events WHERE task_id IN ({placeholders}) '
+                f"AND event IN ('task_started', 'task_completed', 'task_failed')"
+            )
+            async with recorder._db.execute(q, task_ids) as cur:
+                cols = [d[0] for d in cur.description]
+                for row in await cur.fetchall():
+                    ex = dict(zip(cols, row, strict=False))
+                    entry = aux_by_id.setdefault(
+                        ex['task_id'],
+                        {'exec_duration': None, 'status': None, 'exit_code': None, 'source_offsets': None},
+                    )
+                    if ex['event'] == 'task_started':
+                        started_meta = _parse_meta(ex.get('metadata'))
+                        so = started_meta.get('source_offsets')
+                        if isinstance(so, list):
+                            entry['source_offsets'] = so
+                    else:
+                        # Last-write-wins on retries within the batch.
+                        entry['exec_duration'] = ex.get('duration')
+                        entry['status'] = 'completed' if ex['event'] == 'task_completed' else 'failed'
+                        entry['exit_code'] = ex.get('exit_code')
+        result = []
+        for e in events:
+            meta = _parse_meta(e.get('metadata'))
+            aux = aux_by_id.get(e.get('task_id') or '', {})
+            result.append(
+                {
+                    'ts': e['ts'],
+                    'task_id': e.get('task_id'),
+                    'partition': e.get('partition'),
+                    'source_offsets': aux.get('source_offsets'),
+                    'hook_duration': e.get('duration'),
+                    'exec_duration': aux.get('exec_duration'),
+                    'status': aux.get('status'),
+                    'exit_code': aux.get('exit_code'),
+                    'output_message_count': meta.get('output_message_count', 0),
+                }
+            )
+        return JSONResponse(result)
+
+    @app.get('/api/live/message-results')
+    async def api_live_message_results(limit: int = Query(default=200, ge=0, le=5000)):
+        """Latest N ``message_complete`` events.
+
+        All summary data lives in metadata (task_count / succeeded /
+        failed / replaced / output_message_count). In addition we pair
+        each row with its matching ``consumed`` event (by partition +
+        offset) so the response carries ``end_to_end_duration`` — the
+        wall-clock time from poll to on_message_complete finish, which
+        includes arrange time, task scheduling, subprocess execution,
+        and hook runtime. For a message that was consumed multiple
+        times (replay after restart), we pick the most recent consumed
+        event whose ts is <= message_complete.ts.
+        """
+        events = await _fetch_events('message_complete', limit)
+
+        # Batch lookup of consumed events for the exact (partition, offset)
+        # set that appears in this batch of message_complete rows. Filters
+        # by partition IN (...) AND offset IN (...) to let SQLite use the
+        # column indexes; the Python-side tuple match handles the final
+        # (partition, offset) pairing — cheap given the small row count.
+        consumed_by_key: dict[tuple, list[float]] = {}
+        if events and recorder._db:
+            pairs = {
+                (e['partition'], e['offset'])
+                for e in events
+                if e.get('partition') is not None and e.get('offset') is not None
+            }
+            if pairs:
+                partitions = sorted({p for p, _ in pairs})
+                offsets = sorted({o for _, o in pairs})
+                pp = ','.join(['?'] * len(partitions))
+                oo = ','.join(['?'] * len(offsets))
+                q = (
+                    f'SELECT partition, offset, ts FROM events '
+                    f"WHERE event = 'consumed' "
+                    f'AND partition IN ({pp}) AND offset IN ({oo})'
+                )
+                params: list = [*partitions, *offsets]
+                async with recorder._db.execute(q, params) as cur:
+                    for row in await cur.fetchall():
+                        consumed_by_key.setdefault((row[0], row[1]), []).append(row[2])
+
+        result = []
+        for e in events:
+            meta = _parse_meta(e.get('metadata'))
+            end_to_end = None
+            candidates = consumed_by_key.get((e.get('partition'), e.get('offset')))
+            if candidates:
+                mc_ts = e['ts']
+                # Most recent consumed_ts that's <= message_complete ts.
+                # A later consumed would be a subsequent re-poll; this
+                # message_complete corresponds to the most-recent-prior
+                # poll of the same (partition, offset).
+                best = max((c for c in candidates if c <= mc_ts), default=None)
+                if best is not None:
+                    end_to_end = round(mc_ts - best, 4)
+            result.append(
+                {
+                    'ts': e['ts'],
+                    'partition': e.get('partition'),
+                    'offset': e.get('offset'),
+                    'duration': e.get('duration'),
+                    'end_to_end_duration': end_to_end,
+                    'task_count': meta.get('task_count', 0),
+                    'succeeded': meta.get('succeeded', 0),
+                    'failed': meta.get('failed', 0),
+                    'replaced': meta.get('replaced', 0),
+                    'output_message_count': meta.get('output_message_count', 0),
+                }
+            )
+        return JSONResponse(result)
+
+    @app.get('/api/live/window-results')
+    async def api_live_window_results(limit: int = Query(default=200, ge=0, le=5000)):
+        """Latest N ``window_complete`` events. Metadata carries
+        window_id, task_count, output_message_count."""
+        events = await _fetch_events('window_complete', limit)
+        result = []
+        for e in events:
+            meta = _parse_meta(e.get('metadata'))
+            result.append(
+                {
+                    'ts': e['ts'],
+                    'partition': e.get('partition'),
+                    'window_id': meta.get('window_id'),
+                    'duration': e.get('duration'),
+                    'task_count': meta.get('task_count', 0),
+                    'output_message_count': meta.get('output_message_count', 0),
+                }
+            )
+        return JSONResponse(result)
+
+    @app.post('/api/live/sink-breakdown')
+    async def api_live_sink_breakdown(req: _SinkBreakdownRequest):
+        """Group ``produced`` events by ``output_topic`` (sink name) for
+        a given (partition, offsets) filter.
+
+        Called from the completion-hook sidebars. Task Results sidebar
+        passes the task's source_offsets; Message Results passes
+        ``[offset]``; Window Results passes the list of offsets covered.
+        Response: ``{"<sink_name>": <count>}``. Empty map when the filter
+        matches nothing (no fabrication of zero-count entries).
+        """
+        if not req.offsets:
+            return JSONResponse({})
+        await recorder._flush()
+        if not recorder._db or not recorder._config.store_events:
+            return JSONResponse({})
+        placeholders = ','.join(['?'] * len(req.offsets))
+        q = (
+            f'SELECT output_topic, COUNT(*) as n FROM events '
+            f"WHERE event = 'produced' AND partition = ? "
+            f'AND offset IN ({placeholders}) GROUP BY output_topic'
+        )
+        params: list = [req.partition, *req.offsets]
+        async with recorder._db.execute(q, params) as cur:
+            rows = await cur.fetchall()
+        out: dict[str, int] = {}
+        for row in rows:
+            topic = row[0] or '(unknown)'
+            out[topic] = int(row[1])
+        return JSONResponse(out)
 
     @app.get('/api/dashboard')
     async def api_dashboard():

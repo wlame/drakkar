@@ -11,11 +11,21 @@
 </div>
 <p id="tab-hint" class="text-xs text-gray-400 mb-3" style="line-height:1.4;"></p>
 
-<!-- Tab bar -->
+<!-- Tab bar. The three completion-hook tabs are rendered only when the
+     user's handler overrides the corresponding hook (detected at startup
+     via hook_flags — see debug_server._hook_flags). -->
 <div class="flex border-b border-cream-200 mb-4" id="tab-bar">
     <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="arrange" style="color:#6b7280;border-bottom:2px solid transparent;">Arrange</button>
     <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="execute" style="color:#6b7280;border-bottom:2px solid transparent;">Executors</button>
-    <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="collect" style="color:#6b7280;border-bottom:2px solid transparent;">Collect</button>
+    {% if hook_flags.task_complete %}
+    <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="task-results" style="color:#6b7280;border-bottom:2px solid transparent;">Task Results</button>
+    {% endif %}
+    {% if hook_flags.message_complete %}
+    <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="message-results" style="color:#6b7280;border-bottom:2px solid transparent;">Message Results</button>
+    {% endif %}
+    {% if hook_flags.window_complete %}
+    <button class="tab-btn px-4 py-2 text-sm font-medium" data-tab="window-results" style="color:#6b7280;border-bottom:2px solid transparent;">Window Results</button>
+    {% endif %}
 </div>
 
 <!-- ==================== ARRANGE TAB ==================== -->
@@ -128,29 +138,162 @@
     </div>
 </div>
 
-<!-- ==================== COLLECT TAB ==================== -->
-<div class="tab-panel" id="panel-collect" style="display:none;">
-    <p class="text-gray-500 text-sm mb-3">Recent on_task_complete() completions <span id="collect-total" class="text-purple-600"></span></p>
+{% if hook_flags.task_complete %}
+<!-- ==================== TASK RESULTS TAB ==================== -->
+<div class="tab-panel" id="panel-task-results" style="display:none;">
+    <div class="flex items-center justify-between mb-3">
+        <p class="text-gray-500 text-sm">
+            Recent <code class="text-purple-600">on_task_complete()</code> calls
+            <span id="task-results-total" class="text-teal-600"></span>
+        </p>
+    </div>
+    <div class="flex flex-wrap items-center gap-3 mb-3">
+        <label class="text-sm text-gray-500">Partition</label>
+        <select id="task-results-filter-partition" class="bg-white border border-cream-300 rounded px-2 py-1 text-sm text-ink-700 focus:border-teal-400 focus:outline-none">
+            <option value="">All</option>
+        </select>
+        <label class="text-sm text-gray-500">Search</label>
+        <input id="task-results-filter-search" type="text" placeholder="task_id or offset substring" class="bg-white border border-cream-300 rounded px-3 py-1.5 text-sm font-mono text-ink-700 w-64 focus:border-teal-400 focus:outline-none">
+        <label class="text-xs text-gray-500 flex items-center gap-1">
+            <input id="task-results-filter-failed" type="checkbox" class="rounded"> Failed only
+        </label>
+        <span id="task-results-matched" class="text-xs text-gray-400 ml-auto"></span>
+    </div>
     <table class="w-full text-sm">
         <thead>
             <tr class="text-left text-gray-400 border-b border-cream-200">
-                <th class="py-2 px-3">Task ID</th><th class="py-2 px-3">Partition</th>
-                <th class="py-2 px-3">Duration</th><th class="py-2 px-3">Output Messages</th><th class="py-2 px-3">Time</th>
+                <th class="py-2 px-3">Time</th>
+                <th class="py-2 px-3">Task ID</th>
+                <th class="py-2 px-3">Source</th>
+                <th class="py-2 px-3">Exec</th>
+                <th class="py-2 px-3">Hook</th>
+                <th class="py-2 px-3">Outputs</th>
+                <th class="py-2 px-3">Status</th>
             </tr>
         </thead>
-        <tbody id="collect-body"></tbody>
+        <tbody id="task-results-body"></tbody>
     </table>
 </div>
+<!-- Task Results detail sidebar -->
+<div id="task-results-detail-panel" class="fixed top-0 right-0 h-full w-full md:w-1/2 lg:w-2/5 bg-white border-l border-cream-200 shadow-lg transform translate-x-full transition-transform z-40 overflow-y-auto" style="background:#fff;">
+    <div class="p-4 border-b border-cream-200 flex items-center justify-between" style="background:#f5f3ee;">
+        <h3 class="font-semibold text-ink-800" id="task-results-detail-title">Task result</h3>
+        <button onclick="closeTaskResultsDetail()" class="text-gray-400 hover:text-ink-800 text-xl leading-none">&times;</button>
+    </div>
+    <div class="p-4" id="task-results-detail-body">
+        <div class="text-gray-400">Select a row to view details...</div>
+    </div>
+</div>
+{% endif %}
+
+{% if hook_flags.message_complete %}
+<!-- ==================== MESSAGE RESULTS TAB ==================== -->
+<div class="tab-panel" id="panel-message-results" style="display:none;">
+    <div class="flex items-center justify-between mb-3">
+        <p class="text-gray-500 text-sm">
+            Recent <code class="text-purple-600">on_message_complete()</code> calls
+            <span id="message-results-total" class="text-teal-600"></span>
+        </p>
+    </div>
+    <div class="flex flex-wrap items-center gap-3 mb-3">
+        <label class="text-sm text-gray-500">Partition</label>
+        <select id="message-results-filter-partition" class="bg-white border border-cream-300 rounded px-2 py-1 text-sm text-ink-700 focus:border-teal-400 focus:outline-none">
+            <option value="">All</option>
+        </select>
+        <label class="text-sm text-gray-500">Search</label>
+        <input id="message-results-filter-search" type="text" placeholder="offset substring" class="bg-white border border-cream-300 rounded px-3 py-1.5 text-sm font-mono text-ink-700 w-64 focus:border-teal-400 focus:outline-none">
+        <label class="text-xs text-gray-500 flex items-center gap-1">
+            <input id="message-results-filter-issues" type="checkbox" class="rounded"> Issues only
+        </label>
+        <span id="message-results-matched" class="text-xs text-gray-400 ml-auto"></span>
+    </div>
+    <table class="w-full text-sm">
+        <thead>
+            <tr class="text-left text-gray-400 border-b border-cream-200">
+                <th class="py-2 px-3">Time</th>
+                <th class="py-2 px-3">Source</th>
+                <th class="py-2 px-3" title="on_message_complete() hook runtime">Hook</th>
+                <th class="py-2 px-3" title="Wall-clock time from Kafka poll (consumed event) to on_message_complete finish — includes arrange, task queue wait, subprocess exec, hook runtime">End-to-end</th>
+                <th class="py-2 px-3">Tasks (ok / fail / replaced)</th>
+                <th class="py-2 px-3">Outputs</th>
+            </tr>
+        </thead>
+        <tbody id="message-results-body"></tbody>
+    </table>
+</div>
+<!-- Message Results detail sidebar -->
+<div id="message-results-detail-panel" class="fixed top-0 right-0 h-full w-full md:w-1/2 lg:w-2/5 bg-white border-l border-cream-200 shadow-lg transform translate-x-full transition-transform z-40 overflow-y-auto" style="background:#fff;">
+    <div class="p-4 border-b border-cream-200 flex items-center justify-between" style="background:#f5f3ee;">
+        <h3 class="font-semibold text-ink-800" id="message-results-detail-title">Message result</h3>
+        <button onclick="closeMessageResultsDetail()" class="text-gray-400 hover:text-ink-800 text-xl leading-none">&times;</button>
+    </div>
+    <div class="p-4" id="message-results-detail-body">
+        <div class="text-gray-400">Select a row to view details...</div>
+    </div>
+</div>
+{% endif %}
+
+{% if hook_flags.window_complete %}
+<!-- ==================== WINDOW RESULTS TAB ==================== -->
+<div class="tab-panel" id="panel-window-results" style="display:none;">
+    <div class="flex items-center justify-between mb-3">
+        <p class="text-gray-500 text-sm">
+            Recent <code class="text-purple-600">on_window_complete()</code> calls
+            <span id="window-results-total" class="text-teal-600"></span>
+        </p>
+    </div>
+    <div class="flex flex-wrap items-center gap-3 mb-3">
+        <label class="text-sm text-gray-500">Partition</label>
+        <select id="window-results-filter-partition" class="bg-white border border-cream-300 rounded px-2 py-1 text-sm text-ink-700 focus:border-teal-400 focus:outline-none">
+            <option value="">All</option>
+        </select>
+        <label class="text-sm text-gray-500">Search</label>
+        <input id="window-results-filter-search" type="text" placeholder="window id substring" class="bg-white border border-cream-300 rounded px-3 py-1.5 text-sm font-mono text-ink-700 w-64 focus:border-teal-400 focus:outline-none">
+        <span id="window-results-matched" class="text-xs text-gray-400 ml-auto"></span>
+    </div>
+    <table class="w-full text-sm">
+        <thead>
+            <tr class="text-left text-gray-400 border-b border-cream-200">
+                <th class="py-2 px-3">Time</th>
+                <th class="py-2 px-3">Partition</th>
+                <th class="py-2 px-3">Window #</th>
+                <th class="py-2 px-3">Duration</th>
+                <th class="py-2 px-3">Tasks</th>
+                <th class="py-2 px-3">Outputs</th>
+            </tr>
+        </thead>
+        <tbody id="window-results-body"></tbody>
+    </table>
+</div>
+<!-- Window Results detail sidebar -->
+<div id="window-results-detail-panel" class="fixed top-0 right-0 h-full w-full md:w-1/2 lg:w-2/5 bg-white border-l border-cream-200 shadow-lg transform translate-x-full transition-transform z-40 overflow-y-auto" style="background:#fff;">
+    <div class="p-4 border-b border-cream-200 flex items-center justify-between" style="background:#f5f3ee;">
+        <h3 class="font-semibold text-ink-800" id="window-results-detail-title">Window result</h3>
+        <button onclick="closeWindowResultsDetail()" class="text-gray-400 hover:text-ink-800 text-xl leading-none">&times;</button>
+    </div>
+    <div class="p-4" id="window-results-detail-body">
+        <div class="text-gray-400">Select a row to view details...</div>
+    </div>
+</div>
+{% endif %}
 
 <script>
 // === Tab management ===
 var tabHints = {
     arrange: 'Arrange is called after message polling for each partition. It receives a batch of messages and creates executor Tasks with CLI params to run.',
     execute: 'Executors run CPU-bound Tasks as subprocesses with prepared CLI args, capturing stdout/stderr. Limited by the pool semaphore.',
-    collect: 'Collect is called with each executor result and defines output messages for the target topic and database rows to persist.',
+    'task-results': 'on_task_complete() runs after each task\'s subprocess exits. One row per call — shows exec runtime, hook runtime, and the number of sink payloads dispatched.',
+    'message-results': 'on_message_complete() runs after every task derived from one source message reaches a terminal state. Rows aggregate the message\'s fan-out outcomes.',
+    'window-results': 'on_window_complete() runs after every task in one arrange() window finishes. Rows summarize the whole window.',
 };
 
 function switchTab(name) {
+    // Fall back to Executors if the requested tab isn't rendered — happens
+    // when a hash-deep-link points at a completion-hook tab the current
+    // handler doesn't implement, or an old bookmarked ``#collect`` URL.
+    if (!document.querySelector('[data-tab="' + name + '"]')) {
+        name = 'execute';
+    }
     document.querySelectorAll('.tab-panel').forEach(function(p) { p.style.display = 'none'; });
     document.querySelectorAll('.tab-btn').forEach(function(b) {
         b.style.color = '#6b7280'; b.style.borderBottom = '2px solid transparent';
@@ -201,9 +344,31 @@ function toggleFreeze() {
 
 var allTasks = {};
 var recentArranges = [];
-var recentCollects = [];
+// Three completion-hook result feeds. Only the arrays whose hook the
+// handler actually implements are populated — the others stay empty and
+// their tabs aren't rendered. Server-side ``hook_flags`` in live.html
+// context gates both the tabs and the client-side feature toggle below.
+var recentTaskResults = [];
+var recentMessageResults = [];
+var recentWindowResults = [];
 var MAX_HISTORY = {{ max_ui_rows }};
-var arrangeTotal = 0, collectTotal = 0;
+var arrangeTotal = 0, taskResultsTotal = 0, messageResultsTotal = 0, windowResultsTotal = 0;
+var HOOK_FLAGS = {
+    task_complete: {{ 'true' if hook_flags.task_complete else 'false' }},
+    message_complete: {{ 'true' if hook_flags.message_complete else 'false' }},
+    window_complete: {{ 'true' if hook_flags.window_complete else 'false' }},
+};
+// Per-tab sidebar open-state flags — used by the click-outside-to-close
+// handlers further down. Only one of the three is open at any moment.
+var selectedTaskResultKey = null;
+var selectedMessageResultKey = null;
+var selectedWindowResultKey = null;
+// Per-tab filter state. Each tab has its own dropdown/search/toggle set;
+// applying a filter never mutates the underlying feed arrays, only the
+// rendered subset.
+var taskResultsFilter = { partition: '', search: '', failedOnly: false };
+var messageResultsFilter = { partition: '', search: '', issuesOnly: false };
+var windowResultsFilter = { partition: '', search: '' };
 
 // Kafka-UI deep-link config. Empty strings = feature disabled, so
 // makeKafkaUiIcon returns null and callers skip the icon without extra
@@ -1146,31 +1311,699 @@ function renderArrangeDetail() {
     );
 }
 
-function renderCollects() {
-    var el = document.getElementById('collect-total');
-    if (el) el.textContent = '(total: ' + collectTotal + ')';
-    var body = document.getElementById('collect-body');
-    if (!body) return;
-    body.replaceChildren();
-    for (var i = 0; i < recentCollects.length; i++) {
-        var c = recentCollects[i];
-        var tr = document.createElement('tr'); tr.className = 'border-b border-cream-100 hover:bg-cream-100';
-        var td1 = document.createElement('td'); td1.className = 'py-2 px-3 font-mono text-xs';
-        var a1 = document.createElement('a'); a1.href = '/task/' + encodeURIComponent(baseTaskId(c.task_id));
-        a1.className = 'text-purple-600 hover:underline'; a1.textContent = c.task_id; td1.appendChild(a1);
-        var td2 = document.createElement('td'); td2.className = 'py-2 px-3 font-mono'; td2.textContent = 'P' + c.partition;
-        var td3 = document.createElement('td'); td3.className = 'py-2 px-3 font-mono';
-        td3.style.color = durColor(c.duration); td3.textContent = c.duration.toFixed(3) + 's';
-        var td4 = document.createElement('td'); td4.className = 'py-2 px-3 font-mono'; td4.textContent = c.output_count;
-        var td5 = document.createElement('td'); td5.className = 'py-2 px-3 text-gray-400 text-xs'; td5.textContent = fmtTimeMs(c.ts);
-        tr.append(td1, td2, td3, td4, td5); body.appendChild(tr);
+// === Completion-hook tabs: Task Results / Message Results / Window Results ===
+//
+// Each feed is a flat reverse-chronological list capped at MAX_HISTORY and
+// rendered into its own <tbody>. WS events prepend; the 5s resync reloads
+// the latest N via the dedicated endpoint. Sidebars open on row click and
+// fetch per-row sink-type breakdown on demand via /api/live/sink-breakdown.
+// None of this code runs if the handler doesn't implement the corresponding
+// hook (HOOK_FLAGS gates loads + WS handling; the templates gate the DOM).
+
+function durSec(sec) {
+    if (sec == null) return '-';
+    if (sec < 1) return (sec * 1000).toFixed(0) + 'ms';
+    return sec.toFixed(2) + 's';
+}
+
+// Shared helper — ``ok / fail / replaced`` numbers with bold colored style,
+// matching the Arrange tab's makeStatusCounts aesthetic. Zero-count segments
+// still render (padded) so the column aligns visually row-to-row.
+function makeTaskBreakdown(succeeded, failed, replaced) {
+    var wrap = document.createElement('span');
+    wrap.className = 'font-mono text-xs';
+    function part(n, color, bold) {
+        var s = document.createElement('span');
+        s.style.cssText = 'color:' + color + ';margin-right:8px;' + (bold && n ? 'font-weight:700;' : '');
+        s.textContent = n;
+        wrap.appendChild(s);
     }
-    if (!recentCollects.length) {
-        var etr = document.createElement('tr'); var etd = document.createElement('td');
-        etd.colSpan = 5; etd.className = 'py-3 text-center text-gray-400'; etd.textContent = 'No on_task_complete() calls yet';
-        etr.appendChild(etd); body.appendChild(etr);
+    part(succeeded || 0, '#059669', true);
+    part(failed || 0, '#dc2626', true);
+    part(replaced || 0, '#d97706', true);
+    return wrap;
+}
+
+// Renders a ``kafka.results: 3 · postgres.main: 1 · redis.cache: 1`` line
+// from a {sink_name: count} map. Returns an empty span when the map is
+// empty — the caller can append without a feature flag.
+function makeSinkBreakdown(counts) {
+    var wrap = document.createElement('span');
+    wrap.className = 'font-mono text-xs';
+    var keys = counts ? Object.keys(counts).sort() : [];
+    if (!keys.length) {
+        var muted = document.createElement('span');
+        muted.className = 'text-gray-400';
+        muted.textContent = '(no sink outputs)';
+        wrap.appendChild(muted);
+        return wrap;
+    }
+    keys.forEach(function(k, i) {
+        var s = document.createElement('span');
+        s.style.cssText = 'color:#0d9488;margin-right:10px;';
+        s.textContent = k + ': ';
+        var n = document.createElement('span');
+        n.style.cssText = 'color:#1a1a1a;font-weight:600;';
+        n.textContent = counts[k];
+        s.appendChild(n);
+        wrap.appendChild(s);
+    });
+    return wrap;
+}
+
+async function fetchSinkBreakdown(partition, offsets) {
+    if (partition == null || !offsets || !offsets.length) return {};
+    try {
+        var r = await fetch('/api/live/sink-breakdown', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({partition: partition, offsets: offsets}),
+        });
+        if (!r.ok) return {};
+        return await r.json();
+    } catch(ex) {
+        return {};
     }
 }
+
+// --- Task Results tab ---
+
+function taskResultKey(r) { return r ? (r.ts + ':' + r.task_id) : null; }
+
+// Common helper: populate a partition <select> with distinct partitions
+// from the feed array, preserving the user's current selection unless the
+// partition no longer exists.
+function updateResultsPartitionFilter(selectId, feed) {
+    var sel = document.getElementById(selectId);
+    if (!sel) return;
+    var seen = {};
+    for (var i = 0; i < feed.length; i++) {
+        if (feed[i].partition != null) seen[feed[i].partition] = true;
+    }
+    var parts = Object.keys(seen).map(function(p) { return Number(p); }).sort(function(a, b) { return a - b; });
+    var prev = sel.value;
+    sel.replaceChildren();
+    var all = document.createElement('option'); all.value = ''; all.textContent = 'All';
+    sel.appendChild(all);
+    for (var j = 0; j < parts.length; j++) {
+        var o = document.createElement('option');
+        o.value = String(parts[j]);
+        o.textContent = 'P' + parts[j];
+        sel.appendChild(o);
+    }
+    if (prev && parts.indexOf(Number(prev)) !== -1) sel.value = prev;
+}
+
+// Format source offsets compactly: "P5:142" for single, "P5:142+2" for
+// fan-in (first offset + count of remaining). Hover title shows full list.
+function makeSourceCell(partition, offsets) {
+    var td = document.createElement('td');
+    td.className = 'py-2 px-3 font-mono text-xs';
+    if (partition == null) {
+        td.textContent = '-';
+        return td;
+    }
+    if (!offsets || !offsets.length) {
+        // No source offsets (task_started not found in the recorder's
+        // current retention window). Fall back to partition-only link.
+        var p = document.createElement('a');
+        p.href = '/partitions/' + partition;
+        p.className = 'text-teal-600 hover:underline';
+        p.textContent = 'P' + partition;
+        p.onclick = function(ev) { ev.stopPropagation(); };
+        td.appendChild(p);
+        return td;
+    }
+    var firstOffset = offsets[0];
+    var traceLink = document.createElement('a');
+    traceLink.href = '/debug#trace/' + partition + '/' + firstOffset;
+    traceLink.className = 'text-teal-600 hover:underline';
+    traceLink.textContent = 'P' + partition + ':' + firstOffset;
+    traceLink.onclick = function(ev) { ev.stopPropagation(); };
+    traceLink.title = offsets.length > 1
+        ? 'covers offsets: ' + offsets.join(', ')
+        : 'offset ' + firstOffset;
+    td.appendChild(traceLink);
+    if (offsets.length > 1) {
+        var more = document.createElement('span');
+        more.className = 'text-gray-400';
+        more.style.marginLeft = '4px';
+        more.textContent = '+' + (offsets.length - 1);
+        more.title = 'Fan-in — additional offsets: ' + offsets.slice(1).join(', ');
+        td.appendChild(more);
+    }
+    var kIcon = makeKafkaUiIcon(KAFKA_SOURCE_TOPIC, partition, firstOffset);
+    if (kIcon) {
+        kIcon.onclick = function(ev) { ev.stopPropagation(); };
+        td.appendChild(kIcon);
+    }
+    return td;
+}
+
+function taskResultMatchesFilter(r) {
+    if (taskResultsFilter.partition !== '' && String(r.partition) !== taskResultsFilter.partition) return false;
+    if (taskResultsFilter.failedOnly && r.status !== 'failed') return false;
+    var q = taskResultsFilter.search.trim().toLowerCase();
+    if (!q) return true;
+    var hay = [
+        r.task_id || '',
+        (r.source_offsets || []).join(' '),
+    ].join(' ').toLowerCase();
+    return hay.indexOf(q) !== -1;
+}
+
+function renderTaskResults() {
+    if (!HOOK_FLAGS.task_complete) return;
+    var el = document.getElementById('task-results-total');
+    if (el) el.textContent = '(' + taskResultsTotal + ')';
+    updateResultsPartitionFilter('task-results-filter-partition', recentTaskResults);
+    var body = document.getElementById('task-results-body');
+    if (!body) return;
+    body.replaceChildren();
+    var visible = 0;
+    for (var i = 0; i < recentTaskResults.length; i++) {
+        var r = recentTaskResults[i];
+        if (!taskResultMatchesFilter(r)) continue;
+        visible++;
+
+        var tr = document.createElement('tr');
+        tr.className = 'border-b border-cream-100 hover:bg-cream-100 cursor-pointer';
+        if (selectedTaskResultKey === taskResultKey(r)) tr.style.background = '#e0f2fe';
+        (function(row) {
+            tr.onclick = function(ev) { ev.stopPropagation(); openTaskResultDetail(row); };
+        })(r);
+
+        var td1 = document.createElement('td'); td1.className = 'py-2 px-3 text-xs text-gray-500';
+        td1.textContent = fmtTimeMs(r.ts);
+
+        var td2 = document.createElement('td'); td2.className = 'py-2 px-3 font-mono text-xs';
+        var taskLink = document.createElement('a');
+        taskLink.href = '/task/' + encodeURIComponent(baseTaskId(r.task_id || ''));
+        taskLink.className = 'text-purple-600 hover:underline';
+        taskLink.textContent = r.task_id || '-';
+        taskLink.onclick = function(ev) { ev.stopPropagation(); };
+        td2.appendChild(taskLink);
+
+        var td3 = makeSourceCell(r.partition, r.source_offsets);
+
+        var td4 = document.createElement('td'); td4.className = 'py-2 px-3 font-mono text-xs';
+        td4.textContent = durSec(r.exec_duration);
+        if (r.exec_duration != null) td4.style.color = durColor(r.exec_duration);
+
+        var td5 = document.createElement('td'); td5.className = 'py-2 px-3 font-mono text-xs';
+        td5.textContent = durSec(r.hook_duration);
+        if (r.hook_duration != null) td5.style.color = durColor(r.hook_duration);
+
+        var td6 = document.createElement('td'); td6.className = 'py-2 px-3 font-mono text-xs font-semibold';
+        td6.textContent = r.output_message_count != null ? r.output_message_count : '-';
+
+        var td7 = document.createElement('td'); td7.className = 'py-2 px-3 font-mono text-xs font-semibold';
+        // Status pulled from the paired task_completed/task_failed event.
+        // ``null`` means we couldn't find it in the batch lookup — happens
+        // when the subprocess event is outside the row's retention window
+        // or was filtered out. Surface as "?" rather than fabricating.
+        if (r.status === 'completed') { td7.style.color = '#059669'; td7.textContent = 'completed'; }
+        else if (r.status === 'failed') { td7.style.color = '#dc2626'; td7.textContent = 'failed' + (r.exit_code != null ? ' (' + r.exit_code + ')' : ''); }
+        else { td7.style.color = '#9ca3af'; td7.textContent = '?'; }
+
+        tr.append(td1, td2, td3, td4, td5, td6, td7);
+        body.appendChild(tr);
+    }
+    if (!visible) {
+        var etr = document.createElement('tr'); var etd = document.createElement('td');
+        etd.colSpan = 7; etd.className = 'py-3 text-center text-gray-400';
+        etd.textContent = recentTaskResults.length
+            ? 'No rows match the current filter'
+            : 'No on_task_complete() calls yet';
+        etr.appendChild(etd); body.appendChild(etr);
+    }
+    var matched = document.getElementById('task-results-matched');
+    if (matched) matched.textContent = visible + ' of ' + recentTaskResults.length + ' shown';
+}
+
+function openTaskResultDetail(r) {
+    selectedTaskResultKey = taskResultKey(r);
+    var panel = document.getElementById('task-results-detail-panel');
+    if (panel) panel.style.transform = 'translateX(0)';
+    renderTaskResultDetail(r);
+    renderTaskResults();
+}
+function closeTaskResultsDetail() {
+    selectedTaskResultKey = null;
+    var panel = document.getElementById('task-results-detail-panel');
+    if (panel) panel.style.transform = 'translateX(100%)';
+    renderTaskResults();
+}
+window.closeTaskResultsDetail = closeTaskResultsDetail;
+
+function renderTaskResultDetail(r) {
+    var body = document.getElementById('task-results-detail-body');
+    var title = document.getElementById('task-results-detail-title');
+    if (!body) return;
+    if (title) title.textContent = (r.task_id || 'Task') + ' @ ' + fmtTimeMs(r.ts);
+    body.replaceChildren();
+
+    var kv = function(label, value, color) {
+        var row = document.createElement('div'); row.className = 'mb-2';
+        var lbl = document.createElement('div'); lbl.className = 'text-xs text-gray-500 uppercase tracking-wide'; lbl.textContent = label;
+        var val = document.createElement('div'); val.className = 'font-mono text-sm'; val.textContent = value;
+        if (color) val.style.color = color;
+        row.append(lbl, val);
+        body.appendChild(row);
+    };
+    kv('Task ID', r.task_id || '-');
+    kv('Partition', r.partition != null ? 'P' + r.partition : '-');
+    kv('Exec duration', durSec(r.exec_duration), durColor(r.exec_duration || 0));
+    kv('Hook duration', durSec(r.hook_duration), durColor(r.hook_duration || 0));
+    kv('Outputs', r.output_message_count != null ? String(r.output_message_count) : '-');
+    kv('Status', r.status || 'unknown');
+
+    // Sink breakdown block — fetched on open, inserted when ready.
+    var sinkHdr = document.createElement('div');
+    sinkHdr.className = 'text-xs text-gray-500 uppercase tracking-wide mt-4 mb-1';
+    sinkHdr.textContent = 'Sink outputs';
+    body.appendChild(sinkHdr);
+    var sinkBody = document.createElement('div');
+    sinkBody.className = 'mb-3 text-xs text-gray-400';
+    sinkBody.textContent = 'loading…';
+    body.appendChild(sinkBody);
+
+    var links = document.createElement('div');
+    links.className = 'mt-4 flex gap-2';
+    var taskLink = document.createElement('a');
+    taskLink.href = '/task/' + encodeURIComponent(baseTaskId(r.task_id || ''));
+    taskLink.className = 'px-3 py-1 rounded bg-cream-200 hover:bg-cream-300 text-sm text-teal-600';
+    taskLink.textContent = 'Open task detail →';
+    links.appendChild(taskLink);
+    body.appendChild(links);
+
+    // We don't know the source offsets here (would need a task_started
+    // lookup). Pull them from the /api/live/arrange-tasks endpoint; that
+    // response includes source_offsets.
+    fetch('/api/live/arrange-tasks', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({task_ids: [r.task_id]}),
+    }).then(function(resp) { return resp.json(); }).then(function(map) {
+        var t = map[r.task_id] || {};
+        var offsets = Array.isArray(t.source_offsets) ? t.source_offsets : [];
+        if (!offsets.length || r.partition == null) {
+            sinkBody.replaceChildren();
+            sinkBody.appendChild(document.createTextNode('(no source offsets found — task may have aged out of the recorder)'));
+            return;
+        }
+        return fetchSinkBreakdown(r.partition, offsets).then(function(counts) {
+            sinkBody.replaceChildren();
+            sinkBody.appendChild(makeSinkBreakdown(counts));
+        });
+    }).catch(function() {
+        sinkBody.replaceChildren();
+        sinkBody.appendChild(document.createTextNode('(failed to load sink breakdown)'));
+    });
+}
+
+async function loadTaskResults() {
+    if (!HOOK_FLAGS.task_complete) return;
+    try {
+        var limit = Math.max(10 * PARTITION_COUNT, 30);
+        var r = await fetch('/api/live/task-results?limit=' + limit);
+        var arr = await r.json();
+        recentTaskResults = Array.isArray(arr) ? arr : [];
+        taskResultsTotal = recentTaskResults.length;
+    } catch(ex) {}
+}
+
+// --- Message Results tab ---
+
+function messageResultKey(r) { return r ? (r.ts + ':' + r.partition + ':' + r.offset) : null; }
+
+function messageResultMatchesFilter(r) {
+    if (messageResultsFilter.partition !== '' && String(r.partition) !== messageResultsFilter.partition) return false;
+    if (messageResultsFilter.issuesOnly && !(r.failed > 0 || r.replaced > 0)) return false;
+    var q = messageResultsFilter.search.trim().toLowerCase();
+    if (!q) return true;
+    var hay = (r.partition + ':' + r.offset).toLowerCase();
+    return hay.indexOf(q) !== -1;
+}
+
+function renderMessageResults() {
+    if (!HOOK_FLAGS.message_complete) return;
+    var el = document.getElementById('message-results-total');
+    if (el) el.textContent = '(' + messageResultsTotal + ')';
+    updateResultsPartitionFilter('message-results-filter-partition', recentMessageResults);
+    var body = document.getElementById('message-results-body');
+    if (!body) return;
+    body.replaceChildren();
+    var visible = 0;
+    for (var i = 0; i < recentMessageResults.length; i++) {
+        var r = recentMessageResults[i];
+        if (!messageResultMatchesFilter(r)) continue;
+        visible++;
+        var tr = document.createElement('tr');
+        tr.className = 'border-b border-cream-100 hover:bg-cream-100 cursor-pointer';
+        if (selectedMessageResultKey === messageResultKey(r)) tr.style.background = '#e0f2fe';
+        (function(row) {
+            tr.onclick = function(ev) { ev.stopPropagation(); openMessageResultDetail(row); };
+        })(r);
+
+        var td1 = document.createElement('td'); td1.className = 'py-2 px-3 text-xs text-gray-500';
+        td1.textContent = fmtTimeMs(r.ts);
+
+        var td2 = document.createElement('td'); td2.className = 'py-2 px-3 font-mono text-xs';
+        if (r.partition != null && r.offset != null) {
+            var offLink = document.createElement('a');
+            offLink.href = '/debug#trace/' + r.partition + '/' + r.offset;
+            offLink.className = 'text-teal-600 hover:underline';
+            offLink.textContent = 'P' + r.partition + ':' + r.offset;
+            offLink.onclick = function(ev) { ev.stopPropagation(); };
+            td2.appendChild(offLink);
+            var kIcon = makeKafkaUiIcon(KAFKA_SOURCE_TOPIC, r.partition, r.offset);
+            if (kIcon) { kIcon.onclick = (function(orig) { return function(ev) { ev.stopPropagation(); if (orig) orig(ev); }; })(kIcon.onclick); td2.appendChild(kIcon); }
+        } else {
+            td2.textContent = '-';
+        }
+
+        var td3 = document.createElement('td'); td3.className = 'py-2 px-3 font-mono text-xs';
+        td3.textContent = durSec(r.duration);
+        if (r.duration != null) td3.style.color = durColor(r.duration);
+
+        // End-to-end latency: consumed -> on_message_complete. Null when
+        // the consumed event has aged out of the recorder's retention —
+        // rare for recent rows, common after a rotation cycle. Fall back
+        // to "-" with a tooltip explaining.
+        var td4 = document.createElement('td'); td4.className = 'py-2 px-3 font-mono text-xs font-semibold';
+        if (r.end_to_end_duration != null) {
+            td4.textContent = durSec(r.end_to_end_duration);
+            td4.style.color = durColor(r.end_to_end_duration);
+            td4.title = 'Wall-clock: consumed → on_message_complete';
+        } else {
+            td4.textContent = '-';
+            td4.style.color = '#9ca3af';
+            td4.title = 'Consumed event not found in current retention window';
+        }
+
+        var td5 = document.createElement('td'); td5.className = 'py-2 px-3';
+        td5.appendChild(makeTaskBreakdown(r.succeeded, r.failed, r.replaced));
+
+        var td6 = document.createElement('td'); td6.className = 'py-2 px-3 font-mono text-xs font-semibold';
+        td6.textContent = r.output_message_count != null ? r.output_message_count : '-';
+
+        tr.append(td1, td2, td3, td4, td5, td6);
+        body.appendChild(tr);
+    }
+    if (!visible) {
+        var etr = document.createElement('tr'); var etd = document.createElement('td');
+        etd.colSpan = 6; etd.className = 'py-3 text-center text-gray-400';
+        etd.textContent = recentMessageResults.length
+            ? 'No rows match the current filter'
+            : 'No on_message_complete() calls yet';
+        etr.appendChild(etd); body.appendChild(etr);
+    }
+    var matched = document.getElementById('message-results-matched');
+    if (matched) matched.textContent = visible + ' of ' + recentMessageResults.length + ' shown';
+}
+
+function openMessageResultDetail(r) {
+    selectedMessageResultKey = messageResultKey(r);
+    var panel = document.getElementById('message-results-detail-panel');
+    if (panel) panel.style.transform = 'translateX(0)';
+    renderMessageResultDetail(r);
+    renderMessageResults();
+}
+function closeMessageResultsDetail() {
+    selectedMessageResultKey = null;
+    var panel = document.getElementById('message-results-detail-panel');
+    if (panel) panel.style.transform = 'translateX(100%)';
+    renderMessageResults();
+}
+window.closeMessageResultsDetail = closeMessageResultsDetail;
+
+function renderMessageResultDetail(r) {
+    var body = document.getElementById('message-results-detail-body');
+    var title = document.getElementById('message-results-detail-title');
+    if (!body) return;
+    if (title) title.textContent = 'P' + r.partition + ':' + r.offset + ' @ ' + fmtTimeMs(r.ts);
+    body.replaceChildren();
+
+    var summary = document.createElement('div');
+    summary.className = 'mb-4 p-3 rounded border border-cream-200';
+    summary.style.background = '#f9f8f5';
+    var grid = document.createElement('div');
+    grid.className = 'grid grid-cols-2 gap-x-4 gap-y-1 text-xs font-mono';
+    function kv(k, v, color) {
+        var kS = document.createElement('span'); kS.className = 'text-gray-500'; kS.textContent = k;
+        var vS = document.createElement('span'); vS.textContent = v;
+        if (color) vS.style.color = color;
+        grid.appendChild(kS); grid.appendChild(vS);
+    }
+    kv('source', 'P' + r.partition + ':' + r.offset);
+    kv('hook duration', durSec(r.duration), durColor(r.duration || 0));
+    // End-to-end: consumed -> on_message_complete. Surfaces arrange +
+    // queue-wait + subprocess + hook time as one number; hook duration
+    // alone is just the last step, so the end-to-end is the useful
+    // "message went in, result came out" SLI for the operator.
+    if (r.end_to_end_duration != null) {
+        kv('end-to-end', durSec(r.end_to_end_duration), durColor(r.end_to_end_duration));
+    } else {
+        kv('end-to-end', '—  (consumed event not in retention)', '#9ca3af');
+    }
+    kv('tasks', r.task_count != null ? r.task_count : '-');
+    kv('outputs', r.output_message_count != null ? r.output_message_count : '-');
+    summary.appendChild(grid);
+    var stats = document.createElement('div'); stats.className = 'mt-2';
+    stats.appendChild(makeTaskBreakdown(r.succeeded, r.failed, r.replaced));
+    summary.appendChild(stats);
+    body.appendChild(summary);
+
+    var sinkHdr = document.createElement('div');
+    sinkHdr.className = 'text-xs text-gray-500 uppercase tracking-wide mt-4 mb-1';
+    sinkHdr.textContent = 'Sink outputs';
+    body.appendChild(sinkHdr);
+    var sinkBody = document.createElement('div');
+    sinkBody.className = 'mb-3 text-xs text-gray-400';
+    sinkBody.textContent = 'loading…';
+    body.appendChild(sinkBody);
+
+    var links = document.createElement('div'); links.className = 'mt-4 flex gap-2';
+    var traceLink = document.createElement('a');
+    traceLink.href = '/debug#trace/' + r.partition + '/' + r.offset;
+    traceLink.className = 'px-3 py-1 rounded bg-cream-200 hover:bg-cream-300 text-sm text-teal-600';
+    traceLink.textContent = 'Open trace →';
+    links.appendChild(traceLink);
+    var kIcon = makeKafkaUiIcon(KAFKA_SOURCE_TOPIC, r.partition, r.offset);
+    if (kIcon) links.appendChild(kIcon);
+    body.appendChild(links);
+
+    fetchSinkBreakdown(r.partition, [r.offset]).then(function(counts) {
+        sinkBody.replaceChildren();
+        sinkBody.appendChild(makeSinkBreakdown(counts));
+    });
+}
+
+async function loadMessageResults() {
+    if (!HOOK_FLAGS.message_complete) return;
+    try {
+        var limit = Math.max(10 * PARTITION_COUNT, 30);
+        var r = await fetch('/api/live/message-results?limit=' + limit);
+        var arr = await r.json();
+        recentMessageResults = Array.isArray(arr) ? arr : [];
+        messageResultsTotal = recentMessageResults.length;
+    } catch(ex) {}
+}
+
+// --- Window Results tab ---
+
+function windowResultKey(r) { return r ? (r.ts + ':' + r.partition + ':' + r.window_id) : null; }
+
+function windowResultMatchesFilter(r) {
+    if (windowResultsFilter.partition !== '' && String(r.partition) !== windowResultsFilter.partition) return false;
+    var q = windowResultsFilter.search.trim().toLowerCase();
+    if (!q) return true;
+    return String(r.window_id || '').toLowerCase().indexOf(q) !== -1;
+}
+
+function renderWindowResults() {
+    if (!HOOK_FLAGS.window_complete) return;
+    var el = document.getElementById('window-results-total');
+    if (el) el.textContent = '(' + windowResultsTotal + ')';
+    updateResultsPartitionFilter('window-results-filter-partition', recentWindowResults);
+    var body = document.getElementById('window-results-body');
+    if (!body) return;
+    body.replaceChildren();
+    var visible = 0;
+    for (var i = 0; i < recentWindowResults.length; i++) {
+        var r = recentWindowResults[i];
+        if (!windowResultMatchesFilter(r)) continue;
+        visible++;
+        var tr = document.createElement('tr');
+        tr.className = 'border-b border-cream-100 hover:bg-cream-100 cursor-pointer';
+        if (selectedWindowResultKey === windowResultKey(r)) tr.style.background = '#e0f2fe';
+        (function(row) {
+            tr.onclick = function(ev) { ev.stopPropagation(); openWindowResultDetail(row); };
+        })(r);
+
+        var td1 = document.createElement('td'); td1.className = 'py-2 px-3 text-xs text-gray-500';
+        td1.textContent = fmtTimeMs(r.ts);
+
+        var td2 = document.createElement('td'); td2.className = 'py-2 px-3 font-mono text-xs';
+        if (r.partition != null) {
+            var partLink = document.createElement('a');
+            partLink.href = '/partitions/' + r.partition;
+            partLink.className = 'text-teal-600 hover:underline';
+            partLink.textContent = 'P' + r.partition;
+            partLink.onclick = function(ev) { ev.stopPropagation(); };
+            td2.appendChild(partLink);
+        } else {
+            td2.textContent = '-';
+        }
+
+        var td3 = document.createElement('td'); td3.className = 'py-2 px-3 font-mono text-xs';
+        td3.textContent = r.window_id != null ? '#' + r.window_id : '-';
+
+        var td4 = document.createElement('td'); td4.className = 'py-2 px-3 font-mono text-xs';
+        td4.textContent = durSec(r.duration);
+        if (r.duration != null) td4.style.color = durColor(r.duration);
+
+        var td5 = document.createElement('td'); td5.className = 'py-2 px-3 font-mono text-xs';
+        td5.textContent = r.task_count != null ? r.task_count : '-';
+
+        var td6 = document.createElement('td'); td6.className = 'py-2 px-3 font-mono text-xs font-semibold';
+        td6.textContent = r.output_message_count != null ? r.output_message_count : '-';
+
+        tr.append(td1, td2, td3, td4, td5, td6);
+        body.appendChild(tr);
+    }
+    if (!visible) {
+        var etr = document.createElement('tr'); var etd = document.createElement('td');
+        etd.colSpan = 6; etd.className = 'py-3 text-center text-gray-400';
+        etd.textContent = recentWindowResults.length
+            ? 'No rows match the current filter'
+            : 'No on_window_complete() calls yet';
+        etr.appendChild(etd); body.appendChild(etr);
+    }
+    var matched = document.getElementById('window-results-matched');
+    if (matched) matched.textContent = visible + ' of ' + recentWindowResults.length + ' shown';
+}
+
+function openWindowResultDetail(r) {
+    selectedWindowResultKey = windowResultKey(r);
+    var panel = document.getElementById('window-results-detail-panel');
+    if (panel) panel.style.transform = 'translateX(0)';
+    renderWindowResultDetail(r);
+    renderWindowResults();
+}
+function closeWindowResultsDetail() {
+    selectedWindowResultKey = null;
+    var panel = document.getElementById('window-results-detail-panel');
+    if (panel) panel.style.transform = 'translateX(100%)';
+    renderWindowResults();
+}
+window.closeWindowResultsDetail = closeWindowResultsDetail;
+
+function renderWindowResultDetail(r) {
+    var body = document.getElementById('window-results-detail-body');
+    var title = document.getElementById('window-results-detail-title');
+    if (!body) return;
+    if (title) title.textContent = 'P' + r.partition + ' window #' + r.window_id + ' @ ' + fmtTimeMs(r.ts);
+    body.replaceChildren();
+
+    var summary = document.createElement('div');
+    summary.className = 'mb-4 p-3 rounded border border-cream-200';
+    summary.style.background = '#f9f8f5';
+    var grid = document.createElement('div');
+    grid.className = 'grid grid-cols-2 gap-x-4 gap-y-1 text-xs font-mono';
+    function kv(k, v, color) {
+        var kS = document.createElement('span'); kS.className = 'text-gray-500'; kS.textContent = k;
+        var vS = document.createElement('span'); vS.textContent = v;
+        if (color) vS.style.color = color;
+        grid.appendChild(kS); grid.appendChild(vS);
+    }
+    kv('partition', r.partition != null ? 'P' + r.partition : '-');
+    kv('window id', r.window_id != null ? '#' + r.window_id : '-');
+    kv('hook duration', durSec(r.duration), durColor(r.duration || 0));
+    kv('tasks', r.task_count != null ? r.task_count : '-');
+    kv('outputs', r.output_message_count != null ? r.output_message_count : '-');
+    summary.appendChild(grid);
+    body.appendChild(summary);
+
+    // Sink breakdown by collecting all message_complete offsets from this
+    // partition in the same-ish timeframe as this window_complete. Best
+    // effort: we walk our local recentMessageResults cache instead of
+    // querying the DB — good enough for the LIVE view where recent
+    // events are in memory. If empty, we say so and skip the breakdown.
+    var sinkHdr = document.createElement('div');
+    sinkHdr.className = 'text-xs text-gray-500 uppercase tracking-wide mt-4 mb-1';
+    sinkHdr.textContent = 'Sink outputs';
+    body.appendChild(sinkHdr);
+    var sinkBody = document.createElement('div');
+    sinkBody.className = 'mb-3 text-xs text-gray-400';
+    sinkBody.textContent = 'loading…';
+    body.appendChild(sinkBody);
+
+    // Approximate offset set: any message_complete on the same partition
+    // whose ts is within [r.ts - 60s, r.ts]. 60s is comfortably wider
+    // than typical window durations without risking collisions.
+    var minTs = r.ts - 60, maxTs = r.ts + 0.5;
+    var offsets = [];
+    for (var i = 0; i < recentMessageResults.length; i++) {
+        var mr = recentMessageResults[i];
+        if (mr.partition === r.partition && mr.ts >= minTs && mr.ts <= maxTs && mr.offset != null) {
+            offsets.push(mr.offset);
+        }
+    }
+    if (!offsets.length) {
+        sinkBody.replaceChildren();
+        sinkBody.appendChild(document.createTextNode('(no matching on_message_complete events in the live window — open the trace view for authoritative data)'));
+    } else {
+        fetchSinkBreakdown(r.partition, offsets).then(function(counts) {
+            sinkBody.replaceChildren();
+            sinkBody.appendChild(makeSinkBreakdown(counts));
+        });
+    }
+}
+
+async function loadWindowResults() {
+    if (!HOOK_FLAGS.window_complete) return;
+    try {
+        var limit = Math.max(10 * PARTITION_COUNT, 30);
+        var r = await fetch('/api/live/window-results?limit=' + limit);
+        var arr = await r.json();
+        recentWindowResults = Array.isArray(arr) ? arr : [];
+        windowResultsTotal = recentWindowResults.length;
+    } catch(ex) {}
+}
+
+// --- Click-outside-to-close for all three completion-hook sidebars ---
+// Same pattern as Arrange/Cache: clicks inside the panel or the tab panel
+// itself keep the sidebar open; clicks anywhere else close it.
+function wireOutsideClick(panelId, tabPanelId, isOpenFn, closeFn) {
+    document.addEventListener('click', function(ev) {
+        if (!isOpenFn()) return;
+        var panel = document.getElementById(panelId);
+        if (panel && panel.contains(ev.target)) return;
+        var tabPanel = document.getElementById(tabPanelId);
+        if (tabPanel && tabPanel.contains(ev.target)) return;
+        closeFn();
+    });
+}
+wireOutsideClick(
+    'task-results-detail-panel',
+    'panel-task-results',
+    function() { return selectedTaskResultKey !== null; },
+    function() { closeTaskResultsDetail(); },
+);
+wireOutsideClick(
+    'message-results-detail-panel',
+    'panel-message-results',
+    function() { return selectedMessageResultKey !== null; },
+    function() { closeMessageResultsDetail(); },
+);
+wireOutsideClick(
+    'window-results-detail-panel',
+    'panel-window-results',
+    function() { return selectedWindowResultKey !== null; },
+    function() { closeWindowResultsDetail(); },
+);
 
 function makeLabelsTd(labels) {
     var td = document.createElement('td');
@@ -1411,21 +2244,12 @@ async function loadArrangeHistory() {
     } catch(ex) {}
 }
 
-async function loadCollectHistory() {
-    try {
-        var r = await fetch('/api/events?event_types=task_complete&limit=' + MAX_HISTORY);
-        var events = await r.json();
-        for (var i = 0; i < events.length; i++) {
-            var e = events[i];
-            var outputCount = 0;
-            try { outputCount = JSON.parse(e.metadata || '{}').output_message_count || 0; } catch(x) {}
-            recentCollects.push({
-                task_id: e.task_id, partition: e.partition,
-                duration: e.duration || 0, output_count: outputCount, ts: e.ts,
-            });
-        }
-        collectTotal = recentCollects.length;
-    } catch(ex) {}
+// Boot-time loader for all three completion-hook tabs. Each call is a
+// single SQL-backed GET — the feeds are independent, so we fire them in
+// parallel. Runs regardless of HOOK_FLAGS; the individual loaders
+// short-circuit when their flag is off.
+async function loadCompletionHookResults() {
+    await Promise.all([loadTaskResults(), loadMessageResults(), loadWindowResults()]);
 }
 
 // === WebSocket ===
@@ -1539,16 +2363,65 @@ function connectWS() {
                         if (selectedArrangeKey) renderArrangeDetail();
                     });
                 }
-            } else if (e.event === 'task_complete') {
-                collectTotal++;
-                var outputCount = 0;
-                try { outputCount = JSON.parse(e.metadata || '{}').output_message_count || 0; } catch(x) {}
-                recentCollects.unshift({
-                    task_id: e.task_id, partition: e.partition,
-                    duration: e.duration || 0, output_count: outputCount, ts: e.ts,
+            } else if (e.event === 'task_complete' && HOOK_FLAGS.task_complete) {
+                // on_task_complete() hook finished. WS frame carries
+                // duration (hook runtime) + metadata.output_message_count.
+                // Exec duration + status land in a separate task_completed/
+                // task_failed event — we lookup via allTasks (already
+                // populated by the Executors tab's WS handlers).
+                var tcMeta = {};
+                try { tcMeta = JSON.parse(e.metadata || '{}'); } catch(x) {}
+                var paired = allTasks[e.task_id];
+                recentTaskResults.unshift({
+                    ts: e.ts,
+                    task_id: e.task_id,
+                    partition: e.partition,
+                    hook_duration: e.duration || 0,
+                    exec_duration: paired ? paired.duration : null,
+                    status: paired ? paired.status : null,
+                    exit_code: null,
+                    output_message_count: tcMeta.output_message_count || 0,
                 });
-                if (recentCollects.length > MAX_HISTORY) recentCollects.length = MAX_HISTORY;
-                renderCollects();
+                if (recentTaskResults.length > MAX_HISTORY) recentTaskResults.length = MAX_HISTORY;
+                taskResultsTotal++;
+                renderTaskResults();
+            } else if (e.event === 'message_complete' && HOOK_FLAGS.message_complete) {
+                var mcMeta = {};
+                try { mcMeta = JSON.parse(e.metadata || '{}'); } catch(x) {}
+                recentMessageResults.unshift({
+                    ts: e.ts,
+                    partition: e.partition,
+                    offset: e.offset,
+                    duration: e.duration || 0,
+                    // End-to-end duration requires a DB-side join with the
+                    // matching consumed event — WS only pushes the
+                    // message_complete payload. The next 5s resync calls
+                    // /api/live/message-results which computes end-to-end
+                    // server-side and overwrites this feed wholesale.
+                    end_to_end_duration: null,
+                    task_count: mcMeta.task_count || 0,
+                    succeeded: mcMeta.succeeded || 0,
+                    failed: mcMeta.failed || 0,
+                    replaced: mcMeta.replaced || 0,
+                    output_message_count: mcMeta.output_message_count || 0,
+                });
+                if (recentMessageResults.length > MAX_HISTORY) recentMessageResults.length = MAX_HISTORY;
+                messageResultsTotal++;
+                renderMessageResults();
+            } else if (e.event === 'window_complete' && HOOK_FLAGS.window_complete) {
+                var wcMeta = {};
+                try { wcMeta = JSON.parse(e.metadata || '{}'); } catch(x) {}
+                recentWindowResults.unshift({
+                    ts: e.ts,
+                    partition: e.partition,
+                    window_id: wcMeta.window_id,
+                    duration: e.duration || 0,
+                    task_count: wcMeta.task_count || 0,
+                    output_message_count: wcMeta.output_message_count || 0,
+                });
+                if (recentWindowResults.length > MAX_HISTORY) recentWindowResults.length = MAX_HISTORY;
+                windowResultsTotal++;
+                renderWindowResults();
             }
             if (e.pool_active !== undefined) {
                 var pe = document.getElementById('v-pool');
@@ -1597,9 +2470,63 @@ function initArrangeTab() {
     }, 1000);
 }
 
+// --- Completion-hook tab filter wiring ---
+// Each tab has Partition + Search + (Issues/Failed) controls. Filters
+// mutate only the per-tab filter state object; renderers intersect
+// filters with the underlying feed at paint time. Input-event listeners
+// apply instantly so typing in the search box filters live.
+function initCompletionHookTabs() {
+    if (HOOK_FLAGS.task_complete) {
+        var tp = document.getElementById('task-results-filter-partition');
+        var ts = document.getElementById('task-results-filter-search');
+        var tf = document.getElementById('task-results-filter-failed');
+        if (tp) tp.addEventListener('change', function() {
+            taskResultsFilter.partition = tp.value;
+            renderTaskResults();
+        });
+        if (ts) ts.addEventListener('input', function() {
+            taskResultsFilter.search = ts.value;
+            renderTaskResults();
+        });
+        if (tf) tf.addEventListener('change', function() {
+            taskResultsFilter.failedOnly = tf.checked;
+            renderTaskResults();
+        });
+    }
+    if (HOOK_FLAGS.message_complete) {
+        var mp = document.getElementById('message-results-filter-partition');
+        var ms = document.getElementById('message-results-filter-search');
+        var mi = document.getElementById('message-results-filter-issues');
+        if (mp) mp.addEventListener('change', function() {
+            messageResultsFilter.partition = mp.value;
+            renderMessageResults();
+        });
+        if (ms) ms.addEventListener('input', function() {
+            messageResultsFilter.search = ms.value;
+            renderMessageResults();
+        });
+        if (mi) mi.addEventListener('change', function() {
+            messageResultsFilter.issuesOnly = mi.checked;
+            renderMessageResults();
+        });
+    }
+    if (HOOK_FLAGS.window_complete) {
+        var wp = document.getElementById('window-results-filter-partition');
+        var ws_ = document.getElementById('window-results-filter-search');
+        if (wp) wp.addEventListener('change', function() {
+            windowResultsFilter.partition = wp.value;
+            renderWindowResults();
+        });
+        if (ws_) ws_.addEventListener('input', function() {
+            windowResultsFilter.search = ws_.value;
+            renderWindowResults();
+        });
+    }
+}
+
 (async function() {
     ensureAnchor();
-    await Promise.all([syncFromAPI(), loadArrangeHistory(), loadCollectHistory()]);
+    await Promise.all([syncFromAPI(), loadArrangeHistory(), loadCompletionHookResults()]);
     // Right after loading arranged batches, fetch the authoritative state
     // of their task_ids. Without this, any batch older than 10 minutes
     // would render with "unknown" tasks until the next 5s resync.
@@ -1608,16 +2535,20 @@ function initArrangeTab() {
     initBars();
     rebuildAxis();
     renderArranges();
-    renderCollects();
+    renderTaskResults();
+    renderMessageResults();
+    renderWindowResults();
     initArrangeTab();
+    initCompletionHookTabs();
     connectWS();
     // rAF loop: updates bar positions/widths + scroll at 60fps
     requestAnimationFrame(animateTimeline);
     // task list tables (running/finished) — update every 500ms
     setInterval(function() { if (!frozen) renderTaskLists(); }, 500);
     // prune old bars + API sync + axis ticks every 5s. Also refresh the
-    // Arrange tab's task-state lookup so the sidebar doesn't stay stale
-    // for batches outside the 10-minute /api/recent-tasks window.
+    // Arrange tab's task-state lookup AND the three completion-hook feeds
+    // so their lists don't stale out if a handler emits at low rate and
+    // we happen to miss a WS frame.
     setInterval(function() {
         if (frozen) return;
         rebuildAxis();
@@ -1629,6 +2560,11 @@ function initArrangeTab() {
             pruneOldBars();
         });
         refreshArrangeTaskStates();
+        // Refresh the completion-hook feeds from their dedicated endpoints.
+        // Cheap: one indexed scan per feed, limited to N rows.
+        loadTaskResults().then(renderTaskResults);
+        loadMessageResults().then(renderMessageResults);
+        loadWindowResults().then(renderWindowResults);
     }, 5000);
 })();
 

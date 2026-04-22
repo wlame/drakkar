@@ -655,15 +655,29 @@ async def test_partitions_page_with_live_processors(debug_config, mock_recorder,
 
 
 async def test_live_page_has_tabs_and_ws(debug_config, mock_recorder, mock_app):
-    """Live page has tab panels, JS targets, and WebSocket code."""
+    """Live page has tab panels, JS targets, and WebSocket code.
+
+    The three completion-hook tabs (task/message/window results) render
+    conditionally based on hook_flags; mock_app's MagicMock handler
+    auto-reports all three as "implemented" (class-level getattr returns
+    ``None`` which is not identical to the base class's method), so the
+    default context renders all three — this test verifies the full set.
+    """
     fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/live')
     assert resp.status_code == 200
+    # Always-on tabs
     assert 'panel-arrange' in resp.text
     assert 'panel-execute' in resp.text
-    assert 'panel-collect' in resp.text
+    # Old Collect tab was removed — replaced by completion-hook tabs
+    assert 'panel-collect' not in resp.text
+    # Completion-hook tabs (visible because mock handler appears to
+    # override all three — see docstring)
+    assert 'panel-task-results' in resp.text
+    assert 'panel-message-results' in resp.text
+    assert 'panel-window-results' in resp.text
     assert 'allTasks' in resp.text
     assert '/ws' in resp.text
 
@@ -918,6 +932,393 @@ async def test_arrange_tasks_batch_lookup_mixed_states(tmp_path, mock_app, debug
         assert 'rg-mix-missing' not in body
     finally:
         await rec.stop()
+
+
+# --- /api/live/{task,message,window}-results — completion-hook feeds ---
+#
+# These feed the three tabs that replaced the old "Collect" tab in
+# /live. Each endpoint is a LIMIT-N indexed scan on the recorder's
+# events table — no joins (task-results does one extra batch lookup by
+# task_id for exec-duration / status, still a single query).
+
+
+async def test_task_results_returns_latest_n(tmp_path, mock_app, debug_config):
+    """Recent task_complete events, newest first, with paired exec state."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        from drakkar.models import ExecutorResult, ExecutorTask
+
+        # Record a subprocess outcome then the hook completion for the
+        # same task_id — the endpoint pairs them by task_id.
+        t1 = ExecutorTask(task_id='rg-tr-1', args=[], source_offsets=[10, 11])
+        rec.record_task_started(t1, partition=2)
+        rec.record_task_completed(
+            ExecutorResult(exit_code=0, stdout='', stderr='', duration_seconds=0.5, task=t1),
+            partition=2,
+        )
+        rec.record_task_complete(task_id='rg-tr-1', partition=2, duration=0.012, output_message_count=3)
+
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/live/task-results?limit=10')
+        body = resp.json()
+        assert isinstance(body, list)
+        assert len(body) == 1
+        row = body[0]
+        assert row['task_id'] == 'rg-tr-1'
+        assert row['partition'] == 2
+        assert row['hook_duration'] == 0.012
+        # Paired from task_completed
+        assert row['exec_duration'] == 0.5
+        assert row['status'] == 'completed'
+        # Pulled from metadata.output_message_count
+        assert row['output_message_count'] == 3
+        # source_offsets paired from the task_started event's metadata —
+        # essential for rendering the message source in the Task Results tab.
+        assert row['source_offsets'] == [10, 11]
+    finally:
+        await rec.stop()
+
+
+async def test_task_results_missing_exec_pair_surfaces_null_status(
+    tmp_path,
+    mock_app,
+    debug_config,
+):
+    """task_complete without a matching task_completed → status=None
+    (surfaces as "?" in the UI, not a fabricated success/failure)."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        rec.record_task_complete(
+            task_id='rg-orphan',
+            partition=1,
+            duration=0.008,
+            output_message_count=1,
+        )
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/live/task-results')
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]['status'] is None
+        assert body[0]['exec_duration'] is None
+    finally:
+        await rec.stop()
+
+
+async def test_message_results_returns_latest_n(tmp_path, mock_app, debug_config):
+    """message_complete events are returned with their metadata expanded
+    into the top-level response (succeeded/failed/replaced/outputs)."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        rec.record_message_complete(
+            partition=3,
+            offset=100,
+            duration=0.025,
+            task_count=5,
+            succeeded=4,
+            failed=1,
+            replaced=0,
+            output_message_count=7,
+        )
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/live/message-results')
+        body = resp.json()
+        assert len(body) == 1
+        row = body[0]
+        assert row['partition'] == 3
+        assert row['offset'] == 100
+        assert row['duration'] == 0.025
+        assert row['task_count'] == 5
+        assert row['succeeded'] == 4
+        assert row['failed'] == 1
+        assert row['replaced'] == 0
+        assert row['output_message_count'] == 7
+        # No matching consumed event in the DB — end_to_end is None rather
+        # than a fabricated zero.
+        assert row['end_to_end_duration'] is None
+    finally:
+        await rec.stop()
+
+
+async def test_message_results_end_to_end_duration_paired_from_consumed(
+    tmp_path,
+    mock_app,
+    debug_config,
+):
+    """When a consumed event exists for (partition, offset), the response
+    carries end_to_end_duration = message_complete.ts - consumed.ts."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        # Record consumed first, then message_complete. The recorder uses
+        # time.time() for ``ts`` so we just ensure a minimal wall-clock
+        # gap between the two and assert the difference is measurable.
+        from drakkar.models import SourceMessage
+
+        msg = SourceMessage(topic='t', partition=3, offset=100, value=b'{}', timestamp=1000)
+        rec.record_consumed(msg)
+        import asyncio
+
+        await asyncio.sleep(0.02)
+        rec.record_message_complete(
+            partition=3,
+            offset=100,
+            duration=0.01,
+            task_count=1,
+            succeeded=1,
+            failed=0,
+            replaced=0,
+            output_message_count=1,
+        )
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/live/message-results')
+        body = resp.json()
+        assert len(body) == 1
+        row = body[0]
+        # End-to-end = message_complete.ts - consumed.ts. We slept 20ms so
+        # it's comfortably > 0. Upper bound is loose to avoid flakiness
+        # on slow CI runners.
+        assert row['end_to_end_duration'] is not None
+        assert row['end_to_end_duration'] > 0.0
+        assert row['end_to_end_duration'] < 5.0
+    finally:
+        await rec.stop()
+
+
+async def test_message_results_end_to_end_picks_most_recent_prior_consumed(
+    tmp_path,
+    mock_app,
+    debug_config,
+):
+    """If the same (partition, offset) was consumed multiple times (e.g.
+    replay after restart), the pairing picks the most-recent consumed
+    event prior to the message_complete — not the oldest."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        import asyncio
+
+        from drakkar.models import SourceMessage
+
+        msg = SourceMessage(topic='t', partition=3, offset=100, value=b'{}', timestamp=1000)
+        # Old consumed event (simulates a previous replay)
+        rec.record_consumed(msg)
+        await asyncio.sleep(0.05)
+        # Newer consumed event — the one that this message_complete belongs to
+        rec.record_consumed(msg)
+        await asyncio.sleep(0.02)
+        rec.record_message_complete(
+            partition=3,
+            offset=100,
+            duration=0.01,
+            task_count=1,
+            succeeded=1,
+            failed=0,
+            replaced=0,
+            output_message_count=1,
+        )
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/live/message-results')
+        body = resp.json()
+        row = body[0]
+        # If pairing picked the oldest consumed it would be > 0.06s.
+        # Picking the most-recent-prior consumed puts it between the 20ms
+        # sleep and the 50ms total gap — assert < 50ms with margin.
+        assert row['end_to_end_duration'] is not None
+        assert row['end_to_end_duration'] < 0.05
+    finally:
+        await rec.stop()
+
+
+async def test_window_results_returns_latest_n(tmp_path, mock_app, debug_config):
+    """window_complete events carry window_id + task/output counts."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        rec.record_window_complete(
+            partition=5,
+            window_id=42,
+            duration=1.2,
+            task_count=20,
+            output_message_count=35,
+        )
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/live/window-results')
+        body = resp.json()
+        assert len(body) == 1
+        row = body[0]
+        assert row['partition'] == 5
+        assert row['window_id'] == 42
+        assert row['duration'] == 1.2
+        assert row['task_count'] == 20
+        assert row['output_message_count'] == 35
+    finally:
+        await rec.stop()
+
+
+async def test_completion_endpoints_empty_when_no_events(tmp_path, mock_app, debug_config):
+    """All three endpoints return [] on an empty DB, no 500s."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            for url in (
+                '/api/live/task-results',
+                '/api/live/message-results',
+                '/api/live/window-results',
+            ):
+                resp = await c.get(url)
+                assert resp.status_code == 200, url
+                assert resp.json() == [], url
+    finally:
+        await rec.stop()
+
+
+async def test_completion_endpoints_ordered_desc_and_limited(tmp_path, mock_app, debug_config):
+    """Latest events first, and limit caps the response length."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        for off in range(5):
+            rec.record_message_complete(
+                partition=1,
+                offset=off,
+                duration=0.01,
+                task_count=1,
+                succeeded=1,
+                failed=0,
+                replaced=0,
+                output_message_count=1,
+            )
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/live/message-results?limit=3')
+        body = resp.json()
+        assert len(body) == 3
+        # Newest first — offsets 4, 3, 2
+        assert body[0]['offset'] == 4
+        assert body[1]['offset'] == 3
+        assert body[2]['offset'] == 2
+    finally:
+        await rec.stop()
+
+
+# --- /api/live/sink-breakdown — group produced events by sink name ---
+
+
+async def test_sink_breakdown_groups_by_output_topic(tmp_path, mock_app, debug_config):
+    """Produced events for (partition, offsets) collapsed by output_topic."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        # Build three produced payloads with distinct sink names. The
+        # recorder keys ``output_topic`` on ``payload.sink``, so our test
+        # payloads set that attribute directly.
+        from pydantic import BaseModel as _BaseModel
+
+        class _Payload(_BaseModel):
+            sink: str
+
+        for off in (10, 10, 11):
+            rec.record_produced(
+                _Payload(sink='kafka.results'),
+                source_partition=7,
+                source_offset=off,
+            )
+        rec.record_produced(
+            _Payload(sink='postgres.main'),
+            source_partition=7,
+            source_offset=10,
+        )
+        rec.record_produced(
+            _Payload(sink='redis.cache'),
+            source_partition=7,
+            source_offset=11,
+        )
+        # Different partition — must not leak into the breakdown
+        rec.record_produced(
+            _Payload(sink='kafka.results'),
+            source_partition=8,
+            source_offset=10,
+        )
+
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post(
+                '/api/live/sink-breakdown',
+                json={'partition': 7, 'offsets': [10, 11]},
+            )
+        body = resp.json()
+        assert body == {'kafka.results': 3, 'postgres.main': 1, 'redis.cache': 1}
+    finally:
+        await rec.stop()
+
+
+async def test_sink_breakdown_empty_offsets_returns_empty_map(
+    tmp_path,
+    mock_app,
+    debug_config,
+):
+    """Empty offsets list short-circuits, no SQL, returns {}."""
+    rec = await _start_live_recorder(tmp_path)
+    try:
+        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post('/api/live/sink-breakdown', json={'partition': 0, 'offsets': []})
+        assert resp.status_code == 200
+        assert resp.json() == {}
+    finally:
+        await rec.stop()
+
+
+# --- Hook-flag detection — hides unused completion-hook tabs ---
+
+
+def test_hook_flags_no_overrides_returns_all_false():
+    """Plain BaseDrakkarHandler subclass with no hook overrides → all False."""
+    from drakkar.debug_server import _hook_flags
+    from drakkar.handler import BaseDrakkarHandler
+
+    class H(BaseDrakkarHandler):
+        pass
+
+    flags = _hook_flags(H())
+    assert flags == {
+        'task_complete': False,
+        'message_complete': False,
+        'window_complete': False,
+    }
+
+
+def test_hook_flags_detects_overrides():
+    """Each overridden hook flips its flag; non-overridden stay False."""
+    from drakkar.debug_server import _hook_flags
+    from drakkar.handler import BaseDrakkarHandler
+    from drakkar.models import CollectResult, ExecutorResult, MessageGroup
+
+    class H(BaseDrakkarHandler):
+        async def on_task_complete(self, result: ExecutorResult) -> CollectResult | None:
+            return None
+
+        async def on_message_complete(self, group: MessageGroup) -> CollectResult | None:
+            return None
+
+        # on_window_complete NOT overridden — should stay False.
+
+    flags = _hook_flags(H())
+    assert flags['task_complete'] is True
+    assert flags['message_complete'] is True
+    assert flags['window_complete'] is False
 
 
 # --- Sinks page and API ---

@@ -99,6 +99,16 @@ class DrakkarApp:
         return self._config
 
     @property
+    def handler(self) -> BaseDrakkarHandler:
+        """Return the user-supplied handler instance.
+
+        Exposed so the debug server can introspect the handler (e.g. to
+        detect which completion hooks are implemented) without reaching
+        into private state. Read-only.
+        """
+        return self._handler
+
+    @property
     def processors(self) -> dict[int, PartitionProcessor]:
         return self._processors
 
