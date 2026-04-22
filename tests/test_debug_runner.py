@@ -20,11 +20,17 @@ Covers the building blocks of the no-footprint probe (Task 1) plus the
 from __future__ import annotations
 
 import time
+from contextlib import ExitStack
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from pydantic import BaseModel, ValidationError
 
+import drakkar.offsets
+import drakkar.partition
+import drakkar.recorder
+import drakkar.sinks.manager
 from drakkar.cache import Cache, CacheScope, NoOpCache
 from drakkar.config import DrakkarConfig, ExecutorConfig
 from drakkar.debug_runner import (
@@ -904,3 +910,321 @@ async def test_runner_partial_report_without_run_returns_empty_shape():
     assert report.truncated is True
     assert report.tasks == []
     assert report.input.value == ''  # synthetic empty ProbeInput
+
+
+# --- Task 2b: Safety guarantee negative-assertion tests ---------------------
+#
+# The Message Probe promises a *zero-footprint* run: no rows written, no
+# offsets committed, no sinks called, no cache mutations, no
+# PartitionProcessor state touched. These six tests enforce the
+# guarantees listed in the Solution Overview by actively sabotaging any
+# module the probe MUST NOT touch — patched methods raise AssertionError
+# if they are reached, so any accidental regression fails loudly.
+#
+# Each test pairs with one bullet in the "Safety guarantees" list of
+# docs/plans/20260422-message-probe-debug-tab.md; keeping the mapping
+# 1:1 makes it obvious when a promise is unprotected.
+
+
+class _CacheWritingHandler(_HappyPathHandler):
+    """Variant of _HappyPathHandler that also calls ``self.cache.set(...)`` during hooks.
+
+    Used by guarantee #3 to prove that three writes inside a single
+    probe do NOT mutate the live Cache's ``_dirty`` / ``_bytes_sum``
+    state, and that all three show up in the report with
+    ``outcome='suppressed'``.
+    """
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        # One write during arrange
+        self.cache.set('arrange-key', {'stage': 'arrange'})
+        return await super().arrange(messages, pending)
+
+    async def on_task_complete(self, result: ExecutorResult) -> CollectResult | None:
+        # One write per task_complete invocation
+        self.cache.set(f'task-key-{result.task.task_id}', {'stage': 'task'})
+        return await super().on_task_complete(result)
+
+
+class _TaskCompleteRaisingHandler(_HappyPathHandler):
+    """Variant that raises inside ``on_task_complete`` so we can prove cache restore."""
+
+    async def on_task_complete(self, result: ExecutorResult) -> CollectResult | None:
+        self.on_task_complete_calls += 1
+        raise RuntimeError('boom from on_task_complete')
+
+
+# ---- guarantee #1: EventRecorder never called during a probe --------------
+
+
+async def test_runner_never_calls_event_recorder():
+    """Every EventRecorder.record_* invocation would raise — probe must never hit them.
+
+    The runner calls ``executor_pool.execute(task, recorder=None, ...)``
+    so every ``recorder.record_*`` call is guarded by ``if recorder:``
+    inside the executor. We also capture the kwargs passed to
+    ``ExecutorPool.execute`` and assert ``recorder=None`` each time, so
+    a regression in the runner (forgetting to pass ``recorder=None``)
+    fails this test even before the recorder itself can raise.
+    """
+    handler = _HappyPathHandler(task_count=2)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    # Record every ExecutorPool.execute call to verify recorder=None.
+    captured_kwargs: list[dict[str, Any]] = []
+    original_execute = ExecutorPool.execute
+
+    async def _spy_execute(self_pool: ExecutorPool, task: ExecutorTask, **kwargs: Any) -> ExecutorResult:
+        captured_kwargs.append(kwargs)
+        return await original_execute(self_pool, task, **kwargs)
+
+    # Patch every record_* method on EventRecorder to raise. If any of them
+    # fires during the probe, the test fails loudly.
+    record_method_names = [
+        name
+        for name in dir(drakkar.recorder.EventRecorder)
+        if name.startswith('record_') and callable(getattr(drakkar.recorder.EventRecorder, name))
+    ]
+    # Sanity: we really did find at least a handful of record_* methods
+    # (guards against a typo / rename that silently neutralises this test).
+    assert len(record_method_names) >= 5
+
+    # Patch every record_* method and the executor.execute spy inside a
+    # single ExitStack so all patches are unwound cleanly when the block
+    # exits (even if runner.run raises).
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(ExecutorPool, 'execute', _spy_execute))
+        for name in record_method_names:
+            stack.enter_context(
+                patch.object(
+                    drakkar.recorder.EventRecorder,
+                    name,
+                    side_effect=AssertionError(f'EventRecorder.{name} called during probe'),
+                )
+            )
+        report = await runner.run(ProbeInput(value='x', offset=1))
+
+    assert report.errors == []
+    # Every execute call received recorder=None explicitly.
+    assert len(captured_kwargs) == 2
+    for kw in captured_kwargs:
+        assert kw.get('recorder') is None, f'expected recorder=None, got {kw!r}'
+
+
+# ---- guarantee #2: SinkManager never instantiated or called ---------------
+
+
+async def test_runner_never_instantiates_or_calls_sink_manager():
+    """SinkManager.__init__ and deliver_all would raise — probe must never hit them.
+
+    The runner replaces the real SinkManager with a DebugSinkCollector;
+    the production class should stay untouched for the whole probe.
+    """
+    handler = _HappyPathHandler(task_count=1)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    # Sabotage both construction and the main delivery entrypoint.
+    with (
+        patch.object(
+            drakkar.sinks.manager.SinkManager,
+            '__init__',
+            side_effect=AssertionError('SinkManager constructed during probe'),
+        ),
+        patch.object(
+            drakkar.sinks.manager.SinkManager,
+            'deliver_all',
+            side_effect=AssertionError('SinkManager.deliver_all called during probe'),
+        ),
+    ):
+        report = await runner.run(ProbeInput(value='x', offset=1))
+
+    # Probe finished cleanly — handler's CollectResults went to the
+    # DebugSinkCollector, not SinkManager.
+    assert report.errors == []
+    # The in-memory sink collector still produced the planned records
+    # from the CollectResult fields the handler returned.
+    assert len(report.planned_sink_payloads) >= 1
+
+
+# ---- guarantee #3: Cache._dirty and _bytes_sum unchanged -------------------
+
+
+async def test_runner_does_not_mutate_live_cache_dirty_state():
+    """A handler that calls ``cache.set(...)`` three times must leave the live Cache untouched.
+
+    The real Cache accumulates pending writes in ``_dirty`` and tracks a
+    running ``_bytes_sum``. After a probe, both must be byte-identical
+    to their pre-probe snapshot, and the report must show 3 suppressed
+    set calls.
+    """
+    real_cache = _fresh_cache()
+    handler = _CacheWritingHandler(task_count=2)
+    # Attach the real cache as the handler's cache so the proxy wraps it.
+    handler.cache = real_cache
+
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    initial_dirty_len = len(real_cache._dirty)
+    initial_bytes_sum = real_cache._bytes_sum
+
+    report = await runner.run(ProbeInput(value='x', offset=1))
+
+    # The live cache state is *exactly* what it was before the probe.
+    assert len(real_cache._dirty) == initial_dirty_len
+    assert real_cache._bytes_sum == initial_bytes_sum
+    # And the handler's cache attribute was restored to the real cache
+    # (not the proxy).
+    assert handler.cache is real_cache
+
+    # The report captured all three set calls as suppressed writes:
+    # 1 in arrange + 1 per task_complete (2 tasks).
+    set_calls = [c for c in report.cache_calls if c.op == 'set']
+    assert len(set_calls) == 3
+    assert all(c.outcome == 'suppressed' for c in set_calls)
+
+
+# ---- guarantee #4: no offset-commit path reached --------------------------
+
+
+async def test_runner_never_reaches_offset_commit_path():
+    """PartitionProcessor._try_commit and OffsetTracker mutations must never fire.
+
+    The probe bypasses PartitionProcessor entirely, so its offset state
+    machine (OffsetTracker.register / complete / acknowledge_commit)
+    and the committing coroutine (_try_commit) should remain cold.
+    """
+    handler = _HappyPathHandler(task_count=1)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    # Patch PartitionProcessor's commit helper and every OffsetTracker
+    # method that mutates state. Read-only methods (pending_count etc.)
+    # are left alone — they'd fire during metrics scrapes but not during
+    # the probe itself.
+    with (
+        patch.object(
+            drakkar.partition.PartitionProcessor,
+            '_try_commit',
+            side_effect=AssertionError('PartitionProcessor._try_commit called during probe'),
+        ),
+        patch.object(
+            drakkar.offsets.OffsetTracker,
+            'register',
+            side_effect=AssertionError('OffsetTracker.register called during probe'),
+        ),
+        patch.object(
+            drakkar.offsets.OffsetTracker,
+            'complete',
+            side_effect=AssertionError('OffsetTracker.complete called during probe'),
+        ),
+        patch.object(
+            drakkar.offsets.OffsetTracker,
+            'acknowledge_commit',
+            side_effect=AssertionError('OffsetTracker.acknowledge_commit called during probe'),
+        ),
+    ):
+        report = await runner.run(ProbeInput(value='x', offset=1))
+
+    assert report.errors == []
+
+
+# ---- guarantee #5: handler.cache restored after exception -----------------
+
+
+async def test_runner_restores_handler_cache_when_on_task_complete_raises():
+    """If ``on_task_complete`` raises, the ``finally`` in ``_run_locked`` still restores cache.
+
+    Task 3 will add graceful exception capture (probe returns a report
+    with the error instead of propagating). For now, the runner
+    propagates the exception, but the cache must still be restored.
+    This test handles both cases: it catches the exception if raised,
+    and either way asserts ``handler.cache is original_cache``.
+    """
+    handler = _TaskCompleteRaisingHandler(task_count=1)
+    original_cache = handler.cache  # class-level NoOpCache
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    # pytest.raises doesn't fail if no exception is raised when we use
+    # a try/except wrapper manually; using the wrapper instead of
+    # pytest.raises keeps the test robust to whether Task 3 has
+    # landed or not.
+    try:
+        await runner.run(ProbeInput(value='x', offset=1))
+    except Exception:
+        # Task 2a/2b: the runner currently lets the hook exception
+        # propagate — Task 3 will catch it. Either path is acceptable
+        # for guarantee #5; the point is that cache is still restored.
+        pass
+
+    # The strong post-condition: the handler's cache attribute is
+    # exactly the original object, not a DebugCacheProxy.
+    assert handler.cache is original_cache
+
+
+# ---- guarantee #6: no PartitionProcessor state touched --------------------
+
+
+async def test_runner_never_constructs_or_invokes_partition_processor():
+    """PartitionProcessor.__init__ and its core internals must never fire during a probe.
+
+    The runner must NOT reach into PartitionProcessor for any reason:
+    no construction, no ``_process_window``, no ``_execute_and_track``.
+    This is what makes the probe safe in a production worker — we can
+    run it without perturbing the live partition state.
+    """
+    handler = _HappyPathHandler(task_count=1)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    with (
+        patch.object(
+            drakkar.partition.PartitionProcessor,
+            '__init__',
+            side_effect=AssertionError('PartitionProcessor constructed during probe'),
+        ),
+        patch.object(
+            drakkar.partition.PartitionProcessor,
+            '_process_window',
+            side_effect=AssertionError('PartitionProcessor._process_window called during probe'),
+        ),
+        patch.object(
+            drakkar.partition.PartitionProcessor,
+            '_execute_and_track',
+            side_effect=AssertionError('PartitionProcessor._execute_and_track called during probe'),
+        ),
+        patch.object(
+            drakkar.partition.PartitionProcessor,
+            '_try_commit',
+            side_effect=AssertionError('PartitionProcessor._try_commit called during probe'),
+        ),
+    ):
+        report = await runner.run(ProbeInput(value='x', offset=1))
+
+    assert report.errors == []
+    assert len(report.tasks) == 1
