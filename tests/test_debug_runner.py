@@ -1549,3 +1549,316 @@ async def test_probe_cache_summary_counts_match_cache_calls():
     assert outcomes.count('hit') == 2
     assert outcomes.count('miss') == 3
     assert outcomes.count('suppressed') == 2
+
+
+# --- Task 3: Error capture for every hook -----------------------------------
+#
+# These tests exercise the graceful error-capture layer added in Task 3.
+# The runner must never propagate a hook's exception; every failure
+# becomes a ``ProbeError`` on ``DebugReport.errors`` with the full
+# traceback, the corresponding stage's ``error`` field gets a one-line
+# summary, and the pipeline short-circuits according to the plan rules:
+#
+#   deserialize error       → skip every downstream stage
+#   message_label error     → NON-fatal; still run arrange + tasks + hooks
+#   arrange error           → skip tasks + hooks
+#   on_task_complete error  → record on the task entry, keep processing tasks
+#   on_message_complete err → still run on_window_complete (hooks are independent)
+#   on_window_complete err  → captured and returned
+#
+# Each test defines a small handler subclass that injects a raise at the
+# target stage so the probe's behaviour can be asserted end-to-end.
+
+
+class _DeserializeRaisingHandler(_HappyPathHandler):
+    """Raises in ``deserialize_message`` — every downstream stage must be skipped."""
+
+    def deserialize_message(self, msg: SourceMessage) -> SourceMessage:
+        raise ValueError('bad payload from deserialize')
+
+
+async def test_runner_captures_deserialize_error_and_skips_downstream():
+    """deserialize raise → one error, arrange/tasks/hooks all skipped, report is valid JSON."""
+    handler = _DeserializeRaisingHandler(task_count=2)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    report = await runner.run(ProbeInput(value='not json', offset=1))
+
+    # Exactly one error, tagged with the deserialize stage.
+    assert len(report.errors) == 1
+    err = report.errors[0]
+    assert err.stage == 'deserialize'
+    assert err.exception_class == 'ValueError'
+    assert 'bad payload from deserialize' in err.message
+    # Full traceback is captured — a Traceback header appears in every
+    # format_exc output when called inside an except block.
+    assert 'Traceback' in err.traceback or 'ValueError' in err.traceback
+
+    # Dedicated deserialize_error field carries the same ProbeError so
+    # the UI can highlight it in section A.
+    assert report.deserialize_error is not None
+    assert report.deserialize_error.stage == 'deserialize'
+
+    # Arrange stage stays at the default empty shape — it was skipped.
+    assert report.arrange.duration_seconds is None
+    assert report.arrange.error is None
+    assert report.arrange.collect_result is None
+
+    # No tasks, no hooks were invoked.
+    assert report.tasks == []
+    assert report.on_message_complete is None
+    assert report.on_window_complete is None
+    assert handler.arrange_calls == 0
+    assert handler.on_task_complete_calls == 0
+    assert handler.on_message_complete_calls == 0
+    assert handler.on_window_complete_calls == 0
+
+    # Report round-trips through JSON without raising.
+    as_json = report.model_dump_json()
+    restored = DebugReport.model_validate_json(as_json)
+    assert restored == report
+
+
+class _ArrangeRaisingHandler(_HappyPathHandler):
+    """Raises in ``arrange`` — tasks + hooks must be skipped but deserialize ran OK."""
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        self.arrange_calls += 1
+        raise RuntimeError('arrange blew up')
+
+
+async def test_runner_captures_arrange_error_and_skips_downstream():
+    """arrange raise → one error, no tasks/hooks; parsed_payload survives from deserialize."""
+    handler = _ArrangeRaisingHandler(task_count=1)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    report = await runner.run(ProbeInput(value='payload', offset=1))
+
+    # Exactly one error tagged with the arrange stage.
+    assert len(report.errors) == 1
+    assert report.errors[0].stage == 'arrange'
+    assert report.errors[0].exception_class == 'RuntimeError'
+    assert 'arrange blew up' in report.errors[0].message
+
+    # Deserialize ran (default BaseDrakkarHandler.deserialize_message sets
+    # payload=None when input_model is unset). message_label also ran,
+    # since the plan puts arrange *after* message_label in sequence.
+    assert report.message_label == '0:1'
+
+    # Arrange stage has a short error summary + duration (even for the
+    # failing case — we time the attempted call).
+    assert report.arrange.error is not None
+    assert 'arrange blew up' in report.arrange.error
+    assert report.arrange.duration_seconds is not None
+
+    # Downstream stages skipped.
+    assert report.tasks == []
+    assert report.on_message_complete is None
+    assert report.on_window_complete is None
+    assert handler.on_task_complete_calls == 0
+    assert handler.on_message_complete_calls == 0
+    assert handler.on_window_complete_calls == 0
+
+
+class _OnTaskCompleteSelectiveRaisingHandler(_HappyPathHandler):
+    """Raises in ``on_task_complete`` only for the FIRST task; the second succeeds.
+
+    Used to prove that a single task's hook failure does not abort the
+    pipeline — remaining tasks are still processed and
+    on_message_complete still runs.
+    """
+
+    async def on_task_complete(self, result: ExecutorResult) -> CollectResult | None:
+        self.on_task_complete_calls += 1
+        if result.task.task_id == 't-0':
+            raise ValueError('boom for task 0')
+        return CollectResult(
+            kafka=[
+                KafkaPayload(
+                    sink='results',
+                    key=result.task.task_id.encode(),
+                    data=_TinyOutput(id=self.on_task_complete_calls, note='task'),
+                ),
+            ],
+        )
+
+
+async def test_runner_captures_on_task_complete_error_and_continues_other_tasks():
+    """on_task_complete raise for task 0 → task 0 carries the error, task 1 succeeds, hooks still fire."""
+    handler = _OnTaskCompleteSelectiveRaisingHandler(task_count=2)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    report = await runner.run(ProbeInput(value='x', offset=1))
+
+    # Both tasks got an on_task_complete invocation (the failing task's
+    # exception was captured, not propagated).
+    assert handler.on_task_complete_calls == 2
+
+    # Exactly one error, tagged with the failing task's id.
+    assert len(report.errors) == 1
+    assert report.errors[0].stage == 'task_complete:t-0'
+    assert report.errors[0].exception_class == 'ValueError'
+
+    # Task 0's entry carries the one-line error summary, task 1's does not.
+    assert len(report.tasks) == 2
+    assert report.tasks[0].task_id == 't-0'
+    assert report.tasks[0].on_task_complete_error is not None
+    assert 'boom for task 0' in report.tasks[0].on_task_complete_error
+    assert report.tasks[1].task_id == 't-1'
+    assert report.tasks[1].on_task_complete_error is None
+    # Task 1's on_task_complete_result IS populated (the handler returned
+    # a CollectResult for it).
+    assert report.tasks[1].on_task_complete_result is not None
+
+    # on_message_complete still ran (a per-task hook failure does not
+    # block the per-message hook).
+    assert report.on_message_complete is not None
+    assert handler.on_message_complete_calls == 1
+    assert report.on_window_complete is not None
+    assert handler.on_window_complete_calls == 1
+
+
+class _OnMessageCompleteRaisingHandler(_HappyPathHandler):
+    """Raises in ``on_message_complete`` — ``on_window_complete`` must still fire."""
+
+    async def on_message_complete(self, group: MessageGroup) -> CollectResult | None:
+        self.on_message_complete_calls += 1
+        raise RuntimeError('message complete explosion')
+
+
+async def test_runner_captures_on_message_complete_error_but_still_runs_on_window_complete():
+    """on_message_complete raise → error recorded, on_window_complete still runs and succeeds."""
+    handler = _OnMessageCompleteRaisingHandler(task_count=1)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    report = await runner.run(ProbeInput(value='x', offset=1))
+
+    # Error captured under the on_message_complete stage.
+    assert len(report.errors) == 1
+    assert report.errors[0].stage == 'on_message_complete'
+    assert report.errors[0].exception_class == 'RuntimeError'
+
+    # Stage result reflects the error + no CollectResult.
+    assert report.on_message_complete is not None
+    assert report.on_message_complete.error is not None
+    assert 'message complete explosion' in report.on_message_complete.error
+    assert report.on_message_complete.collect_result is None
+
+    # on_window_complete still fired — the hooks are independent and
+    # the plan mandates we keep going so the operator sees both outcomes.
+    assert handler.on_window_complete_calls == 1
+    assert report.on_window_complete is not None
+    assert report.on_window_complete.error is None
+    # The window hook produced a kafka record — it should appear in the
+    # flattened sink payloads.
+    sinks_by_stage = {r.origin_stage: r for r in report.planned_sink_payloads}
+    assert 'window_complete' in sinks_by_stage
+
+
+class _OnWindowCompleteRaisingHandler(_HappyPathHandler):
+    """Raises in ``on_window_complete`` — last stage, the probe simply captures and returns."""
+
+    async def on_window_complete(
+        self,
+        results: list[ExecutorResult],
+        source_messages: list[SourceMessage],
+    ) -> CollectResult | None:
+        self.on_window_complete_calls += 1
+        raise ValueError('window complete explosion')
+
+
+async def test_runner_captures_on_window_complete_error_and_returns():
+    """on_window_complete raise → error captured, probe returns normally, no raise."""
+    handler = _OnWindowCompleteRaisingHandler(task_count=1)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    # The important guarantee: runner.run() does NOT raise.
+    report = await runner.run(ProbeInput(value='x', offset=1))
+
+    assert len(report.errors) == 1
+    assert report.errors[0].stage == 'window_complete'
+    assert report.errors[0].exception_class == 'ValueError'
+
+    # on_window_complete stage result carries the error summary.
+    assert report.on_window_complete is not None
+    assert report.on_window_complete.error is not None
+    assert 'window complete explosion' in report.on_window_complete.error
+    assert report.on_window_complete.collect_result is None
+
+    # on_message_complete fired normally (it is upstream of the failure).
+    assert report.on_message_complete is not None
+    assert report.on_message_complete.error is None
+    assert handler.on_message_complete_calls == 1
+
+
+class _ArrangeRaisesAfterCacheWriteHandler(_HappyPathHandler):
+    """Writes to cache inside ``arrange``, then raises.
+
+    Used to verify that cache calls captured BEFORE a fatal stage error
+    still appear in the final report — the runner must not clear the
+    cache_calls list when a stage raises.
+    """
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        self.arrange_calls += 1
+        # One suppressed write BEFORE the raise.
+        self.cache.set('arrange-key', {'stage': 'arrange'})
+        raise RuntimeError('arrange blew up after cache write')
+
+
+async def test_runner_arrange_error_preserves_cache_calls_in_report():
+    """A cache call made before a fatal arrange error is still captured in the report.
+
+    This is the simpler variant of the "deserialize error preserves
+    cache_calls" scenario — deserialize runs before the proxy swap even
+    has a chance to log anything the handler might call, so we instead
+    exercise the "fatal mid-run failure" path via arrange, which the
+    plan explicitly calls out as the fallback case.
+    """
+    handler = _ArrangeRaisesAfterCacheWriteHandler(task_count=1)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    report = await runner.run(ProbeInput(value='x', offset=1))
+
+    # Arrange failed → one error captured, downstream skipped.
+    assert len(report.errors) == 1
+    assert report.errors[0].stage == 'arrange'
+
+    # The cache_calls list preserves the handler's suppressed write.
+    set_calls = [c for c in report.cache_calls if c.op == 'set' and c.key == 'arrange-key']
+    assert len(set_calls) == 1
+    assert set_calls[0].outcome == 'suppressed'
+    # Summary counts mirror the call log (one suppressed write).
+    assert report.cache_summary['writes_suppressed'] >= 1

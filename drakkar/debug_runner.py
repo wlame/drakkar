@@ -41,11 +41,13 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import time
+import traceback
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
 from drakkar.cache import CacheScope
+from drakkar.executor import ExecutorTaskError
 from drakkar.models import (
     CollectResult,
     ExecutorResult,
@@ -818,48 +820,48 @@ class DebugRunner:
         sink_collector: DebugSinkCollector,
         start_monotonic: float,
     ) -> None:
-        """Run the arrange → per-task → window sequence.
+        """Run the arrange → per-task → window sequence with graceful error capture.
 
         Extracted into its own coroutine so the ``finally`` block in
         ``_run_locked`` only has to worry about cache restoration —
-        stage logic lives here. Happy-path implementation for task 2a;
-        error capture + on_error retries/replacements land in tasks 3
-        and 4.
+        stage logic lives here. Task 3 added try/except wrappers around
+        every hook so exceptions never crash the probe — they land in
+        ``self._partial['errors']`` as ``ProbeError`` entries and the
+        runner short-circuits downstream stages based on which hook
+        failed (see ``_record_error`` and the per-stage logic below).
+
+        Short-circuit rules:
+          - deserialize error → skip all downstream stages
+          - message_label error → non-fatal, keep going
+          - arrange error → skip tasks + hooks
+          - on_task_complete error → record on the task entry, keep processing other tasks
+          - on_message_complete error → still run on_window_complete
+          - on_window_complete error → capture and return
         """
+        # Guarantee 'errors' list exists on _partial. latest_partial_report()
+        # reads it, and every error-capture path appends to it.
+        self._partial.setdefault('errors', [])
+
         # --- deserialize -----------------------------------------------------
-        token = _probe_stage.set('deserialize')
-        try:
-            self._handler.deserialize_message(msg)
-        finally:
-            _probe_stage.reset(token)
-        # deserialize_message mutates msg.payload in place. Serialize
-        # pydantic models via model_dump so the JSON roundtrip used by
-        # the endpoint preserves structure.
-        self._update_partial('parsed_payload', _serialize_payload(msg.payload))
+        # Deserialize is the first stage. If it fails, we cannot usefully
+        # build tasks or call hooks that depend on a parsed payload.
+        deserialize_ok = self._run_deserialize(msg=msg, start_monotonic=start_monotonic)
+        if not deserialize_ok:
+            return
 
         # --- message_label ---------------------------------------------------
-        token = _probe_stage.set('message_label')
-        try:
-            label = self._handler.message_label(msg)
-        finally:
-            _probe_stage.reset(token)
-        self._update_partial('message_label', label)
+        # Label is a cosmetic string used for UI rows / logs. Failing here
+        # must NOT skip downstream stages; we just leave message_label as
+        # None and move on.
+        self._run_message_label(msg=msg, start_monotonic=start_monotonic)
 
         # --- arrange ---------------------------------------------------------
         arrange_start = time.monotonic()
-        token = _probe_stage.set('arrange')
-        try:
-            tasks = await self._handler.arrange([msg], PendingContext())
-        finally:
-            _probe_stage.reset(token)
-        arrange_duration = time.monotonic() - arrange_start
-        self._update_partial(
-            'arrange',
-            ProbeStageResult(duration_seconds=arrange_duration),
-        )
-        timing = dict(self._partial.get('timing', {}))
-        timing['arrange'] = arrange_duration
-        self._update_partial('timing', timing)
+        tasks = await self._run_arrange(msg=msg, start_monotonic=start_monotonic, arrange_start=arrange_start)
+        if tasks is None:
+            # Arrange failed — skip tasks + both hook stages. The error is
+            # already captured on _partial['errors'] and _partial['arrange'].
+            return
 
         # --- per-task execution ---------------------------------------------
         # Maintain a live list on _partial so latest_partial_report() sees
@@ -874,24 +876,199 @@ class DebugRunner:
                 msg=msg,
                 sink_collector=sink_collector,
                 terminal_results=terminal_results,
+                start_monotonic=start_monotonic,
             )
             task_entries.append(entry)
 
         # --- on_message_complete --------------------------------------------
+        # on_message_complete is non-blocking for on_window_complete: even
+        # if it raises, we still invoke on_window_complete so the operator
+        # can see its independent behaviour.
+        await self._run_on_message_complete(
+            msg=msg,
+            tasks=tasks,
+            terminal_results=terminal_results,
+            sink_collector=sink_collector,
+            arrange_start=arrange_start,
+            start_monotonic=start_monotonic,
+        )
+
+        # --- on_window_complete ---------------------------------------------
+        await self._run_on_window_complete(
+            msg=msg,
+            terminal_results=terminal_results,
+            sink_collector=sink_collector,
+            start_monotonic=start_monotonic,
+        )
+
+        # Expose the final sink-collector flattening on _partial so a
+        # partial-report snapshot taken during on_window_complete
+        # captures everything up to that point.
+        self._update_partial('planned_sink_payloads', sink_collector.flatten())
+        _ = start_monotonic  # parameter reserved for wall-clock tracking (task 5)
+
+    # -- per-stage helpers ---------------------------------------------------
+    #
+    # Each helper runs one hook stage with error capture. They return a
+    # value (or a flag) so the caller can decide whether to short-circuit
+    # the pipeline. Keeping each stage in its own method keeps _run_stages
+    # readable and mirrors the stage-by-stage rules documented in the plan.
+
+    def _run_deserialize(self, *, msg: SourceMessage, start_monotonic: float) -> bool:
+        """Run handler.deserialize_message with error capture. Returns True on success.
+
+        Returning False signals the caller to stop — the parsed payload
+        is missing and every downstream stage would be meaningless.
+        """
+        token = _probe_stage.set('deserialize')
+        try:
+            try:
+                self._handler.deserialize_message(msg)
+            except Exception as exc:
+                probe_error = self._build_probe_error(
+                    stage='deserialize',
+                    exc=exc,
+                    start_monotonic=start_monotonic,
+                )
+                self._record_error(probe_error)
+                # Also surface as a dedicated field — the UI renders
+                # deserialize errors in section A with special emphasis.
+                self._update_partial('deserialize_error', probe_error)
+                return False
+        finally:
+            _probe_stage.reset(token)
+        # deserialize_message mutates msg.payload in place. Serialize
+        # pydantic models via model_dump so the JSON roundtrip used by
+        # the endpoint preserves structure.
+        self._update_partial('parsed_payload', _serialize_payload(msg.payload))
+        return True
+
+    def _run_message_label(self, *, msg: SourceMessage, start_monotonic: float) -> None:
+        """Run handler.message_label with error capture. Non-fatal on error."""
+        token = _probe_stage.set('message_label')
+        try:
+            try:
+                label = self._handler.message_label(msg)
+            except Exception as exc:
+                self._record_error(
+                    self._build_probe_error(
+                        stage='message_label',
+                        exc=exc,
+                        start_monotonic=start_monotonic,
+                    )
+                )
+                # Leave message_label as None; downstream stages carry on.
+                return
+        finally:
+            _probe_stage.reset(token)
+        self._update_partial('message_label', label)
+
+    async def _run_arrange(
+        self,
+        *,
+        msg: SourceMessage,
+        start_monotonic: float,
+        arrange_start: float,
+    ) -> list[ExecutorTask] | None:
+        """Run handler.arrange with error capture. Returns None to signal fatal failure.
+
+        Populates ``_partial['arrange']`` with a ``ProbeStageResult`` in
+        both success and failure cases — on failure the ``error`` field
+        carries a one-line summary and the full traceback is on
+        ``_partial['errors']``.
+        """
+        token = _probe_stage.set('arrange')
+        try:
+            try:
+                tasks = await self._handler.arrange([msg], PendingContext())
+            except Exception as exc:
+                arrange_duration = time.monotonic() - arrange_start
+                probe_error = self._build_probe_error(
+                    stage='arrange',
+                    exc=exc,
+                    start_monotonic=start_monotonic,
+                )
+                self._record_error(probe_error)
+                self._update_partial(
+                    'arrange',
+                    ProbeStageResult(
+                        duration_seconds=arrange_duration,
+                        error=_one_line_summary(exc),
+                    ),
+                )
+                timing = dict(self._partial.get('timing', {}))
+                timing['arrange'] = arrange_duration
+                self._update_partial('timing', timing)
+                return None
+        finally:
+            _probe_stage.reset(token)
+
+        arrange_duration = time.monotonic() - arrange_start
+        self._update_partial(
+            'arrange',
+            ProbeStageResult(duration_seconds=arrange_duration),
+        )
+        timing = dict(self._partial.get('timing', {}))
+        timing['arrange'] = arrange_duration
+        self._update_partial('timing', timing)
+        return tasks
+
+    async def _run_on_message_complete(
+        self,
+        *,
+        msg: SourceMessage,
+        tasks: list[ExecutorTask],
+        terminal_results: list[ExecutorResult],
+        sink_collector: DebugSinkCollector,
+        arrange_start: float,
+        start_monotonic: float,
+    ) -> None:
+        """Run handler.on_message_complete with error capture.
+
+        Even on failure, the runner continues to on_window_complete —
+        the two hooks are independent (per plan rules), so a broken
+        on_message_complete should not mask on_window_complete's
+        behaviour from the operator.
+        """
         mc_start = time.monotonic()
         token = _probe_stage.set('message_complete')
         try:
-            group = MessageGroup(
-                source_message=msg,
-                tasks=list(tasks),
-                results=list(terminal_results),
-                errors=[],
-                started_at=arrange_start,
-                finished_at=time.monotonic(),
-            )
-            mc_result = await self._handler.on_message_complete(group)
+            try:
+                group = MessageGroup(
+                    source_message=msg,
+                    tasks=list(tasks),
+                    results=list(terminal_results),
+                    errors=[],
+                    started_at=arrange_start,
+                    finished_at=time.monotonic(),
+                )
+                mc_result = await self._handler.on_message_complete(group)
+            except Exception as exc:
+                mc_duration = time.monotonic() - mc_start
+                self._record_error(
+                    self._build_probe_error(
+                        stage='on_message_complete',
+                        exc=exc,
+                        start_monotonic=start_monotonic,
+                    )
+                )
+                # Keep collect_result=None so the UI can distinguish "hook
+                # raised" from "hook returned None by design".
+                self._update_partial(
+                    'on_message_complete',
+                    ProbeStageResult(
+                        duration_seconds=mc_duration,
+                        collect_result=None,
+                        error=_one_line_summary(exc),
+                    ),
+                )
+                timing = dict(self._partial.get('timing', {}))
+                timing['on_message_complete'] = mc_duration
+                self._update_partial('timing', timing)
+                return
         finally:
             _probe_stage.reset(token)
+
         mc_duration = time.monotonic() - mc_start
         # If the hook returned a CollectResult, route it through the sink
         # collector — same behaviour as PartitionProcessor's _on_collect
@@ -910,16 +1087,47 @@ class DebugRunner:
         timing['on_message_complete'] = mc_duration
         self._update_partial('timing', timing)
 
-        # --- on_window_complete ---------------------------------------------
+    async def _run_on_window_complete(
+        self,
+        *,
+        msg: SourceMessage,
+        terminal_results: list[ExecutorResult],
+        sink_collector: DebugSinkCollector,
+        start_monotonic: float,
+    ) -> None:
+        """Run handler.on_window_complete with error capture. Always the last stage."""
         wc_start = time.monotonic()
         token = _probe_stage.set('window_complete')
         try:
-            wc_result = await self._handler.on_window_complete(
-                list(terminal_results),
-                [msg],
-            )
+            try:
+                wc_result = await self._handler.on_window_complete(
+                    list(terminal_results),
+                    [msg],
+                )
+            except Exception as exc:
+                wc_duration = time.monotonic() - wc_start
+                self._record_error(
+                    self._build_probe_error(
+                        stage='window_complete',
+                        exc=exc,
+                        start_monotonic=start_monotonic,
+                    )
+                )
+                self._update_partial(
+                    'on_window_complete',
+                    ProbeStageResult(
+                        duration_seconds=wc_duration,
+                        collect_result=None,
+                        error=_one_line_summary(exc),
+                    ),
+                )
+                timing = dict(self._partial.get('timing', {}))
+                timing['on_window_complete'] = wc_duration
+                self._update_partial('timing', timing)
+                return
         finally:
             _probe_stage.reset(token)
+
         wc_duration = time.monotonic() - wc_start
         if wc_result is not None:
             token = _probe_stage.set('window_complete')
@@ -935,12 +1143,6 @@ class DebugRunner:
         timing['on_window_complete'] = wc_duration
         self._update_partial('timing', timing)
 
-        # Expose the final sink-collector flattening on _partial so a
-        # partial-report snapshot taken during on_window_complete
-        # captures everything up to that point.
-        self._update_partial('planned_sink_payloads', sink_collector.flatten())
-        _ = start_monotonic  # parameter reserved for wall-clock tracking (task 5)
-
     async def _run_single_task(
         self,
         *,
@@ -948,14 +1150,25 @@ class DebugRunner:
         msg: SourceMessage,
         sink_collector: DebugSinkCollector,
         terminal_results: list[ExecutorResult],
+        start_monotonic: float,
     ) -> ProbeTaskEntry:
         """Execute one task and return its ``ProbeTaskEntry``.
 
         Appended to the partial ``tasks`` list by the caller so the
-        snapshot order always reflects arrange() order. Task 2a is the
-        happy-path only — on_error retries and replacements land in
-        task 4.
+        snapshot order always reflects arrange() order.
+
+        Error-capture behaviour (Task 3):
+          - subprocess failure (``ExecutorTaskError``): record a failed
+            task entry with ``status='failed'`` and ``subprocess_exception``
+            set. Task 4 will add the ``on_error`` path; for now we just
+            surface the failure and keep going.
+          - on_task_complete raising: record the error on the task entry
+            (``on_task_complete_error``) + append to ``_partial['errors']``
+            with stage ``task_complete:<id>`` so the Errors panel can
+            render the full traceback. The probe continues with the next
+            task.
         """
+        # -- executor execute ----------------------------------------------
         token = _probe_stage.set(f'executor:{task.task_id}')
         try:
             exec_result = await self._executor_pool.execute(
@@ -963,19 +1176,41 @@ class DebugRunner:
                 recorder=None,
                 partition_id=msg.partition,
             )
+        except ExecutorTaskError as exc:
+            # Subprocess-level failure. Task 4 will add the on_error
+            # path; here we just record the failure so the probe can
+            # continue to on_message_complete / on_window_complete.
+            # The ExecutorError.exception / stderr pair is the same
+            # data partition.py uses when it records a failed task.
+            return _failed_task_entry(task=task, error=exc)
         finally:
             _probe_stage.reset(token)
 
         terminal_results.append(exec_result)
 
-        # -- on_task_complete for this task ---------------------------------
+        # -- on_task_complete for this task --------------------------------
         tc_start = time.monotonic()
+        tc_result: CollectResult | None = None
+        tc_error_summary: str | None = None
         token = _probe_stage.set(f'task_complete:{task.task_id}')
         try:
-            tc_result = await self._handler.on_task_complete(exec_result)
+            try:
+                tc_result = await self._handler.on_task_complete(exec_result)
+            except Exception as exc:
+                tc_error_summary = _one_line_summary(exc)
+                self._record_error(
+                    self._build_probe_error(
+                        stage=f'task_complete:{task.task_id}',
+                        exc=exc,
+                        start_monotonic=start_monotonic,
+                    )
+                )
         finally:
             _probe_stage.reset(token)
         tc_duration = time.monotonic() - tc_start
+
+        # Only feed the sink collector on success — a raised
+        # on_task_complete produced no result to forward.
         if tc_result is not None:
             token = _probe_stage.set(f'task_complete:{task.task_id}')
             try:
@@ -997,7 +1232,42 @@ class DebugRunner:
             stderr=exec_result.stderr,
             on_task_complete_duration=tc_duration,
             on_task_complete_result=tc_result,
+            on_task_complete_error=tc_error_summary,
         )
+
+    # -- error-capture helpers ----------------------------------------------
+
+    def _build_probe_error(
+        self,
+        *,
+        stage: str,
+        exc: BaseException,
+        start_monotonic: float,
+    ) -> ProbeError:
+        """Wrap an exception in a ``ProbeError`` with a captured traceback.
+
+        ``traceback.format_exc()`` reads the CURRENT exception context,
+        so this must only be called from inside an ``except`` block — the
+        helper assumes its caller just caught ``exc`` and the frame is
+        still active.
+        """
+        return ProbeError(
+            stage=stage,
+            exception_class=type(exc).__name__,
+            message=str(exc),
+            traceback=traceback.format_exc(),
+            occurred_at_ms=(time.monotonic() - start_monotonic) * 1000.0,
+        )
+
+    def _record_error(self, error: ProbeError) -> None:
+        """Append a ``ProbeError`` to the running ``_partial['errors']`` list.
+
+        Kept as a single choke-point so future code (metrics, structured
+        logging of captured errors) has one place to patch. The list is
+        initialised at the top of ``_run_stages``.
+        """
+        errors: list[ProbeError] = self._partial.setdefault('errors', [])
+        errors.append(error)
 
 
 # ---- small helpers used by DebugRunner -------------------------------------
@@ -1054,3 +1324,48 @@ def _summarize_cache_calls(calls: list[ProbeCacheCall]) -> dict[str, int]:
         'misses': misses,
         'writes_suppressed': writes_suppressed,
     }
+
+
+def _one_line_summary(exc: BaseException) -> str:
+    """Short one-line summary of an exception for the stage's ``error`` field.
+
+    The full traceback is always captured separately on the top-level
+    ``DebugReport.errors`` list; this short form is what the UI shows
+    inline on the corresponding stage card (arrange, message_complete,
+    etc.) so the operator sees at-a-glance what went wrong.
+    """
+    message = str(exc) or '<no message>'
+    # Collapse any embedded newlines so the cell stays on one line.
+    message = message.replace('\n', ' ').replace('\r', ' ')
+    return f'{type(exc).__name__}: {message}'
+
+
+def _failed_task_entry(*, task: ExecutorTask, error: ExecutorTaskError) -> ProbeTaskEntry:
+    """Build a ``ProbeTaskEntry`` for a subprocess-level task failure.
+
+    Used when ``ExecutorPool.execute`` raises ``ExecutorTaskError`` —
+    the task never produced a successful ``ExecutorResult``, so we
+    synthesise an entry from the ``ExecutorError`` attached to the
+    exception. Task 4 will extend this with the ``on_error`` path
+    (RETRY / replacements); for now we just record the failure so the
+    probe can carry on and finish the remaining hooks.
+    """
+    err = error.error
+    result = error.result
+    # Prefer the exception text when it's set (timeouts, launch failures);
+    # otherwise fall back to stderr for non-zero-exit-code failures.
+    subprocess_exception = err.exception or (err.stderr or None)
+    return ProbeTaskEntry(
+        task_id=task.task_id,
+        parent_task_id=task.parent_task_id,
+        labels=dict(task.labels),
+        source_offsets=list(task.source_offsets),
+        precomputed=task.precomputed is not None,
+        status='failed',
+        exit_code=err.exit_code,
+        duration_seconds=result.duration_seconds,
+        stdin=task.stdin or '',
+        stdout=result.stdout,
+        stderr=result.stderr,
+        subprocess_exception=subprocess_exception,
+    )
