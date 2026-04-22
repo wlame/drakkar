@@ -1228,3 +1228,324 @@ async def test_runner_never_constructs_or_invokes_partition_processor():
 
     assert report.errors == []
     assert len(report.tasks) == 1
+
+
+# --- Task 2c: use_cache toggle + proxy integration tests -------------------
+#
+# These tests exercise the ``use_cache`` flag end-to-end through the
+# runner. They prove that:
+#   - with ``use_cache=True`` reads forward to the live Cache and return
+#     hits when keys are present;
+#   - with ``use_cache=False`` reads bypass the live Cache entirely and
+#     always return miss;
+#   - set/delete writes are always suppressed (never touch the live
+#     cache) regardless of ``use_cache``;
+#   - ``ProbeCacheCall.origin_stage`` reflects which hook made the call
+#     (arrange / task_complete:<id> / message_complete);
+#   - ``DebugReport.cache_summary`` counts match the cache_calls list.
+#
+# Each test defines a tiny handler subclass so the cache interaction is
+# fully explicit at the test site — easier to follow than a
+# configuration-driven helper.
+
+
+class _CacheGetInArrangeHandler(_HappyPathHandler):
+    """Calls ``self.cache.get(...)`` in ``arrange`` and stores the returned value.
+
+    Used to verify that ``use_cache=True`` forwards reads to the live
+    cache (returning the seeded value) while ``use_cache=False`` always
+    reports a miss even though the live cache has the key.
+    """
+
+    def __init__(self, lookup_key: str) -> None:
+        super().__init__(task_count=1)
+        self._lookup_key = lookup_key
+        # Captures the value returned by ``cache.get`` so the test can
+        # assert the handler actually saw the hit (not just the report).
+        self.seen_value: Any = 'sentinel-not-yet-set'
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        # Record what cache.get returned so the test can assert the
+        # handler observed the real value (with use_cache=True) or None
+        # (with use_cache=False).
+        self.seen_value = await self.cache.get(self._lookup_key)
+        return await super().arrange(messages, pending)
+
+
+async def test_probe_with_use_cache_true_returns_seeded_value():
+    """use_cache=True: a seeded key is visible to the handler and logs as a hit.
+
+    The live Cache.set puts the entry directly in ``_memory`` so the
+    proxy's forwarded ``get`` hits the memory fast path synchronously —
+    no reader DB plumbing needed for the test.
+    """
+    real_cache = _fresh_cache()
+    real_cache.set('known', {'a': 1})
+
+    handler = _CacheGetInArrangeHandler(lookup_key='known')
+    handler.cache = real_cache
+
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    report = await runner.run(ProbeInput(value='x', offset=1, use_cache=True))
+
+    # The handler saw the real value (hit forwarded through the proxy).
+    assert handler.seen_value == {'a': 1}
+
+    # The first cache call is the arrange-time get, and it logged as a hit.
+    assert len(report.cache_calls) >= 1
+    first = report.cache_calls[0]
+    assert first.op == 'get'
+    assert first.key == 'known'
+    assert first.outcome == 'hit'
+
+
+async def test_probe_with_use_cache_false_returns_miss_despite_seeded_key():
+    """use_cache=False: handler gets None even though the live cache has the key.
+
+    The proxy short-circuits the read path entirely when ``use_cache`` is
+    False, so the seeded value never leaks into the probe. This is the
+    "cold cache simulation" mode — useful for testing handler behaviour
+    with an empty cache.
+    """
+    real_cache = _fresh_cache()
+    real_cache.set('known', {'a': 1})
+
+    handler = _CacheGetInArrangeHandler(lookup_key='known')
+    handler.cache = real_cache
+
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    report = await runner.run(ProbeInput(value='x', offset=1, use_cache=False))
+
+    # The handler saw None — the proxy did not forward the read.
+    assert handler.seen_value is None
+
+    first = report.cache_calls[0]
+    assert first.op == 'get'
+    assert first.key == 'known'
+    # Miss despite the live cache containing the key — that's the whole
+    # point of the use_cache=False mode.
+    assert first.outcome == 'miss'
+
+
+class _MixedCacheCallsHandler(_HappyPathHandler):
+    """Calls ``get`` → ``set`` → ``get`` in a single ``arrange`` invocation.
+
+    Used to verify that write suppression does not leak into follow-up
+    reads on the same proxy: even though ``set('foo', ...)`` is in the
+    call log as suppressed, the next ``get('foo')`` should still miss
+    because the live cache was never mutated and the proxy does not
+    cache the suppressed value.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(task_count=1)
+        # Captures the values returned by the two gets so tests can
+        # assert both returned None (confirming the second get did not
+        # see the suppressed set).
+        self.first_get: Any = 'sentinel'
+        self.second_get: Any = 'sentinel'
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        # First get — key is absent from the live cache, so even with
+        # use_cache=True this is a miss.
+        self.first_get = await self.cache.get('foo')
+        # Write is suppressed — the live cache is not mutated.
+        self.cache.set('foo', {'v': 1})
+        # Second get — if the suppressed write leaked, this would return
+        # {'v': 1}; but the proxy forwards to the live cache which is
+        # still empty, so this must be a miss too.
+        self.second_get = await self.cache.get('foo')
+        return await super().arrange(messages, pending)
+
+
+async def test_probe_captures_mixed_get_set_get_and_leaves_cache_unchanged():
+    """Suppressed writes do NOT leak into follow-up reads on the same proxy.
+
+    The handler does ``get('foo')`` (miss), ``set('foo', ...)``
+    (suppressed), ``get('foo')`` (still miss). With use_cache=True the
+    read path forwards to the live Cache — since set was suppressed,
+    the live Cache remains empty and the second get must also miss.
+    """
+    real_cache = _fresh_cache()
+    # Snapshot the internal state we want to prove stayed unchanged.
+    initial_dirty_len = len(real_cache._dirty)
+    initial_bytes_sum = real_cache._bytes_sum
+
+    handler = _MixedCacheCallsHandler()
+    handler.cache = real_cache
+
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    report = await runner.run(ProbeInput(value='x', offset=1, use_cache=True))
+
+    # Both gets returned None — the handler never saw the suppressed write.
+    assert handler.first_get is None
+    assert handler.second_get is None
+
+    # The first three cache calls are the handler's three interactions,
+    # in order. Later calls (if any) would come from downstream hooks,
+    # but the default _HappyPathHandler hooks don't touch the cache.
+    first_three = report.cache_calls[:3]
+    assert [(c.op, c.outcome) for c in first_three] == [
+        ('get', 'miss'),
+        ('set', 'suppressed'),
+        ('get', 'miss'),
+    ]
+    # All three refer to the same key so the sequencing is unambiguous.
+    assert all(c.key == 'foo' for c in first_three)
+
+    # Live cache internals must be byte-identical to the pre-probe snapshot.
+    assert len(real_cache._dirty) == initial_dirty_len
+    assert real_cache._bytes_sum == initial_bytes_sum
+
+
+class _OriginStageProbingHandler(_HappyPathHandler):
+    """Calls cache.get in each of the three major hooks to verify origin_stage tagging.
+
+    The runner sets ``_probe_stage`` before each hook; the proxy reads
+    it when logging every call. This handler exercises the arrange,
+    on_task_complete, and on_message_complete stages so the test can
+    assert each call's origin_stage matches the hook that made it.
+    """
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        await self.cache.get('during_arrange')
+        return await super().arrange(messages, pending)
+
+    async def on_task_complete(self, result: ExecutorResult) -> CollectResult | None:
+        await self.cache.get('during_task_complete')
+        return await super().on_task_complete(result)
+
+    async def on_message_complete(self, group: MessageGroup) -> CollectResult | None:
+        await self.cache.get('during_message_complete')
+        return await super().on_message_complete(group)
+
+
+async def test_probe_origin_stage_on_call_log_reflects_calling_hook():
+    """Each cache call is tagged with the stage/hook that made it.
+
+    The runner sets _probe_stage before each hook call; this test
+    asserts that the proxy captures the right stage for three distinct
+    hooks (arrange, on_task_complete, on_message_complete). The
+    task_complete tag is 'task_complete:<task_id>' so we assert on the
+    prefix and then confirm the suffix matches the task's id.
+    """
+    handler = _OriginStageProbingHandler(task_count=1)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    report = await runner.run(ProbeInput(value='x', offset=1, use_cache=False))
+
+    # Build a small lookup: key → call entry. The three keys are unique
+    # so this is a 1-to-1 mapping and we can assert each independently.
+    by_key = {c.key: c for c in report.cache_calls}
+
+    # arrange-time call is tagged with the bare 'arrange' stage name.
+    assert by_key['during_arrange'].origin_stage == 'arrange'
+
+    # on_task_complete-time call carries the running task's id suffix.
+    # The happy-path handler emits exactly one task entry, so we can
+    # look up the id it generated and assert the tag matches.
+    assert len(report.tasks) == 1
+    expected_task_id = report.tasks[0].task_id
+    tc_stage = by_key['during_task_complete'].origin_stage
+    assert tc_stage.startswith('task_complete:')
+    assert tc_stage == f'task_complete:{expected_task_id}'
+
+    # on_message_complete-time call uses the bare 'message_complete' name.
+    assert by_key['during_message_complete'].origin_stage == 'message_complete'
+
+
+class _CacheSummaryHandler(_HappyPathHandler):
+    """Exercises the cache with a known mix: 2 hits, 3 misses, 1 set, 1 delete.
+
+    Used to verify that ``DebugReport.cache_summary`` counts line up
+    exactly with what the call log records. Two hit keys are seeded
+    ahead of time; the other three read keys are left absent so they
+    miss. One set and one delete are added to confirm both paths count
+    toward ``writes_suppressed``.
+    """
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        # Two hits (seeded) + three misses (not seeded).
+        await self.cache.get('hit-1')
+        await self.cache.get('hit-2')
+        await self.cache.get('miss-1')
+        await self.cache.get('miss-2')
+        await self.cache.get('miss-3')
+        # One set + one delete → both recorded as ``suppressed``.
+        self.cache.set('write-1', {'payload': True})
+        self.cache.delete('delete-1')
+        return await super().arrange(messages, pending)
+
+
+async def test_probe_cache_summary_counts_match_cache_calls():
+    """cache_summary aggregates outcomes: 2 hits, 3 misses, 2 writes_suppressed.
+
+    The handler does 2 get-hits, 3 get-misses, 1 set, 1 delete — seven
+    calls total. Both set and delete count as writes_suppressed in the
+    summary (the proxy logs both with outcome='suppressed').
+    """
+    real_cache = _fresh_cache()
+    # Seed the two hit keys so arrange's get() forwards hit the memory
+    # fast path. The 'miss-*' keys are intentionally absent.
+    real_cache.set('hit-1', 'value-1')
+    real_cache.set('hit-2', 'value-2')
+
+    handler = _CacheSummaryHandler(task_count=0)
+    handler.cache = real_cache
+
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    report = await runner.run(ProbeInput(value='x', offset=1, use_cache=True))
+
+    # Exact summary shape, as documented in debug_runner._summarize_cache_calls.
+    assert report.cache_summary == {
+        'calls': 7,
+        'hits': 2,
+        'misses': 3,
+        'writes_suppressed': 2,
+    }
+    # Sanity: the summary is derived from cache_calls, so the list must
+    # match the same totals.
+    outcomes = [c.outcome for c in report.cache_calls]
+    assert outcomes.count('hit') == 2
+    assert outcomes.count('miss') == 3
+    assert outcomes.count('suppressed') == 2
