@@ -612,8 +612,8 @@ class Cache:
 
 ### Task 20: Move plan to completed
 
-- [ ] `mkdir -p docs/plans/completed`
-- [ ] `mv docs/plans/20260421-handler-cache.md docs/plans/completed/`
+- [x] `mkdir -p docs/plans/completed`
+- [x] `mv docs/plans/20260421-handler-cache.md docs/plans/completed/`
 
 ## Post-Completion
 
