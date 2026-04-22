@@ -29,16 +29,16 @@ The architecture splits responsibility across three pieces:
    ``(stage, CollectResult)`` pair and later flatten each sink field
    into a single ``PlannedSinkRecord`` list for the UI.
 
-3. **DebugRunner** (added in Task 2) — orchestrates the run, swaps the
-   handler's ``cache`` attribute for the duration of the probe, and
-   produces the final ``DebugReport``.
-
-This file (Task 1) defines the two helpers above plus all pydantic
-models the report is built from. ``DebugRunner`` itself lands in Task 2.
+3. **DebugRunner** — orchestrates the run, swaps the handler's ``cache``
+   attribute for the duration of the probe, and produces the final
+   ``DebugReport``. Keeps an incremental ``_partial`` dict so the
+   endpoint can return a partial ``DebugReport(truncated=True)`` when a
+   wall-clock timeout fires mid-run.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import time
 from typing import TYPE_CHECKING, Any, Literal
@@ -46,10 +46,20 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, Field
 
 from drakkar.cache import CacheScope
-from drakkar.models import CollectResult
+from drakkar.models import (
+    CollectResult,
+    ExecutorResult,
+    ExecutorTask,
+    MessageGroup,
+    PendingContext,
+    SourceMessage,
+)
 
 if TYPE_CHECKING:
     from drakkar.cache import Cache, NoOpCache
+    from drakkar.config import DrakkarConfig
+    from drakkar.executor import ExecutorPool
+    from drakkar.handler import BaseDrakkarHandler
 
 
 # ---- probe-stage contextvar ------------------------------------------------
@@ -612,3 +622,435 @@ class DebugSinkCollector:
                     )
                 )
         return records
+
+
+# ---- runner ----------------------------------------------------------------
+
+
+class DebugRunner:
+    """Replay a single message through the handler pipeline with zero side effects.
+
+    The runner reproduces ``PartitionProcessor`` behaviour (arrange →
+    execute → on_task_complete → on_message_complete → on_window_complete)
+    inline, but substitutes production-bound collaborators with debug
+    shims:
+
+      - ``handler.cache`` is swapped for a ``DebugCacheProxy`` for the
+        duration of the probe (restored in a ``finally`` even if a hook
+        raises).
+      - ``ExecutorPool.execute`` is called with ``recorder=None``, which
+        the pool already supports — every ``recorder.record_*`` call is
+        gated on ``if recorder:``.
+      - Every ``CollectResult`` a hook returns is fed to a
+        ``DebugSinkCollector`` instead of the real ``SinkManager``.
+
+    Concurrency:
+      ``handler.cache`` is a process-wide attribute. Two concurrent probes
+      would race each other's swap/restore cycle. We serialize probes
+      with an ``asyncio.Lock`` held by the runner — a second concurrent
+      probe simply waits.
+
+    Partial reports:
+      ``_partial`` is mutated incrementally as each stage completes. If
+      the endpoint's wall-clock timeout fires, it calls
+      ``latest_partial_report()`` to build a ``DebugReport(truncated=True)``
+      from whatever state has accumulated so far.
+    """
+
+    def __init__(
+        self,
+        handler: BaseDrakkarHandler,
+        executor_pool: ExecutorPool,
+        app_config: DrakkarConfig,
+    ) -> None:
+        """Hold refs to the live app components.
+
+        Args:
+            handler: the user's ``BaseDrakkarHandler`` instance. The runner
+                swaps ``handler.cache`` for the probe's duration.
+            executor_pool: the live subprocess pool — reused so the probe
+                exercises the real binary and honours the real
+                task_timeout.
+            app_config: the active ``DrakkarConfig``. The probe uses
+                ``app_config.executor.max_retries`` (task 4) and the
+                configured source topic for empty ``ProbeInput.topic``
+                requests (task 5 via the endpoint wiring).
+        """
+        self._handler = handler
+        self._executor_pool = executor_pool
+        self._app_config = app_config
+        # Serializes concurrent probes. The handler.cache swap is
+        # process-wide, so two overlapping probes would clobber each
+        # other's restore step without this lock.
+        self._probe_lock = asyncio.Lock()
+        # Incremental report state mutated stage-by-stage so the endpoint
+        # can build a truncated DebugReport if wall-clock timeout fires
+        # mid-run. Reset at the top of every run().
+        self._partial: dict[str, Any] = {}
+
+    # -- incremental partial-report machinery --------------------------------
+
+    def _update_partial(self, key: str, value: Any) -> None:
+        """Store one piece of partial report state.
+
+        Thin wrapper around dict assignment. Kept as a helper so future
+        partial-report hooks (metrics, logs, etc.) have a single entry
+        point to patch.
+        """
+        self._partial[key] = value
+
+    def latest_partial_report(self) -> DebugReport:
+        """Snapshot current ``_partial`` into a ``DebugReport(truncated=True)``.
+
+        Called by the endpoint on wall-clock timeout. Missing sections
+        fall back to safe defaults (empty lists, zero durations) so the
+        UI can render whatever made it through.
+        """
+        # ``input`` MUST be present — run() sets it before anything else.
+        # If it is absent (latest_partial_report called before run()
+        # started), synthesise an empty ProbeInput so we still produce
+        # a valid DebugReport.
+        probe_input = self._partial.get('input') or ProbeInput(value='')
+        arrange_result = self._partial.get('arrange') or ProbeStageResult()
+        cache_calls = list(self._partial.get('cache_calls', []))
+        return DebugReport(
+            input=probe_input,
+            deserialize_error=self._partial.get('deserialize_error'),
+            parsed_payload=self._partial.get('parsed_payload'),
+            message_label=self._partial.get('message_label'),
+            arrange=arrange_result,
+            tasks=list(self._partial.get('tasks', [])),
+            on_message_complete=self._partial.get('on_message_complete'),
+            on_window_complete=self._partial.get('on_window_complete'),
+            planned_sink_payloads=list(self._partial.get('planned_sink_payloads', [])),
+            cache_calls=cache_calls,
+            cache_summary=_summarize_cache_calls(cache_calls),
+            timing=dict(self._partial.get('timing', {})),
+            errors=list(self._partial.get('errors', [])),
+            truncated=True,
+        )
+
+    # -- top-level entrypoint ------------------------------------------------
+
+    async def run(self, probe_input: ProbeInput) -> DebugReport:
+        """Execute the full probe and return a ``DebugReport(truncated=False)``.
+
+        Runs under ``self._probe_lock`` so overlapping probes serialize.
+        Swaps ``handler.cache`` with ``DebugCacheProxy`` inside a
+        ``try/finally`` that unconditionally restores the original cache
+        — even if the handler raises or the task is cancelled by the
+        endpoint's wall-clock timeout.
+        """
+        async with self._probe_lock:
+            return await self._run_locked(probe_input)
+
+    async def _run_locked(self, probe_input: ProbeInput) -> DebugReport:
+        """Body of run() executed under the probe lock.
+
+        Split into a helper so the lock boundary is visible in ``run``
+        and the implementation below can concentrate on the state
+        machine without an extra indentation level.
+        """
+        self._partial = {}
+        self._update_partial('input', probe_input)
+
+        start_monotonic = time.monotonic()
+        msg = _build_source_message(probe_input)
+
+        sink_collector = DebugSinkCollector()
+        cache_proxy = DebugCacheProxy(
+            real=self._handler.cache,
+            use_cache=probe_input.use_cache,
+            start_time=start_monotonic,
+        )
+        # Snapshot the call log list onto _partial so latest_partial_report
+        # can see cache calls captured before the run completes.
+        self._update_partial('cache_calls', cache_proxy.calls)
+
+        original_cache = self._handler.cache
+        # Use setattr to dodge the static type check — DebugCacheProxy
+        # duck-types the Cache surface (verified by tests) but isn't in
+        # the Cache | NoOpCache union ty sees on the handler attribute.
+        # Keeping the swap out of the type system is intentional: the
+        # proxy should never leak beyond the probe.
+        setattr(self._handler, 'cache', cache_proxy)  # noqa: B010
+        try:
+            await self._run_stages(
+                msg=msg,
+                sink_collector=sink_collector,
+                start_monotonic=start_monotonic,
+            )
+        finally:
+            # Restore cache even if a hook raised or the task was
+            # cancelled (wall-clock timeout path).
+            setattr(self._handler, 'cache', original_cache)  # noqa: B010
+
+        # Finalize planned sink records + timing + cache summary now that
+        # the run is done. All other fields were filled in by _run_stages.
+        self._update_partial('planned_sink_payloads', sink_collector.flatten())
+        timing = dict(self._partial.get('timing', {}))
+        timing['total_wallclock'] = time.monotonic() - start_monotonic
+        self._update_partial('timing', timing)
+
+        return DebugReport(
+            input=probe_input,
+            deserialize_error=self._partial.get('deserialize_error'),
+            parsed_payload=self._partial.get('parsed_payload'),
+            message_label=self._partial.get('message_label'),
+            arrange=self._partial.get('arrange') or ProbeStageResult(),
+            tasks=list(self._partial.get('tasks', [])),
+            on_message_complete=self._partial.get('on_message_complete'),
+            on_window_complete=self._partial.get('on_window_complete'),
+            planned_sink_payloads=list(self._partial.get('planned_sink_payloads', [])),
+            cache_calls=list(cache_proxy.calls),
+            cache_summary=_summarize_cache_calls(cache_proxy.calls),
+            timing=timing,
+            errors=list(self._partial.get('errors', [])),
+            truncated=False,
+        )
+
+    # -- stage sequencing ----------------------------------------------------
+
+    async def _run_stages(
+        self,
+        *,
+        msg: SourceMessage,
+        sink_collector: DebugSinkCollector,
+        start_monotonic: float,
+    ) -> None:
+        """Run the arrange → per-task → window sequence.
+
+        Extracted into its own coroutine so the ``finally`` block in
+        ``_run_locked`` only has to worry about cache restoration —
+        stage logic lives here. Happy-path implementation for task 2a;
+        error capture + on_error retries/replacements land in tasks 3
+        and 4.
+        """
+        # --- deserialize -----------------------------------------------------
+        token = _probe_stage.set('deserialize')
+        try:
+            self._handler.deserialize_message(msg)
+        finally:
+            _probe_stage.reset(token)
+        # deserialize_message mutates msg.payload in place. Serialize
+        # pydantic models via model_dump so the JSON roundtrip used by
+        # the endpoint preserves structure.
+        self._update_partial('parsed_payload', _serialize_payload(msg.payload))
+
+        # --- message_label ---------------------------------------------------
+        token = _probe_stage.set('message_label')
+        try:
+            label = self._handler.message_label(msg)
+        finally:
+            _probe_stage.reset(token)
+        self._update_partial('message_label', label)
+
+        # --- arrange ---------------------------------------------------------
+        arrange_start = time.monotonic()
+        token = _probe_stage.set('arrange')
+        try:
+            tasks = await self._handler.arrange([msg], PendingContext())
+        finally:
+            _probe_stage.reset(token)
+        arrange_duration = time.monotonic() - arrange_start
+        self._update_partial(
+            'arrange',
+            ProbeStageResult(duration_seconds=arrange_duration),
+        )
+        timing = dict(self._partial.get('timing', {}))
+        timing['arrange'] = arrange_duration
+        self._update_partial('timing', timing)
+
+        # --- per-task execution ---------------------------------------------
+        # Maintain a live list on _partial so latest_partial_report() sees
+        # progress as tasks finish.
+        task_entries: list[ProbeTaskEntry] = []
+        self._update_partial('tasks', task_entries)
+        terminal_results: list[ExecutorResult] = []
+
+        for task in tasks:
+            entry = await self._run_single_task(
+                task=task,
+                msg=msg,
+                sink_collector=sink_collector,
+                terminal_results=terminal_results,
+            )
+            task_entries.append(entry)
+
+        # --- on_message_complete --------------------------------------------
+        mc_start = time.monotonic()
+        token = _probe_stage.set('message_complete')
+        try:
+            group = MessageGroup(
+                source_message=msg,
+                tasks=list(tasks),
+                results=list(terminal_results),
+                errors=[],
+                started_at=arrange_start,
+                finished_at=time.monotonic(),
+            )
+            mc_result = await self._handler.on_message_complete(group)
+        finally:
+            _probe_stage.reset(token)
+        mc_duration = time.monotonic() - mc_start
+        # If the hook returned a CollectResult, route it through the sink
+        # collector — same behaviour as PartitionProcessor's _on_collect
+        # callback, minus the real SinkManager write.
+        if mc_result is not None:
+            token = _probe_stage.set('message_complete')
+            try:
+                await sink_collector(mc_result, msg.partition)
+            finally:
+                _probe_stage.reset(token)
+        self._update_partial(
+            'on_message_complete',
+            ProbeStageResult(duration_seconds=mc_duration, collect_result=mc_result),
+        )
+        timing = dict(self._partial.get('timing', {}))
+        timing['on_message_complete'] = mc_duration
+        self._update_partial('timing', timing)
+
+        # --- on_window_complete ---------------------------------------------
+        wc_start = time.monotonic()
+        token = _probe_stage.set('window_complete')
+        try:
+            wc_result = await self._handler.on_window_complete(
+                list(terminal_results),
+                [msg],
+            )
+        finally:
+            _probe_stage.reset(token)
+        wc_duration = time.monotonic() - wc_start
+        if wc_result is not None:
+            token = _probe_stage.set('window_complete')
+            try:
+                await sink_collector(wc_result, msg.partition)
+            finally:
+                _probe_stage.reset(token)
+        self._update_partial(
+            'on_window_complete',
+            ProbeStageResult(duration_seconds=wc_duration, collect_result=wc_result),
+        )
+        timing = dict(self._partial.get('timing', {}))
+        timing['on_window_complete'] = wc_duration
+        self._update_partial('timing', timing)
+
+        # Expose the final sink-collector flattening on _partial so a
+        # partial-report snapshot taken during on_window_complete
+        # captures everything up to that point.
+        self._update_partial('planned_sink_payloads', sink_collector.flatten())
+        _ = start_monotonic  # parameter reserved for wall-clock tracking (task 5)
+
+    async def _run_single_task(
+        self,
+        *,
+        task: ExecutorTask,
+        msg: SourceMessage,
+        sink_collector: DebugSinkCollector,
+        terminal_results: list[ExecutorResult],
+    ) -> ProbeTaskEntry:
+        """Execute one task and return its ``ProbeTaskEntry``.
+
+        Appended to the partial ``tasks`` list by the caller so the
+        snapshot order always reflects arrange() order. Task 2a is the
+        happy-path only — on_error retries and replacements land in
+        task 4.
+        """
+        token = _probe_stage.set(f'executor:{task.task_id}')
+        try:
+            exec_result = await self._executor_pool.execute(
+                task,
+                recorder=None,
+                partition_id=msg.partition,
+            )
+        finally:
+            _probe_stage.reset(token)
+
+        terminal_results.append(exec_result)
+
+        # -- on_task_complete for this task ---------------------------------
+        tc_start = time.monotonic()
+        token = _probe_stage.set(f'task_complete:{task.task_id}')
+        try:
+            tc_result = await self._handler.on_task_complete(exec_result)
+        finally:
+            _probe_stage.reset(token)
+        tc_duration = time.monotonic() - tc_start
+        if tc_result is not None:
+            token = _probe_stage.set(f'task_complete:{task.task_id}')
+            try:
+                await sink_collector(tc_result, msg.partition)
+            finally:
+                _probe_stage.reset(token)
+
+        return ProbeTaskEntry(
+            task_id=task.task_id,
+            parent_task_id=task.parent_task_id,
+            labels=dict(task.labels),
+            source_offsets=list(task.source_offsets),
+            precomputed=task.precomputed is not None,
+            status='done',
+            exit_code=exec_result.exit_code,
+            duration_seconds=exec_result.duration_seconds,
+            stdin=task.stdin or '',
+            stdout=exec_result.stdout,
+            stderr=exec_result.stderr,
+            on_task_complete_duration=tc_duration,
+            on_task_complete_result=tc_result,
+        )
+
+
+# ---- small helpers used by DebugRunner -------------------------------------
+
+
+def _build_source_message(probe_input: ProbeInput) -> SourceMessage:
+    """Build a synthetic ``SourceMessage`` from the probe input.
+
+    - Encodes ``value`` and ``key`` as UTF-8 bytes (the on-wire Kafka shape).
+    - Defaults ``timestamp`` to the current wall-clock time in ms when
+      the input did not supply one (Kafka-style epoch ms).
+    """
+    timestamp = probe_input.timestamp
+    if timestamp is None:
+        timestamp = int(time.time() * 1000)
+    return SourceMessage(
+        topic=probe_input.topic,
+        partition=probe_input.partition,
+        offset=probe_input.offset,
+        key=probe_input.key.encode('utf-8') if probe_input.key is not None else None,
+        value=probe_input.value.encode('utf-8'),
+        timestamp=timestamp,
+    )
+
+
+def _serialize_payload(payload: Any) -> Any:
+    """Serialize ``msg.payload`` into a JSON-safe shape for the report.
+
+    ``deserialize_message`` typically sets ``msg.payload`` to a Pydantic
+    BaseModel instance. Pydantic models round-trip cleanly through
+    ``model_dump(mode='json')``; everything else (None, dict, primitive)
+    passes through unchanged so user handlers that store plain dicts
+    still work.
+    """
+    if payload is None:
+        return None
+    if isinstance(payload, BaseModel):
+        return payload.model_dump(mode='json')
+    return payload
+
+
+def _summarize_cache_calls(calls: list[ProbeCacheCall]) -> dict[str, int]:
+    """Compute the ``cache_summary`` counts used in the Cache calls header.
+
+    Keys: ``calls`` (total), ``hits`` (read+hit), ``misses`` (read+miss),
+    ``writes_suppressed`` (set/delete calls).
+    """
+    hits = sum(1 for c in calls if c.outcome == 'hit')
+    misses = sum(1 for c in calls if c.outcome == 'miss')
+    writes_suppressed = sum(1 for c in calls if c.outcome == 'suppressed')
+    return {
+        'calls': len(calls),
+        'hits': hits,
+        'misses': misses,
+        'writes_suppressed': writes_suppressed,
+    }

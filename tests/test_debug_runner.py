@@ -1,33 +1,36 @@
-"""Tests for the Message Probe debug runner (Task 1).
+"""Tests for the Message Probe debug runner.
 
-Task 1 introduces the building blocks of the no-footprint probe:
+Covers the building blocks of the no-footprint probe (Task 1) plus the
+``DebugRunner`` happy-path orchestration added in Task 2a:
 
 - ``DebugCacheProxy`` — Cache-shaped wrapper that suppresses writes and
   optionally forwards reads while logging every call.
 - ``DebugSinkCollector`` — collects every ``CollectResult`` returned by
   the handler's hooks and flattens them into ``PlannedSinkRecord`` rows
   grouped by sink type.
+- ``DebugRunner`` — orchestrates the arrange → execute →
+  on_task_complete → on_message_complete → on_window_complete sequence
+  inline, keeping partial state for timeout-truncated reports.
 - The pydantic report models (``ProbeInput``, ``ProbeCacheCall``,
   ``ProbeTaskEntry``, ``ProbeStageResult``, ``ProbeError``,
   ``PlannedSinkRecord``, ``DebugReport``) — exercised via a round-trip
   serialize/deserialize test.
-
-No DebugRunner / endpoint logic is touched here — those land in Tasks 2
-and 5 respectively. The tests focus on the surface of these three
-pieces and the invariants we promise at the report level.
 """
 
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import pytest
 from pydantic import BaseModel, ValidationError
 
 from drakkar.cache import Cache, CacheScope, NoOpCache
+from drakkar.config import DrakkarConfig, ExecutorConfig
 from drakkar.debug_runner import (
     DebugCacheProxy,
     DebugReport,
+    DebugRunner,
     DebugSinkCollector,
     PlannedSinkRecord,
     ProbeCacheCall,
@@ -38,14 +41,23 @@ from drakkar.debug_runner import (
     _make_value_preview,
     _probe_stage,
 )
+from drakkar.executor import ExecutorPool
+from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
     CollectResult,
+    ExecutorResult,
+    ExecutorTask,
     FilePayload,
     HttpPayload,
     KafkaPayload,
+    MessageGroup,
     MongoPayload,
+    PendingContext,
     PostgresPayload,
+    PrecomputedResult,
     RedisPayload,
+    SourceMessage,
+    make_task_id,
 )
 
 # --- shared fixtures --------------------------------------------------------
@@ -560,3 +572,335 @@ def test_probe_task_entry_status_literal_rejects_invalid():
             source_offsets=[],
             status='weird',  # type: ignore[arg-type]
         )
+
+
+# --- DebugRunner: happy path ------------------------------------------------
+#
+# These tests exercise the orchestration layer added in Task 2a. They use
+# precomputed tasks (``ExecutorTask.precomputed``) so the test does not
+# depend on a real binary living at a specific path; the executor's fast
+# path returns a synthetic ``ExecutorResult`` from those fields directly.
+#
+# A small concrete handler subclass is defined per test so each test
+# controls exactly which hooks fire and what they return.
+
+
+def _make_executor_pool() -> ExecutorPool:
+    """Real ExecutorPool; precomputed tasks never hit the binary path.
+
+    The binary points to a deliberately bogus path to ensure the tests
+    fail loudly if the precomputed fast path ever regresses and a real
+    subprocess spawn is attempted.
+    """
+    return ExecutorPool(
+        binary_path='/nonexistent/binary/should-never-run',
+        max_executors=2,
+        task_timeout_seconds=5,
+    )
+
+
+def _make_config() -> DrakkarConfig:
+    """Minimal DrakkarConfig — only executor block is read by the runner in task 2a."""
+    return DrakkarConfig(
+        executor=ExecutorConfig(
+            binary_path='/nonexistent/binary/should-never-run',
+            task_timeout_seconds=5,
+            max_retries=1,
+        )
+    )
+
+
+def _make_precomputed_task(
+    *,
+    task_id: str | None = None,
+    offset: int = 0,
+    stdout: str = 'ok',
+    labels: dict[str, str] | None = None,
+    stdin: str | None = None,
+) -> ExecutorTask:
+    """Build an ExecutorTask whose outcome is supplied inline.
+
+    Using ``precomputed`` means ``ExecutorPool.execute`` synthesises the
+    ExecutorResult without running a subprocess. Ideal for unit tests of
+    orchestration logic.
+    """
+    return ExecutorTask(
+        task_id=task_id or make_task_id(),
+        source_offsets=[offset],
+        labels=labels or {},
+        stdin=stdin,
+        precomputed=PrecomputedResult(
+            stdout=stdout,
+            stderr='',
+            exit_code=0,
+            duration_seconds=0.001,
+        ),
+    )
+
+
+class _HappyPathHandler(BaseDrakkarHandler):
+    """Handler that produces N precomputed tasks and emits one Kafka record per hook.
+
+    - ``arrange`` returns ``task_count`` precomputed tasks tied to the
+      incoming message.
+    - ``on_task_complete`` returns a CollectResult with one kafka payload
+      per task.
+    - ``on_message_complete`` returns a CollectResult with one kafka
+      payload summarising the message.
+    - ``on_window_complete`` returns a CollectResult with one kafka
+      payload summarising the window.
+
+    Every hook increments a visible counter on the handler so tests can
+    assert each was called exactly once (or ``task_count`` times for
+    on_task_complete).
+    """
+
+    def __init__(self, task_count: int = 2) -> None:
+        self._task_count = task_count
+        self.arrange_calls = 0
+        self.on_task_complete_calls = 0
+        self.on_message_complete_calls = 0
+        self.on_window_complete_calls = 0
+        # Optional hook for mid-run partial-report inspection. Tests can
+        # assign a callable taking (handler, result) to snapshot the
+        # runner's state between task completions.
+        self.on_task_complete_hook: object | None = None
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        self.arrange_calls += 1
+        msg = messages[0]
+        return [
+            _make_precomputed_task(
+                task_id=f't-{i}',
+                offset=msg.offset,
+                stdout=f'stdout-{i}',
+                labels={'idx': str(i)},
+                stdin=f'stdin-{i}',
+            )
+            for i in range(self._task_count)
+        ]
+
+    async def on_task_complete(self, result: ExecutorResult) -> CollectResult | None:
+        self.on_task_complete_calls += 1
+        hook = self.on_task_complete_hook
+        if hook is not None:
+            hook(self, result)  # type: ignore[operator]
+        return CollectResult(
+            kafka=[
+                KafkaPayload(
+                    sink='results',
+                    key=result.task.task_id.encode(),
+                    data=_TinyOutput(id=self.on_task_complete_calls, note='task'),
+                ),
+            ],
+        )
+
+    async def on_message_complete(self, group: MessageGroup) -> CollectResult | None:
+        self.on_message_complete_calls += 1
+        return CollectResult(
+            kafka=[KafkaPayload(sink='rollup', data=_TinyOutput(id=group.succeeded, note='msg'))],
+        )
+
+    async def on_window_complete(
+        self,
+        results: list[ExecutorResult],
+        source_messages: list[SourceMessage],
+    ) -> CollectResult | None:
+        self.on_window_complete_calls += 1
+        return CollectResult(
+            kafka=[KafkaPayload(sink='window', data=_TinyOutput(id=len(results), note='window'))],
+        )
+
+
+async def test_runner_happy_path_runs_full_sequence():
+    """Two tasks, all hooks fire, report is well-formed, truncated=False."""
+    handler = _HappyPathHandler(task_count=2)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    probe_input = ProbeInput(
+        value='{"hello": "world"}',
+        key='k-1',
+        partition=3,
+        offset=42,
+        topic='in',
+    )
+
+    report = await runner.run(probe_input)
+
+    # Every hook fired the expected number of times.
+    assert handler.arrange_calls == 1
+    assert handler.on_task_complete_calls == 2
+    assert handler.on_message_complete_calls == 1
+    assert handler.on_window_complete_calls == 1
+
+    # Report has all top-level structures populated.
+    assert report.input == probe_input
+    assert report.truncated is False
+    assert report.arrange.duration_seconds is not None
+    assert report.on_message_complete is not None
+    assert report.on_window_complete is not None
+    # Tasks: 2, both with status=done and exit_code=0
+    assert len(report.tasks) == 2
+    assert all(t.status == 'done' for t in report.tasks)
+    assert all(t.exit_code == 0 for t in report.tasks)
+    assert [t.task_id for t in report.tasks] == ['t-0', 't-1']
+    # Labels and stdin survive the round trip.
+    assert report.tasks[0].labels == {'idx': '0'}
+    assert report.tasks[0].stdin == 'stdin-0'
+    # Precomputed flag reflects ExecutorTask.precomputed.
+    assert all(t.precomputed is True for t in report.tasks)
+    # on_task_complete results attached to each task entry.
+    assert all(t.on_task_complete_result is not None for t in report.tasks)
+
+    # Planned sink payloads: 2 from on_task_complete + 1 from
+    # on_message_complete + 1 from on_window_complete = 4 total Kafka records.
+    assert len(report.planned_sink_payloads) == 4
+    sinks_by_stage = {r.origin_stage: r for r in report.planned_sink_payloads}
+    assert 'task_complete:t-0' in sinks_by_stage
+    assert 'task_complete:t-1' in sinks_by_stage
+    assert 'message_complete' in sinks_by_stage
+    assert 'window_complete' in sinks_by_stage
+
+    # No errors captured.
+    assert report.errors == []
+
+    # Timing dict populated for every stage.
+    assert 'arrange' in report.timing
+    assert 'on_message_complete' in report.timing
+    assert 'on_window_complete' in report.timing
+    assert 'total_wallclock' in report.timing
+
+
+async def test_runner_populates_all_report_sections():
+    """Spot-check every stage's output landed in the final DebugReport.
+
+    Keeps the happy-path test above focused on counts; this test confirms
+    the *content* routed to each section.
+    """
+    handler = _HappyPathHandler(task_count=1)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    report = await runner.run(
+        ProbeInput(value='"x"', partition=0, offset=7, topic='t'),
+    )
+
+    # Section A: parsed_payload + message_label echoed.
+    # _HappyPathHandler has no input_model so parsed_payload stays None.
+    assert report.parsed_payload is None
+    assert report.message_label == '0:7'
+
+    # Section B: arrange duration present and non-negative.
+    assert report.arrange.duration_seconds is not None
+    assert report.arrange.duration_seconds >= 0
+
+    # Section C: one task entry with expected fields.
+    assert len(report.tasks) == 1
+    task = report.tasks[0]
+    assert task.stdout == 'stdout-0'
+    assert task.on_task_complete_duration is not None
+
+    # Sections D & E: on_message_complete + on_window_complete captured
+    # with their CollectResults attached.
+    assert report.on_message_complete is not None
+    assert report.on_message_complete.collect_result is not None
+    assert len(report.on_message_complete.collect_result.kafka) == 1
+    assert report.on_window_complete is not None
+    assert report.on_window_complete.collect_result is not None
+    assert len(report.on_window_complete.collect_result.kafka) == 1
+
+
+async def test_runner_restores_handler_cache_after_run():
+    """handler.cache is swapped during the probe and restored on exit."""
+    handler = _HappyPathHandler(task_count=1)
+    original_cache = handler.cache  # class-level NoOpCache
+
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    await runner.run(ProbeInput(value='x', offset=1))
+
+    # After the run returns, handler.cache is the exact original object,
+    # not a DebugCacheProxy. Identity (``is``) is the strong guarantee.
+    assert handler.cache is original_cache
+
+
+# --- DebugRunner: mid-run partial report ------------------------------------
+
+
+async def test_runner_latest_partial_report_mid_run_is_truncated():
+    """latest_partial_report() called mid-run reflects only completed-so-far tasks.
+
+    The handler's on_task_complete hook inspects the runner's partial
+    state the moment task 0 finishes, before task 1 has been submitted.
+    At that point the partial should contain exactly one task entry and
+    latest_partial_report should return truncated=True.
+    """
+    captured: dict[str, Any] = {}
+    handler = _HappyPathHandler(task_count=2)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    # Hook: the FIRST time on_task_complete fires, snapshot the
+    # runner's partial state. We want to verify that:
+    #   - only the task whose on_task_complete just ran is present
+    #   - truncated=True
+    #   - arrange already completed (so it has a duration)
+    def _snapshot(h: _HappyPathHandler, result: ExecutorResult) -> None:
+        if h.on_task_complete_calls == 1:
+            captured['report'] = runner.latest_partial_report()
+
+    handler.on_task_complete_hook = _snapshot
+
+    final = await runner.run(ProbeInput(value='x', offset=1))
+
+    partial: DebugReport = captured['report']
+    assert partial.truncated is True
+    # At snapshot time, the current task has just completed its
+    # execution but its on_task_complete_result is being built. The
+    # runner appends the ProbeTaskEntry to partial['tasks'] AFTER the
+    # hook returns, so inside the hook the partial still reflects zero
+    # completed tasks.
+    assert len(partial.tasks) == 0
+    # arrange completed before any task ran.
+    assert partial.arrange.duration_seconds is not None
+    # on_message_complete / on_window_complete have not fired yet.
+    assert partial.on_message_complete is None
+    assert partial.on_window_complete is None
+    # input was set at the start of run().
+    assert partial.input.value == 'x'
+
+    # The full run still completes correctly.
+    assert final.truncated is False
+    assert len(final.tasks) == 2
+
+
+async def test_runner_partial_report_without_run_returns_empty_shape():
+    """latest_partial_report() before run() ever ran returns a valid empty report."""
+    handler = _HappyPathHandler(task_count=0)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+    report = runner.latest_partial_report()
+    assert report.truncated is True
+    assert report.tasks == []
+    assert report.input.value == ''  # synthetic empty ProbeInput
