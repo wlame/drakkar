@@ -20,16 +20,55 @@
 
 <!-- ==================== ARRANGE TAB ==================== -->
 <div class="tab-panel" id="panel-arrange" style="display:none;">
-    <p class="text-gray-500 text-sm mb-3">Recent arrange() calls <span id="arrange-total" class="text-teal-600"></span></p>
+    <div class="flex items-center justify-between mb-3">
+        <p class="text-gray-500 text-sm">
+            Recent arrange() calls
+            <span id="arrange-total" class="text-teal-600"></span>
+            <span class="text-gray-400 text-xs" id="arrange-cap-hint"></span>
+        </p>
+    </div>
+    <!-- Filter bar. Applies to the list; the sidebar detail is unaffected. -->
+    <div class="flex flex-wrap items-center gap-3 mb-3">
+        <label class="text-sm text-gray-500">Partition</label>
+        <select id="arrange-filter-partition" class="bg-white border border-cream-300 rounded px-2 py-1 text-sm text-ink-700 focus:border-teal-400 focus:outline-none">
+            <option value="">All</option>
+        </select>
+        <label class="text-sm text-gray-500">Search</label>
+        <input id="arrange-filter-search" type="text" placeholder="labels, offsets, task_id substring" class="bg-white border border-cream-300 rounded px-3 py-1.5 text-sm font-mono text-ink-700 w-64 focus:border-teal-400 focus:outline-none">
+        <label class="text-xs text-gray-500 flex items-center gap-1">
+            <input id="arrange-filter-issues" type="checkbox" class="rounded"> Issues only
+        </label>
+        <span id="arrange-filter-matched" class="text-xs text-gray-400 ml-auto"></span>
+    </div>
     <table class="w-full text-sm">
         <thead>
             <tr class="text-left text-gray-400 border-b border-cream-200">
-                <th class="py-2 px-3">Partition</th><th class="py-2 px-3">Messages</th><th class="py-2 px-3">Tasks</th>
-                <th class="py-2 px-3">Duration</th><th class="py-2 px-3">Time</th><th class="py-2 px-3">Message Labels</th>
+                <th class="py-2 px-3">Partition</th>
+                <th class="py-2 px-3">Msgs</th>
+                <th class="py-2 px-3 w-40">Progress</th>
+                <th class="py-2 px-3">Tasks</th>
+                <th class="py-2 px-3">Arrange</th>
+                <th class="py-2 px-3">Batch</th>
+                <th class="py-2 px-3">Time</th>
+                <th class="py-2 px-3">Labels</th>
             </tr>
         </thead>
         <tbody id="arrange-body"></tbody>
     </table>
+</div>
+
+<!-- Batch detail side panel (rendered once at document root, independent of
+     tab visibility — fixed position slides in/out). Listing data and sidebar
+     data both come from the same in-memory state (recentArranges + allTasks)
+     so they stay consistent. -->
+<div id="arrange-detail-panel" class="fixed top-0 right-0 h-full w-full md:w-1/2 lg:w-2/5 bg-white border-l border-cream-200 shadow-lg transform translate-x-full transition-transform z-40 overflow-y-auto" style="background:#fff;">
+    <div class="p-4 border-b border-cream-200 flex items-center justify-between" style="background:#f5f3ee;">
+        <h3 class="font-semibold text-ink-800" id="arrange-detail-title">Batch</h3>
+        <button onclick="closeArrangeDetail()" class="text-gray-400 hover:text-ink-800 text-xl leading-none">&times;</button>
+    </div>
+    <div class="p-4" id="arrange-detail-body">
+        <div class="text-gray-400">Select a batch to view details...</div>
+    </div>
 </div>
 
 <!-- ==================== EXECUTORS TAB ==================== -->
@@ -63,33 +102,30 @@
                 <div id="tl-lanes" style="position:relative;"></div>
             </div>
         </div>
-        <div id="tl-hover" class="border-t border-cream-200 px-3 py-2 text-xs font-mono text-gray-500" style="height:4.5em; overflow:hidden; background:#f9f8f5;">
+        <!-- Hover detail area. Height sized to comfortably fit all rows of
+             per-task info (status line, CLI, stdin, labels, env) without
+             truncation; overflow stays hidden so very-long CLI args still
+             clamp instead of stretching the timeline card. -->
+        <div id="tl-hover" class="border-t border-cream-200 px-3 py-2 text-xs font-mono text-gray-500" style="height:9em; overflow:hidden; background:#f9f8f5;">
             <span class="text-gray-400">hover over a task bar to see details</span>
         </div>
     </div>
 
-    <details open class="mb-4">
-        <summary class="text-lg font-semibold cursor-pointer select-none hover:text-ink-900">
-            Running <span id="running-count" class="text-sm font-normal text-amber-600">(0)</span>
-        </summary>
-        <table class="w-full text-sm mt-2">
-            <thead><tr class="text-left text-gray-400 border-b border-cream-200">
-                <th class="py-2 px-3">Task ID</th><th class="py-2 px-3">Partition</th><th class="py-2 px-3">Labels</th><th class="py-2 px-3">Duration</th><th class="py-2 px-3">CLI Args</th><th class="py-2 px-3">Stdin</th>
-            </tr></thead>
-            <tbody id="running-body"></tbody>
-        </table>
-    </details>
-    <details class="mb-4">
-        <summary class="text-lg font-semibold cursor-pointer select-none hover:text-ink-900">
+    <!-- Finished list. The former "Running" list was removed — it updated
+         too fast (WS events) and showed stale entries during recorder-flush
+         lag. The Timeline bars and the lane viewport already convey "what's
+         running right now" in a more stable way. -->
+    <div class="mb-4">
+        <h2 class="text-lg font-semibold">
             Finished <span id="finished-count" class="text-sm font-normal text-gray-400">(0)</span>
-        </summary>
+        </h2>
         <table class="w-full text-sm mt-2">
             <thead><tr class="text-left text-gray-400 border-b border-cream-200">
                 <th class="py-2 px-3">Task ID</th><th class="py-2 px-3">Partition</th><th class="py-2 px-3">Labels</th><th class="py-2 px-3">Status</th><th class="py-2 px-3">Duration</th><th class="py-2 px-3">Time</th><th class="py-2 px-3">CLI Args</th><th class="py-2 px-3">Stdin</th>
             </tr></thead>
             <tbody id="finished-body"></tbody>
         </table>
-    </details>
+    </div>
 </div>
 
 <!-- ==================== COLLECT TAB ==================== -->
@@ -436,34 +472,482 @@ function initBars() {
 })();
 
 // === Tab renderers ===
+
+// Arrange-tab state. The list cap is 3 x partition_count so the Live view
+// stays stable-sized regardless of how many partitions the broker has
+// assigned to this worker. Template passes partition_count in server-side
+// context. Floor at 3 so the list is never empty even during startup or
+// rebalance when no partitions are assigned yet.
+var PARTITION_COUNT = {{ partition_count|default(0) }};
+var ARRANGE_CAP = Math.max(3 * PARTITION_COUNT, 3);
+// A batch is considered "unsettled" if any of its tasks are still running
+// and start_ts is older than this threshold. Used for the "Issues only"
+// filter toggle so long-unsettled batches surface even without failures.
+var ARRANGE_STUCK_SEC = 30;
+var arrangeFilter = { partition: '', search: '', issuesOnly: false };
+// Index (into recentArranges) of the currently-open sidebar batch, or -1
+// when the panel is closed. We key by ts+partition (a natural composite key
+// for an arranged event) so that inserts to the front of recentArranges
+// don't misalign the selection.
+var selectedArrangeKey = null;
+
+function arrangeKey(a) { return a ? (a.ts + ':' + a.partition) : null; }
+
+// Compute batch-level task stats by looking up each task_id in allTasks.
+// Returns {done, running, failed, unknown, oldest_running_sec, settled}.
+// "unknown" covers task_ids we haven't seen yet on WS (recorder-flush lag
+// or a task that hasn't made it into allTasks) — rendered as neutral bar.
+function computeBatchStatus(batch, nowS) {
+    var stats = {done: 0, running: 0, failed: 0, unknown: 0, oldest_running_sec: 0};
+    var ids = batch.task_ids || [];
+    for (var i = 0; i < ids.length; i++) {
+        var t = allTasks[ids[i]];
+        if (!t) { stats.unknown++; continue; }
+        if (t.status === 'completed') stats.done++;
+        else if (t.status === 'failed') stats.failed++;
+        else if (t.status === 'running') {
+            stats.running++;
+            var age = nowS - (t.start_ts || batch.ts);
+            if (age > stats.oldest_running_sec) stats.oldest_running_sec = age;
+        } else { stats.unknown++; }
+    }
+    stats.total = ids.length;
+    stats.settled = (stats.running === 0) && (stats.unknown === 0) && (ids.length > 0);
+    return stats;
+}
+
+// Batch latency = arrange_ts -> last outcome_ts for the batch, or the
+// current clock while still unsettled. Returned in seconds; the caller
+// formats (ms vs. s).
+function computeBatchLatency(batch, stats, nowS) {
+    if (!batch.task_ids || !batch.task_ids.length) return 0;
+    if (!stats.settled) return nowS - batch.ts;
+    var last = batch.ts;
+    for (var i = 0; i < batch.task_ids.length; i++) {
+        var t = allTasks[batch.task_ids[i]];
+        if (t && t.end_ts && t.end_ts > last) last = t.end_ts;
+    }
+    return last - batch.ts;
+}
+
+function fmtLatency(sec) {
+    if (sec < 1) return (sec * 1000).toFixed(0) + 'ms';
+    if (sec < 60) return sec.toFixed(1) + 's';
+    return (sec / 60).toFixed(1) + 'm';
+}
+
+// 60-char stacked progress bar. Green for done, red for failed, amber for
+// running, light gray for not-yet-seen. A zero-task batch renders a neutral
+// dashed line so the column isn't visually misleading.
+function makeProgressBar(stats) {
+    var bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;height:8px;border-radius:3px;overflow:hidden;background:#f5f3ee;width:100%;';
+    if (!stats.total) {
+        bar.style.background = 'repeating-linear-gradient(90deg,#f5f3ee,#f5f3ee 4px,#ebe8e0 4px,#ebe8e0 8px)';
+        return bar;
+    }
+    function seg(count, color) {
+        if (!count) return;
+        var s = document.createElement('div');
+        s.style.cssText = 'height:100%;background:' + color + ';flex:' + count + ' 0 0;';
+        bar.appendChild(s);
+    }
+    seg(stats.done, '#34d399');
+    seg(stats.running, '#fbbf24');
+    seg(stats.failed, '#f87171');
+    seg(stats.unknown, '#e5e7eb');
+    return bar;
+}
+
+// "12✅/15  2▶  1❌" — only non-zero segments render, keeps the cell compact.
+// Color matches the bar. No ANSI tricks — plain spans.
+function makeStatusCounts(stats) {
+    var wrap = document.createElement('span');
+    wrap.className = 'font-mono text-xs';
+    function part(count, symbol, color, title) {
+        if (!count) return;
+        var s = document.createElement('span');
+        s.style.cssText = 'color:' + color + ';margin-right:6px;';
+        s.textContent = count + symbol;
+        s.title = title;
+        wrap.appendChild(s);
+    }
+    part(stats.done, '✅', '#059669', 'completed');
+    part(stats.running, '▶', '#d97706', 'running');
+    part(stats.failed, '❌', '#dc2626', 'failed');
+    part(stats.unknown, '○', '#9ca3af', 'not yet seen (WS lag)');
+    if (stats.total) {
+        var tot = document.createElement('span');
+        tot.style.cssText = 'color:#9ca3af;';
+        tot.textContent = '/ ' + stats.total;
+        wrap.appendChild(tot);
+    }
+    return wrap;
+}
+
+// --- Filter logic ---
+
+function arrangeMatchesFilter(a, stats) {
+    if (arrangeFilter.partition !== '' && String(a.partition) !== arrangeFilter.partition) return false;
+    if (arrangeFilter.issuesOnly) {
+        if (!stats.failed && !(stats.oldest_running_sec > ARRANGE_STUCK_SEC)) return false;
+    }
+    var q = arrangeFilter.search.trim().toLowerCase();
+    if (!q) return true;
+    // Substring match across task_ids, offsets (as strings), and labels —
+    // one input covers all three because the alphabet spaces don't collide
+    // in practice (offsets are digits, task_ids are prefixed, labels are
+    // k=v strings).
+    var hay = [
+        (a.task_ids || []).join(' '),
+        (a.offsets || []).join(' '),
+        (a.labels || []).join(' '),
+    ].join(' ').toLowerCase();
+    return hay.indexOf(q) !== -1;
+}
+
+function updatePartitionFilterOptions() {
+    var sel = document.getElementById('arrange-filter-partition');
+    if (!sel) return;
+    var seen = {};
+    for (var i = 0; i < recentArranges.length; i++) seen[recentArranges[i].partition] = true;
+    var partitions = Object.keys(seen).map(function(p) { return Number(p); }).sort(function(a,b) { return a - b; });
+    var prev = sel.value;
+    // Preserve user's selection across rebuilds unless the partition is gone.
+    sel.replaceChildren();
+    var all = document.createElement('option'); all.value = ''; all.textContent = 'All';
+    sel.appendChild(all);
+    for (var j = 0; j < partitions.length; j++) {
+        var opt = document.createElement('option');
+        opt.value = String(partitions[j]);
+        opt.textContent = 'P' + partitions[j];
+        sel.appendChild(opt);
+    }
+    if (prev && partitions.indexOf(Number(prev)) !== -1) sel.value = prev;
+}
+
 function renderArranges() {
     var el = document.getElementById('arrange-total');
     if (el) el.textContent = '(total: ' + arrangeTotal + ')';
+    var capHint = document.getElementById('arrange-cap-hint');
+    if (capHint) {
+        capHint.textContent = ' — last ' + ARRANGE_CAP + ' (3 × ' + PARTITION_COUNT + ' partitions)';
+    }
+
+    updatePartitionFilterOptions();
+
     var body = document.getElementById('arrange-body');
     if (!body) return;
     body.replaceChildren();
-    for (var i = 0; i < recentArranges.length; i++) {
-        var a = recentArranges[i];
-        var tr = document.createElement('tr'); tr.className = 'border-b border-cream-100 hover:bg-cream-100';
+    var nowS = Date.now() / 1000;
+
+    var visibleCount = 0;
+    var capped = recentArranges.slice(0, ARRANGE_CAP);
+    for (var i = 0; i < capped.length; i++) {
+        var a = capped[i];
+        var stats = computeBatchStatus(a, nowS);
+        if (!arrangeMatchesFilter(a, stats)) continue;
+        visibleCount++;
+
+        var tr = document.createElement('tr');
+        tr.className = 'border-b border-cream-100 hover:bg-cream-100 cursor-pointer';
+        // Highlight the selected row so the sidebar context is obvious.
+        if (selectedArrangeKey === arrangeKey(a)) {
+            tr.style.background = '#e0f2fe';
+        }
+        (function(batch) {
+            tr.onclick = function() { openArrangeDetail(batch); };
+        })(a);
+
         var td1 = document.createElement('td'); td1.className = 'py-2 px-3 font-mono';
-        var link = document.createElement('a'); link.href = '/partitions/' + a.partition;
-        link.className = 'text-teal-600 hover:underline'; link.textContent = 'P' + a.partition;
+        var link = document.createElement('a');
+        link.href = '/partitions/' + a.partition;
+        link.className = 'text-teal-600 hover:underline';
+        link.textContent = 'P' + a.partition;
+        link.onclick = function(ev) { ev.stopPropagation(); };  // let the link work without opening the sidebar
         td1.appendChild(link);
+
         var td2 = document.createElement('td'); td2.className = 'py-2 px-3 font-mono'; td2.textContent = a.message_count;
-        var td3 = document.createElement('td'); td3.className = 'py-2 px-3 font-mono'; td3.textContent = a.task_count;
-        var td4 = document.createElement('td'); td4.className = 'py-2 px-3 font-mono';
-        td4.style.color = durColor(a.duration); td4.textContent = a.duration.toFixed(3) + 's';
-        var td5 = document.createElement('td'); td5.className = 'py-2 px-3 text-gray-400 text-xs'; td5.textContent = fmtTimeMs(a.ts);
-        var td6 = document.createElement('td'); td6.className = 'py-2 px-3 font-mono text-xs text-gray-500 max-w-md truncate expandable cursor-pointer';
-        td6.title = 'Click to expand';
-        td6.setAttribute('data-full', a.labels.join('\n'));
-        td6.textContent = a.labels.slice(0, 3).join(', ') + (a.labels.length > 3 ? ' ... (' + a.labels.length + ')' : '');
-        tr.append(td1, td2, td3, td4, td5, td6); body.appendChild(tr);
+
+        var td3 = document.createElement('td'); td3.className = 'py-2 px-3 w-40';
+        td3.appendChild(makeProgressBar(stats));
+
+        var td4 = document.createElement('td'); td4.className = 'py-2 px-3';
+        td4.appendChild(makeStatusCounts(stats));
+
+        var td5 = document.createElement('td'); td5.className = 'py-2 px-3 font-mono text-xs';
+        td5.style.color = durColor(a.duration);
+        td5.textContent = a.duration.toFixed(3) + 's';
+
+        var td6 = document.createElement('td'); td6.className = 'py-2 px-3 font-mono text-xs';
+        var latSec = computeBatchLatency(a, stats, nowS);
+        td6.textContent = fmtLatency(latSec);
+        if (stats.settled) {
+            td6.style.color = '#6b7280';
+            td6.title = 'Settled: all tasks reached a final status.';
+        } else {
+            td6.style.color = '#d97706';
+            td6.title = 'Unsettled: ' + stats.running + ' running, ' + stats.unknown + ' not yet seen.';
+        }
+
+        var td7 = document.createElement('td'); td7.className = 'py-2 px-3 text-gray-400 text-xs'; td7.textContent = fmtTimeMs(a.ts);
+
+        var td8 = document.createElement('td'); td8.className = 'py-2 px-3 font-mono text-xs text-gray-500 max-w-sm truncate';
+        td8.title = (a.labels || []).join('\n');
+        td8.textContent = (a.labels || []).slice(0, 3).join(', ') + (a.labels.length > 3 ? ' … (' + a.labels.length + ')' : '');
+
+        tr.append(td1, td2, td3, td4, td5, td6, td7, td8);
+        body.appendChild(tr);
     }
-    if (!recentArranges.length) {
+    if (!visibleCount) {
         var etr = document.createElement('tr'); var etd = document.createElement('td');
-        etd.colSpan = 6; etd.className = 'py-3 text-center text-gray-400'; etd.textContent = 'No arrange() calls yet';
+        etd.colSpan = 8; etd.className = 'py-3 text-center text-gray-400';
+        etd.textContent = recentArranges.length ? 'No batches match the current filter' : 'No arrange() calls yet';
         etr.appendChild(etd); body.appendChild(etr);
+    }
+
+    var matchedEl = document.getElementById('arrange-filter-matched');
+    if (matchedEl) {
+        var rendered = Math.min(recentArranges.length, ARRANGE_CAP);
+        matchedEl.textContent = visibleCount + ' of ' + rendered + ' shown';
+    }
+}
+
+// === Arrange sidebar (batch detail) ===
+//
+// Renders the summary card + message tree for the currently-selected batch.
+// Called both on row click (initial render) and from the 1s ticker so the
+// live latency + per-task state stay fresh without re-fetching.
+
+function findArrangeByKey(key) {
+    for (var i = 0; i < recentArranges.length; i++) {
+        if (arrangeKey(recentArranges[i]) === key) return recentArranges[i];
+    }
+    return null;
+}
+
+function openArrangeDetail(batch) {
+    selectedArrangeKey = arrangeKey(batch);
+    var panel = document.getElementById('arrange-detail-panel');
+    if (panel) panel.style.transform = 'translateX(0)';
+    renderArrangeDetail();
+    renderArranges();  // re-render to highlight the selected row
+}
+
+function closeArrangeDetail() {
+    selectedArrangeKey = null;
+    var panel = document.getElementById('arrange-detail-panel');
+    if (panel) panel.style.transform = 'translateX(100%)';
+    renderArranges();
+}
+window.closeArrangeDetail = closeArrangeDetail;
+
+function percentile(sorted, p) {
+    if (!sorted.length) return 0;
+    var idx = Math.min(Math.floor(p * sorted.length), sorted.length - 1);
+    return sorted[idx];
+}
+
+function renderArrangeDetail() {
+    if (!selectedArrangeKey) return;
+    var batch = findArrangeByKey(selectedArrangeKey);
+    var body = document.getElementById('arrange-detail-body');
+    var title = document.getElementById('arrange-detail-title');
+    if (!body) return;
+    if (!batch) {
+        // Batch aged out of recentArranges (FIFO) while the sidebar was open.
+        body.replaceChildren();
+        var msg = document.createElement('div');
+        msg.className = 'text-gray-400';
+        msg.textContent = 'Batch aged out of the live list.';
+        body.appendChild(msg);
+        if (title) title.textContent = 'Batch';
+        return;
+    }
+    var nowS = Date.now() / 1000;
+    var stats = computeBatchStatus(batch, nowS);
+    var latSec = computeBatchLatency(batch, stats, nowS);
+
+    if (title) title.textContent = 'Batch P' + batch.partition + ' @ ' + fmtTimeMs(batch.ts);
+
+    body.replaceChildren();
+
+    // --- Summary card ---
+    var summary = document.createElement('div');
+    summary.className = 'mb-4 p-3 rounded border border-cream-200';
+    summary.style.background = '#f9f8f5';
+    var grid = document.createElement('div');
+    grid.className = 'grid grid-cols-2 gap-x-4 gap-y-1 text-xs font-mono';
+    function kv(k, v, color) {
+        var kSpan = document.createElement('span');
+        kSpan.className = 'text-gray-500';
+        kSpan.textContent = k;
+        var vSpan = document.createElement('span');
+        vSpan.textContent = v;
+        if (color) vSpan.style.color = color;
+        grid.appendChild(kSpan); grid.appendChild(vSpan);
+    }
+    kv('msgs', batch.message_count);
+    kv('tasks', stats.total);
+    var fan = batch.message_count ? (stats.total / batch.message_count).toFixed(2) + '×' : '—';
+    kv('fan-out', fan);
+    kv('arrange', batch.duration.toFixed(3) + 's', durColor(batch.duration));
+    kv('batch latency', fmtLatency(latSec), stats.settled ? '#6b7280' : '#d97706');
+
+    // p50/p95 over EXECUTED task durations (skip still-running ones).
+    var durs = [];
+    var ids = batch.task_ids || [];
+    for (var k = 0; k < ids.length; k++) {
+        var t = allTasks[ids[k]];
+        if (t && t.duration != null) durs.push(t.duration);
+    }
+    durs.sort(function(a, b) { return a - b; });
+    if (durs.length) {
+        kv('exec p50', percentile(durs, 0.5).toFixed(3) + 's');
+        kv('exec p95', percentile(durs, 0.95).toFixed(3) + 's');
+    }
+    if (!stats.settled) {
+        kv('oldest running', stats.oldest_running_sec > 0 ? fmtLatency(stats.oldest_running_sec) : '—');
+    }
+    summary.appendChild(grid);
+
+    // Status line.
+    var statusLine = document.createElement('div');
+    statusLine.className = 'mt-2';
+    statusLine.appendChild(makeStatusCounts(stats));
+    var barWrap = document.createElement('div');
+    barWrap.className = 'mt-2';
+    barWrap.appendChild(makeProgressBar(stats));
+    summary.appendChild(statusLine);
+    summary.appendChild(barWrap);
+
+    body.appendChild(summary);
+
+    // --- Messages tree ---
+    var msgHeader = document.createElement('div');
+    msgHeader.className = 'text-xs uppercase tracking-wide text-gray-500 mb-2';
+    msgHeader.textContent = 'Messages (' + (batch.offsets || []).length + ')';
+    body.appendChild(msgHeader);
+
+    var offsets = batch.offsets || [];
+    if (!offsets.length) {
+        var noMsg = document.createElement('div');
+        noMsg.className = 'text-gray-400 text-xs';
+        noMsg.textContent = '(no offsets recorded)';
+        body.appendChild(noMsg);
+    }
+
+    // Pre-compute per-offset task mapping: which tasks list THIS offset among
+    // their source_offsets. task.source_offsets comes from the task_started
+    // WS metadata and from /api/recent-tasks — authoritative both paths.
+    // Without it (lag or not-yet-seen task) we fall back to attaching the
+    // task to the first offset so it still shows in the tree.
+    var taskByOffset = {};  // offset -> array of {task_id, task, shared}
+    for (var ti = 0; ti < ids.length; ti++) {
+        var t2 = allTasks[ids[ti]];
+        var covered = (t2 && Array.isArray(t2.source_offsets) && t2.source_offsets.length)
+            ? t2.source_offsets
+            : null;
+        if (!covered) {
+            // Unknown coverage: drop the task under the first offset so it
+            // doesn't disappear. No "shared" badge since we genuinely can't
+            // tell — better than falsely implying fan-in.
+            var fallback = offsets[0];
+            if (fallback != null) {
+                (taskByOffset[fallback] = taskByOffset[fallback] || []).push({
+                    task_id: ids[ti], task: t2 || null, shared: 0,
+                });
+            }
+            continue;
+        }
+        var sharedCount = Math.max(0, covered.length - 1);
+        for (var ci = 0; ci < covered.length; ci++) {
+            var off = covered[ci];
+            (taskByOffset[off] = taskByOffset[off] || []).push({
+                task_id: ids[ti], task: t2, shared: sharedCount,
+            });
+        }
+    }
+
+    for (var mi = 0; mi < offsets.length; mi++) {
+        var off = offsets[mi];
+        var msgBox = document.createElement('div');
+        msgBox.className = 'mb-3 p-2 rounded border border-cream-200';
+        msgBox.style.background = '#fff';
+
+        var head = document.createElement('div');
+        head.className = 'flex items-center justify-between mb-1';
+        var left = document.createElement('div');
+        left.className = 'text-sm font-mono';
+        var offLabel = document.createElement('span');
+        offLabel.style.color = '#6b7280';
+        offLabel.textContent = 'Offset ';
+        var offLink = document.createElement('a');
+        offLink.href = '/debug#trace/' + batch.partition + '/' + off;
+        offLink.className = 'text-teal-600 hover:underline';
+        offLink.textContent = off;
+        offLink.title = 'Open message trace in Debug view';
+        left.append(offLabel, offLink);
+        head.appendChild(left);
+        msgBox.appendChild(head);
+
+        var taskList = document.createElement('div');
+        taskList.className = 'space-y-1';
+        var tasksForMsg = taskByOffset[off] || [];
+        if (!tasksForMsg.length) {
+            var noTasks = document.createElement('div');
+            noTasks.className = 'text-xs text-gray-400';
+            noTasks.textContent = '(no tasks generated)';
+            taskList.appendChild(noTasks);
+        }
+        for (var tix = 0; tix < tasksForMsg.length; tix++) {
+            var te = tasksForMsg[tix];
+            var row = document.createElement('div');
+            row.className = 'flex items-center gap-2 text-xs font-mono';
+
+            var dot = document.createElement('span');
+            dot.style.cssText = 'display:inline-block;width:8px;height:8px;border-radius:50%;';
+            var status = te.task ? te.task.status : 'unknown';
+            dot.style.background = status === 'completed' ? '#34d399'
+                : status === 'failed' ? '#f87171'
+                : status === 'running' ? '#fbbf24'
+                : '#e5e7eb';
+            row.appendChild(dot);
+
+            var tLink = document.createElement('a');
+            tLink.href = '/task/' + encodeURIComponent(baseTaskId(te.task_id));
+            tLink.className = 'text-ink-800 hover:underline';
+            tLink.textContent = te.task_id;
+            row.appendChild(tLink);
+
+            var stat = document.createElement('span');
+            stat.style.cssText = statusCss(status);
+            stat.textContent = status;
+            row.appendChild(stat);
+
+            var dur = document.createElement('span');
+            dur.className = 'text-gray-500';
+            if (te.task && te.task.duration != null) {
+                dur.textContent = te.task.duration.toFixed(3) + 's';
+            } else if (te.task && te.task.start_ts) {
+                dur.textContent = (nowS - te.task.start_ts).toFixed(1) + 's running';
+            } else {
+                dur.textContent = '—';
+            }
+            row.appendChild(dur);
+
+            if (te.shared > 0) {
+                var shared = document.createElement('span');
+                shared.className = 'text-gray-400';
+                shared.textContent = 'shared(' + te.shared + ')';
+                shared.title = 'This task covers ' + (te.shared + 1) + ' messages (fan-in).';
+                row.appendChild(shared);
+            }
+
+            taskList.appendChild(row);
+        }
+        msgBox.appendChild(taskList);
+        body.appendChild(msgBox);
     }
 }
 
@@ -508,41 +992,16 @@ function makeLabelsTd(labels) {
 }
 
 function renderTaskLists() {
-    var now = Date.now() / 1000;
-    var running = [], finished = [];
+    // Running tasks are conveyed by the Timeline lanes above — the former
+    // "Running" section was removed to avoid showing stale rows during
+    // recorder-flush lag.
+    var finished = [];
     var keys = Object.keys(allTasks);
     for (var i = 0; i < keys.length; i++) {
         var t = allTasks[keys[i]];
-        if (t.status === 'running') running.push(t);
-        else if (t.status === 'completed' || t.status === 'failed') finished.push(t);
+        if (t.status === 'completed' || t.status === 'failed') finished.push(t);
     }
     finished.sort(function(a, b) { return (b.end_ts || 0) - (a.end_ts || 0); });
-
-    var rc = document.getElementById('running-count');
-    var rb = document.getElementById('running-body');
-    if (rc) rc.textContent = '(' + running.length + ')';
-    if (rb) {
-        rb.replaceChildren();
-        for (var ri = 0; ri < running.length; ri++) {
-            var rt = running[ri];
-            var rtr = document.createElement('tr'); rtr.className = 'border-b border-cream-100 hover:bg-cream-100';
-            var rtd1 = document.createElement('td'); rtd1.className = 'py-2 px-3 font-mono';
-            var ra1 = document.createElement('a'); ra1.href = '/task/' + encodeURIComponent(baseTaskId(rt.task_id));
-            ra1.className = 'text-amber-600 hover:underline'; ra1.textContent = rt.task_id; rtd1.appendChild(ra1);
-            var rtd2 = document.createElement('td'); rtd2.className = 'py-2 px-3 font-mono'; rtd2.textContent = rt.partition;
-            var rtdL = makeLabelsTd(rt.labels);
-            var rtd3 = document.createElement('td'); rtd3.className = 'py-2 px-3 font-mono'; rtd3.textContent = (now - rt.start_ts).toFixed(1) + 's';
-            var rtd4 = document.createElement('td'); rtd4.className = 'py-2 px-3 font-mono text-xs text-gray-500 max-w-md truncate expandable cursor-pointer';
-            rtd4.title = 'Click to expand'; rtd4.textContent = rt.args || '';
-            var rtd5 = document.createElement('td'); rtd5.className = 'py-2 px-3 font-mono text-xs text-gray-400'; rtd5.textContent = fmtStdin(rt);
-            rtr.append(rtd1, rtd2, rtdL, rtd3, rtd4, rtd5); rb.appendChild(rtr);
-        }
-        if (!running.length) {
-            var etr = document.createElement('tr'); var etd = document.createElement('td');
-            etd.colSpan = 6; etd.className = 'py-3 text-center text-gray-400'; etd.textContent = 'No tasks running';
-            etr.appendChild(etd); rb.appendChild(etr);
-        }
-    }
 
     var fc = document.getElementById('finished-count');
     var fb = document.getElementById('finished-body');
@@ -664,8 +1123,16 @@ async function loadArrangeHistory() {
             recentArranges.push({
                 partition: e.partition,
                 message_count: meta.message_count || (meta.offsets ? meta.offsets.length : 0),
-                task_count: meta.task_count || 0, duration: e.duration || 0,
-                ts: e.ts, labels: meta.message_labels || [],
+                task_count: meta.task_count || 0,
+                duration: e.duration || 0,
+                ts: e.ts,
+                labels: meta.message_labels || [],
+                // offsets[] and task_ids[] power the sidebar's message tree
+                // and the per-row status aggregation (counts/progress bar).
+                // The recorder stores both in arranged.metadata — see
+                // drakkar/recorder.py:record_arranged.
+                offsets: meta.offsets || [],
+                task_ids: meta.task_ids || [],
             });
         }
         arrangeTotal = recentArranges.length;
@@ -736,7 +1203,20 @@ function connectWS() {
                 var wsLabels = null;
                 if (e.labels) { try { wsLabels = typeof e.labels === 'string' ? JSON.parse(e.labels) : e.labels; } catch(x) {} }
                 var wsEnv = null;
-                if (e.metadata) { try { var wsMeta = typeof e.metadata === 'string' ? JSON.parse(e.metadata) : e.metadata; wsEnv = wsMeta.env || null; } catch(x) {} }
+                var wsSourceOffsets = null;
+                if (e.metadata) {
+                    try {
+                        var wsMeta = typeof e.metadata === 'string' ? JSON.parse(e.metadata) : e.metadata;
+                        wsEnv = wsMeta.env || null;
+                        // source_offsets comes from the recorder's task_started
+                        // metadata (see recorder.record_task_started). The
+                        // Arrange tab's sidebar uses it to map each task to
+                        // the exact messages it covers — essential for fan-in
+                        // visualization, and to avoid the "shared(N) badge
+                        // on everything" fallback in the sidebar.
+                        wsSourceOffsets = Array.isArray(wsMeta.source_offsets) ? wsMeta.source_offsets : null;
+                    } catch(x) {}
+                }
                 allTasks[e.task_id] = {
                     task_id: e.task_id, partition: e.partition, pid: e.pid,
                     start_ts: e.ts, end_ts: null, status: 'running', args: e.args, duration: null,
@@ -744,6 +1224,7 @@ function connectWS() {
                     stdin_lines: e.stdin_lines || 0, stdin_size: e.stdin_size || 0,
                     labels: wsLabels,
                     env: wsEnv,
+                    source_offsets: wsSourceOffsets,
                 };
                 ensureBar(allTasks[e.task_id]);
             } else if (e.event === 'task_completed' || e.event === 'task_failed') {
@@ -755,10 +1236,23 @@ function connectWS() {
                 }
             } else if (e.event === 'arranged') {
                 arrangeTotal++;
+                // The WS frame forwards the full event including the raw
+                // ``metadata`` JSON string — parse it to recover offsets[]
+                // and task_ids[] so the sidebar can show the message→task
+                // tree without a separate fetch.
+                var arrMeta = {};
+                if (e.metadata) {
+                    try { arrMeta = typeof e.metadata === 'string' ? JSON.parse(e.metadata) : e.metadata; } catch(x) {}
+                }
                 recentArranges.unshift({
-                    partition: e.partition, message_count: e.message_count || 0,
-                    task_count: e.task_count || 0, duration: e.duration || 0,
-                    ts: e.ts, labels: e.message_labels || [],
+                    partition: e.partition,
+                    message_count: e.message_count || (arrMeta.offsets ? arrMeta.offsets.length : 0),
+                    task_count: e.task_count || (arrMeta.task_ids ? arrMeta.task_ids.length : 0),
+                    duration: e.duration || 0,
+                    ts: e.ts,
+                    labels: e.message_labels || arrMeta.message_labels || [],
+                    offsets: arrMeta.offsets || [],
+                    task_ids: arrMeta.task_ids || [],
                 });
                 if (recentArranges.length > MAX_HISTORY) recentArranges.length = MAX_HISTORY;
                 renderArranges();
@@ -789,6 +1283,37 @@ function initFromHash() {
     switchTab(hash || 'execute');
 }
 
+// --- Arrange tab: filter wiring + live re-render ticker ---
+function initArrangeTab() {
+    var partSel = document.getElementById('arrange-filter-partition');
+    var searchIn = document.getElementById('arrange-filter-search');
+    var issuesCb = document.getElementById('arrange-filter-issues');
+    if (partSel) partSel.addEventListener('change', function() {
+        arrangeFilter.partition = partSel.value;
+        renderArranges();
+    });
+    if (searchIn) searchIn.addEventListener('input', function() {
+        arrangeFilter.search = searchIn.value;
+        renderArranges();
+    });
+    if (issuesCb) issuesCb.addEventListener('change', function() {
+        arrangeFilter.issuesOnly = issuesCb.checked;
+        renderArranges();
+    });
+    // 1s ticker: refreshes the progress bar + counts + live latency by
+    // re-reading from allTasks (which WS updates in real time). Also keeps
+    // the sidebar detail fresh for the currently-selected batch. Guarded
+    // by a frozen check and runs only when the Arrange panel is visible to
+    // avoid wasted work on other tabs.
+    setInterval(function() {
+        if (frozen) return;
+        var panel = document.getElementById('panel-arrange');
+        if (!panel || panel.style.display === 'none') return;
+        renderArranges();
+        if (selectedArrangeKey) renderArrangeDetail();
+    }, 1000);
+}
+
 (async function() {
     ensureAnchor();
     await Promise.all([syncFromAPI(), loadArrangeHistory(), loadCollectHistory()]);
@@ -797,6 +1322,7 @@ function initFromHash() {
     rebuildAxis();
     renderArranges();
     renderCollects();
+    initArrangeTab();
     connectWS();
     // rAF loop: updates bar positions/widths + scroll at 60fps
     requestAnimationFrame(animateTimeline);

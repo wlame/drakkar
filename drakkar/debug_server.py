@@ -451,6 +451,9 @@ def create_debug_app(
                     }
                 )
 
+        # ``partition_count`` powers the Arrange tab's "last N batches" cap
+        # (3 x partition_count) so the live list stays stable-sized regardless
+        # of how many partitions the broker has assigned to this worker.
         return templates.TemplateResponse(
             request,
             'live.html',
@@ -463,6 +466,7 @@ def create_debug_app(
                 'pool_active': drakkar_app._executor_pool.active_count if drakkar_app._executor_pool else 0,
                 'pool_waiting': drakkar_app._executor_pool.waiting_count if drakkar_app._executor_pool else 0,
                 'pool_max': drakkar_app._executor_pool.max_executors if drakkar_app._executor_pool else 0,
+                'partition_count': len(drakkar_app.processors),
                 'max_ui_rows': config.max_ui_rows,
                 'ws_min_duration_ms': config.ws_min_duration_ms,
             },
