@@ -851,3 +851,256 @@ async def test_flush_loop_error_does_not_stop_engine(tmp_path, monkeypatch):
         assert recorded_kwargs.get('on_error') == 'continue'
     finally:
         await engine.stop()
+
+
+async def test_flush_once_cancel_mid_execution_restores_snapshot(tmp_path):
+    """A CancelledError raised mid-flush (between the atomic swap and a
+    successful commit) must restore the un-committed snapshot entries
+    back into ``_cache._dirty`` so the next flush — including the final
+    drain from ``stop()`` — picks them up.
+
+    Without the try/finally restore, the swap happens first, then the
+    CancelledError unwinds the coroutine frame with the ``snapshot``
+    local (pending ops held in a local variable). ``self._cache._dirty``
+    is already the fresh empty dict, and the subsequent final drain
+    sees nothing → silent data loss.
+
+    We simulate the cancel by monkey-patching ``executemany`` to raise
+    CancelledError at its first await.
+    """
+    import asyncio as _asyncio
+
+    engine = await _make_engine(tmp_path)
+    await engine.start()
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        cache.set('a', 1)
+        cache.set('b', 2)
+        # Snapshot the intended ops so we can assert they're preserved.
+        dirty_before = dict(cache._dirty)  # type: ignore[reportPrivateUsage]
+        assert len(dirty_before) == 2
+
+        # Patch executemany to raise CancelledError — mimics the task
+        # cancellation landing at the first await inside _flush_once's
+        # SQL block.
+        assert engine._writer_db is not None  # type: ignore[reportPrivateUsage]
+
+        async def cancelling_executemany(sql, params):
+            raise _asyncio.CancelledError('synthetic cancellation')
+
+        engine._writer_db.executemany = cancelling_executemany  # type: ignore[reportPrivateUsage,assignment]
+
+        # _flush_once must re-raise the CancelledError after restoring
+        # the snapshot. CancelledError is a BaseException, not a
+        # regular Exception, so the try/finally semantics apply.
+        with pytest.raises(_asyncio.CancelledError):
+            await engine._flush_once()  # type: ignore[reportPrivateUsage]
+
+        # The dirty map must contain the same two keys we put in
+        # before the cancel — nothing lost.
+        assert 'a' in cache._dirty  # type: ignore[reportPrivateUsage]
+        assert 'b' in cache._dirty  # type: ignore[reportPrivateUsage]
+        assert len(cache._dirty) == 2  # type: ignore[reportPrivateUsage]
+    finally:
+        # Restore a working executemany so ``stop()``'s final drain can
+        # run cleanly on a fresh connection. We bypass the engine's
+        # reopened DB by setting _dirty to {} directly — the restore
+        # above already confirmed the important property.
+        engine._cache._dirty = {}  # type: ignore[reportPrivateUsage]
+        await engine.stop()
+
+
+async def test_flush_once_cancel_mid_commit_restores_snapshot(tmp_path):
+    """Same guarantee, but the cancellation lands at ``commit()`` rather
+    than ``executemany``. The try/finally must still restore the
+    snapshot: the commit is the point where rows become durable, so a
+    cancel between ``executemany`` and the successful ``commit`` still
+    leaves the DB in its pre-flush state and the snapshot ops must
+    replay.
+    """
+    import asyncio as _asyncio
+
+    engine = await _make_engine(tmp_path)
+    await engine.start()
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        cache.set('k1', 'v1')
+        cache.set('k2', 'v2')
+
+        assert engine._writer_db is not None  # type: ignore[reportPrivateUsage]
+        original_commit = engine._writer_db.commit  # type: ignore[reportPrivateUsage]
+
+        async def cancelling_commit():
+            raise _asyncio.CancelledError('synthetic commit cancel')
+
+        engine._writer_db.commit = cancelling_commit  # type: ignore[reportPrivateUsage,assignment]
+
+        with pytest.raises(_asyncio.CancelledError):
+            await engine._flush_once()  # type: ignore[reportPrivateUsage]
+
+        # Both keys must be back in _dirty after the restore.
+        assert set(cache._dirty.keys()) == {'k1', 'k2'}  # type: ignore[reportPrivateUsage]
+
+        # Restore real commit, then the next flush must persist the
+        # re-queued ops to the DB normally.
+        engine._writer_db.commit = original_commit  # type: ignore[reportPrivateUsage,assignment]
+        await engine._flush_once()  # type: ignore[reportPrivateUsage]
+
+        db_path = tmp_path / 'w1-cache.db.actual'
+        assert (await _fetch_row(db_path, 'k1')) is not None
+        assert (await _fetch_row(db_path, 'k2')) is not None
+        # _dirty drained normally after restore + re-flush.
+        assert cache._dirty == {}  # type: ignore[reportPrivateUsage]
+    finally:
+        await engine.stop()
+
+
+async def test_flush_once_cancel_restore_respects_racing_writes(tmp_path):
+    """When a racing ``set`` lands on the new dirty map between the
+    atomic swap and the cancel, the restore must NOT clobber it: the
+    racing write is newer than the snapshot's entry for the same key,
+    so we keep the live one and skip the restore for that specific key.
+
+    All other (non-colliding) snapshot entries are restored as usual.
+    """
+    import asyncio as _asyncio
+
+    engine = await _make_engine(tmp_path)
+    await engine.start()
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        cache.set('shared', 'snapshot_value')  # goes into snapshot on swap
+        cache.set('only_in_snapshot', 'ok')  # also in snapshot
+
+        assert engine._writer_db is not None  # type: ignore[reportPrivateUsage]
+
+        async def racing_cancelling_executemany(sql, params):
+            # Simulate a racing ``set`` that lands on the fresh _dirty
+            # after the atomic swap — this is what the "no writes lost"
+            # guarantee is meant to handle, but here we also cancel.
+            cache.set('shared', 'racing_value')  # supersedes snapshot entry
+            cache.set('only_in_live', 'live_only')  # new key, not in snapshot
+            raise _asyncio.CancelledError('mid-flush cancel')
+
+        engine._writer_db.executemany = racing_cancelling_executemany  # type: ignore[reportPrivateUsage,assignment]
+
+        with pytest.raises(_asyncio.CancelledError):
+            await engine._flush_once()  # type: ignore[reportPrivateUsage]
+
+        # After restore:
+        # - 'shared' keeps the racing (newer) value, not the snapshot's.
+        # - 'only_in_snapshot' is restored.
+        # - 'only_in_live' keeps its racing value too.
+        dirty = cache._dirty  # type: ignore[reportPrivateUsage]
+        assert 'shared' in dirty
+        assert dirty['shared'].entry is not None
+        assert dirty['shared'].entry.value == '"racing_value"'
+
+        assert 'only_in_snapshot' in dirty
+        assert dirty['only_in_snapshot'].entry is not None
+        assert dirty['only_in_snapshot'].entry.value == '"ok"'
+
+        assert 'only_in_live' in dirty
+        assert dirty['only_in_live'].entry is not None
+        assert dirty['only_in_live'].entry.value == '"live_only"'
+    finally:
+        engine._cache._dirty = {}  # type: ignore[reportPrivateUsage]
+        await engine.stop()
+
+
+async def test_stop_final_drain_persists_ops_after_mid_flush_cancel(tmp_path):
+    """End-to-end: the scheduled flush is cancelled mid-execution by
+    ``stop()``, and the final-drain ``_flush_once()`` must still persist
+    the ops that were in-flight. This is the integration path the
+    cancel-safety restore guards against.
+
+    We drive it by pre-patching executemany to raise CancelledError on
+    the FIRST call (the scheduled flush) and let the SECOND call (the
+    final drain from stop()) run normally. The row must reach the DB.
+    """
+    engine = await _make_engine(tmp_path, flush_interval_seconds=3600.0)
+    await engine.start()
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        cache.set('payload', 'must_persist')
+
+        assert engine._writer_db is not None  # type: ignore[reportPrivateUsage]
+        original_executemany = engine._writer_db.executemany  # type: ignore[reportPrivateUsage]
+        call_count = {'n': 0}
+
+        import asyncio as _asyncio
+
+        async def cancel_then_real(sql, params):
+            call_count['n'] += 1
+            if call_count['n'] == 1:
+                raise _asyncio.CancelledError('synthetic first-cycle cancel')
+            return await original_executemany(sql, params)
+
+        engine._writer_db.executemany = cancel_then_real  # type: ignore[reportPrivateUsage,assignment]
+
+        # First scheduled cycle: cancel → restore.
+        with pytest.raises(_asyncio.CancelledError):
+            await engine._flush_once()  # type: ignore[reportPrivateUsage]
+        # Restore should have put it back.
+        assert 'payload' in cache._dirty  # type: ignore[reportPrivateUsage]
+    finally:
+        # stop() runs the final drain. Second call to executemany now
+        # delegates to the original → the row lands in the DB.
+        await engine.stop()
+
+    db_path = tmp_path / 'w1-cache.db.actual'
+    row = await _fetch_row(db_path, 'payload')
+    assert row is not None, 'final drain should have persisted the re-queued op'
+    assert row[2] == '"must_persist"'
+
+
+async def test_stop_final_drain_failure_is_logged_and_stop_completes(tmp_path, monkeypatch):
+    """Regression: a raising final drain must not prevent ``stop()`` from
+    finishing and closing connections.
+
+    The final drain catches ``Exception`` and logs via ``logger.aexception``
+    — a faulty DB would otherwise deadlock shutdown. This test swaps in a
+    broken ``_flush_once`` that always raises, then asserts:
+      - ``stop()`` returns cleanly (no re-raise)
+      - the writer connection is closed (``_writer_db is None``)
+      - the reader connection is closed (``_reader_db is None``)
+      - the event was routed through ``aexception`` (captured via a spy)
+    """
+    engine = await _make_engine(tmp_path, worker_id='w1', flush_interval_seconds=3600.0)
+    await engine.start()
+
+    # Replace _flush_once with a raising version AFTER start() so the
+    # scheduled periodic is already running against the original.
+    original_flush_once = engine._flush_once  # type: ignore[reportPrivateUsage]
+    call_count = {'count': 0}
+
+    async def raising_flush_once():
+        call_count['count'] += 1
+        raise RuntimeError('synthetic drain failure')
+
+    engine._flush_once = raising_flush_once  # type: ignore[reportPrivateUsage,assignment]
+
+    # Spy on logger.aexception — the final-drain exception handler uses it.
+    from drakkar import cache as cache_module
+
+    captured_events: list[str] = []
+    original_aexception = cache_module.logger.aexception
+
+    async def spy_aexception(event: str, **kwargs):
+        captured_events.append(event)
+        # Let the real logger do its thing so formatting stays exercised.
+        await original_aexception(event, **kwargs)
+
+    monkeypatch.setattr(cache_module.logger, 'aexception', spy_aexception)
+
+    # stop() must complete even though the final drain raises.
+    await engine.stop()
+
+    # Restore for hygiene.
+    engine._flush_once = original_flush_once  # type: ignore[reportPrivateUsage,assignment]
+
+    # Assertions: stop() finished, connections closed, exception logged.
+    assert engine._writer_db is None  # type: ignore[reportPrivateUsage]
+    assert engine._reader_db is None  # type: ignore[reportPrivateUsage]
+    assert call_count['count'] >= 1, 'final drain was never called'
+    assert 'cache_final_drain_failed' in captured_events

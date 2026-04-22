@@ -896,3 +896,107 @@ async def test_reader_connection_is_separate_from_writer(tmp_path):
         assert engine._reader_db is not engine._writer_db  # type: ignore[reportPrivateUsage]
     finally:
         await engine.stop()
+
+
+# -- warm-on-read bytes_sum invariant regression -----------------------------
+
+
+async def test_get_warm_on_read_does_not_drift_bytes_sum_when_key_preexists(tmp_path):
+    """Regression: the DB-fallback warm path must subtract an existing
+    memory entry's bytes before overwriting, otherwise ``_bytes_sum`` leaks
+    by the old entry's size every warm.
+
+    Simulates the race described in the code review: a concurrent
+    ``set()`` lands between ``get()``'s memory-miss check and its
+    warm-on-read overwrite. The raced ``set()`` installs a same-key
+    entry in memory and bumps ``_bytes_sum``; the DB-fallback path then
+    overwrites the memory slot. Without the fix, ``_bytes_sum`` would
+    hold (raced_bytes + warmed_bytes) even though the dict only contains
+    the warmed entry.
+
+    We force the race deterministically by swapping ``_memory.get`` with a
+    one-shot function that returns None on the miss-check (as if the key
+    were absent) and simultaneously installs a same-key entry + bumps the
+    running sum — exactly the state a concurrent ``set()`` would leave.
+    """
+    from drakkar.cache import CacheEntry, CacheScope, _now_ms
+
+    engine = await _make_started_engine(tmp_path)
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+
+        # Seed a DB row for 'k' so get() can warm from DB.
+        cache.set('k', 'from_db')
+        await engine._flush_once()  # type: ignore[reportPrivateUsage]
+        # Reset memory + sum so the post-fix invariant holds cleanly.
+        cache._memory.clear()  # type: ignore[reportPrivateUsage]
+        cache._bytes_sum = 0  # type: ignore[reportPrivateUsage]
+
+        raced_entry = CacheEntry(
+            key='k',
+            scope=CacheScope.LOCAL,
+            value='"raced"',
+            size_bytes=len(b'"raced"'),
+            created_at_ms=_now_ms(),
+            updated_at_ms=_now_ms(),
+            expires_at_ms=None,
+            origin_worker_id='worker-test',
+        )
+
+        # Stash the real ``get`` so we can restore after the miss check.
+        original_memory_get = cache._memory.get  # type: ignore[reportPrivateUsage]
+
+        def one_shot_miss(key, default=None):
+            # First call: pretend the key is absent (miss-check path)
+            # while simultaneously installing the raced entry and
+            # bumping the running sum, mirroring what a concurrent
+            # ``set()`` between the miss-check and the warm would
+            # leave behind.
+            cache._memory.get = original_memory_get  # type: ignore[reportPrivateUsage,assignment]
+            cache._memory[key] = raced_entry  # type: ignore[reportPrivateUsage]
+            cache._bytes_sum += raced_entry.size_bytes  # type: ignore[reportPrivateUsage]
+            return default
+
+        cache._memory.get = one_shot_miss  # type: ignore[reportPrivateUsage,assignment]
+
+        # Run the warm path. With the fix, the warm subtracts the raced
+        # entry's bytes before installing the DB row.
+        _ = await cache.get('k')
+
+        # Invariant: running sum equals actual memory contents.
+        expected_sum = sum(e.size_bytes for e in cache._memory.values())  # type: ignore[reportPrivateUsage]
+        assert cache._bytes_sum == expected_sum  # type: ignore[reportPrivateUsage]
+    finally:
+        await engine.stop()
+
+
+async def test_concurrent_get_and_flush_preserves_bytes_sum_invariant(tmp_path):
+    """After a concurrent get + flush pair completes, the running
+    ``_bytes_sum`` must equal the sum of ``size_bytes`` across the current
+    ``_memory`` contents — there is no room for drift.
+    """
+    engine = await _make_started_engine(tmp_path)
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+
+        # Seed a row so get() has something to fetch from DB.
+        cache.set('seeded', 'v')
+        await engine._flush_once()  # type: ignore[reportPrivateUsage]
+        cache._memory.pop('seeded', None)  # type: ignore[reportPrivateUsage]
+        cache._bytes_sum = 0  # type: ignore[reportPrivateUsage]
+
+        # Launch a concurrent set + flush + get on the same key.
+        cache.set('other', 'pending')
+
+        async def do_get():
+            await cache.get('seeded')
+
+        await asyncio.gather(engine._flush_once(), do_get())  # type: ignore[reportPrivateUsage]
+
+        # Invariant: ``_bytes_sum`` equals the actual sum of entries.
+        expected_sum = sum(e.size_bytes for e in cache._memory.values())  # type: ignore[reportPrivateUsage]
+        assert cache._bytes_sum == expected_sum  # type: ignore[reportPrivateUsage]
+    finally:
+        await engine.stop()

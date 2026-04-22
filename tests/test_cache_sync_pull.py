@@ -219,9 +219,8 @@ async def test_sync_same_cluster_pulls_cluster_and_global(tmp_path):
             ],
         )
 
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        pulled = await engine._sync_once()  # type: ignore[reportPrivateUsage]
 
-        pulled = engine._last_pulled_rows  # type: ignore[reportPrivateUsage]
         assert 'peer1' in pulled
         keys = {row[0] for row in pulled['peer1']}
         assert keys == {'k_cluster', 'k_global'}
@@ -245,9 +244,8 @@ async def test_sync_different_cluster_pulls_global_only(tmp_path):
             ],
         )
 
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        pulled = await engine._sync_once()  # type: ignore[reportPrivateUsage]
 
-        pulled = engine._last_pulled_rows  # type: ignore[reportPrivateUsage]
         assert 'peer2' in pulled
         keys = {row[0] for row in pulled['peer2']}
         assert keys == {'k_global'}
@@ -282,9 +280,8 @@ async def test_sync_excludes_expired_rows(tmp_path):
             ],
         )
 
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        pulled = await engine._sync_once()  # type: ignore[reportPrivateUsage]
 
-        pulled = engine._last_pulled_rows  # type: ignore[reportPrivateUsage]
         keys = {row[0] for row in pulled['peer1']}
         assert keys == {'k_forever', 'k_future'}
     finally:
@@ -315,9 +312,8 @@ async def test_sync_respects_batch_size_limit(tmp_path):
         ]
         await _seed_peer_cache_db(tmp_path, 'peer1', rows)
 
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        pulled = await engine._sync_once()  # type: ignore[reportPrivateUsage]
 
-        pulled = engine._last_pulled_rows  # type: ignore[reportPrivateUsage]
         assert len(pulled['peer1']) == 3
     finally:
         await engine.stop()
@@ -345,9 +341,8 @@ async def test_sync_peer_without_worker_config_is_skipped_with_warn(tmp_path, ca
             ],
         )
 
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        pulled = await engine._sync_once()  # type: ignore[reportPrivateUsage]
 
-        pulled = engine._last_pulled_rows  # type: ignore[reportPrivateUsage]
         # Conservative fallback — only global-scoped rows pulled when
         # cluster membership is unknown.
         assert {row[0] for row in pulled['peer1']} == {'k_global'}
@@ -378,10 +373,10 @@ async def test_sync_disabled_is_no_op(tmp_path, monkeypatch):
 
         monkeypatch.setattr(cache_module, 'discover_peer_dbs', fake_discover)
 
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        pulled = await engine._sync_once()  # type: ignore[reportPrivateUsage]
 
         assert call_count == 0
-        assert engine._last_pulled_rows == {}  # type: ignore[reportPrivateUsage]
+        assert pulled == {}
     finally:
         await engine.stop()
 
@@ -461,9 +456,8 @@ async def test_peer_cluster_empty_string_means_no_cluster(tmp_path):
             ],
         )
 
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        pulled = await engine._sync_once()  # type: ignore[reportPrivateUsage]
 
-        pulled = engine._last_pulled_rows  # type: ignore[reportPrivateUsage]
         # Both have cluster_name='' → same cluster → pulls CLUSTER + GLOBAL.
         assert {row[0] for row in pulled['peer1']} == {'k_cluster', 'k_global'}
     finally:

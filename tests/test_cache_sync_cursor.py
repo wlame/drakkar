@@ -262,28 +262,318 @@ async def test_peer_cursor_picks_up_remaining_tail_on_next_cycle(tmp_path):
             [{'key': f'k{i}', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1000 + i} for i in range(5)],
         )
 
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
-        first_batch = engine._last_pulled_rows['peer1']  # type: ignore[reportPrivateUsage]
+        pulled1 = await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        first_batch = pulled1['peer1']
         assert {row[0] for row in first_batch} == {'k0', 'k1', 'k2'}
 
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
-        second_batch = engine._last_pulled_rows['peer1']  # type: ignore[reportPrivateUsage]
+        pulled2 = await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        second_batch = pulled2['peer1']
         # Cycle 2 should pull only rows updated_at_ms > 1002 → k3, k4.
         assert {row[0] for row in second_batch} == {'k3', 'k4'}
     finally:
         await engine.stop()
 
 
-# --- cursor advances to now-ish when partial batch --------------------------
+# --- same-ms full batch: follow-up drain picks up the tail ------------------
 
 
-async def test_peer_cursor_advances_to_now_when_partial_batch(tmp_path):
+async def test_full_batch_all_same_updated_at_ms_drains_remainder_same_cycle(tmp_path):
+    """Regression: a peer producing MORE than ``batch_size`` rows that all
+    share the SAME ``updated_at_ms`` (e.g. a burst of cache sets committed
+    in the same millisecond) would have its tail rows permanently skipped
+    under a naive cursor-advance-to-last-row-ts policy.
+
+    Why this used to fail:
+    1. Cycle 1 pulls the first ``batch_size`` rows (all at ts=1000).
+    2. Naive advance sets the cursor to 1000.
+    3. Cycle 2 uses ``WHERE updated_at_ms > 1000`` — skipping every
+       remaining same-ms row permanently. (Stepping the cursor BACK
+       wouldn't fix it either: SQLite's deterministic tie ordering
+       would keep returning the same prefix of same-ms rows on any
+       retry at an earlier cursor.)
+
+    Fix: when the main pull returns a full batch that entirely shares
+    one ``updated_at_ms``, ``_sync_once`` triggers a follow-up "drain"
+    pull (``_drain_same_ms_tail``) keyed on ``updated_at_ms = same_ms
+    AND key > last_key``. The drain walks the same-ms rows by key so
+    every tail row gets applied in the same cycle. The cursor then
+    advances normally to that millisecond — there's nothing left to
+    skip.
+
+    This test uses batch_size=3 and seeds 4 same-ms rows. In a single
+    cycle: main pull yields 3, drain yields the remaining 1, and the
+    local DB ends up with all 4.
+    """
+    engine = await _make_engine(
+        tmp_path,
+        worker_id='me',
+        cluster_name='prod',
+        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+    )
+    try:
+        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        # 4 rows, batch_size=3, all at the SAME updated_at_ms. This is
+        # the burst scenario: imagine four cache.set(...) calls that all
+        # complete in the same millisecond on the peer.
+        same_ts = 1000
+        await _seed_peer_cache_db(
+            tmp_path,
+            'peer1',
+            [{'key': f'k{i}', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': same_ts} for i in range(4)],
+        )
+
+        # Single cycle: main pull + same-ms drain, all in one go.
+        pulled_by_peer = await engine._sync_once()  # type: ignore[reportPrivateUsage]
+
+        # _sync_once returns main pull rows + drained rows combined per peer
+        # so we can see the whole cycle's effect. All four keys must be
+        # there.
+        pulled = pulled_by_peer['peer1']
+        pulled_keys = {row[0] for row in pulled}
+        assert pulled_keys == {'k0', 'k1', 'k2', 'k3'}, (
+            f'main pull + drain together must cover all 4 same-ms rows; got {pulled_keys}'
+        )
+
+        # Cursor advances to the same-ms timestamp (no step-back
+        # needed — the drain already handled the tail).
+        cursor_after = engine._peer_cursors['peer1']  # type: ignore[reportPrivateUsage]
+        assert cursor_after == same_ts, f'cursor should advance to same_ts={same_ts} after drain; got {cursor_after}'
+
+        # End-to-end: every key the peer had must now be applied locally.
+        async with aiosqlite.connect(str(tmp_path / 'me-cache.db.actual')) as db:
+            cur = await db.execute('SELECT key FROM cache_entries ORDER BY key')
+            rows = await cur.fetchall()
+            await cur.close()
+        local_keys = {row[0] for row in rows}
+        assert local_keys == {'k0', 'k1', 'k2', 'k3'}, (
+            f'all four same-ms rows must be in the local DB after one cycle; got {local_keys}'
+        )
+    finally:
+        await engine.stop()
+
+
+async def test_full_batch_all_same_ms_with_large_tail_drains_multiple_pages(tmp_path):
+    """The drain loop must page through more than one ``batch_size``
+    worth of same-ms tail. Here batch_size=3 and there are 10 same-ms
+    rows total — 3 from the main pull and 7 more drained across two
+    follow-up pages. All 10 must land locally in one cycle.
+    """
+    engine = await _make_engine(
+        tmp_path,
+        worker_id='me',
+        cluster_name='prod',
+        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+    )
+    try:
+        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        same_ts = 5000
+        # 10 rows, all at the same ms. Keys k00..k09 sort deterministically
+        # for the drain's ``ORDER BY key ASC`` walk.
+        await _seed_peer_cache_db(
+            tmp_path,
+            'peer1',
+            [{'key': f'k{i:02d}', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': same_ts} for i in range(10)],
+        )
+
+        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+
+        async with aiosqlite.connect(str(tmp_path / 'me-cache.db.actual')) as db:
+            cur = await db.execute('SELECT key FROM cache_entries ORDER BY key')
+            rows = await cur.fetchall()
+            await cur.close()
+        local_keys = {row[0] for row in rows}
+        expected_keys = {f'k{i:02d}' for i in range(10)}
+        assert local_keys == expected_keys, (
+            f'drain must page through all {len(expected_keys)} same-ms rows in one cycle; got {local_keys}'
+        )
+    finally:
+        await engine.stop()
+
+
+async def test_full_batch_same_ms_drain_handles_non_lex_insertion_order(tmp_path):
+    """Regression: the same-ms drain must work when peer inserts keys in
+    an order that does NOT match lex sort (i.e. ``Cache.set`` call order
+    is arbitrary business-logic order, not sorted).
+
+    Why this matters: the main pull orders by ``(updated_at_ms ASC,
+    key ASC)`` and the drain queries ``WHERE updated_at_ms = ms AND
+    key > last_key``. If the main pull's ``ORDER BY`` lacked the explicit
+    ``key ASC`` tiebreaker, SQLite would break same-ms ties by rowid —
+    which equals peer insertion order — and ``rows[-1][0]`` would be the
+    LAST-INSERTED same-ms key, NOT the lex-max. Any same-ms keys that
+    sort lexicographically BELOW that last-inserted key but were
+    inserted AFTER it would then be silently skipped by the drain's
+    ``key > last_key`` filter — permanently missing from the local DB.
+
+    This test reproduces the failure scenario: keys are seeded in a
+    shuffled order that does not match lex order. All keys must still
+    sync correctly after one cycle.
+    """
+    engine = await _make_engine(
+        tmp_path,
+        worker_id='me',
+        cluster_name='prod',
+        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+    )
+    try:
+        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        same_ts = 1000
+        # Insertion order deliberately scrambled relative to lex order.
+        # This is the exact scenario the bug report described: 10 same-ms
+        # keys inserted in an arbitrary order that doesn't match lex sort.
+        # With the pre-fix ORDER BY (no secondary key sort), SQLite would
+        # return the first 3 by rowid = [k7, k2, k9], set last_key='k9',
+        # and the drain's ``key > 'k9'`` would miss k0..k6 and k8.
+        shuffled_keys = ['k7', 'k2', 'k9', 'k5', 'k1', 'k8', 'k3', 'k6', 'k0', 'k4']
+        await _seed_peer_cache_db(
+            tmp_path,
+            'peer1',
+            [{'key': k, 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': same_ts} for k in shuffled_keys],
+        )
+
+        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+
+        # All 10 same-ms keys must be in the local DB after one cycle.
+        async with aiosqlite.connect(str(tmp_path / 'me-cache.db.actual')) as db:
+            cur = await db.execute('SELECT key FROM cache_entries ORDER BY key')
+            rows = await cur.fetchall()
+            await cur.close()
+        local_keys = {row[0] for row in rows}
+        expected_keys = set(shuffled_keys)
+        assert local_keys == expected_keys, (
+            f'all same-ms rows must sync regardless of peer insertion order; '
+            f'missing from local DB: {expected_keys - local_keys}'
+        )
+    finally:
+        await engine.stop()
+
+
+async def test_full_batch_mixed_updated_at_ms_drain_no_tail_is_noop(tmp_path):
+    """A mixed-timestamp full batch with NO spillover at its trailing ``ms``
+    still triggers the drain (drain fires on ANY full batch now), but
+    the drain query returns zero rows — nothing beyond ``last_key`` at
+    ``last_ms`` exists on the peer. The main pull's rows still apply,
+    the cursor advances to ``rows[-1].updated_at_ms`` exactly, and the
+    test hook shows only the main pull's rows (not extended by the
+    empty drain).
+
+    This is the cheap-noop case: one extra small indexed query on the
+    peer, no duplicated work.
+    """
+    engine = await _make_engine(
+        tmp_path,
+        worker_id='me',
+        cluster_name='prod',
+        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+    )
+    try:
+        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        # Full batch (3 rows) with all-distinct timestamps. The trailing
+        # ms (1002) has exactly one row on the peer, so the drain's
+        # ``updated_at_ms = 1002 AND key > 'k2'`` returns empty.
+        await _seed_peer_cache_db(
+            tmp_path,
+            'peer1',
+            [{'key': f'k{i}', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1000 + i} for i in range(4)],
+        )
+
+        pulled_by_peer = await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        # Cycle 1 pulls k0..k2 (ts 1000..1002). Cursor advances to 1002.
+        assert engine._peer_cursors['peer1'] == 1002  # type: ignore[reportPrivateUsage]
+        # Drain fired but returned empty → the returned dict still shows
+        # only the main pull's 3 rows (code only extends the per-peer
+        # entry when ``drained`` is truthy).
+        pulled = pulled_by_peer['peer1']
+        assert len(pulled) == 3, (
+            f'mixed-ms full batch with no tail spillover: _sync_once should return 3 rows, got {len(pulled)} rows {[row[0] for row in pulled]}'
+        )
+    finally:
+        await engine.stop()
+
+
+async def test_mixed_ms_full_batch_with_same_ms_tail_drains_remainder(tmp_path):
+    """Regression: the drain must fire on ANY full batch, not only when
+    every row in the batch shares one ``updated_at_ms``.
+
+    Scenario that used to lose data under the old narrower trigger
+    (``rows[0] ts == rows[-1] ts``):
+
+    - batch_size=3, peer rows: k1@1000, k2@1001, k3@1002, k4@1002,
+      k5@1002, k6@1002, k7@1002.
+    - Main pull returns [k1, k2, k3]. ``rows[0] ts=1000`` !=
+      ``rows[-1] ts=1002`` → drain skipped → cursor advances to 1002
+      → next cycle's ``WHERE updated_at_ms > 1002`` permanently skips
+      k4..k7.
+
+    With the broader trigger (drain on any full batch), the first
+    cycle pulls [k1, k2, k3] via the main pull and then drains
+    [k4, k5, k6, k7] via ``updated_at_ms = 1002 AND key > 'k3'``.
+    All seven keys land in the local DB in ONE cycle.
+    """
+    engine = await _make_engine(
+        tmp_path,
+        worker_id='me',
+        cluster_name='prod',
+        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+    )
+    try:
+        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        # Deliberately seed k3..k7 all at ts=1002 to create the mixed-ms
+        # batch with spillover at the trailing ms. k1@1000, k2@1001 are
+        # the earlier-ms prefix of the main pull.
+        rows = [
+            {'key': 'k1', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1000},
+            {'key': 'k2', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1001},
+            {'key': 'k3', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1002},
+            {'key': 'k4', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1002},
+            {'key': 'k5', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1002},
+            {'key': 'k6', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1002},
+            {'key': 'k7', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1002},
+        ]
+        await _seed_peer_cache_db(tmp_path, 'peer1', rows)
+
+        # Single cycle: main pull + same-ms drain for the trailing ms.
+        pulled_by_peer = await engine._sync_once()  # type: ignore[reportPrivateUsage]
+
+        # _sync_once returns all 7 rows (3 main + 4 drained).
+        pulled = pulled_by_peer['peer1']
+        pulled_keys = {row[0] for row in pulled}
+        assert pulled_keys == {'k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7'}, (
+            f'mixed-ms full batch with trailing-ms spillover must pull everything in one cycle; got {pulled_keys}'
+        )
+
+        # Cursor advances to the trailing ms, same as any full batch.
+        cursor_after = engine._peer_cursors['peer1']  # type: ignore[reportPrivateUsage]
+        assert cursor_after == 1002, f'cursor should advance to 1002 after drain; got {cursor_after}'
+
+        # End-to-end: every key the peer had is applied locally — no
+        # rows permanently lost to a silent cursor advance.
+        async with aiosqlite.connect(str(tmp_path / 'me-cache.db.actual')) as db:
+            cur = await db.execute('SELECT key FROM cache_entries ORDER BY key')
+            local_rows = await cur.fetchall()
+            await cur.close()
+        local_keys = {row[0] for row in local_rows}
+        assert local_keys == {'k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7'}, (
+            f'all seven peer rows must be in the local DB after one cycle; got {local_keys}'
+        )
+    finally:
+        await engine.stop()
+
+
+# --- cursor advances to max(last_row_ts, cursor_ms) on partial batch -------
+
+
+async def test_peer_cursor_advances_to_last_row_ts_when_partial_batch(tmp_path):
     """When the pull returned fewer than ``batch_size`` rows, the peer
     has no more rows newer than what we've seen. The cursor advances
-    to "now-ish" (the current wall-clock ms) so the next cycle only
-    looks at rows updated after *this* moment — a mild optimization
-    that also prevents a stuck cursor if peer clocks drift backward
-    (the partial-batch cursor never regresses).
+    to the last (largest) observed peer timestamp so the next cycle
+    only looks at rows newer than that — anchoring to the peer's
+    clock rather than our local wall clock.
+
+    This is the clock-skew-safe property: if we used our local
+    ``_now_ms()`` and the peer's clock was skewed relative to ours,
+    rows with peer-stamped timestamps falling between our previous
+    cursor and our local now would be silently skipped on later pulls.
     """
     engine = await _make_engine(
         tmp_path,
@@ -303,17 +593,132 @@ async def test_peer_cursor_advances_to_now_when_partial_batch(tmp_path):
             ],
         )
 
-        import time as time_module
-
-        before_ms = int(time_module.time() * 1000)
         await engine._sync_once()  # type: ignore[reportPrivateUsage]
-        after_ms = int(time_module.time() * 1000)
 
-        # Cursor advanced past the last row (600) and landed in the
-        # [before_ms, after_ms] window since "now-ish" uses _now_ms().
+        # Cursor should land on the last observed peer timestamp (600),
+        # not on our local wall clock. Starting cursor was 0, and
+        # max(600, 0) == 600.
         cursor = engine._peer_cursors['peer1']  # type: ignore[reportPrivateUsage]
-        assert cursor > 600, f'cursor should advance past last row ts; got {cursor}'
-        assert before_ms <= cursor <= after_ms, f'cursor should land in [{before_ms}, {after_ms}]; got {cursor}'
+        assert cursor == 600, f'cursor should equal last observed peer ts; got {cursor}'
+    finally:
+        await engine.stop()
+
+
+async def test_peer_cursor_never_regresses_on_partial_batch(tmp_path):
+    """The partial-batch cursor must never regress. If the peer's last
+    row timestamp is *below* the current cursor (a stale insert on the
+    peer side, or a clock-drift artifact), the cursor stays at its
+    current value — ``max(rows[-1], cursor_ms)``.
+    """
+    engine = await _make_engine(
+        tmp_path,
+        worker_id='me',
+        cluster_name='prod',
+        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=3)},
+    )
+    try:
+        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        # Full batch: 3 rows with timestamps [1000, 1001, 1002].
+        await _seed_peer_cache_db(
+            tmp_path,
+            'peer1',
+            [{'key': f'k{i}', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1000 + i} for i in range(3)],
+        )
+        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        cursor_after_cycle_1 = engine._peer_cursors['peer1']  # type: ignore[reportPrivateUsage]
+        assert cursor_after_cycle_1 == 1002
+
+        # Manually advance the cursor past any peer timestamps to simulate
+        # a scenario where the cursor sat ahead of what the peer later
+        # reported. Now seed a smaller row; the partial batch's
+        # ``max(..., cursor_ms)`` guard must keep the cursor at its
+        # current value.
+        engine._peer_cursors['peer1'] = 5000  # type: ignore[reportPrivateUsage]
+        async with aiosqlite.connect(str(tmp_path / 'peer1-cache.db.actual')) as db:
+            # Insert a row above the cursor so the pull sees it.
+            await db.execute(
+                'INSERT INTO cache_entries '
+                '(key, scope, value, size_bytes, created_at_ms, updated_at_ms, '
+                ' expires_at_ms, origin_worker_id) VALUES (?,?,?,?,?,?,?,?)',
+                ('k_new', CacheScope.GLOBAL.value, '"v"', 3, 6000, 6000, None, 'peer1'),
+            )
+            await db.commit()
+
+        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        cursor_after_cycle_2 = engine._peer_cursors['peer1']  # type: ignore[reportPrivateUsage]
+        # Partial batch with last ts 6000, cursor 5000 → max = 6000.
+        # Cursor moved forward but is anchored to observed peer ts.
+        assert cursor_after_cycle_2 == 6000, f'expected cursor=6000, got {cursor_after_cycle_2}'
+    finally:
+        await engine.stop()
+
+
+async def test_peer_cursor_tracks_future_skewed_peer_timestamps(tmp_path):
+    """Regression: peer writes rows with timestamps far in the future
+    (clock skewed ahead). The cursor must track the observed peer
+    timestamps so subsequent syncs still see late-arriving rows stamped
+    with peer's clock.
+
+    Timeline:
+    1. Peer seeds rows with timestamps in the future (e.g., 50 years ahead).
+    2. First sync: pulls them (partial batch); cursor → max(peer_ts, 0) = peer_ts.
+    3. Peer adds another row slightly newer than the first batch.
+    4. Second sync: cursor filters correctly — the new row still arrives.
+    """
+    engine = await _make_engine(
+        tmp_path,
+        worker_id='me',
+        cluster_name='prod',
+        cache_overrides={'peer_sync': CachePeerSyncConfig(batch_size=100)},
+    )
+    try:
+        # Peer timestamp: ~50 years in the future (well past any local now_ms).
+        future_ts_base = 4_000_000_000_000  # ≈ year 2096
+
+        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        await _seed_peer_cache_db(
+            tmp_path,
+            'peer1',
+            [
+                {'key': 'k_future', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': future_ts_base},
+            ],
+        )
+        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+
+        # Cursor must be at the observed peer timestamp, not our local
+        # wall clock. If the old code path ran _now_ms() here, the cursor
+        # would be much smaller, and the peer's future-stamped rows
+        # between cursor and peer_ts would be re-pulled repeatedly —
+        # but more importantly, the follow-up check below verifies no
+        # rows are silently skipped.
+        cursor_after_cycle_1 = engine._peer_cursors['peer1']  # type: ignore[reportPrivateUsage]
+        assert cursor_after_cycle_1 == future_ts_base, (
+            f'cursor must track observed peer ts; got {cursor_after_cycle_1}, expected {future_ts_base}'
+        )
+
+        # Peer adds a newer row (still future-stamped, but higher than
+        # the previous). We must observe it on the next sync.
+        async with aiosqlite.connect(str(tmp_path / 'peer1-cache.db.actual')) as db:
+            await db.execute(
+                'INSERT INTO cache_entries '
+                '(key, scope, value, size_bytes, created_at_ms, updated_at_ms, '
+                ' expires_at_ms, origin_worker_id) VALUES (?,?,?,?,?,?,?,?)',
+                (
+                    'k_future_newer',
+                    CacheScope.GLOBAL.value,
+                    '"v"',
+                    3,
+                    future_ts_base + 1000,
+                    future_ts_base + 1000,
+                    None,
+                    'peer1',
+                ),
+            )
+            await db.commit()
+
+        pulled_by_peer = await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        pulled_keys = {row[0] for row in pulled_by_peer['peer1']}
+        assert 'k_future_newer' in pulled_keys, f'future-stamped row should be pulled after cycle 2; got {pulled_keys}'
     finally:
         await engine.stop()
 
@@ -389,7 +794,7 @@ async def test_peer_error_does_not_affect_other_peers(tmp_path):
         bad_link.symlink_to(bad_actual.name)
         await _seed_peer_live_db(tmp_path, 'bad_peer', cluster_name='prod')
 
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        pulled_by_peer = await engine._sync_once()  # type: ignore[reportPrivateUsage]
 
         # Good peer's cursor advanced.
         assert 'good_peer' in engine._peer_cursors  # type: ignore[reportPrivateUsage]
@@ -397,7 +802,7 @@ async def test_peer_error_does_not_affect_other_peers(tmp_path):
         # whichever policy, verify the good peer got through.
         assert engine._peer_cursors['good_peer'] > 0  # type: ignore[reportPrivateUsage]
         # Good peer's pulled rows got through too.
-        assert 'good_peer' in engine._last_pulled_rows  # type: ignore[reportPrivateUsage]
+        assert 'good_peer' in pulled_by_peer
     finally:
         await engine.stop()
 
@@ -663,8 +1068,8 @@ async def test_cursor_filters_already_seen_rows(tmp_path):
             ],
         )
         # Cycle 1 reads both and advances cursor to "now-ish" (partial batch).
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
-        first = engine._last_pulled_rows['peer1']  # type: ignore[reportPrivateUsage]
+        pulled1 = await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        first = pulled1['peer1']
         assert {row[0] for row in first} == {'k1', 'k2'}
         cursor_after_cycle_1 = engine._peer_cursors['peer1']  # type: ignore[reportPrivateUsage]
 
@@ -680,8 +1085,8 @@ async def test_cursor_filters_already_seen_rows(tmp_path):
             )
             await db.commit()
 
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
-        second = engine._last_pulled_rows['peer1']  # type: ignore[reportPrivateUsage]
+        pulled2 = await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        second = pulled2['peer1']
         keys_second = {row[0] for row in second}
         assert 'k_stale' not in keys_second, (
             f'cursor should exclude rows with updated_at_ms <= cursor; got {keys_second}'
@@ -730,9 +1135,9 @@ async def test_peer_error_variants_isolate_and_continue(tmp_path, err_kind):
 
         await _seed_peer_live_db(tmp_path, 'bad', cluster_name='prod')
 
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        pulled_by_peer = await engine._sync_once()  # type: ignore[reportPrivateUsage]
 
         # Good peer still pulled.
-        assert 'healthy' in engine._last_pulled_rows  # type: ignore[reportPrivateUsage]
+        assert 'healthy' in pulled_by_peer
     finally:
         await engine.stop()

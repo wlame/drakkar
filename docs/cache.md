@@ -406,6 +406,14 @@ See [`delete()` above](#deletekey) for the full story.
 - **Eventually consistent** across workers. A `set()` on worker A is
   visible on worker B at most ~(flush_interval + sync_interval) later
   (default: 3s + 30s = 33s).
+- **Worst-case staleness**, concretely: local durability is bounded by
+  `flush_interval_seconds` (default 3s); cross-worker freshness is
+  bounded by `flush_interval_seconds + peer_sync.interval_seconds`
+  (default 3s + 30s = 33s). Size intervals based on your tolerance —
+  halving both to 1.5s/15s trades more SQLite + peer-disk traffic for
+  tighter staleness. The cache never promises stricter consistency than
+  those intervals; anything that needs real consistency should use a
+  real DB sink, not this cache.
 - **LWW (last-write-wins)** by `updated_at_ms`, with lexicographically
   smaller `origin_worker_id` as the tiebreaker for equal timestamps.
   Identical SQL (`LWW_UPSERT_SQL`) is used by local flushes and
@@ -418,6 +426,13 @@ See [`delete()` above](#deletekey) for the full story.
 - **Wall-clock dependent.** LWW compares `updated_at_ms` across
   workers, which assumes NTP-sync'd hosts. Wall-clock skew of a few
   seconds is fine; multi-minute skew would break LWW fairness.
+- **`size_bytes` is UTF-8 byte length.** The in-memory ``bytes_in_memory``
+  gauge (and its DB counterpart ``bytes_in_db``) sum the **byte length
+  of the JSON-encoded value** (`len(json_text.encode('utf-8'))`) — not
+  the Python-object size, not character count. Non-ASCII characters
+  cost 2–4 bytes each. When sizing capacity from the gauge, budget
+  against UTF-8 byte counts: a 100-char Cyrillic string costs 200
+  bytes, not 100.
 
 ---
 

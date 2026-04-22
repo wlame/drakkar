@@ -412,8 +412,7 @@ class Cache:
         # reflect the post-set state; ``_maybe_evict`` may tick them back
         # down if the cap is exceeded.
         metrics.cache_writes.labels(scope=str(scope)).inc()
-        metrics.cache_entries_in_memory.set(len(self._memory))
-        metrics.cache_bytes_in_memory.set(self._bytes_sum)
+        self._refresh_memory_gauges()
 
         self._maybe_evict()
 
@@ -444,11 +443,12 @@ class Cache:
             # Opportunistic eviction. The dirty map is untouched: if there
             # was a pending SET, letting it flush and then be cleaned up
             # by the expiration cleanup cycle is cheaper than trying to
-            # untangle it here. A pending DELETE stays as-is.
-            self._memory.pop(key, None)
-            self._bytes_sum -= entry.size_bytes
-            metrics.cache_entries_in_memory.set(len(self._memory))
-            metrics.cache_bytes_in_memory.set(self._bytes_sum)
+            # untangle it here. A pending DELETE stays as-is. The pop + bytes
+            # accounting goes through the shared helper so the invariant
+            # "running sum tracks the dict" holds without duplicating the
+            # bookkeeping in five places.
+            self._pop_memory_entry(key)
+            self._refresh_memory_gauges()
             return None
         # access → MRU bump
         self._memory.move_to_end(key)
@@ -503,11 +503,10 @@ class Cache:
         entry = self._memory.get(key)
         if entry is not None:
             if self._is_expired(entry):
-                # Mirror peek()'s opportunistic eviction on stale reads.
-                self._memory.pop(key, None)
-                self._bytes_sum -= entry.size_bytes
-                metrics.cache_entries_in_memory.set(len(self._memory))
-                metrics.cache_bytes_in_memory.set(self._bytes_sum)
+                # Mirror peek()'s opportunistic eviction on stale reads —
+                # same shared helpers keep the bookkeeping coherent.
+                self._pop_memory_entry(key)
+                self._refresh_memory_gauges()
                 # Do NOT consult the DB — if the memory entry is expired,
                 # the DB row (if any) will also have expires_at_ms <= now.
                 metrics.cache_misses.inc()
@@ -515,7 +514,9 @@ class Cache:
             # access → MRU bump
             self._memory.move_to_end(key)
             metrics.cache_hits.labels(source='memory').inc()
-            return _decode(entry.value, as_type=as_type) if as_type is not None else _decode(entry.value)
+            # ``_decode`` accepts ``as_type=None`` natively — no ternary
+            # needed to special-case the "no revival" branch.
+            return _decode(entry.value, as_type=as_type)
 
         # --- DB fallback ---
         if self._reader_db is None:
@@ -556,15 +557,25 @@ class Cache:
         # Warm-on-read puts the key at MRU in the OrderedDict; the
         # _maybe_evict call below respects the cap (may drop an older key,
         # but preserves its dirty op if any — same invariant as set()).
+        #
+        # ``_bytes_sum`` accounting: if the key is already in memory (race
+        # with a concurrent ``set`` between the earlier miss check and this
+        # warm, or a double-warm from a future refactor), subtract the
+        # existing entry's bytes before overwriting — otherwise the sum
+        # leaks by the old entry's size every warm. Mirrors the pattern in
+        # ``set()`` which also handles the overwrite case.
+        existing = self._memory.get(db_key)
+        if existing is not None:
+            self._bytes_sum -= existing.size_bytes
         self._memory[db_key] = warmed
         self._memory.move_to_end(db_key)
         self._bytes_sum += warmed.size_bytes
-        metrics.cache_entries_in_memory.set(len(self._memory))
-        metrics.cache_bytes_in_memory.set(self._bytes_sum)
+        self._refresh_memory_gauges()
         self._maybe_evict()
 
         metrics.cache_hits.labels(source='db').inc()
-        return _decode(warmed.value, as_type=as_type) if as_type is not None else _decode(warmed.value)
+        # ``_decode`` accepts ``as_type=None`` — no ternary needed.
+        return _decode(warmed.value, as_type=as_type)
 
     def delete(self, key: str) -> bool:
         """Remove ``key`` from memory and schedule a DB row deletion on next flush.
@@ -580,15 +591,14 @@ class Cache:
         is deliberately local-only" note in the plan for the full edge
         discussion — use TTL for cross-worker invalidation.
         """
-        existing = self._memory.pop(key, None)
+        # Adjust running sum + gauges for the removed memory entry (if any)
+        # via the shared helpers. The dirty-map DELETE still records — the
+        # DB may have a row we can't see from memory alone, and flush needs
+        # to drop it.
+        existing = self._pop_memory_entry(key)
         present = existing is not None
-        # Adjust running sum + gauges for the removed memory entry (if any).
-        # The dirty-map DELETE still records — the DB may have a row we
-        # can't see from memory alone, and flush needs to drop it.
-        if existing is not None:
-            self._bytes_sum -= existing.size_bytes
-            metrics.cache_entries_in_memory.set(len(self._memory))
-            metrics.cache_bytes_in_memory.set(self._bytes_sum)
+        if present:
+            self._refresh_memory_gauges()
         # A DELETE op overwrites any prior SET; flush will see the final
         # state only. Entry is None since the row is going away.
         self._dirty[key] = DirtyOp(op=Op.DELETE, entry=None)
@@ -611,13 +621,163 @@ class Cache:
         return not self._is_expired(entry)
 
     # -- internals ------------------------------------------------------------
+    #
+    # Expiration boundary convention (see TTL discussion in ``set``): an entry
+    # is expired iff ``now_ms >= expires_at_ms``. The corresponding inclusive
+    # cleanup uses ``expires_at_ms <= now_ms``; DB read-gating uses
+    # ``expires_at_ms > now_ms`` (exclusive of now). Keeping one convention
+    # across memory, cleanup, DB purge, and DB SELECT avoids the "off by one
+    # millisecond at the boundary" class of bugs.
 
     @staticmethod
     def _is_expired(entry: CacheEntry) -> bool:
-        """True iff the entry has a TTL that has already elapsed."""
+        """True iff the entry has a TTL that has already elapsed.
+
+        Treats the boundary moment as expired: ``now_ms >= expires_at_ms``
+        matches the SQL ``expires_at_ms <= now_ms`` used by cleanup and the
+        ``expires_at_ms > now_ms`` used by read-gating.
+        """
         if entry.expires_at_ms is None:
             return False
         return _now_ms() >= entry.expires_at_ms
+
+    def _pop_memory_entry(self, key: str) -> CacheEntry | None:
+        """Remove ``key`` from memory and deduct its bytes from the running sum.
+
+        Returns the popped entry for callers that need the original metadata
+        (e.g. size), or ``None`` when the key wasn't in memory. Does NOT
+        refresh the Prometheus gauges — callers that pop multiple keys in
+        one sweep should call ``_refresh_memory_gauges()`` once at the end
+        to amortize the set() calls.
+
+        This helper is the single source of truth for the "pop + bytes-sum
+        deduct" pair; five paths in this class used to inline the sequence,
+        diverging subtly over time (missing size tracking, missing gauge
+        refresh, etc.). Funneling through one helper keeps the invariant
+        that ``_bytes_sum == sum(entry.size_bytes for entry in _memory)``
+        after every mutation.
+        """
+        entry = self._memory.pop(key, None)
+        if entry is not None:
+            self._bytes_sum -= entry.size_bytes
+        return entry
+
+    def _refresh_memory_gauges(self) -> None:
+        """Push the current memory dict size + bytes to Prometheus gauges.
+
+        Prometheus gauges maintain a single int value; ``set`` is O(1).
+        Refreshing after a batch of ``_pop_memory_entry`` calls is cheaper
+        than refreshing per-pop when many entries are removed together
+        (peer-sync invalidation, expire-purge).
+        """
+        metrics.cache_entries_in_memory.set(len(self._memory))
+        metrics.cache_bytes_in_memory.set(self._bytes_sum)
+
+    def _invalidate_memory_keys(self, keys: list[str]) -> None:
+        """Drop the listed keys from memory, adjust ``_bytes_sum`` + gauges.
+
+        Exposed as a semi-private helper so ``CacheEngine`` doesn't have to
+        reach into ``_memory`` / ``_bytes_sum`` directly from peer-sync's
+        apply-step. Keeps the memory / running-sum / gauge triad coherent —
+        callers get the invariant "entries_in_memory and bytes_in_memory
+        reflect the current dict" for free.
+
+        The ``_dirty`` map is left alone: peer-sync's invalidation does not
+        cancel a pending local write — the next flush will pick up whatever
+        SET/DELETE op the user queued, which is independent of whether the
+        memory entry was just invalidated.
+
+        Args:
+            keys: keys to pop from memory. Missing keys are silently skipped.
+        """
+        if not keys:
+            return
+        popped_any = False
+        for key in keys:
+            if self._pop_memory_entry(key) is not None:
+                popped_any = True
+        if popped_any:
+            self._refresh_memory_gauges()
+
+    def swap_dirty(self) -> dict[str, DirtyOp]:
+        """Atomically swap ``_dirty`` for a fresh empty dict and return the
+        old contents.
+
+        Tuple assignment is a single opcode under CPython's GIL, so any
+        concurrent ``set`` / ``delete`` landing after the swap writes into
+        the new empty dict and is picked up by the next flush cycle — no
+        locking needed for in-memory coherence.
+
+        Symmetric with ``restore_dirty``: callers (currently just
+        ``CacheEngine._flush_once``) use this to take a snapshot, perform
+        I/O, and — on failure — put the unsaved ops back via
+        ``restore_dirty``. Keeping the swap + restore pair inside ``Cache``
+        means the engine never has to reach past the class boundary into
+        ``_dirty`` directly, preserving encapsulation.
+        """
+        snapshot = self._dirty
+        self._dirty = {}
+        return snapshot
+
+    def restore_dirty(self, snapshot: dict[str, DirtyOp]) -> None:
+        """Merge an un-flushed snapshot back into ``_dirty`` after a failure.
+
+        Iterates the snapshot in insertion order; only restores a key when
+        the live ``_dirty`` has no newer op for that key — the newer op
+        represents a racing ``set`` / ``delete`` landing post-swap that
+        supersedes the snapshot's view. The snapshot's insertion order is
+        preserved for fully-restored keys; racing keys keep their current
+        position in ``_dirty``.
+
+        Paired with ``swap_dirty`` — used by ``_flush_once`` to maintain
+        the "nothing lost" invariant under cancellation or commit failure.
+        """
+        for key, op in snapshot.items():
+            if key not in self._dirty:
+                self._dirty[key] = op
+
+    def _expire_purge(self, now_ms: int) -> list[str]:
+        """Remove expired entries from memory and drop any pending SET dirty ops.
+
+        Used by ``CacheEngine._cleanup_once`` as the memory-side counterpart
+        to the SQL ``DELETE FROM cache_entries WHERE expires_at_ms <= ?``.
+        Combines three things the cleanup loop needs in one atomic sweep:
+
+        1. Pop expired entries from ``_memory`` (tracks ``_bytes_sum``).
+        2. Drop pending ``Op.SET`` entries in ``_dirty`` for those keys —
+           otherwise the next flush would revive a row we just deleted.
+        3. Preserve pending ``Op.DELETE`` entries — a user-scheduled delete
+           is still the correct action for the row.
+
+        After the sweep, refreshes ``entries_in_memory`` / ``bytes_in_memory``
+        gauges once (cheaper than per-evict updates when many entries expire
+        together).
+
+        Args:
+            now_ms: wall-clock milliseconds used for the TTL comparison.
+
+        Returns:
+            The list of expired keys that were removed. The caller (cleanup
+            loop) does not use this today, but returning it keeps the method
+            testable in isolation and matches the helper's "expire and
+            report" contract.
+        """
+        expired_keys: list[str] = []
+        for key, entry in self._memory.items():
+            if entry.expires_at_ms is not None and entry.expires_at_ms <= now_ms:
+                expired_keys.append(key)
+        for key in expired_keys:
+            self._pop_memory_entry(key)
+            # Drop pending SET ops only. DELETE ops on an expired key are
+            # still correct — the DB row may linger until the next DB purge
+            # and the pending DELETE is the mechanism that removes it
+            # (same path as a user-scheduled delete of any key).
+            pending = self._dirty.get(key)
+            if pending is not None and pending.op is Op.SET:
+                self._dirty.pop(key, None)
+        if expired_keys:
+            self._refresh_memory_gauges()
+        return expired_keys
 
     def _maybe_evict(self) -> None:
         """Drop the LRU key if the memory dict exceeds ``max_memory_entries``.
@@ -642,14 +802,15 @@ class Cache:
         evicted_any = False
         while len(self._memory) > cap:
             # pop oldest by access order (move_to_end in set/peek keeps
-            # recently-touched keys at the tail)
+            # recently-touched keys at the tail). We use popitem directly
+            # here rather than _pop_memory_entry because we need the pair
+            # (key, entry) atomically — popitem returns both in one call.
             _, evicted_entry = self._memory.popitem(last=False)
             self._bytes_sum -= evicted_entry.size_bytes
             metrics.cache_evictions.inc()
             evicted_any = True
         if evicted_any:
-            metrics.cache_entries_in_memory.set(len(self._memory))
-            metrics.cache_bytes_in_memory.set(self._bytes_sum)
+            self._refresh_memory_gauges()
 
 
 # ---- no-op cache stub -------------------------------------------------------
@@ -722,7 +883,7 @@ class NoOpCache:
 # Two indexes:
 #
 # - ``idx_cache_expires`` is partial (only rows with a TTL), to speed up the
-#   cleanup loop's "DELETE WHERE expires_at_ms < now" without widening the
+#   cleanup loop's "DELETE WHERE expires_at_ms <= now" without widening the
 #   index to cover NULL rows that never expire.
 # - ``idx_cache_scope_updated`` is composite; the peer-sync loop filters
 #   rows by ``scope IN (...)`` and orders them by ``updated_at_ms`` for
@@ -744,15 +905,6 @@ CREATE INDEX IF NOT EXISTS idx_cache_expires
 CREATE INDEX IF NOT EXISTS idx_cache_scope_updated
     ON cache_entries(scope, updated_at_ms);
 """
-
-# Hardcoded TTL (seconds) for the in-process peer-cluster_name lookup cache.
-# When peer-sync encounters a new peer, it reads the peer's ``-live.db``
-# ``worker_config`` row to learn the peer's ``cluster_name``. That read is
-# cached for this long, after which the next sync cycle re-reads. Operators
-# rarely change cluster_name at runtime — exposing the TTL as a config knob
-# would add surface without real benefit. YAGNI; bump if someone actually
-# needs it.
-PEER_CLUSTER_CACHE_TTL_SECONDS = 300.0
 
 
 # LWW UPSERT — Last-Write-Wins conflict resolution for the cache_entries
@@ -801,31 +953,22 @@ WHERE
 """
 
 
+# ---- runtime tunables (non-SQL) --------------------------------------------
+
+# Hardcoded TTL (seconds) for the in-process peer-cluster_name lookup cache.
+# When peer-sync encounters a new peer, it reads the peer's ``-live.db``
+# ``worker_config`` row to learn the peer's ``cluster_name``. That read is
+# cached for this long, after which the next sync cycle re-reads. Operators
+# rarely change cluster_name at runtime — exposing the TTL as a config knob
+# would add surface without real benefit. YAGNI; bump if someone actually
+# needs it.
+#
+# Kept separate from the SQL constants above so "which of these knobs are
+# runtime tunables vs DDL/DML?" is obvious at a glance.
+PEER_CLUSTER_CACHE_TTL_SECONDS = 300.0
+
+
 # ---- engine lifecycle -------------------------------------------------------
-
-
-def _cache_link_path(db_dir: str, worker_id: str) -> str:
-    """Return the peer-discovery symlink path: ``<db_dir>/<worker>-cache.db``.
-
-    This is the *symlink* name, scanned by ``discover_peer_dbs(...,
-    suffix='-cache.db')``. Peers find us by reading this symlink and
-    following it to the underlying DB file (see ``_cache_db_file_path``).
-    """
-    return str(Path(db_dir) / f'{worker_id}-cache.db')
-
-
-def _cache_db_file_path(db_dir: str, worker_id: str) -> str:
-    """Return the actual DB file path: ``<db_dir>/<worker>-cache.db.actual``.
-
-    The cache DB file lives under a ``.actual`` suffix so the stable
-    ``<worker>-cache.db`` name can be reserved as a symlink target — the
-    same convention peer discovery uses for recorder live links. Since
-    the cache does not rotate files in v1, the ``.actual`` file is
-    effectively permanent; the indirection exists purely so peer
-    discovery's ``os.path.islink`` filter works identically for recorder
-    and cache.
-    """
-    return str(Path(db_dir) / f'{worker_id}-cache.db.actual')
 
 
 class CacheEngine:
@@ -940,17 +1083,70 @@ class CacheEngine:
         #
         # Advancement rules (see ``_advance_cursor`` / ``_sync_once``):
         #  - zero rows     → cursor unchanged (no progress, retry next cycle)
-        #  - partial batch → cursor jumps to now_ms (caught up; small
-        #                    optimization, prevents stuck cursor on clock
-        #                    drift since partial batches never regress)
+        #  - partial batch → cursor jumps to max(last_row_ts, cursor_ms) to
+        #                    stay anchored on the peer's clock (clock-skew
+        #                    safe) and never regress on a stale insert
         #  - full batch    → cursor advances to last row's ``updated_at_ms``
         #                    so the next cycle picks up the tail
+        #
+        # Same-ms edge case: if a peer has more rows sharing ``rows[-1]``'s
+        # ``updated_at_ms`` than fit in the ``LIMIT`` (either a pure
+        # burst or a mixed-ms batch with spillover at the last ms), the
+        # strict ``> cursor_ms`` filter would skip the tail (SQLite's
+        # deterministic ordering would keep returning the same
+        # LIMIT-bounded prefix even if we stepped the cursor back).
+        # ``_sync_once`` runs a follow-up "drain" pull after ANY full
+        # batch, keyed on ``updated_at_ms = last_ms AND key > last_key``,
+        # that applies all remaining same-ms rows before the cursor
+        # advances. See ``_drain_same_ms_tail``.
         #
         # Cursor state is in-memory only. A worker restart resets cursors to
         # zero and the next cycle re-pulls everything from peers — bounded by
         # TTL cleanup and LWW rejection, so no runaway work. Persisting
         # cursors across restarts is a follow-up (marked as such in the plan).
         self._peer_cursors: dict[str, int] = {}
+
+    @property
+    def reader_db(self) -> aiosqlite.Connection | None:
+        """Public accessor for the reader aiosqlite connection.
+
+        Exposes the read-only connection so external code (notably the
+        debug server's cache endpoints) doesn't need to reach into
+        ``_reader_db`` directly. Returns ``None`` when the engine is
+        disabled or has not been started (no DB is present to read).
+
+        The connection is shared with ``Cache.get``'s DB fallback — we
+        don't open a third connection for the UI, since adding a
+        fourth aiosqlite worker thread per worker would cost more than
+        it saves on read-only queries.
+        """
+        return self._reader_db
+
+    @staticmethod
+    def _cache_link_path(db_dir: str, worker_id: str) -> str:
+        """Return the peer-discovery symlink path: ``<db_dir>/<worker>-cache.db``.
+
+        This is the *symlink* name, scanned by ``discover_peer_dbs(...,
+        suffix='-cache.db')``. Peers find us by reading this symlink and
+        following it to the underlying DB file (see ``_cache_db_file_path``).
+        Scoped to ``CacheEngine`` because nothing outside the engine
+        builds this path.
+        """
+        return str(Path(db_dir) / f'{worker_id}-cache.db')
+
+    @staticmethod
+    def _cache_db_file_path(db_dir: str, worker_id: str) -> str:
+        """Return the actual DB file path: ``<db_dir>/<worker>-cache.db.actual``.
+
+        The cache DB file lives under a ``.actual`` suffix so the stable
+        ``<worker>-cache.db`` name can be reserved as a symlink target — the
+        same convention peer discovery uses for recorder live links. Since
+        the cache does not rotate files in v1, the ``.actual`` file is
+        effectively permanent; the indirection exists purely so peer
+        discovery's ``os.path.islink`` filter works identically for
+        recorder and cache.
+        """
+        return str(Path(db_dir) / f'{worker_id}-cache.db.actual')
 
     def attach_cache(self, cache: Cache) -> None:
         """Associate the handler-facing Cache instance with this engine.
@@ -999,7 +1195,7 @@ class CacheEngine:
         if not self._db_path:
             return
         db_dir = os.path.dirname(self._db_path)
-        link = _cache_link_path(db_dir, self._worker_id)
+        link = self._cache_link_path(db_dir, self._worker_id)
         target = os.path.basename(self._db_path)
         try:
             tmp = link + '.tmp'
@@ -1023,7 +1219,7 @@ class CacheEngine:
         if not self._db_path:
             return
         db_dir = os.path.dirname(self._db_path)
-        link = _cache_link_path(db_dir, self._worker_id)
+        link = self._cache_link_path(db_dir, self._worker_id)
         try:
             if os.path.islink(link):
                 os.remove(link)
@@ -1079,7 +1275,7 @@ class CacheEngine:
             return
 
         os.makedirs(db_dir, exist_ok=True)
-        self._db_path = _cache_db_file_path(db_dir, self._worker_id)
+        self._db_path = self._cache_db_file_path(db_dir, self._worker_id)
         self._writer_db = await aiosqlite.connect(self._db_path)
         await self._create_schema()
 
@@ -1107,8 +1303,23 @@ class CacheEngine:
         # exists when the peer's recorder has ``store_config=True``.
         # Logging once at startup (per the plan) keeps operators aware of
         # the effective state without spamming the sync loop.
+        #
+        # We use two log levels intentionally so operators can tell the
+        # cases apart at a glance:
+        #   - explicit off-switch (config says disabled) → INFO ("I turned
+        #     it off"), no action needed
+        #   - silent downgrade (peer_sync asked for, but store_config off)
+        #     → WARNING ("you wanted this but it got disabled"), operator
+        #     should decide whether to flip store_config or accept the
+        #     degraded mode
         if not self._config.peer_sync.enabled:
             self._peer_sync_enabled = False
+            await logger.ainfo(
+                'cache_peer_sync_disabled_by_config',
+                category='cache',
+                worker_id=self._worker_id,
+                reason='peer_sync.enabled=False in config',
+            )
         elif not self._debug_config.store_config:
             self._peer_sync_enabled = False
             await logger.awarning(
@@ -1320,12 +1531,10 @@ class CacheEngine:
         if self._writer_db is None or self._cache is None:
             return
 
-        # Atomic swap: tuple assignment is single-opcode under CPython's
-        # GIL, so any ``Cache.set`` landing after this line sees the fresh
-        # empty dict and will be drained on the next flush cycle —
-        # nothing lost, no locking needed for in-memory coherence.
-        snapshot: dict[str, DirtyOp] = self._cache._dirty
-        self._cache._dirty = {}
+        # Atomic swap via the Cache's own helper. Keeps the "reach into
+        # ``_dirty`` directly" pattern encapsulated on ``Cache`` — the
+        # engine doesn't own that mutation detail.
+        snapshot = self._cache.swap_dirty()
 
         if not snapshot:
             return
@@ -1341,7 +1550,14 @@ class CacheEngine:
         for key, op in snapshot.items():
             if op.op is Op.SET:
                 entry = op.entry
-                assert entry is not None, 'Op.SET must carry a CacheEntry'
+                if entry is None:
+                    # Structural invariant: ``Op.SET`` DirtyOps are constructed
+                    # with the freshly-encoded ``CacheEntry`` alongside — an
+                    # ``entry is None`` here would indicate a construction bug
+                    # upstream, not user input. We convert what used to be an
+                    # ``assert`` (strippable under ``python -O``) to a hard
+                    # runtime check so production builds still fail loudly.
+                    raise RuntimeError(f"Op.SET DirtyOp for key '{key}' missing CacheEntry payload")
                 upsert_rows.append(
                     (
                         entry.key,
@@ -1361,18 +1577,43 @@ class CacheEngine:
         # starts an implicit transaction on the first DML statement, and
         # ``commit()`` closes it — so the two ``executemany`` calls land
         # together.
-        if upsert_rows:
-            await self._writer_db.executemany(LWW_UPSERT_SQL, upsert_rows)
-        if delete_keys:
-            await self._writer_db.executemany(
-                'DELETE FROM cache_entries WHERE key = ?',
-                delete_keys,
-            )
-        await self._writer_db.commit()
+        #
+        # Cancel-safety: if this coroutine is cancelled (or raises) between
+        # the atomic swap above and a successful ``commit()``, the snapshot
+        # local would otherwise unwind with the frame and its ops would be
+        # lost. The stop() path's final-drain ``_flush_once()`` call would
+        # see an already-empty ``_dirty`` and persist nothing.
+        #
+        # To keep the "nothing lost" guarantee under cancellation, we track
+        # whether the commit completed. On any failure path (including
+        # CancelledError) we merge the un-committed snapshot back into
+        # ``_cache._dirty`` so the next flush — scheduled or the shutdown
+        # drain — picks them up. When merging, any key that has a newer op
+        # in the current ``_dirty`` (a racing ``set`` landed post-swap) wins
+        # over the snapshot entry; otherwise we restore the snapshot op.
+        committed = False
+        try:
+            if upsert_rows:
+                await self._writer_db.executemany(LWW_UPSERT_SQL, upsert_rows)
+            if delete_keys:
+                await self._writer_db.executemany(
+                    'DELETE FROM cache_entries WHERE key = ?',
+                    delete_keys,
+                )
+            await self._writer_db.commit()
+            committed = True
+        finally:
+            if not committed:
+                # Restore un-committed ops through Cache's helper — the
+                # merge logic (skip keys with newer live ops) lives there
+                # too so the engine doesn't have to know about race
+                # semantics on ``_dirty``.
+                self._cache.restore_dirty(snapshot)
 
         # Metric ticks — one label per op type. Incremented even for
         # LWW-rejected UPSERTs (see docstring point 4): the flush did
-        # real work.
+        # real work. Only ticked on a successful commit — a rolled-back
+        # flush did not "do work" from the DB's perspective.
         if upsert_rows:
             metrics.cache_flush_entries.labels(op='set').inc(len(upsert_rows))
         if delete_keys:
@@ -1392,7 +1633,7 @@ class CacheEngine:
         Four jobs per cycle:
 
         1. **DB purge.** ``DELETE FROM cache_entries WHERE expires_at_ms IS
-           NOT NULL AND expires_at_ms < ?`` — one round trip, one commit.
+           NOT NULL AND expires_at_ms <= ?`` — one round trip, one commit.
            The partial index ``idx_cache_expires`` (only indexes non-null
            ``expires_at_ms``) makes this a focused scan rather than a full
            table sweep.
@@ -1432,9 +1673,12 @@ class CacheEngine:
 
         # Step 1: DB purge. Count the rows first via ``rowcount`` on the
         # cursor so we can increment the ``cleanup_removed`` counter by
-        # the real number of rows affected.
+        # the real number of rows affected. Uses ``<= ?`` (inclusive of the
+        # boundary ms) for consistency with ``Cache._is_expired`` and
+        # ``_expire_purge`` — an entry whose ``expires_at_ms`` equals
+        # ``now_ms`` is expired and gets cleaned up here too.
         cursor = await self._writer_db.execute(
-            'DELETE FROM cache_entries WHERE expires_at_ms IS NOT NULL AND expires_at_ms < ?',
+            'DELETE FROM cache_entries WHERE expires_at_ms IS NOT NULL AND expires_at_ms <= ?',
             (now_ms,),
         )
         removed = cursor.rowcount if cursor.rowcount is not None else 0
@@ -1442,32 +1686,13 @@ class CacheEngine:
         await self._writer_db.commit()
 
         # Step 2 + 3: memory sweep + dirty-map pruning for expired SETs.
-        # If an expired entry had a pending set, drop it — otherwise the
-        # next flush would revive a row we just deleted.
+        # Delegate to ``Cache._expire_purge`` — the helper handles both
+        # steps atomically and refreshes the memory gauges once after
+        # the sweep. Moving this logic onto Cache keeps the memory /
+        # bytes-sum / dirty-map triad encapsulated behind the Cache class
+        # rather than reaching across the layer from CacheEngine.
         if self._cache is not None:
-            # Snapshot keys first to avoid "dict changed during iteration".
-            expired_keys: list[str] = []
-            for key, entry in self._cache._memory.items():  # type: ignore[reportPrivateUsage]
-                if entry.expires_at_ms is not None and entry.expires_at_ms < now_ms:
-                    expired_keys.append(key)
-            for key in expired_keys:
-                # Pop + decrement the running sum for the bytes_in_memory
-                # gauge. Walking the dict here is unavoidable (cleanup is
-                # the cadence-bound sweep), but the gauge read stays O(1)
-                # because the sum is maintained on mutation.
-                evicted = self._cache._memory.pop(key, None)  # type: ignore[reportPrivateUsage]
-                if evicted is not None:
-                    self._cache._bytes_sum -= evicted.size_bytes  # type: ignore[reportPrivateUsage]
-                # Drop only pending SET ops — DELETEs are still the correct
-                # action (row is going away either way) and simpler to leave.
-                pending = self._cache._dirty.get(key)  # type: ignore[reportPrivateUsage]
-                if pending is not None and pending.op is Op.SET:
-                    self._cache._dirty.pop(key, None)  # type: ignore[reportPrivateUsage]
-            # Refresh gauges once after the sweep — cheaper than setting
-            # them per-eviction when many entries expire together.
-            if expired_keys:
-                metrics.cache_entries_in_memory.set(len(self._cache._memory))  # type: ignore[reportPrivateUsage]
-                metrics.cache_bytes_in_memory.set(self._cache._bytes_sum)  # type: ignore[reportPrivateUsage]
+            self._cache._expire_purge(now_ms)
 
         # Step 4: refresh DB-size gauges with a single aggregate query. We
         # use ``coalesce(sum(size_bytes), 0)`` so an empty table yields 0
@@ -1526,12 +1751,17 @@ class CacheEngine:
             # cycle can retry.
             return None
 
+        # Each peer DB query is wrapped in ``asyncio.wait_for`` with the
+        # configured timeout so a stuck peer cannot block the sync cycle.
+        # ``asyncio.TimeoutError`` propagates into the outer ``except`` below.
+        timeout = self._config.peer_sync.timeout_seconds
         try:
             async with aiosqlite.connect(f'file:{live_link}?mode=ro', uri=True) as db:
                 async with db.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='worker_config'"
                 ) as cur:
-                    if not await cur.fetchone():
+                    existing_row = await asyncio.wait_for(cur.fetchone(), timeout=timeout)
+                    if not existing_row:
                         # Peer exists but didn't enable store_config. Treat
                         # as "no cluster info available" — pull only
                         # ``scope='global'`` rows.
@@ -1543,8 +1773,13 @@ class CacheEngine:
                         )
                         return None
                 async with db.execute('SELECT cluster_name FROM worker_config WHERE id = 1') as cur:
-                    row = await cur.fetchone()
-                    cluster_name = (row[0] if row is not None and row[0] is not None else '') or ''
+                    row = await asyncio.wait_for(cur.fetchone(), timeout=timeout)
+                    # ``row`` is None when the table is empty; ``row[0]`` is
+                    # None when the column was never populated. Both cases
+                    # collapse to an empty string (unclustered peer) — the
+                    # ``or ''`` handles both None-row (via the ternary) and
+                    # None-column in a single expression.
+                    cluster_name = (row[0] if row is not None else None) or ''
         except Exception:
             # Corrupt / inaccessible peer DB — log and move on. Don't
             # cache the failure; next cycle retries.
@@ -1623,6 +1858,20 @@ class CacheEngine:
             via the surrounding try/except — see Task 13's isolation).
         """
         now_ms = _now_ms()
+        # ORDER BY includes ``key ASC`` as an explicit secondary sort. This
+        # is a correctness requirement for the same-ms drain in
+        # ``_sync_once``: the drain uses ``rows[-1][0]`` (the last row's
+        # key) as a lex-max cursor and queries ``WHERE updated_at_ms = ms
+        # AND key > last_key``. Without an explicit ``key ASC`` tiebreaker,
+        # SQLite breaks ``updated_at_ms`` ties by rowid (insertion order),
+        # which equals the peer's flush order — derived from arbitrary
+        # business-logic ``Cache.set`` call order, not lex order. In that
+        # case ``rows[-1][0]`` might NOT be the lex-max among the same-ms
+        # batch, and ``key > last_key`` would silently skip keys that
+        # happen to sort lexicographically below ``last_key`` but were
+        # inserted after it. Explicit secondary key sort guarantees
+        # ``rows[-1][0]`` IS the lex-max key among the same-ms tail, making
+        # the drain's ``key > last_key`` walk correct.
         query = (
             'SELECT key, scope, value, size_bytes, created_at_ms, '
             'updated_at_ms, expires_at_ms, origin_worker_id '
@@ -1630,10 +1879,15 @@ class CacheEngine:
             f'WHERE {scope_sql} '
             'AND (expires_at_ms IS NULL OR expires_at_ms > ?) '
             'AND updated_at_ms > ? '
-            'ORDER BY updated_at_ms ASC '
+            'ORDER BY updated_at_ms ASC, key ASC '
             'LIMIT ?'
         )
         params = (*scope_params, now_ms, cursor_ms, batch_size)
+        # ``asyncio.wait_for`` wraps the fetch with the configured peer-sync
+        # timeout so a slow or wedged peer cannot stall the whole sync
+        # cycle. Timeout raises ``asyncio.TimeoutError`` which the caller's
+        # per-peer try/except catches and isolates.
+        timeout = self._config.peer_sync.timeout_seconds
         async with (
             aiosqlite.connect(f'file:{peer_db_path}?mode=ro', uri=True) as db,
             db.execute(query, params) as cur,
@@ -1642,9 +1896,132 @@ class CacheEngine:
             # to a concrete tuple-list so callers can index by column position
             # (keys come back at row[0], scope at row[1], etc.) without worrying
             # about cursor lifetime after the ``async with`` closes.
-            return [tuple(row) for row in await cur.fetchall()]
+            fetched = await asyncio.wait_for(cur.fetchall(), timeout=timeout)
+            return [tuple(row) for row in fetched]
 
-    def _advance_cursor(self, *, rows_count: int, batch_size: int, rows: list[tuple]) -> int | None:
+    async def _drain_same_ms_tail(
+        self,
+        *,
+        peer_db_path: str,
+        scope_sql: str,
+        scope_params: tuple,
+        batch_size: int,
+        ms: int,
+        last_key: str,
+    ) -> list[tuple]:
+        """Drain any remaining rows at a single peer timestamp ``ms`` that
+        spilled past the main pull's ``LIMIT``.
+
+        The main ``_pull_peer_rows`` ordering is ``ORDER BY updated_at_ms
+        ASC, key ASC`` and its filter is ``WHERE updated_at_ms > cursor_ms``.
+        Whenever the main pull returns a FULL batch, rows sharing the
+        last row's ``updated_at_ms`` may exist past the ``LIMIT`` — in
+        two flavors:
+
+        1. **All-same-ms batch**: every row in the batch shares one ``ms``
+           (a burst of cache sets committed on the peer in one
+           millisecond). The cursor would advance to that ``ms`` and the
+           strict ``updated_at_ms > cursor_ms`` filter on the next cycle
+           would permanently hide the tail.
+        2. **Mixed-ms batch whose last ms has spillover**: e.g. batch
+           ``[ts=1000, ts=1001, ts=1002]`` where the peer has more rows
+           at ts=1002 past the limit. Same permanent-loss mechanic.
+
+        Both flavors are handled identically by this helper: walk
+        forward by ``key`` at the single ``ms``. The main pull's
+        explicit ``key ASC`` tiebreaker guarantees that ``rows[-1][0]``
+        (passed here as ``last_key``) is the LEX-MAX key among the
+        main pull's rows that share ``ms`` in the batch. Without the
+        tiebreaker, SQLite would break ``updated_at_ms`` ties by rowid
+        (insertion order), which has no relation to lex key order,
+        and ``key > last_key`` below would silently skip keys that sort
+        lexicographically below ``last_key`` but were inserted after it
+        on the peer. The follow-up query targets exactly
+        ``updated_at_ms = ms AND key > last_key`` with
+        ``ORDER BY key ASC LIMIT batch_size`` — a deterministic key-based
+        walk that makes progress even when every row shares one
+        timestamp.
+
+        We loop until a partial batch comes back or the pull returns no
+        rows — same-ms bursts are rare and bounded (a single millisecond
+        can't realistically hold millions of rows), so an inner loop is
+        safe. Each iteration opens its own short-lived read connection
+        for the same reason as the main pull (no queueing behind the
+        writer).
+
+        Args:
+            peer_db_path: same resolved path as the main pull.
+            scope_sql/scope_params: same scope predicate the main pull uses.
+            batch_size: page size for the drain.
+            ms: the shared ``updated_at_ms`` value we're draining.
+            last_key: the ``key`` of the last row already pulled at ``ms``
+                — the drain starts strictly after it.
+
+        Returns:
+            All additional same-ms rows beyond ``last_key`` (empty if the
+            main pull already saw everything at this timestamp — common
+            on mixed-ms batches that happen to have no spillover tail).
+        """
+        now_ms = _now_ms()
+        # Query shape mirrors ``_pull_peer_rows`` for the SELECT list (so
+        # the tuple order is identical and the caller can hand the rows
+        # straight to ``_apply_peer_rows``). The WHERE is tighter: we're
+        # only interested in one millisecond, and we walk forward by key
+        # for a deterministic same-ms tiebreaker. ``ORDER BY key ASC``
+        # guarantees ``key > cursor_key`` makes progress.
+        query = (
+            'SELECT key, scope, value, size_bytes, created_at_ms, '
+            'updated_at_ms, expires_at_ms, origin_worker_id '
+            'FROM cache_entries '
+            f'WHERE {scope_sql} '
+            'AND (expires_at_ms IS NULL OR expires_at_ms > ?) '
+            'AND updated_at_ms = ? '
+            'AND key > ? '
+            'ORDER BY key ASC '
+            'LIMIT ?'
+        )
+        drained: list[tuple] = []
+        cursor_key = last_key
+        # One connection for the whole drain — each iteration used to open
+        # and close its own ``aiosqlite.connect`` with the aiosqlite-spawned
+        # worker-thread overhead that implies. Hoisting the connection keeps
+        # the drain on a single worker thread end-to-end; the ``key > ?``
+        # cursor still guarantees forward progress and distinct pages per
+        # iteration.
+        timeout = self._config.peer_sync.timeout_seconds
+        async with aiosqlite.connect(f'file:{peer_db_path}?mode=ro', uri=True) as db:
+            while True:
+                params = (*scope_params, now_ms, ms, cursor_key, batch_size)
+                async with db.execute(query, params) as cur:
+                    # ``wait_for`` applies the configured peer-sync timeout to
+                    # each page fetch. A peer whose DB is stuck (corrupt WAL,
+                    # slow I/O) raises ``asyncio.TimeoutError`` rather than
+                    # stalling the whole sync cycle; the per-peer try/except
+                    # in ``_sync_once`` catches and isolates the failure.
+                    page = await asyncio.wait_for(
+                        cur.fetchall(),
+                        timeout=timeout,
+                    )
+                page_rows = [tuple(row) for row in page]
+                if not page_rows:
+                    break
+                drained.extend(page_rows)
+                # Last page — no need for another round trip.
+                if len(page_rows) < batch_size:
+                    break
+                # Advance the key cursor and loop; the ``key > ?`` filter
+                # guarantees forward progress on the next iteration.
+                cursor_key = str(page_rows[-1][0])
+        return drained
+
+    def _advance_cursor(
+        self,
+        *,
+        rows_count: int,
+        batch_size: int,
+        rows: list[tuple],
+        cursor_ms: int,
+    ) -> int | None:
         """Compute the new cursor value for a peer after a pull, or ``None``
         if it should stay where it is.
 
@@ -1657,11 +2034,38 @@ class CacheEngine:
         * Full batch (``rows_count == batch_size``) → return the last
           row's ``updated_at_ms``. The peer has more we haven't read;
           next cycle picks up from here.
-        * Partial batch (``0 < rows_count < batch_size``) → return the
-          current wall-clock ms. We've caught up on anything the peer
-          had below this moment; moving to "now-ish" also protects
-          against stuck cursors if peer clocks drift backward — partial
-          batches never regress.
+
+          **Same-millisecond edge case.** A full batch may hit a peer
+          timestamp shared by MORE rows than fit in the LIMIT — either
+          a pure burst (every row in the batch at one ``ms``) or a
+          mixed-ms batch whose trailing ``ms`` has spillover past the
+          ``LIMIT``. In both cases the extra rows at ``rows[-1].ms``
+          would be permanently skipped because advancing the cursor to
+          ``last_ts`` combined with the strict ``WHERE updated_at_ms >
+          cursor_ms`` excludes them, and SQLite's deterministic ordering
+          would keep returning the same prefix on any retry at an
+          earlier cursor. The drain for this case happens in
+          ``_sync_once`` whenever the main pull returns a full batch,
+          via a separate follow-up query keyed on
+          ``(updated_at_ms = rows[-1].ms AND key > rows[-1].key)``;
+          see ``_drain_same_ms_tail``. This helper doesn't need to
+          special-case it — the follow-up drain is an additive apply
+          before the cursor settles here.
+
+        * Partial batch (``0 < rows_count < batch_size``) → return
+          ``max(rows[-1].updated_at_ms, cursor_ms)``. We've caught up on
+          everything the peer had below the max observed timestamp.
+          Anchoring to the observed peer timestamp (rather than our
+          local wall clock) is the critical property here: peer rows
+          are written with the peer's clock, which can be skewed
+          relative to ours by seconds or minutes on NTP-uncorrected
+          hosts. If we advanced to ``_now_ms()`` and the peer's clock
+          was ahead of ours, rows with ``updated_at_ms`` between our
+          previous cursor and our local now would be silently skipped
+          on subsequent pulls (the ``WHERE updated_at_ms > cursor`` clause
+          would exclude them). The ``max(..., cursor_ms)`` guard keeps
+          the cursor monotonic — partial batches never regress — without
+          relying on our local clock.
         """
         if rows_count == 0:
             return None
@@ -1670,9 +2074,11 @@ class CacheEngine:
             # largest timestamp. Column index 5 is updated_at_ms (see the
             # SELECT list in ``_pull_peer_rows``).
             return int(rows[-1][5])
-        return _now_ms()
+        # Partial batch: track the peer's observed timestamps, not our
+        # wall clock. ``max(..., cursor_ms)`` enforces monotonicity.
+        return max(int(rows[-1][5]), cursor_ms)
 
-    async def _sync_once(self) -> None:
+    async def _sync_once(self) -> dict[str, list[tuple]]:
         """Pull one batch of entries from every discovered peer and apply
         them to the local DB via LWW UPSERT.
 
@@ -1711,24 +2117,33 @@ class CacheEngine:
         untouched so the next cycle retries the same range.
 
         Fast paths:
-        - Engine not started / disabled (``_writer_db is None``) → return.
-        - Peer sync disabled (``_peer_sync_enabled=False``) → return with
-          zero filesystem reads. This makes the ``peer_sync.enabled=False``
-          path essentially free at runtime.
+        - Engine not started / disabled (``_writer_db is None``) → return
+          an empty dict.
+        - Peer sync disabled (``_peer_sync_enabled=False``) → return an
+          empty dict with zero filesystem reads. This makes the
+          ``peer_sync.enabled=False`` path essentially free at runtime.
+
+        Returns:
+            ``{peer_name: list_of_row_tuples}`` — one entry per peer we
+            attempted to sync from this cycle, mapping to the rows actually
+            pulled (main pull + same-ms drain combined where applicable).
+            Empty dict when the engine is disabled or peer sync is gated
+            off. The periodic-task wrapper discards the return value
+            (``run_periodic_task`` doesn't inspect the callable's result);
+            unit tests capture it directly from ``await engine._sync_once()``
+            to assert per-peer scope filtering + pagination without mocking
+            aiosqlite internals.
         """
-        # Save pulled rows keyed by peer for test inspection. A production
-        # run consumes this immediately via the UPSERT step below; tests
-        # read it back to verify per-peer filtering.
-        self._last_pulled_rows: dict[str, list[tuple]] = {}
+        pulled: dict[str, list[tuple]] = {}
 
         if self._writer_db is None or not self._peer_sync_enabled:
-            return
+            return pulled
 
         # Resolve the dir once per cycle — both peer-discovery and cluster-
         # name resolution (below) use it, so avoid recomputing.
         db_dir = self._resolve_db_dir()
         if not db_dir:
-            return
+            return pulled
 
         batch_size = self._config.peer_sync.batch_size
         # Iterate peers. One bad peer must not break the whole sync cycle —
@@ -1754,17 +2169,60 @@ class CacheEngine:
                     batch_size=batch_size,
                     cursor_ms=cursor_ms,
                 )
-                self._last_pulled_rows[peer_name] = rows
+                pulled[peer_name] = rows
                 # Apply step — UPSERT pulled rows into our local DB.
                 # _apply_peer_rows handles the zero-row fast path internally
                 # so we don't branch here.
                 await self._apply_peer_rows(peer_name=peer_name, rows=rows)
+                # Same-ms tail drain after ANY full batch. If the peer
+                # returned a full batch, there may be more rows sharing
+                # the LAST row's ``updated_at_ms`` past our LIMIT — even
+                # when earlier rows in the batch had smaller timestamps.
+                # Example with batch_size=3 and peer rows
+                # [ts=1000, ts=1001, ts=1002, ts=1002, ts=1002]: the main
+                # pull returns the first three, the cursor advances to
+                # 1002, and the strictly-greater ``WHERE updated_at_ms >
+                # 1002`` clause on the next cycle would permanently skip
+                # the two remaining ts=1002 rows.
+                #
+                # Trigger is simply "full batch" — the old narrower check
+                # (``rows[0] ts == rows[-1] ts``) missed mixed-ms batches
+                # whose trailing ms had spillover tail rows. Given the
+                # main pull's ``ORDER BY updated_at_ms ASC, key ASC``
+                # (see ``_pull_peer_rows``), ``rows[-1]`` is guaranteed
+                # to be the lex-max key among rows sharing its
+                # ``updated_at_ms`` in the batch, so the drain's
+                # ``WHERE updated_at_ms = last_ms AND key > last_key``
+                # walk pages through only the unseen tail. The drain may
+                # return empty if no more same-ms rows exist on the
+                # peer — that's the common case for mixed batches and
+                # it's cheap (one small indexed query).
+                if len(rows) >= batch_size:
+                    last_ms = int(rows[-1][5])
+                    last_key = str(rows[-1][0])
+                    drained = await self._drain_same_ms_tail(
+                        peer_db_path=peer_db_path,
+                        scope_sql=scope_sql,
+                        scope_params=scope_params,
+                        batch_size=batch_size,
+                        ms=last_ms,
+                        last_key=last_key,
+                    )
+                    if drained:
+                        await self._apply_peer_rows(peer_name=peer_name, rows=drained)
+                        # Include the drained rows in the returned dict
+                        # alongside the main pull so callers (tests) see
+                        # the full per-peer sync result of this cycle.
+                        pulled[peer_name] = rows + drained
                 # Advance cursor on success. Zero rows → no change; rules
-                # live in ``_advance_cursor``.
+                # live in ``_advance_cursor``. ``cursor_ms`` is passed so
+                # partial-batch advancement can stay monotonic without
+                # relying on our local wall clock (peer clocks may drift).
                 next_cursor = self._advance_cursor(
                     rows_count=len(rows),
                     batch_size=batch_size,
                     rows=rows,
+                    cursor_ms=cursor_ms,
                 )
                 if next_cursor is not None:
                     self._peer_cursors[peer_name] = next_cursor
@@ -1781,6 +2239,8 @@ class CacheEngine:
                     db=peer_db_path,
                     error=str(exc),
                 )
+
+        return pulled
 
     async def _apply_peer_rows(self, *, peer_name: str, rows: list[tuple]) -> None:
         """UPSERT a batch of peer-supplied rows into the local DB via the
@@ -1816,34 +2276,27 @@ class CacheEngine:
         if self._writer_db is None:
             return
 
-        # Fetch/upsert counters — labelled by peer so operators can spot a
-        # single misbehaving source. Both are ticked for every row
-        # irrespective of LWW outcome (see docstring).
-        metrics.cache_sync_entries_fetched.labels(peer=peer_name).inc(len(rows))
-
         # executemany over LWW_UPSERT_SQL — one SQLite round trip for the
         # whole batch. aiosqlite's default isolation opens an implicit
         # transaction on the first DML; the commit() below closes it.
         await self._writer_db.executemany(LWW_UPSERT_SQL, rows)
         await self._writer_db.commit()
 
+        # Both counters tick AFTER commit so they stay consistent under
+        # commit-failure: a crash between executemany and commit leaves the
+        # DB untouched and also leaves both counters at their pre-call
+        # values. Mirrors the flush path's post-commit metric-tick pattern —
+        # counters track work that actually landed, not work attempted.
+        metrics.cache_sync_entries_fetched.labels(peer=peer_name).inc(len(rows))
         metrics.cache_sync_entries_upserted.labels(peer=peer_name).inc(len(rows))
 
         # Memory invalidation: unconditional pop for every key we
         # attempted. Simpler than per-row LWW-result bookkeeping, and any
         # caller that needs the freshest value will hit the DB on the next
         # ``get`` which already includes the merged LWW result.
+        #
+        # Delegate to ``Cache._invalidate_memory_keys`` — the helper
+        # handles bytes_sum bookkeeping and gauge refresh atomically,
+        # keeping the memory-side invariants encapsulated on Cache.
         if self._cache is not None:
-            invalidated_any = False
-            for row in rows:
-                key = row[0]
-                # Pop the memory entry; if present, subtract its bytes
-                # from the running sum so the bytes_in_memory gauge
-                # stays accurate after sync invalidates entries.
-                popped = self._cache._memory.pop(key, None)  # type: ignore[reportPrivateUsage]
-                if popped is not None:
-                    self._cache._bytes_sum -= popped.size_bytes  # type: ignore[reportPrivateUsage]
-                    invalidated_any = True
-            if invalidated_any:
-                metrics.cache_entries_in_memory.set(len(self._cache._memory))  # type: ignore[reportPrivateUsage]
-                metrics.cache_bytes_in_memory.set(self._cache._bytes_sum)  # type: ignore[reportPrivateUsage]
+            self._cache._invalidate_memory_keys([row[0] for row in rows])

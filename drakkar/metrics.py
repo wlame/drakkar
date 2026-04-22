@@ -336,6 +336,43 @@ cache_bytes_in_db = Gauge(
 )
 
 
+def cache_gauge_snapshot() -> dict[str, int]:
+    """Return the current integer values of all four cache gauges.
+
+    Provides a stable, library-internals-free interface for callers that
+    need to read gauge values (notably the debug server's
+    ``/api/debug/cache/stats`` endpoint). Iterates the gauge's sample
+    collection via prometheus_client's public ``collect()`` API rather
+    than reaching into ``_value``, so a prometheus_client upgrade that
+    changes the private representation will not silently break callers.
+
+    The four gauges are maintained by the cache engine:
+      - ``entries_in_memory`` / ``bytes_in_memory`` — live mutations
+        on set/delete/evict/cleanup.
+      - ``entries_in_db`` / ``bytes_in_db`` — refreshed once per cleanup
+        cycle via ``SELECT COUNT(*), SUM(size_bytes)``.
+
+    Returns a dict with integer-valued keys; int-casting matches the
+    historical shape of the stats endpoint.
+    """
+
+    def _value_of(gauge: Gauge) -> int:
+        # A Gauge with no labels has exactly one sample per collect()
+        # iteration; read the first sample's value. This is the public
+        # prometheus_client contract, not an internal detail.
+        for metric in gauge.collect():
+            for sample in metric.samples:
+                return int(sample.value)
+        return 0
+
+    return {
+        'entries_in_memory': _value_of(cache_entries_in_memory),
+        'bytes_in_memory': _value_of(cache_bytes_in_memory),
+        'entries_in_db': _value_of(cache_entries_in_db),
+        'bytes_in_db': _value_of(cache_bytes_in_db),
+    }
+
+
 # --- Periodic tasks ---
 
 periodic_task_runs = Counter(

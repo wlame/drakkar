@@ -354,16 +354,33 @@ class TestApiCacheEntries:
         finally:
             await engine.stop()
 
-    async def test_limit_clamped_to_1000(self, tmp_path, mock_recorder, debug_config):
-        """``limit > 1000`` is clamped to 1000 to protect the UI from blowups."""
+    async def test_limit_over_1000_rejected_with_422(self, tmp_path, mock_recorder, debug_config):
+        """``limit > 1000`` is rejected by FastAPI validation with a 422.
+
+        The bound is enforced at the Query layer (``le=1000``) so a
+        misbehaving UI gets immediate feedback rather than silently
+        receiving fewer rows than requested — prior behavior clamped the
+        value server-side, which can mask UI bugs.
+        """
         engine = await _start_live_engine(tmp_path)
         try:
             fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entries?limit=2000')
-            # 200 with clamped limit rather than 400 — the UI can send any
-            # value without risking a 4xx response, and the server stays safe.
+            # FastAPI's Query(le=1000) rejects with 422 Unprocessable Entity.
+            assert resp.status_code == 422
+        finally:
+            await engine.stop()
+
+    async def test_limit_at_max_accepted(self, tmp_path, mock_recorder, debug_config):
+        """``limit=1000`` is the upper bound and returns 200."""
+        engine = await _start_live_engine(tmp_path)
+        try:
+            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            transport = ASGITransport(app=fastapi_app)
+            async with AsyncClient(transport=transport, base_url='http://test') as c:
+                resp = await c.get('/api/debug/cache/entries?limit=1000')
             assert resp.status_code == 200
             body = resp.json()
             assert body['limit'] == 1000

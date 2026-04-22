@@ -125,26 +125,24 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
 
     # Handler-facing cache attribute. The framework reassigns this to either
     # a real ``Cache`` (when ``config.cache.enabled=true``) or leaves the
-    # NoOpCache default in place. Initialized here so tests and user code can
-    # call ``self.cache.<method>`` unconditionally without a None guard —
-    # even in test cases that never run the full DrakkarApp startup path.
+    # class-level NoOpCache default in place. Kept as a class attribute (not
+    # assigned in ``__init__``) so subclasses that override ``__init__``
+    # without calling ``super().__init__()`` still see a working cache stub —
+    # otherwise their instances would be missing the attribute and user code
+    # calling ``self.cache.set(...)`` would AttributeError.
     #
-    # Import is local (inside the class-body initializer) to avoid a circular
-    # import between handler.py and cache.py at module load time. The cache
-    # module imports from peer_discovery/metrics/etc. — none of which touch
-    # handler — so the one-time local import keeps the boundary clean.
-    @classmethod
-    def _default_cache(cls):  # noqa: ANN206
-        from drakkar.cache import NoOpCache
-
-        return NoOpCache()
-
-    # Instance attribute is set in __init__ so every handler instance gets
-    # its own stub — sharing one class-level NoOpCache across instances would
-    # technically be fine (stateless) but makes the framework-wired replacement
-    # path more awkward (would need isinstance checks).
-    def __init__(self) -> None:
-        self.cache: Cache | NoOpCache = self._default_cache()
+    # Sharing one class-level stub across all handler instances is safe because
+    # ``NoOpCache`` is completely stateless — every method either returns a
+    # constant or silently discards its arguments. When the framework wires
+    # in a real ``Cache`` at startup it does so per-instance (instance-level
+    # attribute shadows the class-level default), so each handler still gets
+    # its own cache when enabled.
+    #
+    # Assigned at module-import time below the class body (see after class
+    # definition) because the ``NoOpCache`` import is deferred — module-level
+    # import would trigger a circular import between ``handler.py`` and
+    # ``cache.py`` at load time.
+    cache: Cache | NoOpCache
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
@@ -295,3 +293,23 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
     async def on_revoke(self, partitions: list[int]) -> None:
         """Called when partitions are revoked from this worker."""
         pass
+
+
+# Attach the class-level default cache stub after class definition. We do this
+# outside the class body because ``NoOpCache`` is imported lazily (to avoid the
+# circular ``handler.py`` ↔ ``cache.py`` import at module load time). The
+# assignment runs once at import; every ``BaseDrakkarHandler`` subclass instance
+# reads the shared stub through the class attribute unless the framework
+# replaces it with a real ``Cache`` at runtime.
+def _install_default_cache() -> None:
+    """Attach the stateless NoOpCache stub as a class attribute.
+
+    Called once at module import. ``NoOpCache`` is stateless so sharing one
+    instance across all handler classes is safe.
+    """
+    from drakkar.cache import NoOpCache
+
+    BaseDrakkarHandler.cache = NoOpCache()
+
+
+_install_default_cache()

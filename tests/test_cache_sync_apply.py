@@ -649,3 +649,60 @@ async def test_sync_apply_preserves_size_bytes_from_peer(tmp_path):
         assert row[3] == peer_size
     finally:
         await engine.stop()
+
+
+# --- memory invalidation preserves bytes_sum invariant ----------------------
+
+
+async def test_apply_peer_rows_subtracts_popped_entry_bytes_from_running_sum(tmp_path):
+    """After ``_apply_peer_rows`` invalidates a memory entry, ``_bytes_sum``
+    must decrease by exactly the popped entry's bytes. Without this, the
+    ``drakkar_cache_bytes_in_memory`` gauge drifts upward every sync
+    cycle that touches an in-memory key.
+
+    Scenario: seed a local memory entry with known size_bytes, run a
+    peer sync that invalidates that key, and assert the running sum
+    equals the actual post-invalidation memory contents.
+    """
+    engine = await _make_engine(tmp_path, worker_id='me', cluster_name='prod')
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+
+        # Seed two memory entries so invalidating one leaves the other
+        # intact — lets the test assert the invariant against a non-zero
+        # remainder.
+        cache.set('invalidated', 'X' * 50)  # size_bytes ≈ 52
+        cache.set('untouched', 'Y' * 100)  # size_bytes ≈ 102
+        initial_sum = cache._bytes_sum  # type: ignore[reportPrivateUsage]
+        assert initial_sum == sum(e.size_bytes for e in cache._memory.values())  # type: ignore[reportPrivateUsage]
+
+        # A peer has a newer version of 'invalidated' — sync will UPSERT
+        # and invalidate the memory entry.
+        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        await _seed_peer_cache_db(
+            tmp_path,
+            'peer1',
+            [
+                {
+                    'key': 'invalidated',
+                    'scope': CacheScope.GLOBAL.value,
+                    'value': '"peer_value"',
+                    'updated_at_ms': 9_999_999_999,
+                    'origin_worker_id': 'peer1',
+                }
+            ],
+        )
+
+        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+
+        # Invariant: running sum equals actual memory contents after
+        # invalidation. 'invalidated' must have been popped; 'untouched'
+        # must remain.
+        assert 'invalidated' not in cache._memory  # type: ignore[reportPrivateUsage]
+        assert 'untouched' in cache._memory  # type: ignore[reportPrivateUsage]
+        expected_sum = sum(e.size_bytes for e in cache._memory.values())  # type: ignore[reportPrivateUsage]
+        assert cache._bytes_sum == expected_sum  # type: ignore[reportPrivateUsage]
+        assert cache._bytes_sum < initial_sum  # type: ignore[reportPrivateUsage]
+    finally:
+        await engine.stop()
