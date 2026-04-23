@@ -5,10 +5,12 @@ and offset management. Uses the pluggable sink system for output.
 """
 
 import asyncio
+import math
 import os
 import signal
 import time
 from collections.abc import Coroutine
+from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
@@ -332,6 +334,27 @@ class DrakkarApp:
                 name=f'periodic:{name}',
             )
             self._periodic_tasks.append(task)
+
+        # Stagger startup: sleep until the next wall-clock alignment
+        # boundary so a fleet of workers in a rolling deploy converges
+        # on a single Kafka consumer-group rebalance instead of N. See
+        # KafkaConfig.startup_align_* for tuning and rationale.
+        if self._config.kafka.startup_align_enabled:
+            from drakkar.utils import wait_for_aligned_startup
+
+            min_wait = self._config.kafka.startup_min_wait_seconds
+            interval = self._config.kafka.startup_align_interval_seconds
+            target_wall = math.ceil((time.time() + min_wait) / interval) * interval
+            await log.ainfo(
+                'startup_align_waiting',
+                category='lifecycle',
+                min_wait_seconds=min_wait,
+                align_interval_seconds=interval,
+                target_wall_unix=target_wall,
+                target_wall_iso=datetime.fromtimestamp(target_wall, tz=UTC).isoformat(),
+            )
+            slept = await wait_for_aligned_startup(min_wait, interval)
+            await log.ainfo('startup_align_done', category='lifecycle', slept_seconds=round(slept, 3))
 
         await self._consumer.subscribe()
         self._running = True

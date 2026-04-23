@@ -98,6 +98,9 @@ Settings for the Kafka consumer that reads input messages.
 | `max_poll_interval_ms` | `int` | `300000` | Maximum time (ms) between poll calls before Kafka considers the consumer dead and triggers a rebalance. Increase this if your tasks take a long time. |
 | `session_timeout_ms` | `int` | `45000` | Session timeout (ms) for group membership. If the broker does not receive a heartbeat within this window, the consumer is removed from the group. |
 | `heartbeat_interval_ms` | `int` | `3000` | Interval (ms) between heartbeats sent to the broker. Should be less than `session_timeout_ms / 3`. |
+| `startup_align_enabled` | `bool` | `true` | When `true`, delay the first Kafka subscribe until a shared wall-clock boundary so a fleet of workers converges on a single rebalance. Disable for single-process dev runs. |
+| `startup_min_wait_seconds` | `float` | `4.0` | Minimum seconds to sleep before aligning. Acts as a buffer for slow init (DB connects, schema migrations, cache warm-up). Must be `>= 0`. |
+| `startup_align_interval_seconds` | `int` | `10` | Alignment interval in seconds. Workers wake at the next `time.time() % interval == 0` boundary — default `10` aligns on `:00/:10/:20/:30/:40/:50` of every minute. Must be `>= 1`. |
 
 ```yaml
 kafka:
@@ -108,7 +111,30 @@ kafka:
   max_poll_interval_ms: 600000
   session_timeout_ms: 60000
   heartbeat_interval_ms: 5000
+  # Rolling-deploy: serialize group rebalances by waking all workers at
+  # the same wall-clock moment instead of whenever each finishes init.
+  startup_align_enabled: true
+  startup_min_wait_seconds: 4.0
+  startup_align_interval_seconds: 10
 ```
+
+### Staggered startup alignment
+
+During a rolling deploy, workers come up one at a time over a span of seconds. Each fresh `subscribe` call triggers a Kafka consumer-group rebalance, which stalls consumption on every other worker in the group. A fleet of 10 workers that boots over ~15 seconds can cause 10 cascading rebalances and several seconds of effective downtime.
+
+With `startup_align_enabled: true` (the default), each worker runs its normal init (`on_startup`, cache engine, recorder, periodic tasks, sink connects) and then — *before* calling `consumer.subscribe()` — waits until:
+
+1. At least `startup_min_wait_seconds` have elapsed (lets slow-init workers catch up to fast ones).
+2. The wall-clock Unix-epoch seconds are a multiple of `startup_align_interval_seconds` (default `10` — i.e. `:00/:10/:20/:30/:40/:50`).
+
+Workers whose init completes anywhere in the same 10-second window then all subscribe at the next boundary within one "tick" of each other, collapsing N rebalances into 1.
+
+The sleep window is logged as `startup_align_waiting` / `startup_align_done` lifecycle events with the target instant so deploy runbooks can account for the deliberate pause.
+
+Tuning:
+- **Larger fleets**: keep `startup_align_interval_seconds: 10` (default) — works well up to dozens of workers.
+- **Slow-init workers** (seconds of migrations): raise `startup_min_wait_seconds` so the boundary is likely to fall AFTER the slowest worker's init.
+- **Very small clusters / dev iteration**: set `startup_align_enabled: false` to skip the pause entirely.
 
 ---
 

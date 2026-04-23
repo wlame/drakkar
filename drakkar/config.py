@@ -48,6 +48,22 @@ class KafkaConfig(BaseModel):
     ui_url: str = ''
     ui_cluster_name: str = ''
 
+    # Staggered startup: delay the Kafka subscribe until the next wall-clock
+    # alignment boundary. During a rolling deploy, workers come up one at
+    # a time and each triggers a Kafka consumer-group rebalance — which
+    # stalls consumption on all other workers. Aligning startup to shared
+    # boundaries lets a fleet converge on a single rebalance instead of N.
+    #
+    # Sequence: wait ``startup_min_wait_seconds`` (buffer for slow init),
+    # then sleep until the next wall-clock instant whose Unix-epoch seconds
+    # are a multiple of ``startup_align_interval_seconds`` (default :00,
+    # :10, :20, :30, :40, :50 of every minute in UTC — which maps 1:1 to
+    # local wall-clock seconds since timezone offsets are whole-minute).
+    # Disable with ``startup_align_enabled=false`` for snappy dev iteration.
+    startup_align_enabled: bool = True
+    startup_min_wait_seconds: float = Field(default=4.0, ge=0.0)
+    startup_align_interval_seconds: int = Field(default=10, ge=1)
+
 
 # --- Sink config models ---
 
