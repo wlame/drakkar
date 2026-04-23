@@ -205,7 +205,25 @@ See [Observability — Debug UI](observability.md#debug-ui) for the endpoint inv
 
 ### Is the debug UI safe to expose to a team of operators?
 
-Auth-gated endpoints (`/api/debug/merge`, `/api/debug/probe`) require the configured `auth_token`. The pages that are always open are strictly read-only. Still, concurrent Message Probes serialize on an internal lock, and the probe temporarily replaces `handler.cache` — keep this in mind if you have many operators debugging the same worker simultaneously. **TBD** — document a per-user probe quota proposal.
+Drakkar layers three defenses:
+
+1. **Default loopback binding.** `debug.host='127.0.0.1'` out of the box — the UI is only reachable from the host, not the network. Most development and local-operator flows work against the default.
+2. **Fail-fast on insecure non-loopback binds.** If you set `debug.host='0.0.0.0'` (or any non-loopback address) without a `debug.auth_token`, the worker raises `InsecureDebugConfigError` at startup rather than silently exposing the UI. Either set a strong token or keep the loopback default. See [Insecure-startup failure](configuration.md#insecure-startup-failure).
+3. **Auth + origin check on WebSocket.** The live-event WebSocket at `/ws` requires the same `auth_token` (bearer header or `?token=` query param); invalid tokens close with code 4401. When a token is configured, the handshake also validates the `Origin` header against `allowed_ws_origins` (explicit allowlist) or the `Host` header (same-origin fallback). Comparison uses `secrets.compare_digest`.
+
+Even with all three layers, the read-only pages expose task stdout/stderr, task env (after [redaction](observability.md#flight-recorder)), cache contents, and live event streams. Restrict access to operators. Concurrent Message Probes serialize on an internal lock, and the probe temporarily replaces `handler.cache` — keep this in mind if you have many operators debugging the same worker simultaneously.
+
+### Why does my worker fail with `InsecureDebugConfigError` on startup?
+
+You set `debug.enabled=true` + a non-loopback `debug.host` + no `debug.auth_token`. That combination publishes the debug UI (task stdout, env, cache contents, WebSocket event stream) without authentication — a security bug we refuse to let slip into production.
+
+Pick **one** of these remediations:
+
+- **Set `debug.auth_token`** to a strong random value (e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"`) — recommended for production where the UI needs to be reachable from ops tooling.
+- **Set `debug.host=127.0.0.1`** — UI only reachable from the host, ideal when operators SSH-tunnel or run a sidecar reverse proxy.
+- **Set `debug.enabled=false`** — if the worker doesn't need the flight recorder at all.
+
+See [Insecure-startup failure](configuration.md#insecure-startup-failure) for the full check and the implementation at `drakkar/app.py::_validate_debug_security`.
 
 ### What is the Message Probe tab?
 
@@ -268,7 +286,7 @@ Zero-operational-cost embedded store with WAL-mode concurrency, good enough for 
 
 ### How many event loops does a worker run?
 
-Two: the **main loop** (Kafka consumer + partition processors + executor pool + periodic tasks + sink manager) and the **debug UI loop** (uvicorn on a separate thread). asyncio primitives created on one are not safe to use on the other — cross-loop access is limited to the probe endpoint, which explicitly dispatches back to the main loop via `run_coroutine_threadsafe`.
+Two: the **main loop** (Kafka consumer + partition processors + executor pool + periodic tasks + sink manager) and the **debug UI loop** (uvicorn on a separate thread). asyncio primitives created on one are not safe to use on the other — in particular, the recorder's `aiosqlite` connection and the cache reader connection are bound to the main loop. The debug server uses a `_dispatch_to_main_loop` helper to marshal roughly 20 read-side endpoints (message trace, probe, task listings, cache inspection, etc.) back onto the main loop via `asyncio.run_coroutine_threadsafe`; pure-Python work (template rendering, counters, constants) stays on the UI loop.
 
 ### What happens during a Kafka rebalance?
 
@@ -281,6 +299,47 @@ The poll loop compares in-flight message count to high/low watermarks (multiples
 ### What's the difference between the recorder DB and the cache DB?
 
 They're separate SQLite files with separate schemas and separate reader/writer connections. The recorder stores per-message lifecycle events (flight recorder for the debug UI); the cache stores operator-written key/value pairs for memoization. See [Observability — Flight Recorder](configuration.md#debug-flight-recorder-debug) and [Cache](cache.md).
+
+---
+
+## Security and trust model
+
+This section expands the five trust assumptions listed in the [README](../README.md#security--trust-model) -- each one is an architectural trust boundary, not a latent bug. Read this before a production deploy.
+
+### Why is the handler binary trusted?
+
+Drakkar launches `executor.binary_path` as a subprocess and pipes the message bytes to its stdin without validation. There's no sandbox, no signature check, and no attempt to filter input — the binary is assumed to be operator-provided code you audit the same way you audit the rest of your deployment.
+
+See `drakkar/executor.py::ExecutorPool._launch` for the launch code. The binary runs with the worker's OS privileges, plus any env overrides from `ExecutorConfig.env` or per-task `env`. If you need defense-in-depth against a compromised binary, run the worker under a restricted user / with seccomp / inside a container — Drakkar itself offers no in-process sandbox.
+
+### Why are peer workers trusted?
+
+The cache and recorder peer-sync mechanisms read other workers' SQLite files directly (see `drakkar/cache.py::CacheEngine._sync_loop` and `drakkar/recorder.py::cross_trace`). There's no per-write signature, no auth check, no schema-level integrity verification. Anyone who can write to the shared `db_dir` can inject cache entries or event rows that your workers will read.
+
+Treat `db_dir` as a shared-trust boundary: any principal with write access to that directory has the same trust level as the workers themselves. On a shared filesystem (NFS, EFS), restrict directory permissions to the worker user.
+
+### How is the debug UI protected?
+
+Three layers (see [Is the debug UI safe](#is-the-debug-ui-safe-to-expose-to-a-team-of-operators) above):
+
+1. Loopback default (`debug.host='127.0.0.1'`).
+2. `InsecureDebugConfigError` at startup if you set a non-loopback host without an `auth_token`.
+3. Token + Origin check on the WebSocket stream (`drakkar/debug_server.py::_origin_allowed` and `_token_matches`).
+
+Read-only HTTP pages are not token-gated — auth applies to mutating endpoints (merge, probe) and to the WebSocket event stream. If you put the UI on a non-loopback host, set a strong `auth_token` and consider a reverse proxy with TLS.
+
+### Why doesn't Drakkar validate Kafka message payloads?
+
+Parse errors in `handler.deserialize_message` silently set `msg.payload=None` rather than raising or DLQ-ing the message (see `drakkar/app.py::_deserialize`). A malicious producer can cause handlers to see unexpected `None` payloads, but cannot execute code in the worker. Your handler is responsible for validating the payload before using it — use Pydantic `model_validate` or raise explicitly from `arrange()` to route bad messages.
+
+### What redactions apply to per-task env?
+
+Two surfaces expose env vars:
+
+- **The recorder's `worker_config` table** — framework-level `ExecutorConfig.env` is **never written** to the recorder (it's omitted from the JSON payload entirely). Environment variables listed in `expose_env_vars` are captured by name, and secret-shaped names (`*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*_KEY`, `*API_KEY*`, `*CREDENTIAL*`, `*_DSN`) are redacted to `***`. Non-matching values with embedded URL credentials (`user:pass@host`) have the credentials stripped.
+- **The recorder's per-task `env` metadata** — `task.env` written by your handler is sanitized with the same secret-name patterns before being stored. The original task object is not mutated; only the recorded copy is redacted. See `drakkar/recorder.py::_sanitize_env_value` for the regex.
+
+The contract is "aggressive redact, accept false positives": `PASSWORD_RESET_URL` is redacted because it matches `*PASSWORD*`, even though a reset URL isn't a credential. Operators who need to expose these exact names should rename them — a leaked secret is a worse outcome than a logged URL.
 
 ---
 

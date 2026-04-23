@@ -70,6 +70,8 @@ def _validate_debug_security(config: DrakkarConfig) -> None:
 
     Whitespace-only ``auth_token`` values are treated as empty — a string of
     spaces protects nothing but might fool an operator into thinking it does.
+    ``DebugConfig`` already strips the token on load (see the field validator),
+    so the check below is a plain emptiness test.
 
     Raises:
         InsecureDebugConfigError: When debug is enabled, bound to a
@@ -82,12 +84,12 @@ def _validate_debug_security(config: DrakkarConfig) -> None:
     if host_normalized in _LOOPBACK_HOSTS:
         return
 
-    if config.debug.auth_token.strip() != '':
+    if config.debug.auth_token != '':
         return
 
     raise InsecureDebugConfigError(
         f'Debug UI is bound to a non-loopback host ({config.debug.host}) without auth_token. '
-        f'Either set debug.auth_token, or set debug.host=127.0.0.1, or set debug.enabled=false.'
+        'Either set debug.auth_token, or set debug.host=127.0.0.1, or set debug.enabled=false.'
     )
 
 

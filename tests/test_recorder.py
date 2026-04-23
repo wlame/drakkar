@@ -202,6 +202,57 @@ async def test_record_task_started_sanitizes_env_secrets(recorder):
     assert meta['env']['PUBLIC_URL'] == 'https://api.example.com'
 
 
+@pytest.mark.parametrize(
+    ('name', 'expected_redacted'),
+    [
+        # True-positive matches — these SHOULD be redacted.
+        ('DB_PASSWORD', True),
+        ('API_TOKEN', True),
+        ('MY_SECRET_VALUE', True),
+        ('STRIPE_API_KEY', True),
+        ('AWS_CREDENTIALS', True),
+        ('DATABASE_DSN', True),
+        # "False positives" — these ALSO match the aggressive patterns even
+        # though the name alone doesn't imply a secret. The contract is:
+        # aggressive redact, accept false positives. Operators who need to
+        # expose these exact names should rename them.
+        ('PASSWORD_RESET_URL', True),  # '*PASSWORD*' matches
+        ('API_KEY_VERSION', True),  # '*API_KEY*' matches
+        ('SECRET_MANAGER_ENDPOINT', True),  # '*SECRET*' matches
+        # Genuinely non-matching names — should pass through unredacted.
+        ('PUBLIC_URL', False),
+        ('DB_HOSTNAME', False),
+        ('DEPLOY_ENV', False),
+        ('REQUEST_ID', False),
+    ],
+)
+async def test_record_task_started_env_redaction_coverage(recorder, name: str, expected_redacted: bool):
+    """Documents the redaction contract: aggressive pattern match accepts
+    false positives rather than leaking a secret under an innocuous name.
+
+    The patterns in ``_SECRET_ENV_PATTERNS`` use fnmatch-style globs (``*X*``),
+    so ``PASSWORD_RESET_URL`` matches ``*PASSWORD*`` and is redacted even
+    though a "reset URL" isn't secret per se. This behavior is intentional —
+    the recorder DB is downloadable via the debug UI and the cost of an
+    over-redacted URL in logs is far lower than a leaked credential.
+    """
+    import json
+
+    task = make_task('t1')
+    # Non-empty value so the redaction produces '***' (empty stays empty).
+    task.env = {name: 'test-value-123'}
+    recorder.record_task_started(task, partition=0)
+    await recorder._flush()
+
+    events = await recorder.get_events(event_type='task_started')
+    meta = json.loads(events[0]['metadata'])
+    stored = meta['env'][name]
+    if expected_redacted:
+        assert stored == '***', f'{name!r} expected to be redacted; got {stored!r}'
+    else:
+        assert stored == 'test-value-123', f'{name!r} expected to pass through; got {stored!r}'
+
+
 async def test_record_task_started_env_sanitize_does_not_mutate_task(recorder):
     """The real task.env must stay intact on the task object — the subprocess
     launch still needs the real secret values; only the recorded copy is redacted.

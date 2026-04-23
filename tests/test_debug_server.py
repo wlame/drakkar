@@ -19,6 +19,7 @@ from drakkar.debug_server import (
     _format_ts_full,
     _format_ts_ms,
     _format_uptime,
+    _origin_allowed,
     _worker_group,
     create_debug_app,
 )
@@ -2813,6 +2814,58 @@ class TestAuthToken:
             )
             assert resp.status_code == 200
 
+    async def test_non_ascii_bearer_token_returns_401_not_500(self, mock_recorder, mock_app):
+        """Non-ASCII bearer tokens must fail-closed to 401 instead of 500.
+
+        Regression for phase 4 review finding: ``secrets.compare_digest``
+        raises ``TypeError: comparing strings with non-ASCII characters is
+        not supported`` when either operand contains non-ASCII. Without
+        the ``try/except TypeError`` in ``_token_matches``, FastAPI's
+        default exception handler would turn that into a 500 — noisy,
+        attacker-triggerable, and violating the documented 401 contract.
+
+        httpx refuses to serialize non-ASCII str header values (raises
+        ``UnicodeEncodeError`` on the client side), so we pass raw bytes
+        — this matches what a hostile HTTP client at the wire level would
+        actually send and funnels through starlette's header decoder the
+        same way a real request would.
+        """
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        mock_recorder._config = cfg
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            # UTF-8 encoded bytes for the non-ASCII o-circumflex (U+00F4).
+            # Using bytes bypasses httpx's ASCII-only string check and
+            # reaches starlette's header decoder as a raw byte sequence,
+            # which then surfaces as a non-ASCII str in ``request.headers``.
+            resp = await c.get(
+                '/api/debug/databases',
+                headers={'Authorization': b'Bearer t\xc3\xb4ken'},
+            )
+            assert resp.status_code == 401, f'non-ASCII bearer should 401, got {resp.status_code}'
+
+    async def test_non_ascii_configured_token_returns_401_not_500(self, mock_recorder, mock_app):
+        """Operator-error path: non-ASCII ``auth_token`` in YAML → clean 401s, not 500s.
+
+        Exercises the other TypeError arm: when the *configured* token
+        itself is non-ASCII, every auth check must fail-closed with 401,
+        not explode into 500s that fill logs and trip 5xx alerting.
+        """
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='non-ascïi')
+        mock_recorder._config = cfg
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            # Plain ASCII provided token → compare_digest raises TypeError
+            # on the *configured* (non-ASCII) operand; handler must map
+            # that to 401 instead of 500.
+            resp = await c.get(
+                '/api/debug/databases',
+                headers={'Authorization': 'Bearer secret-123'},
+            )
+            assert resp.status_code == 401, f'ASCII provided + bad config → 401, got {resp.status_code}'
+
 
 # ---------------------------------------------------------------------------
 # WebSocket auth + origin validation tests
@@ -2831,36 +2884,57 @@ class TestWebSocketAuth:
     def test_auth_uses_timing_safe_compare(self, mock_recorder, mock_app, monkeypatch):
         """The auth code path must call ``secrets.compare_digest`` for token check.
 
-        We wrap ``secrets.compare_digest`` with a counter and assert it was
-        invoked at least once for a valid token check. This proves the code
-        is using the timing-safe primitive rather than plain ``==``.
+        Stronger than a "was it called?" assertion: we capture the exact
+        ``(a, b)`` pair passed to ``compare_digest`` and verify both that the
+        provided token and the configured token reach it AND that the auth
+        code path uses the result (the endpoint returns 200 for a valid
+        token and 401 for an invalid one). A buggy implementation that
+        called ``compare_digest`` but ignored the return value would fail
+        the 401 half of this test.
         """
         import secrets as secrets_mod
 
         from drakkar import debug_server as ds
 
-        call_count = {'n': 0}
+        captured_calls: list[tuple[str, str]] = []
         real_compare = secrets_mod.compare_digest
 
-        def counting_compare(a, b):
-            call_count['n'] += 1
+        def capturing_compare(a, b):
+            # Record the exact argument pair (cast to str so the assertion
+            # below doesn't depend on bytes/str layout — compare_digest
+            # accepts either, and we only care about operand identity).
+            captured_calls.append((a if isinstance(a, str) else a.decode(), b if isinstance(b, str) else b.decode()))
             return real_compare(a, b)
 
-        monkeypatch.setattr(ds.secrets, 'compare_digest', counting_compare)
+        monkeypatch.setattr(ds.secrets, 'compare_digest', capturing_compare)
 
         cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
 
-        from httpx import ASGITransport as _AT
-        from httpx import AsyncClient as _AC
-
         async def _call():
-            transport = _AT(app=fastapi_app)
-            async with _AC(transport=transport, base_url='http://test') as c:
-                await c.get('/api/debug/databases', headers={'Authorization': 'Bearer secret-123'})
+            transport = ASGITransport(app=fastapi_app)
+            async with AsyncClient(transport=transport, base_url='http://test') as c:
+                # Positive case: valid token → 200. Bad-token case: 401.
+                ok = await c.get('/api/debug/databases', headers={'Authorization': 'Bearer secret-123'})
+                bad = await c.get('/api/debug/databases', headers={'Authorization': 'Bearer wrong'})
+                return ok.status_code, bad.status_code
 
-        asyncio.run(_call())
-        assert call_count['n'] >= 1, 'secrets.compare_digest must be invoked during auth'
+        ok_status, bad_status = asyncio.run(_call())
+
+        # The helper must have been called with the provided + configured
+        # token pair (order: provided, configured — matches
+        # ``_token_matches`` signature).
+        assert ('secret-123', 'secret-123') in captured_calls, (
+            f'expected (provided, configured) pair in compare_digest calls; got {captured_calls}'
+        )
+        assert ('wrong', 'secret-123') in captured_calls, (
+            f'bad-token attempt should also reach compare_digest; got {captured_calls}'
+        )
+        # The result must actually gate auth — buggy impl ignoring the
+        # return value would still pass both compare_digest checks but
+        # fail one of the status assertions.
+        assert ok_status == 200, f'valid token should be accepted; got {ok_status}'
+        assert bad_status == 401, f'invalid token should be rejected; got {bad_status}'
 
     def test_ws_without_token_when_auth_required_is_rejected(self, mock_recorder, mock_app):
         """WS connect without token while ``auth_token`` is set is rejected."""
@@ -2994,35 +3068,154 @@ class TestWebSocketAuth:
                     ws.receive_text()
         assert exc_info.value.code == 4403
 
-    def test_ws_non_browser_client_no_origin_accepted(self, mock_recorder, mock_app):
-        """Non-browser clients without Origin header are accepted (same-origin fallback)."""
+    def test_ws_non_ascii_token_closes_with_4401(self, mock_recorder, mock_app):
+        """Non-ASCII token on WS handshake closes with 4401, not a server error.
+
+        Regression for phase 4 review finding: ``secrets.compare_digest``
+        raises ``TypeError`` on non-ASCII operands. In the WS endpoint the
+        auth check runs *before* ``ws.close(code=4401, ...)`` — if the
+        TypeError escaped, the handshake would abort with a generic
+        server error instead of the documented 4401 close code.
+        """
+        from starlette.websockets import WebSocketDisconnect
+
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        real_recorder = EventRecorder(cfg)
+        real_recorder._running = True
+        fastapi_app = create_debug_app(cfg, real_recorder, mock_app)
+
+        # Non-ASCII ``?token=`` query param — must funnel through the same
+        # handshake path that closes with 4401 on bad creds.
+        with TestClient(fastapi_app) as tc:  # noqa: SIM117
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                with tc.websocket_connect('/ws?token=non-asc%C3%AFi') as ws:
+                    ws.receive_text()
+        assert exc_info.value.code == 4401, f'expected 4401 close, got {exc_info.value.code}'
+
+    def test_ws_same_origin_mixed_case_host_accepted(self, mock_recorder, mock_app):
+        """Same-origin fallback must be case-insensitive on host.
+
+        The TestClient sends both Origin and Host headers; making them differ
+        only in casing verifies the helper lowercases both sides before
+        comparing. Without the normalization, this handshake would be closed
+        with 4403 even though the two headers point to the same origin.
+        """
         cfg = DebugConfig(
             enabled=True,
             port=8080,
             db_dir='/tmp',
             auth_token='secret-123',
+            allowed_ws_origins=[],
         )
         real_recorder = EventRecorder(cfg)
         real_recorder._running = True
         fastapi_app = create_debug_app(cfg, real_recorder, mock_app)
 
-        # TestClient sets an Origin header automatically; strip by supplying
-        # explicit empty-dict headers is not enough. Instead connect via the
-        # bearer-header path and pass subprotocols=None. The default TestClient
-        # sends Origin=http://testserver — which matches Host, so this already
-        # passes for the positive same-origin case. For the "absent origin"
-        # path we rely on the behavior that Host-matching origin = accept.
         with (
             TestClient(fastapi_app) as tc,
             tc.websocket_connect(
                 '/ws',
-                headers={'authorization': 'Bearer secret-123'},
+                headers={
+                    'authorization': 'Bearer secret-123',
+                    # Upper-case host in Origin, lower-case in Host — case-
+                    # insensitive compare accepts this.
+                    'origin': 'http://TESTSERVER',
+                    'host': 'testserver',
+                },
             ) as ws,
         ):
-            real_recorder._record({'ts': time.time(), 'event': 'non_browser_ok', 'partition': 0})
+            real_recorder._record({'ts': time.time(), 'event': 'case_ok', 'partition': 0})
             data = ws.receive_text()
             event = json.loads(data)
-            assert event['event'] == 'non_browser_ok'
+            assert event['event'] == 'case_ok'
+
+
+# ---------------------------------------------------------------------------
+# ``_origin_allowed`` helper — direct unit tests
+# ---------------------------------------------------------------------------
+# The helper lives at module scope (not nested inside ``create_debug_app``),
+# so we can call it directly with synthetic ``DebugConfig`` values and
+# hand-crafted origin/host strings. This gives coverage of the absent-Origin
+# branch that TestClient can't exercise (it always sends Origin), and of the
+# default-port normalization that browsers apply inconsistently to Origin vs.
+# Host. Each test is a plain function — no FastAPI app, no event loop.
+
+
+class TestOriginAllowedHelper:
+    """Direct unit tests for ``_origin_allowed`` — no TestClient required."""
+
+    def test_absent_origin_accepted(self):
+        """Non-browser clients omit Origin — accept (token was already checked)."""
+        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        assert _origin_allowed(None, 'testserver', cfg) is True
+
+    def test_absent_origin_accepted_even_with_allowlist(self):
+        """Absent Origin is accepted regardless of allowlist — we err on the
+        side of letting authenticated tools connect rather than rejecting a
+        missing header a malicious browser couldn't omit anyway."""
+        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
+        assert _origin_allowed(None, 'testserver', cfg) is True
+
+    def test_allowlist_match_accepted(self):
+        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
+        assert _origin_allowed('https://ops.internal', 'ignored', cfg) is True
+
+    def test_allowlist_case_insensitive(self):
+        """Uppercase Origin must match lowercase allowlist entry."""
+        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
+        assert _origin_allowed('https://OPS.INTERNAL', 'ignored', cfg) is True
+
+    def test_allowlist_default_port_ignored(self):
+        """Browsers strip :443 from https Origin but operators may write it
+        explicitly in the allowlist. Normalization must treat the two forms
+        as equal."""
+        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal:443'])
+        assert _origin_allowed('https://ops.internal', 'ignored', cfg) is True
+
+    def test_allowlist_miss_rejected(self):
+        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
+        assert _origin_allowed('https://evil.com', 'ignored', cfg) is False
+
+    def test_same_origin_exact_match(self):
+        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        assert _origin_allowed('http://testserver', 'testserver', cfg) is True
+
+    def test_same_origin_case_insensitive(self):
+        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        assert _origin_allowed('http://Example.com', 'example.com', cfg) is True
+
+    def test_same_origin_default_port_on_origin_missing_on_host(self):
+        """Browser may send ``Origin: http://example.com`` (no port) while
+        the Host header is ``example.com:80``. Normalization collapses both
+        to ``(example.com, None)`` so the compare succeeds."""
+        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        assert _origin_allowed('http://example.com', 'example.com:80', cfg) is True
+
+    def test_same_origin_default_port_on_host_missing_on_origin(self):
+        """Inverse of the above: ``Origin: http://example.com:80`` + Host
+        ``example.com`` must also match."""
+        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        assert _origin_allowed('http://example.com:80', 'example.com', cfg) is True
+
+    def test_same_origin_non_default_port_mismatch_rejected(self):
+        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        assert _origin_allowed('http://example.com:8080', 'example.com:9090', cfg) is False
+
+    def test_same_origin_ipv6_host_bracketed(self):
+        """RFC 7230 allows ``Host: [::1]:8080`` for IPv6 literals."""
+        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        assert _origin_allowed('http://[::1]:8080', '[::1]:8080', cfg) is True
+
+    def test_same_origin_host_mismatch_rejected(self):
+        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        assert _origin_allowed('https://evil.com', 'testserver', cfg) is False
+
+    def test_malformed_origin_rejected(self):
+        """Garbage in the Origin header must not cause the helper to raise —
+        return False so the endpoint closes the connection cleanly."""
+        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        # No scheme → urlparse returns empty hostname → mismatch
+        assert _origin_allowed('not-a-url', 'testserver', cfg) is False
 
 
 # ---------------------------------------------------------------------------

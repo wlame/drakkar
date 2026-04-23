@@ -349,55 +349,49 @@ async def test_start_disabled_cache_does_not_open_connection(tmp_path):
         await engine.stop()
 
 
-# --- max_memory_entries=None warning at startup -----------------------------
+# --- max_memory_entries=None warning at config load ------------------------
 
 
-async def test_start_with_max_memory_entries_none_emits_warning(tmp_path):
+def test_cache_config_with_max_memory_entries_none_emits_warning():
     """When the operator explicitly opts into an unbounded memory dict
-    (max_memory_entries=None), the engine must emit a warning at startup so
-    the intentional choice is visible in logs. We capture structlog events
-    with ``capture_logs`` and assert the expected event name is present."""
+    (``max_memory_entries=None``), the config validator must emit a warning
+    at load time so the intentional choice is visible in logs. The warning
+    lives in the config layer (not the engine) so it fires once per process
+    even if ``start()`` runs multiple times (tests, rotation, reinit)."""
     import structlog.testing
 
-    engine = CacheEngine(
-        config=CacheConfig(enabled=True, max_memory_entries=None),
-        debug_config=make_debug_config(tmp_path),
-        worker_id='w1',
-        cluster_name='',
-        recorder=None,
-    )
-    try:
-        with structlog.testing.capture_logs() as captured:
-            await engine.start()
-        # Filter out unrelated events (peer_sync disabled info, etc.) and
-        # assert exactly the unbounded-memory warning fired.
-        unbounded_events = [ev for ev in captured if ev.get('event') == 'cache_max_memory_entries_unbounded']
-        assert len(unbounded_events) == 1
-        assert unbounded_events[0]['log_level'] == 'warning'
-        assert unbounded_events[0]['worker_id'] == 'w1'
-    finally:
-        await engine.stop()
+    with structlog.testing.capture_logs() as captured:
+        # Construct the config directly — validators run on instantiation.
+        CacheConfig(enabled=True, max_memory_entries=None)
+    unbounded_events = [ev for ev in captured if ev.get('event') == 'cache_max_memory_entries_unbounded']
+    assert len(unbounded_events) == 1
+    assert unbounded_events[0]['log_level'] == 'warning'
+    # ``worker_id`` should NOT appear — the warning fires at config load,
+    # which is worker-agnostic; including a worker id would be misleading.
+    assert 'worker_id' not in unbounded_events[0]
 
 
-async def test_start_with_default_max_memory_entries_does_not_warn(tmp_path):
+def test_cache_config_with_default_max_memory_entries_does_not_warn():
     """With the default cap of 10_000, the unbounded-memory warning must
     NOT fire — that warning is reserved for the explicit opt-in path."""
     import structlog.testing
 
-    engine = CacheEngine(
-        config=CacheConfig(enabled=True),  # default max_memory_entries=10_000
-        debug_config=make_debug_config(tmp_path),
-        worker_id='w1',
-        cluster_name='',
-        recorder=None,
-    )
-    try:
-        with structlog.testing.capture_logs() as captured:
-            await engine.start()
-        unbounded_events = [ev for ev in captured if ev.get('event') == 'cache_max_memory_entries_unbounded']
-        assert unbounded_events == []
-    finally:
-        await engine.stop()
+    with structlog.testing.capture_logs() as captured:
+        CacheConfig(enabled=True)  # default max_memory_entries=10_000
+    unbounded_events = [ev for ev in captured if ev.get('event') == 'cache_max_memory_entries_unbounded']
+    assert unbounded_events == []
+
+
+def test_cache_config_disabled_with_none_does_not_warn():
+    """When the cache is disabled the setting has no effect, so the warning
+    should not fire — it would mislead operators into thinking the cache is
+    using unbounded memory when in fact no cache exists."""
+    import structlog.testing
+
+    with structlog.testing.capture_logs() as captured:
+        CacheConfig(enabled=False, max_memory_entries=None)
+    unbounded_events = [ev for ev in captured if ev.get('event') == 'cache_max_memory_entries_unbounded']
+    assert unbounded_events == []
 
 
 # --- constants --------------------------------------------------------------

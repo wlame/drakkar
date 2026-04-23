@@ -937,21 +937,24 @@ async def test_poll_loop_executor_idle_waste_metric(test_config):
 # --- Task 7: Debug security startup gate ---
 
 
-def _config_with_debug(debug_cfg: DebugConfig) -> DrakkarConfig:
-    """Build a minimal DrakkarConfig with an explicit DebugConfig for gating tests."""
-    return DrakkarConfig(
-        kafka=KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
-        executor=ExecutorConfig(binary_path='/bin/echo'),
-        sinks=SinksConfig(kafka={'r': KafkaSinkConfig(topic='test-out')}),
-        metrics=MetricsConfig(enabled=False),
-        logging=LoggingConfig(level='WARNING', format='console'),
-        debug=debug_cfg,
-    )
+@pytest.fixture
+def config_with_debug(test_config_no_sinks):
+    """Factory fixture — returns a builder that swaps ``debug`` on the no-sinks baseline.
+
+    The security gating tests only read ``config.debug``, so reusing the
+    existing minimal config and overriding the ``debug`` field keeps the test
+    setup a single line without duplicating the Kafka/executor/sinks scaffold.
+    """
+
+    def _build(debug_cfg: DebugConfig) -> DrakkarConfig:
+        return test_config_no_sinks.model_copy(update={'debug': debug_cfg})
+
+    return _build
 
 
-def test_insecure_debug_config_raises_at_startup():
+def test_insecure_debug_config_raises_at_startup(config_with_debug):
     """debug.enabled + non-loopback host + empty auth_token must fail fast."""
-    config = _config_with_debug(DebugConfig(enabled=True, host='0.0.0.0', auth_token=''))
+    config = config_with_debug(DebugConfig(enabled=True, host='0.0.0.0', auth_token=''))
     with pytest.raises(InsecureDebugConfigError) as excinfo:
         _validate_debug_security(config)
 
@@ -964,34 +967,34 @@ def test_insecure_debug_config_raises_at_startup():
     assert 'debug.enabled=false' in msg
 
 
-def test_debug_config_with_auth_token_allowed_on_any_host():
+def test_debug_config_with_auth_token_allowed_on_any_host(config_with_debug):
     """Non-loopback host is fine as long as auth_token is set."""
-    config = _config_with_debug(DebugConfig(enabled=True, host='0.0.0.0', auth_token='secret-token'))
+    config = config_with_debug(DebugConfig(enabled=True, host='0.0.0.0', auth_token='secret-token'))
     _validate_debug_security(config)  # must not raise
 
 
-def test_debug_config_localhost_allowed_without_auth_token():
+def test_debug_config_localhost_allowed_without_auth_token(config_with_debug):
     """Default host (127.0.0.1) stays safe without auth_token — dev workflow preserved."""
-    config = _config_with_debug(DebugConfig(enabled=True, host='127.0.0.1', auth_token=''))
+    config = config_with_debug(DebugConfig(enabled=True, host='127.0.0.1', auth_token=''))
     _validate_debug_security(config)  # must not raise
 
 
 @pytest.mark.parametrize('loopback', ['127.0.0.1', 'localhost', '::1', 'LOCALHOST', ' 127.0.0.1 '])
-def test_debug_config_loopback_variants_allowed(loopback: str):
+def test_debug_config_loopback_variants_allowed(config_with_debug, loopback: str):
     """Case-insensitive match with whitespace tolerance on loopback hosts."""
-    config = _config_with_debug(DebugConfig(enabled=True, host=loopback, auth_token=''))
+    config = config_with_debug(DebugConfig(enabled=True, host=loopback, auth_token=''))
     _validate_debug_security(config)  # must not raise
 
 
-def test_debug_config_disabled_skips_check():
+def test_debug_config_disabled_skips_check(config_with_debug):
     """debug.enabled=False means no debug server starts, so the check is a no-op."""
-    config = _config_with_debug(DebugConfig(enabled=False, host='0.0.0.0', auth_token=''))
+    config = config_with_debug(DebugConfig(enabled=False, host='0.0.0.0', auth_token=''))
     _validate_debug_security(config)  # must not raise
 
 
-def test_debug_config_whitespace_only_auth_token_treated_as_empty():
+def test_debug_config_whitespace_only_auth_token_treated_as_empty(config_with_debug):
     """A token of only spaces is not a real token — must still fail."""
-    config = _config_with_debug(DebugConfig(enabled=True, host='0.0.0.0', auth_token='   '))
+    config = config_with_debug(DebugConfig(enabled=True, host='0.0.0.0', auth_token='   '))
     with pytest.raises(InsecureDebugConfigError):
         _validate_debug_security(config)
 

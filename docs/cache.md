@@ -368,15 +368,21 @@ unclustered workers, and global-scoped entries from anyone.
 
 ### LRU eviction
 
-`max_memory_entries=None` (default) → the in-memory dict grows
-unbounded. Fine for short-lived workers or small caches; use an LRU
-cap in long-running high-volume production workers.
+`max_memory_entries=10_000` (**default**) → the in-memory dict is capped at
+10,000 entries. Production-safe default — prevents unbounded growth under
+write-heavy workloads. Entries beyond the cap are evicted LRU, with pending
+dirty-ops preserved (see below).
 
-When `max_memory_entries=N` is set and adding the N+1-th entry would
-exceed the cap, the **least-recently-used** key is popped from the
-dict. Its pending dirty-op (if any) is **preserved** — the DB is the
-source of truth, and losing a dirty SET before flush would silently
-drop the write.
+`max_memory_entries=None` → the in-memory dict grows unbounded. Set this
+explicitly only when you have a bounded key universe or your own eviction
+strategy. The config layer emits a `cache_max_memory_entries_unbounded`
+warning at startup so the intentional choice is visible in logs — unlike the
+default, this knob needs operator awareness.
+
+When the cap is set and adding the N+1-th entry would exceed it, the
+**least-recently-used** key is popped from the dict. Its pending dirty-op
+(if any) is **preserved** — the DB is the source of truth, and losing a
+dirty SET before flush would silently drop the write.
 
 Evicted keys fall through to the DB on the next `get()`, which warms
 memory again (and may evict a different key in turn). The

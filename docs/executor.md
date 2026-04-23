@@ -387,6 +387,19 @@ async def arrange(self, messages, pending):
 Per-task env is useful when the binary reads configuration from
 environment variables and different messages need different settings.
 
+!!! note "Per-task env is visible in the debug UI (after redaction)"
+    Values in `task.env` are surfaced on the Message Trace and Task
+    Results tabs of the debug UI — the full env dict is stored in the
+    recorder's `task_started` event metadata. Before storage, values
+    whose names match secret patterns (`*PASSWORD*`, `*SECRET*`,
+    `*TOKEN*`, `*_KEY`, `*API_KEY*`, `*CREDENTIAL*`, `*_DSN`) are
+    replaced with `***`; other values have URL-embedded credentials
+    stripped. The subprocess still receives the real values — only the
+    recorded copy is redacted. For secrets whose names don't match the
+    patterns, use `ExecutorConfig.env` (framework-level, never written
+    to the recorder) or pass them via files on disk. See
+    [Secrets are redacted before they reach disk](observability.md#worker_config-autodiscovery).
+
 ### Override example
 
 Config sets a default, task overrides it for specific messages:

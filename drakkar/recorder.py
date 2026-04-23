@@ -260,6 +260,15 @@ class EventRecorder:
             'produced': 0,
             'committed': 0,
         }
+        # Serialize ``_flush`` calls. The periodic ``_flush_loop`` and
+        # debug endpoints (via ``_dispatch_to_main_loop``) can both
+        # schedule flushes on the main loop. Both paths drain
+        # ``self._buffer`` and observe ``recorder_flush_duration``; without
+        # a lock, two concurrent flushes could each grab half of the
+        # buffer and race on the histogram observation. The lock is
+        # bound to whichever loop first invokes ``_flush`` — on the main
+        # loop for production flows — and is cheap: a plain asyncio.Lock.
+        self._flush_lock = asyncio.Lock()
 
     @property
     def db_path(self) -> str:
@@ -1247,50 +1256,57 @@ class EventRecorder:
             await self._flush()
 
     async def _flush(self) -> None:
-        if not self._db or not self._buffer:
-            return
-        if not self._config.store_events:
-            self._buffer.clear()
-            # Reflect the drain in the gauge even when events aren't persisted —
-            # buffer length is what the gauge reports, not DB row count.
-            recorder_buffer_size.set(0)
-            return
-        batch = []
-        while self._buffer:
-            batch.append(self._buffer.popleft())
-        columns = [
-            'ts',
-            'dt',
-            'event',
-            'partition',
-            'offset',
-            'task_id',
-            'args',
-            'stdout_size',
-            'stdout',
-            'stderr',
-            'exit_code',
-            'duration',
-            'output_topic',
-            'metadata',
-            'pid',
-            'labels',
-        ]
-        placeholders = ', '.join(['?'] * len(columns))
-        col_names = ', '.join(columns)
-        query = f'INSERT INTO events ({col_names}) VALUES ({placeholders})'
-        rows = [tuple(entry.get(col) for col in columns) for entry in batch]
-        # Observe the full flush body (executemany + commit) — the histogram
-        # surfaces disk-I/O latency tail so operators can alert on p99
-        # regressions before the buffer backs up enough to drop events.
-        flush_start = time.monotonic()
-        await self._db.executemany(query, rows)
-        await self._db.commit()
-        recorder_flush_duration.observe(time.monotonic() - flush_start)
-        # Post-drain: the gauge should report the new buffer depth. Usually
-        # zero, but a concurrent _record() during the await could have
-        # appended in between — reading len(self._buffer) is the correct value.
-        recorder_buffer_size.set(len(self._buffer))
+        # The lock serializes concurrent flushes. Without it, the periodic
+        # ``_flush_loop`` and a debug-endpoint-initiated flush could
+        # interleave on the same deque and histogram — the second flush
+        # would typically find an empty buffer and early-return, but the
+        # cost of acquiring an uncontended asyncio.Lock is negligible and
+        # the safety is worth it.
+        async with self._flush_lock:
+            if not self._db or not self._buffer:
+                return
+            if not self._config.store_events:
+                self._buffer.clear()
+                # Reflect the drain in the gauge even when events aren't persisted —
+                # buffer length is what the gauge reports, not DB row count.
+                recorder_buffer_size.set(0)
+                return
+            batch = []
+            while self._buffer:
+                batch.append(self._buffer.popleft())
+            columns = [
+                'ts',
+                'dt',
+                'event',
+                'partition',
+                'offset',
+                'task_id',
+                'args',
+                'stdout_size',
+                'stdout',
+                'stderr',
+                'exit_code',
+                'duration',
+                'output_topic',
+                'metadata',
+                'pid',
+                'labels',
+            ]
+            placeholders = ', '.join(['?'] * len(columns))
+            col_names = ', '.join(columns)
+            query = f'INSERT INTO events ({col_names}) VALUES ({placeholders})'
+            rows = [tuple(entry.get(col) for col in columns) for entry in batch]
+            # Observe the full flush body (executemany + commit) — the histogram
+            # surfaces disk-I/O latency tail so operators can alert on p99
+            # regressions before the buffer backs up enough to drop events.
+            flush_start = time.monotonic()
+            await self._db.executemany(query, rows)
+            await self._db.commit()
+            recorder_flush_duration.observe(time.monotonic() - flush_start)
+            # Post-drain: the gauge should report the new buffer depth. Usually
+            # zero, but a concurrent _record() during the await could have
+            # appended in between — reading len(self._buffer) is the correct value.
+            recorder_buffer_size.set(len(self._buffer))
 
     async def _retention_loop(self) -> None:
         while self._running:

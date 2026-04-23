@@ -8,9 +8,15 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
+import structlog
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Module-scope logger for config-time warnings (field/model validators).
+# These fire once per process at config load, so the sync structlog API
+# is fine — no coroutine context to await in.
+logger = structlog.get_logger()
 
 # Hosts that must never be the target of an operator-configured HTTP sink.
 # These are cloud metadata endpoints which, if accessible, return IAM creds
@@ -336,9 +342,14 @@ class DebugConfig(BaseModel):
     auth_token: str = Field(
         default='',
         description=(
-            'Bearer token for sensitive debug endpoints (database download, merge). '
-            'When empty, no authentication is required. When set, protected endpoints '
-            'require an Authorization: Bearer <token> header or ?token=<token> query parameter.'
+            'Bearer token for sensitive debug endpoints (database download, merge) '
+            'and for the WebSocket live-event stream. When empty, no authentication '
+            'is required. When set, protected HTTP endpoints require an '
+            'Authorization: Bearer <token> header or ?token=<token> query parameter; '
+            'WebSocket connections without a valid token are closed with code 4401. '
+            'Comparison uses ``secrets.compare_digest`` to avoid timing side-channels. '
+            'Trailing/leading whitespace is stripped on load to avoid silent '
+            'mismatches when YAML accidentally quotes spaces.'
         ),
     )
     allowed_ws_origins: list[str] = Field(
@@ -349,6 +360,23 @@ class DebugConfig(BaseModel):
             'auth_token = no origin check (dev workflow preserved).'
         ),
     )
+
+    @field_validator('auth_token', mode='before')
+    @classmethod
+    def _strip_auth_token(cls, v: object) -> object:
+        """Strip leading/trailing whitespace from ``auth_token`` on load.
+
+        Operators sometimes write ``auth_token: " secret "`` in YAML (quoted
+        to preserve a trailing space, by accident). With the raw value kept,
+        ``secrets.compare_digest`` would require clients to send the literal
+        space-padded string — a footgun. We strip once here so the stored
+        value is the canonical token; the startup security gate and the
+        ``_token_matches`` helper both see the same post-strip value.
+        """
+        if isinstance(v, str):
+            return v.strip()
+        return v
+
     debug_url: str = ''
     db_dir: str = '/tmp'
     store_events: bool = True
@@ -437,6 +465,24 @@ class CacheConfig(BaseModel):
         ),
     )
     peer_sync: CachePeerSyncConfig = Field(default_factory=CachePeerSyncConfig)
+
+    @model_validator(mode='after')
+    def _warn_if_unbounded(self) -> 'CacheConfig':
+        """Emit a startup warning when ``max_memory_entries`` is explicitly unbounded.
+
+        Fires once at config load rather than inside ``CacheEngine.start()`` —
+        the engine's ``start`` can be called multiple times in tests and on
+        rotation, and the worker-id context the engine had is irrelevant for
+        a choice that lives in the config itself. We only warn when the cache
+        is actually enabled (otherwise the setting has no effect).
+        """
+        if self.enabled and self.max_memory_entries is None:
+            logger.warning(
+                'cache_max_memory_entries_unbounded',
+                category='cache',
+                reason='cache.max_memory_entries=None configured — memory is unbounded, monitor RSS under load',
+            )
+        return self
 
 
 # --- Root config ---

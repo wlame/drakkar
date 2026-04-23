@@ -364,14 +364,31 @@ logging:
 
 The debug subsystem provides a [flight recorder](observability.md#flight-recorder) (SQLite-backed event log), a [web UI dashboard](observability.md#debug-ui), WebSocket live streaming, and [worker autodiscovery](observability.md#worker-autodiscovery). This is the largest configuration section.
 
+### Insecure-startup failure
+
+The framework rejects a debug configuration that exposes the UI on a public interface without authentication. Concretely, startup fails with `InsecureDebugConfigError` when **all three** conditions are met:
+
+1. `debug.enabled` is `true`
+2. `debug.host` is **not** a loopback address (`127.0.0.1`, `localhost`, `::1`; case-insensitive, trailing whitespace tolerated)
+3. `debug.auth_token` is empty or whitespace-only
+
+Any one of the following fixes resolves the failure:
+
+- **Set a strong `auth_token`.** Generate a 32+ character random value (e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"`) and either embed it in YAML or pass it via `DRAKKAR_DEBUG__AUTH_TOKEN`. This is the production-grade fix.
+- **Bind to loopback.** Set `debug.host=127.0.0.1` so the UI is only reachable from the host. Suitable when you reach the UI via SSH tunneling or a local-only proxy.
+- **Disable debug.** Set `debug.enabled=false` if the worker doesn't need the flight recorder at all.
+
+The check runs at `DrakkarApp._async_run()` startup, before the recorder or debug server is constructed -- so a misconfigured worker fails fast rather than exposing a vulnerable surface. See `drakkar/app.py::_validate_debug_security` for the implementation.
+
 ### Core Settings
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `enabled` | `bool` | `true` | | Enable or disable the entire debug feature. Set to `false` to skip the flight recorder, web UI, and all associated overhead. |
-| `host` | `str` | `'127.0.0.1'` | | Bind address for the debug server. Default `127.0.0.1` (localhost only). Use `0.0.0.0` to expose on all interfaces. |
+| `host` | `str` | `'127.0.0.1'` | | Bind address for the debug server. Default `127.0.0.1` (localhost only). Use `0.0.0.0` to expose on all interfaces. Non-loopback hosts require `auth_token` -- the worker raises `InsecureDebugConfigError` at startup otherwise. |
 | `port` | `int` | `8080` | 1--65535 | Port for the debug web UI (FastAPI server). |
-| `auth_token` | `str` | `''` | | Bearer token for sensitive debug endpoints (database download, merge, database listing). When empty, no authentication is required. When set, protected endpoints require `Authorization: Bearer <token>` header or `?token=<token>` query parameter. Read-only pages (dashboard, live, partitions, sinks, history) are always accessible. |
+| `auth_token` | `str` | `''` | | Bearer token for sensitive debug endpoints (database download, merge, database listing) **and** for the WebSocket live-event stream at `/ws`. When empty, no authentication is required. When set, protected HTTP endpoints require `Authorization: Bearer <token>` header or `?token=<token>` query parameter; WebSocket connections without a valid token are closed with code 4401. Comparison uses `secrets.compare_digest` to avoid timing side-channels. Leading/trailing whitespace is stripped on config load so `auth_token: " secret "` in YAML still works. Read-only pages (dashboard, live, partitions, sinks, history) are always accessible. |
+| `allowed_ws_origins` | `list[str]` | `[]` | | Explicit allowlist of WebSocket `Origin` header values. Only consulted when `auth_token` is set (empty token = no origin check, dev workflow preserved). Empty list + non-empty `auth_token` = same-origin fallback: Origin host must match the `Host` header. Non-empty list = strict allowlist; any Origin not in the list is rejected with close code 4403. Comparison is case-insensitive and normalizes default ports (`:80` for http, `:443` for https) so `https://ops.internal` and `https://ops.internal:443` are equivalent. Missing Origin header (non-browser clients) is always accepted -- the token check already authenticated them. |
 | `debug_url` | `str` | `''` | | External URL for the debug UI. Used when workers discover each other -- if set, this URL is advertised instead of the auto-detected `http://{ip}:{port}`. Useful behind load balancers or Kubernetes ingresses. |
 | `db_dir` | `str` | `'/tmp'` | | Directory for SQLite database files. Set to `''` to run without any disk persistence (in-memory only, WebSocket streaming still works). Use a shared filesystem (e.g., NFS, EFS) for cross-worker autodiscovery and merge. |
 
@@ -638,7 +655,10 @@ Common environment variables and their corresponding YAML paths:
 | `DRAKKAR_LOGGING__FORMAT` | `logging.format` | `console` |
 | `DRAKKAR_LOGGING__OUTPUT` | `logging.output` | `/var/log/drakkar/worker.log` |
 | `DRAKKAR_DEBUG__ENABLED` | `debug.enabled` | `false` |
+| `DRAKKAR_DEBUG__HOST` | `debug.host` | `0.0.0.0` |
 | `DRAKKAR_DEBUG__PORT` | `debug.port` | `9000` |
+| `DRAKKAR_DEBUG__AUTH_TOKEN` | `debug.auth_token` | `32-char-random-string` |
+| `DRAKKAR_DEBUG__ALLOWED_WS_ORIGINS` | `debug.allowed_ws_origins` | `["https://ops.internal"]` |
 | `DRAKKAR_DEBUG__DB_DIR` | `debug.db_dir` | `/shared/debug` |
 | `DRAKKAR_DEBUG__STORE_EVENTS` | `debug.store_events` | `true` |
 | `DRAKKAR_DEBUG__STORE_CONFIG` | `debug.store_config` | `true` |

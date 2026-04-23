@@ -9,10 +9,10 @@ import re
 import secrets
 import threading
 import time
-import typing
+from collections.abc import Coroutine
 from datetime import UTC
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlparse
 
 import structlog
@@ -119,6 +119,147 @@ logger = structlog.get_logger()
 WS_DRAIN_SLEEP = 0.02  # seconds to sleep when WebSocket event queue is empty
 
 TEMPLATES_DIR = Path(__file__).parent / 'templates'
+
+# Default ports are implicit in browsers' Origin header but may appear
+# explicitly in the Host header (and vice-versa). We strip both sides to
+# the same canonical form before comparing so a legitimate same-origin
+# request never trips the check on a ``:80``/``:443`` mismatch.
+_DEFAULT_PORTS = {'http': 80, 'https': 443, 'ws': 80, 'wss': 443}
+
+
+def _normalize_hostport(scheme: str, host: str, port: int | None) -> tuple[str, int | None]:
+    """Lowercase host and drop default ports for a given scheme.
+
+    Returns ``(host_lower, effective_port)`` where effective_port is ``None``
+    when the supplied port is the scheme default (e.g. 80 for http, 443 for
+    https). An explicit non-default port is preserved so the caller can
+    compare port-qualified origins correctly.
+    """
+    host_lower = host.lower()
+    default = _DEFAULT_PORTS.get(scheme.lower())
+    if port is None or (default is not None and port == default):
+        return host_lower, None
+    return host_lower, port
+
+
+def _parse_host_header(host_header: str) -> tuple[str, int | None]:
+    """Split a Host header into ``(host, port)`` with IPv6-bracket support.
+
+    RFC 7230 allows ``Host: [::1]:8080`` for IPv6 addresses. Using
+    ``urlparse`` on a raw Host header doesn't work (no scheme); we parse
+    manually here. Non-numeric ports fall back to ``None`` — the caller
+    will then compare ports as ``None`` which is the most lenient choice.
+    """
+    host_header = host_header.strip()
+    if not host_header:
+        return '', None
+    # IPv6 literal: ``[::1]`` or ``[::1]:8080``
+    if host_header.startswith('['):
+        end = host_header.find(']')
+        if end == -1:
+            # malformed — treat the whole thing as a host
+            return host_header.lower(), None
+        host = host_header[1:end]
+        rest = host_header[end + 1 :]
+        if rest.startswith(':'):
+            try:
+                return host.lower(), int(rest[1:])
+            except ValueError:
+                return host.lower(), None
+        return host.lower(), None
+    # IPv4 or hostname: ``example.com`` or ``example.com:8080``
+    if ':' in host_header:
+        host, _, port_str = host_header.rpartition(':')
+        try:
+            return host.lower(), int(port_str)
+        except ValueError:
+            return host_header.lower(), None
+    return host_header.lower(), None
+
+
+def _origin_allowed(origin: str | None, host_header: str, config: DebugConfig) -> bool:
+    """Return True when a WebSocket handshake origin is allowed.
+
+    Decision table (only consulted when ``auth_token`` is set — caller
+    enforces that guard):
+
+    1. ``origin is None``  → accept. Non-browser clients (curl, websocat,
+       Python websockets lib) typically omit ``Origin``; they already
+       authenticated via token. We err on the side of letting tooling
+       connect rather than pretending a missing Origin is hostile.
+    2. ``origin is not None`` + ``allowed_ws_origins`` non-empty → accept
+       only if ``origin`` is in the allowlist. Case-insensitive compare
+       on the parsed scheme://host:port form so trivial casing differences
+       don't reject legitimate browsers.
+    3. ``origin is not None`` + ``allowed_ws_origins`` empty → same-origin
+       fallback. Parse scheme/host/port from ``origin`` and compare to
+       the Host header after normalizing case and default ports.
+
+    Returns False on any malformed origin — the WS endpoint will close
+    with 4403 in that case.
+    """
+    if origin is None:
+        # Case 1: absent Origin. Non-browser client — token already checked.
+        return True
+
+    # Case 2: explicit allowlist. Normalize both sides (case + default
+    # ports) so operators don't have to match casing letter-for-letter.
+    if config.allowed_ws_origins:
+        try:
+            parsed_origin = urlparse(origin)
+        except ValueError:
+            return False
+        origin_scheme = parsed_origin.scheme.lower()
+        origin_host_norm, origin_port_norm = _normalize_hostport(
+            origin_scheme,
+            parsed_origin.hostname or '',
+            parsed_origin.port,
+        )
+        for allowed in config.allowed_ws_origins:
+            try:
+                parsed_allowed = urlparse(allowed)
+            except ValueError:
+                continue
+            allowed_scheme = parsed_allowed.scheme.lower()
+            allowed_host_norm, allowed_port_norm = _normalize_hostport(
+                allowed_scheme,
+                parsed_allowed.hostname or '',
+                parsed_allowed.port,
+            )
+            if (
+                origin_scheme == allowed_scheme
+                and origin_host_norm == allowed_host_norm
+                and origin_port_norm == allowed_port_norm
+            ):
+                return True
+        return False
+
+    # Case 3: same-origin fallback. Compare host/port pairs; scheme is
+    # skipped because browsers sometimes upgrade ws→wss through a proxy
+    # and strict scheme matching would reject legitimate flows.
+    try:
+        parsed_origin = urlparse(origin)
+    except ValueError:
+        return False
+    origin_host_norm, origin_port_norm = _normalize_hostport(
+        parsed_origin.scheme.lower(),
+        parsed_origin.hostname or '',
+        parsed_origin.port,
+    )
+    host_host, host_port = _parse_host_header(host_header)
+    # Compute the effective port for the Host header. We don't know the
+    # scheme (Host header carries no scheme), so treat a missing port as
+    # "default for scheme" based on the Origin's scheme — this matches
+    # the common browser behavior of stripping default ports from Origin
+    # while leaving them implicit in Host.
+    _, host_port_norm = _normalize_hostport(
+        parsed_origin.scheme.lower() or 'http',
+        host_host,
+        host_port,
+    )
+    if not origin_host_norm or not host_host:
+        return False
+    return origin_host_norm == host_host and origin_port_norm == host_port_norm
 
 
 def _format_ts(ts: float | None) -> str:
@@ -267,10 +408,22 @@ def create_debug_app(
         and leaks no information about the point of divergence when operands
         have the same length. Empty/None provided values short-circuit to
         ``False`` so ``compare_digest`` is never called with an empty operand.
+
+        Non-ASCII str operands also raise ``TypeError`` ("comparing strings
+        with non-ASCII characters is not supported"). We catch that and
+        treat it as an auth failure so an attacker sending a bearer token
+        like ``Bearer tôken`` can't surface 500s (or crash the WS handshake
+        before the ``4401`` close code is sent), and so an operator who
+        mistakenly configures a non-ASCII ``auth_token`` in YAML simply
+        locks everyone out with a clean 401 instead of 500s.
         """
         if not provided or not config.auth_token:
             return False
-        return secrets.compare_digest(provided, config.auth_token)
+        try:
+            return secrets.compare_digest(provided, config.auth_token)
+        except TypeError:
+            # Non-ASCII operands raise TypeError; treat as auth failure.
+            return False
 
     async def _require_auth(
         request: Request,
@@ -310,7 +463,19 @@ def create_debug_app(
     # Only cross-thread aiosqlite reads and processor-internal snapshots
     # need to go through this helper. Pure Python work (template
     # rendering, counters, constants) can stay on the endpoint's loop.
-    async def _dispatch_to_main_loop(coro: typing.Coroutine[typing.Any, typing.Any, typing.Any]) -> typing.Any:
+    #
+    # TODO: propagate cancellation. When the UI endpoint is cancelled
+    # (client disconnect, request timeout), ``asyncio.wrap_future``
+    # cancels the wrapping ``asyncio.Future``, but the underlying
+    # ``concurrent.futures.Future.cancel()`` is a no-op on an already-
+    # running coroutine — so the main-loop coroutine keeps running until
+    # it completes naturally. For SQLite reads this is typically a few
+    # milliseconds and acceptable; a user-written probe that takes
+    # several seconds and is then cancelled will still consume main-loop
+    # work. A full fix would wrap ``coro`` in a shim that polls a
+    # cancellation flag and raises into the main-loop coroutine via
+    # ``loop.call_soon_threadsafe``.
+    async def _dispatch_to_main_loop(coro: Coroutine[Any, Any, Any]) -> Any:
         current_loop = asyncio.get_running_loop()
         candidate_loop = drakkar_app.main_loop
         if isinstance(candidate_loop, asyncio.AbstractEventLoop) and candidate_loop is not current_loop:
@@ -949,6 +1114,11 @@ def create_debug_app(
         """
         reader = _cache_reader_or_404()
 
+        # TODO(phase 2): extract a shared ``_flush_and_select`` helper — this
+        # inner ``_read`` coroutine pattern (flush recorder / open cursor /
+        # fetch columns + rows / hand off to ``_dispatch_to_main_loop``) is
+        # duplicated across ~11 endpoints. Consolidating it would cut 40+
+        # lines and centralize error handling.
         async def _read():
             async with reader.execute(
                 'SELECT key, scope, value, size_bytes, created_at_ms, updated_at_ms, '
@@ -1422,16 +1592,19 @@ def create_debug_app(
                 rows = await cursor.fetchall()
             return columns, rows
 
-        result = await _dispatch_to_main_loop(_read())
-        if result is None:
+        query_result = await _dispatch_to_main_loop(_read())
+        if query_result is None:
             return JSONResponse({})
-        columns, rows = result
+        columns, rows = query_result
         events = [dict(zip(columns, row, strict=False)) for row in rows]
 
-        result: dict[str, dict] = {}
+        # ``by_id`` aggregates event rows per task_id — one entry per task.
+        # Named distinctly from ``query_result`` above so readers (and ty)
+        # don't have to track a variable that changes types mid-function.
+        by_id: dict[str, dict] = {}
         for e in events:
             tid = e['task_id']
-            t = result.setdefault(
+            t = by_id.setdefault(
                 tid,
                 {
                     'task_id': tid,
@@ -1475,7 +1648,7 @@ def create_debug_app(
                 if e.get('pid'):
                     t['pid'] = e['pid']
 
-        return JSONResponse(result)
+        return JSONResponse(by_id)
 
     # ------------------------------------------------------------------
     # Completion-hook result feeds for the Live view's three new tabs:
@@ -1975,13 +2148,12 @@ def create_debug_app(
         Workers are sorted: clustered first (by cluster then name),
         unclustered at the end (sorted by name).
         """
-        # ``discover_workers`` opens aiosqlite connections against peer
-        # live-DB symlinks; those transient connections are fine to open
-        # on any loop, but funneling through the main loop keeps the
-        # concurrency story uniform with the rest of the debug endpoints
-        # (and avoids surprises if the implementation ever grows a
-        # shared handle).
-        workers = await _dispatch_to_main_loop(recorder.discover_workers())
+        # ``discover_workers`` only opens transient aiosqlite connections
+        # against peer live-DB symlinks — it never touches ``recorder._db``
+        # or any primitive bound to the main loop. No dispatch needed;
+        # the connections created inside the coroutine are bound to
+        # whichever loop invokes it, which is fine for a one-shot read.
+        workers = await recorder.discover_workers()
 
         # add the current worker to the list
         current_entry = {
@@ -2050,26 +2222,15 @@ def create_debug_app(
                 return
 
             # --- Origin validation ---
+            # Delegate to ``_origin_allowed`` (module scope) so the
+            # decision logic is directly unit-testable and the four
+            # branches (absent origin / allowlist hit / allowlist miss /
+            # same-origin fallback) are spelled out in one place.
             origin = ws.headers.get('origin')
-            if origin is not None:
-                # Explicit allowlist takes precedence when configured.
-                if config.allowed_ws_origins:
-                    if origin not in config.allowed_ws_origins:
-                        await ws.close(code=4403, reason='forbidden origin')
-                        return
-                else:
-                    # Same-origin fallback — parse the origin's host and
-                    # compare it to the Host header. Host header may
-                    # include a port ("example.com:8080"); urlparse().netloc
-                    # preserves port too, so comparison is apples-to-apples.
-                    parsed = urlparse(origin)
-                    origin_host = parsed.netloc
-                    request_host = ws.headers.get('host', '')
-                    if not origin_host or origin_host != request_host:
-                        await ws.close(code=4403, reason='forbidden origin')
-                        return
-            # Absent Origin header: treat as same-origin (typical for
-            # non-browser clients — they authenticated via token above).
+            request_host = ws.headers.get('host', '')
+            if not _origin_allowed(origin, request_host, config):
+                await ws.close(code=4403, reason='forbidden origin')
+                return
 
         await ws.accept()
         q = recorder.subscribe()

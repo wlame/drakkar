@@ -93,6 +93,16 @@ metrics:
 |--------|------|--------|-------------|
 | `drakkar_handler_duration_seconds` | Histogram | `hook` (`arrange`, `on_task_complete`, `on_message_complete`, `on_error`, `on_window_complete`, etc.) | Duration of user handler hook execution. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30 |
 
+#### Recorder
+
+Emitted only when [`debug.enabled=true`](configuration.md#debug-flight-recorder-debug). Track flight-recorder health -- buffer depth, drops under load, and flush latency. Alert on sustained non-zero `dropped_events_total` or p99 `flush_duration_seconds` exceeding `flush_interval_seconds`.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `drakkar_recorder_buffer_size` | Gauge | -- | Current depth of the in-memory event buffer. Updated on every `_record()` call and after each flush. A sustained value near `max_buffer` signals the flush loop can't keep up with incoming events -- raise `flush_interval_seconds` or `max_buffer`, or investigate disk latency. |
+| `drakkar_recorder_dropped_events_total` | Counter | -- | Events evicted from the ring buffer because it was full at record time. Non-zero means event history has gaps; scale the buffer up or speed up flushes. This was previously a silent failure mode -- the counter makes it alertable. |
+| `drakkar_recorder_flush_duration_seconds` | Histogram | -- | Duration of the full flush body (`executemany` + `commit`). Exposes disk-I/O latency tail. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1. Alert on p99 exceeding `flush_interval_seconds` -- flushes overlapping the next scheduled flush starve the buffer. |
+
 #### Cache
 
 Emitted only when [`cache.enabled=true`](cache.md). Memory gauges are maintained as running sums — Prometheus scrape reads a single int, never walks the in-memory dict. DB gauges are refreshed by the `cache.cleanup` loop (default every 60s).
@@ -443,21 +453,35 @@ This table is what enables the worker autodiscovery feature -- other workers sca
 
 !!! warning "Secrets are redacted before they reach disk"
     The recorder SQLite file is downloadable via the debug UI. To avoid
-    publishing credentials through that path, two redactions are applied
-    before `worker_config` is written:
+    publishing credentials through that path, three redactions are applied
+    before any env data is written:
 
     - **`kafka_brokers`** — embedded credentials are stripped from SASL
       URIs. `SASL_SSL://alice:s3cret@host:9094` becomes
       `SASL_SSL://***:***@host:9094`. Host and port remain visible.
-    - **`env_vars_json`** — values for env var names matching secret
-      patterns (`*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*_KEY`, `*API_KEY*`,
-      `*CREDENTIAL*`, `*_DSN`) are replaced with `***`. For other names,
-      any URL-shaped value has its embedded `user:pass@` credentials
-      stripped.
+    - **`worker_config.env_vars_json`** — values for env var names matching
+      secret patterns (`*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*_KEY`,
+      `*API_KEY*`, `*CREDENTIAL*`, `*_DSN`) are replaced with `***`. For
+      other names, any URL-shaped value has its embedded `user:pass@`
+      credentials stripped.
+    - **per-task `env` metadata** — `task.env` values written by your
+      handler in `arrange()` are sanitized with the same patterns before
+      the `task_started` event is recorded. The original task object is
+      not mutated; only the recorded copy is redacted (the subprocess
+      still receives the real values). This closes the last env-related
+      leak into the debug UI.
+
+    The contract is "aggressive redact, accept false positives":
+    `PASSWORD_RESET_URL` is redacted because it matches `*PASSWORD*` even
+    though a reset URL isn't a credential. Rename the var if you need the
+    value visible. The `ExecutorConfig.env` (framework-level) values are
+    **never written** to the recorder at all — they only reach the
+    subprocess environment.
 
     This protects operators who add secret-named vars to `expose_env_vars`
-    without thinking, and DSNs passed through otherwise-innocuous var
-    names (`UPSTREAM_URL`, `CACHE_URL`, etc.).
+    without thinking, DSNs passed through otherwise-innocuous var names
+    (`UPSTREAM_URL`, `CACHE_URL`, etc.), and per-task env values that
+    handlers assemble from inbound message payloads.
 
 #### `worker_state` -- Periodic Snapshots
 
@@ -497,9 +521,12 @@ default 50,000). A background task flushes the buffer to disk every
 - Provides a short window of recent events even when `db_dir` is empty (in-memory only mode)
 
 If the buffer fills before the next flush (e.g., during a burst),
-oldest events are silently dropped (ring buffer behavior). Increase
-`max_buffer` if you see gaps in event history during high-throughput
-periods.
+oldest events are evicted (ring buffer behavior). Drops are no longer
+silent — the `drakkar_recorder_dropped_events_total` counter
+([see Recorder metrics](#recorder)) increments on every evicted
+event, and the `drakkar_recorder_buffer_size` gauge shows the current
+depth. Alert on sustained non-zero drops and raise `max_buffer` or
+shorten `flush_interval_seconds` when they appear.
 
 On shutdown, the buffer is flushed one final time before closing the
 database.
