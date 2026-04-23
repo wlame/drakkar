@@ -22,6 +22,11 @@ import structlog
 from pydantic import BaseModel
 
 from drakkar.config import DebugConfig
+from drakkar.metrics import (
+    recorder_buffer_size,
+    recorder_dropped_events,
+    recorder_flush_duration,
+)
 from drakkar.models import (
     ExecutorError,
     ExecutorResult,
@@ -309,10 +314,26 @@ class EventRecorder:
         self._ws_subscribers.discard(q)
 
     def _record(self, event: dict, *, skip_ws: bool = False, skip_db: bool = False) -> None:
-        """Append event to buffer and broadcast to WS subscribers."""
+        """Append event to buffer and broadcast to WS subscribers.
+
+        Observability: when the deque is already at capacity, the next
+        append will silently evict the oldest entry. We detect that case
+        BEFORE the append (``len == maxlen``) and increment the drop
+        counter once per dropped event. After the append, the buffer
+        gauge is refreshed to the new depth so operators can watch for
+        contention without scraping internal state.
+        """
         event['dt'] = _format_dt(event['ts'])
         if not skip_db:
+            # deque(maxlen=N) accepts up to N items; when len == maxlen a
+            # subsequent append drops the leftmost entry. We count one
+            # drop per event lost — prometheus_client Counter.inc() is
+            # thread-safe so callers from multiple loops/threads are fine.
+            maxlen = self._buffer.maxlen
+            if maxlen is not None and len(self._buffer) >= maxlen:
+                recorder_dropped_events.inc()
             self._buffer.append(event)
+            recorder_buffer_size.set(len(self._buffer))
         if not skip_ws and self._ws_subscribers:
             for q in self._ws_subscribers:
                 try:
@@ -1230,6 +1251,9 @@ class EventRecorder:
             return
         if not self._config.store_events:
             self._buffer.clear()
+            # Reflect the drain in the gauge even when events aren't persisted —
+            # buffer length is what the gauge reports, not DB row count.
+            recorder_buffer_size.set(0)
             return
         batch = []
         while self._buffer:
@@ -1256,8 +1280,17 @@ class EventRecorder:
         col_names = ', '.join(columns)
         query = f'INSERT INTO events ({col_names}) VALUES ({placeholders})'
         rows = [tuple(entry.get(col) for col in columns) for entry in batch]
+        # Observe the full flush body (executemany + commit) — the histogram
+        # surfaces disk-I/O latency tail so operators can alert on p99
+        # regressions before the buffer backs up enough to drop events.
+        flush_start = time.monotonic()
         await self._db.executemany(query, rows)
         await self._db.commit()
+        recorder_flush_duration.observe(time.monotonic() - flush_start)
+        # Post-drain: the gauge should report the new buffer depth. Usually
+        # zero, but a concurrent _record() during the await could have
+        # appended in between — reading len(self._buffer) is the correct value.
+        recorder_buffer_size.set(len(self._buffer))
 
     async def _retention_loop(self) -> None:
         while self._running:

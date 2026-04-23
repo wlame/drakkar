@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -2622,3 +2623,166 @@ def test_detect_worker_ip_closes_socket_when_getsockname_raises():
     assert ip == '127.0.0.1'
     # Critical assertion: contextlib.closing guarantees exactly one close().
     fake_socket.close.assert_called_once()
+
+
+# --- Recorder buffer / drop / flush metrics ---
+#
+# Task 5 (Phase 1 ship-blockers): three Prometheus metrics surface the
+# flush pipeline's health — gauge for live depth, counter for silent
+# overflow drops, histogram for flush latency. These tests exercise each
+# wiring path end-to-end against a real recorder. We follow the existing
+# ``before = metric._value.get()`` / ``after = ...`` convention used in
+# ``tests/test_metrics.py`` so failures read naturally.
+
+
+async def test_recorder_buffer_gauge_tracks_length_after_append(tmp_path):
+    """Gauge reflects ``len(self._buffer)`` after each ``_record`` call."""
+    from drakkar.metrics import recorder_buffer_size
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_consumed(make_msg(offset=0))
+    assert recorder_buffer_size._value.get() == 1
+    rec.record_consumed(make_msg(offset=1))
+    rec.record_consumed(make_msg(offset=2))
+    assert recorder_buffer_size._value.get() == 3
+
+    await rec.stop()
+
+
+async def test_recorder_buffer_gauge_reflects_zero_after_flush(tmp_path):
+    """Gauge drops to zero once the buffer drains via ``_flush``."""
+    from drakkar.metrics import recorder_buffer_size
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    for offset in range(5):
+        rec.record_consumed(make_msg(offset=offset))
+    assert recorder_buffer_size._value.get() == 5
+
+    await rec._flush()
+    assert recorder_buffer_size._value.get() == 0
+
+    await rec.stop()
+
+
+async def test_recorder_dropped_events_increments_on_overflow(tmp_path):
+    """Appends past ``max_buffer`` increment ``recorder_dropped_events_total``.
+
+    A ``deque(maxlen=N)`` silently evicts the leftmost entry on every
+    over-cap append. The recorder now detects this case **before** the
+    append and bumps the counter exactly once per lost event.
+    """
+    from drakkar.metrics import recorder_dropped_events
+
+    # Tiny buffer makes the overflow test cheap and deterministic.
+    config = make_debug_config(tmp_path, max_buffer=1000)  # field constraint: ge=1000
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    # Shrink post-construction to keep the test fast; validates the drop
+    # path without pushing 1000+ events through the recorder.
+    rec._buffer = deque(maxlen=3)
+    await rec.start()
+
+    before = recorder_dropped_events._value.get()
+
+    # Fill to cap: three appends, none dropped (len goes 0→1→2→3).
+    for offset in range(3):
+        rec.record_consumed(make_msg(offset=offset))
+    assert recorder_dropped_events._value.get() == before
+
+    # Each append beyond cap increments the drop counter once.
+    rec.record_consumed(make_msg(offset=3))
+    rec.record_consumed(make_msg(offset=4))
+    assert recorder_dropped_events._value.get() == before + 2
+    # Buffer length stays at maxlen — deque silently rolled the window.
+    assert len(rec._buffer) == 3
+
+    await rec.stop()
+
+
+def _histogram_count(hist) -> float:
+    """Read a no-label Histogram's current observation count via ``collect()``.
+
+    ``prometheus_client.Histogram`` does not expose ``_count`` as a public
+    attribute; the authoritative sample is emitted through ``collect()``
+    with the name suffix ``_count``. Reading it this way keeps the test
+    decoupled from library internals (matches the approach used in
+    ``drakkar.metrics.cache_gauge_snapshot``).
+    """
+    for metric in hist.collect():
+        for sample in metric.samples:
+            if sample.name.endswith('_count') and not sample.labels:
+                return sample.value
+    return 0.0
+
+
+async def test_recorder_flush_duration_histogram_observed(tmp_path):
+    """``_flush`` observes the executemany+commit duration in the histogram."""
+    from drakkar.metrics import recorder_flush_duration
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    before_sum = recorder_flush_duration._sum.get()
+    before_count = _histogram_count(recorder_flush_duration)
+
+    # Populate buffer so _flush executes the full path (not the early
+    # return when buffer is empty).
+    for offset in range(5):
+        rec.record_consumed(make_msg(offset=offset))
+    await rec._flush()
+
+    # Histogram must have observed exactly one sample with a positive
+    # duration. Sum strictly > before guards against a zero-valued
+    # observe() call slipping through.
+    assert _histogram_count(recorder_flush_duration) == before_count + 1
+    assert recorder_flush_duration._sum.get() > before_sum
+
+    await rec.stop()
+
+
+async def test_recorder_flush_skipped_when_buffer_empty_no_histogram_observation(tmp_path):
+    """Empty-buffer flush returns early without recording a histogram sample.
+
+    The no-op early return in ``_flush`` must not falsely inflate the
+    flush-duration histogram. Operators reading the rate would otherwise
+    see fabricated ticks on idle recorders.
+    """
+    from drakkar.metrics import recorder_flush_duration
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    before_count = _histogram_count(recorder_flush_duration)
+    await rec._flush()
+    assert _histogram_count(recorder_flush_duration) == before_count
+
+    await rec.stop()
+
+
+async def test_recorder_dropped_events_not_incremented_when_skip_db(tmp_path):
+    """``skip_db=True`` bypasses the buffer entirely — no drop counter tick."""
+    from drakkar.metrics import recorder_dropped_events
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    rec._buffer = deque(maxlen=2)
+    await rec.start()
+
+    # Pre-fill to cap so any append would normally drop one event.
+    rec.record_consumed(make_msg(offset=0))
+    rec.record_consumed(make_msg(offset=1))
+    before = recorder_dropped_events._value.get()
+
+    # skip_db path writes only to WS subscribers — buffer untouched,
+    # no overflow possible, counter must not tick.
+    rec._record({'ts': 1.0, 'event': 'skipped'}, skip_db=True)
+    assert recorder_dropped_events._value.get() == before
+
+    await rec.stop()

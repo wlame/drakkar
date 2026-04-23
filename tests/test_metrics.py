@@ -869,3 +869,39 @@ async def test_total_waiting_excludes_inflight():
 
     for proc in app.processors.values():
         await proc.stop()
+
+
+# === Recorder metrics ===
+
+
+def test_recorder_metrics_registered_in_collect_all():
+    """The three recorder metrics appear in the collect_all_metrics snapshot."""
+    from drakkar.metrics import collect_all_metrics
+
+    names = {m['name'] for m in collect_all_metrics()}
+    # Name format matches Prometheus convention: _total is stripped from
+    # Counters for the family name; Gauge and Histogram keep their suffix.
+    assert 'drakkar_recorder_buffer_size' in names
+    assert 'drakkar_recorder_dropped_events' in names
+    assert 'drakkar_recorder_flush_duration_seconds' in names
+
+
+def test_recorder_metrics_have_expected_types():
+    """Confirm the three recorder metrics are registered with the correct types."""
+    from prometheus_client import Counter, Gauge, Histogram
+
+    from drakkar.metrics import (
+        collect_all_metrics,
+        recorder_buffer_size,
+        recorder_dropped_events,
+        recorder_flush_duration,
+    )
+
+    assert isinstance(recorder_buffer_size, Gauge)
+    assert isinstance(recorder_dropped_events, Counter)
+    assert isinstance(recorder_flush_duration, Histogram)
+
+    by_name = {m['name']: m for m in collect_all_metrics()}
+    assert by_name['drakkar_recorder_buffer_size']['type'] == 'gauge'
+    assert by_name['drakkar_recorder_dropped_events']['type'] == 'counter'
+    assert by_name['drakkar_recorder_flush_duration_seconds']['type'] == 'histogram'

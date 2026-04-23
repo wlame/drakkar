@@ -373,6 +373,46 @@ def cache_gauge_snapshot() -> dict[str, int]:
     }
 
 
+# --- Recorder ---
+#
+# Observability for the flight recorder's in-memory flush buffer. The
+# recorder buffers events in a ``deque(maxlen=N)`` and flushes them to
+# SQLite periodically. Under contention (slow disk, high event volume)
+# the buffer can fill and start silently evicting the oldest entries —
+# these three metrics surface that pathway so operators can alert on it.
+#
+#   recorder_buffer_size          Current depth of the flush buffer.
+#                                 Stable near zero under healthy flushing.
+#   recorder_dropped_events_total Events silently dropped on overflow.
+#                                 Any nonzero value is a data-loss signal.
+#   recorder_flush_duration_seconds Wall-clock time spent in one flush
+#                                   (executemany + commit). The histogram
+#                                   buckets are tuned for sub-second flushes
+#                                   with outliers up to 5s.
+recorder_buffer_size = Gauge(
+    'drakkar_recorder_buffer_size',
+    (
+        'Current number of events waiting in the recorder flush buffer. '
+        'Stabilizes near zero under healthy flushing; grows during contention.'
+    ),
+)
+
+recorder_dropped_events = Counter(
+    'drakkar_recorder_dropped_events_total',
+    (
+        'Total events silently dropped when the recorder buffer overflowed '
+        'due to flush stalls. Any nonzero value indicates the recorder is '
+        'losing observability data.'
+    ),
+)
+
+recorder_flush_duration = Histogram(
+    'drakkar_recorder_flush_duration_seconds',
+    'Duration of the recorder flush body (executemany + commit) in seconds',
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
+
+
 # --- Periodic tasks ---
 
 periodic_task_runs = Counter(
