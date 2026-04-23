@@ -21,6 +21,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from drakkar.config import DebugConfig
+from drakkar.debug_runner import DebugRunner, ProbeInput
 from drakkar.metrics import cache_gauge_snapshot
 from drakkar.recorder import EventRecorder
 
@@ -42,6 +43,29 @@ class _ArrangeTaskLookupRequest(BaseModel):
 class _SinkBreakdownRequest(BaseModel):
     partition: int
     offsets: list[int] = Field(default_factory=list, max_length=5000)
+
+
+# ``/api/debug/probe`` request body — module-scope per the same FastAPI
+# heuristic as the two classes above. Mirrors ``ProbeInput`` from
+# ``drakkar.debug_runner`` so the wire format stays stable even if the
+# internal model gains new optional fields. Converted to ``ProbeInput``
+# inside the endpoint via ``model_dump()``.
+class _ProbeRequest(BaseModel):
+    value: str
+    key: str | None = None
+    partition: int = 0
+    offset: int = 0
+    topic: str = ''
+    timestamp: int | None = None
+    use_cache: bool = False
+
+
+# Extra headroom (in seconds) on top of ``2 * task_timeout_seconds`` for
+# the probe's wall-clock timeout. Covers arrange + two round-trips of
+# hook work + serialization overhead. Exposed at module scope so tests
+# can monkeypatch it to a small value without plumbing a timeout arg
+# through the endpoint signature.
+PROBE_TIMEOUT_HEADROOM_SECONDS: float = 30.0
 
 
 def _hook_flags(handler: object) -> dict[str, bool]:
@@ -1511,6 +1535,72 @@ def create_debug_app(
                 }
             )
         return JSONResponse(result)
+
+    # Shared DebugRunner instance. The runner holds an ``asyncio.Lock``
+    # that serializes overlapping probes; keeping a single instance per
+    # FastAPI app means that lock is actually shared across requests.
+    # Built lazily on first use so tests that don't exercise the probe
+    # endpoint don't pay the wiring cost (and so tests can freely swap
+    # ``mock_app.handler`` / ``_executor_pool`` before the first call).
+    _probe_runner: list[DebugRunner | None] = [None]
+
+    def _get_probe_runner() -> DebugRunner:
+        if _probe_runner[0] is None:
+            # The executor pool is created during ``DrakkarApp.run`` and
+            # lives for the whole process; by the time the probe endpoint
+            # is reachable it's always non-None. Guard here so ty's
+            # ``ExecutorPool | None`` narrowing is happy.
+            pool = drakkar_app._executor_pool
+            if pool is None:
+                raise HTTPException(status_code=503, detail='executor pool not ready')
+            _probe_runner[0] = DebugRunner(
+                handler=drakkar_app.handler,
+                executor_pool=pool,
+                app_config=drakkar_app._config,
+            )
+        return _probe_runner[0]
+
+    @app.post('/api/debug/probe')
+    async def api_debug_probe(req: _ProbeRequest) -> JSONResponse:
+        """Run a single-message probe through the live handler pipeline.
+
+        The probe executes arrange → executor → on_task_complete →
+        on_message_complete → on_window_complete exactly like the
+        production path, but with zero side-effects (no sinks, no
+        recorder rows, no cache writes, no offset commits). Concurrent
+        requests serialize on the runner's internal ``asyncio.Lock``.
+
+        Returns 200 with a ``DebugReport``. If the wall-clock timeout
+        fires (``2 * task_timeout_seconds + PROBE_TIMEOUT_HEADROOM_SECONDS``),
+        also returns 200 but with ``truncated=true`` and whatever partial
+        state the runner had captured up to the cancellation point.
+        """
+        runner = _get_probe_runner()
+        # ``_ProbeRequest`` mirrors ``ProbeInput`` by design; model_dump
+        # passes every field through without rename. Kept as two models
+        # so the wire contract is decoupled from the internal pydantic
+        # class used by the runner.
+        probe_input = ProbeInput(**req.model_dump())
+        # Timeout = 2x the per-task timeout + headroom. ``config`` here is
+        # ``DebugConfig``; the executor timeout lives on the full
+        # ``DrakkarConfig`` reachable via ``drakkar_app._config``.
+        timeout = 2 * drakkar_app._config.executor.task_timeout_seconds + PROBE_TIMEOUT_HEADROOM_SECONDS
+        # Launch as a task so wait_for can cancel it cleanly on timeout.
+        # A bare ``await`` would still honour the timeout, but cancelling
+        # via ``Task.cancel()`` propagates a ``CancelledError`` through
+        # the runner's ``finally`` block, which is what restores
+        # ``handler.cache`` — so the task form is what makes the safety
+        # promise hold under timeout.
+        run_task = asyncio.create_task(runner.run(probe_input))
+        try:
+            report = await asyncio.wait_for(run_task, timeout=timeout)
+        except TimeoutError:
+            # The runner's finally block has already restored handler.cache
+            # by the time we get here (wait_for cancels run_task and awaits
+            # its completion before re-raising). The partial snapshot
+            # already has truncated=True.
+            report = runner.latest_partial_report()
+        return JSONResponse(report.model_dump(mode='json'))
 
     @app.post('/api/live/sink-breakdown')
     async def api_live_sink_breakdown(req: _SinkBreakdownRequest):

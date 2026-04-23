@@ -1,5 +1,6 @@
 """Tests for Drakkar debug web UI."""
 
+import asyncio
 import json
 import os
 import re
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from pydantic import BaseModel
 from starlette.testclient import TestClient
 
 from drakkar.config import DebugConfig, DrakkarConfig
@@ -2939,3 +2941,384 @@ class TestApiLabelTrace:
         assert len(events) >= 1
         assert all(e['task_id'] == 'task-b' for e in events)
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# 9. /api/debug/probe — Message Probe endpoint
+# ---------------------------------------------------------------------------
+#
+# These tests exercise the full HTTP path of the Message Probe feature
+# end-to-end: the endpoint wiring, the ``DebugRunner`` instantiation, the
+# concurrency lock, the ``use_cache`` forwarding to ``DebugCacheProxy``,
+# and the wall-clock timeout fallback to ``latest_partial_report``.
+#
+# The fixture ``_probe_mock_app`` extends the default ``mock_app`` with a
+# real ``BaseDrakkarHandler`` instance, a real ``ExecutorPool`` (bogus
+# binary path — only ``precomputed`` tasks are used), and the attributes
+# that ``DebugRunner`` reads directly. Tests craft tiny per-scenario
+# handlers by mutating this one instance.
+
+
+@pytest.fixture
+def _probe_mock_app(mock_app):
+    """Extend ``mock_app`` with handler + real ExecutorPool for probe tests.
+
+    The base ``mock_app`` fixture uses ``MagicMock`` for most fields; the
+    probe endpoint instead needs a real ``BaseDrakkarHandler`` (for the
+    ``cache`` swap) and a real ``ExecutorPool`` (so precomputed tasks
+    hit the actual fast path). We keep the rest of the mock intact so
+    other routes in the same app still render.
+    """
+    from drakkar.executor import ExecutorPool
+    from drakkar.handler import BaseDrakkarHandler
+
+    # Default no-op handler; individual tests monkey-patch methods.
+    mock_app.handler = BaseDrakkarHandler()
+    mock_app._executor_pool = ExecutorPool(
+        binary_path='/nonexistent/binary/should-never-run',
+        max_executors=2,
+        task_timeout_seconds=5,
+    )
+    # Replace the MagicMock-based config with a real one so the endpoint
+    # can read ``executor.task_timeout_seconds`` without TypeError.
+    mock_app._config = DrakkarConfig()
+    return mock_app
+
+
+def _make_precomputed_task(task_id: str, offset: int, stdout: str = 'ok'):
+    """Build a precomputed ExecutorTask used across probe tests.
+
+    Imported lazily to avoid pulling drakkar.models into the module-level
+    import block (keeps the existing import ordering untouched for the
+    other tests in this file).
+    """
+    from drakkar.models import ExecutorTask, PrecomputedResult, make_task_id
+
+    return ExecutorTask(
+        task_id=task_id or make_task_id(),
+        source_offsets=[offset],
+        labels={},
+        stdin=None,
+        precomputed=PrecomputedResult(
+            stdout=stdout,
+            stderr='',
+            exit_code=0,
+            duration_seconds=0.001,
+        ),
+    )
+
+
+class _ProbePayload(BaseModel):
+    """BaseModel used as the payload body of test sink records.
+
+    Kept as a separate top-level class so each KafkaPayload we emit in
+    tests has a proper ``data: BaseModel`` (the ``CollectResult``
+    serializer rejects raw dicts).
+    """
+
+    ok: bool = True
+    note: str = 'probe'
+
+
+class _ProbeTestHandler:
+    """Minimal duck-typed handler for the probe endpoint tests.
+
+    Not a ``BaseDrakkarHandler`` subclass because the tests here only
+    care about hook dispatch, not generic input/output models. The
+    ``cache`` attribute starts as a ``NoOpCache`` so ``DebugCacheProxy``
+    has something to wrap; individual tests may swap in a real ``Cache``.
+    """
+
+    def __init__(self, *, task_count: int = 1) -> None:
+        from drakkar.cache import NoOpCache
+        from drakkar.models import CollectResult, KafkaPayload
+
+        self._task_count = task_count
+        self._CollectResult = CollectResult
+        self._KafkaPayload = KafkaPayload
+        self.cache = NoOpCache()
+        self.arrange_calls = 0
+        self.on_task_complete_calls = 0
+        self.on_message_complete_calls = 0
+        self.on_window_complete_calls = 0
+
+    def message_label(self, msg):
+        return f'{msg.partition}:{msg.offset}'
+
+    def deserialize_message(self, msg):
+        return msg
+
+    async def arrange(self, messages, pending):
+        self.arrange_calls += 1
+        msg = messages[0]
+        return [_make_precomputed_task(task_id=f't-{i}', offset=msg.offset) for i in range(self._task_count)]
+
+    async def on_task_complete(self, result):
+        self.on_task_complete_calls += 1
+        return self._CollectResult(
+            kafka=[self._KafkaPayload(sink='results', key=result.task.task_id.encode(), data=_ProbePayload())],
+        )
+
+    async def on_message_complete(self, group):
+        self.on_message_complete_calls += 1
+        return None
+
+    async def on_window_complete(self, results, source_messages):
+        self.on_window_complete_calls += 1
+        return None
+
+    async def on_error(self, task, error):
+        from drakkar.models import ErrorAction
+
+        return ErrorAction.SKIP
+
+
+async def test_probe_endpoint_valid_body_returns_report(mock_recorder, debug_config, _probe_mock_app):
+    """POST with a valid ProbeInput → 200 + DebugReport with the expected keys."""
+    _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
+
+    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.post(
+            '/api/debug/probe',
+            json={'value': '{"hello": "world"}', 'key': 'k-1', 'partition': 3, 'offset': 42},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    # Every top-level key of DebugReport should be present — the endpoint
+    # serializes the full model.
+    for key in (
+        'input',
+        'arrange',
+        'tasks',
+        'on_message_complete',
+        'on_window_complete',
+        'planned_sink_payloads',
+        'cache_calls',
+        'cache_summary',
+        'timing',
+        'errors',
+        'truncated',
+    ):
+        assert key in body, f'missing key: {key}'
+    assert body['truncated'] is False
+    assert body['input']['value'] == '{"hello": "world"}'
+    assert body['input']['partition'] == 3
+    assert body['input']['offset'] == 42
+    assert len(body['tasks']) == 1
+
+
+async def test_probe_endpoint_empty_body_returns_422(mock_recorder, debug_config, _probe_mock_app):
+    """POST with ``{}`` → 422 because ``value`` is a required field."""
+    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.post('/api/debug/probe', json={})
+    assert resp.status_code == 422
+    # FastAPI's validation response includes a ``detail`` list with one
+    # entry per missing/invalid field.
+    detail = resp.json()['detail']
+    assert any('value' in (err.get('loc') or []) for err in detail)
+
+
+async def test_probe_endpoint_concurrent_calls_serialize(mock_recorder, debug_config, _probe_mock_app):
+    """Two overlapping POSTs → both return 200; the runner's lock serializes them.
+
+    We rely on the probe lock inside ``DebugRunner`` to guarantee no
+    interleaving. This test only asserts both complete successfully —
+    proving serialization requires timing assertions that are flaky; the
+    lock's correctness is exercised directly in ``test_debug_runner.py``.
+    """
+    _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
+
+    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp_a_coro = c.post('/api/debug/probe', json={'value': 'a', 'offset': 1})
+        resp_b_coro = c.post('/api/debug/probe', json={'value': 'b', 'offset': 2})
+        resp_a, resp_b = await asyncio.gather(resp_a_coro, resp_b_coro)
+    assert resp_a.status_code == 200
+    assert resp_b.status_code == 200
+    # Both echoed their own input value — proof that the endpoint didn't
+    # mix up requests when they overlap.
+    values = {resp_a.json()['input']['value'], resp_b.json()['input']['value']}
+    assert values == {'a', 'b'}
+
+
+async def test_probe_endpoint_use_cache_true_sees_seeded_value(mock_recorder, debug_config, _probe_mock_app):
+    """use_cache=True: handler sees a hit on a pre-seeded key."""
+    from drakkar.cache import Cache
+
+    real_cache = Cache(origin_worker_id='worker-probe-test')
+    real_cache.set('known', {'v': 1})
+
+    handler = _ProbeTestHandler(task_count=1)
+    handler.cache = real_cache
+    # Capture what the handler sees at arrange time.
+    observed: dict = {}
+    original_arrange = handler.arrange
+
+    async def arrange_with_read(messages, pending):
+        observed['value'] = await handler.cache.get('known')
+        return await original_arrange(messages, pending)
+
+    handler.arrange = arrange_with_read  # type: ignore[method-assign]
+    _probe_mock_app.handler = handler
+
+    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.post('/api/debug/probe', json={'value': 'x', 'use_cache': True})
+    assert resp.status_code == 200
+    assert observed['value'] == {'v': 1}
+    # The cache_calls log should show a hit for the seeded key.
+    calls = resp.json()['cache_calls']
+    first_get = next(c for c in calls if c['op'] == 'get' and c['key'] == 'known')
+    assert first_get['outcome'] == 'hit'
+
+
+async def test_probe_endpoint_use_cache_false_sees_miss(mock_recorder, debug_config, _probe_mock_app):
+    """use_cache=False: the seeded key is invisible to the handler (miss)."""
+    from drakkar.cache import Cache
+
+    real_cache = Cache(origin_worker_id='worker-probe-test')
+    real_cache.set('known', {'v': 1})
+
+    handler = _ProbeTestHandler(task_count=1)
+    handler.cache = real_cache
+    observed: dict = {}
+    original_arrange = handler.arrange
+
+    async def arrange_with_read(messages, pending):
+        observed['value'] = await handler.cache.get('known')
+        return await original_arrange(messages, pending)
+
+    handler.arrange = arrange_with_read  # type: ignore[method-assign]
+    _probe_mock_app.handler = handler
+
+    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.post('/api/debug/probe', json={'value': 'x', 'use_cache': False})
+    assert resp.status_code == 200
+    assert observed['value'] is None
+    calls = resp.json()['cache_calls']
+    first_get = next(c for c in calls if c['op'] == 'get' and c['key'] == 'known')
+    assert first_get['outcome'] == 'miss'
+
+
+async def test_probe_endpoint_does_not_mutate_cache(mock_recorder, debug_config, _probe_mock_app):
+    """Handler calls cache.set during probe → live cache state unchanged.
+
+    Takes a snapshot of the real Cache's internal ``_dirty`` dict and
+    ``_bytes_sum`` accumulator before the request; re-reads them after
+    and asserts equality. This is the core safety-guarantee test for
+    the probe on the endpoint side — the runner's version of the same
+    check lives in ``test_debug_runner.py``.
+    """
+    from drakkar.cache import Cache
+
+    real_cache = Cache(origin_worker_id='worker-probe-test')
+
+    handler = _ProbeTestHandler(task_count=1)
+    handler.cache = real_cache
+    original_arrange = handler.arrange
+
+    async def arrange_with_writes(messages, pending):
+        handler.cache.set('write-a', {'v': 1})
+        handler.cache.set('write-b', {'v': 2})
+        return await original_arrange(messages, pending)
+
+    handler.arrange = arrange_with_writes  # type: ignore[method-assign]
+    _probe_mock_app.handler = handler
+
+    # Snapshot the dirty map BEFORE the request.
+    dirty_before = dict(real_cache._dirty)
+    bytes_before = real_cache._bytes_sum
+
+    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.post('/api/debug/probe', json={'value': 'x'})
+    assert resp.status_code == 200
+    # Same keys, same byte accumulator — proof that the two ``set``
+    # calls inside the handler were suppressed by DebugCacheProxy.
+    assert dict(real_cache._dirty) == dirty_before
+    assert real_cache._bytes_sum == bytes_before
+
+
+async def test_probe_endpoint_handler_arrange_raises_returns_200_with_errors(
+    mock_recorder, debug_config, _probe_mock_app
+):
+    """Handler arrange raises → endpoint returns 200 with errors populated, NOT 500."""
+    handler = _ProbeTestHandler(task_count=1)
+
+    async def arrange_raises(messages, pending):
+        raise RuntimeError('boom-from-arrange')
+
+    handler.arrange = arrange_raises  # type: ignore[method-assign]
+    _probe_mock_app.handler = handler
+
+    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.post('/api/debug/probe', json={'value': 'x'})
+    # Error is captured in the report, not bubbled as a 500.
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body['arrange']['error'] is not None
+    assert any(err['stage'] == 'arrange' for err in body['errors'])
+    assert any('boom-from-arrange' in err['message'] for err in body['errors'])
+
+
+async def test_probe_endpoint_timeout_returns_partial_report_with_truncated_true(
+    mock_recorder, debug_config, _probe_mock_app, monkeypatch
+):
+    """Handler on_task_complete sleeps past the wall-clock timeout → 200 + truncated=True.
+
+    Set ``task_timeout_seconds=1`` (the minimum ExecutorConfig allows)
+    and monkey-patch ``PROBE_TIMEOUT_HEADROOM_SECONDS`` to ``-1.9`` so
+    the total wait_for timeout is ``2*1 + (-1.9) = 0.1s``. The
+    handler's on_task_complete then sleeps 1s, guaranteeing wait_for
+    fires and cancels the run. Verifies:
+      1. Response is 200 (not 504)
+      2. ``truncated=True`` in the body
+      3. ``handler.cache`` is the ORIGINAL object after the request
+         (the runner's ``finally`` block ran during cancellation cascade)
+    """
+    import drakkar.debug_server as debug_server_mod
+    from drakkar.config import ExecutorConfig
+
+    handler = _ProbeTestHandler(task_count=1)
+    original_cache = handler.cache  # NoOpCache instance
+
+    async def on_task_complete_slow(result):
+        # Sleep longer than the test timeout so wait_for is forced to cancel.
+        await asyncio.sleep(1.0)
+        return None
+
+    handler.on_task_complete = on_task_complete_slow  # type: ignore[method-assign]
+    _probe_mock_app.handler = handler
+    # Build a DrakkarConfig with the minimum allowed per-task timeout.
+    # Total endpoint timeout = 2 * 1 + PROBE_TIMEOUT_HEADROOM_SECONDS.
+    # With a -1.9 headroom that lands at 0.1s, which is well below the
+    # handler's 1s sleep.
+    _probe_mock_app._config = DrakkarConfig(
+        executor=ExecutorConfig(task_timeout_seconds=1, binary_path='/nonexistent'),
+    )
+    monkeypatch.setattr(debug_server_mod, 'PROBE_TIMEOUT_HEADROOM_SECONDS', -1.9)
+
+    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.post('/api/debug/probe', json={'value': 'x'})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body['truncated'] is True
+    # The arrange stage completed before on_task_complete blocked, so it
+    # should be present in the partial report.
+    assert body['arrange']['duration_seconds'] is not None
+    # handler.cache was restored to the original NoOpCache — the finally
+    # block in DebugRunner.run ran during the cancellation cascade.
+    assert handler.cache is original_cache
