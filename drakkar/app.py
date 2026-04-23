@@ -50,6 +50,46 @@ logger = structlog.get_logger()
 
 POLL_IDLE_SLEEP = 0.05  # seconds to sleep when Kafka poll returns no messages
 
+# Loopback hosts treated as safe for an unauthenticated debug UI. Anything
+# outside this set exposes operational data (events, config, probe) to other
+# machines, so we require an ``auth_token`` to be set before allowing startup.
+# Matched case-insensitively so ``LOCALHOST`` and ``127.0.0.1`` behave alike.
+_LOOPBACK_HOSTS: frozenset[str] = frozenset({'127.0.0.1', 'localhost', '::1'})
+
+
+class InsecureDebugConfigError(RuntimeError):
+    """Debug UI is configured in a way that exposes operational data without auth."""
+
+
+def _validate_debug_security(config: DrakkarConfig) -> None:
+    """Fail fast if the debug UI is bound to a non-loopback host without auth.
+
+    The debug UI serves the flight recorder (events, per-task output, worker
+    config, Kafka peek endpoints). Binding to a public interface without
+    ``auth_token`` set would leak all of that to anything on the network.
+
+    Whitespace-only ``auth_token`` values are treated as empty — a string of
+    spaces protects nothing but might fool an operator into thinking it does.
+
+    Raises:
+        InsecureDebugConfigError: When debug is enabled, bound to a
+            non-loopback host, and ``auth_token`` is empty or whitespace.
+    """
+    if not config.debug.enabled:
+        return
+
+    host_normalized = config.debug.host.strip().lower()
+    if host_normalized in _LOOPBACK_HOSTS:
+        return
+
+    if config.debug.auth_token.strip() != '':
+        return
+
+    raise InsecureDebugConfigError(
+        f'Debug UI is bound to a non-loopback host ({config.debug.host}) without auth_token. '
+        f'Either set debug.auth_token, or set debug.host=127.0.0.1, or set debug.enabled=false.'
+    )
+
 
 class DrakkarApp:
     """Main application that orchestrates Kafka consumption, subprocess
@@ -242,6 +282,11 @@ class DrakkarApp:
             )
 
         if self._config.debug.enabled:
+            # Fail fast before anything observable starts up. Raising here
+            # skips the recorder and debug server entirely — no half-started
+            # artifacts remain for the operator to clean up.
+            _validate_debug_security(self._config)
+
             self._recorder = EventRecorder(
                 self._config.debug,
                 worker_name=self._worker_id,
