@@ -2356,9 +2356,10 @@ class TestDebugPage:
 
     async def test_probe_tab_rendered_in_debug_html(self, tmp_path, mock_recorder, mock_app):
         """``GET /debug`` → HTML includes the Message Probe tab button, panel,
-        the visible header, and the results container id. Keeps the UI work
-        honest without depending on a JS test stack — the endpoint behavior
-        itself is covered by the probe endpoint tests above.
+        the visible header, the results container id, AND the rendering
+        helpers (``renderProbeReport`` + section markers) that Task 7 adds.
+        Keeps the UI work honest without depending on a JS test stack — the
+        endpoint behavior itself is covered by the probe endpoint tests above.
         """
         cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
@@ -2374,6 +2375,19 @@ class TestDebugPage:
         # rendering.
         assert 'Message Probe' in html
         assert 'probe-result' in html
+        # Task 7: rendering helpers must be present so the client can turn
+        # a DebugReport into A/B/C cards. These are inline-script markers,
+        # so a substring check is enough to prove the functions were
+        # injected.
+        assert 'renderProbeReport' in html
+        assert 'renderProbeSectionInput' in html
+        assert 'renderProbeSectionArrange' in html
+        assert 'renderProbeSectionTasks' in html
+        # Section wrapper ids are used by the tests and also by future
+        # Task-8 cross-linking (replacement_for / retry_of scroll targets).
+        assert 'probe-section-input' in html
+        assert 'probe-section-arrange' in html
+        assert 'probe-section-tasks' in html
 
 
 class TestDebugServerClass:

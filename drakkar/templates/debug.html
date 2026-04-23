@@ -1541,18 +1541,466 @@
     });
 })();
 
+// === Message Probe — rendering helpers ===
+// These helpers mirror the ones used in live.html but live here so the probe
+// renderer is self-contained. All strings are written via ``textContent`` so
+// we never interpolate HTML from user-supplied data (stdin/stdout/stderr).
+
+// Kafka-UI deep-link config — populated from template globals. Empty strings
+// = feature disabled, so ``probeMakeKafkaUiIcon`` returns null and callers
+// skip the icon without extra guards.
+var PROBE_KAFKA_UI_BASE = {{ kafka_ui_base | tojson }};
+var PROBE_KAFKA_UI_CLUSTER = {{ kafka_ui_cluster | tojson }};
+var PROBE_KAFKA_SOURCE_TOPIC = {{ kafka_source_topic | tojson }};
+var PROBE_KAFKA_SVG_PATH = 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15.5v-2.04c-1.73-.23-3.23-1.2-4.07-2.63l1.5-1.12c.6 1.03 1.52 1.76 2.57 1.97V9.62c-2.28-.46-4-2.5-4-4.93h2c0 1.66 1.12 3.05 2.64 3.46l.36.08V4h2v4.23l.36-.08C14.88 7.74 16 6.35 16 4.69h2c0 2.43-1.72 4.47-4 4.93v4.06c1.05-.21 1.97-.94 2.57-1.97l1.5 1.12c-.84 1.43-2.34 2.4-4.07 2.63v2.04h-2z';
+
+function probeBuildKafkaUiUrl(topic, partition, offset) {
+    if (!PROBE_KAFKA_UI_BASE || !PROBE_KAFKA_UI_CLUSTER || !topic) return '';
+    return PROBE_KAFKA_UI_BASE + '/ui/clusters/' + encodeURIComponent(PROBE_KAFKA_UI_CLUSTER)
+        + '/all-topics/' + encodeURIComponent(topic)
+        + '/messages?seekType=OFFSET&seekTo=' + partition + '%3A%3A' + offset + '&limit=1';
+}
+
+function probeMakeKafkaUiIcon(topic, partition, offset) {
+    // Returns null when Kafka-UI isn't configured. Built via DOM APIs so a
+    // strict-CSP environment keeps working.
+    var url = probeBuildKafkaUiUrl(topic, partition, offset);
+    if (!url) return null;
+    var a = document.createElement('a');
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.title = 'Open in Kafka-UI (' + topic + ' ' + partition + ':' + offset + ')';
+    a.className = 'inline-block align-middle ml-1 text-gray-400 hover:text-ink-800';
+    a.onclick = function(ev) { ev.stopPropagation(); };
+    var SVG_NS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('width', '14');
+    svg.setAttribute('height', '14');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'currentColor');
+    svg.style.cssText = 'display:inline-block;vertical-align:-2px;';
+    var path = document.createElementNS(SVG_NS, 'path');
+    path.setAttribute('d', PROBE_KAFKA_SVG_PATH);
+    svg.appendChild(path);
+    a.appendChild(svg);
+    return a;
+}
+
+function probeDurSec(sec) {
+    // Formats a duration value for display. Returns '-' when null/undefined.
+    if (sec == null) return '-';
+    if (sec < 1) return (sec * 1000).toFixed(0) + 'ms';
+    return sec.toFixed(2) + 's';
+}
+
+function probeDurColor(d) {
+    // Green under 100ms, orange under 1s, red beyond.
+    if (d == null) return '#6b7280';
+    return d > 1 ? '#dc2626' : d > 0.1 ? '#d97706' : '#059669';
+}
+
+function probeShortTaskId(tid) {
+    // Short display of task_id — first 8 chars of the id portion (strips any
+    // retry suffix like ``:r1``). Full id is exposed via title tooltip.
+    if (!tid) return '-';
+    var base = tid.split(':r')[0];
+    return base.length > 10 ? base.slice(0, 10) + '...' : base;
+}
+
+function probePreviewText(text, maxLen) {
+    // Collapses newlines/whitespace for a single-line preview and truncates.
+    if (text == null || text === '') return '';
+    var s = String(text).replace(/\s+/g, ' ').trim();
+    if (s.length > maxLen) s = s.slice(0, maxLen) + '...';
+    return s;
+}
+
+function probeMakeCard(titleText) {
+    // Rounded bordered card matching the existing debug-tab card style.
+    // Returns {card, body} — caller appends content into body.
+    var card = document.createElement('div');
+    card.className = 'mb-4 rounded-lg border border-cream-200';
+    card.style.background = '#fff';
+    var head = document.createElement('div');
+    head.className = 'px-4 py-2 border-b border-cream-200 flex items-center gap-3';
+    head.style.background = '#f5f3ee';
+    var h = document.createElement('h3');
+    h.className = 'font-semibold text-ink-800 text-sm';
+    h.textContent = titleText;
+    head.appendChild(h);
+    card.appendChild(head);
+    var body = document.createElement('div');
+    body.className = 'p-4';
+    card.appendChild(body);
+    return {card: card, body: body, head: head};
+}
+
+function probeMakeErrorBanner(errObj) {
+    // Red banner + scrollable traceback. errObj is a ProbeError dict.
+    var wrap = document.createElement('div');
+    wrap.className = 'p-3 rounded border border-red-300 text-xs text-red-700';
+    wrap.style.background = '#fef2f2';
+    var title = document.createElement('div');
+    title.className = 'font-semibold mb-2';
+    title.textContent = (errObj.exception_class || 'Error') + ': ' + (errObj.message || '');
+    wrap.appendChild(title);
+    if (errObj.traceback) {
+        var pre = document.createElement('pre');
+        pre.className = 'text-xs font-mono whitespace-pre-wrap';
+        pre.style.cssText = 'max-height:240px;overflow-y:auto;background:#fff;padding:8px;border-radius:4px;color:#7f1d1d;';
+        pre.textContent = errObj.traceback;
+        wrap.appendChild(pre);
+    }
+    return wrap;
+}
+
+function probeMakeField(label, valueNode) {
+    // Two-column field row used by section A. ``valueNode`` is either a
+    // string (wrapped in <span>) or a DOM node.
+    var row = document.createElement('div');
+    row.className = 'flex gap-3 py-1 text-xs';
+    var lbl = document.createElement('div');
+    lbl.className = 'text-gray-500 uppercase tracking-wide';
+    lbl.style.minWidth = '10rem';
+    lbl.textContent = label;
+    var val = document.createElement('div');
+    val.className = 'font-mono text-ink-800 flex-1';
+    if (typeof valueNode === 'string' || typeof valueNode === 'number') {
+        val.textContent = String(valueNode);
+    } else if (valueNode instanceof Node) {
+        val.appendChild(valueNode);
+    }
+    row.append(lbl, val);
+    return row;
+}
+
+function probeStatusColor(status) {
+    // Matches the colored-number style used elsewhere in the UI.
+    if (status === 'done') return '#059669';
+    if (status === 'failed') return '#dc2626';
+    if (status === 'replaced') return '#6b7280';
+    if (status === 'retried') return '#d97706';
+    return '#6b7280';
+}
+
+function probeMakeStatusCounts(counts) {
+    // Inline ``done / failed / replaced`` colored counts. ``counts`` is
+    // {done: N, failed: N, replaced: N, retried: N} — zeros are rendered
+    // in muted style so row alignment stays consistent.
+    var wrap = document.createElement('span');
+    wrap.className = 'font-mono text-xs';
+    function part(n, label, color) {
+        var s = document.createElement('span');
+        s.style.cssText = 'color:' + color + ';margin-right:10px;' + (n ? 'font-weight:700;' : 'opacity:0.5;');
+        s.textContent = n + ' ' + label;
+        wrap.appendChild(s);
+    }
+    part(counts.done || 0, 'done', '#059669');
+    part(counts.failed || 0, 'failed', '#dc2626');
+    part(counts.replaced || 0, 'replaced', '#6b7280');
+    if (counts.retried) part(counts.retried, 'retried', '#d97706');
+    return wrap;
+}
+
+// Currently-selected task from the sidebar (used by Task 8). Declared at
+// module scope so the sidebar implementation in Task 8 can read it without
+// re-wiring the click handler.
+var probeSelectedTask = null;
+
+function openTaskSidebar(taskEntry) {
+    // Placeholder until Task 8 implements the full sidebar. We still track
+    // the selected task so later wiring sees the last-clicked row.
+    probeSelectedTask = taskEntry;
+    // Log to console for debugging; a full sidebar lands in Task 8.
+    if (typeof console !== 'undefined' && console.log) {
+        console.log('probe task sidebar (Task 8 stub):', taskEntry);
+    }
+}
+
+// === Message Probe — Section A: Input & deserialization ===
+function renderProbeSectionInput(report) {
+    var card = probeMakeCard('Input');
+    card.card.id = 'probe-section-input';
+    var input = report.input || {};
+
+    // Deserialize errors take the entire card — downstream fields are not
+    // useful when the payload couldn't be parsed at all.
+    if (report.deserialize_error) {
+        card.body.appendChild(probeMakeErrorBanner(report.deserialize_error));
+        return card.card;
+    }
+
+    // Partition:offset line with optional Kafka-UI icon.
+    var posWrap = document.createElement('span');
+    posWrap.className = 'inline-flex items-center';
+    var posText = document.createElement('span');
+    posText.textContent = 'P' + input.partition + ':' + input.offset;
+    posWrap.appendChild(posText);
+    var kIcon = probeMakeKafkaUiIcon(input.topic || PROBE_KAFKA_SOURCE_TOPIC, input.partition, input.offset);
+    if (kIcon) posWrap.appendChild(kIcon);
+    card.body.appendChild(probeMakeField('partition:offset', posWrap));
+
+    card.body.appendChild(probeMakeField('topic', input.topic || '(none)'));
+    card.body.appendChild(probeMakeField('key', input.key == null || input.key === '' ? '(none)' : input.key));
+
+    // Timestamp echoed back as ISO-8601 for readability.
+    var tsText = '-';
+    if (input.timestamp) {
+        try { tsText = new Date(input.timestamp).toISOString(); }
+        catch (e) { tsText = String(input.timestamp); }
+    }
+    card.body.appendChild(probeMakeField('timestamp', tsText));
+
+    // Value preview — first 300 chars, scrollable <pre>.
+    var valuePre = document.createElement('pre');
+    valuePre.className = 'text-xs font-mono whitespace-pre-wrap bg-cream-100 p-2 rounded';
+    valuePre.style.cssText = 'max-height:120px;overflow-y:auto;';
+    var valueStr = input.value == null ? '' : String(input.value);
+    valuePre.textContent = valueStr.length > 300 ? valueStr.slice(0, 300) + '...' : valueStr;
+    card.body.appendChild(probeMakeField('value (preview)', valuePre));
+
+    card.body.appendChild(probeMakeField('message_label', report.message_label == null ? '(none)' : report.message_label));
+
+    // Parsed payload as pretty JSON in a scrollable <pre>.
+    var payloadPre = document.createElement('pre');
+    payloadPre.className = 'text-xs font-mono whitespace-pre-wrap bg-cream-100 p-2 rounded';
+    payloadPre.style.cssText = 'max-height:240px;overflow-y:auto;';
+    if (report.parsed_payload == null) {
+        payloadPre.textContent = '(no parsed payload)';
+        payloadPre.style.color = '#6b7280';
+    } else {
+        try { payloadPre.textContent = JSON.stringify(report.parsed_payload, null, 2); }
+        catch (e) { payloadPre.textContent = String(report.parsed_payload); }
+    }
+    card.body.appendChild(probeMakeField('parsed_payload', payloadPre));
+
+    return card.card;
+}
+
+// === Message Probe — Section B: Arrange ===
+function renderProbeSectionArrange(report) {
+    var card = probeMakeCard('Arrange');
+    card.card.id = 'probe-section-arrange';
+    var arrange = report.arrange || {};
+    var tasks = report.tasks || [];
+
+    if (arrange.error) {
+        // Short summary first, then full traceback from the errors[] panel.
+        var summary = document.createElement('div');
+        summary.className = 'text-xs text-red-700 mb-2';
+        summary.textContent = 'arrange raised: ' + arrange.error;
+        card.body.appendChild(summary);
+        // Find the full traceback in errors[] if present.
+        var arrangeErr = (report.errors || []).filter(function(e) { return e.stage === 'arrange'; })[0];
+        if (arrangeErr) card.body.appendChild(probeMakeErrorBanner(arrangeErr));
+        return card.card;
+    }
+
+    var durMs = arrange.duration_seconds != null ? (arrange.duration_seconds * 1000).toFixed(1) + ' ms' : '-';
+    var summaryLine = document.createElement('div');
+    summaryLine.className = 'text-sm text-ink-800';
+    summaryLine.textContent = tasks.length + ' task' + (tasks.length === 1 ? '' : 's') + ' generated · duration ' + durMs;
+    card.body.appendChild(summaryLine);
+
+    // Neutral note when arrange returned no tasks (message is effectively skipped).
+    if (tasks.length === 0) {
+        var note = document.createElement('div');
+        note.className = 'mt-2 text-xs text-gray-500 italic';
+        note.textContent = 'arrange returned no tasks — message would be skipped';
+        card.body.appendChild(note);
+    }
+    return card.card;
+}
+
+// === Message Probe — Section C: Tasks table ===
+function renderProbeSectionTasks(report) {
+    var card = probeMakeCard('Tasks');
+    card.card.id = 'probe-section-tasks';
+    var tasks = report.tasks || [];
+
+    // Count badge + status counts in the card header (next to the title).
+    var countBadge = document.createElement('span');
+    countBadge.className = 'px-2 py-0.5 rounded text-xs';
+    countBadge.style.cssText = 'background:#e0f2fe;color:#1e40af;font-weight:600;';
+    countBadge.textContent = tasks.length + ' task' + (tasks.length === 1 ? '' : 's');
+    card.head.appendChild(countBadge);
+
+    // Aggregate status counts across the task list.
+    var counts = {done: 0, failed: 0, replaced: 0, retried: 0};
+    for (var i = 0; i < tasks.length; i++) {
+        var st = tasks[i].status;
+        if (counts[st] != null) counts[st]++;
+        // "retried" is inferred — a row with retry_of set signals a retry.
+        if (tasks[i].retry_of) counts.retried++;
+    }
+    card.head.appendChild(probeMakeStatusCounts(counts));
+
+    if (tasks.length === 0) {
+        var empty = document.createElement('div');
+        empty.className = 'text-xs text-gray-500 italic';
+        empty.textContent = 'No tasks to render';
+        card.body.appendChild(empty);
+        return card.card;
+    }
+
+    var table = document.createElement('table');
+    table.className = 'w-full text-sm';
+    var thead = document.createElement('thead');
+    var headTr = document.createElement('tr');
+    headTr.className = 'text-left text-gray-400 text-xs border-b border-cream-200';
+    var cols = ['#', 'task_id', 'labels', 'status', 'exit', 'precomputed', 'duration', 'stdout', 'stderr'];
+    cols.forEach(function(c) {
+        var th = document.createElement('th');
+        th.className = 'py-2 px-3';
+        th.textContent = c;
+        headTr.appendChild(th);
+    });
+    thead.appendChild(headTr);
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    tasks.forEach(function(t, idx) {
+        var tr = document.createElement('tr');
+        tr.className = 'border-b border-cream-50 hover:bg-cream-50 cursor-pointer';
+        (function(entry) {
+            // ev.stopPropagation() prevents a document-level click listener
+            // (added later for the sidebar close-on-outside pattern) from
+            // tearing down the click target mid-rebuild — see
+            // feedback/dom_orphaned_target.
+            tr.onclick = function(ev) { ev.stopPropagation(); openTaskSidebar(entry); };
+        })(t);
+
+        // # (1-based row index)
+        var td0 = document.createElement('td');
+        td0.className = 'py-2 px-3 text-xs text-gray-500 font-mono';
+        td0.textContent = String(idx + 1);
+        tr.appendChild(td0);
+
+        // task_id — shortened with full id in tooltip.
+        var td1 = document.createElement('td');
+        td1.className = 'py-2 px-3 font-mono text-xs';
+        td1.textContent = probeShortTaskId(t.task_id);
+        td1.title = t.task_id || '';
+        tr.appendChild(td1);
+
+        // labels — compact ``k=v`` list.
+        var td2 = document.createElement('td');
+        td2.className = 'py-2 px-3 font-mono text-xs text-gray-600';
+        var labelKeys = t.labels ? Object.keys(t.labels) : [];
+        if (labelKeys.length === 0) {
+            td2.textContent = '(none)';
+            td2.style.color = '#9ca3af';
+        } else {
+            td2.textContent = labelKeys.map(function(k) { return k + '=' + t.labels[k]; }).join(' ');
+        }
+        tr.appendChild(td2);
+
+        // status — colored, bold.
+        var td3 = document.createElement('td');
+        td3.className = 'py-2 px-3 text-xs font-semibold';
+        td3.style.color = probeStatusColor(t.status);
+        td3.textContent = t.status || '-';
+        tr.appendChild(td3);
+
+        // exit — red when nonzero.
+        var td4 = document.createElement('td');
+        td4.className = 'py-2 px-3 font-mono text-xs';
+        if (t.exit_code == null) {
+            td4.textContent = '-';
+            td4.style.color = '#9ca3af';
+        } else {
+            td4.textContent = String(t.exit_code);
+            td4.style.color = t.exit_code === 0 ? '#059669' : '#dc2626';
+        }
+        tr.appendChild(td4);
+
+        // precomputed badge.
+        var td5 = document.createElement('td');
+        td5.className = 'py-2 px-3 text-xs';
+        if (t.precomputed) {
+            var badge = document.createElement('span');
+            badge.className = 'px-2 py-0.5 rounded text-xs';
+            badge.style.cssText = 'background:#d1fae5;color:#065f46;font-weight:600;';
+            badge.textContent = 'precomp';
+            td5.appendChild(badge);
+        }
+        tr.appendChild(td5);
+
+        // duration.
+        var td6 = document.createElement('td');
+        td6.className = 'py-2 px-3 font-mono text-xs';
+        td6.textContent = probeDurSec(t.duration_seconds);
+        td6.style.color = probeDurColor(t.duration_seconds);
+        tr.appendChild(td6);
+
+        // stdout preview — italic gray when empty.
+        var td7 = document.createElement('td');
+        td7.className = 'py-2 px-3 font-mono text-xs';
+        td7.style.maxWidth = '18rem';
+        td7.style.overflow = 'hidden';
+        td7.style.textOverflow = 'ellipsis';
+        td7.style.whiteSpace = 'nowrap';
+        if (!t.stdout) {
+            td7.textContent = '(empty)';
+            td7.style.fontStyle = 'italic';
+            td7.style.color = '#9ca3af';
+        } else {
+            td7.textContent = probePreviewText(t.stdout, 120);
+            td7.title = t.stdout.length > 120 ? t.stdout.slice(0, 500) : t.stdout;
+        }
+        tr.appendChild(td7);
+
+        // stderr preview — red-tinted background when non-empty.
+        var td8 = document.createElement('td');
+        td8.className = 'py-2 px-3 font-mono text-xs';
+        td8.style.maxWidth = '18rem';
+        td8.style.overflow = 'hidden';
+        td8.style.textOverflow = 'ellipsis';
+        td8.style.whiteSpace = 'nowrap';
+        if (!t.stderr) {
+            td8.textContent = '(empty)';
+            td8.style.fontStyle = 'italic';
+            td8.style.color = '#9ca3af';
+        } else {
+            td8.textContent = probePreviewText(t.stderr, 120);
+            td8.title = t.stderr.length > 120 ? t.stderr.slice(0, 500) : t.stderr;
+            td8.style.background = '#fef2f2';
+            td8.style.color = '#991b1b';
+        }
+        tr.appendChild(td8);
+
+        tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    card.body.appendChild(table);
+    return card.card;
+}
+
 function renderProbeReport(report) {
-    // Stub renderer — dumps the full DebugReport as pretty JSON inside a
-    // scrollable ``<pre>``. Tasks 7-10 replace this with stacked result
-    // cards (input echo, arrange, tasks table, sink payloads, cache calls,
-    // timeline, errors).
+    // Renders the DebugReport as a stack of cards:
+    //   A. Input & deserialization
+    //   B. Arrange
+    //   C. Tasks table
+    // Sections D-I (Message/Window/Sinks/Cache/Timeline/Errors) and the
+    // per-task sidebar land in Tasks 8-10. A top-level ``truncated`` banner
+    // surfaces partial reports (wall-clock timeouts).
     var container = document.getElementById('probe-result');
-    var pre = document.createElement('pre');
-    pre.className = 'text-xs font-mono whitespace-pre-wrap';
-    pre.style.maxHeight = '60vh';
-    pre.style.overflow = 'auto';
-    pre.textContent = JSON.stringify(report, null, 2);
-    container.replaceChildren(pre);
+    container.textContent = '';
+
+    if (!report) return;
+
+    if (report.truncated) {
+        var warn = document.createElement('div');
+        warn.className = 'mb-3 p-2 rounded border border-orange-300 text-xs text-orange-800';
+        warn.style.background = '#fff7ed';
+        warn.textContent = 'Partial report — the probe did not reach every stage (timeout or upstream failure).';
+        container.appendChild(warn);
+    }
+
+    container.appendChild(renderProbeSectionInput(report));
+    container.appendChild(renderProbeSectionArrange(report));
+    container.appendChild(renderProbeSectionTasks(report));
 }
 </script>
 {% endblock %}
