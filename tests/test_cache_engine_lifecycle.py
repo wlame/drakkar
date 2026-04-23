@@ -349,6 +349,57 @@ async def test_start_disabled_cache_does_not_open_connection(tmp_path):
         await engine.stop()
 
 
+# --- max_memory_entries=None warning at startup -----------------------------
+
+
+async def test_start_with_max_memory_entries_none_emits_warning(tmp_path):
+    """When the operator explicitly opts into an unbounded memory dict
+    (max_memory_entries=None), the engine must emit a warning at startup so
+    the intentional choice is visible in logs. We capture structlog events
+    with ``capture_logs`` and assert the expected event name is present."""
+    import structlog.testing
+
+    engine = CacheEngine(
+        config=CacheConfig(enabled=True, max_memory_entries=None),
+        debug_config=make_debug_config(tmp_path),
+        worker_id='w1',
+        cluster_name='',
+        recorder=None,
+    )
+    try:
+        with structlog.testing.capture_logs() as captured:
+            await engine.start()
+        # Filter out unrelated events (peer_sync disabled info, etc.) and
+        # assert exactly the unbounded-memory warning fired.
+        unbounded_events = [ev for ev in captured if ev.get('event') == 'cache_max_memory_entries_unbounded']
+        assert len(unbounded_events) == 1
+        assert unbounded_events[0]['log_level'] == 'warning'
+        assert unbounded_events[0]['worker_id'] == 'w1'
+    finally:
+        await engine.stop()
+
+
+async def test_start_with_default_max_memory_entries_does_not_warn(tmp_path):
+    """With the default cap of 10_000, the unbounded-memory warning must
+    NOT fire — that warning is reserved for the explicit opt-in path."""
+    import structlog.testing
+
+    engine = CacheEngine(
+        config=CacheConfig(enabled=True),  # default max_memory_entries=10_000
+        debug_config=make_debug_config(tmp_path),
+        worker_id='w1',
+        cluster_name='',
+        recorder=None,
+    )
+    try:
+        with structlog.testing.capture_logs() as captured:
+            await engine.start()
+        unbounded_events = [ev for ev in captured if ev.get('event') == 'cache_max_memory_entries_unbounded']
+        assert unbounded_events == []
+    finally:
+        await engine.stop()
+
+
 # --- constants --------------------------------------------------------------
 
 

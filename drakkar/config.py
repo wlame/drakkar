@@ -397,9 +397,12 @@ class CacheConfig(BaseModel):
     under ``db_dir`` (falls back to ``debug.db_dir`` when empty) and
     optionally pulled from sibling workers via the peer-sync loop.
 
-    ``max_memory_entries`` defaults to ``None`` (unbounded); when set, the
-    in-memory dict uses LRU eviction and falls through to the DB on miss —
-    the DB is the source of truth, so eviction never loses data.
+    ``max_memory_entries`` defaults to ``10_000`` to prevent unbounded
+    growth under write-heavy workloads; the in-memory dict uses LRU
+    eviction and falls through to the DB on miss — the DB is the source
+    of truth, so eviction never loses data. Explicit ``None`` disables
+    the cap (unbounded cache); the engine emits a warning at startup so
+    that choice is visible in logs.
 
     Gating rules (warn-and-continue, not fail-at-startup):
     - ``enabled=true`` but no ``db_dir`` anywhere → warning + effective-disable
@@ -413,8 +416,18 @@ class CacheConfig(BaseModel):
     db_dir: str = ''
     flush_interval_seconds: float = Field(default=3.0, gt=0)
     cleanup_interval_seconds: float = Field(default=60.0, gt=0)
-    # None = unbounded memory dict; when set, LRU eviction kicks in at N entries.
-    max_memory_entries: int | None = Field(default=None, ge=1)
+    # Cap for in-memory LRU entries. Default 10_000 prevents unbounded growth
+    # under write-heavy workloads. Set to None for explicitly unbounded cache;
+    # the engine will warn at startup so operators see the intentional choice.
+    max_memory_entries: int | None = Field(
+        default=10_000,
+        ge=1,
+        description=(
+            'Cap for in-memory LRU entries. Default 10_000 prevents unbounded '
+            'growth under write-heavy workloads. Set to None for explicitly '
+            'unbounded cache.'
+        ),
+    )
     peer_sync: CachePeerSyncConfig = Field(default_factory=CachePeerSyncConfig)
 
 

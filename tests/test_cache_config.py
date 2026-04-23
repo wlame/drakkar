@@ -65,8 +65,9 @@ def test_cache_config_defaults():
     assert cfg.db_dir == ''
     assert cfg.flush_interval_seconds == 3.0
     assert cfg.cleanup_interval_seconds == 60.0
-    # None = unbounded memory dict
-    assert cfg.max_memory_entries is None
+    # Default cap prevents unbounded growth under write-heavy workloads;
+    # operators can opt into unbounded behavior by setting None explicitly.
+    assert cfg.max_memory_entries == 10_000
     # peer_sync defaults nested in
     assert isinstance(cfg.peer_sync, CachePeerSyncConfig)
     assert cfg.peer_sync.enabled is True
@@ -110,8 +111,16 @@ def test_cache_config_rejects_invalid_max_memory_entries():
 
 
 def test_cache_config_max_memory_entries_none_is_valid():
+    # Explicit opt-in to unbounded cache is still a valid choice — the
+    # engine logs a warning at startup so operators see the decision.
     cfg = CacheConfig(max_memory_entries=None)
     assert cfg.max_memory_entries is None
+
+
+def test_cache_config_max_memory_entries_explicit_value_is_honored():
+    # Explicit smaller cap wins over the default.
+    cfg = CacheConfig(max_memory_entries=500)
+    assert cfg.max_memory_entries == 500
 
 
 def test_cache_config_db_dir_empty_stays_empty():

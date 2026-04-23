@@ -1260,6 +1260,19 @@ class CacheEngine:
         if not self._config.enabled:
             return
 
+        # Explicit opt-in to an unbounded memory dict is allowed (operators
+        # may have their own eviction strategy or a bounded key universe),
+        # but we surface the choice at startup so it is visible in logs.
+        # The default is 10_000 — reaching this branch means the operator
+        # explicitly set ``max_memory_entries: null`` in config.
+        if self._config.max_memory_entries is None:
+            await logger.awarning(
+                'cache_max_memory_entries_unbounded',
+                category='cache',
+                worker_id=self._worker_id,
+                message='cache.max_memory_entries=None configured — memory is unbounded, monitor RSS under load',
+            )
+
         db_dir = self._resolve_db_dir()
         if not db_dir:
             # Warn-and-continue (not fail-at-startup) per the plan. The

@@ -1055,13 +1055,21 @@ class TestConfigSummary:
         assert 'cache=on:f=3s/s=off/c=60s' in summary
 
     def test_summary_cache_on_with_max_memory_entries(self):
-        """max_memory_entries renders as 'max=N' when set, absent otherwise."""
+        """max_memory_entries renders as 'max=N' when set, absent only when
+        explicitly None. The default 10_000 cap is included in the summary so
+        operators can verify the effective limit at a glance."""
         from drakkar.config import CacheConfig
 
         cfg_with = make_config(cache=CacheConfig(enabled=True, max_memory_entries=5000))
         summary_with = cfg_with.config_summary(worker_id='w')
         assert 'max=5000' in summary_with
 
-        cfg_without = make_config(cache=CacheConfig(enabled=True))
-        summary_without = cfg_without.config_summary(worker_id='w')
-        assert 'max=' not in summary_without
+        # Default config now carries max_memory_entries=10_000 — render it.
+        cfg_default = make_config(cache=CacheConfig(enabled=True))
+        summary_default = cfg_default.config_summary(worker_id='w')
+        assert 'max=10000' in summary_default
+
+        # Explicit None (unbounded) is the only case where 'max=' is absent.
+        cfg_unbounded = make_config(cache=CacheConfig(enabled=True, max_memory_entries=None))
+        summary_unbounded = cfg_unbounded.config_summary(worker_id='w')
+        assert 'max=' not in summary_unbounded
