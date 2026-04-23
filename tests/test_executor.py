@@ -85,27 +85,102 @@ async def test_execute_invalid_binary():
 
 
 async def test_execute_concurrency_limit():
+    """The semaphore in ExecutorPool.execute must cap concurrent subprocess
+    runs at ``max_executors``. This test launches many overlapping tasks
+    and samples ``pool.active_count`` from a concurrent sampler coroutine.
+
+    Two assertions make the test meaningful:
+    - ``max_observed <= max_executors``  — the cap is respected
+    - ``max_observed >= max_executors``  — the pool actually saturated
+      (without this, a test that never hits the limit would pass even
+      if the semaphore were removed)
+    """
+    max_executors = 2
+    num_tasks = 6
     pool = ExecutorPool(
         binary_path=sys.executable,
-        max_executors=2,
+        max_executors=max_executors,
         task_timeout_seconds=10,
     )
-    tasks = [make_task(task_id=f't{i}', args=['-c', 'import time; time.sleep(0.2)']) for i in range(4)]
+    # Each task sleeps long enough that many overlap — ensures contention.
+    tasks = [make_task(task_id=f't{i}', args=['-c', 'import time; time.sleep(0.15)']) for i in range(num_tasks)]
 
-    max_active = 0
+    max_observed_active = 0
+    sampler_stop = asyncio.Event()
 
-    async def tracked_execute(task: ExecutorTask) -> None:
-        nonlocal max_active
-        result = pool.execute(task)
-        # check active count while running
-        coro = result
-        await coro
-        if pool.active_count > max_active:
-            max_active = pool.active_count
+    async def sample_active_count() -> None:
+        """Poll pool.active_count until signalled to stop.
 
-    await asyncio.gather(*[pool.execute(t) for t in tasks])
-    # with 4 tasks and 2 max_executors, they should run in 2 rounds
-    # active_count should have been at most 2 at any point
+        Runs in parallel with the gather() below and records the peak.
+        Must start with zero and only reflect real slot occupancy.
+        """
+        nonlocal max_observed_active
+        while not sampler_stop.is_set():
+            if pool.active_count > max_observed_active:
+                max_observed_active = pool.active_count
+            await asyncio.sleep(0.005)
+
+    sampler = asyncio.create_task(sample_active_count())
+    try:
+        await asyncio.gather(*[pool.execute(t) for t in tasks])
+    finally:
+        sampler_stop.set()
+        await sampler
+
+    # Cap is enforced — never more than max_executors running at once.
+    assert max_observed_active <= max_executors, f'pool exceeded cap: observed {max_observed_active} > {max_executors}'
+    # Pool actually saturated — proves the test exercised the slow path.
+    # If the semaphore were removed, the first assertion could still hold
+    # by accident; this second assertion would fail (we'd see > 2) OR
+    # it confirms we at least reached the cap.
+    assert max_observed_active >= max_executors, (
+        f'pool never saturated: observed peak {max_observed_active} < {max_executors} — '
+        'test did not exercise the semaphore'
+    )
+    # After everything completes, counters return to zero.
+    assert pool.active_count == 0
+    assert pool.waiting_count == 0
+
+
+async def test_execute_concurrency_cap_holds_under_burst():
+    """With a large burst (N * cap tasks), the pool never exceeds its cap.
+
+    Separate from the basic concurrency test so a failure here is a
+    clear signal that the semaphore survives heavy contention, not
+    just a small overlap.
+    """
+    max_executors = 3
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=max_executors,
+        task_timeout_seconds=10,
+    )
+    burst_size = max_executors * 4  # 12 tasks, only 3 can run at once
+    tasks = [make_task(task_id=f'burst-{i}', args=['-c', 'import time; time.sleep(0.1)']) for i in range(burst_size)]
+
+    max_observed_active = 0
+    sampler_stop = asyncio.Event()
+
+    async def sample_active_count() -> None:
+        nonlocal max_observed_active
+        while not sampler_stop.is_set():
+            if pool.active_count > max_observed_active:
+                max_observed_active = pool.active_count
+            await asyncio.sleep(0.005)
+
+    sampler = asyncio.create_task(sample_active_count())
+    try:
+        await asyncio.gather(*[pool.execute(t) for t in tasks])
+    finally:
+        sampler_stop.set()
+        await sampler
+
+    assert max_observed_active <= max_executors, f'burst exceeded cap: {max_observed_active} > {max_executors}'
+    assert max_observed_active >= max_executors, (
+        f'burst never saturated the pool: peak {max_observed_active} < {max_executors}'
+    )
+    assert pool.active_count == 0
+    assert pool.waiting_count == 0
 
 
 async def test_execute_active_count_tracking(echo_pool: ExecutorPool):
