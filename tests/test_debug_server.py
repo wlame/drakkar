@@ -3482,6 +3482,72 @@ async def test_probe_endpoint_empty_value_still_runs(mock_recorder, debug_config
     assert body['input']['value'] == ''
 
 
+async def test_probe_endpoint_dispatches_to_drakkar_main_loop_when_different(
+    mock_recorder, debug_config, _probe_mock_app
+):
+    """Regression: the ``ExecutorPool.Semaphore`` crash when the endpoint
+    runs on a separate event loop from the pipeline.
+
+    The debug FastAPI server runs in its own thread + event loop so
+    heavy requests don't block the pipeline. ``ExecutorPool._semaphore``
+    is an ``asyncio.Semaphore`` bound to the main loop where the
+    pool was constructed — acquiring it from a different loop raises
+    "bound to a different event loop" as soon as the pool is
+    contended. The endpoint must therefore dispatch ``runner.run`` back
+    to the main loop via ``asyncio.run_coroutine_threadsafe``.
+
+    This test spawns a real background thread with its own loop,
+    exposes it as ``drakkar_app.main_loop``, records which loop the
+    handler's ``arrange`` actually runs on, and asserts it's the main
+    loop — not the endpoint's loop.
+    """
+    import threading
+
+    main_loop_box: list[asyncio.AbstractEventLoop | None] = [None]
+    loop_ready = threading.Event()
+
+    def thread_body():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        main_loop_box[0] = loop
+        loop_ready.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=thread_body, name='test-main-loop', daemon=True)
+    thread.start()
+    loop_ready.wait(timeout=5)
+    main_loop = main_loop_box[0]
+    assert main_loop is not None
+
+    try:
+        observed_loops: list[asyncio.AbstractEventLoop] = []
+
+        handler = _ProbeTestHandler(task_count=1)
+        original_arrange = handler.arrange
+
+        async def arrange_recording_loop(messages, pending):
+            observed_loops.append(asyncio.get_running_loop())
+            return await original_arrange(messages, pending)
+
+        handler.arrange = arrange_recording_loop  # type: ignore[method-assign]
+        _probe_mock_app.handler = handler
+        _probe_mock_app.main_loop = main_loop
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post('/api/debug/probe', json={'value': '{"hello": "world"}'})
+
+        assert resp.status_code == 200
+        # arrange ran exactly once, on the main loop (not the test's).
+        assert len(observed_loops) == 1
+        assert observed_loops[0] is main_loop
+        assert observed_loops[0] is not asyncio.get_running_loop()
+    finally:
+        main_loop.call_soon_threadsafe(main_loop.stop)
+        thread.join(timeout=5)
+
+
 async def test_probe_endpoint_defaults_topic_to_configured_source_topic(mock_recorder, debug_config, _probe_mock_app):
     """POST with no ``topic`` in body → probe sees ``config.kafka.source_topic``.
 

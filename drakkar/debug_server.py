@@ -1606,20 +1606,43 @@ def create_debug_app(
         # ``DebugConfig``; the executor timeout lives on the full
         # ``DrakkarConfig`` reachable via ``drakkar_app._config``.
         timeout = 2 * drakkar_app._config.executor.task_timeout_seconds + PROBE_TIMEOUT_HEADROOM_SECONDS
-        # ``start_probe`` creates an asyncio.Task with the per-run
-        # _RunState attached as an attribute. This makes the partial
-        # report strictly scoped to THIS request — a concurrent probe
-        # whose timeout fires can't accidentally read our in-flight
-        # state, and vice versa. See the runner for details.
-        run_task = runner.start_probe(probe_input)
-        try:
-            report = await asyncio.wait_for(run_task, timeout=timeout)
-        except TimeoutError:
-            # The runner's finally block has already restored handler.cache
-            # by the time we get here (wait_for cancels run_task and awaits
-            # its completion before re-raising). partial_report_for reads
-            # the state attached to OUR task — not any other probe's.
-            report = runner.partial_report_for(run_task)
+        # Build the per-run state here so we own a reference for the
+        # truncated-partial-report path even when the actual probe
+        # coroutine runs on a different event loop (and thus an
+        # asyncio.Task we can't see).
+        state = runner._make_run_state(probe_input)
+        current_loop = asyncio.get_running_loop()
+        # CRITICAL: the ExecutorPool.semaphore is an ``asyncio.Semaphore``
+        # bound to the loop where the pool was constructed (the main
+        # DrakkarApp loop). The debug FastAPI server typically runs in a
+        # separate thread + loop, so we must dispatch the probe back to
+        # that main loop — otherwise ``semaphore.acquire()`` raises
+        # "bound to a different event loop" as soon as the pool has
+        # contention. When ``drakkar_app.main_loop`` is a real loop and
+        # is NOT our running loop, use the cross-thread path. Otherwise
+        # (same-loop in tests, or loop unavailable) we run inline.
+        candidate_loop = drakkar_app.main_loop
+        if isinstance(candidate_loop, asyncio.AbstractEventLoop) and candidate_loop is not current_loop:
+            # Cross-thread: dispatch to the main loop. On timeout,
+            # cancel the future and sleep briefly so the main-loop
+            # task can run its ``finally`` and restore handler.cache
+            # before we return the partial report.
+            run_future = asyncio.run_coroutine_threadsafe(runner._run_with_state(state), candidate_loop)
+            try:
+                report = await asyncio.wait_for(asyncio.wrap_future(run_future), timeout=timeout)
+            except TimeoutError:
+                run_future.cancel()
+                await asyncio.sleep(0.1)
+                report = state.to_report(truncated=True)
+        else:
+            # Same-loop: plain asyncio. ``wait_for`` already awaits the
+            # cancelled task's ``finally`` before raising, so the cache
+            # is restored by the time we reach the except branch.
+            run_task = asyncio.create_task(runner._run_with_state(state))
+            try:
+                report = await asyncio.wait_for(run_task, timeout=timeout)
+            except TimeoutError:
+                report = state.to_report(truncated=True)
         return JSONResponse(report.model_dump(mode='json'))
 
     @app.post('/api/live/sink-breakdown')

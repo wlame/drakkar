@@ -93,6 +93,13 @@ class DrakkarApp:
         self._background_tasks: set[asyncio.Task] = set()
         self._periodic_tasks: list[asyncio.Task] = []
         self._config_summary: str = ''
+        # Main event loop — captured at the top of _async_run. The debug
+        # FastAPI server runs in a separate thread with its own event loop,
+        # but the ExecutorPool's asyncio.Semaphore is bound to this loop.
+        # The Message Probe endpoint uses this ref to dispatch runner.run()
+        # back here via asyncio.run_coroutine_threadsafe so acquires don't
+        # fail with "bound to a different event loop" on a contended pool.
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def config(self) -> DrakkarConfig:
@@ -135,6 +142,17 @@ class DrakkarApp:
     def config_summary(self) -> str:
         return self._config_summary
 
+    @property
+    def main_loop(self) -> asyncio.AbstractEventLoop | None:
+        """Return the event loop the pipeline runs on, or None before start.
+
+        Exposed so the debug server (which runs on a separate thread + loop)
+        can dispatch the Message Probe back to this loop — the ExecutorPool's
+        semaphore is bound here and cannot be acquired from another loop
+        once it has contention.
+        """
+        return self._loop
+
     def run(self) -> None:
         """Start the application. Blocks until shutdown."""
         setup_logging(
@@ -175,6 +193,10 @@ class DrakkarApp:
         self._dlq_sink = DLQSink(topic=dlq_topic, brokers=dlq_brokers)
 
     async def _async_run(self) -> None:
+        # Capture the running loop so the debug server (separate thread)
+        # can dispatch probes back here for ExecutorPool access.
+        self._loop = asyncio.get_running_loop()
+
         log = logger.bind(worker_id=self._worker_id)
 
         bind_contextvars(hook='on_startup')
