@@ -6,12 +6,13 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import threading
 import time
 from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import structlog
 import uvicorn
@@ -258,6 +259,18 @@ def create_debug_app(
 
     # --- Auth dependency for sensitive endpoints ---
 
+    def _token_matches(provided: str | None) -> bool:
+        """Timing-safe comparison of a provided token against the configured token.
+
+        ``secrets.compare_digest`` raises ``TypeError`` on non-str/bytes inputs
+        and leaks no information about the point of divergence when operands
+        have the same length. Empty/None provided values short-circuit to
+        ``False`` so ``compare_digest`` is never called with an empty operand.
+        """
+        if not provided or not config.auth_token:
+            return False
+        return secrets.compare_digest(provided, config.auth_token)
+
     async def _require_auth(
         request: Request,
         token: str | None = Query(default=None),
@@ -271,7 +284,7 @@ def create_debug_app(
             return
         auth_header = request.headers.get('authorization', '')
         header_token = auth_header.removeprefix('Bearer ').strip() if auth_header.startswith('Bearer ') else ''
-        if header_token == config.auth_token or token == config.auth_token:
+        if _token_matches(header_token) or _token_matches(token):
             return
         raise HTTPException(status_code=401, detail='Invalid or missing auth token')
 
@@ -1832,8 +1845,59 @@ def create_debug_app(
 
         Uses a thread-safe queue (stdlib queue.Queue) since the recorder
         writes from the main thread and Uvicorn runs in a separate thread.
+
+        Authentication: when ``config.auth_token`` is set, the client must
+        provide a matching token either via the ``Authorization: Bearer``
+        header (non-browser clients) or the ``?token=`` query parameter
+        (browsers, which cannot set custom headers on WS handshakes).
+
+        Origin validation: when ``auth_token`` is set, the ``Origin``
+        header (if present) must match the configured allowlist. With an
+        empty allowlist we fall back to same-origin: the origin's host
+        must equal the request's ``Host`` header. Absent ``Origin`` is
+        treated as same-origin (non-browser clients typically don't send
+        it). When ``auth_token`` is empty we skip both checks to preserve
+        the dev workflow.
         """
         import queue as queue_mod
+
+        # --- Auth gate (WebSocket) ---
+        # FastAPI's Depends() works on websocket endpoints, but keeping the
+        # auth check inline lets us call ws.close() with a specific 4xxx
+        # code that the browser can surface — HTTPException during the
+        # handshake drops the connection without a useful reason.
+        if config.auth_token:
+            auth_header = ws.headers.get('authorization', '')
+            header_token = auth_header.removeprefix('Bearer ').strip() if auth_header.startswith('Bearer ') else ''
+            query_token = ws.query_params.get('token')
+            if not (_token_matches(header_token) or _token_matches(query_token)):
+                # 4401: application-specific unauthorized (RFC 6455 reserves
+                # 4000-4999 for app use). Browsers expose this code via the
+                # WebSocket close event.
+                await ws.close(code=4401, reason='unauthorized')
+                return
+
+            # --- Origin validation ---
+            origin = ws.headers.get('origin')
+            if origin is not None:
+                # Explicit allowlist takes precedence when configured.
+                if config.allowed_ws_origins:
+                    if origin not in config.allowed_ws_origins:
+                        await ws.close(code=4403, reason='forbidden origin')
+                        return
+                else:
+                    # Same-origin fallback — parse the origin's host and
+                    # compare it to the Host header. Host header may
+                    # include a port ("example.com:8080"); urlparse().netloc
+                    # preserves port too, so comparison is apples-to-apples.
+                    parsed = urlparse(origin)
+                    origin_host = parsed.netloc
+                    request_host = ws.headers.get('host', '')
+                    if not origin_host or origin_host != request_host:
+                        await ws.close(code=4403, reason='forbidden origin')
+                        return
+            # Absent Origin header: treat as same-origin (typical for
+            # non-browser clients — they authenticated via token above).
 
         await ws.accept()
         q = recorder.subscribe()

@@ -341,6 +341,14 @@ class DebugConfig(BaseModel):
             'require an Authorization: Bearer <token> header or ?token=<token> query parameter.'
         ),
     )
+    allowed_ws_origins: list[str] = Field(
+        default_factory=list,
+        description=(
+            'Explicit allowlist of WebSocket origins. Empty list with non-empty '
+            'auth_token defaults to same-origin only; empty list with empty '
+            'auth_token = no origin check (dev workflow preserved).'
+        ),
+    )
     debug_url: str = ''
     db_dir: str = '/tmp'
     store_events: bool = True
