@@ -9,6 +9,7 @@ import re
 import secrets
 import threading
 import time
+import typing
 from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -288,6 +289,40 @@ def create_debug_app(
             return
         raise HTTPException(status_code=401, detail='Invalid or missing auth token')
 
+    # --- Cross-thread dispatch helper ---
+    #
+    # The debug FastAPI server runs in its own thread + event loop so
+    # heavy UI requests don't block the pipeline. Many shared asyncio
+    # primitives — ``ExecutorPool._semaphore``, the recorder's aiosqlite
+    # connection, the cache reader connection — are bound to the MAIN
+    # event loop where ``DrakkarApp`` was constructed. Awaiting them from
+    # this server's loop raises ``RuntimeError: <thing> is bound to a
+    # different event loop`` under contention.
+    #
+    # ``_dispatch_to_main_loop`` mirrors the pattern proven in
+    # ``api_debug_probe``: when ``drakkar_app.main_loop`` is a real event
+    # loop and is NOT our running loop, schedule ``coro`` on the main
+    # loop via ``asyncio.run_coroutine_threadsafe`` and await the result
+    # here with ``asyncio.wrap_future``. When the loops match (typical
+    # in the unit-test path that skips the background thread) or
+    # ``main_loop`` is a MagicMock (no real loop available), run inline.
+    #
+    # Only cross-thread aiosqlite reads and processor-internal snapshots
+    # need to go through this helper. Pure Python work (template
+    # rendering, counters, constants) can stay on the endpoint's loop.
+    async def _dispatch_to_main_loop(coro: typing.Coroutine[typing.Any, typing.Any, typing.Any]) -> typing.Any:
+        current_loop = asyncio.get_running_loop()
+        candidate_loop = drakkar_app.main_loop
+        if isinstance(candidate_loop, asyncio.AbstractEventLoop) and candidate_loop is not current_loop:
+            # Cross-thread: dispatch back to the main loop. The future
+            # returned by ``run_coroutine_threadsafe`` is a
+            # ``concurrent.futures.Future``; ``asyncio.wrap_future``
+            # turns it into an awaitable on the current loop.
+            fut = asyncio.run_coroutine_threadsafe(coro, candidate_loop)
+            return await asyncio.wrap_future(fut)
+        # Same-loop (or no real main loop in tests): run inline.
+        return await coro
+
     async def _get_lag() -> dict[int, dict]:
         consumer = drakkar_app._consumer
         if not consumer or not drakkar_app.processors:
@@ -483,7 +518,9 @@ def create_debug_app(
 
     @app.get('/partitions', response_class=HTMLResponse)
     async def partitions(request: Request):
-        summary = await recorder.get_partition_summary()
+        # ``get_partition_summary`` internally does ``self._db.execute(...)``;
+        # dispatch to the main loop so the aiosqlite cursor stays there.
+        summary = await _dispatch_to_main_loop(recorder.get_partition_summary())
         processors = drakkar_app.processors
         lag_data = await _get_lag()
         for s in summary:
@@ -512,10 +549,12 @@ def create_debug_app(
         page: int = Query(default=0, ge=0),
     ):
         limit = 50
-        events = await recorder.get_events(
-            partition=partition_id,
-            limit=limit,
-            offset=page * limit,
+        events = await _dispatch_to_main_loop(
+            recorder.get_events(
+                partition=partition_id,
+                limit=limit,
+                offset=page * limit,
+            )
         )
         return templates.TemplateResponse(
             request,
@@ -531,7 +570,22 @@ def create_debug_app(
 
     @app.get('/live', response_class=HTMLResponse)
     async def live(request: Request):
-        active = await recorder.get_active_tasks()
+        # All three reads (active tasks + two event queries) touch the
+        # main-loop aiosqlite connection. Batch them into one dispatch
+        # so the whole page builds from a single cross-thread hop.
+        async def _read_from_main():
+            active_rows = await recorder.get_active_tasks()
+            finished_rows = await recorder.get_events(
+                event_type='task_completed',
+                limit=config.max_ui_rows,
+            )
+            failed_rows = await recorder.get_events(
+                event_type='task_failed',
+                limit=1000,
+            )
+            return active_rows, finished_rows, failed_rows
+
+        active, finished, failed = await _dispatch_to_main_loop(_read_from_main())
         now = time.time()
         for task in active:
             task['elapsed'] = now - task['ts'] if task.get('ts') else 0
@@ -540,42 +594,47 @@ def create_debug_app(
         active_task_ids = {t['task_id'] for t in active}
         running_tasks = {}
         pending_tasks = {}
-        for proc in processors.values():
-            for tid, t in proc._pending_tasks.items():
+
+        # ``proc._pending_tasks``, ``_arranging``, ``_arrange_start``, and
+        # ``_arrange_labels`` are mutated exclusively on the main loop.
+        # Snapshot them via a small coroutine dispatched there so a list
+        # slice doesn't shear while the main loop mutates the underlying
+        # container.
+        async def _snapshot_processors():
+            snapshot: dict = {}
+            arranging_data: list[dict] = []
+            for proc in processors.values():
+                pending_items = list(proc._pending_tasks.items())
+                pid_entries: list[tuple[str, object, int, object]] = []
+                for tid, t in pending_items:
+                    pid_entries.append((tid, t.args, proc.partition_id, t.source_offsets))
+                snapshot[proc.partition_id] = pid_entries
+                if proc._arranging:
+                    arranging_data.append(
+                        {
+                            'partition': proc.partition_id,
+                            'duration': round(now - proc._arrange_start, 2),
+                            'message_count': len(proc._arrange_labels),
+                            'labels': list(proc._arrange_labels[:10]),
+                        }
+                    )
+            return snapshot, arranging_data
+
+        pending_snapshot, arranging = await _dispatch_to_main_loop(_snapshot_processors())
+        for _pid, entries in pending_snapshot.items():
+            for tid, args, partition_id, source_offsets in entries:
                 entry = {
                     'task_id': tid,
-                    'args': t.args,
-                    'partition': proc.partition_id,
-                    'source_offsets': t.source_offsets,
+                    'args': args,
+                    'partition': partition_id,
+                    'source_offsets': source_offsets,
                 }
                 if tid in active_task_ids:
                     running_tasks[tid] = entry
                 else:
                     pending_tasks[tid] = entry
 
-        # recently finished tasks
-        finished = await recorder.get_events(
-            event_type='task_completed',
-            limit=config.max_ui_rows,
-        )
-        failed = await recorder.get_events(
-            event_type='task_failed',
-            limit=1000,
-        )
         recent_finished = sorted(finished + failed, key=lambda e: e.get('ts', 0), reverse=True)[: config.max_ui_rows]
-
-        # active arrange() calls
-        arranging = []
-        for proc in processors.values():
-            if proc._arranging:
-                arranging.append(
-                    {
-                        'partition': proc.partition_id,
-                        'duration': round(now - proc._arrange_start, 2),
-                        'message_count': len(proc._arrange_labels),
-                        'labels': proc._arrange_labels[:10],
-                    }
-                )
 
         # ``partition_count`` powers the Arrange tab's "last N batches" cap
         # (3 x partition_count) so the live list stays stable-sized regardless
@@ -611,7 +670,7 @@ def create_debug_app(
     async def task_detail(request: Request, task_id: str):
         # Strip retry composite key suffix (e.g. "task-abc:r1234567.89" → "task-abc")
         base_id = task_id.split(':r')[0] if ':r' in task_id else task_id
-        events = await recorder.get_task_events(base_id)
+        events = await _dispatch_to_main_loop(recorder.get_task_events(base_id))
         started = next((e for e in events if e['event'] == 'task_started'), None)
         completed = next((e for e in events if e['event'] == 'task_completed'), None)
         failed = next((e for e in events if e['event'] == 'task_failed'), None)
@@ -674,11 +733,13 @@ def create_debug_app(
         part_int = int(partition) if partition and partition.strip() else None
         evt_type = event_type if event_type and event_type.strip() else None
         limit = 100
-        events = await recorder.get_events(
-            partition=part_int,
-            event_type=evt_type,
-            limit=limit,
-            offset=page * limit,
+        events = await _dispatch_to_main_loop(
+            recorder.get_events(
+                partition=part_int,
+                event_type=evt_type,
+                limit=limit,
+                offset=page * limit,
+            )
         )
         return templates.TemplateResponse(
             request,
@@ -819,10 +880,16 @@ def create_debug_app(
         # total count for pagination. A DB corruption or schema drift would
         # otherwise surface as "empty cache" in the UI — log at warning
         # so operators see the signal even when the UI masks the failure.
-        try:
+        # The cache reader aiosqlite connection is bound to the main
+        # loop (opened inside ``CacheEngine.start()``), so dispatch the
+        # COUNT there too.
+        async def _read_count():
             async with reader.execute(f'SELECT COUNT(*) FROM cache_entries {where}', params) as cursor:
-                row = await cursor.fetchone()
-                total = row[0] if row else 0
+                return await cursor.fetchone()
+
+        try:
+            row = await _dispatch_to_main_loop(_read_count())
+            total = row[0] if row else 0
         except Exception as exc:
             await logger.awarning(
                 'debug_cache_entries_count_failed',
@@ -839,10 +906,15 @@ def create_debug_app(
                 'expires_at_ms, origin_worker_id FROM cache_entries '
                 f'{where} ORDER BY updated_at_ms DESC LIMIT ? OFFSET ?'
             )
-            try:
+
+            async def _read_rows():
                 async with reader.execute(query, [*params, limit, offset]) as cursor:
                     columns = [d[0] for d in cursor.description]
                     rows = await cursor.fetchall()
+                return columns, rows
+
+            try:
+                columns, rows = await _dispatch_to_main_loop(_read_rows())
                 for r in rows:
                     entries.append(dict(zip(columns, r, strict=False)))
             except Exception as exc:
@@ -876,7 +948,8 @@ def create_debug_app(
         display as-is.
         """
         reader = _cache_reader_or_404()
-        try:
+
+        async def _read():
             async with reader.execute(
                 'SELECT key, scope, value, size_bytes, created_at_ms, updated_at_ms, '
                 'expires_at_ms, origin_worker_id FROM cache_entries WHERE key = ?',
@@ -884,6 +957,10 @@ def create_debug_app(
             ) as cursor:
                 columns = [d[0] for d in cursor.description]
                 row = await cursor.fetchone()
+            return columns, row
+
+        try:
+            columns, row = await _dispatch_to_main_loop(_read())
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f'Failed to read cache entry: {exc}') from exc
 
@@ -997,33 +1074,39 @@ def create_debug_app(
         offset: int = Query(),
     ):
         """Trace a message across all workers in the same cluster."""
-        events = await recorder.cross_trace(partition, offset)
+        events = await _dispatch_to_main_loop(recorder.cross_trace(partition, offset))
         return JSONResponse(events)
 
     @app.get('/api/debug/label-keys')
     async def api_debug_label_keys():
         """Return distinct label keys found in events."""
-        await recorder._flush()
-        if not recorder._db:
-            return JSONResponse([])
-        try:
+
+        # Flush + read must run on the main loop where the aiosqlite
+        # connection was opened — see ``_dispatch_to_main_loop`` notes.
+        async def _read():
+            await recorder._flush()
+            if not recorder._db:
+                return []
             query = """
                 SELECT DISTINCT labels FROM events
                 WHERE labels IS NOT NULL
                 LIMIT 100
             """
             async with recorder._db.execute(query) as cursor:
-                rows = await cursor.fetchall()
-            keys: set[str] = set()
-            for (labels_json,) in rows:
-                try:
-                    parsed = json.loads(labels_json)
-                    keys.update(parsed.keys())
-                except (json.JSONDecodeError, TypeError, AttributeError):
-                    pass
-            return JSONResponse(sorted(keys))
+                return await cursor.fetchall()
+
+        try:
+            rows = await _dispatch_to_main_loop(_read())
         except Exception:
             return JSONResponse([])
+        keys: set[str] = set()
+        for (labels_json,) in rows:
+            try:
+                parsed = json.loads(labels_json)
+                keys.update(parsed.keys())
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+        return JSONResponse(sorted(keys))
 
     @app.get('/api/debug/trace-by-label')
     async def api_debug_trace_by_label(
@@ -1031,7 +1114,7 @@ def create_debug_app(
         value: str = Query(),
     ):
         """Trace tasks by label value across all workers in the cluster."""
-        events = await recorder.cross_trace_by_label(key, value)
+        events = await _dispatch_to_main_loop(recorder.cross_trace_by_label(key, value))
         return JSONResponse(events)
 
     @app.get('/api/debug/metrics')
@@ -1048,23 +1131,32 @@ def create_debug_app(
         Groups events by task name and returns the latest run, total counts,
         and recent history for each task.
         """
-        await recorder._flush()
-        if not recorder._db:
-            return JSONResponse([])
 
-        query = """
-            SELECT ts, task_id, duration, exit_code, metadata
-            FROM events
-            WHERE event = 'periodic_run'
-            ORDER BY ts DESC
-            LIMIT 500
-        """
-        try:
+        # Flush and SELECT must both execute on the main loop so the
+        # aiosqlite connection stays on its owning loop.
+        async def _read():
+            await recorder._flush()
+            if not recorder._db:
+                return None
+            query = """
+                SELECT ts, task_id, duration, exit_code, metadata
+                FROM events
+                WHERE event = 'periodic_run'
+                ORDER BY ts DESC
+                LIMIT 500
+            """
             async with recorder._db.execute(query) as cursor:
                 columns = [d[0] for d in cursor.description]
                 rows = await cursor.fetchall()
+            return columns, rows
+
+        try:
+            result = await _dispatch_to_main_loop(_read())
         except Exception:
             return JSONResponse([])
+        if result is None:
+            return JSONResponse([])
+        columns, rows = result
 
         # group by task name. We also surface a per-task ``system: bool``
         # derived from the event's ``metadata.system``. Framework-internal
@@ -1147,12 +1239,8 @@ def create_debug_app(
         limit: int = Query(default=200, le=10000),
     ):
         """Get events as JSON. Supports multiple partitions/types as comma-separated."""
-        await recorder._flush()
         part_list = [int(p) for p in partitions.split(',') if p.strip()] if partitions else None
         type_list = [t.strip() for t in event_types.split(',') if t.strip()] if event_types else None
-
-        if not recorder._db:
-            return JSONResponse([])
 
         conditions = []
         params: list = []
@@ -1172,18 +1260,26 @@ def create_debug_app(
         query = f'SELECT * FROM events {where} ORDER BY id DESC LIMIT ?'
         params.append(limit)
 
-        async with recorder._db.execute(query, params) as cursor:
-            columns = [d[0] for d in cursor.description]
-            rows = await cursor.fetchall()
-            return JSONResponse([dict(zip(columns, row, strict=False)) for row in rows])
+        # Flush pending events + the SELECT must both execute on the
+        # main loop where the aiosqlite connection lives.
+        async def _read():
+            await recorder._flush()
+            if not recorder._db:
+                return None
+            async with recorder._db.execute(query, params) as cursor:
+                columns = [d[0] for d in cursor.description]
+                rows = await cursor.fetchall()
+            return columns, rows
+
+        result = await _dispatch_to_main_loop(_read())
+        if result is None:
+            return JSONResponse([])
+        columns, rows = result
+        return JSONResponse([dict(zip(columns, row, strict=False)) for row in rows])
 
     @app.get('/api/recent-tasks')
     async def api_recent_tasks(minutes: int = Query(default=2)):
         """Get tasks from the last N minutes for timeline visualization."""
-        await recorder._flush()
-        if not recorder._db:
-            return JSONResponse([])
-
         since = time.time() - (minutes * 60)
         query = """
             SELECT * FROM events
@@ -1191,10 +1287,22 @@ def create_debug_app(
             AND ts >= ?
             ORDER BY ts ASC
         """
-        async with recorder._db.execute(query, [since]) as cursor:
-            columns = [d[0] for d in cursor.description]
-            rows = await cursor.fetchall()
-            events = [dict(zip(columns, row, strict=False)) for row in rows]
+
+        # Flush + read on the main loop; post-processing stays here.
+        async def _read():
+            await recorder._flush()
+            if not recorder._db:
+                return None
+            async with recorder._db.execute(query, [since]) as cursor:
+                columns = [d[0] for d in cursor.description]
+                rows = await cursor.fetchall()
+            return columns, rows
+
+        result = await _dispatch_to_main_loop(_read())
+        if result is None:
+            return JSONResponse([])
+        columns, rows = result
+        events = [dict(zip(columns, row, strict=False)) for row in rows]
 
         # group events into timeline entries — one entry per execution attempt.
         # retries (same task_id with multiple task_started) produce separate entries:
@@ -1291,9 +1399,6 @@ def create_debug_app(
         task_ids = [t for t in req.task_ids if t]
         if not task_ids:
             return JSONResponse({})
-        await recorder._flush()
-        if not recorder._db or not recorder._config.store_events:
-            return JSONResponse({})
 
         placeholders = ','.join(['?'] * len(task_ids))
         query = f"""
@@ -1304,10 +1409,24 @@ def create_debug_app(
               AND event IN ('task_started', 'task_completed', 'task_failed')
             ORDER BY task_id, id ASC
         """
-        async with recorder._db.execute(query, task_ids) as cursor:
-            columns = [d[0] for d in cursor.description]
-            rows = await cursor.fetchall()
-            events = [dict(zip(columns, row, strict=False)) for row in rows]
+
+        # Dispatch the flush + SELECT to the main loop; this keeps the
+        # aiosqlite connection on its owning loop even though the
+        # endpoint executes on the debug server's thread.
+        async def _read():
+            await recorder._flush()
+            if not recorder._db or not recorder._config.store_events:
+                return None
+            async with recorder._db.execute(query, task_ids) as cursor:
+                columns = [d[0] for d in cursor.description]
+                rows = await cursor.fetchall()
+            return columns, rows
+
+        result = await _dispatch_to_main_loop(_read())
+        if result is None:
+            return JSONResponse({})
+        columns, rows = result
+        events = [dict(zip(columns, row, strict=False)) for row in rows]
 
         result: dict[str, dict] = {}
         for e in events:
@@ -1376,17 +1495,24 @@ def create_debug_app(
         list when recorder storage is disabled. Callers parse metadata
         themselves because each event type has different metadata shape.
         """
-        await recorder._flush()
-        if not recorder._db or not recorder._config.store_events:
-            return []
-        query = (
-            'SELECT ts, task_id, partition, offset, duration, metadata '
-            'FROM events WHERE event = ? ORDER BY id DESC LIMIT ?'
-        )
-        async with recorder._db.execute(query, (event_name, limit)) as cur:
-            columns = [d[0] for d in cur.description]
-            rows = await cur.fetchall()
+
+        # Entire DB interaction (flush + SELECT + fetch) dispatches to
+        # the main loop. Returning rows as dicts inside the coroutine
+        # avoids carrying the aiosqlite cursor across the loop boundary.
+        async def _read():
+            await recorder._flush()
+            if not recorder._db or not recorder._config.store_events:
+                return []
+            query = (
+                'SELECT ts, task_id, partition, offset, duration, metadata '
+                'FROM events WHERE event = ? ORDER BY id DESC LIMIT ?'
+            )
+            async with recorder._db.execute(query, (event_name, limit)) as cur:
+                columns = [d[0] for d in cur.description]
+                rows = await cur.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]
+
+        return await _dispatch_to_main_loop(_read())
 
     def _parse_meta(raw: str | None) -> dict:
         if not raw:
@@ -1422,24 +1548,34 @@ def create_debug_app(
                 f'FROM events WHERE task_id IN ({placeholders}) '
                 f"AND event IN ('task_started', 'task_completed', 'task_failed')"
             )
-            async with recorder._db.execute(q, task_ids) as cur:
-                cols = [d[0] for d in cur.description]
-                for row in await cur.fetchall():
-                    ex = dict(zip(cols, row, strict=False))
-                    entry = aux_by_id.setdefault(
-                        ex['task_id'],
-                        {'exec_duration': None, 'status': None, 'exit_code': None, 'source_offsets': None},
-                    )
-                    if ex['event'] == 'task_started':
-                        started_meta = _parse_meta(ex.get('metadata'))
-                        so = started_meta.get('source_offsets')
-                        if isinstance(so, list):
-                            entry['source_offsets'] = so
-                    else:
-                        # Last-write-wins on retries within the batch.
-                        entry['exec_duration'] = ex.get('duration')
-                        entry['status'] = 'completed' if ex['event'] == 'task_completed' else 'failed'
-                        entry['exit_code'] = ex.get('exit_code')
+
+            # The aiosqlite connection lives on the main loop, so run
+            # the SELECT + fetchall there and return plain Python data.
+            async def _read_aux():
+                if not recorder._db:
+                    return [], []
+                async with recorder._db.execute(q, task_ids) as cur:
+                    cols = [d[0] for d in cur.description]
+                    aux_rows = await cur.fetchall()
+                return cols, aux_rows
+
+            cols, aux_rows = await _dispatch_to_main_loop(_read_aux())
+            for row in aux_rows:
+                ex = dict(zip(cols, row, strict=False))
+                entry = aux_by_id.setdefault(
+                    ex['task_id'],
+                    {'exec_duration': None, 'status': None, 'exit_code': None, 'source_offsets': None},
+                )
+                if ex['event'] == 'task_started':
+                    started_meta = _parse_meta(ex.get('metadata'))
+                    so = started_meta.get('source_offsets')
+                    if isinstance(so, list):
+                        entry['source_offsets'] = so
+                else:
+                    # Last-write-wins on retries within the batch.
+                    entry['exec_duration'] = ex.get('duration')
+                    entry['status'] = 'completed' if ex['event'] == 'task_completed' else 'failed'
+                    entry['exit_code'] = ex.get('exit_code')
         result = []
         for e in events:
             meta = _parse_meta(e.get('metadata'))
@@ -1498,9 +1634,17 @@ def create_debug_app(
                     f'AND partition IN ({pp}) AND offset IN ({oo})'
                 )
                 params: list = [*partitions, *offsets]
-                async with recorder._db.execute(q, params) as cur:
-                    for row in await cur.fetchall():
-                        consumed_by_key.setdefault((row[0], row[1]), []).append(row[2])
+
+                # SELECT runs on the main loop; collect rows into a
+                # plain list so no aiosqlite objects escape.
+                async def _read_consumed():
+                    if not recorder._db:
+                        return []
+                    async with recorder._db.execute(q, params) as cur:
+                        return await cur.fetchall()
+
+                for row in await _dispatch_to_main_loop(_read_consumed()):
+                    consumed_by_key.setdefault((row[0], row[1]), []).append(row[2])
 
         result = []
         for e in events:
@@ -1671,9 +1815,6 @@ def create_debug_app(
         """
         if not req.offsets:
             return JSONResponse({})
-        await recorder._flush()
-        if not recorder._db or not recorder._config.store_events:
-            return JSONResponse({})
         placeholders = ','.join(['?'] * len(req.offsets))
         q = (
             f'SELECT output_topic, COUNT(*) as n FROM events '
@@ -1681,8 +1822,19 @@ def create_debug_app(
             f'AND offset IN ({placeholders}) GROUP BY output_topic'
         )
         params: list = [req.partition, *req.offsets]
-        async with recorder._db.execute(q, params) as cur:
-            rows = await cur.fetchall()
+
+        # Flush + aggregate both run on the main loop. The cursor stays
+        # there; only the fetched rows cross back to our loop.
+        async def _read():
+            await recorder._flush()
+            if not recorder._db or not recorder._config.store_events:
+                return None
+            async with recorder._db.execute(q, params) as cur:
+                return await cur.fetchall()
+
+        rows = await _dispatch_to_main_loop(_read())
+        if rows is None:
+            return JSONResponse({})
         out: dict[str, int] = {}
         for row in rows:
             topic = row[0] or '(unknown)'
@@ -1743,49 +1895,63 @@ def create_debug_app(
     @app.get('/api/debug/processors')
     async def api_debug_processors():
         """Dump internal state of all partition processors for diagnostics."""
-        result = {}
-        for pid, proc in sorted(drakkar_app.processors.items()):
-            tracker = proc.offset_tracker
-            sorted_offsets = list(tracker._sorted_offsets[:20])
-            offset_states = {o: str(tracker._offsets.get(o, '?')) for o in sorted_offsets}
-            arrange_info = None
-            if proc._arranging:
-                arrange_info = {
-                    'duration': round(time.time() - proc._arrange_start, 2),
-                    'message_count': len(proc._arrange_labels),
-                    'labels': proc._arrange_labels[:20],
+
+        # Build the full per-processor snapshot on the main loop. These
+        # containers (``_sorted_offsets``, ``_offsets``, ``_arrange_labels``,
+        # ``_active_tasks``) are mutated exclusively by the main loop; a
+        # list slice from another thread can shear while the main loop
+        # rebalances. Collecting everything inside one coroutine pinned
+        # to the main loop keeps the snapshot internally consistent.
+        async def _snapshot():
+            snap: dict = {}
+            for pid, proc in sorted(drakkar_app.processors.items()):
+                tracker = proc.offset_tracker
+                sorted_offsets = list(tracker._sorted_offsets[:20])
+                offset_states = {o: str(tracker._offsets.get(o, '?')) for o in sorted_offsets}
+                arrange_info = None
+                if proc._arranging:
+                    arrange_info = {
+                        'duration': round(time.time() - proc._arrange_start, 2),
+                        'message_count': len(proc._arrange_labels),
+                        'labels': list(proc._arrange_labels[:20]),
+                    }
+                entry: dict = {
+                    'queue_size': proc.queue_size,
+                    'inflight_count': proc.inflight_count,
+                    'arranging': proc._arranging,
+                    'arrange': arrange_info,
+                    'pending_count': tracker.pending_count,
+                    'completed_count': tracker.completed_count,
+                    'total_tracked': tracker.total_tracked,
+                    'last_committed': tracker.last_committed,
+                    'committable': tracker.committable(),
+                    'first_offsets': sorted_offsets,
+                    'offset_states': offset_states,
+                    'active_task_count': len(proc._active_tasks),
                 }
-            entry: dict = {
-                'queue_size': proc.queue_size,
-                'inflight_count': proc.inflight_count,
-                'arranging': proc._arranging,
-                'arrange': arrange_info,
-                'pending_count': tracker.pending_count,
-                'completed_count': tracker.completed_count,
-                'total_tracked': tracker.total_tracked,
-                'last_committed': tracker.last_committed,
-                'committable': tracker.committable(),
-                'first_offsets': sorted_offsets,
-                'offset_states': offset_states,
-                'active_task_count': len(proc._active_tasks),
-            }
-            # show stuck task details
-            stuck = []
-            for task in proc._active_tasks:
-                if not task.done():
-                    frames = task.get_stack(limit=5)
-                    stack_lines = []
-                    for frame in frames:
-                        stack_lines.append(f'{frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}')
-                    stuck.append(
-                        {
-                            'name': task.get_name(),
-                            'stack': stack_lines,
-                        }
-                    )
-            if stuck:
-                entry['stuck_tasks'] = stuck
-            result[pid] = entry
+                # show stuck task details — ``task.get_stack()`` reads the
+                # frame state of the coroutine as of now, so it must run
+                # on the main loop where the task lives to get an
+                # accurate snapshot.
+                stuck = []
+                for task in list(proc._active_tasks):
+                    if not task.done():
+                        frames = task.get_stack(limit=5)
+                        stack_lines = []
+                        for frame in frames:
+                            stack_lines.append(f'{frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}')
+                        stuck.append(
+                            {
+                                'name': task.get_name(),
+                                'stack': stack_lines,
+                            }
+                        )
+                if stuck:
+                    entry['stuck_tasks'] = stuck
+                snap[pid] = entry
+            return snap
+
+        result = await _dispatch_to_main_loop(_snapshot())
         pool = drakkar_app._executor_pool
         return JSONResponse(
             {
@@ -1809,7 +1975,13 @@ def create_debug_app(
         Workers are sorted: clustered first (by cluster then name),
         unclustered at the end (sorted by name).
         """
-        workers = await recorder.discover_workers()
+        # ``discover_workers`` opens aiosqlite connections against peer
+        # live-DB symlinks; those transient connections are fine to open
+        # on any loop, but funneling through the main loop keeps the
+        # concurrency story uniform with the rest of the debug endpoints
+        # (and avoids surprises if the implementation ever grows a
+        # shared handle).
+        workers = await _dispatch_to_main_loop(recorder.discover_workers())
 
         # add the current worker to the list
         current_entry = {

@@ -3783,3 +3783,234 @@ async def test_probe_endpoint_defaults_topic_to_configured_source_topic(mock_rec
     # The configured source topic appears as the echo, since the request
     # left topic empty.
     assert body['input']['topic'] == 'configured-input-topic'
+
+
+# ---------------------------------------------------------------------------
+# Cross-thread aiosqlite dispatch regression test
+#
+# Mirrors the probe-endpoint regression at line ~3696. The debug FastAPI
+# server runs on its own thread + event loop, so any ``aiosqlite``
+# connection opened on the pipeline's main loop cannot be awaited from
+# the endpoint's loop directly — ``run_coroutine_threadsafe`` must
+# marshal the call back. We exercise ``/api/events`` here because it's
+# the simplest aiosqlite-reading endpoint; the same helper
+# (``_dispatch_to_main_loop``) wraps every cross-thread read in the
+# module.
+# ---------------------------------------------------------------------------
+
+
+async def test_api_events_dispatches_to_drakkar_main_loop_when_different(
+    tmp_path, mock_recorder, debug_config, mock_app
+):
+    """Regression: cross-thread aiosqlite reads must run on the main loop.
+
+    Spawns a real background thread with its own event loop, opens an
+    aiosqlite connection on that loop, wires it into the recorder, and
+    then hits ``/api/events`` from the test's loop. The assertion is
+    that the ``aiosqlite._db.execute`` call runs on the main loop, not
+    the endpoint's loop — without the dispatch helper, the cursor
+    would be bound to the main loop and awaiting it from the test's
+    loop raises ``"... is bound to a different event loop"`` once the
+    connection has any contention.
+    """
+    import threading
+
+    import aiosqlite
+
+    from drakkar.recorder import SCHEMA_EVENTS
+
+    main_loop_box: list[asyncio.AbstractEventLoop | None] = [None]
+    loop_ready = threading.Event()
+
+    def thread_body():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        main_loop_box[0] = loop
+        loop_ready.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=thread_body, name='test-main-loop', daemon=True)
+    thread.start()
+    loop_ready.wait(timeout=5)
+    main_loop = main_loop_box[0]
+    assert main_loop is not None
+
+    try:
+        # Open the aiosqlite connection on the main loop, not the test
+        # loop. This mirrors production: the recorder creates ``_db``
+        # during ``EventRecorder.start()`` which runs on ``DrakkarApp``'s
+        # loop. The cursor is bound to the loop where ``connect``
+        # resolves; awaiting the cursor from another loop is the bug.
+        async def _open_db():
+            db_path = str(tmp_path / 'live.db')
+            db = await aiosqlite.connect(db_path)
+            await db.executescript(SCHEMA_EVENTS)
+            now = time.time()
+            for i in range(3):
+                await db.execute(
+                    'INSERT INTO events (ts, dt, event, partition, offset, task_id) VALUES (?, ?, ?, ?, ?, ?)',
+                    (now - i, '2026-04-22', 'consumed', 0, i, f'task-{i}'),
+                )
+            await db.commit()
+            return db
+
+        db_future = asyncio.run_coroutine_threadsafe(_open_db(), main_loop)
+        db = await asyncio.wrap_future(db_future)
+
+        # Record which loop the ``execute`` actually runs on by wrapping
+        # the connection with a small spy. The real aiosqlite connection
+        # is kept so commits, fetchall, etc. still work normally.
+        observed_loops: list[asyncio.AbstractEventLoop] = []
+
+        class _LoopObservingDB:
+            """Passthrough wrapper that records the loop on each execute."""
+
+            def __init__(self, wrapped: aiosqlite.Connection) -> None:
+                self._wrapped = wrapped
+
+            def execute(self, *args, **kwargs):
+                observed_loops.append(asyncio.get_running_loop())
+                return self._wrapped.execute(*args, **kwargs)
+
+            def __getattr__(self, name: str):
+                return getattr(self._wrapped, name)
+
+        mock_recorder._db = _LoopObservingDB(db)
+        mock_recorder._flush = AsyncMock()
+        mock_recorder._buffer = []
+        mock_recorder._config = debug_config
+        mock_app.main_loop = main_loop
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/events')
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 3
+
+        # The SELECT ran exactly once, on the main loop (not the test's).
+        assert len(observed_loops) >= 1
+        assert all(lo is main_loop for lo in observed_loops), f'expected all SELECTs on main loop, got {observed_loops}'
+        assert main_loop is not asyncio.get_running_loop()
+
+        # Close the DB on the main loop to avoid "future is attached to
+        # a different loop" during teardown.
+        close_future = asyncio.run_coroutine_threadsafe(db.close(), main_loop)
+        await asyncio.wrap_future(close_future)
+    finally:
+        main_loop.call_soon_threadsafe(main_loop.stop)
+        thread.join(timeout=5)
+
+
+async def test_api_events_falls_back_to_inline_when_main_loop_is_mock(tmp_path, mock_recorder, debug_config, mock_app):
+    """When ``main_loop`` is a ``MagicMock`` (the default unit-test path),
+    ``_dispatch_to_main_loop`` must fall back to inline execution so the
+    test suite doesn't need a real background thread. Regression for the
+    MagicMock-guard in ``isinstance(candidate_loop, asyncio.AbstractEventLoop)``.
+    """
+    import aiosqlite
+
+    from drakkar.recorder import SCHEMA_EVENTS
+
+    db_path = str(tmp_path / 'live.db')
+    db = await aiosqlite.connect(db_path)
+    await db.executescript(SCHEMA_EVENTS)
+    await db.execute(
+        'INSERT INTO events (ts, dt, event, partition, offset, task_id) VALUES (?, ?, ?, ?, ?, ?)',
+        (time.time(), '2026-04-22', 'consumed', 0, 1, 'task-1'),
+    )
+    await db.commit()
+
+    mock_recorder._db = db
+    mock_recorder._flush = AsyncMock()
+    mock_recorder._buffer = []
+    mock_recorder._config = debug_config
+    # ``mock_app.main_loop`` is a ``MagicMock`` by default; the helper
+    # should see it's not an ``asyncio.AbstractEventLoop`` and execute
+    # inline on the current loop without error.
+
+    fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.get('/api/events')
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+    await db.close()
+
+
+async def test_api_debug_processors_snapshot_runs_on_main_loop(mock_recorder, debug_config, mock_app):
+    """The ``/api/debug/processors`` snapshot reads private mutable state
+    on ``PartitionProcessor`` that is mutated exclusively by the main
+    loop (``_sorted_offsets``, ``_arranging``, ``_arrange_labels``,
+    etc.). The snapshot-building coroutine must therefore run on the
+    main loop for internal consistency.
+    """
+    import threading
+
+    main_loop_box: list[asyncio.AbstractEventLoop | None] = [None]
+    loop_ready = threading.Event()
+
+    def thread_body():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        main_loop_box[0] = loop
+        loop_ready.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=thread_body, name='test-main-loop-proc', daemon=True)
+    thread.start()
+    loop_ready.wait(timeout=5)
+    main_loop = main_loop_box[0]
+    assert main_loop is not None
+
+    try:
+        observed_loops: list[asyncio.AbstractEventLoop] = []
+
+        # A minimal processor stub: the endpoint reads a handful of
+        # attributes. We record which loop the read happens on by
+        # intercepting one of the reads.
+        class _ObservingOffsets:
+            def __init__(self):
+                self._data = [1, 2, 3]
+
+            def __getitem__(self, idx):
+                observed_loops.append(asyncio.get_running_loop())
+                return self._data[idx]
+
+        proc = MagicMock()
+        proc.offset_tracker = MagicMock()
+        proc.offset_tracker._sorted_offsets = _ObservingOffsets()
+        proc.offset_tracker._offsets = {1: 'pending', 2: 'pending', 3: 'done'}
+        proc.offset_tracker.pending_count = 2
+        proc.offset_tracker.completed_count = 1
+        proc.offset_tracker.total_tracked = 3
+        proc.offset_tracker.last_committed = 0
+        proc.offset_tracker.committable.return_value = 0
+        proc.queue_size = 0
+        proc.inflight_count = 0
+        proc._arranging = False
+        proc._arrange_start = 0.0
+        proc._arrange_labels = []
+        proc._active_tasks = []
+
+        mock_app.processors = {0: proc}
+        mock_app.main_loop = main_loop
+
+        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/processors')
+
+        assert resp.status_code == 200
+        # The snapshot touched ``_sorted_offsets[:20]`` which goes
+        # through ``__getitem__`` at least once. All observations must
+        # be on the main loop.
+        assert len(observed_loops) >= 1
+        assert all(lo is main_loop for lo in observed_loops), (
+            f'expected all processor reads on main loop, got {observed_loops}'
+        )
+    finally:
+        main_loop.call_soon_threadsafe(main_loop.stop)
+        thread.join(timeout=5)
