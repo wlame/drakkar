@@ -42,7 +42,7 @@ import asyncio
 import contextvars
 import time
 import traceback
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -50,6 +50,7 @@ from drakkar.cache import CacheScope
 from drakkar.executor import ExecutorTaskError
 from drakkar.models import (
     CollectResult,
+    ErrorAction,
     ExecutorResult,
     ExecutorTask,
     MessageGroup,
@@ -81,6 +82,24 @@ _probe_stage: contextvars.ContextVar[str] = contextvars.ContextVar(
     'drakkar_probe_stage',
     default='unknown',
 )
+
+
+# ---- on_error-raised sentinel ----------------------------------------------
+#
+# ``_invoke_on_error`` returns ``_ON_ERROR_RAISED`` when on_error itself
+# raised — distinct from any valid action value (ErrorAction.* enum
+# member, list of tasks). Using a singleton instance of a dedicated
+# sentinel class keeps ty's type narrowing happy: the runtime check
+# ``action is _ON_ERROR_RAISED`` narrows ``action`` out of the
+# ``_OnErrorRaisedSentinel`` branch, leaving the union of the real
+# action types (``str | list[ExecutorTask]``) for the following code.
+
+
+class _OnErrorRaisedSentinel:
+    """Marker type for the on_error-raised return path. See ``_ON_ERROR_RAISED``."""
+
+
+_ON_ERROR_RAISED = _OnErrorRaisedSentinel()
 
 
 # ---- pydantic models for the report ----------------------------------------
@@ -689,6 +708,13 @@ class DebugRunner:
         # can build a truncated DebugReport if wall-clock timeout fires
         # mid-run. Reset at the top of every run().
         self._partial: dict[str, Any] = {}
+        # Scratch slot used by ``_execute_and_record_task`` to communicate
+        # the ExecutorTaskError it caught (or None on success) back to
+        # its caller in ``_process_task`` / ``_run_retry_loop``. Returning
+        # a tuple would leak an implementation detail across all of the
+        # task-execution helpers; this attribute keeps the public return
+        # as just ``ProbeTaskEntry``.
+        self._last_exec_error: ExecutorTaskError | None = None
 
     # -- incremental partial-report machinery --------------------------------
 
@@ -871,14 +897,18 @@ class DebugRunner:
         terminal_results: list[ExecutorResult] = []
 
         for task in tasks:
-            entry = await self._run_single_task(
+            # _process_task is the on_error-aware orchestrator: it handles
+            # RETRY (up to max_retries), replacement lists, SKIP, and
+            # on_error itself raising — appending one ProbeTaskEntry per
+            # execute attempt (including retries and replacements).
+            await self._process_task(
                 task=task,
                 msg=msg,
                 sink_collector=sink_collector,
                 terminal_results=terminal_results,
+                task_entries=task_entries,
                 start_monotonic=start_monotonic,
             )
-            task_entries.append(entry)
 
         # --- on_message_complete --------------------------------------------
         # on_message_complete is non-blocking for on_window_complete: even
@@ -1143,7 +1173,268 @@ class DebugRunner:
         timing['on_window_complete'] = wc_duration
         self._update_partial('timing', timing)
 
-    async def _run_single_task(
+    async def _process_task(
+        self,
+        *,
+        task: ExecutorTask,
+        msg: SourceMessage,
+        sink_collector: DebugSinkCollector,
+        terminal_results: list[ExecutorResult],
+        task_entries: list[ProbeTaskEntry],
+        start_monotonic: float,
+        retry_of: str | None = None,
+        replacement_for: str | None = None,
+    ) -> None:
+        """Run ONE task end-to-end with the full on_error / retry / replace cycle.
+
+        Appends one ``ProbeTaskEntry`` per executor attempt to
+        ``task_entries`` (so retries and replacements also land in the
+        Tasks section of the UI). The live list is kept on ``_partial``
+        so ``latest_partial_report`` sees in-flight progress.
+
+        Flow:
+          1. Execute the task via ``_execute_and_record_task``.
+          2. On success (no ``ExecutorTaskError``) → append the entry,
+             on_task_complete already fed into the sink collector.
+          3. On failure:
+             a. Call ``handler.on_error(task, error)`` with stage
+                ``on_error:<task_id>``. If it raises, record a ProbeError
+                and mark the entry ``status='failed'``.
+             b. If the action is ``ErrorAction.RETRY``:
+                  - re-execute the SAME task while ``retry_count < max_retries``.
+                    Each attempt produces its own ``ProbeTaskEntry`` with
+                    ``retry_of=<parent>`` set. Previous entries keep
+                    ``status='failed'`` — the retry entry reflects the
+                    retry's terminal outcome (done/failed).
+                  - Once retries are exhausted (handler still wants RETRY
+                    but budget is gone), the last failed entry is kept
+                    as ``status='failed'``.
+             c. If the action is a ``list[ExecutorTask]`` (replacements):
+                  - mark the original entry ``status='replaced'`` and
+                    recurse for each replacement with
+                    ``replacement_for=<parent_task_id>``.
+             d. If the action is ``ErrorAction.SKIP`` (or any other value):
+                  - the failed entry keeps ``status='failed'``; we stop.
+
+        Retries and replacement cascades each run their OWN on_error
+        cycle, so a retry that fails again goes through on_error too (up
+        to the per-task retry budget). Replacement tasks that themselves
+        fail can trigger a fresh on_error; we don't cap recursion — that
+        mirrors production semantics. A broken handler that infinitely
+        returns replacements would hang the probe the same way it would
+        hang the real worker.
+        """
+        entry = await self._execute_and_record_task(
+            task=task,
+            msg=msg,
+            sink_collector=sink_collector,
+            terminal_results=terminal_results,
+            start_monotonic=start_monotonic,
+            retry_of=retry_of,
+            replacement_for=replacement_for,
+        )
+        task_entries.append(entry)
+
+        # Success path → nothing more to do for this task.
+        exec_error = self._last_exec_error
+        self._last_exec_error = None  # reset so the next call starts clean
+        if exec_error is None:
+            return
+
+        # -- on_error path ----------------------------------------------------
+        await self._handle_task_failure(
+            task=task,
+            failed_entry=entry,
+            exec_error=exec_error,
+            msg=msg,
+            sink_collector=sink_collector,
+            terminal_results=terminal_results,
+            task_entries=task_entries,
+            start_monotonic=start_monotonic,
+        )
+
+    async def _handle_task_failure(
+        self,
+        *,
+        task: ExecutorTask,
+        failed_entry: ProbeTaskEntry,
+        exec_error: ExecutorTaskError,
+        msg: SourceMessage,
+        sink_collector: DebugSinkCollector,
+        terminal_results: list[ExecutorResult],
+        task_entries: list[ProbeTaskEntry],
+        start_monotonic: float,
+    ) -> None:
+        """Run on_error for ``failed_entry`` and react to its returned action.
+
+        Branches out into three production-mirroring paths (RETRY /
+        replacement list / SKIP-or-other) plus the on_error-itself-raises
+        path. See ``_process_task`` docstring for the full state machine.
+        """
+        action = await self._invoke_on_error(
+            task=task,
+            exec_error=exec_error,
+            start_monotonic=start_monotonic,
+        )
+        if action is _ON_ERROR_RAISED:
+            # on_error itself raised — ProbeError already recorded.
+            # failed_entry keeps its default status='failed'.
+            return
+
+        # Replacement list: original → 'replaced', recurse for each new task.
+        if isinstance(action, list):
+            failed_entry.status = 'replaced'
+            # ty can narrow ``action`` to ``list`` via isinstance, but not
+            # the element type. The on_error contract (see
+            # BaseDrakkarHandler.on_error) guarantees list members are
+            # ExecutorTask instances, so the cast is safe.
+            replacements = cast('list[ExecutorTask]', action)
+            for replacement in replacements:
+                await self._process_task(
+                    task=replacement,
+                    msg=msg,
+                    sink_collector=sink_collector,
+                    terminal_results=terminal_results,
+                    task_entries=task_entries,
+                    start_monotonic=start_monotonic,
+                    replacement_for=task.task_id,
+                )
+            return
+
+        # RETRY path: re-execute up to max_retries more attempts, each as a
+        # fresh ProbeTaskEntry with retry_of=<original task_id>. The loop
+        # stops on the first success OR when max_retries is reached OR when
+        # on_error stops returning RETRY.
+        if action == ErrorAction.RETRY:
+            await self._run_retry_loop(
+                task=task,
+                msg=msg,
+                sink_collector=sink_collector,
+                terminal_results=terminal_results,
+                task_entries=task_entries,
+                start_monotonic=start_monotonic,
+            )
+            return
+
+        # SKIP or any unrecognized action → leave the failed entry as-is.
+        # This matches production's "else: window.results.append(e.result)"
+        # branch in PartitionProcessor._execute_and_track.
+
+    async def _run_retry_loop(
+        self,
+        *,
+        task: ExecutorTask,
+        msg: SourceMessage,
+        sink_collector: DebugSinkCollector,
+        terminal_results: list[ExecutorResult],
+        task_entries: list[ProbeTaskEntry],
+        start_monotonic: float,
+    ) -> None:
+        """Re-execute ``task`` up to ``max_retries`` times, recording each attempt.
+
+        Called after the FIRST attempt has already failed and on_error
+        returned RETRY. ``max_retries`` is the total retry budget — a
+        config value of 3 means up to 3 retry attempts after the initial
+        failure (so 4 total executor invocations in the worst case, same
+        as production).
+
+        Each retry attempt:
+          - Appends its own ``ProbeTaskEntry`` (with ``retry_of`` set).
+          - On success → stops the loop.
+          - On failure → calls on_error; if still RETRY and budget
+            remains, continues. If on_error returns a list or something
+            else, the loop exits and that branch is handled via
+            ``_handle_task_failure`` on the retry entry.
+        """
+        max_retries = self._app_config.executor.max_retries
+        retry_count = 0
+        while retry_count < max_retries:
+            retry_count += 1
+            retry_entry = await self._execute_and_record_task(
+                task=task,
+                msg=msg,
+                sink_collector=sink_collector,
+                terminal_results=terminal_results,
+                start_monotonic=start_monotonic,
+                retry_of=task.task_id,
+                replacement_for=None,
+            )
+            task_entries.append(retry_entry)
+            exec_error = self._last_exec_error
+            self._last_exec_error = None
+            if exec_error is None:
+                # Retry succeeded — done.
+                return
+            # Retry failed. Ask the handler what to do next.
+            action = await self._invoke_on_error(
+                task=task,
+                exec_error=exec_error,
+                start_monotonic=start_monotonic,
+            )
+            if action is _ON_ERROR_RAISED:
+                return
+            if isinstance(action, list):
+                # Replacement path off a retry — retry_entry becomes
+                # 'replaced' and we recurse on the replacements. See the
+                # matching cast in ``_handle_task_failure`` for why the
+                # cast is needed and safe.
+                retry_entry.status = 'replaced'
+                replacements = cast('list[ExecutorTask]', action)
+                for replacement in replacements:
+                    await self._process_task(
+                        task=replacement,
+                        msg=msg,
+                        sink_collector=sink_collector,
+                        terminal_results=terminal_results,
+                        task_entries=task_entries,
+                        start_monotonic=start_monotonic,
+                        replacement_for=task.task_id,
+                    )
+                return
+            if action != ErrorAction.RETRY:
+                # SKIP or unknown → stop, retry_entry stays 'failed'.
+                return
+            # RETRY again and budget allows → next loop iteration.
+
+    async def _invoke_on_error(
+        self,
+        *,
+        task: ExecutorTask,
+        exec_error: ExecutorTaskError,
+        start_monotonic: float,
+    ) -> str | list[ExecutorTask] | _OnErrorRaisedSentinel:
+        """Call ``handler.on_error`` with error capture. Returns the raw action or a sentinel.
+
+        Returns ``_ON_ERROR_RAISED`` when on_error itself raises (the
+        ProbeError has already been appended). Otherwise returns the
+        action verbatim so the caller can pattern-match on RETRY / list /
+        SKIP / other.
+
+        The return type uses ``str`` (not ``ErrorAction``) because
+        ``ErrorAction`` is a ``StrEnum`` — user handlers are free to
+        return the raw string ``'retry'`` / ``'skip'`` instead of the
+        enum member. The caller uses ``action == ErrorAction.RETRY`` to
+        treat both cases identically (StrEnum equality matches the
+        underlying str).
+        """
+        stage = f'on_error:{task.task_id}'
+        token = _probe_stage.set(stage)
+        try:
+            try:
+                return await self._handler.on_error(task, exec_error.error)
+            except Exception as exc:
+                self._record_error(
+                    self._build_probe_error(
+                        stage=stage,
+                        exc=exc,
+                        start_monotonic=start_monotonic,
+                    )
+                )
+                return _ON_ERROR_RAISED
+        finally:
+            _probe_stage.reset(token)
+
+    async def _execute_and_record_task(
         self,
         *,
         task: ExecutorTask,
@@ -1151,41 +1442,50 @@ class DebugRunner:
         sink_collector: DebugSinkCollector,
         terminal_results: list[ExecutorResult],
         start_monotonic: float,
+        retry_of: str | None,
+        replacement_for: str | None,
     ) -> ProbeTaskEntry:
-        """Execute one task and return its ``ProbeTaskEntry``.
+        """Execute one attempt and return its ``ProbeTaskEntry``.
 
-        Appended to the partial ``tasks`` list by the caller so the
-        snapshot order always reflects arrange() order.
+        Sets ``self._last_exec_error`` to the caught ``ExecutorTaskError``
+        on failure, or ``None`` on success — a poor-man's second return
+        value that keeps the call sites tidy (Python doesn't let us
+        return a union cleanly without forcing every caller through the
+        same unpacking dance).
 
-        Error-capture behaviour (Task 3):
-          - subprocess failure (``ExecutorTaskError``): record a failed
-            task entry with ``status='failed'`` and ``subprocess_exception``
-            set. Task 4 will add the ``on_error`` path; for now we just
-            surface the failure and keep going.
-          - on_task_complete raising: record the error on the task entry
-            (``on_task_complete_error``) + append to ``_partial['errors']``
-            with stage ``task_complete:<id>`` so the Errors panel can
-            render the full traceback. The probe continues with the next
-            task.
+        On success: runs ``on_task_complete``, feeds any returned
+        ``CollectResult`` into the sink collector, returns a
+        ``status='done'`` entry with stdout/stderr/etc attached.
+
+        On failure: records a ``ProbeError`` via ``_record_error`` for
+        ANY ``on_task_complete`` exception (still runs it even on success
+        path), returns a ``status='failed'`` entry built from the
+        ``ExecutorError`` attached to the exception.
         """
-        # -- executor execute ----------------------------------------------
+        # -- executor execute ------------------------------------------------
         token = _probe_stage.set(f'executor:{task.task_id}')
         try:
-            exec_result = await self._executor_pool.execute(
-                task,
-                recorder=None,
-                partition_id=msg.partition,
-            )
-        except ExecutorTaskError as exc:
-            # Subprocess-level failure. Task 4 will add the on_error
-            # path; here we just record the failure so the probe can
-            # continue to on_message_complete / on_window_complete.
-            # The ExecutorError.exception / stderr pair is the same
-            # data partition.py uses when it records a failed task.
-            return _failed_task_entry(task=task, error=exc)
+            try:
+                exec_result = await self._executor_pool.execute(
+                    task,
+                    recorder=None,
+                    partition_id=msg.partition,
+                )
+            except ExecutorTaskError as exc:
+                self._last_exec_error = exc
+                # Subprocess-level failure — build a 'failed' entry from
+                # the ExecutorError payload attached to the exception.
+                # on_error / retry / replace logic happens in the caller.
+                return _failed_task_entry(
+                    task=task,
+                    error=exc,
+                    retry_of=retry_of,
+                    replacement_for=replacement_for,
+                )
         finally:
             _probe_stage.reset(token)
 
+        self._last_exec_error = None
         terminal_results.append(exec_result)
 
         # -- on_task_complete for this task --------------------------------
@@ -1233,6 +1533,8 @@ class DebugRunner:
             on_task_complete_duration=tc_duration,
             on_task_complete_result=tc_result,
             on_task_complete_error=tc_error_summary,
+            retry_of=retry_of,
+            replacement_for=replacement_for,
         )
 
     # -- error-capture helpers ----------------------------------------------
@@ -1340,15 +1642,25 @@ def _one_line_summary(exc: BaseException) -> str:
     return f'{type(exc).__name__}: {message}'
 
 
-def _failed_task_entry(*, task: ExecutorTask, error: ExecutorTaskError) -> ProbeTaskEntry:
+def _failed_task_entry(
+    *,
+    task: ExecutorTask,
+    error: ExecutorTaskError,
+    retry_of: str | None = None,
+    replacement_for: str | None = None,
+) -> ProbeTaskEntry:
     """Build a ``ProbeTaskEntry`` for a subprocess-level task failure.
 
     Used when ``ExecutorPool.execute`` raises ``ExecutorTaskError`` —
     the task never produced a successful ``ExecutorResult``, so we
     synthesise an entry from the ``ExecutorError`` attached to the
-    exception. Task 4 will extend this with the ``on_error`` path
-    (RETRY / replacements); for now we just record the failure so the
-    probe can carry on and finish the remaining hooks.
+    exception. The entry starts with ``status='failed'``; callers may
+    later flip it to ``'replaced'`` if on_error returns a replacement
+    list (see ``DebugRunner._handle_task_failure``).
+
+    ``retry_of`` / ``replacement_for`` thread through on_error retries
+    and replacement cascades so the UI can show the lineage of each
+    entry (see Tasks section C in the probe tab).
     """
     err = error.error
     result = error.result
@@ -1368,4 +1680,6 @@ def _failed_task_entry(*, task: ExecutorTask, error: ExecutorTaskError) -> Probe
         stdout=result.stdout,
         stderr=result.stderr,
         subprocess_exception=subprocess_exception,
+        retry_of=retry_of,
+        replacement_for=replacement_for,
     )

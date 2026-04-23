@@ -51,6 +51,8 @@ from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
     CollectResult,
+    ErrorAction,
+    ExecutorError,
     ExecutorResult,
     ExecutorTask,
     FilePayload,
@@ -605,13 +607,17 @@ def _make_executor_pool() -> ExecutorPool:
     )
 
 
-def _make_config() -> DrakkarConfig:
-    """Minimal DrakkarConfig — only executor block is read by the runner in task 2a."""
+def _make_config(*, max_retries: int = 1) -> DrakkarConfig:
+    """Minimal DrakkarConfig — only executor block is read by the runner.
+
+    ``max_retries`` is exposed so Task 4's tests can control the retry
+    budget per scenario (retry path, retries exhausted, etc.).
+    """
     return DrakkarConfig(
         executor=ExecutorConfig(
             binary_path='/nonexistent/binary/should-never-run',
             task_timeout_seconds=5,
-            max_retries=1,
+            max_retries=max_retries,
         )
     )
 
@@ -1862,3 +1868,392 @@ async def test_runner_arrange_error_preserves_cache_calls_in_report():
     assert set_calls[0].outcome == 'suppressed'
     # Summary counts mirror the call log (one suppressed write).
     assert report.cache_summary['writes_suppressed'] >= 1
+
+
+# --- Task 4: on_error path (retries and replacements) ----------------------
+#
+# These tests exercise the probe's ``on_error`` integration. When the
+# executor raises ``ExecutorTaskError`` (e.g. a precomputed task with
+# non-zero exit_code), the runner calls ``handler.on_error(task, err)``
+# and interprets the return value:
+#
+#   ErrorAction.RETRY   → re-run the task (subject to max_retries)
+#   list[ExecutorTask]  → execute each replacement in sequence
+#   ErrorAction.SKIP    → leave the failed entry as-is
+#   (anything else)     → treated as SKIP
+#
+# If ``on_error`` itself raises, we capture a ProbeError tagged
+# ``on_error:<task_id>`` and keep the failed entry.
+#
+# Each test wires a small handler subclass that drives the exact
+# scenario under test, using precomputed tasks with non-zero exit_code
+# to simulate subprocess failures without spawning real subprocesses.
+
+
+def _make_failing_precomputed_task(
+    *,
+    task_id: str,
+    offset: int = 0,
+    stderr: str = 'boom',
+    exit_code: int = 1,
+) -> ExecutorTask:
+    """Build an ExecutorTask whose precomputed exit_code is non-zero.
+
+    ``ExecutorPool._execute_precomputed`` raises ``ExecutorTaskError``
+    for any non-zero exit_code, so this task triggers the exact same
+    code path a real subprocess failure would. Ideal for unit-testing
+    on_error orchestration without flaky subprocess spawning.
+    """
+    return ExecutorTask(
+        task_id=task_id,
+        source_offsets=[offset],
+        precomputed=PrecomputedResult(
+            stdout='',
+            stderr=stderr,
+            exit_code=exit_code,
+            duration_seconds=0.001,
+        ),
+    )
+
+
+class _RetryThenSucceedHandler(_HappyPathHandler):
+    """arrange returns a precomputed task that fails the first time and
+    succeeds on retry.
+
+    Each time ``arrange`` is called (only once in practice), it returns
+    a SINGLE task. That task is a precomputed task whose exit_code
+    starts non-zero. The ``on_task_complete`` fast-path uses the task's
+    own precomputed data, so we swap the task's precomputed payload
+    between attempts by mutating the returned task's ``precomputed``
+    field when ``on_error`` fires. Cleaner: we keep the task reference
+    and flip its ``precomputed.exit_code`` from 1 → 0 inside on_error.
+
+    on_error always returns RETRY.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(task_count=1)
+        # Track how many times on_error fired so tests can assert the
+        # retry cycle ran exactly as expected.
+        self.on_error_calls = 0
+        # Hold a reference to the task we yielded so on_error can mutate
+        # its precomputed payload for the next attempt.
+        self._task: ExecutorTask | None = None
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        self.arrange_calls += 1
+        msg = messages[0]
+        self._task = _make_failing_precomputed_task(
+            task_id='t-flaky',
+            offset=msg.offset,
+            stderr='first-attempt-fail',
+            exit_code=1,
+        )
+        return [self._task]
+
+    async def on_error(
+        self,
+        task: ExecutorTask,
+        error: ExecutorError,
+    ) -> str | list[ExecutorTask]:
+        self.on_error_calls += 1
+        # Flip the precomputed outcome so the retry succeeds with
+        # exit_code=0. The runner reuses the SAME ExecutorTask instance
+        # for the retry — mutating its precomputed field in-place makes
+        # the next execution attempt see the new outcome.
+        if task.precomputed is not None:
+            task.precomputed = PrecomputedResult(
+                stdout='retry-worked',
+                stderr='',
+                exit_code=0,
+                duration_seconds=0.001,
+            )
+        return ErrorAction.RETRY
+
+
+async def test_runner_retries_failed_task_when_on_error_returns_retry():
+    """First attempt fails, on_error returns RETRY, second attempt succeeds.
+
+    Assertions:
+      - Two task entries total (original failed + retry done).
+      - Retry entry carries retry_of=<original task_id>.
+      - on_task_complete fired for the successful retry (its result is
+        attached to the retry entry).
+      - No ProbeError recorded (on_error completed cleanly).
+    """
+    handler = _RetryThenSucceedHandler()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(max_retries=1),
+    )
+
+    report = await runner.run(ProbeInput(value='x', offset=1))
+
+    assert handler.on_error_calls == 1
+    # No on_error-raise error captured; report should be clean.
+    assert report.errors == []
+
+    # Exactly two task entries: original + one retry.
+    assert len(report.tasks) == 2
+    original, retry = report.tasks
+    assert original.task_id == 't-flaky'
+    assert original.status == 'failed'
+    assert original.retry_of is None  # original is never marked as a retry
+    assert original.subprocess_exception is not None or original.stderr
+
+    assert retry.task_id == 't-flaky'
+    assert retry.status == 'done'
+    assert retry.retry_of == 't-flaky'
+    # Successful retry → on_task_complete fired and attached its result.
+    assert retry.on_task_complete_result is not None
+    assert retry.exit_code == 0
+    assert retry.stdout == 'retry-worked'
+
+
+class _AlwaysRetryHandler(_HappyPathHandler):
+    """Subprocess always fails; on_error always asks to RETRY.
+
+    Used to prove the ``max_retries`` cap: with ``max_retries=2`` and a
+    handler that never stops asking for RETRY, the probe should record
+    1 original + 2 retry entries (3 total), all ``status='failed'``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(task_count=1)
+        self.on_error_calls = 0
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        self.arrange_calls += 1
+        return [
+            _make_failing_precomputed_task(
+                task_id='t-always-fail',
+                offset=messages[0].offset,
+                stderr='always-fails',
+                exit_code=2,
+            ),
+        ]
+
+    async def on_error(
+        self,
+        task: ExecutorTask,
+        error: ExecutorError,
+    ) -> str | list[ExecutorTask]:
+        self.on_error_calls += 1
+        return ErrorAction.RETRY
+
+
+async def test_runner_stops_retrying_when_max_retries_exhausted():
+    """With max_retries=2 and a handler that always RETRies, we see 3 failed entries.
+
+    1 original attempt + 2 retries (max_retries cap) = 3 task entries.
+    All ``status='failed'``. ``on_task_complete`` fires ZERO times —
+    every attempt failed and the executor never produced a successful
+    ExecutorResult to feed to the hook.
+    """
+    handler = _AlwaysRetryHandler()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(max_retries=2),
+    )
+
+    report = await runner.run(ProbeInput(value='x', offset=1))
+
+    # on_error fires after EACH failed attempt (original + 2 retries = 3).
+    assert handler.on_error_calls == 3
+    # on_task_complete never ran — no attempt produced a valid result.
+    assert handler.on_task_complete_calls == 0
+
+    # Three task entries total, every one failed.
+    assert len(report.tasks) == 3
+    assert all(t.status == 'failed' for t in report.tasks)
+    # The original has no retry_of; the two retries both retry t-always-fail.
+    assert report.tasks[0].retry_of is None
+    assert report.tasks[1].retry_of == 't-always-fail'
+    assert report.tasks[2].retry_of == 't-always-fail'
+
+    # None of the failed attempts produced an on_task_complete result.
+    assert all(t.on_task_complete_result is None for t in report.tasks)
+
+    # Hooks downstream of the task loop still fire — the probe does not
+    # abort just because every attempt failed.
+    assert handler.on_message_complete_calls == 1
+    assert handler.on_window_complete_calls == 1
+
+
+class _ReplacementHandler(_HappyPathHandler):
+    """Subprocess fails; on_error returns TWO replacement tasks that succeed.
+
+    Tests the ``list`` branch of the on_error return contract. The
+    replacements are precomputed-success tasks so ``on_task_complete``
+    fires for each one.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(task_count=1)
+        self.on_error_calls = 0
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        self.arrange_calls += 1
+        return [
+            _make_failing_precomputed_task(
+                task_id='t-original',
+                offset=messages[0].offset,
+                stderr='original-fails',
+                exit_code=1,
+            ),
+        ]
+
+    async def on_error(
+        self,
+        task: ExecutorTask,
+        error: ExecutorError,
+    ) -> str | list[ExecutorTask]:
+        self.on_error_calls += 1
+        # Two successful precomputed replacements. Both inherit the
+        # original's source_offsets so the message-tracker bookkeeping
+        # (irrelevant for the probe, but kept for production parity)
+        # would be happy in a real run too.
+        return [
+            ExecutorTask(
+                task_id='r-A',
+                source_offsets=task.source_offsets,
+                precomputed=PrecomputedResult(
+                    stdout='replacement-A',
+                    stderr='',
+                    exit_code=0,
+                    duration_seconds=0.001,
+                ),
+            ),
+            ExecutorTask(
+                task_id='r-B',
+                source_offsets=task.source_offsets,
+                precomputed=PrecomputedResult(
+                    stdout='replacement-B',
+                    stderr='',
+                    exit_code=0,
+                    duration_seconds=0.001,
+                ),
+            ),
+        ]
+
+
+async def test_runner_executes_replacement_tasks_returned_from_on_error():
+    """on_error returns [A, B] → original marked replaced, A and B execute.
+
+    Assertions:
+      - Three task entries total: original + A + B.
+      - Original entry has ``status='replaced'``.
+      - A and B have ``status='done'`` and ``replacement_for='t-original'``.
+      - on_task_complete fires once per replacement (2 times total).
+    """
+    handler = _ReplacementHandler()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(max_retries=3),
+    )
+
+    report = await runner.run(ProbeInput(value='x', offset=1))
+
+    assert handler.on_error_calls == 1
+    # on_task_complete fires for both successful replacements; the
+    # original never produced a result so it does not count.
+    assert handler.on_task_complete_calls == 2
+    assert report.errors == []
+
+    # Exactly three task entries: 1 original + 2 replacements.
+    assert len(report.tasks) == 3
+    original, rep_a, rep_b = report.tasks
+    assert original.task_id == 't-original'
+    assert original.status == 'replaced'
+
+    assert rep_a.task_id == 'r-A'
+    assert rep_a.status == 'done'
+    assert rep_a.replacement_for == 't-original'
+    assert rep_a.on_task_complete_result is not None
+
+    assert rep_b.task_id == 'r-B'
+    assert rep_b.status == 'done'
+    assert rep_b.replacement_for == 't-original'
+    assert rep_b.on_task_complete_result is not None
+
+
+class _OnErrorRaisesHandler(_HappyPathHandler):
+    """Subprocess fails; on_error itself raises.
+
+    Proves the ``on_error``-raises path: the probe captures a ProbeError
+    tagged ``on_error:<task_id>`` and the failed task entry stays as
+    ``status='failed'`` (no retry, no replacement).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(task_count=1)
+        self.on_error_calls = 0
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        self.arrange_calls += 1
+        return [
+            _make_failing_precomputed_task(
+                task_id='t-broken',
+                offset=messages[0].offset,
+                stderr='subprocess-fail',
+                exit_code=9,
+            ),
+        ]
+
+    async def on_error(
+        self,
+        task: ExecutorTask,
+        error: ExecutorError,
+    ) -> str | list[ExecutorTask]:
+        self.on_error_calls += 1
+        raise RuntimeError('on_error itself blew up')
+
+
+async def test_runner_captures_on_error_exception_and_marks_task_failed():
+    """on_error raises → ProbeError recorded, failed entry kept, no retry/replace.
+
+    Assertions:
+      - Exactly one task entry, ``status='failed'``.
+      - Exactly one ProbeError with stage=='on_error:t-broken'.
+      - No additional retry / replacement entries were appended.
+    """
+    handler = _OnErrorRaisesHandler()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(max_retries=3),
+    )
+
+    report = await runner.run(ProbeInput(value='x', offset=1))
+
+    assert handler.on_error_calls == 1
+    # Only one task entry — no retries, no replacements.
+    assert len(report.tasks) == 1
+    assert report.tasks[0].task_id == 't-broken'
+    assert report.tasks[0].status == 'failed'
+
+    # Exactly one ProbeError, tagged with the on_error:<task_id> stage.
+    on_error_errors = [e for e in report.errors if e.stage.startswith('on_error:')]
+    assert len(on_error_errors) == 1
+    assert on_error_errors[0].stage == 'on_error:t-broken'
+    assert on_error_errors[0].exception_class == 'RuntimeError'
+    assert 'on_error itself blew up' in on_error_errors[0].message
