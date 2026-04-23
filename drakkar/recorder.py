@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import glob
 import json
@@ -194,13 +195,17 @@ def _list_db_files(db_dir: str, worker_name: str) -> list[str]:
 
 
 def detect_worker_ip() -> str:
-    """Detect the worker's outbound IP address."""
+    """Detect the worker's outbound IP address.
+
+    Uses ``contextlib.closing`` so the UDP socket is always closed, even
+    if ``getsockname()`` raises. Without the wrapper an exception after
+    ``connect()`` would leak the file descriptor; this function is called
+    on every DB rotation so the leak would accumulate over days.
+    """
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('10.255.255.255', 1))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as s:
+            s.connect(('10.255.255.255', 1))
+            return s.getsockname()[0]
     except Exception:
         return '127.0.0.1'
 

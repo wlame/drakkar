@@ -23,6 +23,7 @@ from drakkar.recorder import (
     _list_db_files,
     _live_link_path,
     _make_db_path,
+    detect_worker_ip,
 )
 from drakkar.recorder import (
     logger as recorder_logger,
@@ -2538,3 +2539,35 @@ async def test_threshold_zero_means_include_all(tmp_path):
     assert 'stdout' in entry
     rec.unsubscribe(q)
     await rec.stop()
+
+
+def test_detect_worker_ip_happy_path_returns_ip_string():
+    """Happy path: real socket returns a valid-looking IPv4 string."""
+    import ipaddress
+
+    ip = detect_worker_ip()
+    # Must be a valid IPv4 address — either a real outbound IP or the
+    # 127.0.0.1 fallback if the socket operations failed in the sandbox.
+    parsed = ipaddress.ip_address(ip)
+    assert parsed.version == 4
+
+
+def test_detect_worker_ip_closes_socket_when_getsockname_raises():
+    """Regression: socket must be closed even if getsockname() raises.
+
+    Guards against fd leak on DB rotation: prior implementation called
+    ``s.close()`` after ``getsockname()``, so an exception between
+    ``connect()`` and ``close()`` leaked the descriptor.
+    """
+    from unittest.mock import MagicMock, patch
+
+    fake_socket = MagicMock()
+    fake_socket.getsockname.side_effect = OSError('boom')
+
+    with patch('drakkar.recorder.socket.socket', return_value=fake_socket):
+        ip = detect_worker_ip()
+
+    # Fallback value preserved regardless of the underlying failure.
+    assert ip == '127.0.0.1'
+    # Critical assertion: contextlib.closing guarantees exactly one close().
+    fake_socket.close.assert_called_once()
