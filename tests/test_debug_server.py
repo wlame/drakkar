@@ -2398,6 +2398,16 @@ class TestDebugPage:
         # ESC-close marker: a document-level keydown listener that dismisses
         # the sidebar. The function name is the simplest stable marker.
         assert 'closeTaskSidebar' in html
+        # Task 9: section helpers and wrapper ids for on_message_complete /
+        # on_window_complete / Planned sink outputs. Presence of the
+        # function names proves the helpers were injected; the section ids
+        # prove ``renderProbeReport`` wires them in.
+        assert 'renderProbeSectionOnMessageComplete' in html
+        assert 'renderProbeSectionOnWindowComplete' in html
+        assert 'renderProbeSectionSinks' in html
+        assert 'probe-section-message-complete' in html
+        assert 'probe-section-window-complete' in html
+        assert 'probe-section-sinks' in html
 
 
 class TestDebugServerClass:

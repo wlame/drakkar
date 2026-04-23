@@ -2335,14 +2335,342 @@ function renderProbeSectionTasks(report) {
     return card.card;
 }
 
+// === Message Probe — Sections D/E: on_message_complete / on_window_complete ===
+
+function probeCountSinkRecordsByType(collectResult) {
+    // Walks a CollectResult (pydantic dump: {kafka: [...], postgres: [...],
+    // mongo: [...], http: [...], redis: [...], files: [...]}) and returns
+    // a map {kafka: N, mongo: N, ...} including only sink types that have
+    // at least one payload. Used by the inline summary on sections D/E so
+    // the operator sees "kafka: 3 · mongo: 1" without drilling into the JSON.
+    if (!collectResult) return {};
+    var out = {};
+    var types = ['kafka', 'postgres', 'mongo', 'http', 'redis', 'files'];
+    for (var i = 0; i < types.length; i++) {
+        var list = collectResult[types[i]];
+        if (list && list.length) out[types[i]] = list.length;
+    }
+    return out;
+}
+
+function probeMakeSinkSummaryLine(counts) {
+    // Renders "kafka: 3 · mongo: 1" as a single text node; empty map →
+    // "no sink records". Colored neutrally (same weight as other meta lines).
+    var keys = Object.keys(counts);
+    if (keys.length === 0) return 'no sink records';
+    keys.sort();
+    return keys.map(function(k) { return k + ': ' + counts[k]; }).join(' · ');
+}
+
+function probeMakeStatusDot(isError) {
+    // Small inline dot: green = success, red = error. Uses a span with
+    // fixed size + border-radius so CSS-disabled printers still render it.
+    var dot = document.createElement('span');
+    dot.className = 'inline-block rounded-full';
+    dot.style.cssText = 'width:8px;height:8px;margin-right:6px;vertical-align:middle;background:' + (isError ? '#dc2626' : '#059669') + ';';
+    return dot;
+}
+
+function probeRenderHookResultCard(title, cardId, stageResult, errors, fallbackNote) {
+    // Shared shape for sections D (on_message_complete) and E
+    // (on_window_complete). Both stages have identical rendering — a
+    // one-line summary, optional error banner, optional sink-count line,
+    // and the pretty-printed CollectResult JSON.
+    //
+    // - ``stageResult``: the ProbeStageResult dict from the report, or null
+    //   when the stage did not run (e.g. upstream failure).
+    // - ``errors``: report.errors[] — scanned for a matching traceback when
+    //   ``stageResult.error`` is set.
+    // - ``fallbackNote``: gray note shown when stageResult is null (stage
+    //   did not run).
+    var card = probeMakeCard(title);
+    card.card.id = cardId;
+
+    if (!stageResult) {
+        var note = document.createElement('div');
+        note.className = 'text-xs text-gray-500 italic';
+        note.textContent = fallbackNote;
+        card.body.appendChild(note);
+        return card.card;
+    }
+
+    // Summary line: status dot + duration + sink-record-by-type count.
+    var summaryLine = document.createElement('div');
+    summaryLine.className = 'text-xs text-ink-800 mb-2 flex items-center gap-2';
+    summaryLine.appendChild(probeMakeStatusDot(!!stageResult.error));
+    var durSpan = document.createElement('span');
+    durSpan.className = 'font-mono';
+    durSpan.textContent = 'duration ' + probeDurSec(stageResult.duration_seconds);
+    durSpan.style.color = probeDurColor(stageResult.duration_seconds);
+    summaryLine.appendChild(durSpan);
+
+    var sep = document.createElement('span');
+    sep.className = 'text-gray-400';
+    sep.textContent = '·';
+    summaryLine.appendChild(sep);
+
+    var countsText = document.createElement('span');
+    countsText.className = 'text-gray-600 font-mono';
+    countsText.textContent = probeMakeSinkSummaryLine(probeCountSinkRecordsByType(stageResult.collect_result));
+    summaryLine.appendChild(countsText);
+    card.body.appendChild(summaryLine);
+
+    // Error banner — one-line error + full traceback from the errors[] list
+    // so the operator gets the same info that section I will show.
+    if (stageResult.error) {
+        // Match the stage identifier used by the runner (e.g.
+        // ``on_message_complete``) to find the matching ProbeError entry.
+        var stageKey = cardId.replace('probe-section-', '').replace(/-/g, '_');
+        // Map section ids back to stage names the runner uses.
+        if (stageKey === 'message_complete') stageKey = 'on_message_complete';
+        if (stageKey === 'window_complete') stageKey = 'on_window_complete';
+        var match = (errors || []).filter(function(e) { return e.stage === stageKey; })[0];
+        if (match) {
+            card.body.appendChild(probeMakeErrorBanner(match));
+        } else {
+            // Fall back to a short banner when the full traceback isn't in
+            // errors[] for some reason (shouldn't happen, but defensive).
+            var shortBanner = document.createElement('div');
+            shortBanner.className = 'p-3 rounded border border-red-300 text-xs text-red-700 mb-2';
+            shortBanner.style.background = '#fef2f2';
+            shortBanner.textContent = stageResult.error;
+            card.body.appendChild(shortBanner);
+        }
+    }
+
+    // Full CollectResult JSON — scrollable pre block so large results
+    // don't blow out the page. Displays ``(no result)`` when the hook
+    // returned None.
+    var crJson = '';
+    if (stageResult.collect_result != null) {
+        try { crJson = JSON.stringify(stageResult.collect_result, null, 2); }
+        catch (e) { crJson = String(stageResult.collect_result); }
+    }
+    card.body.appendChild(probeMakeScrollablePreBlock('CollectResult', crJson, {emptyLabel: '(no result)'}));
+
+    return card.card;
+}
+
+function renderProbeSectionOnMessageComplete(report) {
+    // Section D — on_message_complete card.
+    return probeRenderHookResultCard(
+        'on_message_complete',
+        'probe-section-message-complete',
+        report.on_message_complete,
+        report.errors,
+        'on_message_complete did not run (previous stage failed)'
+    );
+}
+
+function renderProbeSectionOnWindowComplete(report) {
+    // Section E — on_window_complete card. Same shape as D.
+    return probeRenderHookResultCard(
+        'on_window_complete',
+        'probe-section-window-complete',
+        report.on_window_complete,
+        report.errors,
+        'on_window_complete did not run (previous stage failed)'
+    );
+}
+
+// === Message Probe — Section F: Planned sink outputs ===
+
+function probeGroupPlannedSinksByType(planned) {
+    // Groups PlannedSinkRecord entries by ``sink_type`` preserving first-seen
+    // order. Returns an array of {sink_type, records} objects so the caller
+    // can iterate with a stable ordering (insertion order in the JSON).
+    var order = [];
+    var groups = {};
+    for (var i = 0; i < planned.length; i++) {
+        var rec = planned[i];
+        if (!(rec.sink_type in groups)) {
+            groups[rec.sink_type] = [];
+            order.push(rec.sink_type);
+        }
+        groups[rec.sink_type].push(rec);
+    }
+    order.sort();  // alphabetical for stable display
+    return order.map(function(st) { return {sink_type: st, records: groups[st]}; });
+}
+
+function probePayloadPreview(payload) {
+    // 100-char single-line preview of a payload. JSON.stringify so dicts
+    // render readably; newlines collapsed to spaces.
+    if (payload == null) return '';
+    var s;
+    try { s = JSON.stringify(payload); }
+    catch (e) { s = String(payload); }
+    s = s.replace(/\s+/g, ' ');
+    if (s.length > 100) s = s.slice(0, 100) + '...';
+    return s;
+}
+
+function probeCapitalize(str) {
+    if (!str) return '';
+    return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+function probeMakeSinkSubCard(sinkType, records) {
+    // Renders one sub-section per sink type with a header (capitalized +
+    // count badge) and a table of destination/origin_stage/payload preview.
+    // Rows are clickable — a detail row below each summary toggles to show
+    // the full payload JSON in a scrollable pre.
+    var wrap = document.createElement('div');
+    wrap.className = 'mb-4 rounded border border-cream-200';
+    wrap.style.background = '#fff';
+
+    var head = document.createElement('div');
+    head.className = 'px-3 py-2 border-b border-cream-200 flex items-center gap-2';
+    head.style.background = '#f5f3ee';
+    var h = document.createElement('h4');
+    h.className = 'font-semibold text-ink-800 text-xs';
+    h.textContent = probeCapitalize(sinkType);
+    head.appendChild(h);
+    var countBadge = document.createElement('span');
+    countBadge.className = 'px-2 py-0.5 rounded text-xs';
+    countBadge.style.cssText = 'background:#e0f2fe;color:#1e40af;font-weight:600;';
+    countBadge.textContent = records.length + ' record' + (records.length === 1 ? '' : 's');
+    head.appendChild(countBadge);
+    wrap.appendChild(head);
+
+    var table = document.createElement('table');
+    table.className = 'w-full text-sm';
+    var thead = document.createElement('thead');
+    var headTr = document.createElement('tr');
+    headTr.className = 'text-left text-gray-400 text-xs border-b border-cream-200';
+    ['destination', 'origin stage', 'payload preview'].forEach(function(c) {
+        var th = document.createElement('th');
+        th.className = 'py-2 px-3';
+        th.textContent = c;
+        headTr.appendChild(th);
+    });
+    thead.appendChild(headTr);
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    records.forEach(function(rec) {
+        var tr = document.createElement('tr');
+        tr.className = 'border-b border-cream-50 hover:bg-cream-50 cursor-pointer';
+
+        // Detail row — initially hidden. Click on the summary row toggles it.
+        var detailTr = document.createElement('tr');
+        detailTr.className = 'probe-sink-detail-row';
+        detailTr.style.display = 'none';
+        var detailTd = document.createElement('td');
+        detailTd.setAttribute('colspan', '3');
+        detailTd.className = 'px-3 py-2';
+        detailTd.style.background = '#fafaf7';
+
+        // Full JSON payload in a scrollable pre (reuses existing helper).
+        var payloadJson = '';
+        if (rec.payload != null) {
+            try { payloadJson = JSON.stringify(rec.payload, null, 2); }
+            catch (e) { payloadJson = String(rec.payload); }
+        }
+        detailTd.appendChild(probeMakeScrollablePreBlock('payload', payloadJson, {emptyLabel: '(no payload)'}));
+
+        // Extras — type-specific metadata (kafka key, sink instance, ttl).
+        // Only shown when non-empty; kept compact as a single code line.
+        if (rec.extras && Object.keys(rec.extras).length) {
+            var extrasWrap = document.createElement('div');
+            extrasWrap.className = 'mt-2 text-xs font-mono text-gray-600';
+            var extrasLabel = document.createElement('span');
+            extrasLabel.className = 'text-gray-500 uppercase tracking-wide mr-2';
+            extrasLabel.textContent = 'extras';
+            extrasWrap.appendChild(extrasLabel);
+            var extrasVal = document.createElement('span');
+            try { extrasVal.textContent = JSON.stringify(rec.extras); }
+            catch (e) { extrasVal.textContent = String(rec.extras); }
+            extrasWrap.appendChild(extrasVal);
+            detailTd.appendChild(extrasWrap);
+        }
+        detailTr.appendChild(detailTd);
+
+        // Summary row onclick — toggle the detail row display.
+        tr.onclick = function(ev) {
+            ev.stopPropagation();
+            detailTr.style.display = detailTr.style.display === 'none' ? '' : 'none';
+        };
+
+        // destination cell + optional Kafka-UI icon for kafka sinks.
+        var tdDest = document.createElement('td');
+        tdDest.className = 'py-2 px-3 font-mono text-xs';
+        tdDest.textContent = rec.destination || '-';
+        if (sinkType === 'kafka') {
+            // For kafka records the destination is the sink instance name;
+            // the actual topic comes from the ``extras.sink_instance`` +
+            // config. The Kafka-UI icon here deep-links to the destination
+            // topic so the operator can inspect the live state. We use the
+            // source topic as a fallback (matches production behaviour when
+            // sink topic == source topic).
+            var icon = probeMakeKafkaUiIcon(rec.destination || PROBE_KAFKA_SOURCE_TOPIC, 0, 0);
+            if (icon) tdDest.appendChild(icon);
+        }
+        tr.appendChild(tdDest);
+
+        var tdOrigin = document.createElement('td');
+        tdOrigin.className = 'py-2 px-3 font-mono text-xs text-gray-600';
+        tdOrigin.textContent = rec.origin_stage || '-';
+        tr.appendChild(tdOrigin);
+
+        var tdPreview = document.createElement('td');
+        tdPreview.className = 'py-2 px-3 font-mono text-xs text-gray-600';
+        tdPreview.style.maxWidth = '32rem';
+        tdPreview.style.overflow = 'hidden';
+        tdPreview.style.textOverflow = 'ellipsis';
+        tdPreview.style.whiteSpace = 'nowrap';
+        tdPreview.textContent = probePayloadPreview(rec.payload);
+        tr.appendChild(tdPreview);
+
+        tbody.appendChild(tr);
+        tbody.appendChild(detailTr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    return wrap;
+}
+
+function renderProbeSectionSinks(report) {
+    // Section F — Planned sink outputs. Shows what would have been written
+    // to each sink type, grouped by type. ``probe-sink-detail-row`` siblings
+    // toggle to reveal full payload JSON on row click.
+    var card = probeMakeCard('Planned sink outputs');
+    card.card.id = 'probe-section-sinks';
+
+    var planned = report.planned_sink_payloads || [];
+
+    // Total count badge next to the title — parallels the Tasks card style.
+    var totalBadge = document.createElement('span');
+    totalBadge.className = 'px-2 py-0.5 rounded text-xs';
+    totalBadge.style.cssText = 'background:#e0f2fe;color:#1e40af;font-weight:600;';
+    totalBadge.textContent = planned.length + ' record' + (planned.length === 1 ? '' : 's');
+    card.head.appendChild(totalBadge);
+
+    if (planned.length === 0) {
+        var note = document.createElement('div');
+        note.className = 'text-xs text-gray-500 italic';
+        note.textContent = 'No sink records would have been produced';
+        card.body.appendChild(note);
+        return card.card;
+    }
+
+    var groups = probeGroupPlannedSinksByType(planned);
+    for (var i = 0; i < groups.length; i++) {
+        card.body.appendChild(probeMakeSinkSubCard(groups[i].sink_type, groups[i].records));
+    }
+    return card.card;
+}
+
 function renderProbeReport(report) {
     // Renders the DebugReport as a stack of cards:
     //   A. Input & deserialization
     //   B. Arrange
     //   C. Tasks table
-    // Sections D-I (Message/Window/Sinks/Cache/Timeline/Errors) and the
-    // per-task sidebar land in Tasks 8-10. A top-level ``truncated`` banner
-    // surfaces partial reports (wall-clock timeouts).
+    //   D. on_message_complete
+    //   E. on_window_complete
+    //   F. Planned sink outputs
+    // Sections G-I (Cache/Timeline/Errors) land in Task 10. A top-level
+    // ``truncated`` banner surfaces partial reports (wall-clock timeouts).
     var container = document.getElementById('probe-result');
     container.textContent = '';
 
@@ -2359,6 +2687,9 @@ function renderProbeReport(report) {
     container.appendChild(renderProbeSectionInput(report));
     container.appendChild(renderProbeSectionArrange(report));
     container.appendChild(renderProbeSectionTasks(report));
+    container.appendChild(renderProbeSectionOnMessageComplete(report));
+    container.appendChild(renderProbeSectionOnWindowComplete(report));
+    container.appendChild(renderProbeSectionSinks(report));
 }
 </script>
 {% endblock %}
