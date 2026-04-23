@@ -1529,9 +1529,7 @@
 
         // Stash the submitted body on ``window`` so the toolbar's Re-run /
         // Edit-and-re-run buttons and the post-run chip can reference the
-        // last-submitted input. We use ``window`` (rather than the module-
-        // scope ``_probeLastInput`` declared later in the same script) so
-        // this IIFE's scope can reach it cleanly without hoisting tricks.
+        // last-submitted input across IIFEs.
         window._probeLastInput = body;
 
         setBusy(true);
@@ -1564,47 +1562,11 @@
 // These helpers mirror the ones used in live.html but live here so the probe
 // renderer is self-contained. All strings are written via ``textContent`` so
 // we never interpolate HTML from user-supplied data (stdin/stdout/stderr).
-
-// Kafka-UI deep-link config — populated from template globals. Empty strings
-// = feature disabled, so ``probeMakeKafkaUiIcon`` returns null and callers
-// skip the icon without extra guards.
-var PROBE_KAFKA_UI_BASE = {{ kafka_ui_base | tojson }};
-var PROBE_KAFKA_UI_CLUSTER = {{ kafka_ui_cluster | tojson }};
-var PROBE_KAFKA_SOURCE_TOPIC = {{ kafka_source_topic | tojson }};
-var PROBE_KAFKA_SVG_PATH = 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15.5v-2.04c-1.73-.23-3.23-1.2-4.07-2.63l1.5-1.12c.6 1.03 1.52 1.76 2.57 1.97V9.62c-2.28-.46-4-2.5-4-4.93h2c0 1.66 1.12 3.05 2.64 3.46l.36.08V4h2v4.23l.36-.08C14.88 7.74 16 6.35 16 4.69h2c0 2.43-1.72 4.47-4 4.93v4.06c1.05-.21 1.97-.94 2.57-1.97l1.5 1.12c-.84 1.43-2.34 2.4-4.07 2.63v2.04h-2z';
-
-function probeBuildKafkaUiUrl(topic, partition, offset) {
-    if (!PROBE_KAFKA_UI_BASE || !PROBE_KAFKA_UI_CLUSTER || !topic) return '';
-    return PROBE_KAFKA_UI_BASE + '/ui/clusters/' + encodeURIComponent(PROBE_KAFKA_UI_CLUSTER)
-        + '/all-topics/' + encodeURIComponent(topic)
-        + '/messages?seekType=OFFSET&seekTo=' + partition + '%3A%3A' + offset + '&limit=1';
-}
-
-function probeMakeKafkaUiIcon(topic, partition, offset) {
-    // Returns null when Kafka-UI isn't configured. Built via DOM APIs so a
-    // strict-CSP environment keeps working.
-    var url = probeBuildKafkaUiUrl(topic, partition, offset);
-    if (!url) return null;
-    var a = document.createElement('a');
-    a.href = url;
-    a.target = '_blank';
-    a.rel = 'noopener';
-    a.title = 'Open in Kafka-UI (' + topic + ' ' + partition + ':' + offset + ')';
-    a.className = 'inline-block align-middle ml-1 text-gray-400 hover:text-ink-800';
-    a.onclick = function(ev) { ev.stopPropagation(); };
-    var SVG_NS = 'http://www.w3.org/2000/svg';
-    var svg = document.createElementNS(SVG_NS, 'svg');
-    svg.setAttribute('width', '14');
-    svg.setAttribute('height', '14');
-    svg.setAttribute('viewBox', '0 0 24 24');
-    svg.setAttribute('fill', 'currentColor');
-    svg.style.cssText = 'display:inline-block;vertical-align:-2px;';
-    var path = document.createElementNS(SVG_NS, 'path');
-    path.setAttribute('d', PROBE_KAFKA_SVG_PATH);
-    svg.appendChild(path);
-    a.appendChild(svg);
-    return a;
-}
+//
+// Kafka-UI deep-link helpers (``makeKafkaUiIcon``, ``buildKafkaUiUrl``,
+// ``KAFKA_UI_BASE``, ``KAFKA_UI_CLUSTER``, ``KAFKA_SOURCE_TOPIC``,
+// ``KAFKA_SVG_PATH``) live in base.html so every page shares a single
+// definition — see that file.
 
 function probeDurSec(sec) {
     // Formats a duration value for display. Returns '-' when null/undefined.
@@ -1816,7 +1778,15 @@ function probeMakeSidebarLinkToTask(labelPrefix, targetTaskId) {
     a.title = labelPrefix + ' ' + targetTaskId;
     a.onclick = function(ev) {
         ev.stopPropagation();
-        var row = document.querySelector('tr[data-task-id="' + targetTaskId + '"]');
+        // Walk all task rows and match by dataset equality rather than
+        // interpolating ``targetTaskId`` into a CSS selector string —
+        // this avoids needing to escape quotes/backslashes that could
+        // appear in a user-crafted task_id.
+        var rows = document.querySelectorAll('tr[data-task-id]');
+        var row = null;
+        for (var i = 0; i < rows.length; i++) {
+            if (rows[i].dataset.taskId === targetTaskId) { row = rows[i]; break; }
+        }
         if (row && row.scrollIntoView) {
             row.scrollIntoView({behavior: 'smooth', block: 'center'});
             // Brief highlight so the eye can find the jumped-to row.
@@ -2100,7 +2070,7 @@ function renderProbeSectionInput(report) {
     var posText = document.createElement('span');
     posText.textContent = 'P' + input.partition + ':' + input.offset;
     posWrap.appendChild(posText);
-    var kIcon = probeMakeKafkaUiIcon(input.topic || PROBE_KAFKA_SOURCE_TOPIC, input.partition, input.offset);
+    var kIcon = makeKafkaUiIcon(input.topic || KAFKA_SOURCE_TOPIC, input.partition, input.offset);
     if (kIcon) posWrap.appendChild(kIcon);
     card.body.appendChild(probeMakeField('partition:offset', posWrap));
 
@@ -2425,12 +2395,15 @@ function probeRenderHookResultCard(title, cardId, stageResult, errors, fallbackN
     // Error banner — one-line error + full traceback from the errors[] list
     // so the operator gets the same info that section I will show.
     if (stageResult.error) {
-        // Match the stage identifier used by the runner (e.g.
-        // ``on_message_complete``) to find the matching ProbeError entry.
+        // Match the stage identifier used by the runner. Card ids are
+        // kebab-case suffixes of ``probe-section-``; the runner's stage
+        // tags are snake_case and prefixed ``on_`` for hook stages. The
+        // card ids for hook stages intentionally OMIT the ``on_`` prefix
+        // for brevity, so we add it back here for the lookup.
         var stageKey = cardId.replace('probe-section-', '').replace(/-/g, '_');
-        // Map section ids back to stage names the runner uses.
-        if (stageKey === 'message_complete') stageKey = 'on_message_complete';
-        if (stageKey === 'window_complete') stageKey = 'on_window_complete';
+        if (stageKey === 'message_complete' || stageKey === 'window_complete') {
+            stageKey = 'on_' + stageKey;
+        }
         var match = (errors || []).filter(function(e) { return e.stage === stageKey; })[0];
         if (match) {
             card.body.appendChild(probeMakeErrorBanner(match));
@@ -2604,13 +2577,15 @@ function probeMakeSinkSubCard(sinkType, records) {
         tdDest.className = 'py-2 px-3 font-mono text-xs';
         tdDest.textContent = rec.destination || '-';
         if (sinkType === 'kafka') {
-            // For kafka records the destination is the sink instance name;
-            // the actual topic comes from the ``extras.sink_instance`` +
-            // config. The Kafka-UI icon here deep-links to the destination
-            // topic so the operator can inspect the live state. We use the
-            // source topic as a fallback (matches production behaviour when
-            // sink topic == source topic).
-            var icon = probeMakeKafkaUiIcon(rec.destination || PROBE_KAFKA_SOURCE_TOPIC, 0, 0);
+            // The runner resolves the Kafka sink instance name to its
+            // configured topic and stores it in ``extras.topic`` (null
+            // when the mapping is missing — sink not in config). Prefer
+            // that for the UI deep-link so the operator opens the real
+            // output topic rather than the sink instance name. Falls
+            // back to destination when extras.topic is absent (which
+            // usually means destination already IS the topic).
+            var kafkaTopic = (rec.extras && rec.extras.topic) || rec.destination || KAFKA_SOURCE_TOPIC;
+            var icon = makeKafkaUiIcon(kafkaTopic, 0, 0);
             if (icon) tdDest.appendChild(icon);
         }
         tr.appendChild(tdDest);
@@ -2899,13 +2874,18 @@ function renderProbeSectionTimeline(report) {
 
         // Click a bar → scroll the related section into view. For tasks
         // we prefer to scroll the corresponding row so the row highlight
-        // from ``probeMakeSidebarLinkToTask`` kicks in.
+        // from ``probeMakeSidebarLinkToTask`` kicks in. We match by
+        // dataset equality so arbitrary task_id values don't need to be
+        // escaped into a CSS selector.
         bar.onclick = (function(s) {
             return function(ev) {
                 ev.stopPropagation();
                 var target = null;
                 if (s.kind === 'task' && s.taskId) {
-                    target = document.querySelector('tr[data-task-id="' + s.taskId + '"]');
+                    var rows = document.querySelectorAll('tr[data-task-id]');
+                    for (var i = 0; i < rows.length; i++) {
+                        if (rows[i].dataset.taskId === s.taskId) { target = rows[i]; break; }
+                    }
                 }
                 if (!target) target = document.getElementById(s.targetId);
                 if (target && target.scrollIntoView) {
@@ -3021,11 +3001,6 @@ function renderProbeSectionErrors(report) {
 }
 
 // === Message Probe — Toolbar (sticky top of results) ===
-
-// Module-scope handle on the last submitted probe input so the toolbar
-// buttons (Re-run, Edit & re-run) and the post-run form chip can operate
-// without having to dig the values back out of the DOM.
-var _probeLastInput = null;
 
 function renderProbeToolbar(report) {
     // Sticky toolbar rendered above all result sections. Offers three
@@ -3188,9 +3163,8 @@ function renderProbeReport(report) {
     if (errorsCard) container.appendChild(errorsCard);
 
     // ``window._probeLastInput`` is populated by the Run-button IIFE just
-    // before each fetch — see the click handler above. Falling back to the
-    // module var keeps renderer tests (which may set it directly) working.
-    collapseProbeFormToChip(window._probeLastInput || _probeLastInput);
+    // before each fetch — see the click handler above.
+    collapseProbeFormToChip(window._probeLastInput);
 }
 </script>
 {% endblock %}

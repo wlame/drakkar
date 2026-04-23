@@ -79,6 +79,55 @@
         {% block content %}{% endblock %}
     </main>
     <script>
+    // === Shared Kafka-UI deep-link helpers ===
+    //
+    // Every page that renders a per-offset row (live, history, debug
+    // probe timeline) needs the same "open in Kafka-UI" icon. The
+    // config values come from jinja globals set in debug_server.py
+    // (``kafka_ui_base``, ``kafka_ui_cluster``, ``kafka_source_topic``)
+    // so they exist on every page that extends this template. Empty
+    // strings = feature disabled, in which case ``makeKafkaUiIcon``
+    // returns null and callers can simply skip the append.
+    var KAFKA_UI_BASE = {{ kafka_ui_base | tojson }};
+    var KAFKA_UI_CLUSTER = {{ kafka_ui_cluster | tojson }};
+    var KAFKA_SOURCE_TOPIC = {{ kafka_source_topic | tojson }};
+    // Constant SVG path — matches the Kafka icon in the nav header above.
+    var KAFKA_SVG_PATH = 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15.5v-2.04c-1.73-.23-3.23-1.2-4.07-2.63l1.5-1.12c.6 1.03 1.52 1.76 2.57 1.97V9.62c-2.28-.46-4-2.5-4-4.93h2c0 1.66 1.12 3.05 2.64 3.46l.36.08V4h2v4.23l.36-.08C14.88 7.74 16 6.35 16 4.69h2c0 2.43-1.72 4.47-4 4.93v4.06c1.05-.21 1.97-.94 2.57-1.97l1.5 1.12c-.84 1.43-2.34 2.4-4.07 2.63v2.04h-2z';
+
+    function buildKafkaUiUrl(topic, partition, offset) {
+        if (!KAFKA_UI_BASE || !KAFKA_UI_CLUSTER || !topic) return '';
+        return KAFKA_UI_BASE + '/ui/clusters/' + encodeURIComponent(KAFKA_UI_CLUSTER)
+            + '/all-topics/' + encodeURIComponent(topic)
+            + '/messages?seekType=OFFSET&seekTo=' + partition + '%3A%3A' + offset + '&limit=1';
+    }
+
+    function makeKafkaUiIcon(topic, partition, offset) {
+        // Returns null when Kafka-UI isn't configured so callers can skip
+        // the append without re-checking the feature flag. Built via DOM
+        // APIs (no innerHTML) so a strict-CSP/Trusted-Types env stays happy.
+        var url = buildKafkaUiUrl(topic, partition, offset);
+        if (!url) return null;
+        var a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.title = 'Open in Kafka-UI (' + topic + ' ' + partition + ':' + offset + ')';
+        a.className = 'inline-block align-middle ml-1 text-gray-400 hover:text-ink-800';
+        a.onclick = function(ev) { ev.stopPropagation(); };  // don't trigger row/sidebar handlers
+        var SVG_NS = 'http://www.w3.org/2000/svg';
+        var svg = document.createElementNS(SVG_NS, 'svg');
+        svg.setAttribute('width', '14');
+        svg.setAttribute('height', '14');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('fill', 'currentColor');
+        svg.style.cssText = 'display:inline-block;vertical-align:-2px;';
+        var path = document.createElementNS(SVG_NS, 'path');
+        path.setAttribute('d', KAFKA_SVG_PATH);
+        svg.appendChild(path);
+        a.appendChild(svg);
+        return a;
+    }
+
     function applyWidth(wide) {
         document.querySelectorAll('.width-container').forEach(function(el) {
             if (wide) {

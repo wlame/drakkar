@@ -39,10 +39,13 @@ The architecture splits responsibility across three pieces:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import time
 import traceback
-from typing import TYPE_CHECKING, Any, Literal, cast
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -51,6 +54,7 @@ from drakkar.executor import ExecutorTaskError
 from drakkar.models import (
     CollectResult,
     ErrorAction,
+    ExecutorError,
     ExecutorResult,
     ExecutorTask,
     MessageGroup,
@@ -84,22 +88,22 @@ _probe_stage: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 
-# ---- on_error-raised sentinel ----------------------------------------------
-#
-# ``_invoke_on_error`` returns ``_ON_ERROR_RAISED`` when on_error itself
-# raised — distinct from any valid action value (ErrorAction.* enum
-# member, list of tasks). Using a singleton instance of a dedicated
-# sentinel class keeps ty's type narrowing happy: the runtime check
-# ``action is _ON_ERROR_RAISED`` narrows ``action`` out of the
-# ``_OnErrorRaisedSentinel`` branch, leaving the union of the real
-# action types (``str | list[ExecutorTask]``) for the following code.
+@contextlib.contextmanager
+def _stage(name: str) -> Iterator[None]:
+    """Temporarily set the ``_probe_stage`` contextvar to ``name``.
 
-
-class _OnErrorRaisedSentinel:
-    """Marker type for the on_error-raised return path. See ``_ON_ERROR_RAISED``."""
-
-
-_ON_ERROR_RAISED = _OnErrorRaisedSentinel()
+    Hook helpers wrap their body in ``with _stage('arrange'):`` so the
+    contextvar reflects the current stage for any ``DebugCacheProxy``
+    call the hook makes. The ``finally`` block always resets the
+    contextvar via the returned token — even if the hook raises — so a
+    later cache call outside the hook sees the previous stage rather
+    than a leaked "arrange" tag.
+    """
+    token = _probe_stage.set(name)
+    try:
+        yield
+    finally:
+        _probe_stage.reset(token)
 
 
 # ---- pydantic models for the report ----------------------------------------
@@ -112,19 +116,26 @@ class ProbeInput(BaseModel):
     bytes when constructing the synthetic ``SourceMessage``. We keep it
     as a string on the wire because the /debug tab posts JSON, and
     base64-encoding the payload just to flip back immediately is noise.
+
+    Length caps defend against authenticated-DoS from posting huge
+    payloads through the debug endpoint — ~10MB per value / 64KB per
+    topic/key is more than enough for any realistic production message.
     """
 
     value: str = Field(
-        description='Raw message value as text. Encoded to UTF-8 bytes before the synthetic SourceMessage is built.'
+        max_length=10_000_000,
+        description='Raw message value as text. Encoded to UTF-8 bytes before the synthetic SourceMessage is built.',
     )
     key: str | None = Field(
         default=None,
+        max_length=65_536,
         description='Optional Kafka message key. Encoded to UTF-8 bytes when set.',
     )
-    partition: int = Field(default=0, description='Synthetic partition id for the probe.')
-    offset: int = Field(default=0, description='Synthetic offset for the probe.')
+    partition: int = Field(default=0, ge=0, description='Synthetic partition id for the probe.')
+    offset: int = Field(default=0, ge=0, description='Synthetic offset for the probe.')
     topic: str = Field(
         default='',
+        max_length=65_536,
         description='Synthetic topic name. The endpoint substitutes the configured source topic when this is empty.',
     )
     timestamp: int | None = Field(
@@ -149,7 +160,13 @@ class ProbeCacheCall(BaseModel):
 
     op: Literal['get', 'set', 'peek', 'delete', 'contains'] = Field(description='Which proxy method was called.')
     key: str = Field(description='Cache key involved.')
-    scope: str = Field(description='CacheScope name for the call (LOCAL / CLUSTER / GLOBAL).')
+    scope: str | None = Field(
+        default=None,
+        description=(
+            'CacheScope name for the call (LOCAL / CLUSTER / GLOBAL). '
+            'None for ops where scope is not meaningful (get/peek/delete/contains do not take a scope).'
+        ),
+    )
     outcome: Literal['hit', 'miss', 'suppressed'] = Field(
         description='hit / miss for reads; suppressed for writes (set/delete), since writes never reach the live cache.'
     )
@@ -342,11 +359,11 @@ def _make_value_preview(value: Any) -> str | None:
     if value is None:
         return None
     # repr() handles bytes, numbers, dicts, Pydantic models; str() would
-    # silently lose bytes and re-raise on exotic types.
-    try:
-        text = repr(value)
-    except Exception as exc:  # pragma: no cover — truly unserialisable reprs
-        text = f'<unrepr: {exc.__class__.__name__}>'
+    # silently lose bytes and re-raise on exotic types. We trust repr()
+    # not to raise — Python's stdlib objects always have a working
+    # repr, and user-provided values that would raise here would have
+    # already blown up earlier in the pipeline.
+    text = repr(value)
     text = text.replace('\n', ' ').replace('\r', ' ')
     if len(text) > 120:
         text = text[:117] + '...'
@@ -382,8 +399,8 @@ class DebugCacheProxy:
       exact signatures so any handler code that works against the real
       Cache works against the proxy. We derive the ``scope`` field of
       ``ProbeCacheCall`` from the value actually passed to ``set``;
-      other ops report the scope as ``'-'`` since the underlying Cache
-      does not track it per-call.
+      other ops leave ``scope=None`` since the underlying Cache does not
+      track it per-call (the UI renders None as a blank cell).
     """
 
     def __init__(
@@ -425,7 +442,7 @@ class DebugCacheProxy:
         *,
         op: Literal['get', 'set', 'peek', 'delete', 'contains'],
         key: str,
-        scope: str,
+        scope: str | None,
         outcome: Literal['hit', 'miss', 'suppressed'],
         value_preview: str | None,
     ) -> None:
@@ -452,13 +469,13 @@ class DebugCacheProxy:
             self._log_call(
                 op='get',
                 key=key,
-                scope='-',
+                scope=None,
                 outcome=outcome,
                 value_preview=_make_value_preview(value) if value is not None else None,
             )
             return value
         # use_cache=False → always report a miss, never touch the real cache.
-        self._log_call(op='get', key=key, scope='-', outcome='miss', value_preview=None)
+        self._log_call(op='get', key=key, scope=None, outcome='miss', value_preview=None)
         return None
 
     def peek(self, key: str) -> Any | None:
@@ -472,12 +489,12 @@ class DebugCacheProxy:
             self._log_call(
                 op='peek',
                 key=key,
-                scope='-',
+                scope=None,
                 outcome=outcome,
                 value_preview=_make_value_preview(value) if value is not None else None,
             )
             return value
-        self._log_call(op='peek', key=key, scope='-', outcome='miss', value_preview=None)
+        self._log_call(op='peek', key=key, scope=None, outcome='miss', value_preview=None)
         return None
 
     def __contains__(self, key: str) -> bool:
@@ -485,9 +502,9 @@ class DebugCacheProxy:
         if self._use_cache:
             present = key in self._real
             outcome: Literal['hit', 'miss'] = 'hit' if present else 'miss'
-            self._log_call(op='contains', key=key, scope='-', outcome=outcome, value_preview=None)
+            self._log_call(op='contains', key=key, scope=None, outcome=outcome, value_preview=None)
             return present
-        self._log_call(op='contains', key=key, scope='-', outcome='miss', value_preview=None)
+        self._log_call(op='contains', key=key, scope=None, outcome='miss', value_preview=None)
         return False
 
     # -- write-side API (always suppressed) ----------------------------------
@@ -512,14 +529,25 @@ class DebugCacheProxy:
         _ = ttl
 
     def delete(self, key: str) -> bool:
-        """Suppressed delete. Returns False unconditionally — probe never mutates state.
+        """Suppressed delete. Returns whether ``key`` was in live memory without mutating.
 
-        Mirrors ``NoOpCache.delete`` which also returns False. The log
-        entry records the user intent even though the live cache is
-        untouched.
+        Mirrors the real ``Cache.delete`` contract: returns True when the
+        key currently exists in memory, False otherwise. We DO NOT
+        actually delete; we just peek at the live cache (only when
+        ``use_cache=True``) to give handler code a truthful "was it
+        there" signal, which some branches read. With ``use_cache=False``
+        the proxy refuses to look at the live cache at all and returns
+        False, matching ``NoOpCache.delete``.
         """
-        self._log_call(op='delete', key=key, scope='-', outcome='suppressed', value_preview=None)
-        return False
+        present = False
+        if self._use_cache:
+            # ``peek`` is memory-only and never touches the DB; safe to
+            # call without risking side effects. Value semantics: the
+            # real Cache's ``delete`` returns True iff the memory entry
+            # existed, not the DB row, so peek is the right check.
+            present = self._real.peek(key) is not None
+        self._log_call(op='delete', key=key, scope=None, outcome='suppressed', value_preview=None)
+        return present
 
 
 # ---- sink collector --------------------------------------------------------
@@ -538,10 +566,19 @@ class DebugSinkCollector:
     ``CollectResult``. Sorted by stage first, then by sink field in the
     canonical CollectResult order (kafka → postgres → mongo → http →
     redis → files) for stable UI ordering.
+
+    ``kafka_sink_topics`` maps Kafka sink instance names to their
+    configured topic (from ``app.config.sinks.kafka[name].topic``).
+    When set, the flattener uses the topic as the ``destination``
+    field — the UI then renders a correct Kafka-UI deep-link for that
+    topic. When the map is empty, the destination falls back to the
+    sink instance name (old behaviour), so tests that don't wire a
+    config mapping still work.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, kafka_sink_topics: dict[str, str] | None = None) -> None:
         self.entries: list[tuple[str, CollectResult]] = []
+        self._kafka_sink_topics = kafka_sink_topics or {}
 
     async def __call__(self, collect_result: CollectResult, partition_id: int) -> None:
         """Capture one CollectResult. Signature matches ``_on_collect`` in PartitionProcessor.
@@ -574,18 +611,26 @@ class DebugSinkCollector:
         """
         records: list[PlannedSinkRecord] = []
         for stage, cr in self.entries:
-            # Kafka payloads — destination is the configured sink instance
-            # name since the real topic lives in config; the UI can map
-            # it back using the kafka_source_topic global.
+            # Kafka payloads — destination is the real topic when we can
+            # resolve the sink instance through the runner's config
+            # mapping. Falling back to the sink instance name preserves
+            # behaviour for tests that don't wire a mapping. Putting the
+            # real topic in ``destination`` fixes the UI Kafka-UI deep-
+            # link (previously it was using the sink instance NAME as
+            # the topic, producing broken links).
             for kp in cr.kafka:
+                sink_name = kp.sink or ''
+                topic = self._kafka_sink_topics.get(sink_name)
+                destination = topic or sink_name or '(default)'
                 records.append(
                     PlannedSinkRecord(
                         sink_type='kafka',
-                        destination=kp.sink or '(default)',
+                        destination=destination,
                         origin_stage=stage,
                         payload=kp.data.model_dump(mode='json'),
                         extras={
                             'sink_instance': kp.sink,
+                            'topic': topic,
                             # bytes → UTF-8 decode (errors='replace') so
                             # the JSON roundtrip does not lose binary keys.
                             'key': kp.key.decode('utf-8', errors='replace') if kp.key is not None else None,
@@ -648,6 +693,86 @@ class DebugSinkCollector:
 # ---- runner ----------------------------------------------------------------
 
 
+@dataclass
+class _RunState:
+    """Per-run state for a single probe invocation.
+
+    One instance lives for the lifetime of ONE ``DebugRunner.run()`` call
+    and is passed through every stage helper. Keeping state per-run (as
+    opposed to on the runner instance) prevents cross-probe contamination
+    when a second probe's wall-clock timeout fires while it is still
+    waiting on the probe lock — the partial-snapshot code can only look
+    at state that belongs to the probe that actually ran.
+
+    The fields mirror the ``DebugReport`` schema one-to-one; see
+    ``to_report`` for the conversion.
+    """
+
+    probe_input: ProbeInput
+    sink_collector: DebugSinkCollector
+    # ``cache_proxy`` is created lazily inside ``_run_locked`` so the
+    # proxy captures the real ``handler.cache`` AFTER the probe lock is
+    # acquired. If we captured it at ``_make_run_state`` time (before the
+    # lock), a probe queued behind an in-flight probe would see the
+    # predecessor's ``DebugCacheProxy`` as its ``real`` backend — a
+    # second probe's reads would chain through the first probe's proxy
+    # and (with ``use_cache=False`` on the outer probe) get false misses
+    # for keys that actually live in the real cache. Creating the proxy
+    # post-lock eliminates that chain entirely. ``None`` only persists
+    # for probes whose wall-clock timeout fires BEFORE they acquire the
+    # lock — in that case no cache calls were ever made, so an empty
+    # call log is the correct report shape.
+    cache_proxy: DebugCacheProxy | None
+    use_cache: bool
+    start_monotonic: float
+
+    # Stage outputs — populated by the respective stage helpers. Kept
+    # as plain attributes so ``to_report`` is a straightforward pass-
+    # through rather than a dict walk.
+    deserialize_error: ProbeError | None = None
+    parsed_payload: Any = None
+    message_label: str | None = None
+    arrange: ProbeStageResult = field(default_factory=ProbeStageResult)
+    tasks: list[ProbeTaskEntry] = field(default_factory=list)
+    on_message_complete: ProbeStageResult | None = None
+    on_window_complete: ProbeStageResult | None = None
+    timing: dict[str, float] = field(default_factory=dict)
+    errors: list[ProbeError] = field(default_factory=list)
+
+    def to_report(self, *, truncated: bool) -> DebugReport:
+        """Snapshot this state into a ``DebugReport`` suitable for JSON.
+
+        ``truncated=True`` marks the report as partial — the endpoint
+        sets this when the wall-clock timeout fires and cancels the run.
+        Sink payloads are re-flattened from the collector on every call
+        so a snapshot taken mid-run includes every CollectResult the
+        handler produced up to the cancellation point.
+
+        ``cache_proxy`` is ``None`` only when the probe's wall-clock
+        timeout fired BEFORE the lock was acquired — the proxy is
+        created inside ``_run_locked``, so a queued-then-cancelled probe
+        never gets one. An empty call log is the correct shape in that
+        case; the handler never ran.
+        """
+        cache_calls = list(self.cache_proxy.calls) if self.cache_proxy is not None else []
+        return DebugReport(
+            input=self.probe_input,
+            deserialize_error=self.deserialize_error,
+            parsed_payload=self.parsed_payload,
+            message_label=self.message_label,
+            arrange=self.arrange,
+            tasks=list(self.tasks),
+            on_message_complete=self.on_message_complete,
+            on_window_complete=self.on_window_complete,
+            planned_sink_payloads=self.sink_collector.flatten(),
+            cache_calls=cache_calls,
+            cache_summary=_summarize_cache_calls(cache_calls),
+            timing=dict(self.timing),
+            errors=list(self.errors),
+            truncated=truncated,
+        )
+
+
 class DebugRunner:
     """Replay a single message through the handler pipeline with zero side effects.
 
@@ -672,10 +797,13 @@ class DebugRunner:
       probe simply waits.
 
     Partial reports:
-      ``_partial`` is mutated incrementally as each stage completes. If
-      the endpoint's wall-clock timeout fires, it calls
-      ``latest_partial_report()`` to build a ``DebugReport(truncated=True)``
-      from whatever state has accumulated so far.
+      Per-run state lives on a ``_RunState`` dataclass created fresh at
+      the top of ``_run_locked``. ``start_probe`` attaches that state
+      onto the returned ``asyncio.Task`` — ``partial_report_for(task)``
+      reads it back and returns a truncated ``DebugReport``, even if
+      the task was cancelled before it acquired the probe lock. This
+      task-scoped attachment is what prevents cross-probe contamination
+      between an earlier cancelled probe and a subsequent one.
     """
 
     def __init__(
@@ -704,58 +832,66 @@ class DebugRunner:
         # process-wide, so two overlapping probes would clobber each
         # other's restore step without this lock.
         self._probe_lock = asyncio.Lock()
-        # Incremental report state mutated stage-by-stage so the endpoint
-        # can build a truncated DebugReport if wall-clock timeout fires
-        # mid-run. Reset at the top of every run().
-        self._partial: dict[str, Any] = {}
-        # Scratch slot used by ``_execute_and_record_task`` to communicate
-        # the ExecutorTaskError it caught (or None on success) back to
-        # its caller in ``_process_task`` / ``_run_retry_loop``. Returning
-        # a tuple would leak an implementation detail across all of the
-        # task-execution helpers; this attribute keeps the public return
-        # as just ``ProbeTaskEntry``.
-        self._last_exec_error: ExecutorTaskError | None = None
 
     # -- incremental partial-report machinery --------------------------------
 
-    def _update_partial(self, key: str, value: Any) -> None:
-        """Store one piece of partial report state.
+    def start_probe(self, probe_input: ProbeInput) -> asyncio.Task[DebugReport]:
+        """Create a run task whose partial state is scoped to that specific task.
 
-        Thin wrapper around dict assignment. Kept as a helper so future
-        partial-report hooks (metrics, logs, etc.) have a single entry
-        point to patch.
+        The endpoint calls this (instead of ``run`` directly) when it
+        needs to distinguish "this probe's partial state" from "some
+        earlier probe's partial state". The returned task carries a
+        ``_RunState`` object via ``partial_report_for`` — even if the
+        task is cancelled before it acquires the probe lock, the
+        endpoint will get back a valid empty ``DebugReport(truncated=
+        True)`` rather than a stale blob from a previous probe.
         """
-        self._partial[key] = value
+        state = self._make_run_state(probe_input)
+        task: asyncio.Task[DebugReport] = asyncio.create_task(self._run_with_state(state))
+        # Attach the state to the task. Using setattr keeps the runner
+        # stateless across concurrent requests — each task's state is
+        # self-contained.
+        setattr(task, '_drakkar_probe_state', state)  # noqa: B010
+        return task
 
-    def latest_partial_report(self) -> DebugReport:
-        """Snapshot current ``_partial`` into a ``DebugReport(truncated=True)``.
+    @staticmethod
+    def partial_report_for(task: asyncio.Task[DebugReport]) -> DebugReport:
+        """Build a truncated ``DebugReport`` from the state attached to ``task``.
 
-        Called by the endpoint on wall-clock timeout. Missing sections
-        fall back to safe defaults (empty lists, zero durations) so the
-        UI can render whatever made it through.
+        Companion of ``start_probe``. The state may be partially filled
+        (probe was running when cancelled) or completely empty (probe
+        was still queued on the lock when the endpoint timed out). In
+        both cases we produce a valid DebugReport — the UI renders
+        ``truncated=True`` as a warning banner and shows whatever made
+        it through.
         """
-        # ``input`` MUST be present — run() sets it before anything else.
-        # If it is absent (latest_partial_report called before run()
-        # started), synthesise an empty ProbeInput so we still produce
-        # a valid DebugReport.
-        probe_input = self._partial.get('input') or ProbeInput(value='')
-        arrange_result = self._partial.get('arrange') or ProbeStageResult()
-        cache_calls = list(self._partial.get('cache_calls', []))
-        return DebugReport(
-            input=probe_input,
-            deserialize_error=self._partial.get('deserialize_error'),
-            parsed_payload=self._partial.get('parsed_payload'),
-            message_label=self._partial.get('message_label'),
-            arrange=arrange_result,
-            tasks=list(self._partial.get('tasks', [])),
-            on_message_complete=self._partial.get('on_message_complete'),
-            on_window_complete=self._partial.get('on_window_complete'),
-            planned_sink_payloads=list(self._partial.get('planned_sink_payloads', [])),
-            cache_calls=cache_calls,
-            cache_summary=_summarize_cache_calls(cache_calls),
-            timing=dict(self._partial.get('timing', {})),
-            errors=list(self._partial.get('errors', [])),
-            truncated=True,
+        state: _RunState | None = getattr(task, '_drakkar_probe_state', None)
+        if state is None:  # pragma: no cover — only hit if caller uses a foreign task
+            return DebugReport(input=ProbeInput(value=''), arrange=ProbeStageResult(), truncated=True)
+        return state.to_report(truncated=True)
+
+    def _make_run_state(self, probe_input: ProbeInput) -> _RunState:
+        """Build a fresh ``_RunState`` for one probe invocation.
+
+        Resolves Kafka sink instance names to their configured topics
+        (from ``app_config.sinks.kafka[name].topic``). The sink
+        collector uses this mapping so the UI's Kafka-UI deep-link
+        points at the real topic instead of the sink instance name.
+
+        The ``DebugCacheProxy`` is intentionally NOT created here — see
+        the note on ``_RunState.cache_proxy``. It is constructed inside
+        ``_run_locked`` once the probe lock has been acquired so the
+        proxy's ``real`` backend is the live cache, never a prior
+        probe's proxy.
+        """
+        start_monotonic = time.monotonic()
+        kafka_sink_topics = {name: cfg.topic for name, cfg in self._app_config.sinks.kafka.items()}
+        return _RunState(
+            probe_input=probe_input,
+            sink_collector=DebugSinkCollector(kafka_sink_topics=kafka_sink_topics),
+            cache_proxy=None,
+            use_cache=probe_input.use_cache,
+            start_monotonic=start_monotonic,
         )
 
     # -- top-level entrypoint ------------------------------------------------
@@ -768,93 +904,80 @@ class DebugRunner:
         ``try/finally`` that unconditionally restores the original cache
         — even if the handler raises or the task is cancelled by the
         endpoint's wall-clock timeout.
+
+        Unit tests typically call this directly for its convenience —
+        the endpoint uses ``start_probe`` + ``wait_for`` +
+        ``partial_report_for`` instead so it can return a correctly-
+        scoped partial on timeout.
+        """
+        state = self._make_run_state(probe_input)
+        return await self._run_with_state(state)
+
+    async def _run_with_state(self, state: _RunState) -> DebugReport:
+        """Acquire the probe lock and execute the full run against ``state``.
+
+        Shared body of ``run`` and ``start_probe``. Keeps the state
+        object as a plain parameter so no mutable attribute lives on
+        the runner for the endpoint path.
         """
         async with self._probe_lock:
-            return await self._run_locked(probe_input)
+            return await self._run_locked(state)
 
-    async def _run_locked(self, probe_input: ProbeInput) -> DebugReport:
+    async def _run_locked(self, state: _RunState) -> DebugReport:
         """Body of run() executed under the probe lock.
 
-        Split into a helper so the lock boundary is visible in ``run``
-        and the implementation below can concentrate on the state
-        machine without an extra indentation level.
+        Swaps ``handler.cache`` with the run's ``DebugCacheProxy`` for
+        the duration of the probe, restores it in a ``finally`` even
+        if the handler raised or the task was cancelled by the
+        endpoint's wall-clock timeout.
+
+        The ``DebugCacheProxy`` is constructed HERE — after acquiring
+        the lock — rather than in ``_make_run_state``. That way its
+        ``real`` backend is the handler's live cache, never a prior
+        probe's proxy. Constructing the proxy pre-lock would make
+        concurrent probes chain through each other (probe B's reads
+        forwarding through probe A's proxy), breaking the documented
+        ``use_cache=True`` contract for the second probe.
         """
-        self._partial = {}
-        self._update_partial('input', probe_input)
-
-        start_monotonic = time.monotonic()
-        msg = _build_source_message(probe_input)
-
-        sink_collector = DebugSinkCollector()
-        cache_proxy = DebugCacheProxy(
-            real=self._handler.cache,
-            use_cache=probe_input.use_cache,
-            start_time=start_monotonic,
-        )
-        # Snapshot the call log list onto _partial so latest_partial_report
-        # can see cache calls captured before the run completes.
-        self._update_partial('cache_calls', cache_proxy.calls)
-
+        msg = _build_source_message(state.probe_input)
         original_cache = self._handler.cache
+        # Build the proxy now that we know the true live cache. This
+        # also means any earlier-queued probe whose cache_proxy slot is
+        # still ``None`` gets its proxy wired to the REAL cache (not to
+        # whatever proxy was in flight while it was waiting).
+        state.cache_proxy = DebugCacheProxy(
+            real=original_cache,
+            use_cache=state.use_cache,
+            start_time=state.start_monotonic,
+        )
         # Use setattr to dodge the static type check — DebugCacheProxy
         # duck-types the Cache surface (verified by tests) but isn't in
         # the Cache | NoOpCache union ty sees on the handler attribute.
         # Keeping the swap out of the type system is intentional: the
         # proxy should never leak beyond the probe.
-        setattr(self._handler, 'cache', cache_proxy)  # noqa: B010
+        setattr(self._handler, 'cache', state.cache_proxy)  # noqa: B010
         try:
-            await self._run_stages(
-                msg=msg,
-                sink_collector=sink_collector,
-                start_monotonic=start_monotonic,
-            )
+            await self._run_stages(state=state, msg=msg)
         finally:
             # Restore cache even if a hook raised or the task was
             # cancelled (wall-clock timeout path).
             setattr(self._handler, 'cache', original_cache)  # noqa: B010
 
-        # Finalize planned sink records + timing + cache summary now that
-        # the run is done. All other fields were filled in by _run_stages.
-        self._update_partial('planned_sink_payloads', sink_collector.flatten())
-        timing = dict(self._partial.get('timing', {}))
-        timing['total_wallclock'] = time.monotonic() - start_monotonic
-        self._update_partial('timing', timing)
-
-        return DebugReport(
-            input=probe_input,
-            deserialize_error=self._partial.get('deserialize_error'),
-            parsed_payload=self._partial.get('parsed_payload'),
-            message_label=self._partial.get('message_label'),
-            arrange=self._partial.get('arrange') or ProbeStageResult(),
-            tasks=list(self._partial.get('tasks', [])),
-            on_message_complete=self._partial.get('on_message_complete'),
-            on_window_complete=self._partial.get('on_window_complete'),
-            planned_sink_payloads=list(self._partial.get('planned_sink_payloads', [])),
-            cache_calls=list(cache_proxy.calls),
-            cache_summary=_summarize_cache_calls(cache_proxy.calls),
-            timing=timing,
-            errors=list(self._partial.get('errors', [])),
-            truncated=False,
-        )
+        state.timing['total_wallclock'] = time.monotonic() - state.start_monotonic
+        return state.to_report(truncated=False)
 
     # -- stage sequencing ----------------------------------------------------
 
-    async def _run_stages(
-        self,
-        *,
-        msg: SourceMessage,
-        sink_collector: DebugSinkCollector,
-        start_monotonic: float,
-    ) -> None:
+    async def _run_stages(self, *, state: _RunState, msg: SourceMessage) -> None:
         """Run the arrange → per-task → window sequence with graceful error capture.
 
         Extracted into its own coroutine so the ``finally`` block in
         ``_run_locked`` only has to worry about cache restoration —
         stage logic lives here. Task 3 added try/except wrappers around
         every hook so exceptions never crash the probe — they land in
-        ``self._partial['errors']`` as ``ProbeError`` entries and the
-        runner short-circuits downstream stages based on which hook
-        failed (see ``_record_error`` and the per-stage logic below).
+        ``state.errors`` as ``ProbeError`` entries and the runner
+        short-circuits downstream stages based on which hook failed
+        (see ``_record_error`` and the per-stage logic below).
 
         Short-circuit rules:
           - deserialize error → skip all downstream stages
@@ -864,14 +987,10 @@ class DebugRunner:
           - on_message_complete error → still run on_window_complete
           - on_window_complete error → capture and return
         """
-        # Guarantee 'errors' list exists on _partial. latest_partial_report()
-        # reads it, and every error-capture path appends to it.
-        self._partial.setdefault('errors', [])
-
         # --- deserialize -----------------------------------------------------
         # Deserialize is the first stage. If it fails, we cannot usefully
         # build tasks or call hooks that depend on a parsed payload.
-        deserialize_ok = self._run_deserialize(msg=msg, start_monotonic=start_monotonic)
+        deserialize_ok = self._run_deserialize(state=state, msg=msg)
         if not deserialize_ok:
             return
 
@@ -879,22 +998,44 @@ class DebugRunner:
         # Label is a cosmetic string used for UI rows / logs. Failing here
         # must NOT skip downstream stages; we just leave message_label as
         # None and move on.
-        self._run_message_label(msg=msg, start_monotonic=start_monotonic)
+        self._run_message_label(state=state, msg=msg)
 
         # --- arrange ---------------------------------------------------------
         arrange_start = time.monotonic()
-        tasks = await self._run_arrange(msg=msg, start_monotonic=start_monotonic, arrange_start=arrange_start)
+        tasks = await self._run_arrange(state=state, msg=msg, arrange_start=arrange_start)
         if tasks is None:
             # Arrange failed — skip tasks + both hook stages. The error is
-            # already captured on _partial['errors'] and _partial['arrange'].
+            # already captured on state.errors and state.arrange.
             return
 
         # --- per-task execution ---------------------------------------------
-        # Maintain a live list on _partial so latest_partial_report() sees
-        # progress as tasks finish.
-        task_entries: list[ProbeTaskEntry] = []
-        self._update_partial('tasks', task_entries)
-        terminal_results: list[ExecutorResult] = []
+        # ``all_scheduled_tasks`` starts with the arrange output and grows
+        # as on_error replacements are added (mirrors production's
+        # ``window.tasks`` / ``tracker.tasks`` behaviour). Passed to
+        # on_message_complete below so the handler sees the full lineage.
+        all_scheduled_tasks: list[ExecutorTask] = list(tasks)
+        # Production separates three lists with distinct semantics — the
+        # probe mirrors all three:
+        #
+        # 1. ``successful_terminal_results`` (mirrors production's
+        #    ``tracker.results``): ONE ExecutorResult per successful task.
+        #    Fed into ``MessageGroup.results`` — so handlers that read
+        #    ``group.results`` see the same "success-only" shape as
+        #    production. See drakkar/partition.py:525-526.
+        # 2. ``terminal_errors`` (mirrors production's ``tracker.errors``):
+        #    ONE ExecutorError per terminally-failed task (SKIP /
+        #    retries-exhausted / on_task_complete raised). Fed into
+        #    ``MessageGroup.errors``. Replaced tasks do NOT contribute
+        #    — only their successors. See drakkar/partition.py:527-528.
+        # 3. ``all_terminal_results`` (mirrors production's
+        #    ``window.results``): ONE ExecutorResult per terminal task
+        #    outcome — successes AND failures (failures carry either the
+        #    ExecutorError's ``.result`` or a synthesized failure
+        #    ExecutorResult). Fed into ``on_window_complete(results, ...)``.
+        #    See drakkar/partition.py:406, 473, 479.
+        successful_terminal_results: list[ExecutorResult] = []
+        terminal_errors: list[ExecutorError] = []
+        all_terminal_results: list[ExecutorResult] = []
 
         for task in tasks:
             # _process_task is the on_error-aware orchestrator: it handles
@@ -902,12 +1043,13 @@ class DebugRunner:
             # on_error itself raising — appending one ProbeTaskEntry per
             # execute attempt (including retries and replacements).
             await self._process_task(
+                state=state,
                 task=task,
                 msg=msg,
-                sink_collector=sink_collector,
-                terminal_results=terminal_results,
-                task_entries=task_entries,
-                start_monotonic=start_monotonic,
+                successful_terminal_results=successful_terminal_results,
+                terminal_errors=terminal_errors,
+                all_terminal_results=all_terminal_results,
+                all_scheduled_tasks=all_scheduled_tasks,
             )
 
         # --- on_message_complete --------------------------------------------
@@ -915,27 +1057,20 @@ class DebugRunner:
         # if it raises, we still invoke on_window_complete so the operator
         # can see its independent behaviour.
         await self._run_on_message_complete(
+            state=state,
             msg=msg,
-            tasks=tasks,
-            terminal_results=terminal_results,
-            sink_collector=sink_collector,
+            all_scheduled_tasks=all_scheduled_tasks,
+            successful_terminal_results=successful_terminal_results,
+            terminal_errors=terminal_errors,
             arrange_start=arrange_start,
-            start_monotonic=start_monotonic,
         )
 
         # --- on_window_complete ---------------------------------------------
         await self._run_on_window_complete(
+            state=state,
             msg=msg,
-            terminal_results=terminal_results,
-            sink_collector=sink_collector,
-            start_monotonic=start_monotonic,
+            all_terminal_results=all_terminal_results,
         )
-
-        # Expose the final sink-collector flattening on _partial so a
-        # partial-report snapshot taken during on_window_complete
-        # captures everything up to that point.
-        self._update_partial('planned_sink_payloads', sink_collector.flatten())
-        _ = start_monotonic  # parameter reserved for wall-clock tracking (task 5)
 
     # -- per-stage helpers ---------------------------------------------------
     #
@@ -944,114 +1079,88 @@ class DebugRunner:
     # the pipeline. Keeping each stage in its own method keeps _run_stages
     # readable and mirrors the stage-by-stage rules documented in the plan.
 
-    def _run_deserialize(self, *, msg: SourceMessage, start_monotonic: float) -> bool:
+    def _run_deserialize(self, *, state: _RunState, msg: SourceMessage) -> bool:
         """Run handler.deserialize_message with error capture. Returns True on success.
 
         Returning False signals the caller to stop — the parsed payload
         is missing and every downstream stage would be meaningless.
         """
-        token = _probe_stage.set('deserialize')
-        try:
+        with _stage('deserialize'):
             try:
                 self._handler.deserialize_message(msg)
             except Exception as exc:
                 probe_error = self._build_probe_error(
+                    state=state,
                     stage='deserialize',
                     exc=exc,
-                    start_monotonic=start_monotonic,
                 )
-                self._record_error(probe_error)
+                self._record_error(state=state, error=probe_error)
                 # Also surface as a dedicated field — the UI renders
                 # deserialize errors in section A with special emphasis.
-                self._update_partial('deserialize_error', probe_error)
+                state.deserialize_error = probe_error
                 return False
-        finally:
-            _probe_stage.reset(token)
         # deserialize_message mutates msg.payload in place. Serialize
         # pydantic models via model_dump so the JSON roundtrip used by
         # the endpoint preserves structure.
-        self._update_partial('parsed_payload', _serialize_payload(msg.payload))
+        state.parsed_payload = _serialize_payload(msg.payload)
         return True
 
-    def _run_message_label(self, *, msg: SourceMessage, start_monotonic: float) -> None:
+    def _run_message_label(self, *, state: _RunState, msg: SourceMessage) -> None:
         """Run handler.message_label with error capture. Non-fatal on error."""
-        token = _probe_stage.set('message_label')
-        try:
+        with _stage('message_label'):
             try:
                 label = self._handler.message_label(msg)
             except Exception as exc:
                 self._record_error(
-                    self._build_probe_error(
-                        stage='message_label',
-                        exc=exc,
-                        start_monotonic=start_monotonic,
-                    )
+                    state=state,
+                    error=self._build_probe_error(state=state, stage='message_label', exc=exc),
                 )
                 # Leave message_label as None; downstream stages carry on.
                 return
-        finally:
-            _probe_stage.reset(token)
-        self._update_partial('message_label', label)
+        state.message_label = label
 
     async def _run_arrange(
         self,
         *,
+        state: _RunState,
         msg: SourceMessage,
-        start_monotonic: float,
         arrange_start: float,
     ) -> list[ExecutorTask] | None:
         """Run handler.arrange with error capture. Returns None to signal fatal failure.
 
-        Populates ``_partial['arrange']`` with a ``ProbeStageResult`` in
-        both success and failure cases — on failure the ``error`` field
+        Populates ``state.arrange`` with a ``ProbeStageResult`` in both
+        success and failure cases — on failure the ``error`` field
         carries a one-line summary and the full traceback is on
-        ``_partial['errors']``.
+        ``state.errors``.
         """
-        token = _probe_stage.set('arrange')
-        try:
+        with _stage('arrange'):
             try:
                 tasks = await self._handler.arrange([msg], PendingContext())
             except Exception as exc:
                 arrange_duration = time.monotonic() - arrange_start
-                probe_error = self._build_probe_error(
-                    stage='arrange',
-                    exc=exc,
-                    start_monotonic=start_monotonic,
+                probe_error = self._build_probe_error(state=state, stage='arrange', exc=exc)
+                self._record_error(state=state, error=probe_error)
+                state.arrange = ProbeStageResult(
+                    duration_seconds=arrange_duration,
+                    error=_one_line_summary(exc),
                 )
-                self._record_error(probe_error)
-                self._update_partial(
-                    'arrange',
-                    ProbeStageResult(
-                        duration_seconds=arrange_duration,
-                        error=_one_line_summary(exc),
-                    ),
-                )
-                timing = dict(self._partial.get('timing', {}))
-                timing['arrange'] = arrange_duration
-                self._update_partial('timing', timing)
+                state.timing['arrange'] = arrange_duration
                 return None
-        finally:
-            _probe_stage.reset(token)
 
         arrange_duration = time.monotonic() - arrange_start
-        self._update_partial(
-            'arrange',
-            ProbeStageResult(duration_seconds=arrange_duration),
-        )
-        timing = dict(self._partial.get('timing', {}))
-        timing['arrange'] = arrange_duration
-        self._update_partial('timing', timing)
+        state.arrange = ProbeStageResult(duration_seconds=arrange_duration)
+        state.timing['arrange'] = arrange_duration
         return tasks
 
     async def _run_on_message_complete(
         self,
         *,
+        state: _RunState,
         msg: SourceMessage,
-        tasks: list[ExecutorTask],
-        terminal_results: list[ExecutorResult],
-        sink_collector: DebugSinkCollector,
+        all_scheduled_tasks: list[ExecutorTask],
+        successful_terminal_results: list[ExecutorResult],
+        terminal_errors: list[ExecutorError],
         arrange_start: float,
-        start_monotonic: float,
     ) -> None:
         """Run handler.on_message_complete with error capture.
 
@@ -1059,16 +1168,23 @@ class DebugRunner:
         the two hooks are independent (per plan rules), so a broken
         on_message_complete should not mask on_window_complete's
         behaviour from the operator.
+
+        ``all_scheduled_tasks`` includes arrange output AND any
+        on_error replacements — production's ``MessageGroup.tasks`` has
+        the same shape. ``successful_terminal_results`` carries ONLY
+        successful ExecutorResults (mirrors production's
+        ``tracker.results``). ``terminal_errors`` carries terminally-
+        failed tasks' ExecutorErrors (mirrors production's
+        ``tracker.errors``).
         """
         mc_start = time.monotonic()
-        token = _probe_stage.set('message_complete')
-        try:
+        with _stage('message_complete'):
             try:
                 group = MessageGroup(
                     source_message=msg,
-                    tasks=list(tasks),
-                    results=list(terminal_results),
-                    errors=[],
+                    tasks=list(all_scheduled_tasks),
+                    results=list(successful_terminal_results),
+                    errors=list(terminal_errors),
                     started_at=arrange_start,
                     finished_at=time.monotonic(),
                 )
@@ -1076,227 +1192,211 @@ class DebugRunner:
             except Exception as exc:
                 mc_duration = time.monotonic() - mc_start
                 self._record_error(
-                    self._build_probe_error(
-                        stage='on_message_complete',
-                        exc=exc,
-                        start_monotonic=start_monotonic,
-                    )
+                    state=state,
+                    error=self._build_probe_error(state=state, stage='on_message_complete', exc=exc),
                 )
                 # Keep collect_result=None so the UI can distinguish "hook
                 # raised" from "hook returned None by design".
-                self._update_partial(
-                    'on_message_complete',
-                    ProbeStageResult(
-                        duration_seconds=mc_duration,
-                        collect_result=None,
-                        error=_one_line_summary(exc),
-                    ),
+                state.on_message_complete = ProbeStageResult(
+                    duration_seconds=mc_duration,
+                    collect_result=None,
+                    error=_one_line_summary(exc),
                 )
-                timing = dict(self._partial.get('timing', {}))
-                timing['on_message_complete'] = mc_duration
-                self._update_partial('timing', timing)
+                state.timing['on_message_complete'] = mc_duration
                 return
-        finally:
-            _probe_stage.reset(token)
 
         mc_duration = time.monotonic() - mc_start
         # If the hook returned a CollectResult, route it through the sink
         # collector — same behaviour as PartitionProcessor's _on_collect
         # callback, minus the real SinkManager write.
         if mc_result is not None:
-            token = _probe_stage.set('message_complete')
-            try:
-                await sink_collector(mc_result, msg.partition)
-            finally:
-                _probe_stage.reset(token)
-        self._update_partial(
-            'on_message_complete',
-            ProbeStageResult(duration_seconds=mc_duration, collect_result=mc_result),
-        )
-        timing = dict(self._partial.get('timing', {}))
-        timing['on_message_complete'] = mc_duration
-        self._update_partial('timing', timing)
+            with _stage('message_complete'):
+                await state.sink_collector(mc_result, msg.partition)
+        state.on_message_complete = ProbeStageResult(duration_seconds=mc_duration, collect_result=mc_result)
+        state.timing['on_message_complete'] = mc_duration
 
     async def _run_on_window_complete(
         self,
         *,
+        state: _RunState,
         msg: SourceMessage,
-        terminal_results: list[ExecutorResult],
-        sink_collector: DebugSinkCollector,
-        start_monotonic: float,
+        all_terminal_results: list[ExecutorResult],
     ) -> None:
-        """Run handler.on_window_complete with error capture. Always the last stage."""
+        """Run handler.on_window_complete with error capture. Always the last stage.
+
+        ``all_terminal_results`` mirrors production's ``window.results``
+        — one ExecutorResult per terminal task outcome, successes AND
+        failures alike (failures carry either the ExecutorTaskError's
+        ``.result`` or a synthesized ``exit_code=-1`` failure). See
+        drakkar/partition.py:406, 473, 479.
+        """
         wc_start = time.monotonic()
-        token = _probe_stage.set('window_complete')
-        try:
+        with _stage('window_complete'):
             try:
                 wc_result = await self._handler.on_window_complete(
-                    list(terminal_results),
+                    list(all_terminal_results),
                     [msg],
                 )
             except Exception as exc:
                 wc_duration = time.monotonic() - wc_start
                 self._record_error(
-                    self._build_probe_error(
-                        stage='window_complete',
-                        exc=exc,
-                        start_monotonic=start_monotonic,
-                    )
+                    state=state,
+                    error=self._build_probe_error(state=state, stage='on_window_complete', exc=exc),
                 )
-                self._update_partial(
-                    'on_window_complete',
-                    ProbeStageResult(
-                        duration_seconds=wc_duration,
-                        collect_result=None,
-                        error=_one_line_summary(exc),
-                    ),
+                state.on_window_complete = ProbeStageResult(
+                    duration_seconds=wc_duration,
+                    collect_result=None,
+                    error=_one_line_summary(exc),
                 )
-                timing = dict(self._partial.get('timing', {}))
-                timing['on_window_complete'] = wc_duration
-                self._update_partial('timing', timing)
+                state.timing['on_window_complete'] = wc_duration
                 return
-        finally:
-            _probe_stage.reset(token)
 
         wc_duration = time.monotonic() - wc_start
         if wc_result is not None:
-            token = _probe_stage.set('window_complete')
-            try:
-                await sink_collector(wc_result, msg.partition)
-            finally:
-                _probe_stage.reset(token)
-        self._update_partial(
-            'on_window_complete',
-            ProbeStageResult(duration_seconds=wc_duration, collect_result=wc_result),
-        )
-        timing = dict(self._partial.get('timing', {}))
-        timing['on_window_complete'] = wc_duration
-        self._update_partial('timing', timing)
+            with _stage('window_complete'):
+                await state.sink_collector(wc_result, msg.partition)
+        state.on_window_complete = ProbeStageResult(duration_seconds=wc_duration, collect_result=wc_result)
+        state.timing['on_window_complete'] = wc_duration
 
     async def _process_task(
         self,
         *,
+        state: _RunState,
         task: ExecutorTask,
         msg: SourceMessage,
-        sink_collector: DebugSinkCollector,
-        terminal_results: list[ExecutorResult],
-        task_entries: list[ProbeTaskEntry],
-        start_monotonic: float,
+        successful_terminal_results: list[ExecutorResult],
+        terminal_errors: list[ExecutorError],
+        all_terminal_results: list[ExecutorResult],
+        all_scheduled_tasks: list[ExecutorTask],
         retry_of: str | None = None,
         replacement_for: str | None = None,
     ) -> None:
         """Run ONE task end-to-end with the full on_error / retry / replace cycle.
 
         Appends one ``ProbeTaskEntry`` per executor attempt to
-        ``task_entries`` (so retries and replacements also land in the
-        Tasks section of the UI). The live list is kept on ``_partial``
-        so ``latest_partial_report`` sees in-flight progress.
+        ``state.tasks`` (so retries and replacements also land in the
+        Tasks section of the UI).
+
+        Production keeps three terminal-outcome lists with distinct
+        semantics — the probe mirrors all three:
+          - ``successful_terminal_results`` (production: ``tracker.results``)
+            — success-only, feeds ``MessageGroup.results``.
+          - ``terminal_errors`` (production: ``tracker.errors``) — one
+            per terminally-failed task, feeds ``MessageGroup.errors``.
+          - ``all_terminal_results`` (production: ``window.results``) —
+            both successes AND failures, feeds ``on_window_complete``.
 
         Flow:
           1. Execute the task via ``_execute_and_record_task``.
-          2. On success (no ``ExecutorTaskError``) → append the entry,
-             on_task_complete already fed into the sink collector.
-          3. On failure:
-             a. Call ``handler.on_error(task, error)`` with stage
-                ``on_error:<task_id>``. If it raises, record a ProbeError
-                and mark the entry ``status='failed'``.
-             b. If the action is ``ErrorAction.RETRY``:
-                  - re-execute the SAME task while ``retry_count < max_retries``.
-                    Each attempt produces its own ``ProbeTaskEntry`` with
-                    ``retry_of=<parent>`` set. Previous entries keep
-                    ``status='failed'`` — the retry entry reflects the
-                    retry's terminal outcome (done/failed).
-                  - Once retries are exhausted (handler still wants RETRY
-                    but budget is gone), the last failed entry is kept
-                    as ``status='failed'``.
-             c. If the action is a ``list[ExecutorTask]`` (replacements):
-                  - mark the original entry ``status='replaced'`` and
-                    recurse for each replacement with
-                    ``replacement_for=<parent_task_id>``.
-             d. If the action is ``ErrorAction.SKIP`` (or any other value):
-                  - the failed entry keeps ``status='failed'``; we stop.
+          2. On success → append the entry, on_task_complete already
+             fed into the sink collector. No on_error invoked.
+          3. On failure (SKIP or retries-exhausted):
+             a. Call ``handler.on_error(task, error)``. If it raises,
+                mark the entry ``status='failed'`` and append to
+                ``terminal_errors`` AND ``all_terminal_results``.
+             b. If the action is RETRY → ``_run_retry_loop``.
+             c. If the action is a ``list[ExecutorTask]`` → mark original
+                ``status='replaced'``, recurse for each replacement. Also
+                apply production's parent_task_id auto-link: if the
+                replacement did not set one, point it back at the
+                original (see PartitionProcessor:437).
+             d. If the action is SKIP or anything else → failed entry
+                stays ``status='failed'`` and the ExecutorError goes to
+                ``terminal_errors`` + the ExecutorResult goes to
+                ``all_terminal_results`` (mirrors production's
+                ``window.results.append(e.result)`` + ``tracker.errors.
+                append(task_error)`` pair).
 
         Retries and replacement cascades each run their OWN on_error
-        cycle, so a retry that fails again goes through on_error too (up
-        to the per-task retry budget). Replacement tasks that themselves
-        fail can trigger a fresh on_error; we don't cap recursion — that
-        mirrors production semantics. A broken handler that infinitely
-        returns replacements would hang the probe the same way it would
-        hang the real worker.
+        cycle. A broken handler that infinitely returns replacements
+        would hang the probe the same way it hangs the real worker.
         """
-        entry = await self._execute_and_record_task(
+        entry, exec_error = await self._execute_and_record_task(
+            state=state,
             task=task,
             msg=msg,
-            sink_collector=sink_collector,
-            terminal_results=terminal_results,
-            start_monotonic=start_monotonic,
+            successful_terminal_results=successful_terminal_results,
+            terminal_errors=terminal_errors,
+            all_terminal_results=all_terminal_results,
             retry_of=retry_of,
             replacement_for=replacement_for,
         )
-        task_entries.append(entry)
+        state.tasks.append(entry)
 
         # Success path → nothing more to do for this task.
-        exec_error = self._last_exec_error
-        self._last_exec_error = None  # reset so the next call starts clean
         if exec_error is None:
             return
 
         # -- on_error path ----------------------------------------------------
         await self._handle_task_failure(
+            state=state,
             task=task,
             failed_entry=entry,
             exec_error=exec_error,
             msg=msg,
-            sink_collector=sink_collector,
-            terminal_results=terminal_results,
-            task_entries=task_entries,
-            start_monotonic=start_monotonic,
+            successful_terminal_results=successful_terminal_results,
+            terminal_errors=terminal_errors,
+            all_terminal_results=all_terminal_results,
+            all_scheduled_tasks=all_scheduled_tasks,
         )
 
     async def _handle_task_failure(
         self,
         *,
+        state: _RunState,
         task: ExecutorTask,
         failed_entry: ProbeTaskEntry,
         exec_error: ExecutorTaskError,
         msg: SourceMessage,
-        sink_collector: DebugSinkCollector,
-        terminal_results: list[ExecutorResult],
-        task_entries: list[ProbeTaskEntry],
-        start_monotonic: float,
+        successful_terminal_results: list[ExecutorResult],
+        terminal_errors: list[ExecutorError],
+        all_terminal_results: list[ExecutorResult],
+        all_scheduled_tasks: list[ExecutorTask],
     ) -> None:
         """Run on_error for ``failed_entry`` and react to its returned action.
 
         Branches out into three production-mirroring paths (RETRY /
         replacement list / SKIP-or-other) plus the on_error-itself-raises
         path. See ``_process_task`` docstring for the full state machine.
+
+        Terminal failures append to ``all_terminal_results`` (production's
+        ``window.results``) AND ``terminal_errors`` (production's
+        ``tracker.errors``). The success-only list ``successful_terminal_
+        results`` is NOT touched here — only ``_execute_and_record_task``
+        touches it on the happy path.
         """
-        action = await self._invoke_on_error(
-            task=task,
-            exec_error=exec_error,
-            start_monotonic=start_monotonic,
-        )
-        if action is _ON_ERROR_RAISED:
+        action = await self._invoke_on_error(state=state, task=task, exec_error=exec_error)
+        if action is None:
             # on_error itself raised — ProbeError already recorded.
-            # failed_entry keeps its default status='failed'.
+            # Terminal failure: feed the ExecutorResult into the
+            # window-level list (mirrors ``window.results``) AND the
+            # ExecutorError into the tracker-level error list (mirrors
+            # ``tracker.errors``). Does NOT touch the success-only list.
+            all_terminal_results.append(exec_error.result)
+            terminal_errors.append(exec_error.error)
             return
 
         # Replacement list: original → 'replaced', recurse for each new task.
+        # on_error's contract (see BaseDrakkarHandler.on_error) guarantees
+        # list members are ExecutorTask instances.
         if isinstance(action, list):
             failed_entry.status = 'replaced'
-            # ty can narrow ``action`` to ``list`` via isinstance, but not
-            # the element type. The on_error contract (see
-            # BaseDrakkarHandler.on_error) guarantees list members are
-            # ExecutorTask instances, so the cast is safe.
-            replacements = cast('list[ExecutorTask]', action)
-            for replacement in replacements:
+            for replacement in action:
+                # Auto-link replacement to the parent, matching production
+                # (see drakkar/partition.py:437). User handlers rarely set
+                # this explicitly; keeping the auto-link preserves the
+                # replacement lineage in the probe report.
+                if replacement.parent_task_id is None:
+                    replacement.parent_task_id = task.task_id
+                all_scheduled_tasks.append(replacement)
                 await self._process_task(
+                    state=state,
                     task=replacement,
                     msg=msg,
-                    sink_collector=sink_collector,
-                    terminal_results=terminal_results,
-                    task_entries=task_entries,
-                    start_monotonic=start_monotonic,
+                    successful_terminal_results=successful_terminal_results,
+                    terminal_errors=terminal_errors,
+                    all_terminal_results=all_terminal_results,
+                    all_scheduled_tasks=all_scheduled_tasks,
                     replacement_for=task.task_id,
                 )
             return
@@ -1307,28 +1407,35 @@ class DebugRunner:
         # on_error stops returning RETRY.
         if action == ErrorAction.RETRY:
             await self._run_retry_loop(
+                state=state,
                 task=task,
                 msg=msg,
-                sink_collector=sink_collector,
-                terminal_results=terminal_results,
-                task_entries=task_entries,
-                start_monotonic=start_monotonic,
+                successful_terminal_results=successful_terminal_results,
+                terminal_errors=terminal_errors,
+                all_terminal_results=all_terminal_results,
+                all_scheduled_tasks=all_scheduled_tasks,
+                first_exec_error=exec_error,
             )
             return
 
         # SKIP or any unrecognized action → leave the failed entry as-is.
         # This matches production's "else: window.results.append(e.result)"
-        # branch in PartitionProcessor._execute_and_track.
+        # branch in PartitionProcessor._execute_and_track. Also append to
+        # terminal_errors so MessageGroup.errors mirrors production.
+        all_terminal_results.append(exec_error.result)
+        terminal_errors.append(exec_error.error)
 
     async def _run_retry_loop(
         self,
         *,
+        state: _RunState,
         task: ExecutorTask,
         msg: SourceMessage,
-        sink_collector: DebugSinkCollector,
-        terminal_results: list[ExecutorResult],
-        task_entries: list[ProbeTaskEntry],
-        start_monotonic: float,
+        successful_terminal_results: list[ExecutorResult],
+        terminal_errors: list[ExecutorError],
+        all_terminal_results: list[ExecutorResult],
+        all_scheduled_tasks: list[ExecutorTask],
+        first_exec_error: ExecutorTaskError,
     ) -> None:
         """Re-execute ``task`` up to ``max_retries`` times, recording each attempt.
 
@@ -1343,72 +1450,95 @@ class DebugRunner:
           - On success → stops the loop.
           - On failure → calls on_error; if still RETRY and budget
             remains, continues. If on_error returns a list or something
-            else, the loop exits and that branch is handled via
-            ``_handle_task_failure`` on the retry entry.
+            else, the loop exits and that branch is handled inline so
+            the retry entry gets the correct terminal status.
+
+        ``first_exec_error`` carries the originally-failed attempt's
+        error so that if we end up exhausting retries (budget gone but
+        handler still wants RETRY), we can append the final failure to
+        the terminal lists.
+
+        Success-only ``successful_terminal_results`` is touched by
+        ``_execute_and_record_task`` on the happy path; terminal-failure
+        branches here append to ``all_terminal_results`` (production's
+        ``window.results``) + ``terminal_errors`` (production's
+        ``tracker.errors``) to keep the three lists in the production
+        shape.
         """
         max_retries = self._app_config.executor.max_retries
         retry_count = 0
+        last_exec_error: ExecutorTaskError | None = first_exec_error
         while retry_count < max_retries:
             retry_count += 1
-            retry_entry = await self._execute_and_record_task(
+            retry_entry, exec_error = await self._execute_and_record_task(
+                state=state,
                 task=task,
                 msg=msg,
-                sink_collector=sink_collector,
-                terminal_results=terminal_results,
-                start_monotonic=start_monotonic,
+                successful_terminal_results=successful_terminal_results,
+                terminal_errors=terminal_errors,
+                all_terminal_results=all_terminal_results,
                 retry_of=task.task_id,
                 replacement_for=None,
             )
-            task_entries.append(retry_entry)
-            exec_error = self._last_exec_error
-            self._last_exec_error = None
+            state.tasks.append(retry_entry)
             if exec_error is None:
-                # Retry succeeded — done.
+                # Retry succeeded — done. on_task_complete already fed
+                # its CollectResult into the sink collector via
+                # ``_execute_and_record_task``.
                 return
+            last_exec_error = exec_error
             # Retry failed. Ask the handler what to do next.
-            action = await self._invoke_on_error(
-                task=task,
-                exec_error=exec_error,
-                start_monotonic=start_monotonic,
-            )
-            if action is _ON_ERROR_RAISED:
+            action = await self._invoke_on_error(state=state, task=task, exec_error=exec_error)
+            if action is None:
+                # on_error itself raised — ProbeError already recorded.
+                all_terminal_results.append(exec_error.result)
+                terminal_errors.append(exec_error.error)
                 return
             if isinstance(action, list):
                 # Replacement path off a retry — retry_entry becomes
-                # 'replaced' and we recurse on the replacements. See the
-                # matching cast in ``_handle_task_failure`` for why the
-                # cast is needed and safe.
+                # 'replaced' and we recurse on the replacements. Auto-
+                # link parent_task_id as in ``_handle_task_failure``.
                 retry_entry.status = 'replaced'
-                replacements = cast('list[ExecutorTask]', action)
-                for replacement in replacements:
+                for replacement in action:
+                    if replacement.parent_task_id is None:
+                        replacement.parent_task_id = task.task_id
+                    all_scheduled_tasks.append(replacement)
                     await self._process_task(
+                        state=state,
                         task=replacement,
                         msg=msg,
-                        sink_collector=sink_collector,
-                        terminal_results=terminal_results,
-                        task_entries=task_entries,
-                        start_monotonic=start_monotonic,
+                        successful_terminal_results=successful_terminal_results,
+                        terminal_errors=terminal_errors,
+                        all_terminal_results=all_terminal_results,
+                        all_scheduled_tasks=all_scheduled_tasks,
                         replacement_for=task.task_id,
                     )
                 return
             if action != ErrorAction.RETRY:
                 # SKIP or unknown → stop, retry_entry stays 'failed'.
+                all_terminal_results.append(exec_error.result)
+                terminal_errors.append(exec_error.error)
                 return
             # RETRY again and budget allows → next loop iteration.
+        # Loop exited because retry_count hit max_retries — retries
+        # exhausted. Append the last attempt's failure (mirrors
+        # production's "max_retries_exceeded" branch).
+        if last_exec_error is not None:
+            all_terminal_results.append(last_exec_error.result)
+            terminal_errors.append(last_exec_error.error)
 
     async def _invoke_on_error(
         self,
         *,
+        state: _RunState,
         task: ExecutorTask,
         exec_error: ExecutorTaskError,
-        start_monotonic: float,
-    ) -> str | list[ExecutorTask] | _OnErrorRaisedSentinel:
-        """Call ``handler.on_error`` with error capture. Returns the raw action or a sentinel.
+    ) -> str | list[ExecutorTask] | None:
+        """Call ``handler.on_error`` with error capture.
 
-        Returns ``_ON_ERROR_RAISED`` when on_error itself raises (the
-        ProbeError has already been appended). Otherwise returns the
-        action verbatim so the caller can pattern-match on RETRY / list /
-        SKIP / other.
+        Returns ``None`` when on_error itself raises (the ProbeError has
+        already been appended). Otherwise returns the action verbatim so
+        the caller can pattern-match on RETRY / list / SKIP / other.
 
         The return type uses ``str`` (not ``ErrorAction``) because
         ``ErrorAction`` is a ``StrEnum`` — user handlers are free to
@@ -1418,53 +1548,67 @@ class DebugRunner:
         underlying str).
         """
         stage = f'on_error:{task.task_id}'
-        token = _probe_stage.set(stage)
-        try:
+        with _stage(stage):
             try:
                 return await self._handler.on_error(task, exec_error.error)
             except Exception as exc:
                 self._record_error(
-                    self._build_probe_error(
-                        stage=stage,
-                        exc=exc,
-                        start_monotonic=start_monotonic,
-                    )
+                    state=state,
+                    error=self._build_probe_error(state=state, stage=stage, exc=exc),
                 )
-                return _ON_ERROR_RAISED
-        finally:
-            _probe_stage.reset(token)
+                return None
 
     async def _execute_and_record_task(
         self,
         *,
+        state: _RunState,
         task: ExecutorTask,
         msg: SourceMessage,
-        sink_collector: DebugSinkCollector,
-        terminal_results: list[ExecutorResult],
-        start_monotonic: float,
+        successful_terminal_results: list[ExecutorResult],
+        terminal_errors: list[ExecutorError],
+        all_terminal_results: list[ExecutorResult],
         retry_of: str | None,
         replacement_for: str | None,
-    ) -> ProbeTaskEntry:
-        """Execute one attempt and return its ``ProbeTaskEntry``.
+    ) -> tuple[ProbeTaskEntry, ExecutorTaskError | None]:
+        """Execute one attempt and return its ``ProbeTaskEntry`` plus optional exec error.
 
-        Sets ``self._last_exec_error`` to the caught ``ExecutorTaskError``
-        on failure, or ``None`` on success — a poor-man's second return
-        value that keeps the call sites tidy (Python doesn't let us
-        return a union cleanly without forcing every caller through the
-        same unpacking dance).
+        Returns a tuple ``(entry, exec_error)``. ``exec_error`` is the
+        caught ``ExecutorTaskError`` on subprocess-level failure, or
+        ``None`` on success. Using a tuple return (rather than a scratch
+        slot on ``_RunState``) keeps the failure signal co-located with
+        the entry and removes the need for callers to read-then-clear a
+        shared attribute.
 
-        On success: runs ``on_task_complete``, feeds any returned
-        ``CollectResult`` into the sink collector, returns a
-        ``status='done'`` entry with stdout/stderr/etc attached.
+        Production keeps three terminal-outcome lists (see
+        ``_process_task`` docstring) with distinct semantics. This helper
+        touches them as follows:
 
-        On failure: records a ``ProbeError`` via ``_record_error`` for
-        ANY ``on_task_complete`` exception (still runs it even on success
-        path), returns a ``status='failed'`` entry built from the
-        ``ExecutorError`` attached to the exception.
+          - ``successful_terminal_results`` (production: ``tracker.results``)
+            — appended ONLY when the executor task succeeded AND
+            ``on_task_complete`` did not raise. Mirrors
+            ``partition.py:525-526`` (tracker.results.append(task_result)
+            runs only on the success branch where ``task_result`` is set
+            at partition.py:407).
+          - ``all_terminal_results`` (production: ``window.results``) —
+            appended for BOTH success (real result) AND the
+            ``on_task_complete`` raising path (synthesized
+            ``exit_code=-1`` result). Mirrors ``partition.py:406`` +
+            ``partition.py:479-487``.
+          - ``terminal_errors`` (production: ``tracker.errors``) —
+            appended ONLY when ``on_task_complete`` raised, carrying
+            the synthesized ExecutorError. Mirrors the unexpected-
+            exception branch at ``partition.py:488-495`` + ``partition.
+            py:527-528``.
+
+        On executor failure (``ExecutorTaskError``): returns a
+        ``status='failed'`` entry built from the ExecutorError attached
+        to the exception, paired with the caught error. The caller
+        (``_process_task`` / ``_run_retry_loop``) handles on_error and
+        is responsible for appending to the right terminal list(s) based
+        on the on_error action.
         """
         # -- executor execute ------------------------------------------------
-        token = _probe_stage.set(f'executor:{task.task_id}')
-        try:
+        with _stage(f'executor:{task.task_id}'):
             try:
                 exec_result = await self._executor_pool.execute(
                     task,
@@ -1472,53 +1616,75 @@ class DebugRunner:
                     partition_id=msg.partition,
                 )
             except ExecutorTaskError as exc:
-                self._last_exec_error = exc
                 # Subprocess-level failure — build a 'failed' entry from
                 # the ExecutorError payload attached to the exception.
                 # on_error / retry / replace logic happens in the caller.
-                return _failed_task_entry(
+                failed_entry = _failed_task_entry(
                     task=task,
                     error=exc,
                     retry_of=retry_of,
                     replacement_for=replacement_for,
                 )
-        finally:
-            _probe_stage.reset(token)
-
-        self._last_exec_error = None
-        terminal_results.append(exec_result)
+                return failed_entry, exc
 
         # -- on_task_complete for this task --------------------------------
         tc_start = time.monotonic()
         tc_result: CollectResult | None = None
         tc_error_summary: str | None = None
-        token = _probe_stage.set(f'task_complete:{task.task_id}')
-        try:
+        tc_exception: Exception | None = None
+        with _stage(f'task_complete:{task.task_id}'):
             try:
                 tc_result = await self._handler.on_task_complete(exec_result)
             except Exception as exc:
                 tc_error_summary = _one_line_summary(exc)
+                tc_exception = exc
                 self._record_error(
-                    self._build_probe_error(
+                    state=state,
+                    error=self._build_probe_error(
+                        state=state,
                         stage=f'task_complete:{task.task_id}',
                         exc=exc,
-                        start_monotonic=start_monotonic,
-                    )
+                    ),
                 )
-        finally:
-            _probe_stage.reset(token)
         tc_duration = time.monotonic() - tc_start
+
+        # Feed the terminal lists AFTER on_task_complete ran, mirroring
+        # production ordering.
+        if tc_exception is None:
+            # Full success path — production: partition.py:406-407.
+            # Both the window-level list AND the tracker-level success
+            # list get the real result.
+            successful_terminal_results.append(exec_result)
+            all_terminal_results.append(exec_result)
+        else:
+            # on_task_complete raised — production's catch-all at
+            # partition.py:476-495 synthesizes a failure ExecutorResult
+            # for window.results + an ExecutorError for tracker.errors.
+            # The success-only list is NOT touched here (in production,
+            # ``task_result`` stays None on this path, so tracker.results
+            # never sees an append at partition.py:525-526).
+            synthesized_result = ExecutorResult(
+                exit_code=-1,
+                stdout='',
+                stderr=str(tc_exception),
+                duration_seconds=0,
+                task=task,
+            )
+            synthesized_error = ExecutorError(
+                task=task,
+                exception=str(tc_exception),
+                stderr=str(tc_exception),
+            )
+            all_terminal_results.append(synthesized_result)
+            terminal_errors.append(synthesized_error)
 
         # Only feed the sink collector on success — a raised
         # on_task_complete produced no result to forward.
         if tc_result is not None:
-            token = _probe_stage.set(f'task_complete:{task.task_id}')
-            try:
-                await sink_collector(tc_result, msg.partition)
-            finally:
-                _probe_stage.reset(token)
+            with _stage(f'task_complete:{task.task_id}'):
+                await state.sink_collector(tc_result, msg.partition)
 
-        return ProbeTaskEntry(
+        entry = ProbeTaskEntry(
             task_id=task.task_id,
             parent_task_id=task.parent_task_id,
             labels=dict(task.labels),
@@ -1536,15 +1702,16 @@ class DebugRunner:
             retry_of=retry_of,
             replacement_for=replacement_for,
         )
+        return entry, None
 
     # -- error-capture helpers ----------------------------------------------
 
     def _build_probe_error(
         self,
         *,
+        state: _RunState,
         stage: str,
         exc: BaseException,
-        start_monotonic: float,
     ) -> ProbeError:
         """Wrap an exception in a ``ProbeError`` with a captured traceback.
 
@@ -1558,18 +1725,16 @@ class DebugRunner:
             exception_class=type(exc).__name__,
             message=str(exc),
             traceback=traceback.format_exc(),
-            occurred_at_ms=(time.monotonic() - start_monotonic) * 1000.0,
+            occurred_at_ms=(time.monotonic() - state.start_monotonic) * 1000.0,
         )
 
-    def _record_error(self, error: ProbeError) -> None:
-        """Append a ``ProbeError`` to the running ``_partial['errors']`` list.
+    def _record_error(self, *, state: _RunState, error: ProbeError) -> None:
+        """Append a ``ProbeError`` to the per-run errors list.
 
         Kept as a single choke-point so future code (metrics, structured
-        logging of captured errors) has one place to patch. The list is
-        initialised at the top of ``_run_stages``.
+        logging of captured errors) has one place to patch.
         """
-        errors: list[ProbeError] = self._partial.setdefault('errors', [])
-        errors.append(error)
+        state.errors.append(error)
 
 
 # ---- small helpers used by DebugRunner -------------------------------------

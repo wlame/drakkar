@@ -364,6 +364,7 @@ Multi-purpose debug page with:
     - **By label** -- search inputs are auto-generated for each [label](handler.md#task-labels) key found in the database (e.g., `request_id`, `pattern`). Enter a value to find all tasks and events matching that label. Useful for tracing a specific request across partitions and workers.
     Both modes search the current worker first, then other live workers in the cluster, then rotated historical DB files.
 - **Database management** -- list all debug database files with event counts and sizes, download individual files, merge multiple files into one, and view per-file breakdown by event type.
+- **Message Probe** -- replay a single pasted message through the handler pipeline (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with **zero footprint**: no sink writes, no offset commits, no event-recorder rows, no cache writes, no peer sync. The report shows every task's stdout/stderr/exit code, each hook's returned `CollectResult`, the payloads that *would have been* written to each sink, every cache call, a timeline waterfall, and any exceptions raised at any stage. Posts to `/api/debug/probe` with a JSON body containing the message's `value` (and optional `key`, `partition`, `offset`, `topic`, `timestamp`, `use_cache`).
 
 #### `/task/{id}` -- Task Detail
 

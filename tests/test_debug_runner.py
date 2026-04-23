@@ -19,6 +19,8 @@ Covers the building blocks of the no-footprint probe (Task 1) plus the
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
 from contextlib import ExitStack
 from typing import Any
@@ -254,16 +256,46 @@ def test_proxy_set_records_value_preview():
     assert 'nested' in preview
 
 
-def test_proxy_delete_is_suppressed():
-    """``delete`` never forwards to the real cache; returns False unconditionally."""
+def test_proxy_delete_is_suppressed_but_reports_presence_with_use_cache_true():
+    """``delete`` with use_cache=True reports whether the key was live without mutating.
+
+    Mirrors the real ``Cache.delete`` contract (returns True if key is
+    in memory, False otherwise). The live cache value must remain
+    untouched — only the return value reflects presence.
+    """
     real = _fresh_cache()
     real.set('k', 'v')
     proxy = _make_proxy(real=real, use_cache=True)
     result = proxy.delete('k')
-    assert result is False
+    assert result is True  # key was present in the real memory
     # Real cache still has the value — the delete was not propagated.
     assert real.peek('k') == 'v'
     assert proxy.calls[-1].op == 'delete'
+    assert proxy.calls[-1].outcome == 'suppressed'
+
+
+def test_proxy_delete_returns_false_when_key_absent_with_use_cache_true():
+    """With use_cache=True but key not present, delete returns False."""
+    real = _fresh_cache()
+    proxy = _make_proxy(real=real, use_cache=True)
+    result = proxy.delete('missing')
+    assert result is False
+    assert proxy.calls[-1].op == 'delete'
+    assert proxy.calls[-1].outcome == 'suppressed'
+
+
+def test_proxy_delete_returns_false_when_use_cache_false():
+    """With use_cache=False, delete never looks at real cache — returns False.
+
+    Matches ``NoOpCache.delete``: the probe refuses to leak any live
+    cache state when the operator opted out via ``use_cache=False``.
+    """
+    real = _fresh_cache()
+    real.set('k', 'v')
+    proxy = _make_proxy(real=real, use_cache=False)
+    result = proxy.delete('k')
+    assert result is False
+    assert real.peek('k') == 'v'
     assert proxy.calls[-1].outcome == 'suppressed'
 
 
@@ -373,7 +405,7 @@ async def test_sink_collector_flatten_kafka_payload():
     assert rec.destination == 'results'
     assert rec.origin_stage == 'task_complete:t-1'
     assert rec.payload == {'id': 10, 'note': 'hello'}
-    assert rec.extras == {'sink_instance': 'results', 'key': 'my-key'}
+    assert rec.extras == {'sink_instance': 'results', 'topic': None, 'key': 'my-key'}
 
 
 async def test_sink_collector_flatten_kafka_default_sink():
@@ -383,7 +415,24 @@ async def test_sink_collector_flatten_kafka_default_sink():
     await collector(cr, 0)
     flat = collector.flatten()
     assert flat[0].destination == '(default)'
-    assert flat[0].extras == {'sink_instance': '', 'key': None}
+    assert flat[0].extras == {'sink_instance': '', 'topic': None, 'key': None}
+
+
+async def test_sink_collector_flatten_kafka_uses_real_topic_when_mapping_provided():
+    """When ``kafka_sink_topics`` is populated, destination = real topic (not sink name).
+
+    This makes the UI Kafka-UI deep-link resolve to the correct topic
+    instead of the sink instance name (which produced broken links).
+    """
+    collector = DebugSinkCollector(kafka_sink_topics={'results': 'output_topic'})
+    cr = CollectResult(
+        kafka=[KafkaPayload(sink='results', data=_TinyOutput())],
+    )
+    await collector(cr, 0)
+    flat = collector.flatten()
+    assert flat[0].destination == 'output_topic'
+    assert flat[0].extras['topic'] == 'output_topic'
+    assert flat[0].extras['sink_instance'] == 'results'
 
 
 async def test_sink_collector_flatten_postgres_payload():
@@ -854,13 +903,18 @@ async def test_runner_restores_handler_cache_after_run():
 # --- DebugRunner: mid-run partial report ------------------------------------
 
 
-async def test_runner_latest_partial_report_mid_run_is_truncated():
-    """latest_partial_report() called mid-run reflects only completed-so-far tasks.
+async def test_runner_partial_report_for_mid_run_is_truncated():
+    """partial_report_for(task) called mid-run reflects only completed-so-far tasks.
 
     The handler's on_task_complete hook inspects the runner's partial
     state the moment task 0 finishes, before task 1 has been submitted.
-    At that point the partial should contain exactly one task entry and
-    latest_partial_report should return truncated=True.
+    At that point the partial should carry truncated=True and the task
+    list should still be empty (the runner appends the entry AFTER the
+    hook returns).
+
+    Uses the production entrypoint (``start_probe`` +
+    ``partial_report_for``) — the same path the /api/debug/probe
+    endpoint takes on a wall-clock timeout.
     """
     captured: dict[str, Any] = {}
     handler = _HappyPathHandler(task_count=2)
@@ -870,24 +924,26 @@ async def test_runner_latest_partial_report_mid_run_is_truncated():
         app_config=_make_config(),
     )
 
-    # Hook: the FIRST time on_task_complete fires, snapshot the
-    # runner's partial state. We want to verify that:
-    #   - only the task whose on_task_complete just ran is present
-    #   - truncated=True
-    #   - arrange already completed (so it has a duration)
+    # ``start_probe`` creates the task synchronously (doesn't run yet —
+    # the loop has to yield first), so we can install the hook after
+    # the task exists but before it executes. The hook captures the
+    # partial via ``partial_report_for(task)``, which is what the
+    # endpoint uses.
+    run_task = runner.start_probe(ProbeInput(value='x', offset=1))
+
     def _snapshot(h: _HappyPathHandler, result: ExecutorResult) -> None:
         if h.on_task_complete_calls == 1:
-            captured['report'] = runner.latest_partial_report()
+            captured['report'] = DebugRunner.partial_report_for(run_task)
 
     handler.on_task_complete_hook = _snapshot
 
-    final = await runner.run(ProbeInput(value='x', offset=1))
+    final = await run_task
 
     partial: DebugReport = captured['report']
     assert partial.truncated is True
     # At snapshot time, the current task has just completed its
     # execution but its on_task_complete_result is being built. The
-    # runner appends the ProbeTaskEntry to partial['tasks'] AFTER the
+    # runner appends the ProbeTaskEntry to partial.tasks AFTER the
     # hook returns, so inside the hook the partial still reflects zero
     # completed tasks.
     assert len(partial.tasks) == 0
@@ -896,7 +952,7 @@ async def test_runner_latest_partial_report_mid_run_is_truncated():
     # on_message_complete / on_window_complete have not fired yet.
     assert partial.on_message_complete is None
     assert partial.on_window_complete is None
-    # input was set at the start of run().
+    # input was set at the start of the run.
     assert partial.input.value == 'x'
 
     # The full run still completes correctly.
@@ -904,18 +960,25 @@ async def test_runner_latest_partial_report_mid_run_is_truncated():
     assert len(final.tasks) == 2
 
 
-async def test_runner_partial_report_without_run_returns_empty_shape():
-    """latest_partial_report() before run() ever ran returns a valid empty report."""
-    handler = _HappyPathHandler(task_count=0)
-    runner = DebugRunner(
-        handler=handler,
-        executor_pool=_make_executor_pool(),
-        app_config=_make_config(),
-    )
-    report = runner.latest_partial_report()
+async def test_runner_partial_report_for_foreign_task_returns_empty_shape():
+    """partial_report_for() on a task without probe state returns a valid empty report.
+
+    Mirrors the endpoint-path fallback when a caller's wall-clock
+    timeout fires before ``start_probe`` even got scheduled. We feed
+    the method a completed asyncio task that carries no
+    ``_drakkar_probe_state`` attribute — the method should not raise
+    and should return a truncated stub report.
+    """
+
+    async def _noop() -> DebugReport:
+        return DebugReport(input=ProbeInput(value=''), arrange=ProbeStageResult(), truncated=False)
+
+    foreign_task: asyncio.Task[DebugReport] = asyncio.create_task(_noop())
+    await foreign_task
+    report = DebugRunner.partial_report_for(foreign_task)
     assert report.truncated is True
     assert report.tasks == []
-    assert report.input.value == ''  # synthetic empty ProbeInput
+    assert report.input.value == ''
 
 
 # --- Task 2b: Safety guarantee negative-assertion tests ---------------------
@@ -1157,13 +1220,14 @@ async def test_runner_never_reaches_offset_commit_path():
 
 
 async def test_runner_restores_handler_cache_when_on_task_complete_raises():
-    """If ``on_task_complete`` raises, the ``finally`` in ``_run_locked`` still restores cache.
+    """If ``on_task_complete`` raises and the error IS propagated, cache restore still runs.
 
-    Task 3 will add graceful exception capture (probe returns a report
-    with the error instead of propagating). For now, the runner
-    propagates the exception, but the cache must still be restored.
-    This test handles both cases: it catches the exception if raised,
-    and either way asserts ``handler.cache is original_cache``.
+    Task 3 made the runner catch on_task_complete exceptions so they land
+    in ``DebugReport.errors`` instead of propagating. To exercise the
+    exception-propagation path, we patch ``_run_stages`` to re-raise the
+    captured error, forcing the cache restore through a real exception
+    flow (not just the happy path). Without the ``finally`` block the
+    assertion ``handler.cache is original_cache`` would fail.
     """
     handler = _TaskCompleteRaisingHandler(task_count=1)
     original_cache = handler.cache  # class-level NoOpCache
@@ -1173,17 +1237,18 @@ async def test_runner_restores_handler_cache_when_on_task_complete_raises():
         app_config=_make_config(),
     )
 
-    # pytest.raises doesn't fail if no exception is raised when we use
-    # a try/except wrapper manually; using the wrapper instead of
-    # pytest.raises keeps the test robust to whether Task 3 has
-    # landed or not.
-    try:
+    # Patch _run_stages to raise, bypassing Task 3's in-runner error
+    # capture. This forces the cache-restore path to go through a real
+    # exception flow — without the finally clause in _run_locked, the
+    # assertion below would fail.
+    async def _raise_stages(**kwargs):
+        raise RuntimeError('injected-stage-failure')
+
+    with (
+        patch.object(runner, '_run_stages', side_effect=_raise_stages),
+        pytest.raises(RuntimeError, match='injected-stage-failure'),
+    ):
         await runner.run(ProbeInput(value='x', offset=1))
-    except Exception:
-        # Task 2a/2b: the runner currently lets the hook exception
-        # propagate — Task 3 will catch it. Either path is acceptable
-        # for guarantee #5; the point is that cache is still restored.
-        pass
 
     # The strong post-condition: the handler's cache attribute is
     # exactly the original object, not a DebugCacheProxy.
@@ -1806,7 +1871,7 @@ async def test_runner_captures_on_window_complete_error_and_returns():
     report = await runner.run(ProbeInput(value='x', offset=1))
 
     assert len(report.errors) == 1
-    assert report.errors[0].stage == 'window_complete'
+    assert report.errors[0].stage == 'on_window_complete'
     assert report.errors[0].exception_class == 'ValueError'
 
     # on_window_complete stage result carries the error summary.
@@ -2257,3 +2322,881 @@ async def test_runner_captures_on_error_exception_and_marks_task_failed():
     assert on_error_errors[0].stage == 'on_error:t-broken'
     assert on_error_errors[0].exception_class == 'RuntimeError'
     assert 'on_error itself blew up' in on_error_errors[0].message
+
+
+# ---- Review phase 1: missing-test gap fills --------------------------------
+
+
+class _MessageLabelRaisingHandler(_HappyPathHandler):
+    """Handler where ``message_label`` raises — downstream must continue."""
+
+    def __init__(self) -> None:
+        super().__init__(task_count=1)
+
+    def message_label(self, message: SourceMessage) -> str:
+        raise RuntimeError('label-boom')
+
+
+async def test_runner_message_label_error_is_nonfatal():
+    """message_label raising → error recorded but arrange + tasks + hooks still fire."""
+    handler = _MessageLabelRaisingHandler()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+    report = await runner.run(ProbeInput(value='x', offset=1))
+    # The error was captured...
+    labels = [e for e in report.errors if e.stage == 'message_label']
+    assert len(labels) == 1
+    assert labels[0].exception_class == 'RuntimeError'
+    # ...and every downstream stage still ran.
+    assert report.arrange.duration_seconds is not None
+    assert len(report.tasks) == 1
+    assert report.on_message_complete is not None
+    assert report.on_window_complete is not None
+    assert report.message_label is None  # stayed empty because label raised
+
+
+class _ReplacementWithoutParentHandler(_ReplacementHandler):
+    """Variant of _ReplacementHandler whose replacements have no parent_task_id set.
+
+    The runner is expected to auto-link them back to the original task
+    (mirrors production's PartitionProcessor:437 behaviour). Used to
+    verify the auto-link contract.
+    """
+
+    async def on_error(
+        self,
+        task: ExecutorTask,
+        error: ExecutorError,
+    ) -> str | list[ExecutorTask]:
+        self.on_error_calls += 1
+        return [
+            ExecutorTask(
+                task_id='r-no-parent',
+                source_offsets=task.source_offsets,
+                # parent_task_id NOT set — runner must fill it in.
+                precomputed=PrecomputedResult(
+                    stdout='replacement',
+                    stderr='',
+                    exit_code=0,
+                    duration_seconds=0.001,
+                ),
+            ),
+        ]
+
+
+async def test_runner_autopopulates_replacement_parent_task_id():
+    """Replacement with parent_task_id=None gets auto-linked to the failed task.
+
+    Matches production's ``drakkar/partition.py:437`` auto-link for any
+    replacement the user handler did not explicitly link. Without this,
+    the probe's lineage graph would diverge from a real worker's.
+    """
+    handler = _ReplacementWithoutParentHandler()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(max_retries=3),
+    )
+    report = await runner.run(ProbeInput(value='x', offset=1))
+    # The replacement entry has parent_task_id pointing at the failed task.
+    replacement = next(t for t in report.tasks if t.task_id == 'r-no-parent')
+    assert replacement.parent_task_id == 't-original'
+
+
+class _TerminalFailureHandler(_HappyPathHandler):
+    """arrange returns a failing task; on_error SKIPs.
+
+    Used to verify terminal failures flow into on_message_complete +
+    on_window_complete (production puts them on window.results /
+    MessageGroup.errors; the probe must mirror that).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(task_count=1)
+        # Record what the handler sees inside on_message_complete /
+        # on_window_complete so tests can assert shape.
+        self.mc_results_seen: list[ExecutorResult] = []
+        self.mc_errors_seen: list[ExecutorError] = []
+        self.mc_tasks_seen: list[ExecutorTask] = []
+        self.wc_results_seen: list[ExecutorResult] = []
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        self.arrange_calls += 1
+        return [
+            _make_failing_precomputed_task(
+                task_id='t-fail',
+                offset=messages[0].offset,
+                stderr='subprocess-boom',
+                exit_code=1,
+            ),
+        ]
+
+    async def on_error(
+        self,
+        task: ExecutorTask,
+        error: ExecutorError,
+    ) -> str | list[ExecutorTask]:
+        return ErrorAction.SKIP
+
+    async def on_message_complete(self, group: MessageGroup) -> CollectResult | None:
+        self.on_message_complete_calls += 1
+        self.mc_results_seen = list(group.results)
+        self.mc_errors_seen = list(group.errors)
+        self.mc_tasks_seen = list(group.tasks)
+        return None
+
+    async def on_window_complete(
+        self,
+        results: list[ExecutorResult],
+        source_messages: list[SourceMessage],
+    ) -> CollectResult | None:
+        self.on_window_complete_calls += 1
+        self.wc_results_seen = list(results)
+        return None
+
+
+async def test_runner_feeds_terminal_failures_into_message_and_window_hooks():
+    """SKIP'd terminal failures flow into on_window_complete, and tracker.errors.
+
+    Mirrors production's three-list separation (see
+    ``partition.py:406, 473, 479, 525-528``):
+      - ``MessageGroup.results`` mirrors ``tracker.results`` — SUCCESS-
+        only. A SKIP'd terminal failure must NOT appear here.
+      - ``MessageGroup.errors`` mirrors ``tracker.errors`` — FAILURE-
+        only. The failed task's ExecutorError must appear here.
+      - ``on_window_complete(results, ...)`` mirrors ``window.results``
+        — BOTH successes and terminal failures. The failed ExecutorResult
+        appears here even though it's not on the message group.
+    """
+    handler = _TerminalFailureHandler()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+    await runner.run(ProbeInput(value='x', offset=1))
+
+    # on_message_complete sees the failure in errors ONLY, not in
+    # results — matches production's success-only ``tracker.results``.
+    assert handler.mc_results_seen == []
+    assert len(handler.mc_errors_seen) == 1
+    assert handler.mc_errors_seen[0].task.task_id == 't-fail'
+    # Task list includes the failed original.
+    assert [t.task_id for t in handler.mc_tasks_seen] == ['t-fail']
+
+    # on_window_complete's results list carries the failed ExecutorResult
+    # — production puts it on ``window.results`` even though it's not on
+    # ``tracker.results``. Confirms the probe mirrors that split.
+    assert len(handler.wc_results_seen) == 1
+    assert handler.wc_results_seen[0].exit_code == 1
+
+
+class _MixedSuccessFailureHandler(_HappyPathHandler):
+    """Two tasks: A succeeds, B fails terminally (SKIP'd on_error).
+
+    Regression fixture for the split between ``MessageGroup.results``
+    (success-only, mirrors ``tracker.results``) and
+    ``on_window_complete``'s ``results`` (both, mirrors
+    ``window.results``). The previous probe implementation accidentally
+    put B's ExecutorResult on BOTH ``group.results`` AND ``group.errors``
+    — this fixture lets a test prove that behaviour is gone.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(task_count=2)
+        self.mc_results_seen: list[ExecutorResult] = []
+        self.mc_errors_seen: list[ExecutorError] = []
+        self.wc_results_seen: list[ExecutorResult] = []
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        # t-A uses the success fixture; t-B uses the failing fixture —
+        # keeps lineage predictable so the assertions can key on IDs.
+        self.arrange_calls += 1
+        return [
+            _make_precomputed_task(task_id='t-A', offset=messages[0].offset, stdout='A-ok'),
+            _make_failing_precomputed_task(
+                task_id='t-B',
+                offset=messages[0].offset,
+                stderr='B-boom',
+                exit_code=1,
+            ),
+        ]
+
+    async def on_error(
+        self,
+        task: ExecutorTask,
+        error: ExecutorError,
+    ) -> str | list[ExecutorTask]:
+        return ErrorAction.SKIP
+
+    async def on_message_complete(self, group: MessageGroup) -> CollectResult | None:
+        self.on_message_complete_calls += 1
+        self.mc_results_seen = list(group.results)
+        self.mc_errors_seen = list(group.errors)
+        return None
+
+    async def on_window_complete(
+        self,
+        results: list[ExecutorResult],
+        source_messages: list[SourceMessage],
+    ) -> CollectResult | None:
+        self.on_window_complete_calls += 1
+        self.wc_results_seen = list(results)
+        return None
+
+
+async def test_runner_mixed_success_failure_splits_results_vs_errors_production_parity():
+    """Mixed outcomes → MessageGroup.results success-only, errors failure-only, window both.
+
+    Regression for the message-group / window divergence (code review
+    phase 1 iteration 3, issue 2). Production's
+    ``PartitionProcessor._execute_and_track``:
+      - partition.py:525-526 appends to ``tracker.results`` ONLY on
+        success (``task_result`` only set at partition.py:407).
+      - partition.py:527-528 appends to ``tracker.errors`` ONLY on
+        failure.
+      - partition.py:406, 473, 479 append to ``window.results`` on BOTH
+        paths.
+
+    This test schedules A=succeed + B=fail and asserts:
+      - ``group.results`` contains A's result only (no B) —
+        success-only ``tracker.results`` parity.
+      - ``group.errors`` contains B's error only — failure-only
+        ``tracker.errors`` parity.
+      - ``on_window_complete`` receives BOTH A and B's ExecutorResults
+        — ``window.results`` parity.
+
+    A regression where B's result double-counted (appeared in BOTH
+    ``group.results`` and ``group.errors``) would be caught by the first
+    assertion.
+    """
+    handler = _MixedSuccessFailureHandler()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+    await runner.run(ProbeInput(value='x', offset=1))
+
+    # MessageGroup.results mirrors production's tracker.results:
+    # exactly ONE entry (A's success) — B MUST NOT appear here.
+    assert len(handler.mc_results_seen) == 1
+    assert handler.mc_results_seen[0].task.task_id == 't-A'
+    assert handler.mc_results_seen[0].exit_code == 0
+    # No failing task leaked into the success list — double-counting
+    # regression fingerprint.
+    assert all(r.task.task_id != 't-B' for r in handler.mc_results_seen)
+
+    # MessageGroup.errors mirrors production's tracker.errors:
+    # exactly ONE entry (B's failure) — A MUST NOT appear here.
+    assert len(handler.mc_errors_seen) == 1
+    assert handler.mc_errors_seen[0].task.task_id == 't-B'
+    assert all(e.task.task_id != 't-A' for e in handler.mc_errors_seen)
+
+    # on_window_complete's ``results`` mirrors production's
+    # window.results — BOTH A (success) and B (failure) appear, each
+    # with its own ExecutorResult.
+    wc_ids = [r.task.task_id for r in handler.wc_results_seen]
+    assert sorted(wc_ids) == ['t-A', 't-B']
+    wc_by_id = {r.task.task_id: r for r in handler.wc_results_seen}
+    assert wc_by_id['t-A'].exit_code == 0
+    assert wc_by_id['t-B'].exit_code == 1
+
+
+async def test_runner_replacement_tasks_appear_in_message_group_tasks():
+    """on_error replacement → MessageGroup.tasks sees both original and replacement.
+
+    Production's ``tracker.tasks`` (passed as ``MessageGroup.tasks``)
+    grows as on_error adds replacements. The probe mirrors that so a
+    handler that walks ``group.tasks`` sees the same shape.
+    """
+    seen_tasks: list[ExecutorTask] = []
+
+    class _ReplaceAndRecord(_ReplacementHandler):
+        async def on_message_complete(self, group: MessageGroup) -> CollectResult | None:
+            seen_tasks.extend(group.tasks)
+            return None
+
+    handler = _ReplaceAndRecord()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(max_retries=3),
+    )
+    await runner.run(ProbeInput(value='x', offset=1))
+    # Both the failed original and the two replacements show up.
+    ids = {t.task_id for t in seen_tasks}
+    assert ids == {'t-original', 'r-A', 'r-B'}
+
+
+class _RetryThenReplaceHandler(_HappyPathHandler):
+    """Subprocess always fails; on_error returns RETRY, then replacements on retry."""
+
+    def __init__(self) -> None:
+        super().__init__(task_count=1)
+        self.on_error_calls = 0
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        self.arrange_calls += 1
+        return [
+            _make_failing_precomputed_task(
+                task_id='t-original',
+                offset=messages[0].offset,
+                stderr='first-fail',
+                exit_code=1,
+            ),
+        ]
+
+    async def on_error(
+        self,
+        task: ExecutorTask,
+        error: ExecutorError,
+    ) -> str | list[ExecutorTask]:
+        self.on_error_calls += 1
+        if self.on_error_calls == 1:
+            return ErrorAction.RETRY
+        # Second call (from the retry loop) → return replacements.
+        return [
+            ExecutorTask(
+                task_id=f'r-{self.on_error_calls}',
+                source_offsets=task.source_offsets,
+                precomputed=PrecomputedResult(
+                    stdout='repl',
+                    stderr='',
+                    exit_code=0,
+                    duration_seconds=0.001,
+                ),
+            ),
+        ]
+
+
+async def test_runner_retry_loop_handles_replacement_after_retry():
+    """Retry fails, on_error then returns a replacement list → retry entry replaced."""
+    handler = _RetryThenReplaceHandler()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(max_retries=3),
+    )
+    report = await runner.run(ProbeInput(value='x', offset=1))
+    # Three entries: original (failed), retry (replaced), replacement (done).
+    # Original + retry share task_id, so we inspect by order.
+    assert len(report.tasks) == 3
+    assert report.tasks[0].task_id == 't-original'
+    assert report.tasks[0].status == 'failed'
+    assert report.tasks[1].task_id == 't-original'
+    assert report.tasks[1].status == 'replaced'
+    assert report.tasks[1].retry_of == 't-original'
+    assert report.tasks[2].task_id == 'r-2'
+    assert report.tasks[2].status == 'done'
+    assert report.tasks[2].replacement_for == 't-original'
+
+
+class _RetryThenSkipHandler(_HappyPathHandler):
+    """Subprocess always fails; on_error returns RETRY, then SKIP on retry."""
+
+    def __init__(self) -> None:
+        super().__init__(task_count=1)
+        self.on_error_calls = 0
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        self.arrange_calls += 1
+        return [_make_failing_precomputed_task(task_id='t-skip', offset=messages[0].offset)]
+
+    async def on_error(
+        self,
+        task: ExecutorTask,
+        error: ExecutorError,
+    ) -> str | list[ExecutorTask]:
+        self.on_error_calls += 1
+        if self.on_error_calls == 1:
+            return ErrorAction.RETRY
+        return ErrorAction.SKIP
+
+
+async def test_runner_retry_loop_handles_skip_after_retry():
+    """Retry loop: on_error returns SKIP after the retry → loop exits, entry stays failed."""
+    handler = _RetryThenSkipHandler()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(max_retries=3),
+    )
+    report = await runner.run(ProbeInput(value='x', offset=1))
+    assert handler.on_error_calls == 2  # original + retry
+    assert len(report.tasks) == 2  # original + one retry
+    assert report.tasks[0].status == 'failed'
+    assert report.tasks[1].status == 'failed'
+    assert report.tasks[1].retry_of == 't-skip'
+
+
+class _RetryThenOnErrorRaisesHandler(_HappyPathHandler):
+    """Subprocess fails; on_error RETRY the first time, raises on the retry failure."""
+
+    def __init__(self) -> None:
+        super().__init__(task_count=1)
+        self.on_error_calls = 0
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        self.arrange_calls += 1
+        return [_make_failing_precomputed_task(task_id='t-err', offset=messages[0].offset)]
+
+    async def on_error(
+        self,
+        task: ExecutorTask,
+        error: ExecutorError,
+    ) -> str | list[ExecutorTask]:
+        self.on_error_calls += 1
+        if self.on_error_calls == 1:
+            return ErrorAction.RETRY
+        raise RuntimeError('on_error-blew-up')
+
+
+async def test_runner_retry_loop_captures_on_error_raised_on_retry():
+    """On_error raising inside the retry loop is captured as a ProbeError and stops the loop."""
+    handler = _RetryThenOnErrorRaisesHandler()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(max_retries=3),
+    )
+    report = await runner.run(ProbeInput(value='x', offset=1))
+    # Exactly one ProbeError tagged with on_error:<id>, captured from
+    # the raising on_error call inside the retry loop.
+    raising = [e for e in report.errors if e.stage.startswith('on_error:')]
+    assert len(raising) == 1
+    assert 'on_error-blew-up' in raising[0].message
+
+
+# ---- _build_source_message + _serialize_payload ---------------------------
+
+
+class _InputModel(BaseModel):
+    """Simple BaseModel used as a handler's input_model for deserialize coverage."""
+
+    hello: str
+
+
+class _BaseModelPayloadHandler(_HappyPathHandler):
+    """Overrides deserialize to set msg.payload to a BaseModel — exercises _serialize_payload."""
+
+    def deserialize_message(self, message: SourceMessage) -> None:
+        import json as _json
+
+        data = _json.loads(message.value.decode('utf-8'))
+        message.payload = _InputModel(**data)
+
+
+async def test_runner_serializes_base_model_payload_to_json_dict():
+    """msg.payload as a BaseModel → parsed_payload in the report is a JSON-friendly dict."""
+    handler = _BaseModelPayloadHandler(task_count=0)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+    report = await runner.run(ProbeInput(value='{"hello": "world"}', offset=1))
+    assert report.parsed_payload == {'hello': 'world'}
+
+
+def test_serialize_payload_passes_through_plain_dict():
+    """Plain dict (not BaseModel) passes through unchanged via _serialize_payload."""
+    from drakkar.debug_runner import _serialize_payload
+
+    payload = {'x': 1, 'y': [1, 2, 3]}
+    assert _serialize_payload(payload) is payload
+
+
+def test_build_source_message_defaults_timestamp_to_current_time_ms():
+    """Default timestamp = wall-clock ms (close to time.time() * 1000)."""
+    from drakkar.debug_runner import _build_source_message
+
+    before_ms = int(time.time() * 1000)
+    msg = _build_source_message(ProbeInput(value='x'))
+    after_ms = int(time.time() * 1000) + 1
+    assert before_ms <= msg.timestamp <= after_ms
+
+
+def test_build_source_message_key_none_produces_none_bytes():
+    """key=None → message.key is None (not b'')."""
+    from drakkar.debug_runner import _build_source_message
+
+    msg = _build_source_message(ProbeInput(value='hello'))
+    assert msg.key is None
+
+
+def test_build_source_message_encodes_value_and_key_as_utf8():
+    """value and key are UTF-8 encoded to bytes."""
+    from drakkar.debug_runner import _build_source_message
+
+    msg = _build_source_message(ProbeInput(value='héllo', key='kéy'))
+    assert msg.value == 'héllo'.encode()
+    assert msg.key == 'kéy'.encode()
+
+
+# ---- DebugCacheProxy: ttl kwarg + bytes-value preview ----------------------
+
+
+def test_proxy_set_accepts_ttl_kwarg_without_affecting_log():
+    """``set(..., ttl=60)`` is a suppressed no-op — ttl is only for signature parity.
+
+    The ttl value is not reflected in the call log (we don't store it),
+    but passing it must not raise. Documents the "ttl accepted for
+    signature parity" contract in the proxy's set method.
+    """
+    proxy = _make_proxy(use_cache=False)
+    proxy.set('k', 'v', ttl=60.0)
+    # Proxy accepted ttl without error; call was logged as a suppressed write.
+    assert proxy.calls[-1].op == 'set'
+    assert proxy.calls[-1].outcome == 'suppressed'
+
+
+def test_make_value_preview_handles_bytes():
+    """bytes values show up in the preview via repr() — no UnicodeDecodeError."""
+    preview = _make_value_preview(b'hello')
+    assert preview is not None
+    # repr(bytes) adds the b'' wrapper; assertion is loose (just checks content).
+    assert 'hello' in preview
+
+
+# ---- DebugSinkCollector: non-UTF-8 kafka key ------------------------------
+
+
+async def test_sink_collector_flatten_kafka_key_handles_non_utf8_bytes():
+    """Non-UTF-8 kafka keys decode with ``errors='replace'`` so JSON roundtrip works."""
+    collector = DebugSinkCollector()
+    # 0xff is not a valid UTF-8 lead byte — triggers the errors='replace' path.
+    cr = CollectResult(kafka=[KafkaPayload(sink='s', key=b'\xff\xfe', data=_TinyOutput())])
+    await collector(cr, 0)
+    flat = collector.flatten()
+    # U+FFFD (REPLACEMENT CHARACTER) is what errors='replace' produces.
+    assert flat[0].extras['key'] == '��'
+
+
+# ---- DebugRunner: probe lock serialization --------------------------------
+
+
+class _LockSerializationHandler(_HappyPathHandler):
+    """Handler whose on_task_complete awaits a shared event to prove lock serialization.
+
+    The test starts two probes. The first one's on_task_complete blocks
+    on ``release`` until the test releases it. Meanwhile probe B is
+    launched — it must queue on the probe lock. Completion order then
+    tells us whether the lock actually serialized the two runs.
+    """
+
+    def __init__(self, release_event: asyncio.Event, entered_event: asyncio.Event) -> None:
+        super().__init__(task_count=1)
+        self._release = release_event
+        self._entered = entered_event
+
+    async def on_task_complete(self, result: ExecutorResult) -> CollectResult | None:
+        self.on_task_complete_calls += 1
+        if self.on_task_complete_calls == 1:
+            # First call only — signal the test and wait for release.
+            self._entered.set()
+            await self._release.wait()
+        return None
+
+
+async def test_runner_probe_lock_serializes_overlapping_runs():
+    """Two concurrent ``runner.run`` calls must serialize — neither races on handler.cache.
+
+    Launches two runs in parallel. A blocking event inside the first
+    run's on_task_complete keeps it under the lock; the second run
+    must wait. Completion order proves serialization: the second
+    cannot finish before the first.
+    """
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    handler = _LockSerializationHandler(release_event=release, entered_event=entered)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    completion_order: list[str] = []
+
+    async def _run_one(label: str, offset: int) -> None:
+        await runner.run(ProbeInput(value=label, offset=offset))
+        completion_order.append(label)
+
+    task_a = asyncio.create_task(_run_one('A', 1))
+    # Wait until A is blocked inside its hook (so A has the lock).
+    await entered.wait()
+    # Start B — it must wait on the probe lock.
+    task_b = asyncio.create_task(_run_one('B', 2))
+    # Give B a moment to queue up on the lock.
+    await asyncio.sleep(0.05)
+    # B cannot have finished yet because A is still holding the lock.
+    assert completion_order == []
+    # Release A.
+    release.set()
+    await asyncio.gather(task_a, task_b)
+    # A finished first, proving the lock serialized the two runs.
+    assert completion_order == ['A', 'B']
+
+
+# ---- Cross-probe contamination: partial reports don't leak state ----------
+
+
+async def test_partial_report_for_independent_task_is_not_contaminated():
+    """Two concurrent start_probe calls → each task's partial reflects ONLY its own state.
+
+    Regression test for the "cross-probe contamination" bug: when a
+    probe's wait_for times out while it is still waiting on the probe
+    lock, the partial report must be the EMPTY stub, not some other
+    probe's in-flight state.
+    """
+    handler = _HappyPathHandler(task_count=1)
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+    # Start probe A — it will run to completion on its own.
+    task_a = runner.start_probe(ProbeInput(value='A', offset=1))
+    # Start probe B — it waits on the lock (acquired by A).
+    task_b = runner.start_probe(ProbeInput(value='B', offset=2))
+    # Immediately cancel B BEFORE it acquires the lock to simulate a
+    # wait_for timeout on the endpoint side.
+    task_b.cancel()
+    # Reading B's partial report must reflect B's empty state — NOT any
+    # data from A's in-flight or completed state.
+    b_report = DebugRunner.partial_report_for(task_b)
+    assert b_report.truncated is True
+    assert b_report.input.value == 'B'
+    assert b_report.tasks == []  # B never ran any task
+    # Let A finish cleanly.
+    await task_a
+    # Also verify B actually got cancelled.
+    with contextlib.suppress(asyncio.CancelledError):
+        await task_b
+
+
+# ---- Regression: cache proxy chaining across concurrent probes -------------
+#
+# When probe B starts WHILE probe A is inside the lock, probe B's run-state
+# must NOT capture A's ``DebugCacheProxy`` as its ``real`` backend.
+# Otherwise B's reads would chain through A's proxy and — when A had
+# ``use_cache=False`` — see false misses for keys that live in the real
+# cache. The fix: build the proxy inside ``_run_locked`` (after acquiring
+# the lock) so ``real`` is always the true ``handler.cache``.
+
+
+class _CacheReadingHandler(BaseDrakkarHandler):
+    """Handler whose ``on_task_complete`` reads a specific key from the cache.
+
+    The first probe runs a blocking ``on_task_complete`` that holds the
+    probe lock — during that window, the test launches a second probe
+    (with ``use_cache=True``) and cancels it once A is done. We then
+    verify that probe B actually observed the seeded value on its read.
+    """
+
+    def __init__(self, *, read_key: str, block_event: asyncio.Event | None = None) -> None:
+        self._read_key = read_key
+        self._block_event = block_event
+        self.read_value: Any = '__unset__'
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        msg = messages[0]
+        return [_make_precomputed_task(task_id='t-0', offset=msg.offset)]
+
+    async def on_task_complete(self, result: ExecutorResult) -> CollectResult | None:
+        # Record the value of the seeded key. If the proxy forwarded
+        # correctly to the REAL cache, this reads the seeded value.
+        # If it chained through a prior probe's use_cache=False proxy,
+        # this would be None (a false miss).
+        self.read_value = await self.cache.get(self._read_key)
+        if self._block_event is not None:
+            await self._block_event.wait()
+        return None
+
+    async def on_message_complete(self, group: MessageGroup) -> CollectResult | None:
+        return None
+
+    async def on_window_complete(
+        self,
+        results: list[ExecutorResult],
+        source_messages: list[SourceMessage],
+    ) -> CollectResult | None:
+        return None
+
+
+async def test_concurrent_probes_with_different_use_cache_dont_chain_proxies():
+    """Probe B (use_cache=True) reads the REAL cache even if probe A (use_cache=False) is in flight.
+
+    Regression test for the proxy-chaining bug: when probe B's
+    ``_RunState`` was built while probe A held the lock, probe B's
+    ``DebugCacheProxy`` captured A's proxy as its ``real`` backend. If
+    A had ``use_cache=False``, every read from B (with
+    ``use_cache=True``) would fall through A's proxy and get a false
+    miss for keys that actually live in the real cache.
+
+    The fix constructs the proxy inside ``_run_locked`` (after
+    acquiring the lock), so the ``real`` target is the unchanged
+    ``handler.cache``, not whatever was swapped in by a concurrent
+    probe.
+    """
+    seeded_cache = _fresh_cache()
+    seeded_cache.set('shared-key', 'real-value')
+
+    # Shared handler: attr shared between the two probes. One handler
+    # per probe would be more realistic but the runner swaps
+    # handler.cache at probe start, so the live cache attribute that
+    # matters for this bug is the one on the shared handler.
+    block = asyncio.Event()
+    handler = _CacheReadingHandler(read_key='shared-key', block_event=block)
+    # Attach the seeded real cache to the handler so both probes share it.
+    setattr(handler, 'cache', seeded_cache)  # noqa: B010
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    # Probe A: use_cache=False. While inside on_task_complete, A will
+    # block on ``block`` — this ensures A holds the probe lock during
+    # the window when B's start_probe runs and creates B's _RunState.
+    task_a = runner.start_probe(ProbeInput(value='A', offset=1, use_cache=False))
+
+    # Wait a beat for A to actually enter on_task_complete (holding the lock).
+    # A small sleep is fine — on_task_complete is reached after arrange
+    # + executor.execute on a precomputed task, which is near-instant.
+    for _ in range(50):
+        if handler.read_value != '__unset__':
+            break
+        await asyncio.sleep(0.01)
+    assert handler.read_value is None, 'probe A should have observed miss (use_cache=False)'
+
+    # Now A is inside on_task_complete, holding the lock. Build probe B:
+    # this is when the bug would fire — B's _RunState was historically
+    # built with real=handler.cache at this exact moment, which was A's
+    # proxy (already installed by _run_locked). The fix moves proxy
+    # construction to post-lock-acquire, so B's proxy will target the
+    # true seeded_cache instead.
+    #
+    # To keep the test deterministic we don't actually inspect B's
+    # observed value here — we release A first, wait for B to acquire
+    # the lock and run, then check the captured value.
+    handler.read_value = '__unset__'  # reset before B runs
+    task_b = runner.start_probe(ProbeInput(value='B', offset=2, use_cache=True))
+
+    # Let A finish so B can acquire the lock.
+    block.set()
+    await task_a
+    report_b = await task_b
+
+    # With the fix, B's on_task_complete saw the seeded value through
+    # the REAL cache — NOT None via chained proxies.
+    assert handler.read_value == 'real-value', (
+        f"probe B with use_cache=True must read seeded value 'real-value' via the real cache; "
+        f"got {handler.read_value!r}. If None, the proxy chained through probe A's proxy."
+    )
+    # B's cache_calls log also proves the read was a hit.
+    b_get_calls = [c for c in report_b.cache_calls if c.op == 'get' and c.key == 'shared-key']
+    assert len(b_get_calls) == 1
+    assert b_get_calls[0].outcome == 'hit'
+
+
+# ---- Regression: on_task_complete raises → synthesize failure, drop success --
+
+
+class _TaskSucceedsHookRaisesHandler(_HappyPathHandler):
+    """Executor task succeeds cleanly, but ``on_task_complete`` raises.
+
+    Captures what ``on_message_complete`` actually receives so the test
+    can assert the probe mirrors production's catch-all behaviour —
+    synthesizing a failure ``ExecutorResult`` + ``ExecutorError`` into
+    the window/group rather than forwarding the real success result.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(task_count=1)
+        self.observed_group: MessageGroup | None = None
+
+    async def on_task_complete(self, result: ExecutorResult) -> CollectResult | None:
+        self.on_task_complete_calls += 1
+        raise RuntimeError('hook exploded but task succeeded')
+
+    async def on_message_complete(self, group: MessageGroup) -> CollectResult | None:
+        self.on_message_complete_calls += 1
+        # Snapshot the group so the test can inspect what the hook saw.
+        self.observed_group = group
+        return None
+
+
+async def test_on_message_complete_sees_synthesized_failure_when_on_task_complete_raises():
+    """Task succeeds + on_task_complete raises → synthesized failure flows into errors + window.
+
+    Regression test for the terminal-list divergence. Production's
+    ``PartitionProcessor._execute_and_track`` (drakkar/partition.py:
+    476-495) appends a synthesized ``ExecutorResult(exit_code=-1,
+    stderr=str(e), ...)`` to ``window.results`` and a synthesized
+    ``ExecutorError`` to ``task_error`` (which later lands in
+    ``tracker.errors`` at line 528). It does NOT set ``task_result``
+    on this path, so ``tracker.results`` stays EMPTY (line 525-526 only
+    runs when ``task_result is not None``).
+
+    The probe mirrors that exact split:
+      - ``group.results`` is empty (success-only, no success here).
+      - ``group.errors`` has the synthesized ExecutorError.
+      - ``on_window_complete``'s ``results`` has the synthesized failure
+        ExecutorResult (exit_code=-1).
+    """
+    handler = _TaskSucceedsHookRaisesHandler()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    report = await runner.run(ProbeInput(value='x', offset=1))
+
+    # The on_task_complete error was captured (Task 3's guarantee).
+    tc_errors = [e for e in report.errors if e.stage.startswith('task_complete:')]
+    assert len(tc_errors) == 1
+    assert tc_errors[0].exception_class == 'RuntimeError'
+
+    # on_message_complete ran and observed the hook-raise failure.
+    assert handler.observed_group is not None
+    group = handler.observed_group
+
+    # Production puts the synthesized result on ``window.results`` NOT
+    # ``tracker.results``. So ``MessageGroup.results`` (mirrors
+    # tracker.results) is empty on this path.
+    assert group.results == []
+
+    # MessageGroup.errors has a synthesized ExecutorError for the
+    # failed-via-hook task (production's tracker.errors shape).
+    assert len(group.errors) == 1
+    assert group.errors[0].task.task_id == 't-0'
+    assert 'hook exploded but task succeeded' in (group.errors[0].exception or '')

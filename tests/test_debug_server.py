@@ -2786,6 +2786,33 @@ class TestAuthToken:
             )
             assert resp.status_code != 401
 
+    async def test_probe_requires_token(self, mock_recorder, _probe_mock_app):
+        """/api/debug/probe is sensitive — no auth → 401, with auth → 200.
+
+        Regression for code review phase 1 iteration 3 issue 1: the
+        probe endpoint runs user handlers with a real executor-pool slot
+        and reads the real cache when ``use_cache=True``, so it must be
+        gated by ``auth_token`` like the other sensitive debug
+        endpoints (``/api/debug/merge``, ``/api/debug/databases``,
+        ``/debug/download/{filename}``).
+        """
+        _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        mock_recorder._config = cfg
+        fastapi_app = create_debug_app(cfg, mock_recorder, _probe_mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            # No auth header → 401.
+            resp = await c.post('/api/debug/probe', json={'value': 'x'})
+            assert resp.status_code == 401
+            # Correct bearer token → 200.
+            resp = await c.post(
+                '/api/debug/probe',
+                json={'value': 'x'},
+                headers={'Authorization': 'Bearer secret-123'},
+            )
+            assert resp.status_code == 200
+
 
 # ---------------------------------------------------------------------------
 # Periodic tasks API
@@ -3391,3 +3418,91 @@ async def test_probe_endpoint_timeout_returns_partial_report_with_truncated_true
     # handler.cache was restored to the original NoOpCache — the finally
     # block in DebugRunner.run ran during the cancellation cascade.
     assert handler.cache is original_cache
+
+
+async def test_probe_endpoint_timeout_partial_includes_sink_records_from_completed_hooks(
+    mock_recorder, debug_config, _probe_mock_app, monkeypatch
+):
+    """When timeout fires after on_task_complete produced a sink record, the partial captures it.
+
+    Regression test for the "planned_sink_payloads lost on timeout" bug.
+    Before the ``_RunState`` refactor, the sink-flattening only ran at
+    the very end of ``_run_stages``, so timeout cancellation lost any
+    records captured by completed hooks. The per-run state now
+    flattens on every ``to_report`` call so the partial sees them.
+    """
+    import drakkar.debug_server as debug_server_mod
+    from drakkar.config import ExecutorConfig
+
+    handler = _ProbeTestHandler(task_count=1)
+    _probe_mock_app.handler = handler
+
+    # on_message_complete is the slow hook — it sleeps past the timeout,
+    # but on_task_complete has already fired and produced a kafka record.
+    async def on_message_complete_slow(group):
+        await asyncio.sleep(1.0)
+        return None
+
+    handler.on_message_complete = on_message_complete_slow  # type: ignore[method-assign]
+
+    _probe_mock_app._config = DrakkarConfig(
+        executor=ExecutorConfig(task_timeout_seconds=1, binary_path='/nonexistent'),
+    )
+    monkeypatch.setattr(debug_server_mod, 'PROBE_TIMEOUT_HEADROOM_SECONDS', -1.9)
+
+    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.post('/api/debug/probe', json={'value': 'x'})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body['truncated'] is True
+    # _ProbeTestHandler emits one kafka record in on_task_complete;
+    # that hook completed BEFORE the timeout fired, so its record
+    # must be in the partial report.
+    kafka_records = [r for r in body['planned_sink_payloads'] if r['sink_type'] == 'kafka']
+    assert len(kafka_records) >= 1
+    assert kafka_records[0]['origin_stage'].startswith('task_complete:')
+
+
+async def test_probe_endpoint_empty_value_still_runs(mock_recorder, debug_config, _probe_mock_app):
+    """POST with ``{"value": ""}`` succeeds — empty value is a valid probe input.
+
+    Empty value is useful for probing handlers that short-circuit on
+    ``msg.value == b''`` or key-only messages (Kafka tombstone-style).
+    """
+    _probe_mock_app.handler = _ProbeTestHandler(task_count=0)
+
+    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.post('/api/debug/probe', json={'value': ''})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body['input']['value'] == ''
+
+
+async def test_probe_endpoint_defaults_topic_to_configured_source_topic(mock_recorder, debug_config, _probe_mock_app):
+    """POST with no ``topic`` in body → probe sees ``config.kafka.source_topic``.
+
+    Handlers that key off ``msg.topic`` would see an empty string
+    without this default — the endpoint substitutes the configured
+    source topic so the probe produces a realistic ``SourceMessage``.
+    """
+    from drakkar.config import ExecutorConfig, KafkaConfig
+
+    _probe_mock_app.handler = _ProbeTestHandler(task_count=0)
+    _probe_mock_app._config = DrakkarConfig(
+        executor=ExecutorConfig(binary_path='/nonexistent'),
+        kafka=KafkaConfig(brokers='host:9092', source_topic='configured-input-topic', consumer_group='grp'),
+    )
+
+    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.post('/api/debug/probe', json={'value': 'x'})
+    assert resp.status_code == 200
+    body = resp.json()
+    # The configured source topic appears as the echo, since the request
+    # left topic empty.
+    assert body['input']['topic'] == 'configured-input-topic'

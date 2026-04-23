@@ -47,15 +47,18 @@ class _SinkBreakdownRequest(BaseModel):
 
 # ``/api/debug/probe`` request body — module-scope per the same FastAPI
 # heuristic as the two classes above. Mirrors ``ProbeInput`` from
-# ``drakkar.debug_runner`` so the wire format stays stable even if the
-# internal model gains new optional fields. Converted to ``ProbeInput``
-# inside the endpoint via ``model_dump()``.
+# ``drakkar.debug_runner``. FastAPI requires the body model to be
+# DEFINED in the same module as the endpoint function for its "single
+# pydantic param = body" heuristic to fire; an imported model ends up
+# being treated as a query parameter and surfaces as 422
+# (``feedback/fastapi_body_model_scope``). The two-model layout is
+# ugly but forced on us by FastAPI.
 class _ProbeRequest(BaseModel):
-    value: str
-    key: str | None = None
-    partition: int = 0
-    offset: int = 0
-    topic: str = ''
+    value: str = Field(max_length=10_000_000)
+    key: str | None = Field(default=None, max_length=65_536)
+    partition: int = Field(default=0, ge=0)
+    offset: int = Field(default=0, ge=0)
+    topic: str = Field(default='', max_length=65_536)
     timestamp: int | None = None
     use_cache: bool = False
 
@@ -1542,10 +1545,19 @@ def create_debug_app(
     # Built lazily on first use so tests that don't exercise the probe
     # endpoint don't pay the wiring cost (and so tests can freely swap
     # ``mock_app.handler`` / ``_executor_pool`` before the first call).
-    _probe_runner: list[DebugRunner | None] = [None]
+    # NOTE: The runner is built lazily on first call and then cached for
+    # the life of the app. Tests that swap the handler or executor pool
+    # AFTER the first probe request won't see their changes take effect.
+    # Test fixtures swap these before touching the endpoint, so this is
+    # fine in practice — but callers should be aware.
+    _probe_runner: DebugRunner | None = None
 
     def _get_probe_runner() -> DebugRunner:
-        if _probe_runner[0] is None:
+        # ``nonlocal`` lets this closure mutate the outer binding without
+        # the list-of-one trick. The outer name stays a plain
+        # ``DebugRunner | None`` so ty narrows cleanly after the check.
+        nonlocal _probe_runner
+        if _probe_runner is None:
             # The executor pool is created during ``DrakkarApp.run`` and
             # lives for the whole process; by the time the probe endpoint
             # is reachable it's always non-None. Guard here so ty's
@@ -1553,14 +1565,14 @@ def create_debug_app(
             pool = drakkar_app._executor_pool
             if pool is None:
                 raise HTTPException(status_code=503, detail='executor pool not ready')
-            _probe_runner[0] = DebugRunner(
+            _probe_runner = DebugRunner(
                 handler=drakkar_app.handler,
                 executor_pool=pool,
                 app_config=drakkar_app._config,
             )
-        return _probe_runner[0]
+        return _probe_runner
 
-    @app.post('/api/debug/probe')
+    @app.post('/api/debug/probe', dependencies=[Depends(_require_auth)])
     async def api_debug_probe(req: _ProbeRequest) -> JSONResponse:
         """Run a single-message probe through the live handler pipeline.
 
@@ -1576,30 +1588,38 @@ def create_debug_app(
         state the runner had captured up to the cancellation point.
         """
         runner = _get_probe_runner()
-        # ``_ProbeRequest`` mirrors ``ProbeInput`` by design; model_dump
-        # passes every field through without rename. Kept as two models
-        # so the wire contract is decoupled from the internal pydantic
-        # class used by the runner.
-        probe_input = ProbeInput(**req.model_dump())
+        # Default empty topic to the configured source topic so handlers
+        # that key on ``msg.topic`` see a realistic value. The model
+        # itself accepts an empty topic to support callers that
+        # deliberately want to probe with no topic set.
+        topic = req.topic or drakkar_app._config.kafka.source_topic
+        probe_input = ProbeInput(
+            value=req.value,
+            key=req.key,
+            partition=req.partition,
+            offset=req.offset,
+            topic=topic,
+            timestamp=req.timestamp,
+            use_cache=req.use_cache,
+        )
         # Timeout = 2x the per-task timeout + headroom. ``config`` here is
         # ``DebugConfig``; the executor timeout lives on the full
         # ``DrakkarConfig`` reachable via ``drakkar_app._config``.
         timeout = 2 * drakkar_app._config.executor.task_timeout_seconds + PROBE_TIMEOUT_HEADROOM_SECONDS
-        # Launch as a task so wait_for can cancel it cleanly on timeout.
-        # A bare ``await`` would still honour the timeout, but cancelling
-        # via ``Task.cancel()`` propagates a ``CancelledError`` through
-        # the runner's ``finally`` block, which is what restores
-        # ``handler.cache`` — so the task form is what makes the safety
-        # promise hold under timeout.
-        run_task = asyncio.create_task(runner.run(probe_input))
+        # ``start_probe`` creates an asyncio.Task with the per-run
+        # _RunState attached as an attribute. This makes the partial
+        # report strictly scoped to THIS request — a concurrent probe
+        # whose timeout fires can't accidentally read our in-flight
+        # state, and vice versa. See the runner for details.
+        run_task = runner.start_probe(probe_input)
         try:
             report = await asyncio.wait_for(run_task, timeout=timeout)
         except TimeoutError:
             # The runner's finally block has already restored handler.cache
             # by the time we get here (wait_for cancels run_task and awaits
-            # its completion before re-raising). The partial snapshot
-            # already has truncated=True.
-            report = runner.latest_partial_report()
+            # its completion before re-raising). partial_report_for reads
+            # the state attached to OUR task — not any other probe's.
+            report = runner.partial_report_for(run_task)
         return JSONResponse(report.model_dump(mode='json'))
 
     @app.post('/api/live/sink-breakdown')
