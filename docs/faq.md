@@ -12,12 +12,21 @@ A Python framework for building Kafka → subprocess → multi-sink pipelines. Y
 
 ### What workloads is Drakkar designed for?
 
-I/O-bound to mixed-CPU pipelines where each input message triggers one or more external subprocess calls (shell tools, language-specific binaries, compiled analyzers) and the outputs fan out to several storage/messaging systems. See [Performance recommendations](performance.md#configuration-recommendations) for profile-specific tuning.
+**Streaming CPU-bound work done by external CLI tools or compiled binaries**, with async Python handling the I/O on either side. The shape of a good fit is:
+
+- **Ingest**: messages arrive on Kafka (async I/O).
+- **Prep** (`arrange()`): optional async lookups — cache, small DB queries, feature-flag checks — that build per-task payloads without blocking the loop.
+- **Work**: each task spawns a subprocess running your CPU-heavy binary (ripgrep, a Rust/Go/C++ analyzer, a numerical tool). This is where the CPU goes — outside Python, so the GIL is irrelevant and N subprocesses truly use N cores.
+- **Collect** (`on_task_complete` / `on_message_complete` / `on_window_complete`): async, builds sink records.
+- **Emit**: records fan out in parallel to one or more sinks (async I/O).
+
+The `ExecutorPool` semaphore sits at the center, throttling concurrent subprocesses to `max_executors` so you saturate CPU without oversubscribing it. Backpressure pauses the Kafka consumer when the pipeline is already full. See [Performance recommendations](performance.md#configuration-recommendations) and [Executor System](executor.md).
 
 ### What is Drakkar NOT a good fit for?
 
-- **Tight-loop CPU work** that belongs inside Python itself — the per-task subprocess launch overhead (~10ms) dominates for very short tasks. See [Bottleneck: Subprocess Launch](performance.md#bottleneck-subprocess-launch).
-- **Ultra-low-latency pipelines** (single-digit ms end-to-end) — batching and windowing cost is real.
+- **Pure async-Python workloads with no subprocess stage** — a plain `aiokafka` consumer + async sinks is simpler; Drakkar's subprocess machinery becomes pure overhead.
+- **Very short tasks** where the per-task subprocess launch overhead (~10ms) dominates the actual work. If your task is ≤ 1ms of real work, use [precomputed tasks](handler.md#precomputed-task-results) or in-process logic. See [Bottleneck: Subprocess Launch](performance.md#bottleneck-subprocess-launch).
+- **Ultra-low-latency pipelines** (single-digit ms end-to-end) — windowing and batching cost is real.
 - **Exactly-once transactional streams** — Drakkar is at-least-once with DLQ safety; see the delivery section below.
 
 ### How does Drakkar compare to Celery, Faust, Kafka Streams, Benthos?
@@ -244,7 +253,14 @@ Check the **Executors** tab on `/live` for stuck tasks; their `task_timeout_seco
 
 ### Why is the executor subprocess-based instead of async-native or threaded?
 
-**TBD** — pin down the design rationale. Candidate reasons: language-agnostic handlers (your analyzer can be Rust/Go/C++), OS-enforced isolation (one task's bug can't corrupt the worker), straightforward timeouts (just SIGKILL the subprocess).
+Four reasons, all aligned with the "CPU in external binaries, Python orchestrates I/O" design goal:
+
+1. **Language portability** — the worker binary can be Rust/Go/C++/a CLI tool you don't own; it just reads a JSON payload from stdin and writes results to stdout.
+2. **Real parallelism** — N subprocesses truly use N cores. Python threads would still contend on the GIL for any CPU burst; `asyncio.to_thread` is only useful for blocking I/O.
+3. **OS-level CPU isolation** — one task's bug (segfault, OOM, infinite loop) cannot corrupt the worker process.
+4. **Clean timeouts and cancellation** — the executor just SIGKILLs a runaway subprocess. Cancelling in-process Python threads is notoriously unreliable.
+
+The cost is ~10ms of launch overhead per task ([Bottleneck: Subprocess Launch](performance.md#bottleneck-subprocess-launch)) — a fair trade when your task does 10ms–10s of real CPU work. For sub-millisecond tasks, use [precomputed results](handler.md#precomputed-task-results) to skip the subprocess entirely.
 
 ### Why SQLite for the recorder and cache?
 
