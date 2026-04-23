@@ -465,6 +465,20 @@ the only visual difference.
 All [cache metrics](observability.md#cache) appear on the `/debug`
 metrics viewer alongside the rest of the framework metrics.
 
+### Message Probe tab — cache is read-only
+
+The **Message Probe** tab on `/debug` runs a pasted message through the
+full handler pipeline without touching production state. In this mode
+**all cache writes are silently suppressed** (`set`, `delete`) — the
+probe's `DebugCacheProxy` records every call but never mutates the live
+cache. Reads are **opt-in** via the *Use cache (read-only)* checkbox: when
+enabled, `get` / `peek` / `__contains__` forward to the real cache and
+show accurate hit/miss outcomes in the call log; when disabled, all reads
+return a miss even for keys that exist. Every call (including suppressed
+writes) is captured with `op`, `key`, `scope`, `outcome`, and the
+originating hook stage, so the probe report lets you audit what the
+handler asked of the cache without disturbing its state.
+
 ---
 
 ## Related pages

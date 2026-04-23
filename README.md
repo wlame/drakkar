@@ -307,11 +307,19 @@ Enabled by default at `:8080`. Pages:
 - `/` -- dashboard with partition tiles, pool utilization, event counters
 - `/partitions` -- per-partition stats
 - `/live` -- tabbed live view: Arrange (with filter, progress bars, and a right-side batch-detail sidebar), Executors (timeline), Collect
-- `/debug` -- tabbed tools: Metrics, Periodic Tasks, Message Trace, Cache (when enabled), Databases. Deep-link `#trace/<partition>/<offset>` opens the Trace tab pre-filled.
+- `/debug` -- tabbed tools: Metrics, Periodic Tasks, Message Trace, Cache (when enabled), Databases, Message Probe. Deep-link `#trace/<partition>/<offset>` opens the Trace tab pre-filled.
 - `/history` -- filterable event browser with partition and event type toggles
 - `/task/{task_id}` -- task detail with PID, duration, CLI command, stdout/stderr
 
 Optional: set `kafka.ui_url` and `kafka.ui_cluster_name` in config to render a small Kafka-UI icon next to every `<partition:offset>` link; clicking the icon opens the corresponding message in Kafka-UI (provectus).
+
+### Message Probe
+
+The **Message Probe** tab on `/debug` lets you paste a raw message value and run it end-to-end through the live handler's full pipeline -- `arrange` -> subprocess executor -> `on_task_complete` -> `on_message_complete` -> `on_window_complete` -- without touching any production state. The report shows the parsed `SourceMessage`, every generated task with stdin/stdout/stderr/exit code/duration, each hook's returned `CollectResult`, the sink payloads that **would have been** produced (grouped by sink type), every cache call made during the run, a timeline waterfall, and any exceptions with full tracebacks. Click any task row to open a right-side sidebar with the full scrollable stdin/stdout/stderr (handles 15k+ lines).
+
+**Safety guarantees** (enforced by tests): no sink writes, no offset commits, no event-recorder rows, no cache writes, no peer sync -- zero footprint on the live system. Cache reads are opt-in via the **Use cache (read-only)** checkbox; when enabled, the probe forwards reads to the live cache but still silently suppresses writes. The `handler.cache` swap is always restored in a `finally` block, even if a hook raises.
+
+Paste your message, click Run, and see the full behavior instead of inferring it from flight-recorder rows.
 
 ### Prometheus metrics
 
