@@ -205,6 +205,18 @@ app.run()
 
 Worker name is read from the `WORKER_ID` environment variable by default (configurable via `worker_name_env` in config).
 
+## Security & trust model
+
+Drakkar has an explicit trust model that operators should understand before production deployment. These assumptions are inherent to the framework's architecture and aren't weaknesses per se -- they're the trust boundaries.
+
+1. **Handler binary is fully trusted.** `executor.binary_path` is operator-configured; message bytes flow to the binary's stdin without sanitization. The binary runs with the worker's privileges (plus any env overrides from `ExecutorConfig.env` or per-task `env`).
+2. **Peer workers sharing `db_dir` are fully trusted.** The cache and recorder peer-sync mechanisms have no cryptographic authentication of peer writes. Anyone who can write to the shared directory can inject cache entries or event rows that your workers will read. Treat `db_dir` as a shared-trust boundary.
+3. **The debug UI is an operator tool, not a public surface.** The default `debug.host='127.0.0.1'` is load-bearing for out-of-the-box security. If you set `debug.host='0.0.0.0'` (or any non-loopback address), you MUST set `debug.auth_token` to a 32+ character random value -- Drakkar now fails-at-startup if you don't. Even with auth, the debug UI exposes subprocess stdout/stderr, task env, cache contents, and live event streams; restrict access to operators only.
+4. **Kafka producers are trusted for availability, not correctness.** Drakkar deserializes message payloads via `handler.deserialize_message`; parse errors silently set `msg.payload=None` rather than DLQ-ing the message or raising. A malicious producer cannot execute code in the worker, but can cause handlers to see unexpected `None` payloads unless your handler validates.
+5. **Per-task `env` is visible in the debug UI.** Handler-written values in `task.env` are now redacted by key pattern (matching `*PASSWORD*`/`*SECRET*`/`*TOKEN*`/etc.), but any non-matching key-value pair is visible in the debug UI. For secrets that don't match the default redaction patterns, use `ExecutorConfig.env` (framework-level, redacted in config exports) or pass them via files on disk rather than env.
+
+See the [FAQ](docs/faq.md) for deeper discussion of each assumption and links to the implementation.
+
 ## Handler hooks
 
 | Hook | When | Purpose |
