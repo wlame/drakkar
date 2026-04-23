@@ -2354,6 +2354,27 @@ class TestDebugPage:
         assert resp.status_code == 200
         assert 'worker=test-worker' in resp.text
 
+    async def test_probe_tab_rendered_in_debug_html(self, tmp_path, mock_recorder, mock_app):
+        """``GET /debug`` → HTML includes the Message Probe tab button, panel,
+        the visible header, and the results container id. Keeps the UI work
+        honest without depending on a JS test stack — the endpoint behavior
+        itself is covered by the probe endpoint tests above.
+        """
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/debug')
+        assert resp.status_code == 200
+        html = resp.text
+        # Tab button + panel pair keep the tab switcher working.
+        assert 'data-tab="probe"' in html
+        assert 'data-tab-panel="probe"' in html
+        # Visible header + results container id — anchors for later task
+        # rendering.
+        assert 'Message Probe' in html
+        assert 'probe-result' in html
+
 
 class TestDebugServerClass:
     """Cover DebugServer start/stop (lines 945-977)."""
