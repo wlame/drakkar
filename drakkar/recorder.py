@@ -544,7 +544,11 @@ class EventRecorder:
             'slot': slot,
         }
         if task.env:
-            metadata['env'] = task.env
+            # Sanitize per-task env values before storing in the recorder DB.
+            # The raw task.env stays untouched on the task object (subprocess
+            # launch still needs real values); only the RECORDED copy is
+            # redacted so the debug UI never exposes secrets.
+            metadata['env'] = {k: _sanitize_env_value(k, v) for k, v in task.env.items()}
         if precomputed:
             # Neutral marker: a result was supplied by the handler and no
             # subprocess ran. The framework does not classify the reason

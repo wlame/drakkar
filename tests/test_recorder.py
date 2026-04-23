@@ -178,6 +178,57 @@ async def test_record_task_started(recorder):
     assert events[0]['partition'] == 5
 
 
+async def test_record_task_started_sanitizes_env_secrets(recorder):
+    """Per-task env values matching secret-name patterns are redacted to ***
+    before being stored in the recorder DB (the debug UI surface).
+    Non-secret values pass through unchanged.
+    """
+    import json
+
+    task = make_task('t1')
+    task.env = {
+        'DB_PASSWORD': 'supersecret',
+        'PUBLIC_URL': 'https://api.example.com',
+        'API_TOKEN': 'abc123',
+    }
+    recorder.record_task_started(task, partition=0)
+    await recorder._flush()
+
+    events = await recorder.get_events(event_type='task_started')
+    meta = json.loads(events[0]['metadata'])
+    assert meta['env']['DB_PASSWORD'] == '***'
+    assert meta['env']['API_TOKEN'] == '***'
+    assert meta['env']['PUBLIC_URL'] == 'https://api.example.com'
+
+
+async def test_record_task_started_env_sanitize_does_not_mutate_task(recorder):
+    """The real task.env must stay intact on the task object — the subprocess
+    launch still needs the real secret values; only the recorded copy is redacted.
+    """
+    task = make_task('t1')
+    task.env = {'DB_PASSWORD': 'supersecret', 'PUBLIC_URL': 'https://example.com'}
+    recorder.record_task_started(task, partition=0)
+    await recorder._flush()
+
+    # Task object itself must be unchanged.
+    assert task.env == {'DB_PASSWORD': 'supersecret', 'PUBLIC_URL': 'https://example.com'}
+
+
+async def test_record_task_started_empty_env_no_metadata_key(recorder):
+    """Empty task.env should not create an 'env' key in metadata (matches
+    existing behavior — the write site is guarded by ``if task.env``)."""
+    import json
+
+    task = make_task('t1')
+    # ExecutorTask.env default_factory=dict, so task.env is already {} here.
+    recorder.record_task_started(task, partition=0)
+    await recorder._flush()
+
+    events = await recorder.get_events(event_type='task_started')
+    meta = json.loads(events[0]['metadata'])
+    assert 'env' not in meta
+
+
 async def test_record_task_completed_without_output(recorder):
     result = make_result('t1')
     recorder.record_task_completed(result, partition=2)
