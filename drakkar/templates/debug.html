@@ -1527,6 +1527,13 @@
             use_cache: !!useCacheEl.checked
         };
 
+        // Stash the submitted body on ``window`` so the toolbar's Re-run /
+        // Edit-and-re-run buttons and the post-run chip can reference the
+        // last-submitted input. We use ``window`` (rather than the module-
+        // scope ``_probeLastInput`` declared later in the same script) so
+        // this IIFE's scope can reach it cleanly without hoisting tricks.
+        window._probeLastInput = body;
+
         setBusy(true);
         resultEl.textContent = '';
 
@@ -2661,6 +2668,487 @@ function renderProbeSectionSinks(report) {
     return card.card;
 }
 
+// === Message Probe — Section G: Cache calls ===
+
+function probeCacheOutcomeColor(outcome) {
+    // Colors for the outcome cell: green hit, grey miss, blue suppressed.
+    if (outcome === 'hit') return '#059669';
+    if (outcome === 'miss') return '#6b7280';
+    if (outcome === 'suppressed') return '#1e40af';
+    return '#6b7280';
+}
+
+function probeShortCacheKey(key) {
+    // First 40 chars of a cache key; callers also attach the full key via
+    // the cell's ``title`` attribute so the operator can hover to see it.
+    if (!key) return '';
+    return key.length > 40 ? key.slice(0, 40) + '...' : key;
+}
+
+function renderProbeSectionCacheCalls(report) {
+    // Section G — Cache calls table. Every call made through the
+    // DebugCacheProxy during the probe is listed, in order. Writes are
+    // always ``suppressed`` (the proxy never touches the live cache). The
+    // header summarises counts from ``cache_summary``.
+    var card = probeMakeCard('Cache calls');
+    card.card.id = 'probe-section-cache-calls';
+    var calls = report.cache_calls || [];
+    var summary = report.cache_summary || {};
+
+    var summaryBadge = document.createElement('span');
+    summaryBadge.className = 'px-2 py-0.5 rounded text-xs font-mono';
+    summaryBadge.style.cssText = 'background:#e0f2fe;color:#1e40af;font-weight:600;';
+    var parts = [
+        (summary.calls || 0) + ' call' + ((summary.calls || 0) === 1 ? '' : 's'),
+        (summary.hits || 0) + ' hit' + ((summary.hits || 0) === 1 ? '' : 's'),
+        (summary.misses || 0) + ' miss' + ((summary.misses || 0) === 1 ? '' : 'es'),
+        (summary.writes_suppressed || 0) + ' writes suppressed'
+    ];
+    summaryBadge.textContent = parts.join(' · ');  // middle-dot separator
+    card.head.appendChild(summaryBadge);
+
+    if (calls.length === 0) {
+        var empty = document.createElement('div');
+        empty.className = 'text-xs text-gray-500 italic';
+        empty.textContent = 'No cache calls';
+        card.body.appendChild(empty);
+        return card.card;
+    }
+
+    var table = document.createElement('table');
+    table.className = 'w-full text-sm';
+    var thead = document.createElement('thead');
+    var headTr = document.createElement('tr');
+    headTr.className = 'text-left text-gray-400 text-xs border-b border-cream-200';
+    ['ms from start', 'origin stage', 'op', 'key', 'scope', 'outcome', 'value preview'].forEach(function(c) {
+        var th = document.createElement('th');
+        th.className = 'py-2 px-3';
+        th.textContent = c;
+        headTr.appendChild(th);
+    });
+    thead.appendChild(headTr);
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    calls.forEach(function(call) {
+        var tr = document.createElement('tr');
+        tr.className = 'border-b border-cream-50 hover:bg-cream-50';
+
+        var tdMs = document.createElement('td');
+        tdMs.className = 'py-1.5 px-3 font-mono text-xs text-gray-600';
+        tdMs.textContent = call.ms_since_start == null ? '-' : call.ms_since_start.toFixed(1);
+        tr.appendChild(tdMs);
+
+        var tdOrigin = document.createElement('td');
+        tdOrigin.className = 'py-1.5 px-3 font-mono text-xs text-gray-600';
+        tdOrigin.textContent = call.origin_stage || '-';
+        tr.appendChild(tdOrigin);
+
+        var tdOp = document.createElement('td');
+        tdOp.className = 'py-1.5 px-3 font-mono text-xs';
+        tdOp.textContent = call.op || '-';
+        tr.appendChild(tdOp);
+
+        // Full key exposed via the title attribute so hover reveals it; the
+        // cell itself renders a short form to keep the row compact.
+        var tdKey = document.createElement('td');
+        tdKey.className = 'py-1.5 px-3 font-mono text-xs';
+        tdKey.textContent = probeShortCacheKey(call.key);
+        tdKey.title = call.key || '';
+        tr.appendChild(tdKey);
+
+        var tdScope = document.createElement('td');
+        tdScope.className = 'py-1.5 px-3 font-mono text-xs text-gray-600';
+        tdScope.textContent = call.scope || '-';
+        tr.appendChild(tdScope);
+
+        var tdOutcome = document.createElement('td');
+        tdOutcome.className = 'py-1.5 px-3 font-mono text-xs font-semibold';
+        tdOutcome.style.color = probeCacheOutcomeColor(call.outcome);
+        tdOutcome.textContent = call.outcome || '-';
+        tr.appendChild(tdOutcome);
+
+        var tdPreview = document.createElement('td');
+        tdPreview.className = 'py-1.5 px-3 font-mono text-xs text-gray-600';
+        tdPreview.style.maxWidth = '24rem';
+        tdPreview.style.overflow = 'hidden';
+        tdPreview.style.textOverflow = 'ellipsis';
+        tdPreview.style.whiteSpace = 'nowrap';
+        tdPreview.textContent = call.value_preview == null ? '' : String(call.value_preview);
+        tr.appendChild(tdPreview);
+
+        tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    card.body.appendChild(table);
+    return card.card;
+}
+
+// === Message Probe — Section H: Timeline waterfall ===
+
+function probeTimelineBarColor(kind, status) {
+    // Color palette for the waterfall bars. ``kind`` is the row type;
+    // ``status`` is only consulted for task rows (matches the Tasks table
+    // colored statuses). Defaults keep the UI usable if unexpected values
+    // show up in a partial report.
+    if (kind === 'arrange') return '#3b82f6';
+    if (kind === 'task') {
+        if (status === 'failed') return '#dc2626';
+        if (status === 'replaced') return '#6b7280';
+        // "retried" is inferred via the retry_of field — surfaced as orange.
+        if (status === 'retried') return '#f97316';
+        return '#059669';  // done (default)
+    }
+    if (kind === 'message_complete') return '#8b5cf6';
+    if (kind === 'window_complete') return '#ec4899';
+    return '#6b7280';
+}
+
+function probeBuildTimelineSegments(report) {
+    // Returns an ordered list of {label, kind, duration, status, targetId}
+    // segments. Durations are in seconds. Missing fields are skipped so the
+    // rendering stays faithful to actually-executed stages.
+    var segs = [];
+    var arrange = report.arrange || {};
+    if (arrange.duration_seconds != null) {
+        segs.push({
+            label: 'arrange',
+            kind: 'arrange',
+            duration: arrange.duration_seconds,
+            targetId: 'probe-section-arrange'
+        });
+    }
+    var tasks = report.tasks || [];
+    tasks.forEach(function(t) {
+        // Sum subprocess + on_task_complete so the bar represents the whole
+        // task-level time even for precomputed tasks (where subprocess
+        // duration is 0 but the hook still ran).
+        var d = 0;
+        if (t.duration_seconds != null) d += t.duration_seconds;
+        if (t.on_task_complete_duration != null) d += t.on_task_complete_duration;
+        // retried status is inferred — same rule used by Section C header counts.
+        var status = t.retry_of ? 'retried' : (t.status || 'done');
+        segs.push({
+            label: probeShortTaskId(t.task_id),
+            kind: 'task',
+            duration: d,
+            status: status,
+            taskId: t.task_id || '',
+            targetId: 'probe-section-tasks'
+        });
+    });
+    var mc = report.on_message_complete;
+    if (mc && mc.duration_seconds != null) {
+        segs.push({
+            label: 'on_message_complete',
+            kind: 'message_complete',
+            duration: mc.duration_seconds,
+            targetId: 'probe-section-message-complete'
+        });
+    }
+    var wc = report.on_window_complete;
+    if (wc && wc.duration_seconds != null) {
+        segs.push({
+            label: 'on_window_complete',
+            kind: 'window_complete',
+            duration: wc.duration_seconds,
+            targetId: 'probe-section-window-complete'
+        });
+    }
+    return segs;
+}
+
+function renderProbeSectionTimeline(report) {
+    // Section H — horizontal stacked bars. Each bar's width is proportional
+    // to the stage's duration / total-wallclock. A minimum width keeps very
+    // short bars visible; labels elide inside narrow bars (full text stays
+    // available via the ``title`` tooltip).
+    var card = probeMakeCard('Timeline');
+    card.card.id = 'probe-section-timeline';
+
+    var timing = report.timing || {};
+    var total = timing.total_wallclock;
+    var segs = probeBuildTimelineSegments(report);
+
+    var totalBadge = document.createElement('span');
+    totalBadge.className = 'ml-auto font-mono text-xs text-gray-600';
+    totalBadge.textContent = 'total ' + (total != null ? (total * 1000).toFixed(1) + ' ms' : '-');
+    card.head.appendChild(totalBadge);
+
+    if (segs.length === 0 || !total || total <= 0) {
+        var empty = document.createElement('div');
+        empty.className = 'text-xs text-gray-500 italic';
+        empty.textContent = 'No timing data recorded';
+        card.body.appendChild(empty);
+        return card.card;
+    }
+
+    var barRow = document.createElement('div');
+    barRow.className = 'flex w-full overflow-hidden rounded border border-cream-200';
+    barRow.style.cssText = 'height:32px;background:#faf8f3;';
+
+    segs.forEach(function(seg) {
+        var pct = Math.max(2, (seg.duration / total) * 100);  // 2% floor so tiny bars show
+        var bar = document.createElement('div');
+        bar.className = 'flex items-center justify-center text-white text-xs font-mono cursor-pointer';
+        bar.style.cssText = 'flex:0 0 auto;width:' + pct.toFixed(2) + '%;'
+            + 'background:' + probeTimelineBarColor(seg.kind, seg.status) + ';'
+            + 'border-right:1px solid rgba(0,0,0,0.06);overflow:hidden;white-space:nowrap;padding:0 4px;';
+        bar.title = seg.label + ' — ' + probeDurSec(seg.duration);
+        bar.textContent = seg.label + ' ' + probeDurSec(seg.duration);
+
+        // Click a bar → scroll the related section into view. For tasks
+        // we prefer to scroll the corresponding row so the row highlight
+        // from ``probeMakeSidebarLinkToTask`` kicks in.
+        bar.onclick = (function(s) {
+            return function(ev) {
+                ev.stopPropagation();
+                var target = null;
+                if (s.kind === 'task' && s.taskId) {
+                    target = document.querySelector('tr[data-task-id="' + s.taskId + '"]');
+                }
+                if (!target) target = document.getElementById(s.targetId);
+                if (target && target.scrollIntoView) {
+                    target.scrollIntoView({behavior: 'smooth', block: 'center'});
+                }
+            };
+        })(seg);
+
+        barRow.appendChild(bar);
+    });
+    card.body.appendChild(barRow);
+
+    // Legend row — keeps the color→stage mapping explicit without cluttering
+    // the bar labels. Only entries that actually appear in the timeline are
+    // rendered so a task-only probe doesn't show a window_complete legend.
+    var legend = document.createElement('div');
+    legend.className = 'mt-3 flex flex-wrap gap-3 text-xs text-gray-600';
+    var kindsSeen = {};
+    segs.forEach(function(s) { kindsSeen[s.kind] = true; });
+    var legendEntries = [
+        {kind: 'arrange', label: 'arrange'},
+        {kind: 'task', label: 'task'},
+        {kind: 'message_complete', label: 'on_message_complete'},
+        {kind: 'window_complete', label: 'on_window_complete'}
+    ];
+    legendEntries.forEach(function(e) {
+        if (!kindsSeen[e.kind]) return;
+        var item = document.createElement('span');
+        item.className = 'inline-flex items-center gap-1';
+        var swatch = document.createElement('span');
+        swatch.style.cssText = 'display:inline-block;width:10px;height:10px;border-radius:2px;'
+            + 'background:' + probeTimelineBarColor(e.kind);
+        item.appendChild(swatch);
+        var lbl = document.createElement('span');
+        lbl.textContent = e.label;
+        item.appendChild(lbl);
+        legend.appendChild(item);
+    });
+    card.body.appendChild(legend);
+
+    return card.card;
+}
+
+// === Message Probe — Section I: Errors panel ===
+
+function renderProbeSectionErrors(report) {
+    // Section I — aggregated error list with collapsible tracebacks. Returns
+    // null when ``report.errors`` is empty so ``renderProbeReport`` can skip
+    // the section entirely without rendering an empty card.
+    var errors = report.errors || [];
+    if (errors.length === 0) return null;
+
+    var card = probeMakeCard('Errors');
+    card.card.id = 'probe-section-errors';
+
+    var badge = document.createElement('span');
+    badge.className = 'px-2 py-0.5 rounded text-xs';
+    badge.style.cssText = 'background:#fee2e2;color:#991b1b;font-weight:600;';
+    badge.textContent = errors.length + ' error' + (errors.length === 1 ? '' : 's');
+    card.head.appendChild(badge);
+
+    errors.forEach(function(err) {
+        var entry = document.createElement('div');
+        entry.className = 'mb-3 rounded border border-red-200';
+        entry.style.background = '#fff';
+
+        // Summary row — clicking it toggles the traceback block below.
+        var summary = document.createElement('div');
+        summary.className = 'px-3 py-2 flex items-center gap-2 cursor-pointer hover:bg-red-50';
+
+        var stageSpan = document.createElement('span');
+        stageSpan.className = 'font-mono text-xs text-gray-700';
+        stageSpan.style.minWidth = '11rem';
+        stageSpan.textContent = err.stage || '-';
+        summary.appendChild(stageSpan);
+
+        var classSpan = document.createElement('span');
+        classSpan.className = 'font-mono text-xs font-semibold text-red-700';
+        classSpan.textContent = err.exception_class || 'Error';
+        summary.appendChild(classSpan);
+
+        var msgSpan = document.createElement('span');
+        msgSpan.className = 'text-xs text-red-700';
+        var fullMsg = err.message == null ? '' : String(err.message);
+        msgSpan.textContent = fullMsg.length > 80 ? fullMsg.slice(0, 80) + '...' : fullMsg;
+        msgSpan.title = fullMsg;
+        summary.appendChild(msgSpan);
+
+        var tbLines = err.traceback ? err.traceback.split('\n').length : 0;
+        var tbHint = document.createElement('span');
+        tbHint.className = 'ml-auto text-xs text-gray-500 font-mono';
+        tbHint.textContent = '(' + tbLines + ' traceback line' + (tbLines === 1 ? '' : 's') + ')';
+        summary.appendChild(tbHint);
+        entry.appendChild(summary);
+
+        // Traceback block — scrollable <pre>, textContent only. User-
+        // controlled data (exception messages can include handler input)
+        // must never be injected as innerHTML.
+        var tb = probeMakeScrollablePreBlock('traceback', err.traceback || '', {emptyLabel: '(no traceback)'});
+        tb.style.borderTop = '1px solid #fecaca';
+        tb.style.borderRadius = '0 0 4px 4px';
+        tb.style.display = 'none';
+        entry.appendChild(tb);
+
+        summary.onclick = function(ev) {
+            ev.stopPropagation();
+            tb.style.display = tb.style.display === 'none' ? '' : 'none';
+        };
+
+        card.body.appendChild(entry);
+    });
+    return card.card;
+}
+
+// === Message Probe — Toolbar (sticky top of results) ===
+
+// Module-scope handle on the last submitted probe input so the toolbar
+// buttons (Re-run, Edit & re-run) and the post-run form chip can operate
+// without having to dig the values back out of the DOM.
+var _probeLastInput = null;
+
+function renderProbeToolbar(report) {
+    // Sticky toolbar rendered above all result sections. Offers three
+    // actions: download the full DebugReport as JSON, re-run the last
+    // probe unchanged, and re-expand the input form for edits.
+    var bar = document.createElement('div');
+    bar.id = 'probe-result-toolbar';
+    bar.className = 'sticky top-0 z-10 mb-3 px-3 py-2 flex items-center gap-2 rounded border border-cream-200';
+    bar.style.cssText = 'background:#fffdf7;';
+
+    var dlBtn = document.createElement('button');
+    dlBtn.type = 'button';
+    dlBtn.className = 'px-3 py-1 rounded text-xs border border-cream-300 bg-white hover:bg-cream-100 text-ink-700';
+    dlBtn.textContent = 'Download JSON';
+    dlBtn.onclick = function(ev) {
+        ev.stopPropagation();
+        // Build a timestamped filename (probe-report-YYYYMMDD-HHMMSS.json)
+        // and trigger a browser download via a temporary anchor + Blob URL.
+        var now = new Date();
+        function pad(n) { return n < 10 ? '0' + n : '' + n; }
+        var ts = now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate())
+            + '-' + pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds());
+        var fname = 'probe-report-' + ts + '.json';
+        var body;
+        try { body = JSON.stringify(report, null, 2); }
+        catch (e) { body = String(report); }
+        var blob = new Blob([body], {type: 'application/json'});
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = fname;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function() { URL.revokeObjectURL(url); }, 2000);
+    };
+    bar.appendChild(dlBtn);
+
+    var rerunBtn = document.createElement('button');
+    rerunBtn.type = 'button';
+    rerunBtn.className = 'px-3 py-1 rounded text-xs border border-cream-300 bg-white hover:bg-cream-100 text-ink-700';
+    rerunBtn.textContent = 'Re-run';
+    rerunBtn.onclick = function(ev) {
+        ev.stopPropagation();
+        var runBtn = document.getElementById('probe-run-btn');
+        if (runBtn && !runBtn.disabled) runBtn.click();
+    };
+    bar.appendChild(rerunBtn);
+
+    var editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'px-3 py-1 rounded text-xs border border-cream-300 bg-white hover:bg-cream-100 text-ink-700';
+    editBtn.textContent = 'Edit & re-run';
+    editBtn.onclick = function(ev) {
+        ev.stopPropagation();
+        expandProbeFormFromChip();
+    };
+    bar.appendChild(editBtn);
+
+    return bar;
+}
+
+// === Message Probe — input form chip ===
+
+function collapseProbeFormToChip(lastInput) {
+    // Hides the input form and renders a compact one-line chip summarising
+    // the submitted probe. An Edit link expands the form back. Called from
+    // ``renderProbeReport`` after a successful render.
+    var form = document.getElementById('probe-form-wrap');
+    if (!form) return;
+    form.style.display = 'none';
+
+    var chip = document.getElementById('probe-form-chip');
+    if (!chip) {
+        chip = document.createElement('div');
+        chip.id = 'probe-form-chip';
+        chip.className = 'mb-4 px-3 py-2 flex items-center gap-3 rounded border border-cream-200';
+        chip.style.background = '#fffdf7';
+        form.parentNode.insertBefore(chip, form);
+    }
+    chip.replaceChildren();
+
+    // Summary text built from the last submitted input; falls back to DOM
+    // lookups when the module-level variable wasn't populated (e.g. the
+    // caller didn't store it before invoking this helper).
+    var inp = lastInput || {};
+    var partition = inp.partition != null ? inp.partition : 0;
+    var offset = inp.offset != null ? inp.offset : 0;
+    var topic = inp.topic || '';
+    var key = inp.key == null || inp.key === '' ? '(none)' : inp.key;
+    var useCache = !!inp.use_cache;
+
+    var summary = document.createElement('span');
+    summary.className = 'font-mono text-xs text-ink-700';
+    summary.textContent = 'P' + partition + ':' + offset
+        + '  topic=' + (topic || '(none)')
+        + '  key=' + key
+        + '  (use_cache: ' + (useCache ? 'yes' : 'no') + ')';
+    chip.appendChild(summary);
+
+    var editLink = document.createElement('a');
+    editLink.href = 'javascript:void(0)';
+    editLink.className = 'ml-auto text-xs text-teal-600 hover:underline';
+    editLink.textContent = 'Edit';
+    editLink.onclick = function(ev) {
+        ev.stopPropagation();
+        expandProbeFormFromChip();
+    };
+    chip.appendChild(editLink);
+
+    chip.style.display = '';
+}
+
+function expandProbeFormFromChip() {
+    // Inverse of ``collapseProbeFormToChip`` — hides the chip and restores
+    // the editable form. Does NOT clear existing form values: the user may
+    // want to tweak one field and re-submit.
+    var form = document.getElementById('probe-form-wrap');
+    var chip = document.getElementById('probe-form-chip');
+    if (form) form.style.display = '';
+    if (chip) chip.style.display = 'none';
+}
+
 function renderProbeReport(report) {
     // Renders the DebugReport as a stack of cards:
     //   A. Input & deserialization
@@ -2669,10 +3157,13 @@ function renderProbeReport(report) {
     //   D. on_message_complete
     //   E. on_window_complete
     //   F. Planned sink outputs
-    // Sections G-I (Cache/Timeline/Errors) land in Task 10. A top-level
-    // ``truncated`` banner surfaces partial reports (wall-clock timeouts).
+    //   G. Cache calls
+    //   H. Timeline waterfall
+    //   I. Errors panel (only when errors[] is non-empty)
+    // A sticky toolbar above the sections offers Download JSON / Re-run /
+    // Edit & re-run. After rendering, the input form collapses to a chip.
     var container = document.getElementById('probe-result');
-    container.textContent = '';
+    container.replaceChildren();
 
     if (!report) return;
 
@@ -2684,12 +3175,22 @@ function renderProbeReport(report) {
         container.appendChild(warn);
     }
 
+    container.appendChild(renderProbeToolbar(report));
     container.appendChild(renderProbeSectionInput(report));
     container.appendChild(renderProbeSectionArrange(report));
     container.appendChild(renderProbeSectionTasks(report));
     container.appendChild(renderProbeSectionOnMessageComplete(report));
     container.appendChild(renderProbeSectionOnWindowComplete(report));
     container.appendChild(renderProbeSectionSinks(report));
+    container.appendChild(renderProbeSectionCacheCalls(report));
+    container.appendChild(renderProbeSectionTimeline(report));
+    var errorsCard = renderProbeSectionErrors(report);
+    if (errorsCard) container.appendChild(errorsCard);
+
+    // ``window._probeLastInput`` is populated by the Run-button IIFE just
+    // before each fetch — see the click handler above. Falling back to the
+    // module var keeps renderer tests (which may set it directly) working.
+    collapseProbeFormToChip(window._probeLastInput || _probeLastInput);
 }
 </script>
 {% endblock %}

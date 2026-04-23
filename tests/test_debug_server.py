@@ -2408,6 +2408,20 @@ class TestDebugPage:
         assert 'probe-section-message-complete' in html
         assert 'probe-section-window-complete' in html
         assert 'probe-section-sinks' in html
+        # Task 10: Cache calls / Timeline / Errors sections + the toolbar +
+        # the input-form chip polish. All surfaces are script-injected so a
+        # substring check is enough — the endpoint behavior is covered by
+        # the probe endpoint tests below.
+        assert 'renderProbeSectionCacheCalls' in html
+        assert 'renderProbeSectionTimeline' in html
+        assert 'renderProbeSectionErrors' in html
+        assert 'renderProbeToolbar' in html
+        assert 'probe-section-cache-calls' in html
+        assert 'probe-section-timeline' in html
+        assert 'probe-section-errors' in html
+        assert 'probe-result-toolbar' in html
+        assert 'collapseProbeFormToChip' in html
+        assert 'probe-form-chip' in html
 
 
 class TestDebugServerClass:
