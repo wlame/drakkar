@@ -117,6 +117,18 @@
 
     <!-- Results container (populated by renderProbeReport) -->
     <div id="probe-result"></div>
+
+    <!-- Per-task detail sidebar (hidden by default; slides in from the right
+         when a row in the Tasks table is clicked). Matches the pattern used
+         by the Arrange / Task Results sidebars on /live: fixed position,
+         translate-x-full when closed, translate-x-0 when open. Each tab
+         has its own sidebar so they can coexist without id clashes. -->
+    <div id="probe-task-sidebar"
+         class="fixed right-0 top-0 bottom-0 w-[50rem] max-w-[90vw] bg-white border-l border-cream-300 shadow-2xl z-40 overflow-y-auto translate-x-full transition-transform duration-200"
+         style="background:#fff;"
+         role="dialog" aria-label="Task detail">
+        <div id="probe-task-sidebar-content" class="p-4"></div>
+    </div>
 </div>
 
 {% if is_cache_enabled() %}
@@ -1703,20 +1715,364 @@ function probeMakeStatusCounts(counts) {
     return wrap;
 }
 
-// Currently-selected task from the sidebar (used by Task 8). Declared at
-// module scope so the sidebar implementation in Task 8 can read it without
-// re-wiring the click handler.
+// Currently-selected task from the sidebar. Declared at module scope so
+// helpers (scroll-to-row, the task-detail body builders) can reference it
+// without re-threading the task entry through each call site.
 var probeSelectedTask = null;
 
-function openTaskSidebar(taskEntry) {
-    // Placeholder until Task 8 implements the full sidebar. We still track
-    // the selected task so later wiring sees the last-clicked row.
-    probeSelectedTask = taskEntry;
-    // Log to console for debugging; a full sidebar lands in Task 8.
-    if (typeof console !== 'undefined' && console.log) {
-        console.log('probe task sidebar (Task 8 stub):', taskEntry);
-    }
+// === Task-detail sidebar helpers ===
+
+function probeExitCodeLabel(exitCode) {
+    // Short interpretation for the exit-code line in the sidebar header.
+    // Matches POSIX conventions used elsewhere in the codebase: 0 = ok,
+    // 124 = GNU timeout, negative = signaled (|N| is the signal number —
+    // e.g. -9 is SIGKILL). Anything else is ``error``.
+    if (exitCode == null) return '(none)';
+    if (exitCode === 0) return 'ok';
+    if (exitCode === 124) return 'timeout';
+    if (exitCode < 0) return 'signal (' + exitCode + ')';
+    return 'error';
 }
+
+function probeMakeScrollablePreBlock(title, content, opts) {
+    // Card-style block for long textual fields (stdin/stdout/stderr/result
+    // JSON). Content is always written via ``textContent`` — NEVER innerHTML
+    // — because probe input can contain arbitrary bytes (null chars, ANSI
+    // escapes, etc.) that must not be parsed as HTML. See the XSS notes in
+    // the plan's "Critical" section.
+    opts = opts || {};
+    var wrap = document.createElement('div');
+    wrap.className = 'mb-3 rounded border border-cream-200';
+    wrap.style.background = '#fff';
+
+    var head = document.createElement('div');
+    head.className = 'px-3 py-2 border-b border-cream-200 flex items-center gap-2';
+    head.style.background = '#f5f3ee';
+    var h = document.createElement('h4');
+    h.className = 'font-semibold text-ink-800 text-xs';
+    h.textContent = title;
+    head.appendChild(h);
+
+    var count = document.createElement('span');
+    count.className = 'text-xs text-gray-500 font-mono';
+    var contentStr = content == null ? '' : String(content);
+    count.textContent = '(' + contentStr.length + ' chars)';
+    head.appendChild(count);
+
+    // Copy button — uses navigator.clipboard so the raw bytes (including
+    // control chars) are preserved. Falls back silently on older browsers.
+    if (contentStr.length > 0) {
+        var copyBtn = document.createElement('button');
+        copyBtn.className = 'ml-auto px-2 py-0.5 rounded text-xs border border-cream-300 hover:bg-cream-100 text-ink-700';
+        copyBtn.textContent = 'Copy';
+        copyBtn.onclick = function(ev) {
+            ev.stopPropagation();
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(contentStr).then(function() {
+                    copyBtn.textContent = 'Copied';
+                    setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1200);
+                }).catch(function() {
+                    copyBtn.textContent = 'Failed';
+                    setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1200);
+                });
+            }
+        };
+        head.appendChild(copyBtn);
+    }
+    wrap.appendChild(head);
+
+    if (!contentStr && opts.emptyLabel) {
+        var empty = document.createElement('div');
+        empty.className = 'p-3 text-xs italic text-gray-400';
+        empty.textContent = opts.emptyLabel;
+        wrap.appendChild(empty);
+    } else {
+        var pre = document.createElement('pre');
+        pre.className = 'p-3 overflow-auto whitespace-pre-wrap font-mono text-xs max-h-96';
+        // Default light background; caller can override (e.g. stderr red tint).
+        pre.style.background = opts.bgClass ? '' : '#fafaf7';
+        if (opts.bgClass) pre.classList.add(opts.bgClass);
+        // textContent only — never innerHTML. Preserves raw bytes safely.
+        pre.textContent = contentStr;
+        wrap.appendChild(pre);
+    }
+    return wrap;
+}
+
+function probeMakeSidebarLinkToTask(labelPrefix, targetTaskId) {
+    // Link that scrolls the row with data-task-id=targetTaskId into view.
+    // Used for parent_task_id / retry_of / replacement_for cross-refs.
+    var a = document.createElement('a');
+    a.href = 'javascript:void(0)';
+    a.className = 'text-xs text-teal-600 hover:underline font-mono';
+    a.textContent = labelPrefix + ' ' + probeShortTaskId(targetTaskId);
+    a.title = labelPrefix + ' ' + targetTaskId;
+    a.onclick = function(ev) {
+        ev.stopPropagation();
+        var row = document.querySelector('tr[data-task-id="' + targetTaskId + '"]');
+        if (row && row.scrollIntoView) {
+            row.scrollIntoView({behavior: 'smooth', block: 'center'});
+            // Brief highlight so the eye can find the jumped-to row.
+            var orig = row.style.background;
+            row.style.background = '#fef3c7';
+            setTimeout(function() { row.style.background = orig; }, 1200);
+        }
+    };
+    return a;
+}
+
+function openTaskSidebar(taskEntry) {
+    probeSelectedTask = taskEntry;
+    var panel = document.getElementById('probe-task-sidebar');
+    var content = document.getElementById('probe-task-sidebar-content');
+    if (!panel || !content) return;
+    content.replaceChildren();
+
+    // --- Header row: close button + title + precomputed badge ---
+    var headerRow = document.createElement('div');
+    headerRow.className = 'flex items-center justify-between mb-3 pb-2 border-b border-cream-200';
+
+    var titleWrap = document.createElement('div');
+    titleWrap.className = 'flex items-center gap-2';
+    var title = document.createElement('h3');
+    title.className = 'font-semibold text-ink-800 text-sm font-mono';
+    title.textContent = probeShortTaskId(taskEntry.task_id);
+    title.title = taskEntry.task_id || '';
+    titleWrap.appendChild(title);
+
+    if (taskEntry.precomputed) {
+        var precompBadge = document.createElement('span');
+        precompBadge.className = 'px-2 py-0.5 rounded text-xs';
+        precompBadge.style.cssText = 'background:#d1fae5;color:#065f46;font-weight:600;';
+        precompBadge.textContent = 'precomp';
+        titleWrap.appendChild(precompBadge);
+    }
+
+    // Status badge — colored matching the table.
+    if (taskEntry.status) {
+        var statusBadge = document.createElement('span');
+        statusBadge.className = 'px-2 py-0.5 rounded text-xs font-semibold';
+        statusBadge.style.cssText = 'background:#f5f3ee;color:' + probeStatusColor(taskEntry.status) + ';';
+        statusBadge.textContent = taskEntry.status;
+        titleWrap.appendChild(statusBadge);
+    }
+    headerRow.appendChild(titleWrap);
+
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'text-gray-400 hover:text-ink-800 text-xl leading-none';
+    closeBtn.setAttribute('aria-label', 'Close');
+    // Unicode multiplication sign; textContent avoids any HTML parsing.
+    closeBtn.textContent = '×';
+    closeBtn.onclick = function(ev) { ev.stopPropagation(); closeTaskSidebar(); };
+    headerRow.appendChild(closeBtn);
+    content.appendChild(headerRow);
+
+    // --- Cross-reference links (parent / retry / replacement) ---
+    if (taskEntry.parent_task_id || taskEntry.retry_of || taskEntry.replacement_for) {
+        var linkRow = document.createElement('div');
+        linkRow.className = 'mb-3 flex flex-wrap gap-3';
+        if (taskEntry.parent_task_id) {
+            linkRow.appendChild(probeMakeSidebarLinkToTask('parent:', taskEntry.parent_task_id));
+        }
+        if (taskEntry.retry_of) {
+            linkRow.appendChild(probeMakeSidebarLinkToTask('retry of:', taskEntry.retry_of));
+        }
+        if (taskEntry.replacement_for) {
+            linkRow.appendChild(probeMakeSidebarLinkToTask('replacement for:', taskEntry.replacement_for));
+        }
+        content.appendChild(linkRow);
+    }
+
+    // --- Metadata card (labels, source_offsets, exit code) ---
+    var metaCard = document.createElement('div');
+    metaCard.className = 'mb-3 p-3 rounded border border-cream-200';
+    metaCard.style.background = '#f9f8f5';
+    var metaGrid = document.createElement('div');
+    metaGrid.className = 'grid grid-cols-[8rem_1fr] gap-x-3 gap-y-1 text-xs';
+
+    function metaRow(label, valNode) {
+        var l = document.createElement('div');
+        l.className = 'text-gray-500 uppercase tracking-wide';
+        l.textContent = label;
+        var v = document.createElement('div');
+        v.className = 'font-mono text-ink-800';
+        if (typeof valNode === 'string' || typeof valNode === 'number') {
+            v.textContent = String(valNode);
+        } else if (valNode instanceof Node) {
+            v.appendChild(valNode);
+        }
+        metaGrid.appendChild(l);
+        metaGrid.appendChild(v);
+    }
+
+    // task_id full — copy-friendly.
+    metaRow('task_id', taskEntry.task_id || '-');
+
+    // labels as inline k=v list.
+    var labels = taskEntry.labels || {};
+    var labelKeys = Object.keys(labels);
+    if (labelKeys.length === 0) {
+        var noneLbl = document.createElement('span');
+        noneLbl.style.color = '#9ca3af';
+        noneLbl.textContent = '(none)';
+        metaRow('labels', noneLbl);
+    } else {
+        metaRow('labels', labelKeys.map(function(k) { return k + '=' + labels[k]; }).join(' '));
+    }
+
+    // source_offsets — inline list; partition comes from the probe input
+    // (ProbeTaskEntry doesn't carry a per-task partition).
+    var offsets = taskEntry.source_offsets || [];
+    if (offsets.length === 0) {
+        var noneOff = document.createElement('span');
+        noneOff.style.color = '#9ca3af';
+        noneOff.textContent = '(none)';
+        metaRow('source_offsets', noneOff);
+    } else {
+        var offsetsWrap = document.createElement('span');
+        offsetsWrap.className = 'inline-flex flex-wrap items-center gap-2';
+        offsets.forEach(function(off, i) {
+            if (i > 0) {
+                var sep = document.createElement('span');
+                sep.className = 'text-gray-400';
+                sep.textContent = ',';
+                offsetsWrap.appendChild(sep);
+            }
+            var n = document.createElement('span');
+            n.textContent = String(off);
+            offsetsWrap.appendChild(n);
+        });
+        metaRow('source_offsets', offsetsWrap);
+    }
+
+    // exit code + short interpretation.
+    var exitVal = document.createElement('span');
+    if (taskEntry.exit_code == null) {
+        exitVal.textContent = '(none)';
+        exitVal.style.color = '#9ca3af';
+    } else {
+        exitVal.textContent = String(taskEntry.exit_code) + '  (' + probeExitCodeLabel(taskEntry.exit_code) + ')';
+        exitVal.style.color = taskEntry.exit_code === 0 ? '#059669' : '#dc2626';
+    }
+    metaRow('exit_code', exitVal);
+
+    metaCard.appendChild(metaGrid);
+    content.appendChild(metaCard);
+
+    // --- Duration breakdown card ---
+    var durCard = document.createElement('div');
+    durCard.className = 'mb-3 p-3 rounded border border-cream-200';
+    durCard.style.background = '#f9f8f5';
+    var durHead = document.createElement('div');
+    durHead.className = 'text-xs text-gray-500 uppercase tracking-wide mb-1';
+    durHead.textContent = 'duration';
+    durCard.appendChild(durHead);
+    var durBody = document.createElement('div');
+    durBody.className = 'text-xs font-mono text-ink-800';
+    function durLine(label, sec) {
+        var line = document.createElement('div');
+        line.className = 'flex gap-3';
+        var l = document.createElement('span');
+        l.className = 'text-gray-500';
+        l.style.minWidth = '10rem';
+        l.textContent = label;
+        var v = document.createElement('span');
+        v.textContent = probeDurSec(sec);
+        v.style.color = probeDurColor(sec);
+        line.append(l, v);
+        durBody.appendChild(line);
+    }
+    durLine('subprocess', taskEntry.duration_seconds);
+    durLine('on_task_complete', taskEntry.on_task_complete_duration);
+    durCard.appendChild(durBody);
+    content.appendChild(durCard);
+
+    // --- stdin / stdout / stderr — scrollable pre blocks, raw text only ---
+    content.appendChild(probeMakeScrollablePreBlock('stdin', taskEntry.stdin, {emptyLabel: '(empty)'}));
+    content.appendChild(probeMakeScrollablePreBlock('stdout', taskEntry.stdout, {emptyLabel: '(empty)'}));
+    // stderr gets a red-tinted background when non-empty; when empty we
+    // surface the neutral ``(empty)`` label to keep the layout consistent.
+    var stderrBlock;
+    if (taskEntry.stderr) {
+        stderrBlock = probeMakeScrollablePreBlock('stderr', taskEntry.stderr, {emptyLabel: '(empty)'});
+        // Paint the last child (the <pre>) with the red tint.
+        var pre = stderrBlock.querySelector('pre');
+        if (pre) {
+            pre.style.background = '#fef2f2';
+            pre.style.color = '#991b1b';
+        }
+    } else {
+        stderrBlock = probeMakeScrollablePreBlock('stderr', '', {emptyLabel: '(empty)'});
+    }
+    content.appendChild(stderrBlock);
+
+    // --- subprocess exception (if any) ---
+    if (taskEntry.subprocess_exception) {
+        var excBlock = probeMakeScrollablePreBlock('subprocess exception', taskEntry.subprocess_exception, {});
+        content.appendChild(excBlock);
+    }
+
+    // --- on_task_complete result (pretty JSON) ---
+    var resultJson = '';
+    if (taskEntry.on_task_complete_result != null) {
+        try { resultJson = JSON.stringify(taskEntry.on_task_complete_result, null, 2); }
+        catch (e) { resultJson = String(taskEntry.on_task_complete_result); }
+    }
+    content.appendChild(probeMakeScrollablePreBlock('on_task_complete result', resultJson, {emptyLabel: '(no result)'}));
+
+    // --- on_task_complete error (red banner with traceback) ---
+    if (taskEntry.on_task_complete_error) {
+        var errBanner = document.createElement('div');
+        errBanner.className = 'mb-3 p-3 rounded border border-red-300 text-xs text-red-700';
+        errBanner.style.background = '#fef2f2';
+        var errTitle = document.createElement('div');
+        errTitle.className = 'font-semibold mb-2';
+        errTitle.textContent = 'on_task_complete raised';
+        errBanner.appendChild(errTitle);
+        var errPre = document.createElement('pre');
+        errPre.className = 'text-xs font-mono whitespace-pre-wrap';
+        errPre.style.cssText = 'max-height:240px;overflow-y:auto;background:#fff;padding:8px;border-radius:4px;color:#7f1d1d;';
+        errPre.textContent = taskEntry.on_task_complete_error;
+        errBanner.appendChild(errPre);
+        content.appendChild(errBanner);
+    }
+
+    // Slide panel into view.
+    panel.classList.remove('translate-x-full');
+    panel.classList.add('translate-x-0');
+}
+
+function closeTaskSidebar() {
+    probeSelectedTask = null;
+    var panel = document.getElementById('probe-task-sidebar');
+    if (!panel) return;
+    panel.classList.add('translate-x-full');
+    panel.classList.remove('translate-x-0');
+}
+
+// Click-outside-to-close. We only react when the click lands inside the
+// probe tab panel but outside the sidebar itself — clicks elsewhere on the
+// page (e.g. switching tabs) don't immediately close the sidebar, matching
+// the Arrange sidebar pattern in live.html.
+document.addEventListener('click', function(ev) {
+    var panel = document.getElementById('probe-task-sidebar');
+    if (!panel) return;
+    if (panel.classList.contains('translate-x-full')) return;  // already closed
+    if (panel.contains(ev.target)) return;  // click inside sidebar
+    var probePanel = document.querySelector('[data-tab-panel="probe"]');
+    if (!probePanel || !probePanel.contains(ev.target)) return;  // outside tab scope
+    closeTaskSidebar();
+});
+
+// ESC closes the sidebar. The row onclick's stopPropagation covers the
+// open path; keydown runs at the document level so it works regardless of
+// focus (the sidebar is a dialog, not an input).
+document.addEventListener('keydown', function(ev) {
+    if (ev.key !== 'Escape') return;
+    var panel = document.getElementById('probe-task-sidebar');
+    if (!panel) return;
+    if (!panel.classList.contains('translate-x-full')) closeTaskSidebar();
+});
 
 // === Message Probe — Section A: Input & deserialization ===
 function renderProbeSectionInput(report) {
@@ -1863,11 +2219,13 @@ function renderProbeSectionTasks(report) {
     tasks.forEach(function(t, idx) {
         var tr = document.createElement('tr');
         tr.className = 'border-b border-cream-50 hover:bg-cream-50 cursor-pointer';
+        // data-task-id lets the sidebar's parent/retry/replacement links
+        // scroll the corresponding row back into view via querySelector.
+        if (t.task_id) tr.setAttribute('data-task-id', t.task_id);
         (function(entry) {
-            // ev.stopPropagation() prevents a document-level click listener
-            // (added later for the sidebar close-on-outside pattern) from
-            // tearing down the click target mid-rebuild — see
-            // feedback/dom_orphaned_target.
+            // ev.stopPropagation() prevents the document-level click listener
+            // (used by the sidebar's close-on-outside pattern) from closing
+            // the freshly opened sidebar — see feedback/dom_orphaned_target.
             tr.onclick = function(ev) { ev.stopPropagation(); openTaskSidebar(entry); };
         })(t);
 

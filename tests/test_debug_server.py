@@ -2388,6 +2388,16 @@ class TestDebugPage:
         assert 'probe-section-input' in html
         assert 'probe-section-arrange' in html
         assert 'probe-section-tasks' in html
+        # Task 8: the right-side task-detail sidebar and its helpers.
+        # The sidebar container is rendered once in the probe tab panel.
+        assert 'id="probe-task-sidebar"' in html
+        # openTaskSidebar is the real (non-stub) implementation — its name
+        # is referenced both by the row onclick and by the scroll-to-row
+        # helper.
+        assert 'openTaskSidebar' in html
+        # ESC-close marker: a document-level keydown listener that dismisses
+        # the sidebar. The function name is the simplest stable marker.
+        assert 'closeTaskSidebar' in html
 
 
 class TestDebugServerClass:
