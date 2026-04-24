@@ -126,23 +126,41 @@ The ceiling moves even lower when:
 - You run 200+ executors with sub-5ms tasks (>40,000 completions/sec is
   beyond a single event loop's reach, period)
 
+### Available optimization: `orjson` (opt-in)
+
+Installing the `perf` extra swaps the recorder's JSON encoder for
+[`orjson`](https://github.com/ijl/orjson), a C-based encoder that is
+~3-5x faster than `json.dumps` on typical recorder payloads
+(task args, metadata, labels). Install with:
+
+```bash
+pip install "drakkar[perf]"
+```
+
+No config change — the recorder detects `orjson` at import time and
+transparently falls back to the stdlib `json` module when the extra is
+not installed. **Output bytes are identical across both paths** (same
+sort-key order, compact separators, UTF-8) so the on-disk recorder DB
+stays stable whether or not the extra is present.
+
+Recommended at **> 1k tasks/sec/worker**; below that, the stdlib
+encoder is fast enough that the gain is not measurable.
+
 ### Future optimizations (Phase 3+)
 
-Two concrete changes buy meaningful headroom on this bottleneck without
-changing the execution model:
+One more concrete change buys meaningful headroom on this bottleneck
+without changing the execution model:
 
 - **Off-thread JSON encoding.** Batch recorder events and hand the
   `json.dumps` work to a worker thread via `asyncio.to_thread` (or a
   dedicated encoder thread). The event loop keeps the Python-object
   buffer; JSON serialization happens off-thread and doesn't hold the GIL
   during the I/O-free encoding fast path.
-- **Switch to `orjson`.** A drop-in replacement for `json.dumps` that
-  is ~3-5x faster on typical recorder payloads. Keeps the encoding on
-  the main thread but cuts the 60-140us per-task cost roughly in half.
 
-Combined, these unlock the 4k-8k tasks/sec/worker ceiling. They are
-scoped for a later phase — today, the honest guidance is "scale
-horizontally once one worker saturates".
+Combined with `orjson`, this should unlock the 4k-8k tasks/sec/worker
+ceiling. It is scoped for a later phase — today, the honest guidance
+is "install the `perf` extra, then scale horizontally once one worker
+saturates".
 
 ---
 

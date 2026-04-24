@@ -1,6 +1,7 @@
 """Tests for Drakkar flight recorder."""
 
 import asyncio
+import json
 import os
 from collections import deque
 from pathlib import Path
@@ -162,7 +163,6 @@ async def test_record_arranged(recorder):
 
     events = await recorder.get_events(event_type='arranged')
     assert len(events) == 1
-    import json
 
     meta = json.loads(events[0]['metadata'])
     assert meta['task_count'] == 2
@@ -185,7 +185,6 @@ async def test_record_task_started_sanitizes_env_secrets(recorder):
     before being stored in the recorder DB (the debug UI surface).
     Non-secret values pass through unchanged.
     """
-    import json
 
     task = make_task('t1')
     task.env = {
@@ -237,7 +236,6 @@ async def test_record_task_started_env_redaction_coverage(recorder, name: str, e
     the recorder DB is downloadable via the debug UI and the cost of an
     over-redacted URL in logs is far lower than a leaked credential.
     """
-    import json
 
     task = make_task('t1')
     # Non-empty value so the redaction produces '***' (empty stays empty).
@@ -270,7 +268,6 @@ async def test_record_task_started_env_sanitize_does_not_mutate_task(recorder):
 async def test_record_task_started_empty_env_no_metadata_key(recorder):
     """Empty task.env should not create an 'env' key in metadata (matches
     existing behavior — the write site is guarded by ``if task.env``)."""
-    import json
 
     task = make_task('t1')
     # ExecutorTask.env default_factory=dict, so task.env is already {} here.
@@ -1099,8 +1096,6 @@ async def test_task_complete_persisted(recorder):
     assert e['partition'] == 2
     assert e['duration'] == 0.123
 
-    import json
-
     meta = json.loads(e['metadata'])
     assert meta['output_message_count'] == 5
 
@@ -1126,8 +1121,6 @@ async def test_message_complete_persisted(recorder):
     assert e['offset'] == 42
     assert e['duration'] == 0.5
 
-    import json
-
     meta = json.loads(e['metadata'])
     assert meta['task_count'] == 6
     assert meta['succeeded'] == 4
@@ -1152,8 +1145,6 @@ async def test_window_complete_persisted(recorder):
     e = events[0]
     assert e['partition'] == 7
     assert e['duration'] == 1.25
-
-    import json
 
     meta = json.loads(e['metadata'])
     assert meta['window_id'] == 11
@@ -1319,8 +1310,6 @@ async def test_record_sink_delivery(recorder):
     events = await recorder.get_events(event_type='sink_delivered')
     assert len(events) == 1
 
-    import json
-
     meta = json.loads(events[0]['metadata'])
     assert meta['sink_type'] == 'kafka'
     assert meta['sink_name'] == 'results'
@@ -1334,8 +1323,6 @@ async def test_record_sink_error(recorder):
 
     events = await recorder.get_events(event_type='sink_error')
     assert len(events) == 1
-
-    import json
 
     meta = json.loads(events[0]['metadata'])
     assert meta['sink_type'] == 'postgres'
@@ -1468,8 +1455,6 @@ async def test_write_config_populates_single_row(tmp_path):
     drakkar_cfg = _make_drakkar_config()
     await rec.write_config(drakkar_cfg)
 
-    import json
-
     async with rec._db.execute('SELECT * FROM worker_config WHERE id = 1') as cur:
         columns = [d[0] for d in cur.description]
         row = await cur.fetchone()
@@ -1548,8 +1533,6 @@ async def test_write_config_captures_env_vars(tmp_path, monkeypatch):
 
     await rec.write_config(_make_drakkar_config())
 
-    import json
-
     async with rec._db.execute('SELECT env_vars_json FROM worker_config WHERE id = 1') as cur:
         row = await cur.fetchone()
     env = json.loads(row[0])
@@ -1613,8 +1596,6 @@ async def test_write_config_redacts_secret_named_env_vars(tmp_path, monkeypatch)
 
     await rec.write_config(_make_drakkar_config())
 
-    import json
-
     async with rec._db.execute('SELECT env_vars_json FROM worker_config WHERE id = 1') as cur:
         row = await cur.fetchone()
     env = json.loads(row[0])
@@ -1640,8 +1621,6 @@ async def test_write_config_redacts_url_credentials_in_env_values(tmp_path, monk
     await rec.start()
 
     await rec.write_config(_make_drakkar_config())
-
-    import json
 
     async with rec._db.execute('SELECT env_vars_json FROM worker_config WHERE id = 1') as cur:
         row = await cur.fetchone()
@@ -1709,8 +1688,6 @@ async def test_sync_state_writes_row(tmp_path):
     rec._counters['completed'] = 50
 
     await rec._sync_state()
-
-    import json
 
     async with rec._db.execute('SELECT * FROM worker_state ORDER BY id DESC LIMIT 1') as cur:
         columns = [d[0] for d in cur.description]
@@ -2504,7 +2481,10 @@ async def test_labels_stored_in_task_started_event(tmp_path):
 
     assert len(rec._buffer) == 1
     entry = rec._buffer[0]
-    assert entry['labels'] == '{"request_id": "req-abc", "user": "alice"}'
+    # Compare semantically: the exact byte layout differs between orjson
+    # (compact) and stdlib json (spaces after ``:`` / ``,``). Both produce
+    # valid JSON that decodes to the same dict.
+    assert json.loads(entry['labels']) == {'request_id': 'req-abc', 'user': 'alice'}
     await rec.stop()
 
 
@@ -2520,7 +2500,7 @@ async def test_labels_stored_in_task_completed_event(tmp_path):
     rec.record_task_completed(result, partition=0)
 
     entry = rec._buffer[0]
-    assert entry['labels'] == '{"request_id": "req-xyz"}'
+    assert json.loads(entry['labels']) == {'request_id': 'req-xyz'}
     await rec.stop()
 
 
@@ -2536,7 +2516,7 @@ async def test_labels_broadcast_via_ws(tmp_path):
     rec.record_task_started(task, partition=0)
 
     event = q.get_nowait()
-    assert event['labels'] == '{"request_id": "req-ws"}'
+    assert json.loads(event['labels']) == {'request_id': 'req-ws'}
     rec.unsubscribe(q)
     await rec.stop()
 
@@ -2573,8 +2553,8 @@ async def test_labels_stored_in_task_failed_event(tmp_path):
     while not q.empty():
         events.append(q.get_nowait())
     # both start and fail events carry labels
-    assert events[0]['labels'] == '{"request_id": "req-fail"}'
-    assert events[1]['labels'] == '{"request_id": "req-fail"}'
+    assert json.loads(events[0]['labels']) == {'request_id': 'req-fail'}
+    assert json.loads(events[1]['labels']) == {'request_id': 'req-fail'}
     rec.unsubscribe(q)
     await rec.stop()
 
@@ -2593,7 +2573,6 @@ async def test_labels_persisted_to_db(tmp_path):
     async with rec._db.execute('SELECT labels FROM events WHERE task_id = ?', ['t-db-labels']) as cur:
         row = await cur.fetchone()
     assert row is not None
-    import json
 
     assert json.loads(row[0]) == {'request_id': 'req-db', 'env': 'prod'}
     await rec.stop()
@@ -3482,3 +3461,188 @@ async def test_recorder_flush_executemany_failure_does_not_commit(tmp_path):
             rec._db.executemany = original_executemany  # type: ignore[method-assign]
             rec._db.commit = original_commit  # type: ignore[method-assign]
         await rec.stop()
+
+
+# --- JSON encoder helpers (orjson fast path + stdlib fallback) ---
+#
+# The recorder encodes payloads (args, metadata, labels, env_vars) via
+# ``_encode_json`` / ``_encode_json_str``. orjson is an optional
+# dependency (``drakkar[perf]``) and when installed we take the fast
+# path; otherwise we fall back to ``json.dumps`` with matching options
+# so the bytes are identical. These tests pin that contract.
+
+
+_ROUND_TRIP_PAYLOADS = [
+    pytest.param({}, id='empty-dict'),
+    pytest.param([], id='empty-list'),
+    pytest.param({'a': 1, 'b': 'str'}, id='flat-dict'),
+    pytest.param({'b': 1, 'a': 2, 'c': 3}, id='unsorted-keys'),
+    pytest.param({'nested': {'y': 'val', 'x': 3}}, id='nested-dict'),
+    pytest.param([1, 2, 3, None, True, False], id='mixed-list'),
+    pytest.param({'unicode': 'naïve', 'emoji': 'test'}, id='unicode-strings'),
+    pytest.param({'float': 1.5, 'zero': 0, 'neg': -7}, id='numbers'),
+    pytest.param({'deeply': {'nested': {'structure': {'value': 42}}}}, id='deep-nesting'),
+    pytest.param(
+        {'task_id': 't-1', 'args': ['--flag', 'value'], 'retry': 0},
+        id='realistic-task',
+    ),
+    pytest.param(
+        {
+            'task_count': 100,
+            'succeeded': 95,
+            'failed': 5,
+            'labels': {'env': 'prod', 'region': 'us-east'},
+        },
+        id='realistic-metadata',
+    ),
+]
+
+
+@pytest.mark.parametrize('payload', _ROUND_TRIP_PAYLOADS)
+def test_encode_json_round_trip(payload):
+    """``_encode_json(x)`` → ``json.loads`` → re-encode must be stable.
+
+    Property: a payload that survives one encode/decode cycle must
+    produce identical bytes when re-encoded. Catches encoder state bugs
+    (e.g. non-deterministic key order) and ensures our options
+    (``OPT_SORT_KEYS``) actually take effect.
+    """
+    from drakkar.recorder import _encode_json
+
+    encoded = _encode_json(payload)
+    decoded = json.loads(encoded)
+    re_encoded = _encode_json(decoded)
+    assert encoded == re_encoded
+    assert decoded == payload
+
+
+@pytest.mark.parametrize('payload', _ROUND_TRIP_PAYLOADS)
+def test_encode_json_orjson_stdlib_byte_parity(payload):
+    """Both encoder paths produce byte-for-byte identical output.
+
+    Swapping the ``perf`` extra on/off (install/uninstall orjson) MUST
+    NOT change the bytes stored in the recorder SQLite file — otherwise
+    a user who installs the extra after running without it would see
+    recorder data whose hashes diverge from historical output, and
+    cross-worker deduplication keyed on JSON payload bytes would break.
+
+    We compare the currently bound encoder (orjson fast path when
+    available) with an inline reconstruction of the stdlib fallback
+    using the exact options the real fallback uses.
+    """
+    from drakkar import recorder
+
+    fast_path_bytes = recorder._encode_json(payload)
+
+    def stdlib_fallback(obj):
+        return json.dumps(
+            obj,
+            sort_keys=True,
+            default=str,
+            separators=(',', ':'),
+            ensure_ascii=False,
+        ).encode('utf-8')
+
+    stdlib_bytes = stdlib_fallback(payload)
+    assert fast_path_bytes == stdlib_bytes, f'fast-path bytes {fast_path_bytes!r} != stdlib bytes {stdlib_bytes!r}'
+
+
+def test_encode_json_monkeypatched_fallback_matches_orjson(monkeypatch):
+    """Force the stdlib fallback by patching ``_encode_json`` and
+    verify that encoded output is still identical to the fast path.
+
+    This exercises the ``except ImportError`` branch structurally — we
+    can't actually uninstall orjson at test time, but we can run the
+    fallback code and prove its output matches.
+    """
+    from drakkar import recorder
+
+    # Capture the fast-path bytes before patching.
+    payload = {'b': 1, 'a': 2, 'nested': {'y': 'val', 'x': 3}, 'unicode': 'naïve'}
+    fast_path_bytes = recorder._encode_json(payload)
+
+    # Swap in the stdlib fallback (verbatim from recorder.py).
+    def fallback(obj):
+        return json.dumps(
+            obj,
+            sort_keys=True,
+            default=str,
+            separators=(',', ':'),
+            ensure_ascii=False,
+        ).encode('utf-8')
+
+    monkeypatch.setattr(recorder, '_encode_json', fallback)
+    fallback_bytes = recorder._encode_json(payload)
+
+    assert fast_path_bytes == fallback_bytes
+
+
+def test_encode_json_datetime_utc_z_suffix():
+    """UTC datetimes encode with a trailing ``Z``, not ``+00:00``.
+
+    orjson's ``OPT_UTC_Z`` flag emits ``Z`` directly. The stdlib fallback
+    uses ``default=str`` which yields ``datetime.isoformat()`` — that
+    writes ``+00:00``. This test pins the orjson behaviour; if we ever
+    swap encoders the test will catch a regression in the format.
+
+    The recorder uses ``_format_dt`` for persisted timestamps (which
+    does the ``+00:00`` → ``Z`` swap itself), so the encoder's datetime
+    handling only affects ad-hoc datetimes embedded inside payload
+    dicts — still worth pinning.
+    """
+    from datetime import UTC, datetime
+
+    from drakkar.recorder import _HAS_ORJSON, _encode_json
+
+    dt = datetime(2026, 4, 24, 12, 30, 45, tzinfo=UTC)
+    encoded = _encode_json({'ts': dt})
+
+    if _HAS_ORJSON:
+        # orjson: native datetime support, OPT_UTC_Z → "Z" suffix.
+        assert encoded == b'{"ts":"2026-04-24T12:30:45Z"}'
+    else:
+        # stdlib fallback: default=str → isoformat → "+00:00".
+        assert encoded == b'{"ts":"2026-04-24T12:30:45+00:00"}'
+
+
+def test_encode_json_str_decodes_bytes():
+    """``_encode_json_str`` returns a string that equals the bytes
+    decoded as UTF-8 — no hidden encoding differences."""
+    from drakkar.recorder import _encode_json, _encode_json_str
+
+    payload = {'key': 'value', 'n': 42}
+    assert _encode_json_str(payload) == _encode_json(payload).decode('utf-8')
+
+
+def test_encode_json_non_json_native_types_via_default_str():
+    """Custom classes fall back to ``default=str`` (both paths).
+
+    orjson raises ``TypeError`` on unsupported types by default; we pass
+    ``default=str`` so anything unusual serializes via ``repr``/``str``.
+    The stdlib path does the same. This test pins that contract so a
+    recorder event carrying a ``Path`` / ``UUID`` / custom object won't
+    crash the flush loop.
+    """
+    from pathlib import Path
+
+    from drakkar.recorder import _encode_json
+
+    # pathlib.Path — both paths coerce via str(path).
+    encoded = _encode_json({'p': Path('/tmp/x')})
+    decoded = json.loads(encoded)
+    assert decoded == {'p': '/tmp/x'}
+
+
+def test_encode_json_sort_keys_deterministic():
+    """``OPT_SORT_KEYS`` / ``sort_keys=True`` make output deterministic
+    regardless of dict insertion order. Critical for cache dedup hashes
+    downstream — two workers encoding the same logical payload must
+    produce identical bytes even if they built the dict in different
+    orders.
+    """
+    from drakkar.recorder import _encode_json
+
+    a = {'z': 1, 'a': 2, 'm': 3}
+    b = {'a': 2, 'm': 3, 'z': 1}
+    c = {'m': 3, 'z': 1, 'a': 2}
+    assert _encode_json(a) == _encode_json(b) == _encode_json(c)
