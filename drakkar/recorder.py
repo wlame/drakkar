@@ -25,7 +25,9 @@ from drakkar.config import DebugConfig
 from drakkar.metrics import (
     recorder_buffer_size,
     recorder_dropped_events,
+    recorder_flush_batches_dropped,
     recorder_flush_duration,
+    recorder_flush_retries,
 )
 from drakkar.models import (
     ExecutorError,
@@ -290,6 +292,15 @@ class EventRecorder:
         # bound to whichever loop first invokes ``_flush`` — on the main
         # loop for production flows — and is cheap: a plain asyncio.Lock.
         self._flush_lock = asyncio.Lock()
+        # Consecutive OperationalError count for the CURRENTLY re-queued
+        # batch. Incremented on each failed flush; reset on any successful
+        # flush OR when a batch is dropped after exceeding
+        # ``max_flush_retries``. The counter is instance-level (not per
+        # batch) because we re-queue the failed rows at the FRONT of the
+        # buffer — the very next flush picks them up again, so a single
+        # counter suffices. New rows appended while we're in a retry loop
+        # simply ride along with the retried batch on the next flush.
+        self._flush_failures: int = 0
 
     @property
     def db_path(self) -> str:
@@ -1402,7 +1413,14 @@ class EventRecorder:
                 # buffer length is what the gauge reports, not DB row count.
                 recorder_buffer_size.set(0)
                 return
-            batch = []
+            # Take a LOCAL snapshot of the rows to flush BEFORE the DB
+            # write. If the write fails with OperationalError we re-queue
+            # this exact list at the FRONT of the buffer so ordering is
+            # preserved and no events are lost. Using ``list(...)`` freezes
+            # the view — a concurrent ``_record`` append between here and
+            # the write would land at the END of the deque (because we
+            # drain via ``popleft`` below) and is unaffected by the snapshot.
+            batch: list[dict] = []
             while self._buffer:
                 batch.append(self._buffer.popleft())
             columns = [
@@ -1431,8 +1449,66 @@ class EventRecorder:
             # surfaces disk-I/O latency tail so operators can alert on p99
             # regressions before the buffer backs up enough to drop events.
             flush_start = time.monotonic()
-            await db.executemany(query, rows)
-            await db.commit()
+            try:
+                await db.executemany(query, rows)
+                await db.commit()
+            except aiosqlite.OperationalError as exc:
+                # Transient DB errors (``database is locked``, ``disk I/O
+                # error``, ENOSPC, WAL corruption, etc.) should not cost us
+                # the batch. Re-queue the snapshot at the FRONT of the
+                # buffer and let the next flush tick retry. ``extendleft``
+                # reverses its iterable, so we pre-reverse ``batch`` to
+                # preserve the original FIFO ordering within the re-queued
+                # rows. Any rows that a concurrent ``_record`` appended
+                # while we were awaiting stay at the back — correct, since
+                # they are strictly newer than the retried batch.
+                #
+                # Rotation edge case: if ``_rotate`` ran BETWEEN a failed
+                # flush and the retry attempt, the re-queued rows end up
+                # written to the NEW DB. For a flight recorder this is
+                # acceptable — the rows' ``ts`` field records when they
+                # were observed, so their wall-clock position is preserved;
+                # only the file-level window association shifts. The
+                # alternative (dropping rows on rotation) would be
+                # strictly worse — silent data loss with no metric tick.
+                self._flush_failures += 1
+                recorder_flush_retries.inc()
+                if self._flush_failures >= self._config.max_flush_retries:
+                    # Give up on this batch: drop it, reset the counter so
+                    # the next batch starts from a clean slate, and tick
+                    # the drop metric. Without the reset, a transient
+                    # outage that eventually recovers would leave the
+                    # counter at N and the FIRST post-recovery failure
+                    # would immediately trip the drop path again.
+                    recorder_flush_batches_dropped.inc()
+                    await logger.aerror(
+                        'recorder_flush_batch_dropped',
+                        category='recorder',
+                        attempt=self._flush_failures,
+                        batch_size=len(batch),
+                        error=str(exc),
+                    )
+                    self._flush_failures = 0
+                    # Buffer state unchanged (batch already popped); reflect
+                    # the (possibly post-concurrent-append) depth.
+                    recorder_buffer_size.set(len(self._buffer))
+                    return
+                # Not yet at the retry cap — re-queue and let the next tick
+                # try again. Log at WARNING so the operator sees the retry
+                # trail before any drop happens.
+                self._buffer.extendleft(reversed(batch))
+                await logger.awarning(
+                    'recorder_flush_retry',
+                    category='recorder',
+                    attempt=self._flush_failures,
+                    max_retries=self._config.max_flush_retries,
+                    batch_size=len(batch),
+                    error=str(exc),
+                )
+                recorder_buffer_size.set(len(self._buffer))
+                return
+            # Success path: reset the retry counter and record the histogram.
+            self._flush_failures = 0
             recorder_flush_duration.observe(time.monotonic() - flush_start)
             # Post-drain: the gauge should report the new buffer depth. Usually
             # zero, but a concurrent _record() during the await could have

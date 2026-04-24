@@ -451,6 +451,45 @@ recorder_flush_duration = Histogram(
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
 )
 
+# Recorder flush retry observability — Phase 3 hardening.
+#
+# ``_flush`` now catches ``OperationalError`` (disk full, WAL contention,
+# DB locked, etc.), re-queues the drained batch at the FRONT of the
+# buffer, and retries on the next flush tick. These two counters surface
+# the retry path:
+#
+#   recorder_flush_retries_total          — ticks once per failed attempt
+#                                            that gets re-queued. Any
+#                                            nonzero rate is a DB-health
+#                                            signal (disk pressure, WAL
+#                                            corruption, lock contention).
+#   recorder_flush_batches_dropped_total  — ticks once per batch that
+#                                            exceeded ``max_flush_retries``
+#                                            and was finally dropped.
+#                                            Every increment here is a
+#                                            data-loss event.
+#
+# Alert suggestion:
+#   rate(drakkar_recorder_flush_retries_total[5m]) > 0.1    — warn
+#   rate(drakkar_recorder_flush_batches_dropped_total[5m]) > 0  — page
+recorder_flush_retries = Counter(
+    'drakkar_recorder_flush_retries_total',
+    (
+        'Total recorder flush attempts that raised OperationalError and '
+        'had their batch re-queued for retry. Nonzero rate indicates '
+        'transient DB health issues (lock contention, disk pressure).'
+    ),
+)
+
+recorder_flush_batches_dropped = Counter(
+    'drakkar_recorder_flush_batches_dropped_total',
+    (
+        'Total recorder batches dropped after exhausting max_flush_retries '
+        'consecutive OperationalError failures. Any increment is a '
+        'data-loss event.'
+    ),
+)
+
 
 # --- Periodic tasks ---
 

@@ -3219,52 +3219,35 @@ async def test_recorder_dropped_events_not_incremented_when_skip_db(tmp_path):
     await rec.stop()
 
 
-# --- Task 12: aiosqlite error injection ----------------------------------
+# --- Task 8 (Phase 3): aiosqlite error injection / snapshot-restore ------
 #
 # Production recorders will sometimes hit aiosqlite ``OperationalError`` —
 # under contention (``database is locked``) or disk failure (``disk I/O
-# error``). These tests codify the recorder's current behaviour so we can
-# see it regress, and so a future hardening task (see plan) can re-write
-# them alongside the fix.
+# error``). ``_flush`` now takes a local snapshot of the batch BEFORE the
+# DB write, and on ``OperationalError`` re-queues the snapshot at the
+# FRONT of the buffer so the next flush retries the same rows. After
+# ``max_flush_retries`` consecutive failures the batch is dropped and
+# the ``drakkar_recorder_flush_batches_dropped_total`` counter ticks.
+# Each failed attempt ticks ``drakkar_recorder_flush_retries_total``.
 #
-# CURRENT BEHAVIOUR (tested below):
-#
-#   - ``_flush`` drains the buffer into a local ``batch`` list BEFORE the
-#     ``executemany`` call. If ``executemany`` or ``commit`` raises, the
-#     events in ``batch`` are lost (they are not returned to the buffer).
-#   - The exception propagates out of ``_flush`` with no try/except.
-#   - ``_flush_loop`` also has no try/except around ``_flush``, so a
-#     failing flush kills ``_flush_task``.
-#
-# This is a gap relative to the cache engine, which restores the snapshot
-# on failure via ``restore_dirty``. The recorder should get the same
-# treatment — or at minimum catch the exception in ``_flush_loop`` so the
-# task survives. The plan captures this as a follow-up hardening task.
-# The tests below codify today's behaviour so any future fix will break
-# them intentionally (prompting an update at the same time as the fix).
+# The tests below exercise:
+#   - transient failure → re-queue → next-flush success
+#   - persistent failure → N retries → drop + counter tick + no mem leak
+#   - rotation DURING a failed flush (re-queued rows go to the new DB —
+#     acceptable for a flight recorder; see the ``_flush`` comment).
+#   - commit never reached when executemany fails (narrow regression check).
 
 
-async def test_recorder_flush_database_locked_drops_batch_TODO_FIX(tmp_path):
-    """CODIFIES A KNOWN BUG: ``aiosqlite.OperationalError('database is locked')``
-    raised mid-flush propagates out of ``_flush`` and the already-drained batch
-    is silently lost from the buffer.
+async def test_recorder_flush_operational_error_requeues_batch(tmp_path):
+    """Transient ``OperationalError`` re-queues the batch; next flush succeeds.
 
-    This assertion (``len(_buffer) == 0`` after failure) is intentionally
-    WRONG behaviour — a robust recorder would requeue the dropped batch or
-    at minimum tick a drop counter. The test is kept to catch regressions
-    in the CURRENT behaviour; when the hardening fix lands, this test must
-    be rewritten to assert the new (correct) behaviour.
-
-    When fixed, replace the ``_TODO_FIX`` suffix in the test name and
-    invert the assertion: the batch should NOT be lost. Search the code
-    for ``_TODO_FIX`` to find other tests that will need attention.
-
-    A future hardening task should:
-      1. catch the OperationalError inside ``_flush`` (or ``_flush_loop``),
-      2. log a warning with structured fields,
-      3. increment a drop-counter metric for observability,
-      4. keep the flush task alive so subsequent flushes can succeed.
+    Scenario: the first executemany raises ``database is locked``; we
+    verify the snapshot was pushed back to the FRONT of the buffer (order
+    preserved), the retry counter ticked by 1, and the second flush
+    (with executemany restored) writes the rows exactly once.
     """
+    from drakkar.metrics import recorder_flush_retries
+
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
@@ -3273,60 +3256,62 @@ async def test_recorder_flush_database_locked_drops_batch_TODO_FIX(tmp_path):
         rec.record_consumed(make_msg(partition=0, offset=1))
         assert len(rec._buffer) == 2
 
-        # Patch executemany to simulate lock contention.
         assert rec._db is not None
         original_executemany = rec._db.executemany
+        calls = {'n': 0}
 
-        async def locked_executemany(query, rows):
-            raise aiosqlite.OperationalError('database is locked')
+        async def failing_once(query, rows):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise aiosqlite.OperationalError('database is locked')
+            return await original_executemany(query, rows)
 
-        rec._db.executemany = locked_executemany  # type: ignore[method-assign]
+        rec._db.executemany = failing_once  # type: ignore[method-assign]
 
-        # Today: the error propagates through _flush.
-        with pytest.raises(aiosqlite.OperationalError, match='database is locked'):
-            await rec._flush()
+        retries_before = recorder_flush_retries._value.get()
 
-        # Today: the batch was drained into a local before the failing call,
-        # so the events are lost from the buffer (bug — future fix should
-        # requeue or at least tick a drop counter).
-        assert len(rec._buffer) == 0
+        # First flush: swallows the OperationalError and re-queues.
+        await rec._flush()
 
-        # Restore executemany so subsequent operations work; verify the
-        # recorder can still flush future events normally once the lock
-        # clears.
-        rec._db.executemany = original_executemany  # type: ignore[method-assign]
-        rec.record_consumed(make_msg(partition=0, offset=2))
+        # Rows are back in the buffer — no data lost.
+        assert len(rec._buffer) == 2
+        # Order preserved: offset 0 at the front, offset 1 behind it.
+        buffered = list(rec._buffer)
+        assert buffered[0]['offset'] == 0
+        assert buffered[1]['offset'] == 1
+        # Retry counter incremented once.
+        assert recorder_flush_retries._value.get() == retries_before + 1
+        # Instance-level failure counter reflects the single failure.
+        assert rec._flush_failures == 1
+
+        # Second flush: real executemany runs, rows land in the DB.
         await rec._flush()
         assert len(rec._buffer) == 0
+        # Retry counter reset on success.
+        assert rec._flush_failures == 0
 
-        # The last event made it to the DB.
+        # Rows written exactly once (not duplicated by the re-queue).
         events = await rec.get_events(partition=0)
-        assert len(events) == 1
-        assert events[0]['offset'] == 2
+        offsets = sorted(ev['offset'] for ev in events)
+        assert offsets == [0, 1]
     finally:
         await rec.stop()
 
 
-async def test_recorder_flush_disk_io_error_drops_batch_TODO_FIX(tmp_path):
-    """CODIFIES A KNOWN BUG: ``aiosqlite.OperationalError('disk I/O error')``
-    on ``executemany`` behaves the same as the lock case — exception propagates
-    out of ``_flush`` and the already-drained batch is silently lost.
+async def test_recorder_flush_persistent_error_drops_after_max_retries(tmp_path):
+    """Persistent ``OperationalError`` → batch dropped after N attempts.
 
-    In production, disk I/O errors arise from the underlying filesystem
-    (volume full, ENOSPC, read-only remount). They typically surface at
-    the INSERT phase rather than COMMIT, because SQLite's default
-    autocommit mode means the write is flushed to the WAL as part of
-    ``executemany``.
-
-    This assertion (``len(_buffer) == 0`` after failure) is intentionally
-    WRONG behaviour — a robust recorder would requeue the dropped batch or
-    at minimum tick a drop counter. When the hardening fix lands, this
-    test must be rewritten to assert the new (correct) behaviour.
-
-    See ``test_recorder_flush_database_locked_drops_batch_TODO_FIX`` for
-    the same caveat.
+    After ``max_flush_retries`` consecutive failures we drop the batch,
+    tick the drop counter, reset the instance counter (so fresh batches
+    start from zero), and leave the buffer empty — no memory leak.
     """
-    config = make_debug_config(tmp_path)
+    from drakkar.metrics import (
+        recorder_flush_batches_dropped,
+        recorder_flush_retries,
+    )
+
+    # Set an explicit small retry budget so the test runs quickly.
+    config = make_debug_config(tmp_path, max_flush_retries=3)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
     try:
@@ -3335,41 +3320,133 @@ async def test_recorder_flush_disk_io_error_drops_batch_TODO_FIX(tmp_path):
         assert len(rec._buffer) == 2
 
         assert rec._db is not None
-        original_executemany = rec._db.executemany
 
-        async def disk_failing_executemany(query, rows):
+        async def always_failing(query, rows):
             raise aiosqlite.OperationalError('disk I/O error')
 
-        rec._db.executemany = disk_failing_executemany  # type: ignore[method-assign]
+        rec._db.executemany = always_failing  # type: ignore[method-assign]
 
-        with pytest.raises(aiosqlite.OperationalError, match='disk I/O error'):
+        retries_before = recorder_flush_retries._value.get()
+        dropped_before = recorder_flush_batches_dropped._value.get()
+
+        # Attempts 1..N-1: re-queue each time, counter climbs.
+        for attempt in range(1, config.max_flush_retries):
             await rec._flush()
+            assert rec._flush_failures == attempt
+            # Rows still in buffer — no data loss yet.
+            assert len(rec._buffer) == 2
 
-        # Batch already drained — buffer empty despite the failure.
+        # Attempt N (max_flush_retries): give up, drop the batch.
+        await rec._flush()
+        # Buffer is empty (no memory leak; the batch was discarded).
         assert len(rec._buffer) == 0
+        # Instance counter reset so the NEXT batch starts from zero.
+        assert rec._flush_failures == 0
+        # Drop counter ticked exactly once.
+        assert recorder_flush_batches_dropped._value.get() == dropped_before + 1
+        # Retry counter ticked on every failed attempt (including the one
+        # that finally tripped the drop).
+        assert recorder_flush_retries._value.get() == retries_before + config.max_flush_retries
 
-        # Recovery: restore executemany and a subsequent flush succeeds.
-        rec._db.executemany = original_executemany  # type: ignore[method-assign]
+        # Subsequent batches with a working DB flush cleanly — retries
+        # counter is fresh because we reset it on drop.
+        async def ok_executemany(query, rows):
+            # Fall back to a brand-new real connection so we don't need
+            # to unwrap the patched one; use the already-installed commit
+            # path via self._db.commit (still the original).
+            # Simpler: just restore the real method in-place.
+            raise RuntimeError('should not be called — patched below')
+
+        # Unpatch: route back through the real aiosqlite method.
+        rec._db.executemany = type(rec._db).executemany.__get__(rec._db)  # type: ignore[method-assign]
+
         rec.record_consumed(make_msg(partition=0, offset=2))
         await rec._flush()
+        assert len(rec._buffer) == 0
+        assert rec._flush_failures == 0
 
         events = await rec.get_events(partition=0)
-        # Only the post-recovery event lands — the pre-failure batch was
-        # lost from the buffer before ``executemany`` was called (bug,
-        # documented in the module header above).
+        # Only the post-drop event lands — the original batch was correctly
+        # dropped (intended behaviour once retries are exhausted).
         assert len(events) == 1
         assert events[0]['offset'] == 2
     finally:
         await rec.stop()
 
 
-async def test_recorder_flush_executemany_failure_preserves_commit_absent(tmp_path):
+async def test_recorder_flush_rotation_between_failures_reroutes_to_new_db(tmp_path):
+    """Rotation DURING a failed flush sends re-queued rows to the NEW DB.
+
+    Documented trade-off: when ``_rotate`` runs while a batch sits in the
+    buffer after a failed flush, the next flush writes those rows to the
+    rotated (new) DB. The rows' ``ts`` still records when they were
+    observed, so their wall-clock position is preserved — only the file-
+    level window association shifts. This is strictly better than silent
+    data loss, which would be the alternative "drop on rotation" policy.
+    """
+    # ``retention_max_events=50_000`` keeps the old DB file around after
+    # rotation (``max_files = retention_max_events // 10_000 = 5``), so we
+    # can open the old file read-only and prove nothing was committed.
+    config = make_debug_config(tmp_path, retention_max_events=50_000)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    try:
+        old_db_path = rec.db_path
+        rec.record_consumed(make_msg(partition=0, offset=0))
+        assert len(rec._buffer) == 1
+
+        # First flush fails, rows re-queued.
+        assert rec._db is not None
+
+        async def failing_executemany(query, rows):
+            raise aiosqlite.OperationalError('database is locked')
+
+        rec._db.executemany = failing_executemany  # type: ignore[method-assign]
+        await rec._flush()
+        assert len(rec._buffer) == 1
+
+        # Sleep so the rotated DB gets a different second-level timestamp
+        # (other rotation tests use the same 1.1s pattern).
+        await asyncio.sleep(1.1)
+
+        # Rotate: flushes once to the old DB (still failing, re-queues
+        # again), opens a new DB, and swaps. The re-queued rows survive.
+        await rec._rotate()
+        new_db_path = rec.db_path
+        assert new_db_path != old_db_path
+        assert len(rec._buffer) >= 1
+
+        # The new DB opens cleanly — no patched executemany carried over.
+        # Reset the instance counter so a fresh retry budget applies to
+        # the re-queued rows post-rotation (this models the common case
+        # where the DB health returns after rotation).
+        rec._flush_failures = 0
+        await rec._flush()
+        assert len(rec._buffer) == 0
+
+        # Re-queued row is visible through the recorder (new DB).
+        events = await rec.get_events(partition=0)
+        assert any(ev['offset'] == 0 for ev in events)
+
+        # Old DB file: row was never committed (executemany kept failing
+        # on the old connection before the rotate swapped it out).
+        async with (
+            aiosqlite.connect(f'file:{old_db_path}?mode=ro', uri=True) as old_db,
+            old_db.execute('SELECT COUNT(*) FROM events WHERE partition = 0') as cur,
+        ):
+            row = await cur.fetchone()
+            assert row is not None
+            assert row[0] == 0
+    finally:
+        await rec.stop()
+
+
+async def test_recorder_flush_executemany_failure_does_not_commit(tmp_path):
     """When ``executemany`` raises, ``commit`` is never reached.
 
-    Narrow follow-up to the two tests above. Ensures the failure path
-    doesn't accidentally commit partial results — important because
-    SQLite auto-commits in some isolation modes and we want to confirm
-    the error surfaces before commit rather than after.
+    Narrow regression check: the failure path must not accidentally
+    commit partial results. SQLite auto-commits in some isolation modes
+    and we want to confirm the error surfaces before commit runs.
     """
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
@@ -3392,11 +3469,13 @@ async def test_recorder_flush_executemany_failure_preserves_commit_absent(tmp_pa
         rec._db.commit = spy_commit  # type: ignore[method-assign]
         rec._db.executemany = locked_executemany  # type: ignore[method-assign]
 
-        with pytest.raises(aiosqlite.OperationalError):
-            await rec._flush()
+        # No longer raises — the handler catches the error and re-queues.
+        await rec._flush()
 
         # commit must not have been called — executemany failed first.
         assert commit_called['n'] == 0
+        # Rows re-queued so nothing is lost.
+        assert len(rec._buffer) == 1
     finally:
         # Restore originals so stop()'s own _flush drain + close work.
         if rec._db is not None:

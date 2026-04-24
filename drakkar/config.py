@@ -435,6 +435,14 @@ class DebugConfig(BaseModel):
     store_output: bool = True
     flush_interval_seconds: int = Field(default=5, ge=1)
     max_buffer: int = Field(default=50_000, ge=1000)
+    # Maximum consecutive ``OperationalError`` failures tolerated on a single
+    # batch before the recorder gives up and drops it. On each failure the
+    # batch is re-queued at the front of the buffer so the next flush tick
+    # retries it; after this many attempts the batch is discarded and the
+    # ``drakkar_recorder_flush_batches_dropped_total`` counter ticks. Default
+    # 3 matches the cache engine's retry budget and keeps a persistent DB
+    # outage from leaking the buffer indefinitely.
+    max_flush_retries: int = Field(default=3, ge=1)
     max_ui_rows: int = Field(default=5000, ge=100)
     log_min_duration_ms: int = Field(default=500, ge=0)
     ws_min_duration_ms: int = Field(default=500, ge=0)
