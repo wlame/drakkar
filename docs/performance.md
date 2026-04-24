@@ -38,17 +38,28 @@ relative proportions hold.
 ### Where the time goes for a 30ms task
 
 ```
-Process launch:      ~3ms    (9% of task wall time)
-Actual work:         ~30ms   (the binary)
-Framework overhead:  ~0.2ms  (arrange + on_task_complete + recording + tracking)
-Sink delivery:       ~1-5ms  (network, per sink, async)
+Process launch:      ~3ms         (9% of task wall time)
+Actual work:         ~30ms        (the binary)
+Python overhead:     ~210-390us   (bytecode + JSON encoding, GIL-held)
+Sink delivery:       ~1-5ms       (network, per sink, async)
 ```
 
-For a 30ms task, process launch is ~9% overhead -- noticeable but
-manageable. **The framework's own overhead** (arrange, on_task_complete,
-recording, offset tracking) **is negligible at ~200us total.** Sink
-delivery is I/O-bound and runs concurrently with the next task's
-execution.
+The **Python orchestration overhead is real** — not negligible, not
+crippling. A more honest breakdown per task:
+
+- **Python bytecode** (arrange, on_task_complete, subprocess completion
+  handling, offset bookkeeping, Pydantic model construction): **150-250us**
+- **JSON encoding** (structlog with contextvars, Prometheus label
+  materialization, `json.dumps` inside the recorder): **60-140us**
+- **Total per-task Python-side cost**: **210-390us**
+
+This is GIL-held time — it runs on the single event-loop thread. For a
+30ms task, that's still only ~1% of task wall time, but the absolute
+cost matters at high throughput (see the next section).
+
+Sink delivery is I/O-bound and runs concurrently with the next task's
+execution, so its wall-clock cost doesn't pile onto the event loop the
+way bytecode and JSON encoding do.
 
 As tasks get faster (5-10ms), the process launch fraction grows to
 30-50% -- see [Subprocess Launch](#bottleneck-subprocess-launch) below
@@ -75,27 +86,63 @@ compete for time on the main event loop. Communication between them uses
 a thread-safe `queue.Queue` for WebSocket event broadcasting.
 
 With 80 executors completing 30ms tasks, that's ~2,700 task
-completions per second hitting the event loop. Each completion triggers:
+completions per second hitting the event loop. Each completion triggers
+a cascade of Python bytecode and JSON encoding, all serialized on the
+single event-loop thread (GIL-held):
 
-1. Subprocess completion handling (~5us)
-2. `record_task_completed()` (~20us)
-3. `on_task_complete()` (user code)
-4. `record_task_complete()` (~10us)
-5. Sink delivery dispatch (~5us to queue, actual I/O is async)
-6. Offset complete + committable scan (~5us)
-7. Prometheus metric updates (~10us)
-8. `asyncio.Task` cleanup (~5us)
+1. Subprocess completion handling, pipe read, UTF-8 decode
+2. Pydantic `ExecutorResult` construction
+3. `record_task_completed()` — structlog (with contextvars), Prometheus
+   label materialization, `json.dumps` into the recorder buffer
+4. `on_task_complete()` (user code)
+5. `record_task_complete()` — another structlog + JSON round-trip
+6. Sink delivery dispatch (fast to queue; I/O itself is async)
+7. Offset complete + committable scan
+8. Prometheus metric updates, `asyncio.Task` cleanup
 
-Total event loop time per completion: **~60us + on_task_complete() duration**.
-At 2,700/sec, that's ~160ms/sec of event loop time -- well within
-budget for a single core. **The event loop is not the bottleneck** for
-most workloads.
+**Total Python-side cost per completion**: **210-390us**
+(150-250us bytecode + 60-140us JSON encoding) **+ on_task_complete() duration**.
 
-It becomes the bottleneck when:
+At 2,700 completions/sec, that's **570-1050ms/sec of GIL-held time —
+57-100% of a single core**. Your `on_task_complete()` runs on top of
+that. **At the advertised sweet spot (80 executors, 30ms tasks), the
+event loop IS the bottleneck**, not a comfortable cushion.
 
-- `arrange()` or `on_task_complete()` do heavy CPU work (avoid this -- keep them fast)
-- You run 200+ executors with sub-5ms tasks (>40,000 completions/sec)
-- Debug recording is enabled with `event_min_duration_ms: 0` and very high throughput
+**Budget for it.** Python orchestration is the primary reason a single
+worker tops out around 4k-8k tasks/sec regardless of how many cores are
+available. To push further, scale horizontally (more workers, each with
+its own event loop) or reduce per-task overhead (see the mitigations
+below and the [Recorder](#bottleneck-recorder-and-debug-ui) tuning
+knobs).
+
+The ceiling moves even lower when:
+
+- `arrange()` or `on_task_complete()` do non-trivial CPU work (any
+  time spent here is fully additive to the 210-390us baseline)
+- `event_min_duration_ms: 0` is set at high throughput — every task
+  pays the full JSON-encode cost into the recorder buffer
+- Sink payloads are large enough that per-sink JSON encoding is
+  non-trivial (group size x payload complexity)
+- You run 200+ executors with sub-5ms tasks (>40,000 completions/sec is
+  beyond a single event loop's reach, period)
+
+### Future optimizations (Phase 3+)
+
+Two concrete changes buy meaningful headroom on this bottleneck without
+changing the execution model:
+
+- **Off-thread JSON encoding.** Batch recorder events and hand the
+  `json.dumps` work to a worker thread via `asyncio.to_thread` (or a
+  dedicated encoder thread). The event loop keeps the Python-object
+  buffer; JSON serialization happens off-thread and doesn't hold the GIL
+  during the I/O-free encoding fast path.
+- **Switch to `orjson`.** A drop-in replacement for `json.dumps` that
+  is ~3-5x faster on typical recorder payloads. Keeps the encoding on
+  the main thread but cuts the 60-140us per-task cost roughly in half.
+
+Combined, these unlock the 4k-8k tasks/sec/worker ceiling. They are
+scoped for a later phase — today, the honest guidance is "scale
+horizontally once one worker saturates".
 
 ---
 
