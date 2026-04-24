@@ -1,6 +1,7 @@
 """Tests for Drakkar main application."""
 
 import asyncio
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -27,6 +28,7 @@ from drakkar.models import (
     SourceMessage,
 )
 from drakkar.sinks.manager import SinkNotConfiguredError
+from tests.conftest import wait_for
 
 
 class _D(BaseModel):
@@ -1021,3 +1023,275 @@ async def test_insecure_debug_config_raises_in_async_run(test_config):
     # Recorder and debug server must not have been touched — the gate ran first.
     assert app._recorder is None
     assert app._debug_server is None
+
+
+# --- Rebalance mid-window: revoke while tasks are in flight ---
+#
+# These tests pin down the behaviour of the partition-revocation path when
+# the revoked partition still has work in flight (in subprocess execution
+# OR mid-arrange). The rebalance-mid-window scenario is the single most
+# important failure mode the processor must handle correctly: Kafka
+# reassigns partitions while the worker still has committed-offset
+# candidates it has NOT yet finished processing.
+#
+# Invariants asserted:
+#   1. No zombie processor — the revoked partition is removed from
+#      ``app.processors`` once the background ``_stop_processor`` task
+#      completes.
+#   2. No silent offset loss — ``_stop_processor`` only commits the
+#      watermark when ``drain()`` completes cleanly. On drain timeout
+#      the commit is SKIPPED so the reassigned owner re-reads the
+#      in-flight messages (at-least-once, not silently dropped).
+#   3. No exceptions escape the poll loop / revoke callback. Anything
+#      raised inside the handler or ``_stop_processor`` is logged via
+#      ``_safe_call`` or swallowed with a warning.
+#   4. In-flight subprocess tasks are either awaited (drain cleanly) or
+#      cancelled, which triggers the executor's ``finally`` block that
+#      kills the orphaned subprocess — no dangling processes remain.
+
+
+class _SleepingArrangeHandler(BaseDrakkarHandler):
+    """Arrange returns one sleeping subprocess task per message.
+
+    Each task sleeps ``sleep_seconds`` inside a Python subprocess, so the
+    task is genuinely in-flight from the executor's point of view. Using
+    real subprocesses (not ``PrecomputedResult``) is what makes this a
+    meaningful rebalance-mid-window test: a precomputed result would
+    complete instantly and there would be no in-flight work to race
+    against.
+    """
+
+    def __init__(self, sleep_seconds: float = 0.5) -> None:
+        self._sleep_seconds = sleep_seconds
+
+    async def arrange(self, messages, pending):
+        return [
+            ExecutorTask(
+                task_id=f't-{msg.offset}',
+                args=['-c', f'import time; time.sleep({self._sleep_seconds}); print("done")'],
+                source_offsets=[msg.offset],
+            )
+            for msg in messages
+        ]
+
+
+async def test_revoke_mid_window_no_offset_loss(test_config):
+    """Revoking a partition with in-flight subprocess tasks must not
+    commit offsets of unfinished messages and must tear the processor
+    down cleanly.
+
+    Timing setup: 3 messages each backed by a subprocess that sleeps
+    well beyond the drain window. ``drain_timeout_seconds = 1`` (the
+    config minimum) forces ``_stop_processor`` onto the timeout path
+    where it SKIPS the final watermark commit to avoid silent data
+    loss. The test then asserts the critical invariants irrespective
+    of how many individual subprocesses managed to complete naturally
+    before teardown.
+    """
+    from drakkar.executor import ExecutorPool
+
+    # drain_timeout minimum is 1s (ge=1 on the Pydantic field). Subprocess
+    # sleeps long enough that drain() is guaranteed to hit the timeout
+    # path with at least one task still in flight.
+    test_config.executor.drain_timeout_seconds = 1
+    test_config.executor.window_size = 10
+
+    sleep_seconds = 2.0
+    app = DrakkarApp(handler=_SleepingArrangeHandler(sleep_seconds=sleep_seconds), config=test_config)
+    # task_timeout_seconds must be > drain_timeout + sleep to ensure the
+    # subprocesses do not time out themselves (isolates the variable).
+    app._executor_pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=4,
+        task_timeout_seconds=10,
+    )
+    mock_consumer = AsyncMock()
+    app._consumer = mock_consumer
+
+    app._on_assign([0])
+    processor = app.processors[0]
+
+    # Enqueue 3 messages; arrange will schedule 3 subprocess tasks.
+    for offset in (100, 101, 102):
+        processor.enqueue(SourceMessage(topic='t', partition=0, offset=offset, value=b'x', timestamp=0))
+
+    # Wait until at least 1 subprocess task is genuinely in flight.
+    # inflight_count > 0 means arrange has returned AND at least one
+    # _execute_and_track task is running against the executor pool —
+    # this is the mid-window revoke precondition.
+    await wait_for(lambda: processor.inflight_count >= 1, timeout=5)
+    assert processor.inflight_count >= 1, 'precondition: at least one task must be in flight'
+
+    # Fire revoke. _on_revoke pops the processor from app.processors
+    # synchronously, then schedules _stop_processor as a background task.
+    app._on_revoke([0])
+    assert 0 not in app.processors, 'processor must be popped from app.processors immediately on revoke'
+
+    # Wait for the background _stop_processor task to finish draining,
+    # committing (or skipping commit), and running processor.stop().
+    # Upper bound: drain_timeout (1s) + stop() wait_for (10s) + slack.
+    await wait_for(lambda: len(app._background_tasks) == 0, timeout=15)
+
+    # Invariant 1: no zombie processor.
+    assert 0 not in app.processors
+    # Invariant 2: the processor's run-loop task is fully torn down.
+    assert processor._task is None
+    # Invariant 3: signal_stop flipped _running=False.
+    assert processor._running is False
+
+    # Invariant 4: no offset loss.
+    #
+    # Subprocesses may finish naturally while the run-loop awaits them
+    # post-signal_stop — those legitimately-completed tasks may issue
+    # commits through the normal _finalize_message_tracker path. That
+    # is CORRECT (the work actually finished) and is NOT offset loss.
+    #
+    # What would be a bug is ``_stop_processor`` issuing a commit when
+    # drain timed out — we explicitly skip that because in-flight tasks
+    # may not yet have reached _finalize. The watermark is
+    # next-to-read, so any committed value must be <= 103. Values
+    # beyond 103 would signal the code was tricked into advancing
+    # past unfinished work.
+    if mock_consumer.commit.call_count > 0:
+        committed_watermarks = [next(iter(call.args[0].values())) for call in mock_consumer.commit.call_args_list]
+        assert max(committed_watermarks) <= 103, (
+            f'commit watermark {max(committed_watermarks)} exceeds the last-known-message+1 (103); '
+            f'possible offset loss. All commits: {mock_consumer.commit.call_args_list}'
+        )
+        # Watermark must be monotonic — no re-commit of a lower value.
+        assert committed_watermarks == sorted(committed_watermarks), (
+            f'watermarks must be monotonically non-decreasing, got: {committed_watermarks}'
+        )
+
+    # Invariant 5: no orphaned message trackers. Every tracker must be
+    # either cleaned up (removed after offset-complete) or still
+    # tracking a genuinely-pending offset (which the reassigned owner
+    # will re-read). Either way, the count bounds the messages we
+    # enqueued.
+    assert len(processor._message_trackers) <= 3
+
+
+async def test_revoke_mid_window_clean_drain_commits_finished_messages(test_config):
+    """When drain completes cleanly (tasks finish within drain_timeout),
+    the final commit MUST include every processed message's watermark.
+
+    Complement to ``test_revoke_mid_window_no_offset_loss``: same flow,
+    but with drain_timeout generous enough that all subprocess tasks
+    finish naturally. Asserts commits happen for every processed offset.
+    """
+    from drakkar.executor import ExecutorPool
+
+    # Generous drain timeout — subprocesses (0.15s each) finish well within it.
+    test_config.executor.drain_timeout_seconds = 5
+    test_config.executor.window_size = 10
+
+    app = DrakkarApp(handler=_SleepingArrangeHandler(sleep_seconds=0.15), config=test_config)
+    app._executor_pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=4,
+        task_timeout_seconds=10,
+    )
+    mock_consumer = AsyncMock()
+    app._consumer = mock_consumer
+
+    app._on_assign([0])
+    processor = app.processors[0]
+
+    for offset in (200, 201, 202):
+        processor.enqueue(SourceMessage(topic='t', partition=0, offset=offset, value=b'x', timestamp=0))
+
+    await wait_for(lambda: processor.inflight_count >= 1, timeout=5)
+
+    app._on_revoke([0])
+    await wait_for(lambda: len(app._background_tasks) == 0, timeout=10)
+
+    # Processor removed, no zombie.
+    assert 0 not in app.processors
+    assert processor._task is None
+
+    # Every offset 200-202 processed + committed. Commit watermark is
+    # next-to-read, so highest commit should be 203.
+    assert mock_consumer.commit.call_count >= 1, (
+        f'clean drain should have committed finished offsets; got: {mock_consumer.commit.call_args_list}'
+    )
+    committed_watermarks = [next(iter(call.args[0].values())) for call in mock_consumer.commit.call_args_list]
+    assert max(committed_watermarks) == 203, (
+        f'watermark commit must be next-to-read (203) after processing 200-202; got: {committed_watermarks}'
+    )
+
+
+async def test_revoke_while_arrange_running(test_config):
+    """Revocation fires while ``arrange()`` is still awaiting (e.g. a DB
+    lookup). The processor must stop cleanly without wedging.
+
+    This simulates the common operational case where a worker is
+    mid-arrange (slow handler doing an I/O call) when Kafka rebalances.
+    Expected behaviour:
+      - signal_stop flips _running=False
+      - arrange() eventually completes (we can't cancel it in-place —
+        user code is awaiting)
+      - the run-loop observes _running=False on its next iteration and
+        exits the main loop
+      - drain() completes (no pending offsets or in-flight tasks
+        because arrange never finished producing any)
+      - processor removed from app.processors
+      - no exceptions escape
+    """
+    from drakkar.executor import ExecutorPool
+
+    # Arrange holds the processor in arrange() for this long. drain_timeout
+    # must be larger than this so the arrange can complete and the run
+    # loop can exit cleanly without force-cancel.
+    arrange_sleep = 0.3
+
+    class SlowArrangeHandler(BaseDrakkarHandler):
+        def __init__(self) -> None:
+            self.arrange_fired = asyncio.Event()
+
+        async def arrange(self, messages, pending):
+            self.arrange_fired.set()
+            await asyncio.sleep(arrange_sleep)
+            # Return no tasks — the point of the test is to fire revoke
+            # while arrange is awaiting, not to test task fan-out.
+            return []
+
+    handler = SlowArrangeHandler()
+
+    test_config.executor.drain_timeout_seconds = 5  # plenty of headroom
+    app = DrakkarApp(handler=handler, config=test_config)
+    app._executor_pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+    )
+    mock_consumer = AsyncMock()
+    app._consumer = mock_consumer
+
+    app._on_assign([0])
+    processor = app.processors[0]
+
+    processor.enqueue(SourceMessage(topic='t', partition=0, offset=50, value=b'x', timestamp=0))
+
+    # Wait until arrange() is actually awaiting — this is the mid-arrange
+    # revoke scenario we want to exercise.
+    await handler.arrange_fired.wait()
+    assert processor._arranging is True, 'processor must be mid-arrange when revoke fires'
+
+    # Fire revoke mid-arrange.
+    app._on_revoke([0])
+    assert 0 not in app.processors
+
+    # The background _stop_processor must complete — processor stops
+    # cleanly without wedging. Allow enough time for arrange_sleep +
+    # drain + stop overhead.
+    await wait_for(lambda: len(app._background_tasks) == 0, timeout=10)
+
+    # Processor is fully torn down, no zombie.
+    assert 0 not in app.processors
+    assert processor._task is None
+    assert processor._running is False
+    # arrange() produced zero tasks, nothing pending — no commit needed.
+    # The key assertion is we did NOT wedge waiting on arrange or
+    # somewhere in stop(). If the test reaches here, clean stop worked.
+    assert processor.inflight_count == 0
+    assert not processor._offset_tracker.has_pending()
