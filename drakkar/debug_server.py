@@ -700,14 +700,12 @@ def create_debug_app(
         reasons: list[str] = []
         if not drakkar_app.is_ready:
             reasons.append('not_started')
-        mgr = drakkar_app.sink_manager
         # ``sink_manager`` is always constructed in ``DrakkarApp.__init__``
-        # so the None-check here is defensive for tests that replace it
-        # with a bare MagicMock. The manager may have zero sinks registered
-        # (startup validation rejects that config, but tests can bypass it)
-        # — ``all_connected`` returns True for an empty manager so that
-        # path is handled automatically.
-        if mgr is not None and not mgr.all_connected():
+        # and ``all_connected`` returns True for an empty manager, so we
+        # can consult it directly. Startup validation rejects a zero-sink
+        # config before the debug server is mounted.
+        mgr = drakkar_app.sink_manager
+        if not mgr.all_connected():
             for sink_id in mgr.disconnected_sink_names():
                 reasons.append(f'sink_{sink_id}_not_connected')
         if reasons:

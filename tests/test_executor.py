@@ -896,10 +896,17 @@ async def test_timeout_kills_grandchildren_via_process_group(tmp_path):
 
     pid_file = tmp_path / 'grandchild.pid'
 
+    # ``task_timeout_seconds=2`` gives the bash script a comfortable
+    # window to launch ``sleep``, capture its PID via ``echo $!``, and
+    # flush that redirection to disk BEFORE the timeout fires. 1s was
+    # enough on a warm machine but flaked under CI load when the shell
+    # startup cost ate into the budget — and if the PID file isn't on
+    # disk yet the test cannot read it to verify the grandchild was
+    # reaped.
     pool = ExecutorPool(
         binary_path='/bin/bash',
         max_executors=1,
-        task_timeout_seconds=1,
+        task_timeout_seconds=2,
     )
     # The bash script:
     #   1) launches `sleep 60` in the background (the grandchild)
@@ -918,8 +925,9 @@ async def test_timeout_kills_grandchildren_via_process_group(tmp_path):
     grandchild_pid = int(pid_file.read_text().strip())
 
     # killpg sends SIGKILL to the whole group; the kernel reaps the grandchild
-    # asynchronously, so give it a short grace window before asserting.
-    deadline = asyncio.get_running_loop().time() + 2.0
+    # asynchronously, so give it a generous grace window before asserting.
+    # 5s keeps the test robust on slow/overloaded CI runners.
+    deadline = asyncio.get_running_loop().time() + 5.0
     alive = True
     while asyncio.get_running_loop().time() < deadline:
         try:
@@ -953,12 +961,18 @@ async def test_killpg_process_lookup_error_swallowed(monkeypatch):
 
     monkeypatch.setattr(_os, 'killpg', raising_killpg)
 
+    # Tight timings to keep the test fast: task_timeout=1s < child sleep=2s.
+    # The timeout fires first → ``_kill_process_tree`` runs → mocked ``killpg``
+    # raises ProcessLookupError, which the executor must swallow. Because the
+    # mock does NOT actually signal the child, ``proc.wait()`` blocks until
+    # the child exits naturally — bounded here to ~2s. Previously the child
+    # slept for 30s which made this single test take the full 30 seconds.
     pool = ExecutorPool(
         binary_path=sys.executable,
         max_executors=1,
         task_timeout_seconds=1,
     )
-    task = make_task(args=['-c', 'import time; time.sleep(30)'])
+    task = make_task(args=['-c', 'import time; time.sleep(2)'])
 
     # The expected exception is the timeout-driven ExecutorTaskError,
     # NOT a ProcessLookupError leaking out of the finally block.

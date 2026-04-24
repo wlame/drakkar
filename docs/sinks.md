@@ -497,6 +497,21 @@ the producer is flushed before exit.
   `--limit` twice replays the first N entries both times — the consumer
   group is throwaway (unique per invocation), so offsets are not preserved
   between runs.
+- **Original Kafka envelope is NOT fully preserved**: the replay script
+  publishes only the `original_payloads` bytes to the target topic. The
+  original message's `key`, `partition`, and `headers` are NOT currently
+  captured by `DLQMessage.serialize()` and therefore cannot be restored
+  by the replay script. If downstream consumers depend on those fields
+  (e.g. the source partition for a keyed-routing consumer, or headers
+  for tracing), point `--target-topic` at a retry topic whose producer
+  re-derives them from the payload body. Operators who need a lossless
+  replay should post-process the DLQ output before publishing.
+- **Partial-entry failure is per-record**: each DLQ entry may expand to
+  multiple target-topic messages (one per preserved payload). If a
+  produce fails midway through a multi-payload entry, earlier sub-
+  payloads from that entry have already been sent. The stderr summary
+  reports the last successful DLQ offset so operators can resume, but
+  inspection of the specific entry may be necessary to avoid duplicates.
 - **Exit code 1 with partial success**: if the producer fails mid-run after
   some records were published, the script exits 1 and logs the last
   successful DLQ offset to stderr. Operators can re-run with an adjusted
@@ -519,6 +534,18 @@ prevents silent failures where the pipeline runs but cannot deliver results.
 
 `close()` is called for every sink during worker shutdown. Close errors are logged
 but never raised, so shutdown proceeds cleanly even if a connection is already lost.
+
+### Connection-state flag (custom sinks)
+
+`BaseSink` maintains an `is_connected: bool` read-only property backed by the
+`mark_connected()` / `mark_disconnected()` methods. You do NOT call these from
+your subclass — the `SinkManager` drives the flag: `connect_all()` calls
+`mark_connected()` after a successful `connect()`, and `close_all()` calls
+`mark_disconnected()` after `close()` runs (even when `close()` raises, so the
+flag faithfully reflects the manager's view of the connection). Readiness
+probes (`/readyz`) read `is_connected` to decide whether to report the sink
+as ready. Your custom sink only needs to implement `connect()` / `close()`;
+the bookkeeping is handled for you.
 
 ### Sink-specific details
 

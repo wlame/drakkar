@@ -3277,6 +3277,67 @@ async def test_recorder_flush_operational_error_requeues_batch(tmp_path):
         await rec.stop()
 
 
+async def test_recorder_flush_requeue_overflow_increments_counter(tmp_path):
+    """Requeue that overflows ``max_buffer`` ticks ``recorder_requeue_overflow``.
+
+    Scenario: an OperationalError during flush forces a re-queue via
+    ``extendleft``. If concurrent ``_record`` appends filled the buffer
+    during the flush's await window, ``extendleft`` silently evicts rows
+    from the tail to honour the deque's ``maxlen``. This was previously
+    uncounted data loss; the new counter surfaces it.
+
+    Test construction:
+      - Shrink ``rec._buffer`` to a tiny ``maxlen`` so overflow is cheap
+        to trigger deterministically.
+      - Populate with 3 rows and take a snapshot of executemany to fail.
+      - Simulate concurrent appends during the failed flush by refilling
+        the buffer BEFORE the requeue lands (we hook the failing
+        executemany to push more rows in).
+    """
+    from drakkar.metrics import recorder_requeue_overflow
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    # Shrink post-construction so the overflow path is reachable without
+    # pushing thousands of events through the recorder.
+    rec._buffer = deque(maxlen=3)
+    await rec.start()
+    try:
+        # Seed the buffer with 3 rows (at capacity).
+        for off in range(3):
+            rec.record_consumed(make_msg(partition=0, offset=off))
+        assert len(rec._buffer) == 3
+
+        assert rec._db is not None
+
+        async def failing_and_filling(query, rows):
+            # Simulate: during the flush's await window a concurrent
+            # ``_record`` pushed 2 new rows into the (now drained) buffer.
+            # After this await returns with an OperationalError, the
+            # executor will extendleft the original 3-row batch back —
+            # with 2 rows already in the buffer and maxlen=3, that means
+            # 2 rows must be evicted from the tail.
+            for off in range(100, 102):
+                rec.record_consumed(make_msg(partition=0, offset=off))
+            raise aiosqlite.OperationalError('database is locked')
+
+        rec._db.executemany = failing_and_filling  # type: ignore[method-assign]
+
+        overflow_before = recorder_requeue_overflow._value.get()
+
+        # Trigger the flush: drains 3 rows into the batch, call fails,
+        # 2 concurrent rows land in the buffer, then extendleft(3 batch
+        # rows) overflows by (2 + 3) - 3 = 2.
+        await rec._flush()
+
+        # Counter ticked by the overflow count (2).
+        assert recorder_requeue_overflow._value.get() == overflow_before + 2
+        # Buffer is pinned at maxlen — the deque rolled the window.
+        assert len(rec._buffer) == 3
+    finally:
+        await rec.stop()
+
+
 async def test_recorder_flush_persistent_error_drops_after_max_retries(tmp_path):
     """Persistent ``OperationalError`` → batch dropped after N attempts.
 
@@ -3328,15 +3389,8 @@ async def test_recorder_flush_persistent_error_drops_after_max_retries(tmp_path)
         assert recorder_flush_retries._value.get() == retries_before + config.max_flush_retries
 
         # Subsequent batches with a working DB flush cleanly — retries
-        # counter is fresh because we reset it on drop.
-        async def ok_executemany(query, rows):
-            # Fall back to a brand-new real connection so we don't need
-            # to unwrap the patched one; use the already-installed commit
-            # path via self._db.commit (still the original).
-            # Simpler: just restore the real method in-place.
-            raise RuntimeError('should not be called — patched below')
-
-        # Unpatch: route back through the real aiosqlite method.
+        # counter is fresh because we reset it on drop. Unpatch by
+        # routing executemany back through the real aiosqlite method.
         rec._db.executemany = type(rec._db).executemany.__get__(rec._db)  # type: ignore[method-assign]
 
         rec.record_consumed(make_msg(partition=0, offset=2))
@@ -3353,7 +3407,7 @@ async def test_recorder_flush_persistent_error_drops_after_max_retries(tmp_path)
         await rec.stop()
 
 
-async def test_recorder_flush_rotation_between_failures_reroutes_to_new_db(tmp_path):
+async def test_recorder_flush_rotation_between_failures_reroutes_to_new_db(tmp_path, monkeypatch):
     """Rotation DURING a failed flush sends re-queued rows to the NEW DB.
 
     Documented trade-off: when ``_rotate`` runs while a batch sits in the
@@ -3384,9 +3438,18 @@ async def test_recorder_flush_rotation_between_failures_reroutes_to_new_db(tmp_p
         await rec._flush()
         assert len(rec._buffer) == 1
 
-        # Sleep so the rotated DB gets a different second-level timestamp
-        # (other rotation tests use the same 1.1s pattern).
-        await asyncio.sleep(1.1)
+        # Force a distinct rotated DB path deterministically, without the
+        # ~1.1s real-time sleep that the previous implementation needed to
+        # roll the second-resolution timestamp in ``_make_db_path``. This
+        # keeps the test fast and removes a long wait from the suite.
+        from drakkar import recorder as recorder_module
+
+        unique_new_path = str(tmp_path / f'{WORKER_NAME}-rotated.db')
+        monkeypatch.setattr(
+            recorder_module,
+            '_make_db_path',
+            lambda db_dir, worker_name: unique_new_path,
+        )
 
         # Rotate: flushes once to the old DB (still failing, re-queues
         # again), opens a new DB, and swaps. The re-queued rows survive.
@@ -3396,12 +3459,13 @@ async def test_recorder_flush_rotation_between_failures_reroutes_to_new_db(tmp_p
         assert len(rec._buffer) >= 1
 
         # The new DB opens cleanly — no patched executemany carried over.
-        # Reset the instance counter so a fresh retry budget applies to
-        # the re-queued rows post-rotation (this models the common case
-        # where the DB health returns after rotation).
-        rec._flush_failures = 0
+        # The instance counter carries over from the pre-rotation failures
+        # (first _flush + the _flush inside _rotate both bumped it), but
+        # since the default ``max_flush_retries`` is 3 we still have one
+        # more attempt available. A successful flush resets the counter.
         await rec._flush()
         assert len(rec._buffer) == 0
+        assert rec._flush_failures == 0
 
         # Re-queued row is visible through the recorder (new DB).
         events = await rec.get_events(partition=0)
@@ -3623,6 +3687,7 @@ def test_encode_json_non_json_native_types_via_default_str():
     recorder event carrying a ``Path`` / ``UUID`` / custom object won't
     crash the flush loop.
     """
+    import uuid as _uuid
     from pathlib import Path
 
     from drakkar.recorder import _encode_json
@@ -3631,6 +3696,24 @@ def test_encode_json_non_json_native_types_via_default_str():
     encoded = _encode_json({'p': Path('/tmp/x')})
     decoded = json.loads(encoded)
     assert decoded == {'p': '/tmp/x'}
+
+    # UUID — orjson serializes natively (no ``default`` hook needed),
+    # stdlib uses default=str. Either way, the decoded JSON is the
+    # canonical UUID string.
+    sample_uuid = _uuid.UUID('12345678-1234-5678-1234-567812345678')
+    encoded = _encode_json({'uid': sample_uuid})
+    decoded = json.loads(encoded)
+    assert decoded == {'uid': '12345678-1234-5678-1234-567812345678'}
+
+    # Custom class with ``__str__`` — both paths coerce via str(obj),
+    # proving the default-str hook catches arbitrary user types.
+    class _Custom:
+        def __str__(self) -> str:
+            return 'custom-repr'
+
+    encoded = _encode_json({'obj': _Custom()})
+    decoded = json.loads(encoded)
+    assert decoded == {'obj': 'custom-repr'}
 
 
 def test_encode_json_sort_keys_deterministic():

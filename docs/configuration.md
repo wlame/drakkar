@@ -451,6 +451,7 @@ These flags control which tables are created in the SQLite database. All require
 | `store_output` | `bool` | `true` | | Include subprocess stdout/stderr in event records. Disable to save disk space when output is large or not needed for debugging. |
 | `flush_interval_seconds` | `int` | `5` | >= 1 | How often (seconds) the in-memory event buffer is flushed to SQLite. |
 | `max_buffer` | `int` | `50000` | >= 1000 | Maximum number of events held in the in-memory buffer. When full, oldest events are dropped (ring buffer). |
+| `max_flush_retries` | `int` | `3` | >= 1 | How many times a flush batch is re-queued on transient `OperationalError` (database is locked, disk I/O error, etc.) before the batch is dropped. On drop, `drakkar_recorder_flush_batches_dropped_total` ticks; on each retry `drakkar_recorder_flush_retries_total` ticks. |
 | `max_ui_rows` | `int` | `5000` | >= 100 | Maximum number of rows returned to the debug web UI in list views. |
 
 ### Duration Thresholds
@@ -501,6 +502,7 @@ debug:
   store_output: true
   flush_interval_seconds: 5
   max_buffer: 50000
+  max_flush_retries: 3
   max_ui_rows: 5000
   log_min_duration_ms: 1000
   ws_min_duration_ms: 500
@@ -631,6 +633,7 @@ debug:
   store_output: true
   flush_interval_seconds: 5
   max_buffer: 50000
+  max_flush_retries: 3
   max_ui_rows: 5000
   log_min_duration_ms: 1000
   ws_min_duration_ms: 500

@@ -468,10 +468,16 @@ recorder_flush_duration = Histogram(
 #                                            and was finally dropped.
 #                                            Every increment here is a
 #                                            data-loss event.
+#   recorder_requeue_overflow_total       — ticks by N when a requeue-on-
+#                                            retry evicts N rows from the
+#                                            buffer tail (concurrent
+#                                            ``_record`` appends filled the
+#                                            deque during flush). Data loss.
 #
 # Alert suggestion:
 #   rate(drakkar_recorder_flush_retries_total[5m]) > 0.1    — warn
 #   rate(drakkar_recorder_flush_batches_dropped_total[5m]) > 0  — page
+#   rate(drakkar_recorder_requeue_overflow_total[5m]) > 0   — warn
 recorder_flush_retries = Counter(
     'drakkar_recorder_flush_retries_total',
     (
@@ -487,6 +493,29 @@ recorder_flush_batches_dropped = Counter(
         'Total recorder batches dropped after exhausting max_flush_retries '
         'consecutive OperationalError failures. Any increment is a '
         'data-loss event.'
+    ),
+)
+
+# Requeue-overflow observability — surfaces a previously silent data-loss path.
+#
+# When ``_flush`` catches an ``OperationalError`` it re-queues the failed
+# batch at the FRONT of the bounded ``deque(maxlen=max_buffer)`` via
+# ``extendleft``. If concurrent ``_record`` appends filled the buffer while
+# the flush was in flight, ``extendleft`` would silently evict rows from
+# the TAIL of the deque (newest events) to honour ``maxlen``. Those drops
+# are NOT counted by ``recorder_dropped_events`` — that counter only ticks
+# inside ``_record`` when the buffer is full at append time. This metric
+# closes the observability gap so operators can alert on data loss along
+# the requeue path.
+#
+# Alert suggestion:
+#   rate(drakkar_recorder_requeue_overflow_total[5m]) > 0  — warn
+recorder_requeue_overflow = Counter(
+    'drakkar_recorder_requeue_overflow_total',
+    (
+        'Total events silently dropped from the recorder buffer tail when '
+        'an OperationalError-triggered requeue exceeded max_buffer capacity. '
+        'Any nonzero value indicates data loss on the flush-retry path.'
     ),
 )
 

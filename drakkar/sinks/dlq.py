@@ -11,7 +11,7 @@ import uuid
 from collections.abc import AsyncIterator
 
 import structlog
-from confluent_kafka import KafkaError, TopicPartition
+from confluent_kafka import KafkaError
 from confluent_kafka.aio import AIOConsumer, AIOProducer
 from pydantic import BaseModel
 
@@ -27,7 +27,7 @@ class DLQMessage:
     """Wraps a failed payload with error metadata for the dead letter queue.
 
     Serialized as JSON with fields:
-        - original_payload: the failed payload serialized as JSON string
+        - original_payloads: list of JSON strings, one per failed payload in the batch
         - sink_name: which sink failed
         - sink_type: type of the failed sink
         - error: error message string
@@ -76,15 +76,12 @@ class DLQSink(BaseSink[BaseModel]):
 
     sink_type = 'dlq'
 
-    # Same rationale as ``KafkaSink.idempotent`` — the underlying
-    # ``AIOProducer`` is not configured with ``enable.idempotence=true``,
-    # so a retried produce can land the same DLQ record twice. Duplicate
-    # DLQ entries are harmless (operators inspect them manually), but we
-    # still default to ``False`` because DLQSink is driven through the
-    # dedicated ``send()`` path, not through the normal
-    # ``deliver()`` retry loop — SinkManager never retries DLQSink
-    # automatically. Kept explicit here for clarity of the contract.
-    idempotent = False
+    # DLQSink inherits ``BaseSink.idempotent = False``. The manager's
+    # retry loop never runs against this sink because DLQSink is driven
+    # through its dedicated ``send()`` path (not the normal ``deliver()``
+    # loop) and does NOT enable broker-side dedup in the producer config.
+    # Duplicate DLQ entries are harmless (operators inspect them manually)
+    # but we keep the conservative default so nothing ever retries.
 
     def __init__(self, topic: str, brokers: str) -> None:
         super().__init__('dlq')
@@ -285,10 +282,3 @@ async def read_dlq_entries(
                 category='sink',
                 error=str(e),
             )
-
-
-# Keep the symbol available for consumers that want to build their own
-# TopicPartition references when extending the reader (e.g. seeking to an
-# offset). Intentionally re-exported from the ``confluent_kafka`` shim so
-# that operator scripts need not import from ``confluent_kafka`` directly.
-__all__ = ['DLQMessage', 'DLQSink', 'TopicPartition', 'read_dlq_entries']

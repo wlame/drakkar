@@ -28,6 +28,7 @@ from drakkar.metrics import (
     recorder_flush_batches_dropped,
     recorder_flush_duration,
     recorder_flush_retries,
+    recorder_requeue_overflow,
 )
 from drakkar.models import (
     ExecutorError,
@@ -1567,7 +1568,34 @@ class EventRecorder:
                 # Not yet at the retry cap — re-queue and let the next tick
                 # try again. Log at WARNING so the operator sees the retry
                 # trail before any drop happens.
+                #
+                # Overflow detection: ``self._buffer`` is bounded by
+                # ``deque(maxlen=max_buffer)``. If a concurrent ``_record``
+                # append filled the buffer while we were awaiting the flush,
+                # ``extendleft`` will silently evict rows from the TAIL
+                # (newest events) to honour ``maxlen``. Those rows are lost
+                # without any metric tick in ``_record`` (that path only
+                # counts drops on the append side). We measure the potential
+                # overflow arithmetically — ``(len_before + batch_len) -
+                # maxlen`` — and tick ``recorder_requeue_overflow`` by the
+                # number of rows the deque had to discard, so operators can
+                # alert on this previously silent data-loss path.
+                buffer_len_before = len(self._buffer)
+                batch_len = len(batch)
                 self._buffer.extendleft(reversed(batch))
+                maxlen = self._buffer.maxlen
+                if maxlen is not None:
+                    overflow = (buffer_len_before + batch_len) - maxlen
+                    if overflow > 0:
+                        recorder_requeue_overflow.inc(overflow)
+                        await logger.awarning(
+                            'recorder_buffer_overflow_on_requeue',
+                            category='recorder',
+                            dropped=overflow,
+                            buffer_len_before=buffer_len_before,
+                            batch_size=batch_len,
+                            max_buffer=maxlen,
+                        )
                 await logger.awarning(
                     'recorder_flush_retry',
                     category='recorder',

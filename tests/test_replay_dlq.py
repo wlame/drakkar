@@ -139,7 +139,12 @@ async def test_replay_publishes_all_entries(replay_module):
 
 
 async def test_dry_run_skips_producer(replay_module):
-    """With dry_run=True the reader iterates fully but produce() is never called."""
+    """With dry_run=True the reader iterates fully but produce() is never called.
+
+    The ``published`` counter reflects only actual writes to the target
+    topic (zero in dry-run). The ``would_publish`` counter tracks the
+    volume estimate so operators can size a real run from dry-run output.
+    """
     entries = [
         _dlq_entry('{"request_id": "r1"}', offset=1),
         _dlq_entry('{"request_id": "r2"}', offset=2),
@@ -159,9 +164,10 @@ async def test_dry_run_skips_producer(replay_module):
         )
 
     assert stats.read == 2
-    # published counter still tracks what WOULD have been sent — this is
-    # deliberate so operators can estimate volume in dry-run mode.
-    assert stats.published == 2
+    # ``published`` is zero in dry-run — nothing was actually produced.
+    assert stats.published == 0
+    # ``would_publish`` tracks the count that WOULD have been sent.
+    assert stats.would_publish == 2
 
 
 # =============================================================================

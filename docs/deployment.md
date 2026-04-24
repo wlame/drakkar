@@ -7,7 +7,7 @@ interaction between the debug server and cluster health checks.
 ## Kubernetes probes
 
 Drakkar exposes two dedicated HTTP endpoints for Kubernetes probes on the
-debug-server port (``debug.port``, default ``8787``):
+debug-server port (``debug.port``, default ``8080``):
 
 | Endpoint   | Purpose    | Success  | Failure                         |
 |------------|------------|----------|---------------------------------|
@@ -44,13 +44,13 @@ for Kubernetes integration to work.
 livenessProbe:
   httpGet:
     path: /healthz
-    port: 8787
+    port: 8080
   periodSeconds: 10
   failureThreshold: 3
 readinessProbe:
   httpGet:
     path: /readyz
-    port: 8787
+    port: 8080
   periodSeconds: 5
   failureThreshold: 3
   initialDelaySeconds: 10

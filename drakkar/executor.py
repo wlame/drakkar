@@ -9,7 +9,7 @@ import os
 import signal
 import sys
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -258,33 +258,29 @@ class ExecutorPool:
         proc = None
         subprocess_env = self._build_env(task)
         try:
-            # create_subprocess_exec passes args as list — no shell injection risk.
+            # Args passed as a list — no shell injection risk.
             # start_new_session=True on POSIX gives the child its own session and
             # process group. That lets the timeout path reap the whole descendant
             # tree via os.killpg (see _kill_process_tree). Without this, a binary
             # that spawns background grandchildren would leak them when the
-            # parent is killed. Windows has no session concept; same call
-            # without the flag (and _kill_process_tree falls back to proc.kill).
+            # parent is killed. Windows has no session concept; the kwarg is
+            # simply omitted there (and _kill_process_tree falls back to
+            # proc.kill).
             stdin_pipe = asyncio.subprocess.PIPE if task.stdin is not None else None
-            if _IS_POSIX:
-                proc = await asyncio.create_subprocess_exec(
-                    binary,
-                    *task.args,
-                    stdin=stdin_pipe,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=subprocess_env,
-                    start_new_session=True,
-                )
-            else:
-                proc = await asyncio.create_subprocess_exec(
-                    binary,
-                    *task.args,
-                    stdin=stdin_pipe,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=subprocess_env,
-                )
+            # ``start_new_session`` only on POSIX — Windows has no session
+            # concept. Use ``Any`` for the kwarg dict so the type checker
+            # doesn't try to widen ``bool`` to ``int`` to match
+            # ``create_subprocess_exec``'s positional-arg signature.
+            platform_kwargs: dict[str, Any] = {'start_new_session': True} if _IS_POSIX else {}
+            proc = await asyncio.create_subprocess_exec(
+                binary,
+                *task.args,
+                stdin=stdin_pipe,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=subprocess_env,
+                **platform_kwargs,
+            )
             stdin_bytes = task.stdin.encode() if task.stdin is not None else None
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(input=stdin_bytes),

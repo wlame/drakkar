@@ -37,6 +37,9 @@ Configured sinks (any combination)
 - **Flight recorder** -- SQLite event log with retention and rotation
 - **Prometheus metrics** -- pipeline, executor, and per-sink metrics
 - **Structured JSON logging** -- ECS-compatible, ready for Elastic
+- **Kubernetes-ready** -- unauthenticated `/healthz` and `/readyz` probes; see [`docs/deployment.md`](docs/deployment.md)
+- **Perf extras** -- `pip install "py-drakkar[perf]"` enables the `orjson` fast path for recorder JSON encoding
+- **DLQ replay** -- `scripts/replay_dlq.py` reads dead-lettered records and republishes them to a target topic (see [`docs/sinks.md#dlq-replay`](docs/sinks.md#dlq-replay))
 
 ## Quick start
 

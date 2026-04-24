@@ -60,6 +60,11 @@ class FakeSink(BaseSink):
 
 class FailCloseSink(FakeSink):
     async def close(self) -> None:
+        # Flip the state flag BEFORE raising so assertions on ``closed``
+        # still reflect "close was attempted" even when the subclass fails.
+        # Without this the flag would lie — tests inspecting ``closed`` on
+        # a fail-close sink would see False even though close() ran.
+        self.closed = True
         raise RuntimeError('close failed')
 
 
@@ -314,6 +319,10 @@ class TrackingCloseFailSink(TrackingCloseSink):
 
     async def close(self) -> None:
         self.close_call_count += 1
+        # Flip ``closed`` before raising — mirrors FailCloseSink so tests
+        # reading the flag see the "close was attempted" state even when
+        # the implementation itself errored.
+        self.closed = True
         raise RuntimeError(f'close failed: {self.name}')
 
 
@@ -1735,11 +1744,20 @@ async def test_idempotent_sink_retries_on_transient_error_then_succeeds():
 
     This is the headline win of the idempotency declaration — the flaky
     network blip never reaches the user's error handler or advances the
-    circuit breaker.
+    circuit breaker. Also asserts that the Prometheus
+    ``sink_delivery_retries`` counter ticks for the in-call retry.
     """
+    from drakkar.metrics import sink_delivery_retries
+
     mgr = SinkManager()
     sink = IdempotentSink('out', sink_type='kafka')
     mgr.register(sink)
+
+    # Capture the counter value BEFORE the test so cross-test ordering
+    # can't make the assertion flaky — Prometheus counters are process-
+    # global and accumulate across the suite.
+    metric = sink_delivery_retries.labels(sink_type='kafka', sink_name='out')
+    retries_before = metric._value.get()
 
     call_count = 0
 
@@ -1766,6 +1784,9 @@ async def test_idempotent_sink_retries_on_transient_error_then_succeeds():
     assert sink._consecutive_failures == 0
     # Payload was delivered exactly once.
     assert len(sink.delivered) == 1
+    # The in-call retry ticked ``sink_delivery_retries`` exactly once —
+    # proves operators see the retry activity via the counter.
+    assert metric._value.get() == retries_before + 1
 
 
 async def test_non_idempotent_sink_does_not_retry_on_transient_error():

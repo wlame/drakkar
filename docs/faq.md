@@ -25,7 +25,7 @@ The `ExecutorPool` semaphore sits at the center, throttling concurrent subproces
 ### What is Drakkar NOT a good fit for?
 
 - **Pure async-Python workloads with no subprocess stage** — a plain `aiokafka` consumer + async sinks is simpler; Drakkar's subprocess machinery becomes pure overhead.
-- **Very short tasks** where the per-task subprocess launch overhead (~10ms) dominates the actual work. If your task is ≤ 1ms of real work, use [precomputed tasks](handler.md#precomputed-task-results) or in-process logic. See [Bottleneck: Subprocess Launch](performance.md#bottleneck-subprocess-launch).
+- **Very short tasks** where the per-task subprocess launch overhead (~10ms) dominates the actual work. If your task is ≤ 1ms of real work, use [precomputed tasks](handler.md#precomputed-task-results-skip-the-subprocess) or in-process logic. See [Bottleneck: Subprocess Launch](performance.md#bottleneck-subprocess-launch).
 - **Ultra-low-latency pipelines** (single-digit ms end-to-end) — windowing and batching cost is real.
 - **Exactly-once transactional streams** — Drakkar is at-least-once with DLQ safety; see the delivery section below.
 
@@ -87,7 +87,7 @@ Knobs that move the ceiling up (all documented in [performance.md](performance.m
 - **Precomputed tasks** (cache hits skip the subprocess entirely) remove the per-task launch cost — the ceiling becomes whatever your sinks can absorb.
 - **Batching messages per task** (one subprocess launch for N messages via stdin) amortizes the 1-5ms launch cost.
 - **Larger `window_size`** enables larger batches in `arrange()`.
-- **Off-thread JSON encoding** and **`orjson`** are on the roadmap to cut recorder overhead (see [Future optimizations](performance.md#future-optimizations-phase-3)).
+- **Off-thread JSON encoding** and **`orjson`** are available to cut recorder overhead (see [Available optimization: `orjson`](performance.md#available-optimization-orjson-opt-in)).
 
 Use the [Config Calculator](calculator.md) for a starting point, then measure in staging. Target metrics live in [Monitoring Throughput](performance.md#monitoring-throughput).
 
@@ -112,7 +112,7 @@ Subclass `BaseDrakkarHandler[InputModel, OutputModel]` and implement at least `a
 
 ### What's a "precomputed" task?
 
-A task whose result the handler already knows (cache hit, deterministic shortcut) — the executor skips the subprocess and emits synthetic `task_started`/`task_completed` events. Useful for memoization. See [Precomputed task results](handler.md#precomputed-task-results).
+A task whose result the handler already knows (cache hit, deterministic shortcut) — the executor skips the subprocess and emits synthetic `task_started`/`task_completed` events. Useful for memoization. See [Precomputed task results](handler.md#precomputed-task-results-skip-the-subprocess).
 
 ### When does a message's offset get committed to Kafka?
 
@@ -166,7 +166,7 @@ Reads are in-memory LRU first; miss → fallback to `_reader_db` (separate aiosq
 
 ### What sinks ship with Drakkar?
 
-Kafka, Postgres, Mongo, HTTP, Redis, Filesystem, and a dedicated DLQ (Kafka topic). See [Sinks](sinks.md) and the per-type config in [Configuration — Sinks](configuration.md#sinks).
+Kafka, Postgres, Mongo, HTTP, Redis, Filesystem, and a dedicated DLQ (Kafka topic). See [Sinks](sinks.md) and the per-type config in [Configuration — Sinks](configuration.md#sinks-sinks).
 
 ### What delivery guarantee does Drakkar provide?
 
@@ -288,7 +288,7 @@ Mildly. Heavy read traffic increases SQLite WAL checkpoint frequency and burns a
 
 ### What happens if my handler crashes mid-message?
 
-The exception is caught, logged, the task is marked failed, `on_error` fires on the handler. If `on_error` returns `RETRY` and `max_retries` isn't exhausted, the task runs again. If all retries fail, the task is terminal and the message's offset commits only after all its tasks settle. See [Error Handling — on_error Hook](executor.md#error-handling-on-error-hook).
+The exception is caught, logged, the task is marked failed, `on_error` fires on the handler. If `on_error` returns `RETRY` and `max_retries` isn't exhausted, the task runs again. If all retries fail, the task is terminal and the message's offset commits only after all its tasks settle. See [Error Handling — on_error Hook](executor.md#error-handling-on_error-hook).
 
 ### What if a subprocess hangs?
 
@@ -304,7 +304,7 @@ Per-batch retries kick in first; exhausted retries fire `on_delivery_error` and 
 
 ### How do I replay messages from the DLQ?
 
-Drakkar does not run a built-in replay worker — replays are operator-driven. The typical pattern is a one-off script that consumes from the DLQ topic and re-produces to the source topic (or a dedicated "retry" topic to avoid re-delivery loops if the original producer also still writes). Each DLQ entry preserves the source topic, partition, offset, key, value, and headers so the original envelope is reconstructible. A reference replay script is a roadmap item (tracked under Phase 3 hygiene); until it ships, the envelope fields needed are documented in the [DLQ payload schema](sinks.md#dead-letter-queue).
+Drakkar does not run a built-in replay worker — replays are operator-driven. Use [`scripts/replay_dlq.py`](sinks.md#dlq-replay) as the reference tool: it reads DLQ entries and republishes their preserved `original_payloads` to a target Kafka topic (defaults to your source topic), with `--dry-run`, `--filter`, `--limit` for inspection and a consumer group that is unique per invocation so each run drains from the beginning. The script preserves the serialized payload bytes; it does NOT currently preserve original partition / key / headers — if downstream routing depends on those, point `--target-topic` at a retry topic whose producer re-derives them. See the [DLQ payload schema](sinks.md#dead-letter-queue) for the fields the script reads.
 
 ### A message is stuck in "in-flight" forever — what do I do?
 
@@ -331,7 +331,7 @@ Four reasons, all aligned with the "CPU in external binaries, Python orchestrate
 3. **OS-level CPU isolation** — one task's bug (segfault, OOM, infinite loop) cannot corrupt the worker process.
 4. **Clean timeouts and cancellation** — the executor just SIGKILLs a runaway subprocess. Cancelling in-process Python threads is notoriously unreliable.
 
-The cost is ~10ms of launch overhead per task ([Bottleneck: Subprocess Launch](performance.md#bottleneck-subprocess-launch)) — a fair trade when your task does 10ms–10s of real CPU work. For sub-millisecond tasks, use [precomputed results](handler.md#precomputed-task-results) to skip the subprocess entirely.
+The cost is ~10ms of launch overhead per task ([Bottleneck: Subprocess Launch](performance.md#bottleneck-subprocess-launch)) — a fair trade when your task does 10ms–10s of real CPU work. For sub-millisecond tasks, use [precomputed results](handler.md#precomputed-task-results-skip-the-subprocess) to skip the subprocess entirely.
 
 ### Why SQLite for the recorder and cache?
 
@@ -357,7 +357,7 @@ They're separate SQLite files with separate schemas and separate reader/writer c
 
 ## Security and trust model
 
-This section expands the five trust assumptions listed in the [README](../README.md#security--trust-model) -- each one is an architectural trust boundary, not a latent bug. Read this before a production deploy.
+This section expands the five trust assumptions listed in the [project README](https://github.com/wlame/drakkar#security--trust-model) -- each one is an architectural trust boundary, not a latent bug. Read this before a production deploy.
 
 ### Why is the handler binary trusted?
 

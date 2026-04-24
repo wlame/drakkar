@@ -146,19 +146,20 @@ stays stable whether or not the extra is present.
 Recommended at **> 1k tasks/sec/worker**; below that, the stdlib
 encoder is fast enough that the gain is not measurable.
 
-### Future optimizations (Phase 3+)
+### Further headroom on the horizon
 
-One more concrete change buys meaningful headroom on this bottleneck
-without changing the execution model:
+`orjson` has already shipped (see above). One more concrete change
+would buy meaningful additional headroom on this bottleneck without
+changing the execution model:
 
 - **Off-thread JSON encoding.** Batch recorder events and hand the
-  `json.dumps` work to a worker thread via `asyncio.to_thread` (or a
+  encode work to a worker thread via `asyncio.to_thread` (or a
   dedicated encoder thread). The event loop keeps the Python-object
-  buffer; JSON serialization happens off-thread and doesn't hold the GIL
+  buffer; serialization happens off-thread and doesn't hold the GIL
   during the I/O-free encoding fast path.
 
 Combined with `orjson`, this should unlock the 4k-8k tasks/sec/worker
-ceiling. It is scoped for a later phase — today, the honest guidance
+ceiling. It is scoped for a later phase — today the honest guidance
 is "install the `perf` extra, then scale horizontally once one worker
 saturates".
 

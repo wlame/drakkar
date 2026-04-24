@@ -83,7 +83,17 @@ _FIELD_TO_SINK_TYPE: dict[str, str] = {
 
 @dataclass
 class SinkStats:
-    """Per-sink delivery statistics tracked in memory."""
+    """Per-sink delivery statistics tracked in memory.
+
+    ``last_delivery_duration`` measures the wall-clock of the FULL
+    ``_deliver_to_sink`` attempt — for an idempotent sink that retries
+    internally on a transient error, this includes the failed attempts
+    and their backoff sleeps, not just the successful call. The figure
+    is therefore an upper-bound estimate of per-batch sink cost rather
+    than the precise "successful attempt" latency. Prometheus
+    ``drakkar_sink_delivery_duration_seconds`` is a better source for
+    latency percentiles across attempts.
+    """
 
     delivered_count: int = 0
     delivered_payloads: int = 0
@@ -438,7 +448,6 @@ class SinkManager:
         sink_type: str,
         sink_name: str,
         payloads: list[BaseModel],
-        stats: SinkStats,
     ) -> None:
         """Run ``sink.deliver(payloads)`` with a bounded fast-retry on transient errors.
 
@@ -472,13 +481,11 @@ class SinkManager:
         # Idempotent path: transient errors get a small number of quick
         # retries with exponential backoff. Non-transient errors propagate
         # on the first raise. Successful delivery returns immediately.
-        last_exception: BaseException | None = None
         for attempt_idx in range(_IDEMPOTENT_MAX_ATTEMPTS):
             try:
                 await sink.deliver(payloads)
                 return
             except _TRANSIENT_ERRORS as exc:
-                last_exception = exc
                 # The last attempt has nothing to retry into — just
                 # re-raise so the caller's error handler sees the
                 # transient error exactly as it would on a non-idempotent
@@ -504,14 +511,6 @@ class SinkManager:
                     error=redact_url(str(exc)),
                 )
                 await asyncio.sleep(backoff)
-
-        # Defensive: the loop above should always either ``return`` on
-        # success or ``raise`` on the terminal attempt. This line is
-        # unreachable under normal control flow but is kept explicit so
-        # a future refactor doesn't silently swallow ``last_exception``
-        # if the loop structure changes.
-        if last_exception is not None:
-            raise last_exception
 
     async def _deliver_to_sink(
         self,
@@ -637,7 +636,6 @@ class SinkManager:
                         sink_type=sink_type,
                         sink_name=sink_name,
                         payloads=payloads,
-                        stats=stats,
                     )
                     duration = time.monotonic() - start
                     stats.delivered_count += 1

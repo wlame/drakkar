@@ -104,6 +104,8 @@ Emitted only when [`debug.enabled=true`](configuration.md#debug-flight-recorder-
 | `drakkar_recorder_buffer_size` | Gauge | -- | Current depth of the in-memory event buffer. Updated on every `_record()` call and after each flush. A sustained value near `max_buffer` signals the flush loop can't keep up with incoming events -- raise `flush_interval_seconds` or `max_buffer`, or investigate disk latency. |
 | `drakkar_recorder_dropped_events_total` | Counter | -- | Events evicted from the ring buffer because it was full at record time. Non-zero means event history has gaps; scale the buffer up or speed up flushes. This was previously a silent failure mode -- the counter makes it alertable. |
 | `drakkar_recorder_flush_duration_seconds` | Histogram | -- | Duration of the full flush body (`executemany` + `commit`). Exposes disk-I/O latency tail. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1. Alert on p99 exceeding `flush_interval_seconds` -- flushes overlapping the next scheduled flush starve the buffer. |
+| `drakkar_recorder_flush_retries_total` | Counter | -- | Flush attempts that failed with `aiosqlite.OperationalError` and re-queued their batch at the front of the buffer. A non-zero `rate(...[5m])` signals a transient DB-health issue (WAL lock, disk pressure); if it climbs without stabilising, the recorder is about to start dropping batches. Pair with `drakkar_recorder_flush_batches_dropped_total` to distinguish "retrying" from "giving up". |
+| `drakkar_recorder_flush_batches_dropped_total` | Counter | -- | Batches discarded after `max_flush_retries` consecutive failures. This is silent recorder data loss — alert on any non-zero rate. Investigate disk space, filesystem health, and WAL contention. |
 
 #### Cache
 

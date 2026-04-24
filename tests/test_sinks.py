@@ -1387,3 +1387,152 @@ async def test_dlq_sink_deliver_raises_not_implemented():
     sink = DLQSink(topic='dlq', brokers='localhost:9092')
     with pytest.raises(NotImplementedError, match=r'Use DLQSink\.send'):
         await sink.deliver([SampleOutput()])
+
+
+# =============================================================================
+# read_dlq_entries — the generator used by scripts/replay_dlq.py
+# =============================================================================
+
+
+def _mock_dlq_message(value_bytes: bytes | None, *, offset: int = 0, partition: int = 0, error=None):
+    """Build a MagicMock that matches the confluent_kafka Message surface
+    needed by ``read_dlq_entries``.
+
+    Only the handful of methods actually called (``error``, ``value``,
+    ``offset``, ``partition``) are stubbed — everything else falls through
+    to MagicMock defaults.
+    """
+    msg = MagicMock()
+    msg.error.return_value = error
+    msg.value.return_value = value_bytes
+    msg.offset.return_value = offset
+    msg.partition.return_value = partition
+    return msg
+
+
+async def test_read_dlq_entries_drains_and_stops_on_idle():
+    """The reader yields every well-formed message then exits when the
+    broker reports empty polls for ``idle_polls_before_stop`` ticks.
+    """
+    import json as _json
+
+    from drakkar.sinks import dlq as dlq_module
+
+    entries = [
+        _json.dumps({'original_payloads': ['{"id": 1}']}).encode(),
+        _json.dumps({'original_payloads': ['{"id": 2}']}).encode(),
+    ]
+    messages = [_mock_dlq_message(b, offset=i) for i, b in enumerate(entries)]
+
+    fake_consumer = AsyncMock()
+    fake_consumer.consume.side_effect = [messages, [], []]
+
+    with patch.object(dlq_module, 'AIOConsumer', return_value=fake_consumer):
+        yielded = []
+        async for entry in dlq_module.read_dlq_entries(
+            topic='test-dlq',
+            brokers='localhost:9092',
+            idle_polls_before_stop=2,
+            poll_timeout=0.01,
+        ):
+            yielded.append(entry)
+
+    assert len(yielded) == 2
+    assert [e['_kafka_offset'] for e in yielded] == [0, 1]
+    assert yielded[0]['original_payloads'] == ['{"id": 1}']
+    fake_consumer.close.assert_awaited()
+
+
+async def test_read_dlq_entries_honors_limit():
+    """When ``limit`` is set, iteration stops after exactly that many
+    entries even if more messages are available in the batch.
+    """
+    import json as _json
+
+    from drakkar.sinks import dlq as dlq_module
+
+    entries = [_json.dumps({'original_payloads': [f'{{"id": {i}}}']}).encode() for i in range(5)]
+    messages = [_mock_dlq_message(b, offset=i) for i, b in enumerate(entries)]
+
+    fake_consumer = AsyncMock()
+    fake_consumer.consume.side_effect = [messages, []]
+
+    with patch.object(dlq_module, 'AIOConsumer', return_value=fake_consumer):
+        yielded = []
+        async for entry in dlq_module.read_dlq_entries(
+            topic='test-dlq',
+            brokers='localhost:9092',
+            limit=3,
+            poll_timeout=0.01,
+        ):
+            yielded.append(entry)
+
+    assert len(yielded) == 3
+    assert [e['_kafka_offset'] for e in yielded] == [0, 1, 2]
+
+
+async def test_read_dlq_entries_skips_invalid_json():
+    """A message whose value is not valid JSON is logged and skipped
+    without aborting the iteration.
+    """
+    import json as _json
+
+    from drakkar.sinks import dlq as dlq_module
+
+    valid = _json.dumps({'original_payloads': ['{"id": 1}']}).encode()
+    invalid = b'this-is-not-json'
+    messages = [
+        _mock_dlq_message(invalid, offset=0),
+        _mock_dlq_message(valid, offset=1),
+    ]
+
+    fake_consumer = AsyncMock()
+    fake_consumer.consume.side_effect = [messages, []]
+
+    with patch.object(dlq_module, 'AIOConsumer', return_value=fake_consumer):
+        yielded = []
+        async for entry in dlq_module.read_dlq_entries(
+            topic='test-dlq',
+            brokers='localhost:9092',
+            idle_polls_before_stop=1,
+            poll_timeout=0.01,
+        ):
+            yielded.append(entry)
+
+    # Only the well-formed message makes it through.
+    assert len(yielded) == 1
+    assert yielded[0]['_kafka_offset'] == 1
+
+
+async def test_read_dlq_entries_skips_partition_eof():
+    """Broker-issued ``_PARTITION_EOF`` messages are NOT treated as entries."""
+    import json as _json
+
+    from confluent_kafka import KafkaError
+
+    from drakkar.sinks import dlq as dlq_module
+
+    eof_error = MagicMock()
+    eof_error.code.return_value = KafkaError._PARTITION_EOF
+
+    valid = _json.dumps({'original_payloads': ['{"id": 1}']}).encode()
+    messages = [
+        _mock_dlq_message(None, offset=0, error=eof_error),
+        _mock_dlq_message(valid, offset=1),
+    ]
+
+    fake_consumer = AsyncMock()
+    fake_consumer.consume.side_effect = [messages, []]
+
+    with patch.object(dlq_module, 'AIOConsumer', return_value=fake_consumer):
+        yielded = []
+        async for entry in dlq_module.read_dlq_entries(
+            topic='test-dlq',
+            brokers='localhost:9092',
+            idle_polls_before_stop=1,
+            poll_timeout=0.01,
+        ):
+            yielded.append(entry)
+
+    assert len(yielded) == 1
+    assert yielded[0]['_kafka_offset'] == 1

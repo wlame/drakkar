@@ -60,7 +60,6 @@ import json
 import signal
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import structlog
 from confluent_kafka.aio import AIOProducer
@@ -75,10 +74,17 @@ PROGRESS_EVERY = 1000
 
 @dataclass
 class ReplayStats:
-    """Counters maintained during a replay run, reported at the end."""
+    """Counters maintained during a replay run, reported at the end.
+
+    ``published`` tracks the number of messages ACTUALLY produced to the
+    target topic. ``would_publish`` tracks the same count for ``--dry-run``
+    so operators can estimate volume without the summary line making it
+    look like real work happened.
+    """
 
     read: int = 0
     published: int = 0
+    would_publish: int = 0
     filtered_out: int = 0
     skipped_invalid: int = 0
     last_successful_offset: int | None = None
@@ -279,15 +285,19 @@ async def run(
                     _emit_progress(stats)
                 continue
 
-            # When target-topic is None but --dry-run is set, use a placeholder
-            # for the log message so the operator can still see what would
-            # have happened.
-            effective_target = target_topic or '<dry-run>'
             try:
                 if not dry_run:
                     await _maybe_publish(producer, target_topic or '', values)
-                stats.published += len(values)
-                stats.last_successful_offset = entry.get('_kafka_offset')
+                    stats.published += len(values)
+                    stats.last_successful_offset = entry.get('_kafka_offset')
+                else:
+                    # Dry-run: track the would-be count separately so the
+                    # summary line can show operators "this many messages
+                    # would have been published" without lying about the
+                    # ``published`` counter (which means "actually written to
+                    # the target topic").
+                    stats.would_publish += len(values)
+                    stats.last_successful_offset = entry.get('_kafka_offset')
             except Exception as exc:
                 err = f'publish failed at dlq_offset={entry.get("_kafka_offset")!r}: {exc}'
                 stats.errors.append(err)
@@ -298,11 +308,12 @@ async def run(
                         file=sys.stderr,
                     )
                 raise
-            finally:
-                if stats.read % PROGRESS_EVERY == 0:
-                    _emit_progress(stats)
 
-            _ = effective_target  # kept for clarity in future log additions
+            # Progress emission ONLY on the success path — don't print a
+            # confusing "replayed N/M" line immediately before the exception
+            # propagates out of the loop.
+            if stats.read % PROGRESS_EVERY == 0:
+                _emit_progress(stats)
     finally:
         if owns_producer and producer is not None:
             try:
@@ -316,11 +327,19 @@ async def run(
 def _emit_progress(stats: ReplayStats) -> None:
     """Print a one-line progress update to stderr.
 
-    Format: ``replayed N/M`` where N is published and M is read. Matches
-    the ``tqdm``-ish conventions operators expect while staying
+    Format: ``replayed N/M`` (or ``would-replay N/M`` in dry-run) where N
+    is the count delivered/to-be-delivered and M is total read so far.
+    Matches the ``tqdm``-ish conventions operators expect while staying
     dependency-free.
     """
-    print(f'replayed {stats.published}/{stats.read}', file=sys.stderr)
+    # In dry-run mode nothing gets published, but ``would_publish`` is
+    # incremented so operators still see progress. Otherwise fall back to
+    # the real ``published`` counter (zero is fine for early-iteration
+    # progress before any batches have been delivered).
+    if stats.would_publish and not stats.published:
+        print(f'would-replay {stats.would_publish}/{stats.read}', file=sys.stderr)
+    else:
+        print(f'replayed {stats.published}/{stats.read}', file=sys.stderr)
 
 
 def _emit_summary(stats: ReplayStats) -> None:
@@ -331,6 +350,7 @@ def _emit_summary(stats: ReplayStats) -> None:
     """
     print(
         f'summary: read={stats.read} published={stats.published} '
+        f'would_publish={stats.would_publish} '
         f'filtered_out={stats.filtered_out} skipped_invalid={stats.skipped_invalid} '
         f'errors={len(stats.errors)}',
         file=sys.stderr,
@@ -389,24 +409,5 @@ async def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _cli() -> None:
-    """Thin synchronous wrapper around ``asyncio.run(main())``.
-
-    Having a zero-arg wrapper makes the script invokable via
-    ``python -m`` or as a console_script entry point if we ever
-    promote it from scripts/ to a real module.
-    """
-    raise SystemExit(asyncio.run(main()))
-
-
 if __name__ == '__main__':  # pragma: no cover - trivial dispatch
-    _cli()
-
-
-def _resolve_config_path(raw: str) -> Path:  # pragma: no cover - helper for external callers
-    """Resolve a config path, expanding ``~`` and normalizing.
-
-    Exposed as a utility for any wrapper scripts that want to validate the
-    path before invoking ``main``.
-    """
-    return Path(raw).expanduser().resolve()
+    raise SystemExit(asyncio.run(main()))

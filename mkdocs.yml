@@ -57,6 +57,7 @@ nav:
   - Executor: executor.md
   - Observability: observability.md
   - Performance: performance.md
+  - Deployment: deployment.md
   - Config Calculator: calculator.md
   - Integration Tests: integration.md
   - Data Flow: data-flow.md
