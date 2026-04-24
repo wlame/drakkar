@@ -869,3 +869,103 @@ async def test_precomputed_works_without_binary_path():
     )
     result = await pool.execute(task)
     assert result.stdout == 'ok'
+
+
+# =============================================================================
+# Process-group isolation on timeout (POSIX only)
+# =============================================================================
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX-only: os.killpg / start_new_session')
+async def test_timeout_kills_grandchildren_via_process_group(tmp_path):
+    """A subprocess that forks a background grandchild must have the grandchild
+    reaped when the parent times out.
+
+    Before process-group isolation, killing just the parent would leave the
+    grandchild running (orphaned, reparented to init). With
+    ``start_new_session=True`` + ``os.killpg`` we signal the whole group.
+
+    Strategy:
+    - spawn ``bash -c "sleep 60 & echo $! > grandchild.pid; wait"``
+    - task_timeout_seconds=1 forces the timeout path
+    - after the timeout, poll ``os.kill(grandchild_pid, 0)`` — a signal of 0
+      is the POSIX "does this process exist?" probe and raises
+      ProcessLookupError once the grandchild is gone
+    """
+    import os as _os  # local alias to avoid conflicting with test helpers
+
+    pid_file = tmp_path / 'grandchild.pid'
+
+    pool = ExecutorPool(
+        binary_path='/bin/bash',
+        max_executors=1,
+        task_timeout_seconds=1,
+    )
+    # The bash script:
+    #   1) launches `sleep 60` in the background (the grandchild)
+    #   2) writes the grandchild PID to a file we can read from the test
+    #   3) `wait`s so bash itself stays alive long enough for the timeout
+    #      to fire (otherwise bash exits before we trigger the kill path)
+    script = f'sleep 60 & echo $! > {pid_file}; wait'
+    task = make_task(args=['-c', script])
+
+    with pytest.raises(ExecutorTaskError) as exc_info:
+        await pool.execute(task)
+    assert 'timed out' in exc_info.value.error.stderr
+
+    # Read the grandchild PID that bash recorded before being killed.
+    assert pid_file.exists(), 'grandchild PID file was never written — script timing is off'
+    grandchild_pid = int(pid_file.read_text().strip())
+
+    # killpg sends SIGKILL to the whole group; the kernel reaps the grandchild
+    # asynchronously, so give it a short grace window before asserting.
+    deadline = asyncio.get_running_loop().time() + 2.0
+    alive = True
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            _os.kill(grandchild_pid, 0)
+        except ProcessLookupError:
+            alive = False
+            break
+        await asyncio.sleep(0.05)
+
+    assert not alive, f'grandchild pid={grandchild_pid} was not reaped by killpg'
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX-only: os.killpg')
+async def test_killpg_process_lookup_error_swallowed(monkeypatch):
+    """If the child exits between ``getpgid`` and ``killpg`` (a benign race),
+    the kernel raises ProcessLookupError. The executor must swallow it and
+    complete the cleanup without propagating the error up the stack.
+
+    We simulate the race by monkey-patching ``os.killpg`` to raise
+    ProcessLookupError on the first call. If the swallow logic is missing,
+    the error would surface from the task's ``finally`` and either mask the
+    original TimeoutError or propagate as an unexpected exception.
+    """
+    import os as _os
+
+    calls: list[int] = []
+
+    def raising_killpg(pgid: int, sig: int) -> None:
+        calls.append(pgid)
+        raise ProcessLookupError('simulated race: child exited before killpg')
+
+    monkeypatch.setattr(_os, 'killpg', raising_killpg)
+
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=1,
+        task_timeout_seconds=1,
+    )
+    task = make_task(args=['-c', 'import time; time.sleep(30)'])
+
+    # The expected exception is the timeout-driven ExecutorTaskError,
+    # NOT a ProcessLookupError leaking out of the finally block.
+    with pytest.raises(ExecutorTaskError) as exc_info:
+        await pool.execute(task)
+
+    assert 'timed out' in exc_info.value.error.stderr
+    # Verify our patched killpg was actually called — otherwise the test
+    # would pass trivially if the code path skipped killpg entirely.
+    assert len(calls) == 1, f'expected exactly one killpg call, got {len(calls)}'

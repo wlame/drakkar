@@ -6,6 +6,8 @@ import asyncio
 import fnmatch
 import heapq
 import os
+import signal
+import sys
 import time
 from typing import TYPE_CHECKING
 
@@ -18,6 +20,12 @@ if TYPE_CHECKING:
     from drakkar.recorder import EventRecorder
 
 logger = structlog.get_logger()
+
+# POSIX systems let us spawn a child in its own session/process group so we
+# can signal the entire descendant tree on timeout (see ``_kill_process_tree``
+# below). Windows has no ``os.killpg`` / session semantics — fall back to the
+# parent-only kill on that platform.
+_IS_POSIX = sys.platform != 'win32'
 
 
 class ExecutorPool:
@@ -250,15 +258,33 @@ class ExecutorPool:
         proc = None
         subprocess_env = self._build_env(task)
         try:
-            # create_subprocess_exec passes args as list — no shell injection risk
-            proc = await asyncio.create_subprocess_exec(
-                binary,
-                *task.args,
-                stdin=asyncio.subprocess.PIPE if task.stdin is not None else None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=subprocess_env,
-            )
+            # create_subprocess_exec passes args as list — no shell injection risk.
+            # start_new_session=True on POSIX gives the child its own session and
+            # process group. That lets the timeout path reap the whole descendant
+            # tree via os.killpg (see _kill_process_tree). Without this, a binary
+            # that spawns background grandchildren would leak them when the
+            # parent is killed. Windows has no session concept; same call
+            # without the flag (and _kill_process_tree falls back to proc.kill).
+            stdin_pipe = asyncio.subprocess.PIPE if task.stdin is not None else None
+            if _IS_POSIX:
+                proc = await asyncio.create_subprocess_exec(
+                    binary,
+                    *task.args,
+                    stdin=stdin_pipe,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=subprocess_env,
+                    start_new_session=True,
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    binary,
+                    *task.args,
+                    stdin=stdin_pipe,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=subprocess_env,
+                )
             stdin_bytes = task.stdin.encode() if task.stdin is not None else None
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(input=stdin_bytes),
@@ -340,8 +366,45 @@ class ExecutorPool:
 
         finally:
             if proc and proc.returncode is None:
-                proc.kill()
-                await proc.wait()
+                await self._kill_process_tree(proc)
+
+    @staticmethod
+    async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+        """Kill a subprocess and all of its descendants.
+
+        On POSIX, the child was spawned with ``start_new_session=True`` so its
+        PID is also its process-group ID. ``os.killpg`` then signals every
+        process in that group — parent and all (grand)children — in one call.
+        This is how we prevent the classic "I killed the shell but its
+        backgrounded jobs are still running" leak on timeout.
+
+        Race handling: the child may exit between ``getpgid`` and ``killpg``
+        (or between the signal and ``wait``), in which case the kernel raises
+        ``ProcessLookupError``. That is benign — the process is already gone,
+        which is what we wanted — so we log at debug and continue.
+
+        Windows has no ``killpg``; we fall back to the standard ``proc.kill``
+        which terminates only the direct child. Grandchild-cleanup on Windows
+        would need job objects and is out of scope.
+        """
+        if _IS_POSIX:
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                # Child exited between our getpgid/killpg calls — that's fine.
+                await logger.adebug(
+                    'executor_killpg_race_noop',
+                    category='executor',
+                    pid=proc.pid,
+                )
+        else:
+            # Windows path: single-process kill, no process group concept.
+            proc.kill()
+        # proc.wait() is safe to call even if the child is already gone — it
+        # just returns the cached returncode. Always await so we don't leave
+        # a zombie or a dangling Transport.
+        await proc.wait()
 
 
 class ExecutorTaskError(Exception):
