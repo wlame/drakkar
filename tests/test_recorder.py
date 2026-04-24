@@ -540,6 +540,120 @@ async def test_rotate_enforces_max_file_count(tmp_path):
     await rec.stop()
 
 
+async def test_rotate_creates_schema_before_swap(tmp_path):
+    """_create_schema(new_db) must run BEFORE self._db is swapped.
+
+    Previously the swap happened first, leaving a schemaless window during
+    which a concurrent flush could hit ``no such table: events``. The fix
+    inverts the order, and this test locks it in by recording the value of
+    ``self._db`` at the moment ``_create_schema`` is called — it must still
+    point at the OLD connection.
+    """
+    config = make_debug_config(tmp_path, retention_hours=24)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    old_db = rec._db
+    observed: dict[str, object] = {}
+    real_create_schema = rec._create_schema
+
+    async def spy_create_schema(db):
+        # Record the live writer at the moment the new DB is being primed.
+        # If the swap happened first, rec._db would equal the passed-in db.
+        observed['db_arg'] = db
+        observed['self_db_at_call'] = rec._db
+        await real_create_schema(db)
+
+    rec._create_schema = spy_create_schema  # type: ignore[method-assign]
+    await rec._rotate()
+
+    # Schema was created on a NEW connection, not the old writer.
+    assert observed['db_arg'] is not old_db
+    # At the moment _create_schema ran, the live writer was still the OLD
+    # connection — ordering is schema-first, swap-second.
+    assert observed['self_db_at_call'] is old_db
+    # After rotation completes, the live writer is the new connection.
+    assert rec._db is observed['db_arg']
+
+    await rec.stop()
+
+
+async def test_concurrent_flush_during_rotate_no_missing_table(tmp_path):
+    """A flush running concurrently with _rotate must never hit 'no such table'.
+
+    This exercises the real race that motivated the fix: _rotate previously
+    swapped self._db first and then created the schema, so a _flush_loop
+    iteration interleaved between the swap and the schema-creation would
+    execute INSERT against a schemaless file.
+
+    We run the race many times to make a scheduling-dependent failure
+    observable; with the fix, every iteration should succeed.
+    """
+    iterations = 20
+    for i in range(iterations):
+        # Isolate each iteration in a subdirectory so DB filenames don't
+        # collide and old files don't influence retention checks.
+        iter_dir = tmp_path / f'iter-{i}'
+        iter_dir.mkdir()
+        config = make_debug_config(iter_dir, retention_hours=999, retention_max_events=100_000)
+        rec = EventRecorder(config, worker_name=WORKER_NAME)
+        await rec.start()
+
+        # Seed the buffer so _flush has real work to do on both the old
+        # and the new DB; this is what would trip 'no such table' if the
+        # schema were still missing at flush time.
+        for offset in range(10):
+            rec.record_consumed(make_msg(offset=offset))
+
+        # Launch flush + rotate + flush concurrently. The second flush
+        # is the one most likely to land in the swap-then-schema window
+        # under the old (broken) ordering.
+        await asyncio.gather(
+            rec._flush(),
+            rec._rotate(),
+            rec._flush(),
+        )
+
+        # No exception means the race didn't surface — there was no
+        # window where self._db was live but missing the events table.
+        await rec.stop()
+
+
+async def test_rotate_schema_creation_failure_does_not_swap(tmp_path):
+    """If _create_schema raises on the new DB, self._db stays unchanged."""
+    config = make_debug_config(tmp_path, retention_hours=24)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    old_db = rec._db
+    old_path = rec.db_path
+
+    async def failing_create_schema(db):
+        raise RuntimeError('simulated schema creation failure')
+
+    rec._create_schema = failing_create_schema  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match='simulated schema creation failure'):
+        await rec._rotate()
+
+    # Live writer was NOT swapped — the old (functional) connection is
+    # still installed, so subsequent flushes/queries keep working.
+    assert rec._db is old_db
+    assert rec.db_path == old_path
+
+    # Sanity: the old connection is still usable.
+    rec.record_consumed(make_msg(offset=42))
+    # Restore the real _create_schema so _flush's writes (which go to the
+    # old, still-schema-ful DB) and cleanup work.
+    del rec._create_schema
+    await rec._flush()
+
+    events = await rec.get_events()
+    assert any(e['offset'] == 42 for e in events)
+
+    await rec.stop()
+
+
 # --- Pool stats in events ---
 
 

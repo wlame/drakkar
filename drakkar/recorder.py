@@ -282,24 +282,31 @@ class EventRecorder:
         """Set callback that returns current worker state (uptime, partitions, pool)."""
         self._state_provider = provider
 
-    async def _create_schema(self) -> None:
-        """Create tables based on config flags."""
-        if not self._db:
-            return
+    async def _create_schema(self, db: aiosqlite.Connection) -> None:
+        """Create tables on the given connection based on config flags.
+
+        Accepts an explicit ``db`` argument (rather than using ``self._db``)
+        so that callers can initialize a freshly-opened connection BEFORE
+        it is installed as the live writer. Used by :meth:`start` during
+        first open and by :meth:`_rotate` to prime the new DB ahead of the
+        atomic swap — the race window where the new file was live but
+        schemaless would otherwise let a concurrent ``_flush`` hit
+        ``no such table: events``.
+        """
         if self._config.store_events:
-            await self._db.executescript(SCHEMA_EVENTS)
+            await db.executescript(SCHEMA_EVENTS)
         if self._config.store_config:
-            await self._db.executescript(SCHEMA_WORKER_CONFIG)
+            await db.executescript(SCHEMA_WORKER_CONFIG)
         if self._config.store_state:
-            await self._db.executescript(SCHEMA_WORKER_STATE)
-        await self._db.commit()
+            await db.executescript(SCHEMA_WORKER_STATE)
+        await db.commit()
 
     async def start(self) -> None:
         self._running = True
         if self._config.db_dir:
             self._db_path = _make_db_path(self._config.db_dir, self._worker_name)
             self._db = await aiosqlite.connect(self._db_path)
-            await self._create_schema()
+            await self._create_schema(self._db)
             self._update_live_link()
             if self._config.store_events:
                 self._flush_task = asyncio.create_task(self._flush_loop())
@@ -1314,24 +1321,53 @@ class EventRecorder:
             await self._rotate()
 
     async def _rotate(self) -> None:
-        """Rotate: open new DB first, then close old — no query gap."""
+        """Rotate: open new DB, initialize it fully, then swap — no schemaless window.
+
+        Ordering matters: if we installed ``self._db = new_db`` before
+        creating the schema, a concurrent ``_flush_loop`` iteration (or
+        any debug-triggered flush) could execute ``INSERT INTO events``
+        against the freshly-opened but still-empty file and hit
+        ``no such table: events``. The fix is to prepare ``new_db``
+        completely before the atomic swap, so any concurrent writer only
+        ever sees a ready connection.
+        """
         # flush remaining buffer to current DB
         await self._flush()
 
-        # open new DB before closing old — queries keep working
+        # open new DB and initialize schema BEFORE swapping. If schema
+        # creation fails, close the orphaned connection and leave
+        # self._db untouched so the caller can retry on the next tick.
         new_path = _make_db_path(self._config.db_dir, self._worker_name)
         new_db = await aiosqlite.connect(new_path)
+        try:
+            await self._create_schema(new_db)
+        except Exception:
+            # Avoid leaking the fd: close the new connection and re-raise.
+            # self._db is still the previous (fully-initialized) writer.
+            with contextlib.suppress(Exception):
+                await new_db.close()
+            raise
 
+        # Atomic swap: once this line executes, any concurrent flush sees
+        # the new, schema-ready connection.
         old_db = self._db
         self._db = new_db
         self._db_path = new_path
-        await self._create_schema()
         if self._drakkar_config:
             await self.write_config(self._drakkar_config)
         self._update_live_link()
 
         if old_db:
-            await old_db.close()
+            # Don't let a close failure on the outgoing connection
+            # propagate — the new writer is already live and functional.
+            try:
+                await old_db.close()
+            except Exception as exc:
+                await logger.awarning(
+                    'recorder_old_db_close_failed',
+                    category='recorder',
+                    error=str(exc),
+                )
 
         # delete DB files older than retention
         cutoff = time.time() - (self._config.retention_hours * 3600)
