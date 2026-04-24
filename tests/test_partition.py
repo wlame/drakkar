@@ -2017,3 +2017,105 @@ async def test_precomputed_failure_routes_through_on_error(failing_pool):
     assert error_hook_calls == ['pc-fail']
     assert groups[0].failed == 1
     assert groups[0].succeeded == 0
+
+
+# --- signal_stop: sync counterpart to stop() ---
+
+
+async def test_signal_stop_sets_running_false_without_blocking(echo_pool):
+    """signal_stop() flips _running to False and returns immediately.
+
+    The run-loop task keeps going until it notices the flag — signal_stop
+    itself must NOT await task completion (that is stop()'s job).
+    """
+
+    class SlowArrangeHandler(BaseDrakkarHandler):
+        # Stays inside arrange() long enough that signal_stop cannot race
+        # the run-loop to completion — lets us assert the task is alive.
+        async def arrange(self, messages, pending):
+            await asyncio.sleep(0.5)
+            return []
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=SlowArrangeHandler(),
+        executor_pool=echo_pool,
+        window_size=1,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    # Wait until the run loop has picked up the message and entered arrange().
+    await wait_for(lambda: proc._arranging, timeout=2)
+    assert proc._running is True
+    assert proc._task is not None
+
+    proc.signal_stop()
+
+    # signal_stop is synchronous: _running must already be False on return
+    # and the task must still be alive (mid-arrange sleep).
+    assert proc._running is False
+    assert proc._task is not None
+    assert not proc._task.done()
+
+    # Clean up: await stop() so the run loop completes naturally.
+    await proc.stop()
+
+
+async def test_stop_after_signal_stop_completes_cleanly(echo_pool):
+    """signal_stop() followed by stop() drains normally without double-signal issues."""
+    committed: list[tuple[int, int]] = []
+
+    async def on_commit(pid: int, offset: int) -> None:
+        committed.append((pid, offset))
+
+    handler = EchoHandler()
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=5,
+        on_commit=on_commit,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.enqueue(make_msg(offset=1))
+    proc.start()
+
+    # Let the processor pick up at least one task before signalling stop.
+    await wait_for(lambda: len(handler.collect_calls) >= 1, timeout=5)
+
+    proc.signal_stop()
+    # stop() should complete without error: it re-sets _running=False
+    # (idempotent) then awaits _task. Queued messages drain as part of
+    # _run()'s post-loop block, so the final commit still happens.
+    await proc.stop()
+
+    assert proc._task is None
+    assert proc._running is False
+    # All enqueued offsets drained + committed — no double-drain regression.
+    assert proc.queue_size == 0
+    assert proc.inflight_count == 0
+    assert any(offset == 2 for _, offset in committed), f'Expected commit of 2, got: {committed}'
+
+
+async def test_signal_stop_is_idempotent(echo_pool):
+    """Calling signal_stop multiple times is safe — it just re-sets the flag."""
+    handler = EchoHandler()
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=1,
+    )
+
+    proc.start()
+    proc.signal_stop()
+    proc.signal_stop()
+    proc.signal_stop()
+
+    assert proc._running is False
+
+    # And stop() still works after the repeat signals.
+    await proc.stop()
+    assert proc._task is None

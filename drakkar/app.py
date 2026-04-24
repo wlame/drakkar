@@ -580,7 +580,7 @@ class DrakkarApp:
         Preferring at-least-once duplication over silent loss.
         """
         try:
-            processor._running = False
+            processor.signal_stop()
             drained_cleanly = False
             try:
                 await asyncio.wait_for(processor.drain(), timeout=self._config.executor.drain_timeout_seconds)
@@ -673,7 +673,7 @@ class DrakkarApp:
             self._periodic_tasks.clear()
 
         for processor in list(self._processors.values()):
-            processor._running = False
+            processor.signal_stop()
 
         drain_timeout = self._config.executor.drain_timeout_seconds
         await log.ainfo('draining_executors', category='lifecycle', timeout=drain_timeout)

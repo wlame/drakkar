@@ -172,6 +172,24 @@ class PartitionProcessor:
         self._running = True
         self._task = asyncio.create_task(self._run())
 
+    def signal_stop(self) -> None:
+        """Signal the run loop to exit without awaiting task completion.
+
+        Sync counterpart to :meth:`stop`. Setting ``_running = False`` is
+        enough to make ``_run()`` break out of its main loop on the next
+        iteration, but the caller must still ``await stop()`` (or the
+        processor's ``_task``) to guarantee in-flight work has drained.
+
+        Use cases:
+          - Multi-processor fan-out where each processor needs an
+            early shutdown signal before waiting on them collectively.
+          - Shutdown hot-paths where spawning ``await`` points per
+            processor would serialise the signal.
+
+        Pair with :meth:`stop` for full shutdown.
+        """
+        self._running = False
+
     async def stop(self) -> None:
         """Stop the partition processor and wait for completion.
 
