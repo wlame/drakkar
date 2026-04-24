@@ -320,6 +320,69 @@ async def on_error(self, task, error):
     The framework auto-populates `parent_task_id` so you can trace the
     chain later; `source_offsets` is the handler's responsibility.
 
+### Replacement accounting — Window vs MessageGroup
+
+The framework tracks tasks in two overlapping accounting structures and
+it is worth knowing how each treats a replaced original.
+
+**`MessageGroup`** (delivered to `on_message_complete`):
+
+- `tasks` — full history: original + every replacement. `len(tasks) == total`.
+- `results` — **terminal successes only**. Original that was replaced is
+  NOT here; the successor's success lands here.
+- `errors` — **terminal failures only** (SKIP or retries exhausted).
+  A replaced original is also NOT here — it wasn't a terminal failure,
+  it was replaced.
+- `replaced` — the delta: `total - succeeded - failed`. This is where
+  replaced originals show up.
+
+So `MessageGroup` cleanly separates the three outcome classes, and
+`group.total == group.succeeded + group.failed + group.replaced` always.
+
+**`window.results`** (delivered to `on_window_complete` as the first arg):
+
+This is a slightly different beast. It contains the **`ExecutorResult`
+of every task invocation that reached a terminal outcome** — both
+successes AND subprocess-level failures (non-zero exit code that ended
+in SKIP or retries-exhausted). Replaced originals do NOT contribute an
+entry.
+
+Concrete example:
+
+| Scenario | `total_tasks` | `len(results)` delivered to `on_window_complete` |
+|---|---|---|
+| 1 task, success | 1 | 1 (the success) |
+| 1 task, fails → SKIP | 1 | 1 (the failure result) |
+| 1 task, fails → RETRY exhausted | 1 | 1 (the final retry's failure result) |
+| 1 task, fails → replaced by 2, both succeed | 3 | 2 (just the replacements — original omitted) |
+| 1 task, fails → replaced by 1, replacement also fails → SKIP | 2 | 1 (replacement's failure; original omitted) |
+| 2 tasks, one succeeds, one fails → replaced by 1 that succeeds | 3 | 2 (first success + replacement success) |
+
+The rule of thumb: **`window.results` has one entry per actually-executed
+task invocation that did not hand off to a replacement.** `total_tasks`
+counts the full schedule. The gap between them equals the number of
+replaced originals.
+
+```python
+async def on_window_complete(self, results, source_messages):
+    # `len(results)` is the count of outcomes — NOT necessarily the
+    # count of originally-scheduled tasks. If you need the total,
+    # prefer summing `group.total` across MessageGroups in
+    # `on_message_complete`, which is always consistent.
+    for r in results:
+        # Each `r` is an ExecutorResult from a real subprocess run.
+        ...
+```
+
+!!! info "Why omit the replaced original?"
+    Semantically, an `on_error` list-return says "this invocation
+    didn't count — route around it with these instead." Appending a
+    placeholder result for the replaced original would double-count
+    the work in `on_window_complete` (users typically iterate
+    `results` for summary aggregation). The trade-off: when
+    replacements occur, `len(window.results) < total_tasks`, which is
+    what the accounting table above captures.
+
 ---
 
 ## Multi-message tasks (fan-IN)

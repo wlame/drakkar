@@ -46,7 +46,47 @@ DRAIN_POLL_INTERVAL = 0.05  # seconds between checks when draining in-flight wor
 
 @dataclass
 class Window:
-    """Tracks the state of one arrange() window within a partition."""
+    """Tracks the state of one arrange() window within a partition.
+
+    Accounting invariants (see also ``docs/fan-out.md`` "Replacement
+    accounting — Window vs MessageGroup"):
+
+    - ``total_tasks`` counts EVERY task ever scheduled in this window —
+      the tasks returned by ``arrange()`` PLUS any replacements added by
+      ``on_error`` list-return. It is incremented at schedule time and
+      never decremented. Retries do NOT bump this counter (they reuse
+      the original invocation's slot).
+    - ``completed_count`` is a per-task-invocation settlement counter.
+      One tick fires for every terminal outcome (success / SKIP /
+      retries-exhausted) AND for every replacement handoff (the
+      replaced original's invocation). Retries hand off to a fresh
+      coroutine and defer the increment; the final retry is the one
+      that ticks.
+    - ``tasks`` mirrors ``total_tasks`` in length — the full scheduled
+      history, including replaced originals. Used for debugging /
+      tracing the replacement chain via ``parent_task_id``. Retries
+      are NOT appended here (the same ``ExecutorTask`` instance is
+      re-run).
+    - ``results`` contains the ``ExecutorResult`` of every task
+      invocation that reached a terminal outcome — success OR
+      subprocess-level failure (exit_code != 0, SKIP'd or retries
+      exhausted). Replaced originals do NOT contribute — their slot
+      in ``tasks`` has no corresponding entry in ``results``. So
+      ``len(results)`` can be less than ``total_tasks`` whenever any
+      task was replaced; the gap equals the number of replaced tasks.
+
+    This is by design: ``window.results`` is what gets passed to
+    ``on_window_complete`` and it represents "outcomes of task runs
+    that actually happened end-to-end," not "one slot per scheduled
+    task." Replacements express "the original didn't count; its
+    successors' outcomes are what matter," so the original's entry
+    is omitted.
+
+    ``is_complete`` compares ``completed_count >= total_tasks`` — so
+    even though ``len(results) < total_tasks`` is possible, the window
+    still closes correctly because each replaced original ticked the
+    counter without appending a result.
+    """
 
     window_id: int
     source_messages: list[SourceMessage]

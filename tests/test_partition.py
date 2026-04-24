@@ -2119,3 +2119,273 @@ async def test_signal_stop_is_idempotent(echo_pool):
     # And stop() still works after the repeat signals.
     await proc.stop()
     assert proc._task is None
+
+
+# --- Replacement accounting: window.results vs total_tasks ---
+#
+# These tests pin down the documented accounting invariant (see
+# ``drakkar/partition.py`` ``Window`` docstring and
+# ``docs/fan-out.md`` "Replacement accounting — Window vs MessageGroup"):
+#
+#   - ``total_tasks`` counts EVERY scheduled task (original + replacements).
+#   - ``completed_count`` ticks once per terminal outcome OR replacement
+#     handoff.
+#   - ``window.results`` contains one ``ExecutorResult`` per task
+#     invocation that actually ran to a terminal outcome — replaced
+#     originals do NOT contribute. So ``len(results)`` can be less than
+#     ``total_tasks`` whenever any task was replaced; the gap equals
+#     the number of replaced tasks.
+#
+# The tests are deliberately descriptive — they double as the reference
+# specification for operators inspecting window state.
+
+
+def _wrap_capture_window(proc: PartitionProcessor, captured: list[Window]) -> None:
+    """Monkey-patch ``proc._execute_and_track`` to snapshot the Window
+    reference as soon as the first task executes against it. We need
+    this because ``Window`` is an internal dataclass that isn't exposed
+    through any public handler hook.
+    """
+    original = proc._execute_and_track
+
+    async def wrapped(task, window, retry_count=0):
+        if window not in captured:
+            captured.append(window)
+        return await original(task, window, retry_count)
+
+    proc._execute_and_track = wrapped  # type: ignore[method-assign]
+
+
+async def test_replacement_window_results_contains_replacements_only(failing_pool):
+    """1 original fails → on_error returns 2 replacements → both succeed.
+
+    Invariant: ``total_tasks == 3``, ``completed_count == 3``,
+    ``len(window.results) == 2`` (only the two replacement successes;
+    the replaced original has no entry).
+    """
+    captured_windows: list[Window] = []
+    window_complete_results_sizes: list[int] = []
+
+    class ReplacementHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id='orig-fail',
+                    args=['-c', 'import sys; sys.exit(1)'],
+                    source_offsets=[messages[0].offset],
+                )
+            ]
+
+        async def on_error(self, task, error):
+            return [
+                ExecutorTask(
+                    task_id='repl-a',
+                    args=['-c', 'print(1)'],
+                    source_offsets=task.source_offsets,
+                ),
+                ExecutorTask(
+                    task_id='repl-b',
+                    args=['-c', 'print(2)'],
+                    source_offsets=task.source_offsets,
+                ),
+            ]
+
+        async def on_window_complete(self, results, source_messages):
+            # Capture the count as the handler actually sees it at hook-fire time.
+            window_complete_results_sizes.append(len(results))
+            return None
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=ReplacementHandler(),
+        executor_pool=failing_pool,
+        window_size=10,
+    )
+    _wrap_capture_window(proc, captured_windows)
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(window_complete_results_sizes) > 0, timeout=5)
+    await proc.stop()
+
+    assert len(captured_windows) == 1, f'expected 1 window, got {len(captured_windows)}'
+    w = captured_windows[0]
+
+    # Window-level accounting:
+    assert w.total_tasks == 3, f'total_tasks={w.total_tasks} (expected 1 original + 2 replacements)'
+    assert w.completed_count == 3, f'completed_count={w.completed_count}'
+    assert len(w.tasks) == 3, 'tasks list should contain full history (original + 2 replacements)'
+    # The documented invariant: one result per actual execution outcome,
+    # so the replaced original is absent.
+    assert len(w.results) == 2, (
+        f'len(results)={len(w.results)} — expected 2 (both replacements). '
+        f'The replaced original must NOT contribute an entry.'
+    )
+    # Both entries are the replacements, in completion order.
+    result_task_ids = {r.task.task_id for r in w.results}
+    assert result_task_ids == {'repl-a', 'repl-b'}
+    # Both replacements succeeded.
+    assert all(r.exit_code == 0 for r in w.results)
+
+    # Sanity: the is_complete property holds (completed_count == total_tasks).
+    assert w.is_complete
+
+    # on_window_complete received the same list (by reference) — size matches.
+    assert window_complete_results_sizes == [2]
+
+
+async def test_replacement_cascading_replaced_then_skip(failing_pool):
+    """Cascading replacement: original fails → 1 replacement → replacement
+    ALSO fails → on_error returns SKIP for the replacement.
+
+    Invariant: ``total_tasks == 2``, ``completed_count == 2``,
+    ``len(window.results) == 1`` (just the replacement's SKIP'd
+    failure result; the original is omitted as "replaced").
+
+    This pins down that SKIP'd replacements DO append to window.results
+    (they are a terminal failure), while a replaced original is the
+    only category that does not contribute.
+    """
+    captured_windows: list[Window] = []
+    complete_fired = asyncio.Event()
+
+    class CascadingHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id='orig-fail',
+                    args=['-c', 'import sys; sys.exit(1)'],
+                    source_offsets=[messages[0].offset],
+                )
+            ]
+
+        async def on_error(self, task, error):
+            if task.task_id == 'orig-fail':
+                # Replace with another task that will also fail.
+                return [
+                    ExecutorTask(
+                        task_id='repl-also-fail',
+                        args=['-c', 'import sys; sys.exit(1)'],
+                        source_offsets=task.source_offsets,
+                    )
+                ]
+            # Replacement failed — SKIP, so it becomes a terminal failure.
+            return ErrorAction.SKIP
+
+        async def on_window_complete(self, results, source_messages):
+            complete_fired.set()
+            return None
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=CascadingHandler(),
+        executor_pool=failing_pool,
+        window_size=10,
+    )
+    _wrap_capture_window(proc, captured_windows)
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await asyncio.wait_for(complete_fired.wait(), timeout=5)
+    await proc.stop()
+
+    assert len(captured_windows) == 1
+    w = captured_windows[0]
+
+    assert w.total_tasks == 2, f'total_tasks={w.total_tasks} (expected 1 original + 1 replacement)'
+    assert w.completed_count == 2
+    assert len(w.tasks) == 2
+    # One entry: the SKIP'd replacement's failure result.
+    # The replaced original contributes nothing.
+    assert len(w.results) == 1, (
+        f"len(results)={len(w.results)} — expected 1 (the replacement that failed and was SKIP'd)."
+    )
+    result = w.results[0]
+    assert result.task.task_id == 'repl-also-fail'
+    # Subprocess exited with non-zero — the failure result was appended
+    # via the ``window.results.append(e.result)`` branch in
+    # ``_execute_and_track`` for terminal-error tasks.
+    assert result.exit_code != 0
+    assert w.is_complete
+
+
+async def test_replacement_mixed_with_retries_then_replaced(failing_pool):
+    """Mixed: original fails → 2 retries (all fail) → then replaced by 1 success.
+
+    Retries reuse the original invocation's slot — they do NOT bump
+    ``total_tasks`` or append to ``window.tasks``. Only the replacement
+    list-return adds new entries. The final accounting therefore:
+
+      - ``total_tasks == 2`` (original + 1 replacement)
+      - ``completed_count == 2`` (1 for the replaced original, 1 for
+        the replacement's terminal success)
+      - ``len(window.results) == 1`` (just the replacement's success)
+      - ``window.tasks`` contains 2 entries (no per-retry entries)
+    """
+    captured_windows: list[Window] = []
+    complete_fired = asyncio.Event()
+    retry_counts: dict[str, int] = {}
+
+    class MixedHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id='orig',
+                    args=['-c', 'import sys; sys.exit(1)'],
+                    source_offsets=[messages[0].offset],
+                )
+            ]
+
+        async def on_error(self, task, error):
+            retry_counts[task.task_id] = retry_counts.get(task.task_id, 0) + 1
+            if task.task_id == 'orig' and retry_counts[task.task_id] <= 2:
+                # First two errors: RETRY. These hand off to a new
+                # coroutine reusing the same inflight slot; no
+                # ``total_tasks`` bump, no ``tasks.append``.
+                return ErrorAction.RETRY
+            if task.task_id == 'orig':
+                # Third error: give up on retrying, replace with a
+                # task that succeeds.
+                return [
+                    ExecutorTask(
+                        task_id='repl-success',
+                        args=['-c', 'print("ok")'],
+                        source_offsets=task.source_offsets,
+                    )
+                ]
+            return ErrorAction.SKIP
+
+        async def on_window_complete(self, results, source_messages):
+            complete_fired.set()
+            return None
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=MixedHandler(),
+        executor_pool=failing_pool,
+        window_size=10,
+    )
+    _wrap_capture_window(proc, captured_windows)
+
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await asyncio.wait_for(complete_fired.wait(), timeout=10)
+    await proc.stop()
+
+    # Sanity: on_error fired 3 times on the 'orig' task (2 RETRIES + 1 replacement decision).
+    assert retry_counts.get('orig') == 3
+
+    assert len(captured_windows) == 1
+    w = captured_windows[0]
+
+    # Retries did NOT inflate total_tasks — only the replacement did.
+    assert w.total_tasks == 2, (
+        f'total_tasks={w.total_tasks} — retries reuse the original slot; '
+        'only the replacement list-return bumps this counter.'
+    )
+    assert w.completed_count == 2
+    assert len(w.tasks) == 2, 'tasks holds 2 entries (original + replacement); retries are not re-appended'
+    assert len(w.results) == 1, f'len(results)={len(w.results)} — expected 1 (the successful replacement).'
+    assert w.results[0].task.task_id == 'repl-success'
+    assert w.results[0].exit_code == 0
+    assert w.is_complete
