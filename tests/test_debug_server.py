@@ -4247,3 +4247,161 @@ async def test_api_debug_processors_snapshot_runs_on_main_loop(mock_recorder, de
     finally:
         main_loop.call_soon_threadsafe(main_loop.stop)
         thread.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# _flush_and_select helper (Task 9): consolidates the "flush + read via
+# reader_db with writer fallback" pattern. The helper is a closure inside
+# ``create_debug_app`` so it isn't imported directly — instead these tests
+# exercise it through ``/api/events`` which routes a minimal SELECT through
+# the helper.
+# ---------------------------------------------------------------------------
+
+
+async def test_flush_and_select_helper_returns_columns_and_rows(tmp_path, mock_recorder, debug_config, mock_app):
+    """The helper returns (columns, rows) from a SELECT on the recorder
+    DB and flushes before reading. Exercised via ``/api/events`` because
+    the helper is a closure inside ``create_debug_app``.
+    """
+    import aiosqlite
+
+    from drakkar.recorder import SCHEMA_EVENTS
+
+    db_path = str(tmp_path / 'live.db')
+    writer = await aiosqlite.connect(db_path)
+    await writer.executescript(SCHEMA_EVENTS)
+    # Seed two rows with distinguishable ids so the helper's tuple
+    # construction is visible in the response.
+    now = time.time()
+    await writer.execute(
+        'INSERT INTO events (ts, dt, event, partition, offset, task_id) VALUES (?, ?, ?, ?, ?, ?)',
+        (now, '2026-04-22', 'consumed', 0, 1, 'task-a'),
+    )
+    await writer.execute(
+        'INSERT INTO events (ts, dt, event, partition, offset, task_id) VALUES (?, ?, ?, ?, ?, ?)',
+        (now - 1, '2026-04-22', 'consumed', 1, 2, 'task-b'),
+    )
+    await writer.commit()
+
+    # Separate reader connection so we can verify the helper preferred it
+    # over the writer. Both point at the same file — typical WAL-mode
+    # recorder setup.
+    reader = await aiosqlite.connect(db_path)
+
+    flush_calls = 0
+
+    async def _flush():
+        nonlocal flush_calls
+        flush_calls += 1
+
+    mock_recorder._db = writer
+    mock_recorder._reader_db = reader
+    mock_recorder.reader_db = reader
+    mock_recorder._flush = _flush
+    mock_recorder._buffer = []
+    mock_recorder._config = debug_config
+
+    fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.get('/api/events')
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 2
+    # Column names surface as dict keys — direct evidence the helper
+    # returned ``columns`` alongside ``rows``.
+    assert {'task_id', 'partition', 'offset', 'event'}.issubset(data[0].keys())
+    task_ids = {e['task_id'] for e in data}
+    assert task_ids == {'task-a', 'task-b'}
+    # Helper always flushes the recorder before SELECTing.
+    assert flush_calls == 1
+
+    await writer.close()
+    await reader.close()
+
+
+async def test_flush_and_select_helper_returns_none_when_db_missing(debug_config, mock_recorder, mock_app):
+    """When both ``reader_db`` and ``_db`` are None the helper must
+    return ``None``; the endpoint maps that onto its empty-response
+    shape (``[]`` for ``/api/events``).
+    """
+    mock_recorder._db = None
+    mock_recorder._reader_db = None
+    mock_recorder.reader_db = None
+
+    flush_calls = 0
+
+    async def _flush():
+        nonlocal flush_calls
+        flush_calls += 1
+
+    mock_recorder._flush = _flush
+    mock_recorder._buffer = []
+    mock_recorder._config = debug_config
+
+    fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.get('/api/events')
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+    # Flush still runs — only the SELECT is skipped. Matches the helper's
+    # original per-site behaviour (flush is unconditional).
+    assert flush_calls == 1
+
+
+async def test_flush_and_select_helper_prefers_reader_db_over_writer(tmp_path, mock_recorder, debug_config, mock_app):
+    """Sanity check that the helper reads through ``reader_db`` not
+    ``_db`` when both are set (the whole point of Task 6). Uses two
+    independent DB files: a writer with one row, a reader with three.
+    A helper that read the writer would return 1 row; the endpoint
+    must return 3.
+    """
+    import aiosqlite
+
+    from drakkar.recorder import SCHEMA_EVENTS
+
+    writer_path = str(tmp_path / 'writer.db')
+    reader_path = str(tmp_path / 'reader.db')
+    writer = await aiosqlite.connect(writer_path)
+    reader = await aiosqlite.connect(reader_path)
+    await writer.executescript(SCHEMA_EVENTS)
+    await reader.executescript(SCHEMA_EVENTS)
+
+    now = time.time()
+    await writer.execute(
+        'INSERT INTO events (ts, dt, event, partition, offset, task_id) VALUES (?, ?, ?, ?, ?, ?)',
+        (now, '2026-04-22', 'consumed', 0, 1, 'writer-only'),
+    )
+    for i in range(3):
+        await reader.execute(
+            'INSERT INTO events (ts, dt, event, partition, offset, task_id) VALUES (?, ?, ?, ?, ?, ?)',
+            (now - i, '2026-04-22', 'consumed', 0, 10 + i, f'reader-{i}'),
+        )
+    await writer.commit()
+    await reader.commit()
+
+    mock_recorder._db = writer
+    mock_recorder._reader_db = reader
+    mock_recorder.reader_db = reader
+    mock_recorder._flush = AsyncMock()
+    mock_recorder._buffer = []
+    mock_recorder._config = debug_config
+
+    fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.get('/api/events')
+
+    assert resp.status_code == 200
+    data = resp.json()
+    # Reader has 3 rows; writer has 1. Seeing 3 (and none of them being
+    # the writer's row) is conclusive evidence that the helper routed
+    # through reader_db.
+    assert len(data) == 3
+    assert all(e['task_id'].startswith('reader-') for e in data)
+
+    await writer.close()
+    await reader.close()

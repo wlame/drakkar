@@ -9,7 +9,7 @@ import re
 import secrets
 import threading
 import time
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Sequence
 from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -487,6 +487,46 @@ def create_debug_app(
             return await asyncio.wrap_future(fut)
         # Same-loop (or no real main loop in tests): run inline.
         return await coro
+
+    # ``_flush_and_select`` consolidates the "flush recorder → check DB →
+    # run SELECT → return (columns, rows)" pattern that was copy-pasted
+    # across 11 debug-server endpoints. All reads go through
+    # ``recorder.reader_db`` (dedicated reader connection opened alongside
+    # the writer in ``EventRecorder.start``) so UI queries don't queue
+    # behind writer flushes; the writer connection is used as a fallback
+    # only when the reader is unavailable (e.g. unit-test shims that set
+    # a single connection).
+    #
+    # Returns ``(columns, rows)`` on success or ``None`` when neither DB
+    # is available. Callers map ``None`` onto whatever empty response
+    # shape their endpoint requires (``JSONResponse([])``, ``{}``, etc.).
+    #
+    # Dispatches through ``_dispatch_to_main_loop`` so the aiosqlite
+    # connection stays on its owning loop even when the debug server
+    # runs in a separate thread.
+    async def _flush_and_select(
+        query: str,
+        params: Sequence[Any] = (),
+    ) -> tuple[list[str], list] | None:
+        """Flush the recorder then run a SELECT.
+
+        Flushes pending events on the writer connection, then executes
+        ``query`` on the dedicated reader connection (falling back to the
+        writer). Returns ``(columns, rows)`` or ``None`` if the recorder
+        DB isn't available.
+        """
+
+        async def _inner() -> tuple[list[str], list] | None:
+            await recorder._flush()
+            db = recorder.reader_db or recorder._db
+            if not db:
+                return None
+            async with db.execute(query, params) as cur:
+                columns: list[str] = [desc[0] for desc in cur.description or []]
+                rows: list = list(await cur.fetchall())
+            return columns, rows
+
+        return await _dispatch_to_main_loop(_inner())
 
     async def _get_lag() -> dict[int, dict]:
         consumer = drakkar_app._consumer
@@ -1114,11 +1154,10 @@ def create_debug_app(
         """
         reader = _cache_reader_or_404()
 
-        # TODO(phase 2): extract a shared ``_flush_and_select`` helper — this
-        # inner ``_read`` coroutine pattern (flush recorder / open cursor /
-        # fetch columns + rows / hand off to ``_dispatch_to_main_loop``) is
-        # duplicated across ~11 endpoints. Consolidating it would cut 40+
-        # lines and centralize error handling.
+        # Reads via the cache engine's reader connection rather than the
+        # recorder's ``_flush_and_select`` helper: this endpoint queries
+        # the cache_entries table, not the events table, and there's
+        # nothing to flush on the recorder side.
         async def _read():
             async with reader.execute(
                 'SELECT key, scope, value, size_bytes, created_at_ms, updated_at_ms, '
@@ -1250,29 +1289,18 @@ def create_debug_app(
     @app.get('/api/debug/label-keys')
     async def api_debug_label_keys():
         """Return distinct label keys found in events."""
-
-        # Flush + read must run on the main loop where the aiosqlite
-        # connection was opened — see ``_dispatch_to_main_loop`` notes.
-        # Writes go through ``recorder._db`` (the writer); SELECTs go
-        # through ``recorder.reader_db`` so UI reads don't queue behind
-        # writer flushes.
-        async def _read():
-            await recorder._flush()
-            reader = recorder.reader_db or recorder._db
-            if not reader:
-                return []
-            query = """
-                SELECT DISTINCT labels FROM events
-                WHERE labels IS NOT NULL
-                LIMIT 100
-            """
-            async with reader.execute(query) as cursor:
-                return await cursor.fetchall()
-
+        query = """
+            SELECT DISTINCT labels FROM events
+            WHERE labels IS NOT NULL
+            LIMIT 100
+        """
         try:
-            rows = await _dispatch_to_main_loop(_read())
+            result = await _flush_and_select(query)
         except Exception:
             return JSONResponse([])
+        if result is None:
+            return JSONResponse([])
+        _columns, rows = result
         keys: set[str] = set()
         for (labels_json,) in rows:
             try:
@@ -1305,29 +1333,15 @@ def create_debug_app(
         Groups events by task name and returns the latest run, total counts,
         and recent history for each task.
         """
-
-        # Flush and SELECT must both execute on the main loop so the
-        # aiosqlite connection stays on its owning loop. The SELECT uses
-        # the dedicated reader connection to avoid queuing behind flushes.
-        async def _read():
-            await recorder._flush()
-            reader = recorder.reader_db or recorder._db
-            if not reader:
-                return None
-            query = """
-                SELECT ts, task_id, duration, exit_code, metadata
-                FROM events
-                WHERE event = 'periodic_run'
-                ORDER BY ts DESC
-                LIMIT 500
-            """
-            async with reader.execute(query) as cursor:
-                columns = [d[0] for d in cursor.description]
-                rows = await cursor.fetchall()
-            return columns, rows
-
+        query = """
+            SELECT ts, task_id, duration, exit_code, metadata
+            FROM events
+            WHERE event = 'periodic_run'
+            ORDER BY ts DESC
+            LIMIT 500
+        """
         try:
-            result = await _dispatch_to_main_loop(_read())
+            result = await _flush_and_select(query)
         except Exception:
             return JSONResponse([])
         if result is None:
@@ -1436,21 +1450,7 @@ def create_debug_app(
         query = f'SELECT * FROM events {where} ORDER BY id DESC LIMIT ?'
         params.append(limit)
 
-        # Flush pending events + the SELECT must both execute on the
-        # main loop where the aiosqlite connection lives. SELECT routes
-        # through the dedicated reader connection so UI queries don't
-        # queue behind writer flushes.
-        async def _read():
-            await recorder._flush()
-            reader = recorder.reader_db or recorder._db
-            if not reader:
-                return None
-            async with reader.execute(query, params) as cursor:
-                columns = [d[0] for d in cursor.description]
-                rows = await cursor.fetchall()
-            return columns, rows
-
-        result = await _dispatch_to_main_loop(_read())
+        result = await _flush_and_select(query, params)
         if result is None:
             return JSONResponse([])
         columns, rows = result
@@ -1466,20 +1466,7 @@ def create_debug_app(
             AND ts >= ?
             ORDER BY ts ASC
         """
-
-        # Flush + read on the main loop; post-processing stays here.
-        # SELECT goes through the reader connection.
-        async def _read():
-            await recorder._flush()
-            reader = recorder.reader_db or recorder._db
-            if not reader:
-                return None
-            async with reader.execute(query, [since]) as cursor:
-                columns = [d[0] for d in cursor.description]
-                rows = await cursor.fetchall()
-            return columns, rows
-
-        result = await _dispatch_to_main_loop(_read())
+        result = await _flush_and_select(query, [since])
         if result is None:
             return JSONResponse([])
         columns, rows = result
@@ -1591,21 +1578,13 @@ def create_debug_app(
             ORDER BY task_id, id ASC
         """
 
-        # Dispatch the flush + SELECT to the main loop; this keeps the
-        # aiosqlite connection on its owning loop even though the
-        # endpoint executes on the debug server's thread. SELECT goes
-        # through the reader connection.
-        async def _read():
-            await recorder._flush()
-            reader = recorder.reader_db or recorder._db
-            if not reader or not recorder._config.store_events:
-                return None
-            async with reader.execute(query, task_ids) as cursor:
-                columns = [d[0] for d in cursor.description]
-                rows = await cursor.fetchall()
-            return columns, rows
-
-        query_result = await _dispatch_to_main_loop(_read())
+        # Short-circuit when recorder event storage is disabled — no point
+        # flushing + SELECTing against an empty table. ``_flush_and_select``
+        # would still dispatch to the main loop and return rows, but they'd
+        # always be empty.
+        if not recorder._config.store_events:
+            return JSONResponse({})
+        query_result = await _flush_and_select(query, task_ids)
         if query_result is None:
             return JSONResponse({})
         columns, rows = query_result
@@ -1681,26 +1660,17 @@ def create_debug_app(
         list when recorder storage is disabled. Callers parse metadata
         themselves because each event type has different metadata shape.
         """
-
-        # Entire DB interaction (flush + SELECT + fetch) dispatches to
-        # the main loop. Returning rows as dicts inside the coroutine
-        # avoids carrying the aiosqlite cursor across the loop boundary.
-        # SELECT goes through the reader connection.
-        async def _read():
-            await recorder._flush()
-            reader = recorder.reader_db or recorder._db
-            if not reader or not recorder._config.store_events:
-                return []
-            query = (
-                'SELECT ts, task_id, partition, offset, duration, metadata '
-                'FROM events WHERE event = ? ORDER BY id DESC LIMIT ?'
-            )
-            async with reader.execute(query, (event_name, limit)) as cur:
-                columns = [d[0] for d in cur.description]
-                rows = await cur.fetchall()
-            return [dict(zip(columns, row, strict=False)) for row in rows]
-
-        return await _dispatch_to_main_loop(_read())
+        if not recorder._config.store_events:
+            return []
+        query = (
+            'SELECT ts, task_id, partition, offset, duration, metadata '
+            'FROM events WHERE event = ? ORDER BY id DESC LIMIT ?'
+        )
+        result = await _flush_and_select(query, (event_name, limit))
+        if result is None:
+            return []
+        columns, rows = result
+        return [dict(zip(columns, row, strict=False)) for row in rows]
 
     def _parse_meta(raw: str | None) -> dict:
         if not raw:
@@ -2008,6 +1978,8 @@ def create_debug_app(
         """
         if not req.offsets:
             return JSONResponse({})
+        if not recorder._config.store_events:
+            return JSONResponse({})
         placeholders = ','.join(['?'] * len(req.offsets))
         q = (
             f'SELECT output_topic, COUNT(*) as n FROM events '
@@ -2016,20 +1988,10 @@ def create_debug_app(
         )
         params: list = [req.partition, *req.offsets]
 
-        # Flush + aggregate both run on the main loop. The cursor stays
-        # there; only the fetched rows cross back to our loop. SELECT
-        # uses the reader connection.
-        async def _read():
-            await recorder._flush()
-            reader = recorder.reader_db or recorder._db
-            if not reader or not recorder._config.store_events:
-                return None
-            async with reader.execute(q, params) as cur:
-                return await cur.fetchall()
-
-        rows = await _dispatch_to_main_loop(_read())
-        if rows is None:
+        result = await _flush_and_select(q, params)
+        if result is None:
             return JSONResponse({})
+        _columns, rows = result
         out: dict[str, int] = {}
         for row in rows:
             topic = row[0] or '(unknown)'
