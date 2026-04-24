@@ -7,6 +7,7 @@ with error handling via the on_delivery_error handler hook.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
@@ -111,8 +112,23 @@ class SinkManager:
         return dict(self._stats)
 
     async def connect_all(self) -> None:
-        """Connect all registered sinks. Raises on first failure."""
-        for sink in self._sinks.values():
+        """Connect all registered sinks in parallel.
+
+        Uses asyncio.gather to overlap connect latencies — wall-clock time
+        becomes ~max(connect_latency) instead of sum. Cold-start saving
+        when multiple sinks are configured (each sink's connect can do
+        network I/O, schema probes, etc.).
+
+        Failure semantics: return_exceptions=False means the first failing
+        connect propagates immediately and gather cancels the pending coroutines.
+        Other sinks may be mid-connect when we raise — do not assume an
+        all-or-nothing atomic connect. Matches the previous serial loop's
+        fail-fast behavior.
+
+        Empty sink list: asyncio.gather() with no args returns an empty tuple.
+        """
+
+        async def _connect_one(sink: BaseSink[Any]) -> None:
             await sink.connect()
             await logger.ainfo(
                 'sink_connected',
@@ -120,6 +136,8 @@ class SinkManager:
                 sink_type=sink.sink_type,
                 sink_name=sink.name,
             )
+
+        await asyncio.gather(*[_connect_one(sink) for sink in self._sinks.values()])
 
     async def close_all(self) -> None:
         """Close all registered sinks. Logs errors but doesn't raise."""

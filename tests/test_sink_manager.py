@@ -1,5 +1,7 @@
 """Tests for SinkManager — routing, validation, delivery, error handling."""
 
+import asyncio
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -125,6 +127,70 @@ async def test_close_all_logs_errors_but_continues():
 
     await mgr.close_all()  # should not raise
     assert s2.closed
+
+
+# --- connect_all parallelism ---
+
+
+class SlowConnectSink(FakeSink):
+    """FakeSink whose connect() sleeps to simulate real network/DB latency."""
+
+    def __init__(self, name: str, sink_type: str = 'kafka', connect_delay: float = 0.1) -> None:
+        super().__init__(name=name, sink_type=sink_type)
+        self.connect_delay = connect_delay
+
+    async def connect(self) -> None:
+        await asyncio.sleep(self.connect_delay)
+        self.connected = True
+
+
+class FailConnectSink(FakeSink):
+    """FakeSink whose connect() raises — exercises fail-fast semantics."""
+
+    async def connect(self) -> None:
+        raise RuntimeError('connect failed')
+
+
+async def test_connect_all_runs_sinks_in_parallel():
+    """Three sinks each sleeping 0.1s should connect in ~0.1s total, not 0.3s.
+
+    Threshold is 0.2s — generous slack to avoid CI scheduler-variance flake
+    while still failing loudly if the implementation regressed to serial.
+    """
+    mgr = SinkManager()
+    mgr.register(SlowConnectSink(name='a', sink_type='kafka', connect_delay=0.1))
+    mgr.register(SlowConnectSink(name='b', sink_type='postgres', connect_delay=0.1))
+    mgr.register(SlowConnectSink(name='c', sink_type='mongo', connect_delay=0.1))
+
+    start = time.monotonic()
+    await mgr.connect_all()
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.2, f'expected parallel connect (<0.2s), got {elapsed:.3f}s'
+    for sink in mgr.sinks.values():
+        assert sink.connected  # type: ignore[attr-defined]
+
+
+async def test_connect_all_raises_when_any_sink_fails():
+    """If one sink.connect() raises, connect_all propagates the first failure.
+
+    Semantic note: the other sinks may be mid-connect when the first failure
+    fires; asyncio.gather cancels their coroutines. This is NOT atomic
+    all-or-nothing — callers must not assume every sink is cleanly connected
+    or cleanly untouched after a raise.
+    """
+    mgr = SinkManager()
+    mgr.register(FailConnectSink(name='bad', sink_type='kafka'))
+    mgr.register(FakeSink(name='ok', sink_type='postgres'))
+
+    with pytest.raises(RuntimeError, match='connect failed'):
+        await mgr.connect_all()
+
+
+async def test_connect_all_with_zero_sinks():
+    """Empty sink list — asyncio.gather() with no args returns empty tuple cleanly."""
+    mgr = SinkManager()
+    await mgr.connect_all()  # should not raise
 
 
 # --- resolve_sink ---
