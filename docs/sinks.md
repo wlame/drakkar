@@ -435,6 +435,74 @@ When `dlq.brokers` is empty, the DLQ producer connects to the same brokers as th
 main Kafka consumer (`kafka.brokers`). Set `dlq.brokers` explicitly to write DLQ
 messages to a different Kafka cluster.
 
+### DLQ replay
+
+`scripts/replay_dlq.py` is a reference operator tool that reads DLQ entries
+and republishes their preserved `original_payloads` to a target Kafka topic.
+Use it after fixing a bug that caused messages to land in the DLQ — the script
+drives those messages back through Kafka so the normal consumer picks them up
+again.
+
+#### When to use it
+
+- A downstream sink regressed, the bug has been fixed, and you want to
+  reprocess the dead-lettered batch without editing offsets by hand.
+- You want to inspect and filter the DLQ contents before replaying (pair
+  `--dry-run` with `--filter` to count matches).
+- You want to divert DLQ content to a shadow topic for offline analysis
+  (set `--target-topic` to a scratch topic).
+
+#### Usage
+
+```bash
+# Dry run, count matches only
+uv run python scripts/replay_dlq.py \
+    --dlq-config=config.yaml \
+    --target-topic=search-requests \
+    --dry-run \
+    --filter='customer_id:42'
+
+# Real replay, bounded
+uv run python scripts/replay_dlq.py \
+    --dlq-config=config.yaml \
+    --target-topic=search-requests \
+    --limit=1000
+
+# Different broker for the target
+uv run python scripts/replay_dlq.py \
+    --dlq-config=config.yaml \
+    --target-topic=search-requests \
+    --target-brokers=prod-kafka:9092
+```
+
+The script prints `replayed N/M` to stderr every 1000 records and a final
+summary line (`summary: read=… published=… filtered_out=… errors=…`) when it
+finishes. Ctrl+C is handled gracefully — the in-flight produce completes and
+the producer is flushed before exit.
+
+#### Caveats
+
+- **Duplicate processing**: the script does NOT deduplicate against the
+  source topic. If your sink is not idempotent (see
+  [`BaseSink.idempotent`](#retry-contract)) and your pipeline has
+  already partially processed the DLQ contents, replaying will cause
+  duplicate work. Verify the sink's idempotency contract before replaying.
+- **Filter is substring-only**: `--filter='customer_id:42'` is a plain `in`
+  check against each payload's JSON string. It does not parse JSON or
+  support path expressions. For structural filtering, pipe the DLQ topic
+  through `kcat | jq` in advance and feed a pre-filtered topic to the
+  script.
+- **`--limit` does not resume**: `--limit=1000` stops after 1000 entries
+  have been READ (filter-rejected entries still count). Running with
+  `--limit` twice replays the first N entries both times — the consumer
+  group is throwaway (unique per invocation), so offsets are not preserved
+  between runs.
+- **Exit code 1 with partial success**: if the producer fails mid-run after
+  some records were published, the script exits 1 and logs the last
+  successful DLQ offset to stderr. Operators can re-run with an adjusted
+  filter (e.g. filtering for records newer than that offset's timestamp)
+  to resume.
+
 ---
 
 ## Sink connections

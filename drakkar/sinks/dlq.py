@@ -7,9 +7,12 @@ metadata so they can be investigated and reprocessed later.
 
 import json
 import time
+import uuid
+from collections.abc import AsyncIterator
 
 import structlog
-from confluent_kafka.aio import AIOProducer
+from confluent_kafka import KafkaError, TopicPartition
+from confluent_kafka.aio import AIOConsumer, AIOProducer
 from pydantic import BaseModel
 
 from drakkar.metrics import dlq_send_failures, sink_dlq_messages
@@ -190,3 +193,102 @@ class DLQSink(BaseSink[BaseModel]):
                     error=str(e),
                 )
             self._producer = None
+
+
+async def read_dlq_entries(
+    topic: str,
+    brokers: str,
+    limit: int | None = None,
+    poll_timeout: float = 2.0,
+    idle_polls_before_stop: int = 2,
+) -> AsyncIterator[dict]:
+    """Consume DLQ entries from the DLQ Kafka topic, from the beginning.
+
+    Opens a consumer with a unique, throwaway consumer group so every invocation
+    reads the entire topic from offset 0. The iteration stops when the broker
+    reports no new messages for ``idle_polls_before_stop`` consecutive polls —
+    this is the standard "drained" heuristic for one-shot readers since Kafka
+    has no real "end of topic" signal beyond _PARTITION_EOF events (which
+    confluent-kafka emits only when the client is configured to surface them).
+
+    Each yielded value is the parsed JSON payload written by ``DLQSink.send()``
+    (see the ``DLQMessage.serialize()`` docstring for the field layout).
+
+    Yields at most ``limit`` entries when specified; yields indefinitely until
+    drained otherwise. The caller is expected to iterate in an async for loop
+    and handle KeyboardInterrupt / early termination itself.
+
+    This function is intentionally minimal — it exists so ad-hoc replay /
+    inspection tools (e.g. ``scripts/replay_dlq.py``) do not need to know
+    about confluent-kafka wiring. It is NOT part of the hot-path framework
+    code and is not exercised by the worker runtime.
+    """
+    group_id = f'drakkar-dlq-reader-{uuid.uuid4().hex[:12]}'
+    consumer = AIOConsumer(
+        {
+            'bootstrap.servers': brokers,
+            'group.id': group_id,
+            'enable.auto.commit': False,
+            'auto.offset.reset': 'earliest',
+        }
+    )
+    try:
+        await consumer.subscribe([topic])
+
+        yielded = 0
+        idle_polls = 0
+        while True:
+            if limit is not None and yielded >= limit:
+                return
+            raw_messages = await consumer.consume(
+                num_messages=100,
+                timeout=poll_timeout,
+            )
+            if not raw_messages:
+                idle_polls += 1
+                if idle_polls >= idle_polls_before_stop:
+                    return
+                continue
+            idle_polls = 0
+            for msg in raw_messages:
+                if msg.error():
+                    if msg.error().code() == KafkaError._PARTITION_EOF:
+                        continue
+                    await logger.awarning(
+                        'dlq_reader_error',
+                        category='sink',
+                        error=str(msg.error()),
+                    )
+                    continue
+                if limit is not None and yielded >= limit:
+                    return
+                try:
+                    entry = json.loads(msg.value())
+                except json.JSONDecodeError as e:
+                    await logger.awarning(
+                        'dlq_reader_invalid_json',
+                        category='sink',
+                        error=str(e),
+                        offset=msg.offset(),
+                    )
+                    continue
+                entry['_kafka_offset'] = msg.offset()
+                entry['_kafka_partition'] = msg.partition()
+                yield entry
+                yielded += 1
+    finally:
+        try:
+            await consumer.close()
+        except Exception as e:
+            await logger.awarning(
+                'dlq_reader_close_error',
+                category='sink',
+                error=str(e),
+            )
+
+
+# Keep the symbol available for consumers that want to build their own
+# TopicPartition references when extending the reader (e.g. seeking to an
+# offset). Intentionally re-exported from the ``confluent_kafka`` shim so
+# that operator scripts need not import from ``confluent_kafka`` directly.
+__all__ = ['DLQMessage', 'DLQSink', 'TopicPartition', 'read_dlq_entries']
