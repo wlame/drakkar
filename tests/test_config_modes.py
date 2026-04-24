@@ -132,6 +132,13 @@ def _setup_app_sinks(app: DrakkarApp) -> None:
         # and non-probing in the default (non-breaker-specific) test paths.
         mock_sink.circuit_state = 'closed'
         mock_sink.probe_inflight = False
+        # ``mark_connected`` / ``mark_disconnected`` are sync helpers called
+        # by SinkManager around connect/close so the readiness probe signal
+        # flips cleanly. AsyncMock would return unawaited coroutines and
+        # surface warnings under shutdown — pin them to plain MagicMocks.
+        mock_sink.mark_connected = MagicMock()
+        mock_sink.mark_disconnected = MagicMock()
+        mock_sink.is_connected = False
         app._sink_manager._sinks[key] = mock_sink
         for i, s in enumerate(app._sink_manager._by_type[sink.sink_type]):
             if s.name == sink.name:

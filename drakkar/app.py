@@ -138,6 +138,13 @@ class DrakkarApp:
         self._processors: dict[int, PartitionProcessor] = {}
         self._running = False
         self._paused = False
+        # Readiness signal for the ``/readyz`` Kubernetes probe (exposed
+        # via the debug server). Flipped to ``True`` after the worker has
+        # cleared its full startup sequence — consumer subscribed, sinks
+        # connected, first poll cycle completed — and back to ``False``
+        # during ``_shutdown`` so a draining pod fails its readiness
+        # probe and is taken out of rotation immediately.
+        self.is_ready: bool = False
         self._background_tasks: set[asyncio.Task] = set()
         self._periodic_tasks: list[asyncio.Task] = []
         self._config_summary: str = ''
@@ -497,6 +504,14 @@ class DrakkarApp:
                 if processor:
                     processor.enqueue(msg)
 
+            # After the first poll completes successfully we consider the
+            # worker ready to serve traffic — the consumer is subscribed,
+            # sinks were connected before the loop started, and at least
+            # one poll round-trip has finished. Kubernetes readiness probes
+            # can now flip us into the service endpoints. Idempotent: the
+            # assignment on subsequent iterations is a no-op.
+            self.is_ready = True
+
             if not messages:
                 # Consumer idle: no messages from Kafka, nothing queued, not paused.
                 # Measures time with genuinely nothing to do (consumer lag is zero).
@@ -678,6 +693,13 @@ class DrakkarApp:
         """Graceful shutdown: cancel periodic tasks, drain executors, commit offsets, close sinks."""
         log = logger.bind(worker_id=self._worker_id)
         await log.ainfo('drakkar_shutting_down', category='lifecycle')
+
+        # Flip readiness off IMMEDIATELY so a Kubernetes readiness probe
+        # that fires between now and ``close_all`` fails — the pod is
+        # taken out of the service endpoints before we start tearing down
+        # sinks. Liveness (``/healthz``) stays responsive until the process
+        # actually exits.
+        self.is_ready = False
 
         # cancel periodic tasks
         for task in self._periodic_tasks:

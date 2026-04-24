@@ -104,6 +104,13 @@ def _setup_app_sinks(app: DrakkarApp) -> None:
         # plain values so non-circuit-breaker tests behave like a closed circuit.
         mock_sink.circuit_state = 'closed'
         mock_sink.probe_inflight = False
+        # ``mark_connected`` / ``mark_disconnected`` are sync helpers called
+        # by SinkManager around connect/close so the readiness probe signal
+        # flips cleanly. AsyncMock would return unawaited coroutines and
+        # surface warnings under shutdown — pin them to plain MagicMocks.
+        mock_sink.mark_connected = MagicMock()
+        mock_sink.mark_disconnected = MagicMock()
+        mock_sink.is_connected = False
         app._sink_manager._sinks[key] = mock_sink
         # update _by_type
         for i, s in enumerate(app._sink_manager._by_type[sink.sink_type]):
@@ -119,6 +126,18 @@ def test_app_creation(test_config):
     app = DrakkarApp(handler=handler, config=test_config)
     assert app.config == test_config
     assert app.processors == {}
+
+
+def test_app_is_ready_starts_false(test_config):
+    """is_ready is False until the first poll cycle completes.
+
+    The readiness signal drives the /readyz Kubernetes probe — it MUST
+    report "not ready" immediately after construction, before the worker
+    has even started, otherwise a pod would receive traffic during its
+    cold-start window.
+    """
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    assert app.is_ready is False
 
 
 def test_app_creation_with_worker_id(test_config):

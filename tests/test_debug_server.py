@@ -4416,3 +4416,139 @@ async def test_flush_and_select_helper_prefers_reader_db_over_writer(tmp_path, m
 
     await writer.close()
     await reader.close()
+
+
+# ---------------------------------------------------------------------------
+# Kubernetes probes: /healthz and /readyz
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def probe_app(mock_app):
+    """mock_app variant with the probe-relevant state set explicitly.
+
+    ``mock_app`` is a ``MagicMock`` — any attribute access returns a truthy
+    ``MagicMock``, which would make ``drakkar_app.is_ready`` and
+    ``sink_manager.all_connected()`` evaluate as ``True`` by accident. This
+    fixture pins the two signals to concrete values so probe tests assert
+    on them deterministically. Individual tests flip the values via
+    ``probe_app.is_ready`` / ``probe_app.sink_manager.all_connected.return_value``.
+    """
+    mock_app.is_ready = False
+    mock_app.sink_manager.all_connected.return_value = True
+    mock_app.sink_manager.disconnected_sink_names.return_value = []
+    return mock_app
+
+
+@pytest.fixture
+async def probe_client(debug_config, mock_recorder, probe_app):
+    fastapi_app = create_debug_app(debug_config, mock_recorder, probe_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        yield c
+
+
+async def test_healthz_returns_200_without_auth(debug_config, mock_recorder, probe_app):
+    """Liveness probe must work even when an auth_token is configured.
+
+    Kubernetes probes have no way to supply a bearer token, so ``/healthz``
+    must accept anonymous requests regardless of ``config.auth_token``.
+    """
+    cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-token')
+    fastapi_app = create_debug_app(cfg, mock_recorder, probe_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        resp = await c.get('/healthz')
+
+    assert resp.status_code == 200
+    assert resp.json() == {'status': 'ok'}
+
+
+async def test_healthz_ignores_supplied_auth_token(probe_client):
+    """A client that sends an Authorization header to /healthz is not rejected."""
+    resp = await probe_client.get('/healthz', headers={'Authorization': 'Bearer irrelevant'})
+    assert resp.status_code == 200
+    assert resp.json() == {'status': 'ok'}
+
+
+async def test_readyz_returns_503_before_is_ready(probe_client, probe_app):
+    """/readyz must fail with 503 until the first poll cycle completes."""
+    probe_app.is_ready = False
+    probe_app.sink_manager.all_connected.return_value = True
+
+    resp = await probe_client.get('/readyz')
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body['status'] == 'not_ready'
+    assert 'not_started' in body['reasons']
+
+
+async def test_readyz_returns_200_when_ready_and_all_connected(probe_client, probe_app):
+    """/readyz succeeds only when both is_ready AND all sinks connected."""
+    probe_app.is_ready = True
+    probe_app.sink_manager.all_connected.return_value = True
+    probe_app.sink_manager.disconnected_sink_names.return_value = []
+
+    resp = await probe_client.get('/readyz')
+
+    assert resp.status_code == 200
+    assert resp.json() == {'status': 'ready'}
+
+
+async def test_readyz_returns_503_when_sink_disconnected(probe_client, probe_app):
+    """/readyz surfaces each disconnected sink id in the reasons array."""
+    probe_app.is_ready = True
+    probe_app.sink_manager.all_connected.return_value = False
+    probe_app.sink_manager.disconnected_sink_names.return_value = ['kafka:results']
+
+    resp = await probe_client.get('/readyz')
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body['status'] == 'not_ready'
+    assert 'sink_kafka:results_not_connected' in body['reasons']
+
+
+async def test_readyz_reports_multiple_reasons(probe_client, probe_app):
+    """When both the worker isn't ready and a sink is down, /readyz lists both."""
+    probe_app.is_ready = False
+    probe_app.sink_manager.all_connected.return_value = False
+    probe_app.sink_manager.disconnected_sink_names.return_value = ['postgres:main-db']
+
+    resp = await probe_client.get('/readyz')
+
+    assert resp.status_code == 503
+    body = resp.json()
+    reasons = body['reasons']
+    assert 'not_started' in reasons
+    assert 'sink_postgres:main-db_not_connected' in reasons
+
+
+async def test_readyz_ignores_supplied_auth_token(probe_client, probe_app):
+    """A bearer token on /readyz does not change its response code."""
+    probe_app.is_ready = True
+    probe_app.sink_manager.all_connected.return_value = True
+    probe_app.sink_manager.disconnected_sink_names.return_value = []
+
+    resp = await probe_client.get('/readyz', headers={'Authorization': 'Bearer anything'})
+
+    assert resp.status_code == 200
+    assert resp.json() == {'status': 'ready'}
+
+
+async def test_readyz_with_auth_token_configured_still_accessible(debug_config, mock_recorder, probe_app):
+    """When an auth_token is configured globally, /readyz remains unauthenticated."""
+    cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-token')
+    probe_app.is_ready = True
+    probe_app.sink_manager.all_connected.return_value = True
+    probe_app.sink_manager.disconnected_sink_names.return_value = []
+
+    fastapi_app = create_debug_app(cfg, mock_recorder, probe_app)
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url='http://test') as c:
+        # No Authorization header supplied — still 200.
+        resp = await c.get('/readyz')
+
+    assert resp.status_code == 200
+    assert resp.json() == {'status': 'ready'}

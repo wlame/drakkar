@@ -670,6 +670,50 @@ def create_debug_app(
 
         return {'card_links': card_links, 'worker_links': worker_links, 'cluster_links': cluster_links}
 
+    # --- Kubernetes probes (unauthenticated by design) ---
+    #
+    # ``/healthz`` and ``/readyz`` intentionally skip the ``_require_auth``
+    # dependency: Kubernetes probes have no facility for bearer tokens, and
+    # the endpoints expose only liveness / readiness signals — nothing that
+    # leaks message content, partition state, or operator credentials.
+    # They are fast-path (no I/O, no recorder access) so the kubelet's
+    # sub-second probe budget is respected even under load.
+    #
+    # Contract:
+    #   - ``/healthz`` — liveness: always 200 while the process is running
+    #     and the FastAPI loop is responsive. Kubernetes restarts the pod
+    #     on failure.
+    #   - ``/readyz`` — readiness: 200 only when ``DrakkarApp.is_ready`` is
+    #     True AND every registered sink reports ``is_connected``. 503
+    #     otherwise with a ``reasons`` list pointing at what's missing.
+    #     Kubernetes removes the pod from service endpoints on failure
+    #     (without restarting it).
+
+    @app.get('/healthz')
+    async def healthz() -> JSONResponse:
+        """Liveness probe — returns 200 as long as the event loop is alive."""
+        return JSONResponse({'status': 'ok'})
+
+    @app.get('/readyz')
+    async def readyz() -> JSONResponse:
+        """Readiness probe — 200 iff the worker is ready AND all sinks are connected."""
+        reasons: list[str] = []
+        if not drakkar_app.is_ready:
+            reasons.append('not_started')
+        mgr = drakkar_app.sink_manager
+        # ``sink_manager`` is always constructed in ``DrakkarApp.__init__``
+        # so the None-check here is defensive for tests that replace it
+        # with a bare MagicMock. The manager may have zero sinks registered
+        # (startup validation rejects that config, but tests can bypass it)
+        # — ``all_connected`` returns True for an empty manager so that
+        # path is handled automatically.
+        if mgr is not None and not mgr.all_connected():
+            for sink_id in mgr.disconnected_sink_names():
+                reasons.append(f'sink_{sink_id}_not_connected')
+        if reasons:
+            return JSONResponse({'status': 'not_ready', 'reasons': reasons}, status_code=503)
+        return JSONResponse({'status': 'ready'})
+
     @app.get('/', response_class=HTMLResponse)
     async def dashboard(request: Request):
         stats = await recorder.get_stats()

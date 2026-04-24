@@ -110,6 +110,86 @@ async def test_connect_all():
     assert s2.connected
 
 
+async def test_connect_all_marks_is_connected():
+    """After successful connect_all, BaseSink.is_connected must be True for all sinks.
+
+    The ``is_connected`` flag is what the ``/readyz`` Kubernetes probe
+    consults via ``SinkManager.all_connected()``. If ``connect_all``
+    failed to flip it we'd report false negatives forever.
+    """
+    mgr = SinkManager()
+    s1 = FakeSink('a', sink_type='kafka')
+    s2 = FakeSink('b', sink_type='postgres')
+    mgr.register(s1)
+    mgr.register(s2)
+
+    # Before connect_all — nothing is connected yet.
+    assert not s1.is_connected
+    assert not s2.is_connected
+    assert not mgr.all_connected()
+
+    await mgr.connect_all()
+
+    assert s1.is_connected
+    assert s2.is_connected
+    assert mgr.all_connected()
+    assert mgr.disconnected_sink_names() == []
+
+
+async def test_close_all_marks_is_disconnected():
+    """close_all must flip is_connected back to False so /readyz fails during shutdown."""
+    mgr = SinkManager()
+    s1 = FakeSink('a', sink_type='kafka')
+    mgr.register(s1)
+    await mgr.connect_all()
+    assert s1.is_connected
+
+    await mgr.close_all()
+
+    assert not s1.is_connected
+    assert not mgr.all_connected()
+
+
+async def test_all_connected_empty_manager_returns_true():
+    """An empty manager trivially reports "all connected" — no sinks can be down."""
+    mgr = SinkManager()
+    assert mgr.all_connected() is True
+    assert mgr.disconnected_sink_names() == []
+
+
+async def test_disconnected_sink_names_reports_only_unconnected():
+    """disconnected_sink_names only lists sinks whose is_connected is False."""
+    mgr = SinkManager()
+    s1 = FakeSink('results', sink_type='kafka')
+    s2 = FakeSink('main', sink_type='postgres')
+    mgr.register(s1)
+    mgr.register(s2)
+    await mgr.connect_all()
+
+    # Simulate one sink dropping its connection at runtime.
+    s1.mark_disconnected()
+
+    assert mgr.all_connected() is False
+    assert mgr.disconnected_sink_names() == ['kafka:results']
+
+
+async def test_close_all_flips_disconnect_even_when_close_raises():
+    """A sink whose close() raises must still be marked disconnected.
+
+    Leaving is_connected=True on a failed-close sink would mislead
+    ``/readyz`` into reporting the sink as healthy during shutdown.
+    """
+    mgr = SinkManager()
+    s = FailCloseSink('fail', sink_type='kafka')
+    mgr.register(s)
+    await mgr.connect_all()
+    assert s.is_connected
+
+    await mgr.close_all()
+
+    assert not s.is_connected
+
+
 async def test_close_all():
     mgr = SinkManager()
     s1 = FakeSink('a', sink_type='kafka')

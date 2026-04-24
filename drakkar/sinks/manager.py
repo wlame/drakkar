@@ -219,6 +219,12 @@ class SinkManager:
 
         async def _connect_one(sink: BaseSink[Any]) -> None:
             await sink.connect()
+            # Mark the sink as connected only AFTER ``connect()`` returns
+            # successfully. If the subclass raises we want the flag to stay
+            # False so ``all_connected()`` (used by ``/readyz``) reports the
+            # sink as down — otherwise a post-raise readiness check could
+            # falsely succeed.
+            sink.mark_connected()
             await logger.ainfo(
                 'sink_connected',
                 category='sink',
@@ -265,6 +271,11 @@ class SinkManager:
             return_exceptions=True,
         )
         for sink, cleanup_result in zip(successful_sinks, cleanup_results, strict=True):
+            # Flip the sink back to "not connected" regardless of whether
+            # ``close()`` raised — we already logged the original connect
+            # failure, and leaving the flag True on a cleanup-failed sink
+            # would mislead ``/readyz`` into reporting it as healthy.
+            sink.mark_disconnected()
             if isinstance(cleanup_result, BaseException):
                 # Log cleanup failure but never mask the original connect
                 # error — operators need the startup-failure signal, not
@@ -292,6 +303,32 @@ class SinkManager:
                     sink_name=sink.name,
                     error=str(e),
                 )
+            finally:
+                # Always flip the connection flag even if ``close()`` raised
+                # — after shutdown nothing else reads from the sink, and a
+                # raised close() means the connection is in an undefined
+                # state which is strictly not "connected".
+                sink.mark_disconnected()
+
+    def all_connected(self) -> bool:
+        """Return True when every registered sink is connected.
+
+        Consulted by the ``/readyz`` endpoint (``drakkar/debug_server.py``)
+        to report whether the worker can serve traffic. An empty manager
+        (no sinks registered) returns True — startup validation in
+        ``DrakkarApp`` already rejects that config, so the invariant is
+        upheld at a higher layer.
+        """
+        return all(sink.is_connected for sink in self._sinks.values())
+
+    def disconnected_sink_names(self) -> list[str]:
+        """Return ``"<type>:<name>"`` identifiers for sinks that are NOT connected.
+
+        Used by the ``/readyz`` endpoint to populate the ``reasons`` array in
+        its 503 response body so operators can see at a glance which sink is
+        keeping the worker from reporting ready.
+        """
+        return [f'{sink.sink_type}:{sink.name}' for sink in self._sinks.values() if not sink.is_connected]
 
     def resolve_sink(self, sink_type: str, sink_name: str) -> BaseSink[Any]:
         """Resolve a sink instance by type and name.

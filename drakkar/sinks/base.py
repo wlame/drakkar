@@ -88,6 +88,15 @@ class BaseSink(ABC, Generic[PayloadT]):
         self._name = name
         self._ui_url = ui_url
 
+        # Connection lifecycle flag — flips to True after a successful
+        # ``connect()`` and back to False after ``close()``. The SinkManager
+        # manipulates it via ``mark_connected`` / ``mark_disconnected`` so
+        # subclasses don't have to thread the bookkeeping through their
+        # own ``connect`` / ``close`` implementations. Exposed as the
+        # ``is_connected`` read-only property for readiness probes
+        # (``/readyz`` in the debug server).
+        self._is_connected: bool = False
+
         # Circuit breaker state. Starts closed (0.0 on the gauge) — the
         # per-sink gauge is initialized eagerly so a freshly-registered sink
         # appears in Prometheus scrape output as "closed" rather than absent.
@@ -147,6 +156,37 @@ class BaseSink(ABC, Generic[PayloadT]):
     def ui_url(self) -> str:
         """Optional URL to a web UI for this sink's backing service."""
         return self._ui_url
+
+    @property
+    def is_connected(self) -> bool:
+        """Read-only view of whether the sink's connection is established.
+
+        Set to ``True`` by ``SinkManager.connect_all`` after ``connect()``
+        returns successfully, and back to ``False`` after ``close()`` runs
+        (via ``close_all`` at shutdown or the partial-failure cleanup
+        branch in ``connect_all``). Exposed so readiness probes in the
+        debug server can report a clean ``/readyz`` state.
+        """
+        return self._is_connected
+
+    def mark_connected(self) -> None:
+        """Mark this sink as connected — called by SinkManager after ``connect()``.
+
+        Exists as an explicit method so connection-state bookkeeping stays
+        out of subclass ``connect()`` implementations: each sink only has
+        to establish its underlying client, and the manager handles the
+        shared state update for readiness probes.
+        """
+        self._is_connected = True
+
+    def mark_disconnected(self) -> None:
+        """Mark this sink as disconnected — called by SinkManager after ``close()``.
+
+        Idempotent: calling on an already-disconnected sink is a no-op
+        (safe for the shutdown path where ``close_all`` and a partial-
+        failure cleanup can both run).
+        """
+        self._is_connected = False
 
     def record_failure(self) -> None:
         """Update circuit breaker state after a failed delivery attempt.
