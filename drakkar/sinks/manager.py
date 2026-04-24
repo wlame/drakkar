@@ -206,8 +206,10 @@ class SinkManager:
         """Route and deliver all payloads in a CollectResult to their sinks.
 
         Groups payloads by (sink_type, resolved_sink_name), then delivers
-        each group. On delivery failure, calls on_delivery_error and handles
-        the returned action (DLQ, RETRY, SKIP).
+        each group concurrently via asyncio.gather. Total wall-clock time
+        becomes ~max(sink_latency) instead of the sum. On delivery failure,
+        calls on_delivery_error and handles the returned action
+        (DLQ, RETRY, SKIP) PER SINK — each sink retries independently.
 
         Args:
             result: The CollectResult from on_task_complete(),
@@ -227,77 +229,128 @@ class SinkManager:
                 sink = self.resolve_sink(sink_type, payload.sink)
                 groups[(sink.sink_type, sink.name)].append(payload)
 
-        for (sink_type, sink_name), payloads in groups.items():
-            sink = self._sinks[(sink_type, sink_name)]
-            stats = self._stats[(sink_type, sink_name)]
-            attempt = 0
-            while True:
-                try:
-                    start = time.monotonic()
-                    await sink.deliver(payloads)
-                    duration = time.monotonic() - start
-                    stats.delivered_count += 1
-                    stats.delivered_payloads += len(payloads)
-                    stats.last_delivery_ts = time.time()
-                    stats.last_delivery_duration = round(duration, 4)
-                    if recorder:
-                        recorder.record_sink_delivery(
-                            sink_type=sink_type,
-                            sink_name=sink_name,
-                            payload_count=len(payloads),
-                            duration=duration,
-                        )
-                    break
-                except Exception as e:
-                    attempt += 1
-                    stats.error_count += 1
-                    stats.last_error = str(e)
-                    stats.last_error_ts = time.time()
-                    if recorder:
-                        recorder.record_sink_error(
-                            sink_type=sink_type,
-                            sink_name=sink_name,
-                            error=str(e),
-                            attempt=attempt,
-                        )
-                    error = DeliveryError(
-                        sink_name=sink_name,
-                        sink_type=sink_type,
-                        error=str(e),
-                        payloads=payloads,
-                    )
-                    action = await on_delivery_error(error)
+        if not groups:
+            return
 
-                    if action == DeliveryAction.RETRY and attempt < max_retries:
-                        stats.retry_count += 1
-                        sink_delivery_retries.labels(sink_type=sink_type, sink_name=sink_name).inc()
-                        await logger.awarning(
-                            'sink_delivery_retry',
-                            category='sink',
-                            sink_type=sink_type,
-                            sink_name=sink_name,
-                            attempt=attempt,
-                        )
-                        continue
-                    elif action == DeliveryAction.SKIP:
-                        sink_deliveries_skipped.labels(sink_type=sink_type, sink_name=sink_name).inc()
-                        await logger.awarning(
-                            'sink_delivery_skipped',
-                            category='sink',
-                            sink_type=sink_type,
-                            sink_name=sink_name,
-                            payload_count=len(payloads),
-                        )
-                        break
-                    else:
-                        # DLQ or RETRY exhausted — DLQ handling is done by the caller (app.py)
-                        # since it needs access to the DLQ sink which lives outside the manager.
-                        await logger.awarning(
-                            'sink_delivery_failed_to_dlq',
-                            category='sink',
-                            sink_type=sink_type,
-                            sink_name=sink_name,
-                            payload_count=len(payloads),
-                            attempts=attempt,
-                        )
-                        break
+        # Dispatch per-sink delivery coroutines concurrently. Each coroutine
+        # owns its own retry/DLQ/stats logic, so concurrent execution is safe
+        # — stats are scoped per (sink_type, name), no cross-sink contention.
+        # return_exceptions=True ensures one sink's meltdown does not cancel
+        # sibling deliveries; unhandled leaks (bugs in _deliver_to_sink) are
+        # logged but don't crash the caller.
+        group_keys = list(groups.keys())
+        coros = [
+            self._deliver_to_sink(
+                sink_type=sink_type,
+                sink_name=sink_name,
+                payloads=groups[(sink_type, sink_name)],
+                on_delivery_error=on_delivery_error,
+                max_retries=max_retries,
+                recorder=recorder,
+            )
+            for (sink_type, sink_name) in group_keys
+        ]
+        results = await asyncio.gather(*coros, return_exceptions=True)
+
+        # Surface any exceptions that escaped the per-sink helper — these
+        # are bugs (the helper is supposed to catch all delivery errors and
+        # route them through on_delivery_error), so log loudly but do not
+        # re-raise so other sinks' successes aren't discarded upstream.
+        for (sink_type, sink_name), outcome in zip(group_keys, results, strict=True):
+            if isinstance(outcome, BaseException):
+                await logger.aerror(
+                    'sink_deliver_helper_unhandled_exception',
+                    category='sink',
+                    sink_type=sink_type,
+                    sink_name=sink_name,
+                    error=str(outcome),
+                )
+
+    async def _deliver_to_sink(
+        self,
+        sink_type: str,
+        sink_name: str,
+        payloads: list[BaseModel],
+        on_delivery_error: DeliveryErrorCallback,
+        max_retries: int,
+        recorder: EventRecorder | None,
+    ) -> None:
+        """Deliver a single sink's payload group with retry + DLQ semantics.
+
+        Extracted so sink groups can run under asyncio.gather; the retry loop,
+        per-sink stats updates, and DLQ routing all run inside one coroutine
+        so concurrent gather does not interleave a single sink's retries.
+        """
+        sink = self._sinks[(sink_type, sink_name)]
+        stats = self._stats[(sink_type, sink_name)]
+        attempt = 0
+        while True:
+            try:
+                start = time.monotonic()
+                await sink.deliver(payloads)
+                duration = time.monotonic() - start
+                stats.delivered_count += 1
+                stats.delivered_payloads += len(payloads)
+                stats.last_delivery_ts = time.time()
+                stats.last_delivery_duration = round(duration, 4)
+                if recorder:
+                    recorder.record_sink_delivery(
+                        sink_type=sink_type,
+                        sink_name=sink_name,
+                        payload_count=len(payloads),
+                        duration=duration,
+                    )
+                return
+            except Exception as e:
+                attempt += 1
+                stats.error_count += 1
+                stats.last_error = str(e)
+                stats.last_error_ts = time.time()
+                if recorder:
+                    recorder.record_sink_error(
+                        sink_type=sink_type,
+                        sink_name=sink_name,
+                        error=str(e),
+                        attempt=attempt,
+                    )
+                error = DeliveryError(
+                    sink_name=sink_name,
+                    sink_type=sink_type,
+                    error=str(e),
+                    payloads=payloads,
+                )
+                action = await on_delivery_error(error)
+
+                if action == DeliveryAction.RETRY and attempt < max_retries:
+                    stats.retry_count += 1
+                    sink_delivery_retries.labels(sink_type=sink_type, sink_name=sink_name).inc()
+                    await logger.awarning(
+                        'sink_delivery_retry',
+                        category='sink',
+                        sink_type=sink_type,
+                        sink_name=sink_name,
+                        attempt=attempt,
+                    )
+                    continue
+                elif action == DeliveryAction.SKIP:
+                    sink_deliveries_skipped.labels(sink_type=sink_type, sink_name=sink_name).inc()
+                    await logger.awarning(
+                        'sink_delivery_skipped',
+                        category='sink',
+                        sink_type=sink_type,
+                        sink_name=sink_name,
+                        payload_count=len(payloads),
+                    )
+                    return
+                else:
+                    # DLQ or RETRY exhausted — DLQ handling is done by the caller (app.py)
+                    # since it needs access to the DLQ sink which lives outside the manager.
+                    await logger.awarning(
+                        'sink_delivery_failed_to_dlq',
+                        category='sink',
+                        sink_type=sink_type,
+                        sink_name=sink_name,
+                        payload_count=len(payloads),
+                        attempts=attempt,
+                    )
+                    return

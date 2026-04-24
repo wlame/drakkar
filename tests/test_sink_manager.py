@@ -783,3 +783,222 @@ async def test_stats_error_with_recorder():
     assert call_kwargs[1]['sink_name'] == 'out'
     assert 'delivery failed' in call_kwargs[1]['error']
     assert call_kwargs[1]['attempt'] == 1
+
+
+# --- deliver_all parallelism ---
+
+
+class SlowDeliverSink(FakeSink):
+    """FakeSink whose deliver() sleeps before recording — used for timing tests."""
+
+    def __init__(self, name: str, sink_type: str = 'kafka', deliver_delay: float = 0.0) -> None:
+        super().__init__(name=name, sink_type=sink_type)
+        self.deliver_delay = deliver_delay
+
+    async def deliver(self, payloads: list[BaseModel]) -> None:
+        await asyncio.sleep(self.deliver_delay)
+        if self.fail_on_deliver:
+            raise RuntimeError('delivery failed')
+        self.delivered.append(payloads)
+
+
+async def test_deliver_all_runs_sinks_in_parallel():
+    """Three sinks with different latencies should deliver in ~max(latencies).
+
+    With sequential delivery total would be 50 + 100 + 200 = 350ms. With gather
+    it should be ~200ms. Threshold 0.30s leaves generous slack for CI scheduler
+    variance while still failing loudly if the implementation regressed to serial.
+    """
+    mgr = SinkManager()
+    mgr.register(SlowDeliverSink(name='fast', sink_type='kafka', deliver_delay=0.05))
+    mgr.register(SlowDeliverSink(name='medium', sink_type='postgres', deliver_delay=0.1))
+    mgr.register(SlowDeliverSink(name='slow', sink_type='mongo', deliver_delay=0.2))
+
+    result = CollectResult(
+        kafka=[KafkaPayload(sink='fast', data=SampleData())],
+        postgres=[PostgresPayload(sink='medium', table='t', data=SampleData())],
+        mongo=[MongoPayload(sink='slow', collection='c', data=SampleData())],
+    )
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    start = time.monotonic()
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.30, f'expected parallel deliver (<0.30s), got {elapsed:.3f}s'
+    stats = mgr.get_all_stats()
+    assert stats[('kafka', 'fast')].delivered_count == 1
+    assert stats[('postgres', 'medium')].delivered_count == 1
+    assert stats[('mongo', 'slow')].delivered_count == 1
+
+
+async def test_deliver_all_one_sink_failure_does_not_block_others():
+    """A slow, always-failing sink must not drag down siblings' wall-clock.
+
+    The failing sink retries (each attempt takes deliver_delay), so serial
+    execution would pin total time to failing_sink_retries * delay + siblings.
+    With gather, the two successful sinks complete in ~their own latency.
+    """
+    mgr = SinkManager()
+    good_a = SlowDeliverSink(name='good_a', sink_type='kafka', deliver_delay=0.05)
+    good_b = SlowDeliverSink(name='good_b', sink_type='postgres', deliver_delay=0.05)
+    bad = SlowDeliverSink(name='bad', sink_type='mongo', deliver_delay=0.15)
+    bad.fail_on_deliver = True
+    mgr.register(good_a)
+    mgr.register(good_b)
+    mgr.register(bad)
+
+    result = CollectResult(
+        kafka=[KafkaPayload(sink='good_a', data=SampleData())],
+        postgres=[PostgresPayload(sink='good_b', table='t', data=SampleData())],
+        mongo=[MongoPayload(sink='bad', collection='c', data=SampleData())],
+    )
+    # DLQ action: bad sink stops after one attempt; total time dominated by
+    # bad sink's single 0.15s attempt rather than 3x retries.
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
+
+    start = time.monotonic()
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+    elapsed = time.monotonic() - start
+
+    assert len(good_a.delivered) == 1
+    assert len(good_b.delivered) == 1
+    # bad sink never appended to delivered (failed), but others did
+    assert len(bad.delivered) == 0
+    # Total should be ~0.15s (max of fast siblings + single bad attempt),
+    # not sum. Generous slack for CI variance.
+    assert elapsed < 0.30, f'expected parallel deliver with one failure (<0.30s), got {elapsed:.3f}s'
+
+
+async def test_deliver_all_with_all_sinks_failing_routes_all_to_dlq():
+    """All three sinks fail simultaneously — DLQ handler called for each, no unhandled exceptions."""
+    mgr = SinkManager()
+    s1 = FakeSink('a', sink_type='kafka')
+    s2 = FakeSink('b', sink_type='postgres')
+    s3 = FakeSink('c', sink_type='mongo')
+    s1.fail_on_deliver = True
+    s2.fail_on_deliver = True
+    s3.fail_on_deliver = True
+    mgr.register(s1)
+    mgr.register(s2)
+    mgr.register(s3)
+
+    # Track each DLQ-routed error so we can assert all three sinks reach the handler.
+    dlq_calls: list[DeliveryError] = []
+
+    async def dlq_handler(error: DeliveryError) -> DeliveryAction:
+        dlq_calls.append(error)
+        return DeliveryAction.DLQ
+
+    result = CollectResult(
+        kafka=[KafkaPayload(sink='a', data=SampleData())],
+        postgres=[PostgresPayload(sink='b', table='t', data=SampleData())],
+        mongo=[MongoPayload(sink='c', collection='c', data=SampleData())],
+    )
+
+    # Must not raise — gather with return_exceptions=True absorbs per-sink errors.
+    await mgr.deliver_all(result, on_delivery_error=dlq_handler, partition_id=0)
+
+    assert len(dlq_calls) == 3
+    routed_sink_names = {err.sink_name for err in dlq_calls}
+    assert routed_sink_names == {'a', 'b', 'c'}
+
+    # All three sinks show one error recorded in stats, no successful deliveries.
+    stats = mgr.get_all_stats()
+    for key in [('kafka', 'a'), ('postgres', 'b'), ('mongo', 'c')]:
+        assert stats[key].error_count == 1
+        assert stats[key].delivered_count == 0
+
+
+async def test_deliver_all_per_sink_retries_still_work():
+    """One sink fails twice then succeeds on the third try; others succeed once.
+
+    Verifies that the retry loop inside _deliver_to_sink runs per-sink when
+    dispatched via gather — the flaky sink gets 3 attempts while siblings
+    complete in their single attempt.
+    """
+    mgr = SinkManager()
+    flaky = FakeSink('flaky', sink_type='kafka')
+    ok_a = FakeSink('ok_a', sink_type='postgres')
+    ok_b = FakeSink('ok_b', sink_type='mongo')
+    mgr.register(flaky)
+    mgr.register(ok_a)
+    mgr.register(ok_b)
+
+    call_count = 0
+    original_deliver = flaky.deliver
+
+    async def flaky_deliver(payloads: list) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise RuntimeError(f'transient error #{call_count}')
+        await original_deliver(payloads)
+
+    flaky.deliver = flaky_deliver  # type: ignore[assignment]
+    on_error = AsyncMock(return_value=DeliveryAction.RETRY)
+
+    result = CollectResult(
+        kafka=[KafkaPayload(sink='flaky', data=SampleData())],
+        postgres=[PostgresPayload(sink='ok_a', table='t', data=SampleData())],
+        mongo=[MongoPayload(sink='ok_b', collection='c', data=SampleData())],
+    )
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, max_retries=5)
+
+    # All three sinks eventually succeed.
+    assert len(flaky.delivered) == 1
+    assert len(ok_a.delivered) == 1
+    assert len(ok_b.delivered) == 1
+
+    stats = mgr.get_all_stats()
+    assert stats[('kafka', 'flaky')].delivered_count == 1
+    assert stats[('kafka', 'flaky')].retry_count == 2  # retried twice before success
+    assert stats[('postgres', 'ok_a')].delivered_count == 1
+    assert stats[('postgres', 'ok_a')].retry_count == 0
+    assert stats[('mongo', 'ok_b')].delivered_count == 1
+    assert stats[('mongo', 'ok_b')].retry_count == 0
+
+
+async def test_deliver_all_preserves_sink_stats_per_sink_under_gather():
+    """Concurrent delivery must not cross-contaminate per-sink stats.
+
+    One sink fails, two succeed — each sink's delivered_count / error_count /
+    last_error must reflect only its own deliveries, never a sibling's.
+    """
+    mgr = SinkManager()
+    s_fail = FakeSink('fail', sink_type='kafka')
+    s_ok_a = FakeSink('ok_a', sink_type='postgres')
+    s_ok_b = FakeSink('ok_b', sink_type='mongo')
+    s_fail.fail_on_deliver = True
+    mgr.register(s_fail)
+    mgr.register(s_ok_a)
+    mgr.register(s_ok_b)
+
+    result = CollectResult(
+        kafka=[KafkaPayload(sink='fail', data=SampleData())],
+        postgres=[PostgresPayload(sink='ok_a', table='t', data=SampleData())],
+        mongo=[MongoPayload(sink='ok_b', collection='c', data=SampleData())],
+    )
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
+
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    stats = mgr.get_all_stats()
+
+    fail_stats = stats[('kafka', 'fail')]
+    assert fail_stats.delivered_count == 0
+    assert fail_stats.error_count == 1
+    assert fail_stats.last_error == 'delivery failed'
+    assert fail_stats.last_error_ts is not None
+
+    ok_a_stats = stats[('postgres', 'ok_a')]
+    assert ok_a_stats.delivered_count == 1
+    assert ok_a_stats.error_count == 0
+    assert ok_a_stats.last_error is None
+    assert ok_a_stats.last_error_ts is None
+
+    ok_b_stats = stats[('mongo', 'ok_b')]
+    assert ok_b_stats.delivered_count == 1
+    assert ok_b_stats.error_count == 0
+    assert ok_b_stats.last_error is None
+    assert ok_b_stats.last_error_ts is None
