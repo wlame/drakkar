@@ -2054,9 +2054,9 @@ class TestApiEvents:
         mock_recorder._db = db
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
-        mock_recorder._flush = AsyncMock()
+        mock_recorder.flush = AsyncMock()
         mock_recorder._buffer = []
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         client = AsyncClient(transport=transport, base_url='http://test')
@@ -2102,7 +2102,7 @@ class TestApiEvents:
         mock_recorder._db = None
         mock_recorder._reader_db = None
         mock_recorder.reader_db = None
-        mock_recorder._flush = AsyncMock()
+        mock_recorder.flush = AsyncMock()
 
         fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2176,9 +2176,14 @@ class TestApiRecentTasks:
         mock_recorder._db = db
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
-        mock_recorder._flush = AsyncMock()
+        # The debug_server calls recorder.flush() (public API) and
+        # recorder.config (public property) — both expose formerly-private
+        # attributes. Stub the public names directly so the specced mock
+        # returns the real config instead of a MagicMock (which breaks when
+        # the endpoint reads recorder.config.ws_min_duration_ms).
+        mock_recorder.flush = AsyncMock()
+        mock_recorder.config = cfg
         mock_recorder._buffer = []
-        mock_recorder._config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         client = AsyncClient(transport=transport, base_url='http://test')
@@ -2241,7 +2246,7 @@ class TestApiRecentTasks:
         mock_recorder._db = None
         mock_recorder._reader_db = None
         mock_recorder.reader_db = None
-        mock_recorder._flush = AsyncMock()
+        mock_recorder.flush = AsyncMock()
 
         fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2633,9 +2638,9 @@ class TestApiRecentTasksEdgeCases:
         mock_recorder._db = db
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
-        mock_recorder._flush = AsyncMock()
+        mock_recorder.flush = AsyncMock()
         mock_recorder._buffer = []
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2668,9 +2673,9 @@ class TestApiRecentTasksEdgeCases:
         mock_recorder._db = db
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
-        mock_recorder._flush = AsyncMock()
+        mock_recorder.flush = AsyncMock()
         mock_recorder._buffer = []
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2739,7 +2744,7 @@ class TestAuthToken:
 
     async def test_protected_routes_require_token(self, mock_recorder, mock_app):
         cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2749,7 +2754,7 @@ class TestAuthToken:
 
     async def test_protected_routes_accept_bearer_header(self, mock_recorder, mock_app):
         cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         headers = {'Authorization': 'Bearer secret-123'}
@@ -2759,7 +2764,7 @@ class TestAuthToken:
 
     async def test_protected_routes_accept_query_param(self, mock_recorder, mock_app):
         cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2768,7 +2773,7 @@ class TestAuthToken:
 
     async def test_wrong_token_returns_401(self, mock_recorder, mock_app):
         cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2777,7 +2782,7 @@ class TestAuthToken:
 
     async def test_no_auth_when_token_empty(self, mock_recorder, mock_app):
         cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='')
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2786,7 +2791,7 @@ class TestAuthToken:
 
     async def test_unprotected_routes_always_accessible(self, mock_recorder, mock_app):
         cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2796,7 +2801,7 @@ class TestAuthToken:
 
     async def test_merge_requires_token(self, tmp_path, mock_recorder, mock_app):
         cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2821,7 +2826,7 @@ class TestAuthToken:
         """
         _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
         cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, _probe_mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2853,7 +2858,7 @@ class TestAuthToken:
         same way a real request would.
         """
         cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2875,7 +2880,7 @@ class TestAuthToken:
         not explode into 500s that fill logs and trip 5xx alerting.
         """
         cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='non-ascïi')
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -3262,9 +3267,9 @@ class TestApiPeriodicTasks:
         mock_recorder._db = db
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
-        mock_recorder._flush = AsyncMock()
+        mock_recorder.flush = AsyncMock()
         mock_recorder._buffer = []
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
 
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -3305,9 +3310,9 @@ class TestApiPeriodicTasks:
         mock_recorder._db = db
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
-        mock_recorder._flush = AsyncMock()
+        mock_recorder.flush = AsyncMock()
         mock_recorder._buffer = []
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
 
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -3377,9 +3382,9 @@ class TestApiLabelTrace:
         mock_recorder._db = db
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
-        mock_recorder._flush = AsyncMock()
+        mock_recorder.flush = AsyncMock()
         mock_recorder._buffer = []
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
         mock_recorder._worker_name = 'test-worker'
         mock_recorder._cluster_name = ''
         mock_recorder._db_path = db_path
@@ -3427,9 +3432,9 @@ class TestApiLabelTrace:
         mock_recorder._db = db
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
-        mock_recorder._flush = AsyncMock()
+        mock_recorder.flush = AsyncMock()
         mock_recorder._buffer = []
-        mock_recorder._config = cfg
+        mock_recorder.config = cfg
 
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -4107,9 +4112,9 @@ async def test_api_events_dispatches_to_drakkar_main_loop_when_different(
         mock_recorder._db = observer
         mock_recorder._reader_db = observer
         mock_recorder.reader_db = observer
-        mock_recorder._flush = AsyncMock()
+        mock_recorder.flush = AsyncMock()
         mock_recorder._buffer = []
-        mock_recorder._config = debug_config
+        mock_recorder.config = debug_config
         mock_app.main_loop = main_loop
 
         fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
@@ -4157,9 +4162,9 @@ async def test_api_events_falls_back_to_inline_when_main_loop_is_mock(tmp_path, 
     mock_recorder._db = db
     mock_recorder._reader_db = db
     mock_recorder.reader_db = db
-    mock_recorder._flush = AsyncMock()
+    mock_recorder.flush = AsyncMock()
     mock_recorder._buffer = []
-    mock_recorder._config = debug_config
+    mock_recorder.config = debug_config
     # ``mock_app.main_loop`` is a ``MagicMock`` by default; the helper
     # should see it's not an ``asyncio.AbstractEventLoop`` and execute
     # inline on the current loop without error.
@@ -4297,9 +4302,13 @@ async def test_flush_and_select_helper_returns_columns_and_rows(tmp_path, mock_r
     mock_recorder._db = writer
     mock_recorder._reader_db = reader
     mock_recorder.reader_db = reader
-    mock_recorder._flush = _flush
+    # Debug server uses the public ``recorder.flush()`` (MED-4). Stub the
+    # public name so the helper's ``await recorder.flush()`` actually hits
+    # our counter — setting ``_flush`` would be a no-op because the mock
+    # spec routes calls through the real attribute name.
+    mock_recorder.flush = _flush
+    mock_recorder.config = debug_config
     mock_recorder._buffer = []
-    mock_recorder._config = debug_config
 
     fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
@@ -4322,9 +4331,9 @@ async def test_flush_and_select_helper_returns_columns_and_rows(tmp_path, mock_r
 
 
 async def test_flush_and_select_helper_returns_none_when_db_missing(debug_config, mock_recorder, mock_app):
-    """When both ``reader_db`` and ``_db`` are None the helper must
-    return ``None``; the endpoint maps that onto its empty-response
-    shape (``[]`` for ``/api/events``).
+    """When ``reader_db`` is None the helper must return ``None``;
+    the endpoint maps that onto its empty-response shape (``[]`` for
+    ``/api/events``).
     """
     mock_recorder._db = None
     mock_recorder._reader_db = None
@@ -4336,9 +4345,11 @@ async def test_flush_and_select_helper_returns_none_when_db_missing(debug_config
         nonlocal flush_calls
         flush_calls += 1
 
-    mock_recorder._flush = _flush
+    # Public-API stubbing (MED-4) — see the helper-returns-columns test
+    # above for rationale.
+    mock_recorder.flush = _flush
+    mock_recorder.config = debug_config
     mock_recorder._buffer = []
-    mock_recorder._config = debug_config
 
     fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
@@ -4386,9 +4397,9 @@ async def test_flush_and_select_helper_prefers_reader_db_over_writer(tmp_path, m
     mock_recorder._db = writer
     mock_recorder._reader_db = reader
     mock_recorder.reader_db = reader
-    mock_recorder._flush = AsyncMock()
+    mock_recorder.flush = AsyncMock()
     mock_recorder._buffer = []
-    mock_recorder._config = debug_config
+    mock_recorder.config = debug_config
 
     fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)

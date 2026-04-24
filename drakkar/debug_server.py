@@ -488,37 +488,31 @@ def create_debug_app(
         # Same-loop (or no real main loop in tests): run inline.
         return await coro
 
-    # ``_flush_and_select`` consolidates the "flush recorder → check DB →
-    # run SELECT → return (columns, rows)" pattern that was copy-pasted
-    # across 11 debug-server endpoints. All reads go through
-    # ``recorder.reader_db`` (dedicated reader connection opened alongside
-    # the writer in ``EventRecorder.start``) so UI queries don't queue
-    # behind writer flushes; the writer connection is used as a fallback
-    # only when the reader is unavailable (e.g. unit-test shims that set
-    # a single connection).
-    #
-    # Returns ``(columns, rows)`` on success or ``None`` when neither DB
-    # is available. Callers map ``None`` onto whatever empty response
-    # shape their endpoint requires (``JSONResponse([])``, ``{}``, etc.).
-    #
-    # Dispatches through ``_dispatch_to_main_loop`` so the aiosqlite
-    # connection stays on its owning loop even when the debug server
-    # runs in a separate thread.
     async def _flush_and_select(
         query: str,
         params: Sequence[Any] = (),
     ) -> tuple[list[str], list] | None:
-        """Flush the recorder then run a SELECT.
+        """Flush the recorder then run a SELECT against the reader connection.
 
-        Flushes pending events on the writer connection, then executes
-        ``query`` on the dedicated reader connection (falling back to the
-        writer). Returns ``(columns, rows)`` or ``None`` if the recorder
-        DB isn't available.
+        Consolidates the "flush → check DB → SELECT → (columns, rows)"
+        pattern shared by 11 debug-server endpoints. Reads go through
+        ``recorder.reader_db`` (the dedicated reader aiosqlite connection
+        opened alongside the writer) so UI queries don't queue behind
+        writer flushes. Dispatches via ``_dispatch_to_main_loop`` so the
+        connection stays on its owning loop when the debug server runs
+        in a separate thread.
+
+        Returns ``(columns, rows)`` on success or ``None`` when the reader
+        connection is absent (recorder not started, or started without
+        event storage). No automatic fallback to the writer — that would
+        defeat the dedicated-reader-pool design. Callers map ``None`` onto
+        whatever empty response shape their endpoint uses
+        (``JSONResponse([])``, ``{}``, etc.).
         """
 
         async def _inner() -> tuple[list[str], list] | None:
-            await recorder._flush()
-            db = recorder.reader_db or recorder._db
+            await recorder.flush()
+            db = recorder.reader_db
             if not db:
                 return None
             async with db.execute(query, params) as cur:
@@ -1294,10 +1288,12 @@ def create_debug_app(
             WHERE labels IS NOT NULL
             LIMIT 100
         """
-        try:
-            result = await _flush_and_select(query)
-        except Exception:
-            return JSONResponse([])
+        # No try/except: ``_flush_and_select`` already maps DB-absent to
+        # ``None`` (handled below) and any real exception here is a bug
+        # (malformed SQL, recorder internal state corruption) that should
+        # surface loudly rather than be silently hidden behind an empty
+        # response. Fail-loud beats a silently-empty label dropdown.
+        result = await _flush_and_select(query)
         if result is None:
             return JSONResponse([])
         _columns, rows = result
@@ -1340,10 +1336,10 @@ def create_debug_app(
             ORDER BY ts DESC
             LIMIT 500
         """
-        try:
-            result = await _flush_and_select(query)
-        except Exception:
-            return JSONResponse([])
+        # No try/except — see ``api_debug_label_keys`` for rationale.
+        # ``_flush_and_select`` returns ``None`` on DB-absent; any raised
+        # exception is a real bug and should surface.
+        result = await _flush_and_select(query)
         if result is None:
             return JSONResponse([])
         columns, rows = result
@@ -1537,7 +1533,7 @@ def create_debug_app(
         # Apply ws_min_duration_ms filtering: hide fast completed tasks
         # from the live UI, same as the WebSocket path. Running tasks
         # (duration unknown) and failed tasks (always visible) are kept.
-        ws_threshold_s = recorder._config.ws_min_duration_ms / 1000.0
+        ws_threshold_s = recorder.config.ws_min_duration_ms / 1000.0
         result = []
         for t in tasks.values():
             if not t['start_ts']:
@@ -1582,7 +1578,7 @@ def create_debug_app(
         # flushing + SELECTing against an empty table. ``_flush_and_select``
         # would still dispatch to the main loop and return rows, but they'd
         # always be empty.
-        if not recorder._config.store_events:
+        if not recorder.config.store_events:
             return JSONResponse({})
         query_result = await _flush_and_select(query, task_ids)
         if query_result is None:
@@ -1660,7 +1656,7 @@ def create_debug_app(
         list when recorder storage is disabled. Callers parse metadata
         themselves because each event type has different metadata shape.
         """
-        if not recorder._config.store_events:
+        if not recorder.config.store_events:
             return []
         query = (
             'SELECT ts, task_id, partition, offset, duration, metadata '
@@ -1699,7 +1695,7 @@ def create_debug_app(
         # for rendering the message source in the UI), while
         # task_completed/task_failed carry the subprocess exit status.
         aux_by_id: dict[str, dict] = {}
-        if task_ids and (recorder.reader_db or recorder._db):
+        if task_ids and recorder.reader_db:
             placeholders = ','.join(['?'] * len(task_ids))
             q = (
                 f'SELECT task_id, event, duration, exit_code, metadata '
@@ -1712,7 +1708,7 @@ def create_debug_app(
             # Routes through the reader connection so UI lookups don't
             # queue behind writer flushes.
             async def _read_aux():
-                reader = recorder.reader_db or recorder._db
+                reader = recorder.reader_db
                 if not reader:
                     return [], []
                 async with reader.execute(q, task_ids) as cur:
@@ -1778,7 +1774,7 @@ def create_debug_app(
         # column indexes; the Python-side tuple match handles the final
         # (partition, offset) pairing — cheap given the small row count.
         consumed_by_key: dict[tuple, list[float]] = {}
-        if events and (recorder.reader_db or recorder._db):
+        if events and recorder.reader_db:
             pairs = {
                 (e['partition'], e['offset'])
                 for e in events
@@ -1800,7 +1796,7 @@ def create_debug_app(
                 # plain list so no aiosqlite objects escape. Uses the
                 # reader connection.
                 async def _read_consumed():
-                    reader = recorder.reader_db or recorder._db
+                    reader = recorder.reader_db
                     if not reader:
                         return []
                     async with reader.execute(q, params) as cur:
@@ -1978,7 +1974,7 @@ def create_debug_app(
         """
         if not req.offsets:
             return JSONResponse({})
-        if not recorder._config.store_events:
+        if not recorder.config.store_events:
             return JSONResponse({})
         placeholders = ','.join(['?'] * len(req.offsets))
         q = (

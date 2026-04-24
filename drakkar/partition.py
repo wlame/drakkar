@@ -233,11 +233,11 @@ class PartitionProcessor:
     async def stop(self) -> None:
         """Stop the partition processor and wait for completion.
 
-        Sets _running=False so _run() exits its main loop and drains
-        remaining queued messages. Waits up to 10s for natural exit
-        before force-cancelling.
+        Signals _run() to exit its main loop via ``signal_stop`` (the
+        single documented way to clear ``_running``), then waits up to 10s
+        for natural exit before force-cancelling.
         """
-        self._running = False
+        self.signal_stop()
         if self._task:
             try:
                 await asyncio.wait_for(self._task, timeout=10.0)

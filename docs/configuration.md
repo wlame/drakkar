@@ -305,6 +305,33 @@ sinks:
       base_path: /data/archive
 ```
 
+### Circuit Breaker (`sinks.circuit_breaker`)
+
+Every registered sink has a per-instance circuit breaker. The breaker
+trips after `failure_threshold` consecutive terminal failures (retries
+exhausted + DLQ action) and skips all deliveries for `cooldown_seconds`
+before allowing a single probe through. A successful probe closes the
+breaker; a failing probe reopens with a fresh cooldown. See
+[Sinks → Circuit Breaker](sinks.md#circuit-breaker) for the full state
+machine and metrics.
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `failure_threshold` | `int` | `5` | >= 1 | Consecutive terminal failures required to trip the breaker. A `SKIP` outcome does NOT count — it's operator intent, not a health signal. |
+| `cooldown_seconds` | `float` | `30.0` | >= 0.1 | Seconds the breaker stays open before promoting to half-open and allowing a single probe through. |
+
+```yaml
+sinks:
+  circuit_breaker:
+    failure_threshold: 5
+    cooldown_seconds: 30.0
+```
+
+The breaker defaults are reasonable for most deployments — lower
+`failure_threshold` in latency-sensitive pipelines where one stuck sink
+would block the whole delivery fan-out; raise `cooldown_seconds` when
+probing a recovering downstream is itself expensive.
+
 ---
 
 ## Dead Letter Queue (`dlq:`)

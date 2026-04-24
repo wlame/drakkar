@@ -122,11 +122,16 @@ def _setup_app_sinks(app: DrakkarApp) -> None:
         mock_sink._name = sink.name
         # Circuit breaker hooks are sync methods on BaseSink. AsyncMock
         # makes every attribute an AsyncMock by default (returns truthy
-        # coroutines), so _should_skip_delivery would look "open" to the
+        # coroutines), so should_skip_delivery would look "open" to the
         # manager and no delivery would ever happen. Force the defaults.
-        mock_sink._should_skip_delivery = MagicMock(return_value=False)
-        mock_sink._record_success = MagicMock()
-        mock_sink._record_failure = MagicMock()
+        mock_sink.should_skip_delivery = MagicMock(return_value=False)
+        mock_sink.record_success = MagicMock()
+        mock_sink.record_failure = MagicMock()
+        # Read-only properties on the real BaseSink — pin to plain values so
+        # the manager's ``probe_claimed`` check treats the circuit as closed
+        # and non-probing in the default (non-breaker-specific) test paths.
+        mock_sink.circuit_state = 'closed'
+        mock_sink.probe_inflight = False
         app._sink_manager._sinks[key] = mock_sink
         for i, s in enumerate(app._sink_manager._by_type[sink.sink_type]):
             if s.name == sink.name:

@@ -3244,16 +3244,22 @@ async def test_recorder_dropped_events_not_incremented_when_skip_db(tmp_path):
 # them intentionally (prompting an update at the same time as the fix).
 
 
-async def test_recorder_flush_handles_database_locked(tmp_path):
-    """``aiosqlite.OperationalError('database is locked')`` raised mid-
-    flush propagates out of ``_flush`` (no swallow today) and the
-    already-drained batch is lost from the buffer.
+async def test_recorder_flush_database_locked_drops_batch_TODO_FIX(tmp_path):
+    """CODIFIES A KNOWN BUG: ``aiosqlite.OperationalError('database is locked')``
+    raised mid-flush propagates out of ``_flush`` and the already-drained batch
+    is silently lost from the buffer.
 
-    This test codifies today's behaviour. It also documents the gap: the
-    recorder has no retry/requeue path for transient lock errors, and the
-    ``_flush_loop`` has no try/except so the flush task dies on the first
-    such error. A future hardening task should:
+    This assertion (``len(_buffer) == 0`` after failure) is intentionally
+    WRONG behaviour — a robust recorder would requeue the dropped batch or
+    at minimum tick a drop counter. The test is kept to catch regressions
+    in the CURRENT behaviour; when the hardening fix lands, this test must
+    be rewritten to assert the new (correct) behaviour.
 
+    When fixed, replace the ``_TODO_FIX`` suffix in the test name and
+    invert the assertion: the batch should NOT be lost. Search the code
+    for ``_TODO_FIX`` to find other tests that will need attention.
+
+    A future hardening task should:
       1. catch the OperationalError inside ``_flush`` (or ``_flush_loop``),
       2. log a warning with structured fields,
       3. increment a drop-counter metric for observability,
@@ -3301,16 +3307,24 @@ async def test_recorder_flush_handles_database_locked(tmp_path):
         await rec.stop()
 
 
-async def test_recorder_flush_handles_disk_io_error(tmp_path):
-    """``aiosqlite.OperationalError('disk I/O error')`` on ``executemany``
-    behaves the same as the lock case: exception propagates out of
-    ``_flush``, already-drained batch is lost.
+async def test_recorder_flush_disk_io_error_drops_batch_TODO_FIX(tmp_path):
+    """CODIFIES A KNOWN BUG: ``aiosqlite.OperationalError('disk I/O error')``
+    on ``executemany`` behaves the same as the lock case — exception propagates
+    out of ``_flush`` and the already-drained batch is silently lost.
 
     In production, disk I/O errors arise from the underlying filesystem
     (volume full, ENOSPC, read-only remount). They typically surface at
     the INSERT phase rather than COMMIT, because SQLite's default
     autocommit mode means the write is flushed to the WAL as part of
     ``executemany``.
+
+    This assertion (``len(_buffer) == 0`` after failure) is intentionally
+    WRONG behaviour — a robust recorder would requeue the dropped batch or
+    at minimum tick a drop counter. When the hardening fix lands, this
+    test must be rewritten to assert the new (correct) behaviour.
+
+    See ``test_recorder_flush_database_locked_drops_batch_TODO_FIX`` for
+    the same caveat.
     """
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)

@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Generic, Literal, TypeVar
+from typing import Generic, Literal, TypeVar
 
 from pydantic import BaseModel
 
+from drakkar.config import CircuitBreakerConfig
 from drakkar.metrics import sink_circuit_open, sink_circuit_trips
-
-if TYPE_CHECKING:
-    from drakkar.config import CircuitBreakerConfig
 
 PayloadT = TypeVar('PayloadT', bound=BaseModel)
 
@@ -41,11 +39,13 @@ class BaseSink(ABC, Generic[PayloadT]):
         4. close() — release resources (called once at shutdown)
 
     Circuit breaker:
-        The `_record_*` / `_should_skip_delivery` helpers implement a per-sink
-        circuit breaker. The SinkManager drives the state transitions — a sink
-        subclass never calls these directly. The breaker config is wired in by
-        `set_circuit_config` (called from SinkManager.register at startup) or
-        falls back to the default `CircuitBreakerConfig()` when no manager is
+        The ``record_success`` / ``record_failure`` / ``should_skip_delivery``
+        / ``release_probe_inflight`` methods and the ``circuit_state``
+        property implement a per-sink circuit breaker. The SinkManager drives
+        the state transitions — a sink subclass never calls these directly.
+        The breaker config is wired in by the SinkManager via
+        ``configure_circuit_breaker`` when it registers the sink, or falls
+        back to the default ``CircuitBreakerConfig()`` when no manager is
         involved (tests, standalone sink usage).
     """
 
@@ -59,17 +59,52 @@ class BaseSink(ABC, Generic[PayloadT]):
         # Circuit breaker state. Starts closed (0.0 on the gauge) — the
         # per-sink gauge is initialized eagerly so a freshly-registered sink
         # appears in Prometheus scrape output as "closed" rather than absent.
-        # set_circuit_config overrides the default with operator-configured
-        # thresholds when the manager registers the sink.
+        # SinkManager calls ``configure_circuit_breaker`` with operator-
+        # configured thresholds when the manager registers the sink.
         self._consecutive_failures: int = 0
         self._circuit_state: CircuitState = 'closed'
         self._circuit_opened_at: float | None = None
-        # Lazy import to avoid a cycle: config.py itself may import sink
-        # classes in other contexts (e.g. test fixtures).
-        from drakkar.config import CircuitBreakerConfig
-
+        # Tracks whether a half-open probe delivery is already in flight.
+        # With parallel deliver_all (asyncio.gather across partitions) two
+        # concurrent invocations against the same sink could BOTH observe
+        # ``half_open`` and BOTH let the probe through, slamming a recovering
+        # downstream with many simultaneous requests. This flag forces a
+        # single probe: the first caller marks it, subsequent callers see
+        # ``half_open`` + inflight and skip.
+        self._probe_inflight: bool = False
         self._circuit_config: CircuitBreakerConfig = CircuitBreakerConfig()
         sink_circuit_open.labels(sink_type=self.sink_type, sink_name=self._name).set(0.0)
+
+    @property
+    def circuit_state(self) -> CircuitState:
+        """Read-only view of the current circuit-breaker state.
+
+        Exposes ``closed`` / ``open`` / ``half_open`` to callers that need to
+        reason about the breaker (SinkManager's probe-slot tracking, tests
+        that assert transitions). Mutation goes through the ``record_*`` /
+        ``should_skip_delivery`` / ``release_probe_inflight`` methods.
+        """
+        return self._circuit_state
+
+    @property
+    def probe_inflight(self) -> bool:
+        """Read-only view of the half-open probe-inflight flag.
+
+        Used by SinkManager's ``try/finally`` in ``_deliver_to_sink`` to
+        detect whether THIS invocation claimed the probe slot (so it knows
+        whether a neutral release is needed on non-terminal exits).
+        """
+        return self._probe_inflight
+
+    def configure_circuit_breaker(self, config: CircuitBreakerConfig) -> None:
+        """Replace the breaker's thresholds — called by SinkManager.register.
+
+        Kept as an explicit method rather than a direct attribute assignment
+        so every call site routes through a named public API. Sinks
+        registered outside a manager keep the default ``CircuitBreakerConfig``
+        wired in ``__init__``.
+        """
+        self._circuit_config = config
 
     @property
     def name(self) -> str:
@@ -81,21 +116,7 @@ class BaseSink(ABC, Generic[PayloadT]):
         """Optional URL to a web UI for this sink's backing service."""
         return self._ui_url
 
-    @property
-    def circuit_state(self) -> CircuitState:
-        """Current circuit breaker state — exposed for tests and the debug UI."""
-        return self._circuit_state
-
-    def set_circuit_config(self, config: CircuitBreakerConfig) -> None:
-        """Install the circuit breaker config from the SinkManager.
-
-        Called by SinkManager.register at startup. Separated from __init__
-        so sinks can be constructed independently (in tests, in user code)
-        without threading the config through every sink constructor.
-        """
-        self._circuit_config = config
-
-    def _record_failure(self) -> None:
+    def record_failure(self) -> None:
         """Update circuit breaker state after a failed delivery attempt.
 
         Called by SinkManager after the retry budget on a sink is exhausted
@@ -108,6 +129,10 @@ class BaseSink(ABC, Generic[PayloadT]):
           open       + failure — caller shouldn't reach here (we'd have skipped)
         """
         self._consecutive_failures += 1
+        # Clear the probe-inflight flag on every terminal outcome —
+        # ``should_skip_delivery`` can hand out the next probe once the
+        # current one has finished (success or failure).
+        self._probe_inflight = False
 
         if self._circuit_state == 'half_open':
             # Probe failed — snap back open with a fresh cooldown window.
@@ -122,13 +147,13 @@ class BaseSink(ABC, Generic[PayloadT]):
         if self._circuit_state == 'closed' and self._consecutive_failures >= self._circuit_config.failure_threshold:
             # Threshold hit — trip open. Cooldown timer starts now; the next
             # delivery attempt after cooldown elapses becomes a half-open
-            # probe (see _should_skip_delivery).
+            # probe (see should_skip_delivery).
             self._circuit_state = 'open'
             self._circuit_opened_at = time.monotonic()
             sink_circuit_open.labels(sink_type=self.sink_type, sink_name=self._name).set(1.0)
             sink_circuit_trips.labels(sink_type=self.sink_type, sink_name=self._name).inc()
 
-    def _record_success(self) -> None:
+    def record_success(self) -> None:
         """Update circuit breaker state after a successful delivery.
 
         Transitions:
@@ -137,37 +162,84 @@ class BaseSink(ABC, Generic[PayloadT]):
           open      + success — caller shouldn't reach here (we'd have skipped)
         """
         self._consecutive_failures = 0
+        # Clear probe-inflight on every terminal success so subsequent
+        # ``should_skip_delivery`` checks promote cleanly to half_open on
+        # the next cooldown elapse.
+        self._probe_inflight = False
         if self._circuit_state == 'half_open':
             self._circuit_state = 'closed'
             self._circuit_opened_at = None
             sink_circuit_open.labels(sink_type=self.sink_type, sink_name=self._name).set(0.0)
 
-    def _should_skip_delivery(self) -> bool:
+    def release_probe_inflight(self) -> None:
+        """Release the half-open probe slot without touching circuit state.
+
+        The SinkManager normally clears ``_probe_inflight`` implicitly via
+        ``record_success`` / ``record_failure`` on a terminal outcome.
+        Some delivery paths end without either call — notably the
+        ``DeliveryAction.SKIP`` branch (operator intent to drop the batch,
+        NOT an infrastructure-health signal) and any rare case where
+        ``on_delivery_error`` itself raises. Without a neutral release
+        helper, those paths would leak the probe flag and leave the circuit
+        stuck in half_open with ``_probe_inflight=True`` forever — every
+        subsequent ``should_skip_delivery`` call would see the stale flag
+        and skip, permanently wedging the sink.
+
+        Idempotent by design: a stray call when no probe was in flight is
+        harmless (it's already False). The caller is the delivery path's
+        ``try/finally`` in ``SinkManager._deliver_to_sink``, which tracks
+        whether this particular invocation claimed the slot.
+        """
+        self._probe_inflight = False
+
+    def should_skip_delivery(self) -> bool:
         """Return True when the SinkManager should bypass `deliver()` entirely.
 
         - closed:    never skip.
         - open:      skip unless cooldown has elapsed. When it has, transition
-                     to half_open (gauge → 0.5) and allow the next delivery
-                     through as a probe.
-        - half_open: a probe is already in flight (the one we just allowed
-                     through); don't skip, let the caller complete it. The
-                     result (success or failure) will drive the next
-                     transition via _record_success / _record_failure.
+                     to half_open (gauge → 0.5), claim the probe slot, and
+                     allow this single delivery through as the probe.
+        - half_open: a probe may already be in flight. If it is, skip (the
+                     caller should route this batch to DLQ rather than issue
+                     a concurrent probe). Otherwise claim the probe slot and
+                     let this delivery through.
+
+        Without the ``_probe_inflight`` gate, parallel delivery could slam a
+        recovering downstream with many simultaneous probe requests, defeating
+        the "single probe" intent of the half-open state. ``should_skip_delivery``
+        is purely synchronous — asyncio cooperative scheduling only yields at
+        ``await`` boundaries, so claim-the-slot and read-the-flag cannot
+        interleave between callers.
+
+        Callers that claim the probe slot here MUST eventually release it
+        via ``record_success`` / ``record_failure`` (terminal outcomes)
+        or ``release_probe_inflight`` (non-terminal exits like SKIP or a
+        handler that itself raises). SinkManager's ``_deliver_to_sink``
+        uses a ``try/finally`` to guarantee this.
         """
         if self._circuit_state == 'closed':
             return False
 
         if self._circuit_state == 'half_open':
-            # Probe in flight — don't skip, wait for the outcome.
+            if self._probe_inflight:
+                return True
+            self._probe_inflight = True
             return False
 
         # state == 'open'
-        assert self._circuit_opened_at is not None
+        # Using ``assert`` here would be stripped under ``python -O``, which
+        # would leave the next line raising a confusing ``TypeError``
+        # (``None - float``). Match the explicit-guard style used elsewhere
+        # in the codebase (e.g. drakkar/cache.py) so the error message is
+        # actionable under every interpreter mode.
+        if self._circuit_opened_at is None:
+            raise RuntimeError('circuit state is "open" but _circuit_opened_at is None — internal invariant broken')
         elapsed = time.monotonic() - self._circuit_opened_at
         if elapsed >= self._circuit_config.cooldown_seconds:
-            # Cooldown elapsed — promote to half_open. The next delivery
-            # (this one) is the probe; success closes, failure reopens.
+            # Cooldown elapsed — promote to half_open and claim the probe
+            # slot in a single non-awaiting step.
             self._circuit_state = 'half_open'
+            self._probe_inflight = True
             sink_circuit_open.labels(sink_type=self.sink_type, sink_name=self._name).set(0.5)
             return False
 

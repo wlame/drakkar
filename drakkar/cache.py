@@ -2099,15 +2099,19 @@ class CacheEngine:
         - Increment ``cache_peer_sync_timeouts`` (unlabelled worker-level
           counter — any nonzero rate signals a slow-peer or
           peer-count-vs-interval imbalance).
-        - Return an empty dict. The periodic-task wrapper doesn't inspect
-          the return value; the important contract is that
-          ``_sync_once`` itself does not raise, so the periodic task
-          keeps running.
+        - Re-raise ``TimeoutError`` so the periodic-task wrapper classifies
+          the run as ``status=error``. Existing dashboards keyed on
+          ``periodic_task_runs{status='error'}`` pick up deadline breaches
+          through the same alerting path as other failures, instead of
+          hiding them behind a dedicated counter. The wrapper's default
+          behavior is to keep the loop alive, so re-raising does NOT
+          disable peer-sync.
 
         Returns:
             Whatever ``_sync_inner`` produced on successful completion
-            (``{peer_name: list_of_row_tuples}``), or an empty dict if
-            the deadline fired. Tests that want to assert fetched rows
+            (``{peer_name: list_of_row_tuples}``). When the deadline fires
+            this method does not return — it raises ``TimeoutError`` to the
+            periodic task wrapper. Tests that want to assert fetched rows
             without triggering the deadline should either leave
             ``cycle_deadline_seconds=None`` and rely on the default or
             configure a generous explicit deadline.
@@ -2116,8 +2120,14 @@ class CacheEngine:
         # ``None`` is the default: derive from the interval so operators
         # who never tune the deadline still get a reasonable bound. The
         # 0.9 factor gives the periodic loop headroom to schedule the
-        # next cycle without overlapping.
-        deadline = cycle_deadline if cycle_deadline is not None else self._config.peer_sync.interval_seconds * 0.9
+        # next cycle without overlapping. The 0.1s clamp is a local floor
+        # — ``interval_seconds`` is only constrained by ``gt=0``, so a tiny
+        # value (e.g. a pathological test config with interval_seconds=0.05)
+        # could otherwise yield a deadline too small to be usable.
+        if cycle_deadline is not None:
+            deadline = cycle_deadline
+        else:
+            deadline = max(0.1, self._config.peer_sync.interval_seconds * 0.9)
         try:
             return await asyncio.wait_for(self._sync_inner(), timeout=deadline)
         except TimeoutError:
@@ -2131,27 +2141,32 @@ class CacheEngine:
                 category='cache',
                 deadline_seconds=deadline,
             )
-            # Return silently — the periodic task must continue. Re-raising
-            # would crash the loop and leave peer-sync permanently
-            # disabled until the next worker restart.
-            return {}
+            # Re-raise so the periodic-task wrapper classifies this run as
+            # ``status=error`` — dashboards keyed on
+            # ``periodic_task_runs{status='error'}`` already alert on
+            # sync failures, and a silent swallow here would hide peer-sync
+            # deadline breaches from the usual observability path. The
+            # wrapper's default ``on_error`` behavior is to keep the loop
+            # alive (it logs the exception but schedules the next tick),
+            # so re-raising does NOT disable peer-sync.
+            raise
 
     async def _sync_inner(self) -> dict[str, list[tuple]]:
         """Pull one batch of entries from every discovered peer and apply
         them to the local DB via LWW UPSERT.
 
-        Task 11 scope: discovery + per-peer pull with scope-aware filter.
-        Task 12: apply the pulled rows to the local DB via the shared
-        ``LWW_UPSERT_SQL`` constant, invalidate any cached in-memory
-        entries for the upserted keys, and tick the
-        ``sync_entries_fetched`` / ``sync_entries_upserted`` counters.
-        Task 13 (this change): cursor-based incremental pulls and
-        per-peer error isolation.
+        Behavior:
+        - Discovers peer DBs and pulls scope-filtered rows per peer.
+        - Applies rows via the shared ``LWW_UPSERT_SQL`` constant (same
+          conflict resolution as the local flush path), invalidates any
+          cached in-memory entries for the upserted keys, and ticks the
+          ``sync_entries_fetched`` / ``sync_entries_upserted`` counters.
+        - Uses cursor-based incremental pulls and isolates failures to
+          the offending peer so one bad DB cannot break the cycle.
 
-        Phase 2 Task 2: renamed from ``_sync_once`` to ``_sync_inner``;
-        the deadline-enforcing wrapper now owns the public
-        ``_sync_once`` name so every caller (periodic task, tests) picks
-        up the per-cycle cap transparently.
+        The deadline-enforcing ``_sync_once`` wrapper calls this method so
+        every caller (periodic task, tests) picks up the per-cycle cap
+        transparently.
 
         Apply step details:
 
@@ -2339,9 +2354,63 @@ class CacheEngine:
         if self._writer_db is None:
             return
 
-        # executemany over LWW_UPSERT_SQL — one SQLite round trip for the
-        # whole batch. aiosqlite's default isolation opens an implicit
-        # transaction on the first DML; the commit() below closes it.
+        # Shield the entire commit + post-commit bookkeeping trio (executemany,
+        # commit, counter ticks, memory invalidation) from ``asyncio.wait_for``
+        # cancellation in the ``_sync_once`` deadline wrapper.
+        #
+        # Two correctness problems drive the wide shield boundary:
+        #
+        # 1. DB consistency: without a shield, the deadline could fire between
+        #    executemany and commit, cancel the current ``_apply_peer_rows``
+        #    mid-transaction, and leave the writer in an open-transaction
+        #    state. The NEXT flush/commit (whether from the cache flush loop
+        #    or a retry of peer sync) would then commit BOTH batches as one
+        #    transaction — conflating a cancelled peer batch with unrelated
+        #    local writes.
+        #
+        # 2. Memory/DB coherence: if the shield covered only the commit,
+        #    ``CancelledError`` would still raise at the shield call site,
+        #    skipping the counter ticks and ``_invalidate_memory_keys`` call
+        #    below. The DB would hold the new peer rows but the memory cache
+        #    would still hold the STALE pre-sync values, and ``Cache.get()``
+        #    would keep returning stale until TTL or a local overwrite —
+        #    silently violating the "memory ≤ DB freshness" invariant for a
+        #    potentially long time.
+        #
+        # Moving the counters + invalidation INSIDE ``_commit_peer_rows`` and
+        # shielding the whole call keeps both invariants: the deadline still
+        # fires (the wait_for returns), but the currently-running apply
+        # finishes its commit-and-invalidate sequence cleanly before the
+        # cancellation surfaces.
+        await asyncio.shield(self._commit_peer_rows(peer_name=peer_name, rows=rows))
+
+    async def _commit_peer_rows(self, *, peer_name: str, rows: list[tuple]) -> None:
+        """Run the executemany + commit + bookkeeping trio uninterruptibly.
+
+        Factored out so the caller can wrap the call in ``asyncio.shield``
+        and keep the deadline's cancellation semantics independent of the
+        SQL + post-commit bookkeeping. The guard at the call site
+        (``_writer_db is None``) already handles the engine-stopped race;
+        this helper only cares about the DB round-trip and the bookkeeping
+        that MUST stay coherent with the commit.
+
+        Post-commit bookkeeping lives here — NOT at the caller — so the
+        shield covers all three steps as a single cancellation-atomic unit:
+        1. executemany + commit (DB state changes)
+        2. metric counters (observability of what landed)
+        3. memory invalidation (keeps ``Cache._memory`` ≤ DB freshness)
+
+        If the caller shielded only the commit, a deadline-triggered
+        cancellation would skip (2) and (3): the DB would hold the new rows
+        but memory would still hold stale values, and ``Cache.get()`` would
+        keep returning stale until TTL or a local overwrite.
+        """
+        # Narrow the type for ty: the caller checked ``_writer_db is None``
+        # but since this is a separate method the type checker can't see
+        # that guard. A local ``assert``-free runtime check is cheap and
+        # lets the method stay callable in isolation (e.g. tests).
+        if self._writer_db is None:
+            return
         await self._writer_db.executemany(LWW_UPSERT_SQL, rows)
         await self._writer_db.commit()
 
@@ -2361,5 +2430,7 @@ class CacheEngine:
         # Delegate to ``Cache._invalidate_memory_keys`` — the helper
         # handles bytes_sum bookkeeping and gauge refresh atomically,
         # keeping the memory-side invariants encapsulated on Cache.
+        # This lives inside the shielded region so a deadline firing between
+        # commit() and here cannot leave memory stale relative to the DB.
         if self._cache is not None:
             self._cache._invalidate_memory_keys([row[0] for row in rows])

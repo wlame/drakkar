@@ -485,6 +485,26 @@ class CachePeerSyncConfig(BaseModel):
         ),
     )
 
+    @model_validator(mode='after')
+    def _validate_deadline_vs_interval(self) -> 'CachePeerSyncConfig':
+        """Reject explicit ``cycle_deadline_seconds >= interval_seconds``.
+
+        The deadline's whole point is to cap a single cycle short of the next
+        tick so the periodic task never overlaps itself. If the operator
+        configures a deadline that's greater than or equal to the interval,
+        the cap can't fire before the next invocation schedules — in that
+        case the operator probably misread the fields or intended a much
+        larger interval. Fail loudly at config load so the misconfiguration
+        surfaces before any data flows.
+        """
+        if self.cycle_deadline_seconds is not None and self.cycle_deadline_seconds >= self.interval_seconds:
+            raise ValueError(
+                f'cache.peer_sync.cycle_deadline_seconds ({self.cycle_deadline_seconds}) must be '
+                f'strictly less than cache.peer_sync.interval_seconds ({self.interval_seconds}) — '
+                'otherwise the deadline can never fire before the next cycle schedules.'
+            )
+        return self
+
 
 class CacheConfig(BaseModel):
     """Handler-accessible key/value cache, memory-backed with write-behind SQLite.

@@ -180,7 +180,7 @@ dlq_send_failures = Counter(
     'Total failed attempts to send messages to the dead letter queue',
 )
 
-# Per-sink circuit breaker observability (Phase 2 Task 7). The gauge maps to
+# Per-sink circuit breaker observability. The gauge maps to
 # three discrete circuit states so a single time-series makes the state
 # transitions visible on any Grafana line chart:
 #   0.0 — closed   (normal operation)
@@ -198,7 +198,11 @@ sink_circuit_open = Gauge(
 
 sink_circuit_trips = Counter(
     'drakkar_sink_circuit_trips_total',
-    'Total sink circuit trips (closed→open transitions) per sink',
+    # Ticks on ANY transition into the open state — the initial closed→open
+    # trip at the failure threshold AND half_open→open reopenings after a
+    # failed probe. That way a flapping circuit shows up as a rate on this
+    # counter, not as a single trip plus silent reopens.
+    'Total transitions into the open state (initial trips + failed-probe reopens) per sink',
     ['sink_type', 'sink_name'],
 )
 
@@ -258,9 +262,9 @@ cache_deletes = Counter(
     'Total cache deletes (Cache.delete calls)',
 )
 
-# LRU eviction counter introduced alongside Task 4. Increments once per entry
-# popped from memory when ``max_memory_entries`` is exceeded — operators
-# watch this to spot cap-undersizing or hot-key churn.
+# LRU eviction counter. Increments once per entry popped from memory when
+# ``max_memory_entries`` is exceeded — operators watch this to spot
+# cap-undersizing or hot-key churn.
 cache_evictions = Counter(
     'drakkar_cache_evictions_total',
     'Total entries evicted from the in-memory cache dict due to the LRU cap',
@@ -281,10 +285,8 @@ cache_bytes_in_memory = Gauge(
     'Sum of size_bytes across entries held in the in-memory cache dict',
 )
 
-# Flush-loop counter introduced alongside Task 7. The full metrics wiring
-# pass (Task 14) adds hits/misses/writes/sync/cleanup — but the flush
-# counters land here now so the flush path can report op-by-op activity
-# from the first cycle it runs.
+# Flush-loop counter reporting op-by-op activity (UPSERTs and deletes) drained
+# from the dirty map per flush.
 #
 # Labels:
 #   op='set'     — rows UPSERTed via ``LWW_UPSERT_SQL``
@@ -301,18 +303,18 @@ cache_flush_entries = Counter(
     ['op'],
 )
 
-# Cleanup-loop counter introduced alongside Task 10. The cleanup loop deletes
-# every row whose ``expires_at_ms < now_ms``; this counter advances by the
-# number of rows actually removed per cycle. Operators use it to spot TTL
-# mis-sizing — a sudden spike means many entries are expiring together.
+# Cleanup-loop counter. The cleanup loop deletes every row whose
+# ``expires_at_ms < now_ms``; this counter advances by the number of rows
+# actually removed per cycle. Operators use it to spot TTL mis-sizing —
+# a sudden spike means many entries are expiring together.
 cache_cleanup_removed = Counter(
     'drakkar_cache_cleanup_removed_total',
     'Total cache entries removed from SQLite by the cleanup loop',
 )
 
-# Peer-sync counters introduced alongside Task 12 (UPSERT apply step). Both
-# are labelled by peer worker name so operators can spot uneven sync
-# throughput or a single misbehaving peer.
+# Peer-sync counters for the UPSERT apply step. Both are labelled by peer
+# worker name so operators can spot uneven sync throughput or a single
+# misbehaving peer.
 #
 #   fetched  — rows read from the peer's cache DB via the scoped SELECT.
 #   upserted — rows the engine *attempted* to UPSERT into the local DB.
@@ -333,18 +335,17 @@ cache_sync_entries_upserted = Counter(
     ['peer'],
 )
 
-# Peer-sync error counter introduced alongside Task 13. Labelled by peer so
-# operators can alert on a specific misbehaving worker (corrupt DB, missing
-# file, read timeout, etc.) without parsing logs. One increment per failed
-# per-peer cycle; the sync loop itself keeps running so one bad peer cannot
-# break the whole worker.
+# Peer-sync error counter. Labelled by peer so operators can alert on a
+# specific misbehaving worker (corrupt DB, missing file, read timeout, etc.)
+# without parsing logs. One increment per failed per-peer cycle; the sync
+# loop itself keeps running so one bad peer cannot break the whole worker.
 cache_sync_errors = Counter(
     'drakkar_cache_sync_errors_total',
     'Total per-peer failures during the cache peer-sync cycle',
     ['peer'],
 )
 
-# Per-cycle deadline counter (Task 2 of Phase 2). Complements the per-peer
+# Per-cycle deadline counter. Complements the per-peer
 # ``cache_sync_errors`` counter: that one ticks on a single peer failing,
 # this one ticks when the whole cycle (all peers combined) blew past the
 # wall-clock cap. Unlabelled — the deadline is a worker-level property so
@@ -358,7 +359,6 @@ cache_peer_sync_timeouts = Counter(
         'Any nonzero rate indicates a slow peer or large peer count relative '
         'to interval_seconds.'
     ),
-    [],
 )
 
 # DB-size gauges refreshed by the cleanup loop. Counting DB rows on every

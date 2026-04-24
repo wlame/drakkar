@@ -11,8 +11,9 @@ supports multiple named instances (e.g., two separate Kafka topics or three Post
 
 | Event | When | What happens |
 |-------|------|--------------|
-| `connect()` | Worker startup, after [on_startup()](handler.md#on_startup) | Each configured sink opens its connection (Kafka producer, asyncpg pool, motor client, httpx client, Redis connection). If any fails, the worker crashes immediately. |
-| `deliver(payloads)` | After each [on_task_complete()](handler.md#on_task_complete) or [on_message_complete()](handler.md#on_message_complete) or [on_window_complete()](handler.md#on_window_complete) returns payloads | The framework groups payloads by `(sink_type, sink_name)` and calls `deliver()` once per group. A single `on_task_complete()` returning payloads for 3 sinks produces 3 `deliver()` calls. |
+| `connect()` | Worker startup, after [on_startup()](handler.md#on_startup) | Every configured sink's `connect()` runs concurrently (`asyncio.gather`), so cold-start latency is bounded by the slowest sink, not the sum. If any fails, the worker crashes immediately. |
+| `deliver(payloads)` | After each [on_task_complete()](handler.md#on_task_complete) or [on_message_complete()](handler.md#on_message_complete) or [on_window_complete()](handler.md#on_window_complete) returns payloads | The framework groups payloads by `(sink_type, sink_name)`, then dispatches one `deliver()` call per group **in parallel** via `asyncio.gather`. One slow or failing sink does not block others. Each group owns its own retry / DLQ / circuit-breaker state. |
+| [Circuit breaker](#circuit-breaker) | Before each `deliver()` call | If the sink's breaker is open, `deliver()` is skipped and the batch routes straight to the DLQ. |
 | [on_delivery_error()](handler.md#on_delivery_error) | When `deliver()` raises an exception | Your handler decides: `DLQ` (default), `RETRY`, or `SKIP`. Retries re-call `deliver()` up to `executor.max_retries` times. |
 | Offset commit | After **all** sinks confirm delivery for a window | Kafka offsets are committed only when every payload from the window has been successfully delivered (or routed to DLQ/skipped). No partial commits. |
 | `close()` | Worker shutdown | Each sink closes its connection gracefully. Errors are logged but don't block shutdown. |
@@ -270,6 +271,43 @@ Your hook returns a `DeliveryAction`:
 | `DeliveryAction.SKIP` | Drop the payloads and continue processing |
 
 If `RETRY` is returned but retries are exhausted, the framework falls through to DLQ.
+
+### Circuit Breaker
+
+Every sink has a per-instance circuit breaker that protects the
+worker from hammering a persistently-failing downstream. The breaker
+operates at the **terminal-outcome** level (retries already
+exhausted, operator returned `DLQ`), so transient blips don't trip it.
+
+**States and transitions:**
+
+| State | Behavior | Transition |
+|-------|----------|------------|
+| `closed` | Every `deliver()` call goes through. Terminal failures increment `_consecutive_failures`; any success resets it to zero. | After `failure_threshold` consecutive failures → `open`. |
+| `open` | `deliver()` is skipped for the cooldown window. The batch routes **directly** to the DLQ — the handler's `on_delivery_error` is bypassed on this path (SKIP would silently drop data, RETRY would hammer the recovering downstream, neither is appropriate). | After `cooldown_seconds` elapsed, the next incoming batch promotes to `half_open`. |
+| `half_open` | A **single probe** delivery is allowed through. Parallel delivery attempts against the same sink observe the in-flight probe and skip — the `_probe_inflight` gate enforces single-flight semantics. | Probe success → `closed` with counters reset. Probe failure → `open` with a fresh cooldown. |
+
+**Operator-visible signals:**
+
+- `drakkar_sink_circuit_open{sink_type, sink_name}` — gauge with
+  states encoded as `0.0` (closed), `0.5` (half-open), `1.0` (open).
+  Zero-initialized at registration so a never-tripped sink still
+  appears in scrape output.
+- `drakkar_sink_circuit_trips_total{sink_type, sink_name}` — counter
+  ticking on every transition *into* open (initial failure-threshold
+  trip AND half-open probe failures). A flapping circuit shows up as
+  a rising rate on this counter, not a single trip plus silent
+  reopens.
+- `SinkStats.last_error == 'circuit open'` — the debug UI renders
+  this sentinel so operators can distinguish breaker-routed DLQ
+  entries from actual delivery failures.
+
+The breaker defaults (`failure_threshold=5`, `cooldown_seconds=30.0`)
+are tuned for typical throughput. Pipelines with stricter latency
+budgets can lower the threshold so one persistent outage trips the
+breaker sooner; long-recovery downstreams may want a longer cooldown.
+See [Configuration → Circuit Breaker](configuration.md#circuit-breaker-sinkscircuit_breaker)
+for the full knobs.
 
 ### Example
 

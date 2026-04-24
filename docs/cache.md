@@ -163,7 +163,24 @@ cache:
     interval_seconds: 30.0
     batch_size: 500
     timeout_seconds: 5.0
+    # Upper bound on a single sync cycle. When None (default), derived as
+    # interval_seconds * 0.9 so the next scheduled tick never overlaps the
+    # current one. Set an explicit value when peers live on slow storage
+    # (NFS, cross-region) and you want a tighter cap than the derived
+    # default — but stay strictly below interval_seconds (config load
+    # fails otherwise, so a misconfiguration surfaces at startup).
+    cycle_deadline_seconds: null
 ```
+
+`cycle_deadline_seconds` caps each `cache.sync` cycle. When the deadline
+fires, `_sync_once` tears down the in-flight peer reads, ticks the
+unlabelled `cache_peer_sync_timeouts_total` counter, and raises
+`TimeoutError` so the periodic-task wrapper classifies the run as
+`status=error` — dashboards keyed on
+`periodic_task_runs{status='error'}` pick up deadline breaches through
+the same alerting path as other failures. The periodic loop keeps
+running (the wrapper's default on-error behavior is to log + schedule
+the next tick), so a single deadline fire does not disable peer sync.
 
 ---
 

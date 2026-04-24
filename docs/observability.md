@@ -86,6 +86,8 @@ metrics:
 | `drakkar_tasks_precomputed_total` | Counter | -- | Tasks whose result was supplied by the handler via `ExecutorTask.precomputed`, bypassing the subprocess. Framework is agnostic to the reason (cache hit, lookup, deterministic shortcut). Compare to `drakkar_executor_tasks_total{status="completed"}` for the short-circuit rate. |
 | `drakkar_sink_dlq_messages_total` | Counter | -- | Total messages sent to the [dead letter queue](sinks.md#dead-letter-queue) |
 | `drakkar_dlq_send_failures_total` | Counter | -- | Total failed attempts to send messages to the DLQ. When both the primary sink and DLQ fail, the payload is lost — alert on this counter. |
+| `drakkar_sink_circuit_open` | Gauge | `sink_type`, `sink_name` | Per-sink [circuit breaker](sinks.md#circuit-breaker) state: `0.0` closed, `0.5` half-open, `1.0` open. Gauges are zero-initialized at sink registration so a never-tripped sink still appears in scrape output. Sustained `1.0` on a sink means its downstream has been down longer than the cooldown can recover from. |
+| `drakkar_sink_circuit_trips_total` | Counter | `sink_type`, `sink_name` | Transitions *into* the open state per sink — both the initial failure-threshold trip and every half-open probe failure. A flapping circuit surfaces as a rising rate on this counter, not a single trip plus silent reopens. Alert on `rate(...[5m]) > 0` paired with non-zero `drakkar_sink_circuit_open`. |
 
 #### Handler Hooks
 
@@ -119,6 +121,7 @@ Emitted only when [`cache.enabled=true`](cache.md). Memory gauges are maintained
 | `drakkar_cache_sync_entries_fetched_total` | Counter | `peer` | Rows pulled from a peer worker's cache DB by the sync loop, per peer. |
 | `drakkar_cache_sync_entries_upserted_total` | Counter | `peer` | Rows the sync loop attempted to UPSERT into the local DB. Equals or less than `sync_entries_fetched_total` when LWW rejects some. |
 | `drakkar_cache_sync_errors_total` | Counter | `peer` | Per-peer failures during the sync cycle (connection refused, corrupt DB, timeout). One increment per failed cycle; sync loop keeps running. |
+| `drakkar_cache_peer_sync_timeouts_total` | Counter | -- | Worker-level count of peer-sync cycles that exceeded `cache.peer_sync.cycle_deadline_seconds` (or the derived `interval_seconds * 0.9` default). One tick per cycle that was cut short by the deadline. A sustained non-zero rate signals a slow-peer or peer-count-vs-interval imbalance — either tune the deadline up, stagger peers, or reduce the number of peers pulled per cycle. |
 | `drakkar_cache_entries_in_memory` | Gauge | -- | Entries currently in the in-memory dict. Running sum, adjusted per set/delete/evict/cleanup. |
 | `drakkar_cache_bytes_in_memory` | Gauge | -- | Sum of `size_bytes` across in-memory entries. Running sum (see above). |
 | `drakkar_cache_entries_in_db` | Gauge | -- | Rows in the local `<worker>-cache.db`. Refreshed by the cleanup loop. |

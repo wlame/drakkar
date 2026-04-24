@@ -27,7 +27,7 @@ from drakkar.models import (
     PostgresPayload,
     SourceMessage,
 )
-from drakkar.sinks.manager import SinkNotConfiguredError
+from drakkar.sinks.manager import CIRCUIT_OPEN_ERROR, SinkNotConfiguredError
 from tests.conftest import wait_for
 
 
@@ -92,12 +92,18 @@ def _setup_app_sinks(app: DrakkarApp) -> None:
         mock_sink.name = sink.name
         mock_sink._name = sink.name
         # Circuit breaker hooks are sync, called by SinkManager per delivery.
-        # AsyncMock would return truthy coroutines for _should_skip_delivery
+        # AsyncMock would return truthy coroutines for should_skip_delivery
         # (treated as "skip me"), so override with plain MagicMocks that
         # return sensible defaults for non-circuit-breaker tests.
-        mock_sink._should_skip_delivery = MagicMock(return_value=False)
-        mock_sink._record_success = MagicMock()
-        mock_sink._record_failure = MagicMock()
+        mock_sink.should_skip_delivery = MagicMock(return_value=False)
+        mock_sink.record_success = MagicMock()
+        mock_sink.record_failure = MagicMock()
+        # ``circuit_state`` / ``probe_inflight`` are read-only properties on
+        # the real BaseSink; on the AsyncMock they'd be auto-created coroutines
+        # which make the SinkManager's ``probe_claimed`` check truthy. Pin to
+        # plain values so non-circuit-breaker tests behave like a closed circuit.
+        mock_sink.circuit_state = 'closed'
+        mock_sink.probe_inflight = False
         app._sink_manager._sinks[key] = mock_sink
         # update _by_type
         for i, s in enumerate(app._sink_manager._by_type[sink.sink_type]):
@@ -267,6 +273,63 @@ async def test_app_handle_collect_unconfigured_sink_raises(test_config):
     )
     with pytest.raises(SinkNotConfiguredError, match="No 'mongo' sink"):
         await app._handle_collect(result, partition_id=0)
+
+
+async def test_app_routes_circuit_open_to_dlq_sink(test_config):
+    """HIGH-3 integration: when a sink's circuit breaker is open, the app-level
+    ``_handle_collect`` must route skipped payloads straight to the DLQ sink
+    rather than consult ``on_delivery_error``. The breaker already decided the
+    sink is unhealthy — SKIP would silently drop data, RETRY would hammer the
+    recovering downstream, and neither belongs in the handler's control loop.
+
+    This is the end-to-end counterpart of
+    ``tests/test_sink_manager.py::test_circuit_skipped_delivery_routes_to_dlq``
+    — it verifies the ``dlq_sink`` argument is actually threaded through
+    ``DrakkarApp._handle_collect`` into ``SinkManager.deliver_all`` and that
+    the DLQ sink's ``send`` is invoked without handler approval.
+    """
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    _setup_app_sinks(app)
+
+    # Wire a fake DLQ sink so the force-DLQ branch has a target.
+    dlq_sink = AsyncMock()
+    app._dlq_sink = dlq_sink
+
+    # Force one of the kafka sinks into open-circuit state. `_setup_app_sinks`
+    # replaced the real sink with an AsyncMock, so we override the circuit
+    # breaker hook to return True (meaning "skip delivery") — this simulates
+    # the breaker being open without having to walk the state machine.
+    kafka_sink = app._sink_manager._sinks[('kafka', 'results')]
+    kafka_sink.should_skip_delivery = MagicMock(return_value=True)
+
+    # Also open the circuit on the postgres sink so we don't branch into
+    # the "only one sink tripped" case. Simpler to have both skip.
+    pg_sink = app._sink_manager._sinks[('postgres', 'main')]
+    pg_sink.should_skip_delivery = MagicMock(return_value=True)
+
+    result = CollectResult(
+        kafka=[KafkaPayload(data=_D())],
+        postgres=[PostgresPayload(table='t', data=_D())],
+    )
+
+    # Deliver — both sinks skip, both force-DLQ.
+    await app._handle_collect(result, partition_id=0)
+
+    # Neither sink was touched.
+    kafka_sink.deliver.assert_not_called()
+    pg_sink.deliver.assert_not_called()
+
+    # DLQ received BOTH skipped batches (exactly one call per sink group).
+    # HIGH-3 intent: the breaker's open state triggers direct DLQ routing
+    # from SinkManager — the app's on_delivery_error handler is NOT invoked,
+    # so there's no second call fan-out through the handler path.
+    assert dlq_sink.send.await_count == 2
+    sent_errors = [call.args[0] for call in dlq_sink.send.await_args_list]
+    assert {e.sink_type for e in sent_errors} == {'kafka', 'postgres'}
+    # Every error must carry the "circuit open" sentinel so dashboards can
+    # filter DLQ entries routed by the breaker vs by terminal delivery failure.
+    for err in sent_errors:
+        assert err.error == CIRCUIT_OPEN_ERROR
 
 
 # --- Commit ---
@@ -1116,11 +1179,22 @@ async def test_revoke_mid_window_no_offset_loss(test_config):
         processor.enqueue(SourceMessage(topic='t', partition=0, offset=offset, value=b'x', timestamp=0))
 
     # Wait until at least 1 subprocess task is genuinely in flight.
-    # inflight_count > 0 means arrange has returned AND at least one
-    # _execute_and_track task is running against the executor pool —
-    # this is the mid-window revoke precondition.
-    await wait_for(lambda: processor.inflight_count >= 1, timeout=5)
+    # inflight_count > 0 is the first signal: arrange returned and
+    # _execute_and_track was scheduled. But the coroutine may not have
+    # actually launched the subprocess yet — we need a stronger signal.
+    # Poll for executor_pool semaphore acquisition (every in-flight task
+    # acquires the semaphore before starting the subprocess) so we know
+    # a subprocess really is running before we fire the revoke.
+    assert app._executor_pool is not None
+    semaphore = app._executor_pool._semaphore
+    max_executors = 4  # matches the ExecutorPool constructor above
+
+    await wait_for(
+        lambda: processor.inflight_count >= 1 and semaphore._value < max_executors,
+        timeout=5,
+    )
     assert processor.inflight_count >= 1, 'precondition: at least one task must be in flight'
+    assert semaphore._value < max_executors, 'precondition: at least one executor semaphore slot must be held'
 
     # Fire revoke. _on_revoke pops the processor from app.processors
     # synchronously, then schedules _stop_processor as a background task.
@@ -1142,33 +1216,38 @@ async def test_revoke_mid_window_no_offset_loss(test_config):
     # Invariant 4: no offset loss.
     #
     # Subprocesses may finish naturally while the run-loop awaits them
-    # post-signal_stop — those legitimately-completed tasks may issue
-    # commits through the normal _finalize_message_tracker path. That
-    # is CORRECT (the work actually finished) and is NOT offset loss.
+    # post-signal_stop — those legitimately-completed tasks commit
+    # through the normal _finalize_message_tracker path. A clean finalize
+    # of all three messages yields watermark 103 (last-offset + 1) from
+    # the NATURAL commit path, which is CORRECT (work actually finished)
+    # and is NOT offset loss.
     #
-    # What would be a bug is ``_stop_processor`` issuing a commit when
-    # drain timed out — we explicitly skip that because in-flight tasks
-    # may not yet have reached _finalize. The watermark is
-    # next-to-read, so any committed value must be <= 103. Values
-    # beyond 103 would signal the code was tricked into advancing
-    # past unfinished work.
-    if mock_consumer.commit.call_count > 0:
-        committed_watermarks = [next(iter(call.args[0].values())) for call in mock_consumer.commit.call_args_list]
-        assert max(committed_watermarks) <= 103, (
-            f'commit watermark {max(committed_watermarks)} exceeds the last-known-message+1 (103); '
-            f'possible offset loss. All commits: {mock_consumer.commit.call_args_list}'
-        )
+    # The bug we're guarding against is ``_stop_processor`` advancing
+    # past unfinished work — that would surface as watermark > 103 (we
+    # only enqueued 100-102). A watermark of exactly 103 is either the
+    # happy-path finalize of all three, or the end of a clean drain —
+    # both correct.
+    committed_watermarks = [next(iter(call.args[0].values())) for call in mock_consumer.commit.call_args_list]
+    if committed_watermarks:
         # Watermark must be monotonic — no re-commit of a lower value.
         assert committed_watermarks == sorted(committed_watermarks), (
             f'watermarks must be monotonically non-decreasing, got: {committed_watermarks}'
         )
+        # Last-known-message + 1 is the upper bound for a correct
+        # watermark. Values > 103 would mean the code was tricked into
+        # advancing past unfinished work.
+        assert max(committed_watermarks) <= 103, (
+            f'commit watermark {max(committed_watermarks)} exceeds last-known-message+1 (103); '
+            f'possible offset loss. All commits: {mock_consumer.commit.call_args_list}'
+        )
 
-    # Invariant 5: no orphaned message trackers. Every tracker must be
-    # either cleaned up (removed after offset-complete) or still
-    # tracking a genuinely-pending offset (which the reassigned owner
-    # will re-read). Either way, the count bounds the messages we
-    # enqueued.
+    # Invariant 5: no orphaned message trackers. Every tracker must refer
+    # to an enqueued offset (100-102). With drain_timeout the inflight-
+    # finalize path may leave trackers for in-flight offsets, but we
+    # enqueued exactly 3, so the bound is 3.
     assert len(processor._message_trackers) <= 3
+    for offset in processor._message_trackers:
+        assert offset in (100, 101, 102), f'tracker for unexpected offset: {offset}'
 
 
 async def test_revoke_mid_window_clean_drain_commits_finished_messages(test_config):

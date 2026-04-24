@@ -19,7 +19,12 @@ from drakkar.models import (
     RedisPayload,
 )
 from drakkar.sinks.base import BaseSink
-from drakkar.sinks.manager import AmbiguousSinkError, SinkManager, SinkNotConfiguredError
+from drakkar.sinks.manager import (
+    CIRCUIT_OPEN_ERROR,
+    AmbiguousSinkError,
+    SinkManager,
+    SinkNotConfiguredError,
+)
 
 # --- Test helpers ---
 
@@ -154,8 +159,11 @@ class FailConnectSink(FakeSink):
 async def test_connect_all_runs_sinks_in_parallel():
     """Three sinks each sleeping 0.1s should connect in ~0.1s total, not 0.3s.
 
-    Threshold is 0.2s — generous slack to avoid CI scheduler-variance flake
-    while still failing loudly if the implementation regressed to serial.
+    Upper threshold 0.15s — tight enough to rule out partial-parallelism
+    (2-of-3 serial would land around ~0.2s). Lower bound 0.09s rules out
+    a degenerate implementation that returns before any sink actually
+    slept for its full delay. Both bounds fail loudly if a regression
+    partially or fully serializes connect_all.
     """
     mgr = SinkManager()
     mgr.register(SlowConnectSink(name='a', sink_type='kafka', connect_delay=0.1))
@@ -166,7 +174,7 @@ async def test_connect_all_runs_sinks_in_parallel():
     await mgr.connect_all()
     elapsed = time.monotonic() - start
 
-    assert elapsed < 0.2, f'expected parallel connect (<0.2s), got {elapsed:.3f}s'
+    assert 0.09 <= elapsed < 0.15, f'expected parallel connect in [0.09s, 0.15s), got {elapsed:.3f}s'
     for sink in mgr.sinks.values():
         assert sink.connected  # type: ignore[attr-defined]
 
@@ -806,8 +814,11 @@ async def test_deliver_all_runs_sinks_in_parallel():
     """Three sinks with different latencies should deliver in ~max(latencies).
 
     With sequential delivery total would be 50 + 100 + 200 = 350ms. With gather
-    it should be ~200ms. Threshold 0.30s leaves generous slack for CI scheduler
-    variance while still failing loudly if the implementation regressed to serial.
+    it should be ~max(delays) = 200ms. Upper bound 0.25s rules out
+    partial-parallelism (2-of-3 serial lands around ~300ms). Lower bound 0.19s
+    rules out a degenerate implementation that returns before the slowest sink
+    finishes its sleep. Both bounds fail loudly if the implementation regressed
+    or was never actually parallelized.
     """
     mgr = SinkManager()
     mgr.register(SlowDeliverSink(name='fast', sink_type='kafka', deliver_delay=0.05))
@@ -825,7 +836,7 @@ async def test_deliver_all_runs_sinks_in_parallel():
     await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
     elapsed = time.monotonic() - start
 
-    assert elapsed < 0.30, f'expected parallel deliver (<0.30s), got {elapsed:.3f}s'
+    assert 0.19 <= elapsed < 0.25, f'expected parallel deliver in [0.19s, 0.25s), got {elapsed:.3f}s'
     stats = mgr.get_all_stats()
     assert stats[('kafka', 'fast')].delivered_count == 1
     assert stats[('postgres', 'medium')].delivered_count == 1
@@ -1004,44 +1015,6 @@ async def test_deliver_all_preserves_sink_stats_per_sink_under_gather():
     assert ok_b_stats.last_error_ts is None
 
 
-async def test_deliver_all_logs_unhandled_helper_exception_without_re_raising():
-    """If ``_deliver_to_sink`` leaks an exception (a bug, since the helper is
-    supposed to catch everything and route through on_delivery_error), the
-    surrounding ``asyncio.gather(return_exceptions=True)`` captures it. The
-    caller logs the leak via ``sink_deliver_helper_unhandled_exception`` but
-    does not re-raise so sibling sinks' successes are preserved.
-    """
-    import structlog
-
-    mgr = SinkManager()
-    sink = FakeSink('buggy', sink_type='kafka')
-    mgr.register(sink)
-
-    # Replace the helper with one that raises an arbitrary exception so we
-    # exercise the "unhandled leak" branch at the end of deliver_all. This
-    # would never happen in practice (the real helper catches everything),
-    # but the guard exists precisely because bugs can slip in.
-    async def buggy_helper(**kwargs):
-        raise RuntimeError('helper leaked an unexpected exception')
-
-    mgr._deliver_to_sink = buggy_helper  # type: ignore[assignment]
-
-    result = CollectResult(
-        kafka=[KafkaPayload(sink='buggy', data=SampleData())],
-    )
-    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
-
-    with structlog.testing.capture_logs() as logs:
-        # No exception propagates out — the gather wrapper swallows it and
-        # the manager logs it as an error instead.
-        await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
-
-    assert any(
-        log.get('event') == 'sink_deliver_helper_unhandled_exception' and log.get('sink_name') == 'buggy'
-        for log in logs
-    )
-
-
 # --- Circuit breaker (Phase 2 Task 7) ---
 #
 # The per-sink circuit breaker trips after `failure_threshold` consecutive
@@ -1099,7 +1072,7 @@ async def test_circuit_trips_after_threshold_consecutive_failures():
     await mgr.deliver_all(result, on_delivery_error=capture, partition_id=0)
 
     assert len(skipped_errors) == 1
-    assert skipped_errors[0].error == 'circuit open'
+    assert skipped_errors[0].error == CIRCUIT_OPEN_ERROR
     assert skipped_errors[0].sink_name == 'out'
     # Sink was never touched for the skipped delivery — fail_on_deliver
     # would have raised if it had been called. The only source of errors
@@ -1165,11 +1138,15 @@ async def test_circuit_intermittent_failures_do_not_trip():
 
 
 async def test_circuit_cooldown_elapses_half_open_success_closes():
-    """After cooldown, the next delivery is a half-open probe; success closes the circuit."""
+    """After cooldown, the next delivery is a half-open probe; success closes the circuit.
+
+    Cooldown 0.2s + sleep 0.3s leaves a 100ms margin above the cooldown to
+    tolerate CI scheduler variance without flaking. The margin was 50ms
+    before (0.05s cooldown + 0.1s sleep) which is too tight under load.
+    """
     from drakkar.metrics import sink_circuit_open
 
-    # Short cooldown so the test can wait through it cheaply.
-    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=0.05)
+    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=0.2)
     sink = FakeSink('out', sink_type='kafka')
     sink.fail_on_deliver = True
     mgr.register(sink)
@@ -1183,7 +1160,7 @@ async def test_circuit_cooldown_elapses_half_open_success_closes():
     assert sink.circuit_state == 'open'
 
     # Wait past the cooldown, then stop failing so the probe succeeds.
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(0.3)
     sink.fail_on_deliver = False
 
     # Next delivery is the half-open probe — it runs the real deliver path
@@ -1198,7 +1175,7 @@ async def test_circuit_cooldown_elapses_half_open_success_closes():
 
 async def test_circuit_half_open_failure_reopens_with_renewed_cooldown():
     """Half-open probe failure → circuit snaps back to open + new cooldown."""
-    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=0.05)
+    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=0.2)
     sink = FakeSink('out', sink_type='kafka')
     sink.fail_on_deliver = True
     mgr.register(sink)
@@ -1215,7 +1192,7 @@ async def test_circuit_half_open_failure_reopens_with_renewed_cooldown():
 
     # Wait past cooldown — the next delivery becomes a probe, but the sink
     # is still failing so the probe fails too. The circuit should reopen.
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(0.3)
     await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
 
     assert sink.circuit_state == 'open'
@@ -1227,10 +1204,10 @@ async def test_circuit_half_open_failure_reopens_with_renewed_cooldown():
 
 
 async def test_circuit_trips_counter_increments_on_each_trip():
-    """sink_circuit_trips_total ticks once per closed→open transition."""
+    """sink_circuit_trips_total ticks on every transition into open (initial + reopens)."""
     from drakkar.metrics import sink_circuit_trips
 
-    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=0.05)
+    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=0.2)
     sink = FakeSink('out', sink_type='kafka')
     sink.fail_on_deliver = True
     mgr.register(sink)
@@ -1246,8 +1223,10 @@ async def test_circuit_trips_counter_increments_on_each_trip():
     after_first = sink_circuit_trips.labels(sink_type='kafka', sink_name='out')._value.get()
     assert after_first == before + 1
 
-    # Wait cooldown, fail the half-open probe → trip #2 (open → half_open → open).
-    await asyncio.sleep(0.1)
+    # Wait past cooldown (0.2s), fail the half-open probe → trip #2
+    # (open → half_open → open). 100ms margin above cooldown to avoid
+    # CI scheduler flake.
+    await asyncio.sleep(0.3)
     await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
 
     after_second = sink_circuit_trips.labels(sink_type='kafka', sink_name='out')._value.get()
@@ -1278,7 +1257,7 @@ async def test_circuit_preserves_stats_on_skip():
 
     stats_after = mgr.get_all_stats()[('kafka', 'out')]
     assert stats_after.error_count == error_before + 1
-    assert stats_after.last_error == 'circuit open'
+    assert stats_after.last_error == CIRCUIT_OPEN_ERROR
     assert stats_after.last_error_ts is not None
     # No delivery completed — delivered_count did not change.
     assert stats_after.delivered_count == stats_before.delivered_count
@@ -1309,3 +1288,217 @@ async def test_circuit_retries_with_in_run_failures_do_not_double_count():
     await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, max_retries=3)
     await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, max_retries=3)
     assert sink.circuit_state == 'open'
+
+
+async def test_circuit_skip_action_does_not_trip_breaker():
+    """When the handler returns ``DeliveryAction.SKIP`` (drop + continue), the
+    failure is intentional-drop, not a downstream-health signal. The breaker
+    must NOT tick its consecutive-failure counter on a SKIP — otherwise an
+    operator who drops a malformed batch would unintentionally help trip the
+    sink offline.
+
+    Terminal here is SKIP, not retries-exhausted, so the existing RETRY-path
+    test (``test_circuit_retries_with_in_run_failures_do_not_double_count``)
+    doesn't cover this shape.
+    """
+    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=30.0)
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    # Every delivery fails, but the operator SKIPs — the breaker should
+    # stay closed indefinitely (the failures aren't a health signal).
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    for _ in range(5):
+        await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    # Threshold is 2 — 5 SKIPs would easily exceed it if SKIPs counted.
+    assert sink.circuit_state == 'closed'
+    assert sink._consecutive_failures == 0
+
+
+async def test_circuit_success_resets_consecutive_failure_counter():
+    """After partial failures, a single success must snap the consecutive
+    counter back to zero so the breaker only trips on GENUINELY-CONSECUTIVE
+    failures, not an accumulated total.
+
+    Complements ``test_circuit_intermittent_failures_do_not_trip`` — that
+    test walks an alternating pattern; this one asserts the reset is
+    explicit and survives retries-exhausted terminals.
+    """
+    mgr = _make_breaker_manager(failure_threshold=3, cooldown_seconds=30.0)
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    # DLQ terminal so each batch lands as one consecutive failure.
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+
+    # Two failures — counter climbs to 2, threshold not yet hit.
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+    assert sink._consecutive_failures == 2
+    assert sink.circuit_state == 'closed'
+
+    # Flip to success — the counter must reset to zero.
+    sink.fail_on_deliver = False
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+    assert sink._consecutive_failures == 0
+    assert sink.circuit_state == 'closed'
+
+
+async def test_circuit_concurrent_probes_respect_single_flight():
+    """Two concurrent deliveries against a half-open breaker must NOT both
+    issue the probe — only the first claim wins, the others skip.
+
+    Regression for HIGH-2: ``deliver_all`` uses ``asyncio.gather`` across
+    sinks/groups, so under a recovering downstream two batches could both
+    observe ``half_open`` in the same event-loop tick and both let the
+    probe through, slamming the downstream with concurrent probes and
+    defeating the "single probe" intent.
+
+    Strategy: force the circuit into half_open manually (synthetic state
+    transition is cheaper than waiting through cooldown), then fire two
+    ``deliver_all`` calls concurrently. Exactly one should reach the sink.
+    """
+    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=30.0)
+    sink = FakeSink('out', sink_type='kafka')
+    mgr.register(sink)
+
+    # Place the breaker into half_open with NO probe in flight, as would
+    # happen naturally when cooldown elapses on the first ``should_skip_delivery``
+    # call of a new batch. _probe_inflight starts False so the first
+    # caller will claim it. These private attributes are touched directly to
+    # inject synthetic state — the public API offers read-only views.
+    sink._circuit_state = 'half_open'
+    sink._circuit_opened_at = 0.0
+    sink._probe_inflight = False
+
+    # Make the sink's deliver slow so the two concurrent callers overlap
+    # in the gather — otherwise the first finishes before the second even
+    # reaches ``should_skip_delivery``.
+    delivered_calls: list[list] = []
+
+    async def slow_deliver(payloads: list) -> None:
+        await asyncio.sleep(0.1)
+        delivered_calls.append(payloads)
+
+    sink.deliver = slow_deliver  # type: ignore[assignment]
+
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+
+    # Two concurrent deliver_all invocations — both target the same sink.
+    await asyncio.gather(
+        mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0),
+        mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0),
+    )
+
+    # Exactly ONE delivery reached the sink. The other caller saw
+    # half_open + probe_inflight=True and skipped, routing its batch to
+    # the handler (on_error invoked with circuit-open error).
+    assert len(delivered_calls) == 1, f'exactly one probe should have reached the sink, got {len(delivered_calls)}'
+    assert on_error.await_count == 1, (
+        f'the skipped caller should have invoked on_delivery_error exactly once, got {on_error.await_count}'
+    )
+
+
+async def test_circuit_half_open_skip_clears_probe_inflight():
+    """A half-open probe that fails and is then SKIPped must release the
+    probe slot — otherwise the circuit is wedged forever.
+
+    Regression for the review finding: the SKIP branch exits without
+    calling ``record_success`` or ``record_failure``, so before the fix
+    it left ``probe_inflight=True`` indefinitely. Subsequent
+    ``should_skip_delivery`` calls saw ``half_open + inflight=True`` and
+    returned True every time, permanently routing every batch to DLQ even
+    though the sink might be healthy.
+
+    Scenario walked here:
+      1. Sink is in half_open with the probe slot free.
+      2. Delivery #1 claims the probe slot, ``sink.deliver`` raises,
+         handler returns SKIP. No ``record_*`` is called, so without
+         the try/finally guard the probe flag would leak.
+      3. Delivery #2 must NOT see a leaked probe flag — it must be
+         allowed to probe (and in this test succeeds, closing the
+         circuit).
+    """
+    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=30.0)
+    sink = FakeSink('out', sink_type='kafka')
+    mgr.register(sink)
+
+    # Force half_open state with probe slot free — the natural promotion
+    # path via cooldown-elapsed is covered by other tests; here we want
+    # to exercise the SKIP-path leak regardless of how we got to half_open.
+    # Private attributes touched directly for synthetic state injection; the
+    # public API offers read-only views (``circuit_state`` / ``probe_inflight``).
+    sink._circuit_state = 'half_open'
+    sink._circuit_opened_at = 0.0
+    sink._probe_inflight = False
+
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+
+    # Delivery #1: probe fails, handler returns SKIP. Before the fix,
+    # this left ``probe_inflight=True`` forever because neither
+    # ``record_success`` nor ``record_failure`` was called.
+    sink.fail_on_deliver = True
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    # Invariant: after a SKIPped probe the inflight flag must be clear,
+    # so the next delivery can legitimately probe the sink again.
+    assert not sink.probe_inflight, 'SKIP on a half-open probe must release the probe slot — it was left True'
+    # Circuit should still be half_open (we didn't record success or
+    # failure, just a neutral release). A subsequent successful delivery
+    # will close it via ``record_success``.
+    assert sink.circuit_state == 'half_open'
+
+    # Delivery #2: this call MUST be allowed to probe. If the leak
+    # regression returns, ``should_skip_delivery`` would skip this one
+    # too, ``sink.deliver`` would never run, and ``delivered`` would be
+    # empty — the assertion below would fail.
+    sink.fail_on_deliver = False
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    assert len(sink.delivered) == 1, (
+        'after a SKIPped half-open probe, the NEXT delivery must be allowed to probe again — '
+        f'probe flag leak would skip it instead, got delivered={len(sink.delivered)}'
+    )
+    # Successful probe closes the circuit.
+    assert sink.circuit_state == 'closed'
+
+
+async def test_circuit_half_open_handler_raises_clears_probe_inflight():
+    """If ``on_delivery_error`` itself raises, the probe slot must still
+    be released — the handler exception must not leak circuit-breaker
+    state.
+
+    Same shape as the SKIP-leak regression, but instead of SKIP the
+    handler propagates an exception. Without the try/finally guard in
+    ``_deliver_to_sink`` the probe flag would leak identically, wedging
+    the circuit forever.
+    """
+    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=30.0)
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    # Synthetic half_open state, probe slot free.
+    sink._circuit_state = 'half_open'
+    sink._circuit_opened_at = 0.0
+    sink._probe_inflight = False
+
+    # Handler raises — simulates a buggy user handler that crashes.
+    async def raising_handler(err: DeliveryError) -> DeliveryAction:
+        raise RuntimeError('handler crashed')
+
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    with pytest.raises(RuntimeError, match='handler crashed'):
+        await mgr.deliver_all(result, on_delivery_error=raising_handler, partition_id=0)
+
+    # Even though the handler raised, the probe flag must have been
+    # released by the try/finally guard. Without it, every future
+    # delivery would see ``half_open + inflight=True`` and skip.
+    assert not sink.probe_inflight, 'a raising on_delivery_error on a half-open probe must release the probe slot'

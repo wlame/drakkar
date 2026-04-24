@@ -1,6 +1,6 @@
 # Frequently Asked Questions
 
-A living Q&A page drawing from real operator questions and common first-time-reader confusions. Answers are deliberately short — click through for depth. Items marked **TBD** are open questions we haven't pinned down yet; contributions welcome.
+A living Q&A page drawing from real operator questions and common first-time-reader confusions. Answers are deliberately short — click through for depth. Contributions welcome.
 
 ---
 
@@ -31,7 +31,17 @@ The `ExecutorPool` semaphore sits at the center, throttling concurrent subproces
 
 ### How does Drakkar compare to Celery, Faust, Kafka Streams, Benthos?
 
-**TBD** — we'll write a proper comparison matrix. The short pitch: Drakkar is narrower (Kafka-only input; subprocess executors first-class) and more opinionated about fan-in/fan-out/partition ordering.
+Drakkar is narrower and more opinionated than any of them — the sweet spot is **Kafka input + CPU-heavy external binary + multi-sink fan-out** with strict per-partition ordering. Rough shape of how the others differ:
+
+| Tool | Input sources | Work stage | Python-native? | Notes |
+|------|--------------|-----------|----------------|-------|
+| **Drakkar** | Kafka only | **Subprocess pool** (external binary via stdin/stdout) | Yes (3.13+) | Built-in DLQ, circuit breakers, flight recorder, peer-sync cache, live debug UI. Offsets commit per-partition after *all* sinks ack. |
+| **Celery** | Broker-agnostic (Redis, RabbitMQ, SQS, Kafka via plugin) | In-process Python function | Yes | General task queue; no native Kafka partition ordering; one broker at a time per worker. |
+| **Faust** | Kafka only | In-process async Python (streams & tables) | Yes | Stream-processing DSL (agents, tables, windows). No first-class subprocess executor; you bring your own. |
+| **Kafka Streams** | Kafka only | In-process JVM code | No (Java/Scala) | Stateful stream processor with changelog-backed stores. No Python. |
+| **Benthos** (now Bento/Redpanda Connect) | ~50 sources | Config-driven processors (Go) | No | YAML pipeline DSL; excellent fan-out; no user-written Python; handlers are Bloblang/WASM. |
+
+Use Drakkar when your handler binary is Rust/Go/C++/a CLI you don't own, you need per-partition ordering, and you want multi-sink delivery (Kafka + Postgres + HTTP + ...) with at-least-once guarantees and a DLQ. Use one of the others when your work is pure in-process Python (Faust), pure Go/config (Benthos), or not Kafka-first (Celery).
 
 ### What languages can my handler's executor binary be written in?
 
@@ -39,7 +49,7 @@ Any language. The executor launches a subprocess and communicates via stdin/stdo
 
 ### Why Python 3.13+?
 
-**TBD** — confirm whether the floor is motivated by specific asyncio improvements, typing features, or just baseline modernization.
+The floor is driven by **PEP 695 generic syntax** used across the codebase (e.g. `async def get[T: BaseModel](...)` in `drakkar/cache.py`). That syntax parses only on 3.12+, and Drakkar stabilized it on 3.13 where the type parameter machinery is mature and ty / mypy handle it cleanly. Python 3.14 is also supported (the package classifiers list both). Dropping the 3.13 floor would mean rewriting those signatures to the `TypeVar` / `Generic[T]` form — doable, but not planned pre-1.0.
 
 ---
 
@@ -51,7 +61,14 @@ Depends on task shape (fast/slow), executor pool size, and input throughput. Use
 
 ### How much memory per worker?
 
-**TBD** — depends heavily on max_poll_records, cache memory cap, and subprocess memory. Real numbers from production deployments are the right way to answer this.
+There's no single number — memory is dominated by three tunables plus your subprocess. A useful back-of-envelope:
+
+- **Buffered Kafka messages**: `max_poll_records` × average message size × (number of partitions × `window_size`) in worst case. Defaults (`max_poll_records=100`, `window_size` small) keep this in the tens of MB.
+- **In-memory cache**: capped by `cache.max_memory_entries` (default `10_000`). Each entry is a Python dict + serialized Pydantic JSON; budget roughly 1-10 KB/entry for typical payloads. Set `max_memory_entries: null` for unbounded (the config layer emits a startup warning if you do — monitor RSS).
+- **Flight recorder buffer**: small, bounded by `recorder.flush_interval_seconds` × event rate. Events are buffered in memory and flushed to SQLite; a full buffer is tens of MB.
+- **Subprocess children**: `max_executors` live processes, each using whatever your binary consumes. This usually dwarfs the Python RSS.
+
+For a typical worker (max_executors=80, cache enabled with defaults, recorder on), the **Python process** sits in the 150-400 MB range. The subprocess pool adds whatever your binary needs, times `max_executors`. Measure under load; there's no substitute. Raw capacity knobs are documented in [Configuration](configuration.md) and the [Cache memory cap](cache.md) page.
 
 ### Can I run multiple workers on one host?
 
@@ -63,7 +80,16 @@ Run more workers in the same Kafka consumer group. The group rebalances partitio
 
 ### What's the maximum throughput per worker?
 
-**TBD** — depends on task profile. Use the [Config Calculator](calculator.md) for order-of-magnitude; measure real throughput in staging. Target metrics are covered in [Monitoring Throughput](performance.md#monitoring-throughput).
+Roughly **4,000-8,000 tasks/sec/worker** before a single event loop becomes the bottleneck — see [Bottleneck: Event Loop](performance.md#bottleneck-event-loop) for the breakdown of where the GIL time goes. In practice you hit this ceiling with sub-10ms tasks and `max_executors > 100`; for longer tasks (≥ 30ms) you'll saturate on CPU / downstream sinks well before Python orchestration becomes the limit.
+
+Knobs that move the ceiling up (all documented in [performance.md](performance.md)):
+
+- **Precomputed tasks** (cache hits skip the subprocess entirely) remove the per-task launch cost — the ceiling becomes whatever your sinks can absorb.
+- **Batching messages per task** (one subprocess launch for N messages via stdin) amortizes the 1-5ms launch cost.
+- **Larger `window_size`** enables larger batches in `arrange()`.
+- **Off-thread JSON encoding** and **`orjson`** are on the roadmap to cut recorder overhead (see [Future optimizations](performance.md#future-optimizations-phase-3)).
+
+Use the [Config Calculator](calculator.md) for a starting point, then measure in staging. Target metrics live in [Monitoring Throughput](performance.md#monitoring-throughput).
 
 ### What benefit does separating pipelines by partition give?
 
@@ -110,7 +136,13 @@ Framework-provided `self.cache` on every handler: in-memory LRU + write-behind p
 
 ### How do workers discover each other's caches?
 
-**TBD** — fill in: what discovery mechanism is used (shared filesystem? peer list in config? Kafka topic?), what happens if the filesystem isn't shared, fallbacks when a peer DB is unreachable. See partial notes in [Cache — Peer unreachable](cache.md#peer-unreachable). This needs a proper write-up.
+Via a **shared filesystem** — no peer list in config, no Kafka topic, no discovery protocol. Each worker writes its cache DB under a shared directory (`cache.db_dir`, falling back to `debug.db_dir`) and publishes a stable live symlink named `<worker>-cache.db` pointing at the current file. Peers `glob` the directory for `*-cache.db` symlinks, skip their own entry, resolve through `os.path.realpath` (so a peer rotating its DB doesn't break mid-read), and read rows from the peer's `cache_entries` table. See `drakkar/peer_discovery.py::discover_peer_dbs` for the implementation.
+
+What happens if the filesystem isn't shared: peer sync finds zero peers and the cache operates single-worker. No error, no warning — it just behaves like a local cache. If you *want* cluster-wide cache, mount a shared volume (NFS, EFS, hostPath in k8s) and point every worker's `db_dir` at it.
+
+Fallbacks when a peer DB is unreachable: the sync loop wraps each peer in `try/except`, logs a warning, increments `drakkar_cache_sync_errors_total{peer=...}`, and continues to the next peer. Broken symlinks (peer's DB file gone) are silently skipped — the peer may come back later with a fresh file. One bad peer cannot break the whole sync cycle. See [Cache — Peer unreachable](cache.md#peer-unreachable).
+
+Trust boundary: the `db_dir` is shared-trust — anyone who can write to it can inject cache entries that peers will read. There is no per-write signature or auth. Restrict directory permissions to the worker user (see [Why are peer workers trusted?](#why-are-peer-workers-trusted)).
 
 ### What if two workers write the same cache key?
 
@@ -142,7 +174,7 @@ Kafka, Postgres, Mongo, HTTP, Redis, Filesystem, and a dedicated DLQ (Kafka topi
 
 ### Does Drakkar support exactly-once?
 
-No. Kafka EOS transactions aren't wired in; workloads that require exactly-once should key their output writes idempotently. **TBD** — whether to offer an opt-in EOS mode is an open roadmap question.
+No. Kafka EOS transactions aren't wired in; workloads that require exactly-once should key their output writes idempotently (Kafka sinks use producer-side dedup via message keys; Postgres/Mongo sinks can use `ON CONFLICT` / upsert semantics; HTTP sinks should send an idempotency key). There is no roadmap item for first-class transactional EOS — the design cost (coordinating the Kafka consumer group, the producer transaction, and arbitrary external sinks) conflicts with Drakkar's "many sinks, one pipeline" philosophy. If you need strict EOS between Kafka and Kafka only, use Kafka Streams or a transactional producer directly.
 
 ### What happens when a sink is unreachable?
 
@@ -154,7 +186,13 @@ Name each in config (`sinks.kafka.results`, `sinks.kafka.audit`); your handler r
 
 ### How do I add a custom sink type?
 
-**TBD** — there's no stable plugin API yet. Today you'd subclass `BaseSink`. Worth documenting as the project hardens.
+There's no plugin registry yet — sink types are built into `DrakkarApp._build_sinks()` (see `drakkar/app.py`). Today the path to a custom sink is:
+
+1. Subclass `BaseSink[YourPayloadT]` from `drakkar.sinks.base`; set the `sink_type` class attribute and implement `connect()`, `deliver(payloads)`, and `close()`.
+2. Handle your own retries internally — the `SinkManager` records failures and trips a circuit breaker, but delegates retry policy to the sink. Design your `deliver()` to be safe to re-enter (idempotent writes) so that framework-level duplicates (at-least-once delivery) don't cause trouble downstream.
+3. Register your sink instance with the framework's `SinkManager` in your bootstrap code (currently requires a small fork of `DrakkarApp._build_sinks` or a monkey-patch).
+
+A stable plugin API (entry-points-based `SinkRegistry`) is on the Phase 4 roadmap — it will let you add sink types without forking the app bootstrap. Until then, an in-tree contribution is often the easier path if the sink type is generally useful.
 
 ---
 
@@ -174,7 +212,7 @@ Up to the number of Kafka partitions. Extra workers sit idle (Kafka only assigns
 
 ### Can I hot-reload config without restarting?
 
-**TBD** — probably no today. Document explicitly or add a SIGHUP handler if desired.
+No. Config is loaded once at startup and held in the `DrakkarApp` instance for its lifetime — there is no SIGHUP handler and no config-watch loop. The signal handlers today (`drakkar/app.py`) are `SIGINT` and `SIGTERM`, both of which trigger graceful shutdown. To change config, rely on rolling deploys: Kafka's cooperative-sticky rebalance keeps non-revoked partitions running during the rollout, and `kafka.startup_align_enabled` (default on) prevents a fleet-wide cascade rejoin. See [Staggered startup alignment](configuration.md#staggered-startup-alignment).
 
 ### Where do logs go?
 
@@ -186,7 +224,14 @@ Drakkar exposes metrics on `/metrics` at the configured port. See [Scrape Config
 
 ### How do I deploy in Kubernetes?
 
-**TBD** — no first-class k8s manifests yet. A blessed example chart would be useful.
+Drakkar does not ship blessed Helm charts or Kustomize overlays yet — a reference chart is on the roadmap. What the framework *does* provide to make k8s easy:
+
+- **Graceful shutdown** on `SIGTERM` (drains in-flight windows, commits settled offsets, disconnects sinks).
+- **Structured logs** on stdout (JSON via structlog) — ready for any k8s log collector.
+- **Prometheus metrics** on a configurable port for `prometheus-operator` `ServiceMonitor`.
+- **Stateful considerations**: each worker needs a unique `worker_id` (set via the env var named in `worker_name_env`, default `WORKER_ID`) and a per-worker DB path (recorder + cache SQLite files). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `debug.db_dir` / `cache.db_dir`, or use a shared `ReadWriteMany` volume (NFS, EFS) if you want cluster-wide peer sync.
+
+Typical shape: one `StatefulSet` (or `Deployment` with a PVC per replica) × N replicas = N Kafka consumer-group members. Replica count ≤ partition count. Env-var overrides follow the `DRAKKAR_` prefix + `__` nesting convention (see [Configuration Loading](configuration.md#configuration-loading)).
 
 ---
 
@@ -201,7 +246,7 @@ The UI runs on a separate thread with its own asyncio event loop, so most read-o
 - **GIL contention** between the UI thread and the main loop under heavy UI use.
 - **aiosqlite connections** are per-thread workers; UI reads don't block pipeline writes thanks to SQLite WAL mode.
 
-See [Observability — Debug UI](observability.md#debug-ui) for the endpoint inventory. **TBD** — we'll turn this answer into a proper subsection of that page.
+See [Observability — Debug UI](observability.md#debug-ui) for the endpoint inventory.
 
 ### Is the debug UI safe to expose to a team of operators?
 
@@ -227,7 +272,7 @@ See [Insecure-startup failure](configuration.md#insecure-startup-failure) for th
 
 ### What is the Message Probe tab?
 
-Paste a raw Kafka message value; the framework runs it end-to-end through your handler (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with zero intentional footprint: no sink writes, no offset commits, no recorder rows, no cache writes. Shows every task's stdin/stdout/stderr/exit code/duration plus the sink payloads that *would* have been produced. **TBD** — promote this explanation into `observability.md` under the `/debug` section.
+Paste a raw Kafka message value; the framework runs it end-to-end through your handler (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with zero intentional footprint: no sink writes, no offset commits, no recorder rows, no cache writes. Shows every task's stdin/stdout/stderr/exit code/duration plus the sink payloads that *would* have been produced. The full contract (headers, cache proxy behavior, concurrent-probe serialization) is documented on the [Debug UI page](observability.md#debug-ui).
 
 ### How do I trace a specific message through the pipeline?
 
@@ -247,23 +292,31 @@ The exception is caught, logged, the task is marked failed, `on_error` fires on 
 
 ### What if a subprocess hangs?
 
-`executor.task_timeout_seconds` (default per-profile) kills the subprocess and reports exit code 124. Then the normal `on_error` path handles it. See [Execution Flow — Enforce Timeout](executor.md#5-enforce-timeout).
+`executor.task_timeout_seconds` kills the subprocess when `asyncio.wait_for` raises `TimeoutError`; the executor's `finally` block calls `proc.kill()` + `proc.wait()` and the result is recorded with `exit_code=-1` and `stderr='task timed out'`. Then the normal `on_error` path handles it. See [Execution Flow — Enforce Timeout](executor.md#5-enforce-timeout).
 
 ### What if the Kafka broker goes down?
 
-librdkafka (the underlying client) handles reconnects transparently — the consumer automatically rejoins when brokers recover. **TBD** — document how Drakkar surfaces "disconnected" state in the dashboard and whether there's a hard fail-fast option.
+librdkafka (the underlying client) handles reconnects transparently — the consumer automatically rejoins when brokers recover. Drakkar does not expose a distinct "broker-down" state in the debug UI or Prometheus: there is no `drakkar_kafka_connected` gauge today. What you *will* see: `drakkar_messages_consumed_total` rate drops to zero while processing continues on already-polled messages. Pair a "no new messages" alert (`rate(drakkar_messages_consumed_total[5m]) == 0` while expecting traffic) with broker-level monitoring (Kafka's own JMX / kafka_exporter metrics) to catch broker issues. There is no hard fail-fast option — the design assumption is that brokers recover and transient disconnects should not restart the worker.
 
 ### What if a sink is unreachable for a long time?
 
-The sink's retry policy kicks in; exhausted retries route the record to the DLQ topic and fire `on_delivery_error`. See [Dead letter queue](sinks.md#dead-letter-queue).
+Per-batch retries kick in first; exhausted retries fire `on_delivery_error` and route the record to the DLQ. After `failure_threshold` consecutive terminal failures (default `5`), the sink's [circuit breaker](sinks.md#circuit-breaker) trips and subsequent batches route **directly** to the DLQ without even attempting the sink — so you stop paying the retry-timeout cost on every batch while the downstream is down. After `cooldown_seconds` (default `30s`) the breaker promotes to half-open and sends a single probe; success closes it, failure reopens with a fresh cooldown. Watch `drakkar_sink_circuit_open` and `drakkar_sink_circuit_trips_total` to alert on the condition. See also [Dead letter queue](sinks.md#dead-letter-queue).
 
 ### How do I replay messages from the DLQ?
 
-**TBD** — there's no built-in replay worker today. Typically operators run a one-off script that consumes from the DLQ topic and re-produces to the source topic. Worth shipping a reference script.
+Drakkar does not run a built-in replay worker — replays are operator-driven. The typical pattern is a one-off script that consumes from the DLQ topic and re-produces to the source topic (or a dedicated "retry" topic to avoid re-delivery loops if the original producer also still writes). Each DLQ entry preserves the source topic, partition, offset, key, value, and headers so the original envelope is reconstructible. A reference replay script is a roadmap item (tracked under Phase 3 hygiene); until it ships, the envelope fields needed are documented in the [DLQ payload schema](sinks.md#dead-letter-queue).
 
 ### A message is stuck in "in-flight" forever — what do I do?
 
-Check the **Executors** tab on `/live` for stuck tasks; their `task_timeout_seconds` should eventually fire. If a single task is wedged past the timeout and the subprocess didn't die, something unusual is happening — check the worker logs and consider restarting. **TBD** — document the specific rescue procedure.
+Check the **Executors** tab on `/live` for stuck tasks; their `task_timeout_seconds` should eventually fire. When a task overruns the timeout, `asyncio.wait_for` raises `TimeoutError`, the executor's `finally` block calls `proc.kill()` + `proc.wait()`, and the task takes the normal `on_error` path. If the subprocess *itself* doesn't die after `proc.kill()`, the task coroutine stays pending — the debug server exposes `/api/debug/processors`, which includes a `stuck_tasks` list with a live coroutine stack (top 5 frames) per in-flight task; that's the rescue-visibility tool.
+
+Rescue procedure when a task is truly wedged past the timeout:
+
+1. Open `/live` → **Executors** tab and look for tasks whose `oldest_running_sec` exceeds `task_timeout_seconds`.
+2. Hit `/api/debug/processors` to get the coroutine stack for each wedged task via the `stuck_tasks` field.
+3. Check worker logs for the task's `task_id` — you'll usually find the downstream call (sink, cache, peer sync) that's blocked.
+4. If the stack shows the subprocess already exited and the coroutine is wedged in sink or recorder code, a worker restart is the safest recovery — Kafka's cooperative-sticky rebalance will reassign the partition to another worker, which will re-poll the un-committed offset range and retry the work.
+5. There is no in-UI "force complete" button today by design: marking a wedged task as succeeded could silently ack a half-applied side effect. Operators are expected to restart the worker instead.
 
 ---
 
@@ -345,4 +398,4 @@ The contract is "aggressive redact, accept false positives": `PASSWORD_RESET_URL
 
 ## Contribute to this page
 
-Missing a question you've asked or answered? Send a PR adding it here — even questions with **TBD** answers are useful: they mark the project's documentation debt visibly, and get resolved faster when they're written down.
+Missing a question you've asked or answered? Send a PR adding it here — even questions without a confident answer are useful: they mark the project's documentation debt visibly, and get resolved faster when they're written down.

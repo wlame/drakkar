@@ -54,3 +54,7 @@ credentials.json
 *.log
 logs/
 _tmp*
+
+# Integration test runtime artifacts (recorder DBs, WAL/SHM side files, cache snapshots)
+integration/shared/*
+!integration/shared/README.md

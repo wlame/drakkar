@@ -200,8 +200,15 @@ async def test_peer_sync_cycle_deadline_fires_and_counter_increments(tmp_path):
 
         before = metrics.cache_peer_sync_timeouts._value.get()  # type: ignore[reportPrivateUsage]
 
+        # MED-1: ``_sync_once`` re-raises ``TimeoutError`` on deadline so the
+        # periodic-task wrapper logs the run as ``status=error``. Dashboards
+        # keyed on ``periodic_task_runs{status='error'}`` already alert on
+        # sync failures, so a silent-swallow here would hide peer-sync
+        # deadline breaches. The wrapper's default behavior is to keep the
+        # loop alive (re-raising does NOT disable peer-sync).
         start_time = asyncio.get_event_loop().time()
-        result = await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        with pytest.raises(TimeoutError):
+            await engine._sync_once()  # type: ignore[reportPrivateUsage]
         elapsed = asyncio.get_event_loop().time() - start_time
 
         after = metrics.cache_peer_sync_timeouts._value.get()  # type: ignore[reportPrivateUsage]
@@ -212,8 +219,6 @@ async def test_peer_sync_cycle_deadline_fires_and_counter_increments(tmp_path):
         assert elapsed < 1.5, f'expected <1.5s (deadline 0.5s), got {elapsed:.3f}s'
         # Counter ticked exactly once.
         assert after - before == 1
-        # Empty dict on timeout — the periodic task continues.
-        assert result == {}
     finally:
         await engine.stop()
 
@@ -315,7 +320,11 @@ async def test_peer_sync_continues_after_timeout(tmp_path):
         engine._sync_inner = slow_sync_inner  # type: ignore[reportPrivateUsage, method-assign]
 
         before_first = metrics.cache_peer_sync_timeouts._value.get()  # type: ignore[reportPrivateUsage]
-        await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        # MED-1: the deadline path re-raises ``TimeoutError`` (see
+        # ``test_peer_sync_cycle_deadline_fires_and_counter_increments``
+        # for the full rationale).
+        with pytest.raises(TimeoutError):
+            await engine._sync_once()  # type: ignore[reportPrivateUsage]
         after_first = metrics.cache_peer_sync_timeouts._value.get()  # type: ignore[reportPrivateUsage]
         assert after_first - before_first == 1
 
@@ -377,14 +386,15 @@ async def test_peer_sync_default_deadline_derives_from_interval(tmp_path):
 
         before = metrics.cache_peer_sync_timeouts._value.get()  # type: ignore[reportPrivateUsage]
         start_time = asyncio.get_event_loop().time()
-        result = await engine._sync_once()  # type: ignore[reportPrivateUsage]
+        # MED-1: re-raises on deadline (see the earlier deadline test).
+        with pytest.raises(TimeoutError):
+            await engine._sync_once()  # type: ignore[reportPrivateUsage]
         elapsed = asyncio.get_event_loop().time() - start_time
         after = metrics.cache_peer_sync_timeouts._value.get()  # type: ignore[reportPrivateUsage]
 
         # Default deadline is 0.45s — comfortably under 1.5s.
         assert elapsed < 1.5, f'expected <1.5s (default deadline ~0.45s), got {elapsed:.3f}s'
         assert after - before == 1
-        assert result == {}
     finally:
         await engine.stop()
 
@@ -410,24 +420,26 @@ async def test_peer_sync_default_deadline_derives_from_interval(tmp_path):
 # per-peer try/except).
 
 
-async def test_concurrent_sync_once_calls_dont_race(tmp_path):
-    """Two overlapping ``_sync_once`` calls plus a concurrent ``_flush_once``
-    on the same engine must complete without aiosqlite errors, and the
-    final local-DB state must be consistent (every peer row pulled, every
-    local set landed — no missing, no duplicate rows).
+async def test_concurrent_sync_once_smoke(tmp_path):
+    """SMOKE: two overlapping ``_sync_once`` calls plus a concurrent
+    ``_flush_once`` on the same engine complete without aiosqlite errors,
+    and the final local-DB state is consistent.
 
-    Why: Phase 1 review flagged that no test exercised
-    ``asyncio.gather(engine._sync_once(), engine._sync_once())``. A
-    regression in peer-cursor maintenance or in the shared-writer path
-    could let a race slip through unseen. This test gives us a
-    reproducible "two cycles and a flush in the same gather" scenario.
+    NOTE: This is a smoke test, NOT a race-regression test. aiosqlite
+    serializes all SQL calls on a single background thread, so two
+    concurrent ``_sync_once`` coroutines on the event loop can never
+    actually interleave reads/writes to the same connection. A genuine
+    race-regression test would need to inject a deterministic yield via
+    monkey-patch (e.g. ``await asyncio.sleep(0)`` between the cursor
+    read and write in ``_advance_cursor``) to force the interleaving
+    the scheduler won't provide.
 
-    Why this is safe even without an explicit lock:
+    Why the smoke check is still worth running:
+     - Catches coarse-grained regressions (e.g. a refactor that removes
+       per-peer try/except would surface here as a raised exception
+       even without interleaving).
      - ``_peer_cursors`` is a plain dict — reads and writes to individual
        keys are atomic under CPython's GIL.
-     - ``_writer_db.executemany(...)`` goes through aiosqlite's single
-       background thread, so two concurrent coroutines' SQL calls
-       serialize at the connection level (no overlapping transactions).
      - Per-peer errors inside ``_sync_inner`` are isolated, so even if one
        concurrent call happens to observe a transient state inconsistency
        from the other, it would be caught and logged, not raised.
@@ -604,6 +616,179 @@ async def test_concurrent_sync_across_cycles(tmp_path):
         # 1003 (impossible given strict monotonicity in the SQL) or
         # rolled it back below, this catches it.
         assert cursor_history[-1] == 1003, f'cursor must settle at 1003 after full drain; history: {cursor_history}'
+    finally:
+        await engine.stop()
+
+
+# --- deadline-vs-memory-invalidation regression ----------------------------
+#
+# Review finding: ``_apply_peer_rows`` previously called
+# ``asyncio.shield(self._commit_peer_rows(rows))`` and then ran the counter
+# ticks and ``_invalidate_memory_keys`` AFTER the shielded block. When the
+# outer ``_sync_once`` deadline fired, ``CancelledError`` would still raise
+# at the shield call site (the shield only protects the inner coro from
+# being cancelled, not the caller from seeing the cancellation). The code
+# after the shield never ran, so the DB had new peer rows but memory kept
+# the stale pre-sync values — ``Cache.get()`` kept returning stale until
+# TTL or overwrite.
+#
+# Fix: move the counter ticks and ``_invalidate_memory_keys`` INSIDE
+# ``_commit_peer_rows`` (which the shield fully protects). The deadline
+# still fires, but the shielded region completes the full trio
+# (commit + counters + memory invalidation) before cancellation surfaces.
+#
+# The test below drives the same race deterministically by calling
+# ``_apply_peer_rows`` under a short ``asyncio.wait_for`` deadline, with a
+# patched ``_commit_peer_rows`` that sleeps LONG ENOUGH for the deadline to
+# fire mid-apply. With the fix, memory is invalidated despite the
+# cancellation; without the fix, memory would still hold the stale entry.
+
+
+async def test_peer_sync_deadline_does_not_leave_stale_memory(tmp_path):
+    """When the peer-sync deadline fires during ``_apply_peer_rows``, memory
+    invalidation MUST still run — otherwise ``Cache.get()`` serves stale.
+
+    Pre-fix shape (the regression):
+        ``_apply_peer_rows`` called ``asyncio.shield(_commit_peer_rows(rows))``
+        for the commit, then ran counter ticks + ``_invalidate_memory_keys``
+        AFTER the shield. A ``wait_for`` cancellation would raise
+        ``CancelledError`` at the shield boundary as soon as the inner coro
+        completed, skipping the invalidation. The DB had new rows but
+        memory kept the stale pre-sync values.
+
+    Fix shape:
+        Counters + invalidation moved INSIDE ``_commit_peer_rows`` so the
+        shield covers the full trio. The deadline still fires, but the
+        shielded region runs to completion before cancellation surfaces.
+
+    Test strategy: seed a memory entry, then call ``_apply_peer_rows``
+    under a short ``wait_for`` while a patched writer ``commit()``
+    sleeps long enough to trip the deadline. Assert the ``TimeoutError``
+    is raised (deadline fired) AND memory is invalidated anyway.
+
+    The writer's ``commit`` is patched rather than ``_commit_peer_rows``
+    itself so the test doesn't couple to the internal helper's exact
+    signature. Any implementation that keeps invalidation inside the
+    shielded region passes; any regression that moves it back outside
+    fails.
+    """
+    engine = await _make_engine(
+        tmp_path,
+        worker_id='me',
+        cluster_name='prod',
+        cache_overrides={
+            'peer_sync': CachePeerSyncConfig(
+                enabled=True,
+                interval_seconds=30.0,
+                # Generous deadline — this test does not go through
+                # ``_sync_once``; it calls ``_apply_peer_rows`` directly
+                # with its own ``wait_for`` to pin down the cancellation
+                # timing deterministically.
+                cycle_deadline_seconds=10.0,
+            ),
+        },
+    )
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+
+        # Seed a stale memory entry. Without invalidation, ``Cache.get``
+        # would return 'stale' from the memory fast path after the sync.
+        cache.set('shared', 'stale', scope=CacheScope.GLOBAL)
+        assert 'shared' in cache._memory  # type: ignore[reportPrivateUsage]
+
+        # Patch the writer's ``commit`` to sleep after performing the
+        # real commit. That extends the shielded region long enough for
+        # the outer ``wait_for`` deadline to fire WHILE
+        # ``_commit_peer_rows`` is still running. The shield keeps us
+        # inside ``_commit_peer_rows`` until the sleep finishes; the
+        # fix's post-commit invalidation runs during that window. Pre-fix,
+        # the post-shield invalidation would be skipped as soon as the
+        # shielded call returned and ``CancelledError`` propagated.
+        assert engine._writer_db is not None  # type: ignore[reportPrivateUsage]
+        original_commit = engine._writer_db.commit  # type: ignore[reportPrivateUsage]
+
+        async def slow_commit(*args, **kwargs):
+            # Run the real commit first so the DB transaction actually
+            # closes — otherwise the sleep below would hold an open
+            # transaction against the writer.
+            await original_commit(*args, **kwargs)
+            # Sleep LONG ENOUGH that the outer ``wait_for`` (50ms) fires
+            # while we're still inside the shielded region.
+            await asyncio.sleep(0.5)
+
+        engine._writer_db.commit = slow_commit  # type: ignore[reportPrivateUsage,assignment]
+
+        # Build a peer row that targets 'shared' with a newer timestamp so
+        # the LWW UPSERT accepts it. Binding order mirrors LWW_UPSERT_SQL:
+        # (key, scope, value, size_bytes, created_at_ms, updated_at_ms,
+        #  expires_at_ms, origin_worker_id).
+        new_value = '"fresh"'
+        peer_rows = [
+            (
+                'shared',
+                CacheScope.GLOBAL.value,
+                new_value,
+                len(new_value.encode('utf-8')),
+                9_999_999_000,  # created_at_ms
+                9_999_999_999,  # updated_at_ms — newer than local
+                None,  # no TTL
+                'peer1',
+            )
+        ]
+
+        # Call ``_apply_peer_rows`` under a short ``wait_for`` that fires
+        # well before the slow commit returns. The TimeoutError surfaces
+        # at the ``await asyncio.shield(...)`` boundary.
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                engine._apply_peer_rows(peer_name='peer1', rows=peer_rows),  # type: ignore[reportPrivateUsage]
+                timeout=0.05,
+            )
+
+        # ``asyncio.shield`` keeps the inner coroutine running even after
+        # the caller's ``wait_for`` raises ``TimeoutError``. The post-
+        # commit invalidation runs INSIDE that shielded region, so it
+        # executes eventually — but not before ``wait_for`` returns.
+        # Wait for the shielded commit to finish its patched 0.5s sleep
+        # so we can assert on the final memory state (what subsequent
+        # ``Cache.get()`` calls would see once the shield completes).
+        #
+        # Pre-fix behavior: the post-shield invalidation would be SKIPPED
+        # entirely when ``CancelledError`` propagated. Even after the
+        # shielded task finished, 'shared' would remain in memory forever
+        # — until TTL or a local overwrite. No amount of sleeping would
+        # invalidate it.
+        #
+        # Post-fix behavior: sleeping for longer than the slow-commit sleep
+        # gives the shielded coro time to complete; its internal
+        # ``_invalidate_memory_keys`` call runs and 'shared' is evicted.
+        await asyncio.sleep(0.6)
+
+        # Restore the original commit BEFORE any further engine I/O —
+        # otherwise ``engine.stop()`` in the finally block would wait
+        # for the 0.5s sleep on its own shutdown commit.
+        engine._writer_db.commit = original_commit  # type: ignore[reportPrivateUsage,assignment]
+
+        # The core regression assertion: memory was invalidated inside
+        # the shielded region, so the stale 'shared' entry is GONE from
+        # memory after the shielded task completes. Without the fix,
+        # the invalidation call would be AFTER the shield and never run
+        # under cancellation — 'shared' would still be present.
+        assert 'shared' not in cache._memory, (  # type: ignore[reportPrivateUsage]
+            'memory invalidation must run inside the shielded region — '
+            'deadline-triggered cancellation must not leave stale memory entries'
+        )
+
+        # Also assert the DB got the new value (commit ran before sleep,
+        # so this should always hold — sanity check that the shield
+        # protected the commit itself).
+        async with aiosqlite.connect(str(tmp_path / 'me-cache.db.actual')) as db:
+            cur = await db.execute('SELECT value FROM cache_entries WHERE key = ?', ('shared',))
+            row = await cur.fetchone()
+            await cur.close()
+        assert row is not None, 'peer row must have been committed inside the shield'
+        assert row[0] == new_value, f'expected committed peer value, got {row[0]!r}'
     finally:
         await engine.stop()
 

@@ -296,6 +296,14 @@ class EventRecorder:
         return self._db_path
 
     @property
+    def config(self) -> DebugConfig:
+        """Read-only access to the debug config — lets the debug server
+        inspect ``store_events`` / ``ws_min_duration_ms`` without reaching
+        into the private ``_config`` attribute.
+        """
+        return self._config
+
+    @property
     def reader_db(self) -> aiosqlite.Connection | None:
         """Return the dedicated reader aiosqlite connection.
 
@@ -307,6 +315,17 @@ class EventRecorder:
         ``_db``. Callers should check for ``None`` before executing.
         """
         return self._reader_db
+
+    async def flush(self) -> None:
+        """Public entry point to flush pending events to the writer DB.
+
+        Exposed for the debug server — it needs to force a flush before
+        running SELECTs through ``reader_db`` so the UI sees every event
+        recorded up to the query moment. The underlying ``_flush`` method
+        is the same; this alias keeps callers off private attributes and
+        gives us a stable public API to evolve.
+        """
+        await self._flush()
 
     @property
     def counters(self) -> dict[str, int]:
@@ -339,17 +358,37 @@ class EventRecorder:
         self._running = True
         if self._config.db_dir:
             self._db_path = _make_db_path(self._config.db_dir, self._worker_name)
-            self._db = await aiosqlite.connect(self._db_path)
-            # WAL mode is what lets a separate reader connection coexist
-            # with the writer without serializing reads behind writes.
-            # Applied per-connection (SQLite stores the mode in the DB
-            # header; the reader picks it up automatically on open).
-            await self._db.execute('PRAGMA journal_mode=WAL')
-            await self._create_schema(self._db)
-            # Open the dedicated reader connection AFTER schema creation
-            # so the reader always sees a ready DB. URI with ``mode=ro``
-            # rejects any accidental write attempt through this handle.
-            self._reader_db = await _open_reader(self._db_path)
+            # Open writer + apply PRAGMA + create schema + open reader in a
+            # single try/except. A failure at any of these steps must close
+            # whichever connections already opened — otherwise the caller
+            # typically doesn't call ``stop()`` on a failed ``start`` and
+            # the partially-opened ``_db`` handle leaks its fd + lock.
+            try:
+                self._db = await aiosqlite.connect(self._db_path)
+                # WAL mode is what lets a separate reader connection coexist
+                # with the writer without serializing reads behind writes.
+                # Applied per-connection (SQLite stores the mode in the DB
+                # header; the reader picks it up automatically on open).
+                await self._db.execute('PRAGMA journal_mode=WAL')
+                await self._create_schema(self._db)
+                # Open the dedicated reader connection AFTER schema creation
+                # so the reader always sees a ready DB. URI with ``mode=ro``
+                # rejects any accidental write attempt through this handle.
+                self._reader_db = await _open_reader(self._db_path)
+            except Exception:
+                # Best-effort cleanup of whichever connections opened before
+                # the exception. Reset attrs so a retry of start() starts
+                # from scratch and a later stop() is a clean no-op.
+                if self._reader_db is not None:
+                    with contextlib.suppress(Exception):
+                        await self._reader_db.close()
+                    self._reader_db = None
+                if self._db is not None:
+                    with contextlib.suppress(Exception):
+                        await self._db.close()
+                    self._db = None
+                self._running = False
+                raise
             self._update_live_link()
             if self._config.store_events:
                 self._flush_task = asyncio.create_task(self._flush_loop())
@@ -571,7 +610,18 @@ class EventRecorder:
                 )
             self._reader_db = None
         if self._db:
-            await self._db.close()
+            # Match the ``_rotate`` pattern: a close failure on the writer
+            # must not leak an exception out of shutdown. Log + continue so
+            # the live-link cleanup and the final ``recorder_stopped`` log
+            # still happen.
+            try:
+                await self._db.close()
+            except Exception as exc:
+                await logger.awarning(
+                    'recorder_writer_close_failed',
+                    category='recorder',
+                    error=str(exc),
+                )
             self._db = None
         self._remove_live_link()
         await logger.ainfo('recorder_stopped', category='recorder')
@@ -1336,7 +1386,15 @@ class EventRecorder:
         # cost of acquiring an uncontended asyncio.Lock is negligible and
         # the safety is worth it.
         async with self._flush_lock:
-            if not self._db or not self._buffer:
+            # Snapshot ``self._db`` once at the top of the critical section
+            # and use the local ``db`` reference for both ``executemany`` and
+            # ``commit``. Otherwise a concurrent ``_rotate`` (which does NOT
+            # hold ``_flush_lock``) could swap ``self._db`` between the two
+            # awaits — we'd commit on the new connection (no-op, since the
+            # executemany happened on the old one) and then ``old_db.close()``
+            # would discard the uncommitted transaction → data loss.
+            db = self._db
+            if not db or not self._buffer:
                 return
             if not self._config.store_events:
                 self._buffer.clear()
@@ -1373,8 +1431,8 @@ class EventRecorder:
             # surfaces disk-I/O latency tail so operators can alert on p99
             # regressions before the buffer backs up enough to drop events.
             flush_start = time.monotonic()
-            await self._db.executemany(query, rows)
-            await self._db.commit()
+            await db.executemany(query, rows)
+            await db.commit()
             recorder_flush_duration.observe(time.monotonic() - flush_start)
             # Post-drain: the gauge should report the new buffer depth. Usually
             # zero, but a concurrent _record() during the await could have
