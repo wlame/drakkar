@@ -199,6 +199,17 @@ def _list_db_files(db_dir: str, worker_name: str) -> list[str]:
     return files
 
 
+async def _open_reader(db_path: str) -> aiosqlite.Connection:
+    """Open a read-only aiosqlite connection to ``db_path``.
+
+    Uses the ``file:...?mode=ro`` SQLite URI form so any write attempt
+    through this handle fails fast with an SQLite error. Each aiosqlite
+    connection spawns its own worker thread, which is the property that
+    lets debug-UI SELECTs run in parallel with writer flushes/commits.
+    """
+    return await aiosqlite.connect(f'file:{db_path}?mode=ro', uri=True)
+
+
 def detect_worker_ip() -> str:
     """Detect the worker's outbound IP address.
 
@@ -239,6 +250,16 @@ class EventRecorder:
         self._cluster_name = cluster_name
         self._buffer: deque[dict] = deque(maxlen=config.max_buffer)
         self._db: aiosqlite.Connection | None = None
+        # Dedicated reader connection used by the debug UI for SELECTs.
+        # aiosqlite serializes ops per connection, so without this the UI
+        # read path would queue behind buffered-event flushes on the
+        # writer. WAL mode (applied to the writer) lets a separate reader
+        # connection see consistent snapshots while the writer commits.
+        # Opened in ``start()``, rotated alongside ``_db`` in ``_rotate``,
+        # closed first in ``stop()`` — closing the reader before the
+        # writer avoids the edge case where a SELECT is pending against
+        # a connection whose WAL has just been torn down.
+        self._reader_db: aiosqlite.Connection | None = None
         self._db_path: str = ''
         self._flush_task: asyncio.Task | None = None
         self._retention_task: asyncio.Task | None = None
@@ -275,6 +296,19 @@ class EventRecorder:
         return self._db_path
 
     @property
+    def reader_db(self) -> aiosqlite.Connection | None:
+        """Return the dedicated reader aiosqlite connection.
+
+        The debug UI should use this connection for SELECTs — it runs on a
+        separate aiosqlite worker thread from the writer, so UI reads
+        don't queue behind buffered-event flushes. Returns ``None`` when
+        the recorder has not been started yet or was started without a
+        ``db_dir`` (memory-only mode), matching the semantics of
+        ``_db``. Callers should check for ``None`` before executing.
+        """
+        return self._reader_db
+
+    @property
     def counters(self) -> dict[str, int]:
         return dict(self._counters)
 
@@ -306,7 +340,16 @@ class EventRecorder:
         if self._config.db_dir:
             self._db_path = _make_db_path(self._config.db_dir, self._worker_name)
             self._db = await aiosqlite.connect(self._db_path)
+            # WAL mode is what lets a separate reader connection coexist
+            # with the writer without serializing reads behind writes.
+            # Applied per-connection (SQLite stores the mode in the DB
+            # header; the reader picks it up automatically on open).
+            await self._db.execute('PRAGMA journal_mode=WAL')
             await self._create_schema(self._db)
+            # Open the dedicated reader connection AFTER schema creation
+            # so the reader always sees a ready DB. URI with ``mode=ro``
+            # rejects any accidental write attempt through this handle.
+            self._reader_db = await _open_reader(self._db_path)
             self._update_live_link()
             if self._config.store_events:
                 self._flush_task = asyncio.create_task(self._flush_loop())
@@ -514,6 +557,19 @@ class EventRecorder:
 
         await self._flush()
         await self._sync_state()
+        # Close the reader first. A close failure here should not block
+        # the writer close below — the writer close is what actually
+        # finalizes pending commits and tears down the WAL.
+        if self._reader_db:
+            try:
+                await self._reader_db.close()
+            except Exception as exc:
+                await logger.awarning(
+                    'recorder_reader_close_failed',
+                    category='recorder',
+                    error=str(exc),
+                )
+            self._reader_db = None
         if self._db:
             await self._db.close()
             self._db = None
@@ -967,7 +1023,12 @@ class EventRecorder:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
-        if not self._db or not self._config.store_events:
+        # Reads go through the dedicated reader connection so they don't
+        # serialize behind buffered-event flushes on the writer; fall back
+        # to the writer when the reader isn't available (e.g. legacy tests
+        # that set ``_db`` only).
+        reader = self._reader_db or self._db
+        if not reader or not self._config.store_events:
             return []
         conditions = []
         params: list = []
@@ -983,7 +1044,7 @@ class EventRecorder:
         where = f'WHERE {" AND ".join(conditions)}' if conditions else ''
         query = f'SELECT * FROM events {where} ORDER BY id DESC LIMIT ? OFFSET ?'
         params.extend([limit, offset])
-        async with self._db.execute(query, params) as cursor:
+        async with reader.execute(query, params) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]
@@ -991,10 +1052,11 @@ class EventRecorder:
     async def trace_by_label(self, label_key: str, label_value: str) -> list[dict]:
         """Find all events for tasks matching a label key-value pair."""
         await self._flush()
-        if not self._db or not self._config.store_events:
+        reader = self._reader_db or self._db
+        if not reader or not self._config.store_events:
             return []
         json_path = f'$.{label_key}'
-        async with self._db.execute(_LABEL_TRACE_QUERY, [json_path, label_value]) as cursor:
+        async with reader.execute(_LABEL_TRACE_QUERY, [json_path, label_value]) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]
@@ -1054,9 +1116,10 @@ class EventRecorder:
     async def get_trace(self, partition: int, msg_offset: int) -> list[dict]:
         """Get the full lifecycle of a message by partition and offset."""
         await self._flush()
-        if not self._db or not self._config.store_events:
+        reader = self._reader_db or self._db
+        if not reader or not self._config.store_events:
             return []
-        async with self._db.execute(_TRACE_QUERY, [partition, msg_offset, partition, msg_offset]) as cursor:
+        async with reader.execute(_TRACE_QUERY, [partition, msg_offset, partition, msg_offset]) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]
@@ -1164,17 +1227,19 @@ class EventRecorder:
     async def get_task_events(self, task_id: str) -> list[dict]:
         """Get all events for a specific task_id, ordered chronologically."""
         await self._flush()  # ensure recent events are queryable
-        if not self._db or not self._config.store_events:
+        reader = self._reader_db or self._db
+        if not reader or not self._config.store_events:
             return []
         query = 'SELECT * FROM events WHERE task_id = ? ORDER BY id ASC'
-        async with self._db.execute(query, [task_id]) as cursor:
+        async with reader.execute(query, [task_id]) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]
 
     async def get_partition_summary(self) -> list[dict]:
         """Get summary stats per partition from recorded events."""
-        if not self._db or not self._config.store_events:
+        reader = self._reader_db or self._db
+        if not reader or not self._config.store_events:
             return []
         query = """
             SELECT
@@ -1190,7 +1255,7 @@ class EventRecorder:
             GROUP BY partition
             ORDER BY partition
         """
-        async with self._db.execute(query) as cursor:
+        async with reader.execute(query) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]
@@ -1198,7 +1263,8 @@ class EventRecorder:
     async def get_active_tasks(self) -> list[dict]:
         """Get tasks that started but haven't completed or failed."""
         await self._flush()
-        if not self._db or not self._config.store_events:
+        reader = self._reader_db or self._db
+        if not reader or not self._config.store_events:
             return []
         query = """
             SELECT s.* FROM events s
@@ -1210,7 +1276,7 @@ class EventRecorder:
             )
             ORDER BY s.ts DESC
         """
-        async with self._db.execute(query) as cursor:
+        async with reader.execute(query) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]
@@ -1340,6 +1406,7 @@ class EventRecorder:
         new_path = _make_db_path(self._config.db_dir, self._worker_name)
         new_db = await aiosqlite.connect(new_path)
         try:
+            await new_db.execute('PRAGMA journal_mode=WAL')
             await self._create_schema(new_db)
         except Exception:
             # Avoid leaking the fd: close the new connection and re-raise.
@@ -1348,14 +1415,46 @@ class EventRecorder:
                 await new_db.close()
             raise
 
-        # Atomic swap: once this line executes, any concurrent flush sees
-        # the new, schema-ready connection.
+        # Open the new reader against the new path. Done BEFORE swapping
+        # so a concurrent debug-UI read arriving mid-swap never lands on
+        # a half-torn-down reader. If the open fails, abort: close the
+        # new writer (since we're no longer installing it) and leave the
+        # previous writer/reader pair intact so the worker stays usable.
+        try:
+            new_reader = await _open_reader(new_path)
+        except Exception:
+            with contextlib.suppress(Exception):
+                await new_db.close()
+            raise
+
+        # Atomic swap: once these lines execute, any concurrent flush or
+        # UI read sees the new, schema-ready connections. We swap writer
+        # first so a concurrent SELECT using the stale reader still runs
+        # against a (briefly) valid handle; the stale reader is closed
+        # below and its next use would correctly raise/fail through the
+        # None check in the debug_server helpers.
         old_db = self._db
+        old_reader = self._reader_db
         self._db = new_db
+        self._reader_db = new_reader
         self._db_path = new_path
         if self._drakkar_config:
             await self.write_config(self._drakkar_config)
         self._update_live_link()
+
+        if old_reader:
+            # Close the old reader before the old writer so any pending
+            # SELECT returns/errors promptly rather than blocking the
+            # writer close. Failures here are non-fatal — the new reader
+            # is already live.
+            try:
+                await old_reader.close()
+            except Exception as exc:
+                await logger.awarning(
+                    'recorder_old_reader_close_failed',
+                    category='recorder',
+                    error=str(exc),
+                )
 
         if old_db:
             # Don't let a close failure on the outgoing connection

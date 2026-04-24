@@ -33,6 +33,13 @@ from drakkar.recorder import EventRecorder
 @pytest.fixture
 def mock_recorder():
     rec = AsyncMock(spec=EventRecorder)
+    # Default the connection attrs to None so endpoints that check
+    # ``recorder.reader_db or recorder._db`` see a clean absence rather
+    # than an auto-generated MagicMock truthy value. Tests that exercise
+    # real DB queries set both explicitly.
+    rec._db = None
+    rec._reader_db = None
+    rec.reader_db = None
     rec.get_stats.return_value = {
         'total_events': 42,
         'consumed': 20,
@@ -2041,7 +2048,12 @@ class TestApiEvents:
 
         cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
 
+        # Same connection for read and write paths in this unit-test
+        # shim — the dedicated reader connection that the real recorder
+        # opens is not needed here because there's no writer contention.
         mock_recorder._db = db
+        mock_recorder._reader_db = db
+        mock_recorder.reader_db = db
         mock_recorder._flush = AsyncMock()
         mock_recorder._buffer = []
         mock_recorder._config = cfg
@@ -2088,6 +2100,8 @@ class TestApiEvents:
 
     async def test_events_no_db_returns_empty(self, debug_config, mock_recorder, mock_app):
         mock_recorder._db = None
+        mock_recorder._reader_db = None
+        mock_recorder.reader_db = None
         mock_recorder._flush = AsyncMock()
 
         fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
@@ -2160,6 +2174,8 @@ class TestApiRecentTasks:
         cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
 
         mock_recorder._db = db
+        mock_recorder._reader_db = db
+        mock_recorder.reader_db = db
         mock_recorder._flush = AsyncMock()
         mock_recorder._buffer = []
         mock_recorder._config = cfg
@@ -2223,6 +2239,8 @@ class TestApiRecentTasks:
 
     async def test_recent_tasks_no_db_returns_empty(self, debug_config, mock_recorder, mock_app):
         mock_recorder._db = None
+        mock_recorder._reader_db = None
+        mock_recorder.reader_db = None
         mock_recorder._flush = AsyncMock()
 
         fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
@@ -2613,6 +2631,8 @@ class TestApiRecentTasksEdgeCases:
         cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
 
         mock_recorder._db = db
+        mock_recorder._reader_db = db
+        mock_recorder.reader_db = db
         mock_recorder._flush = AsyncMock()
         mock_recorder._buffer = []
         mock_recorder._config = cfg
@@ -2646,6 +2666,8 @@ class TestApiRecentTasksEdgeCases:
         cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
 
         mock_recorder._db = db
+        mock_recorder._reader_db = db
+        mock_recorder.reader_db = db
         mock_recorder._flush = AsyncMock()
         mock_recorder._buffer = []
         mock_recorder._config = cfg
@@ -3238,6 +3260,8 @@ class TestApiPeriodicTasks:
 
         cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp')
         mock_recorder._db = db
+        mock_recorder._reader_db = db
+        mock_recorder.reader_db = db
         mock_recorder._flush = AsyncMock()
         mock_recorder._buffer = []
         mock_recorder._config = cfg
@@ -3279,6 +3303,8 @@ class TestApiPeriodicTasks:
 
         cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
         mock_recorder._db = db
+        mock_recorder._reader_db = db
+        mock_recorder.reader_db = db
         mock_recorder._flush = AsyncMock()
         mock_recorder._buffer = []
         mock_recorder._config = cfg
@@ -3349,6 +3375,8 @@ class TestApiLabelTrace:
 
         cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
         mock_recorder._db = db
+        mock_recorder._reader_db = db
+        mock_recorder.reader_db = db
         mock_recorder._flush = AsyncMock()
         mock_recorder._buffer = []
         mock_recorder._config = cfg
@@ -3397,6 +3425,8 @@ class TestApiLabelTrace:
 
         cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp')
         mock_recorder._db = db
+        mock_recorder._reader_db = db
+        mock_recorder.reader_db = db
         mock_recorder._flush = AsyncMock()
         mock_recorder._buffer = []
         mock_recorder._config = cfg
@@ -4068,7 +4098,15 @@ async def test_api_events_dispatches_to_drakkar_main_loop_when_different(
             def __getattr__(self, name: str):
                 return getattr(self._wrapped, name)
 
-        mock_recorder._db = _LoopObservingDB(db)
+        # Route both writer and reader through the loop-observing spy so
+        # we can assert the debug-server read path stays on the main loop
+        # whether it reads via ``_db`` or ``reader_db`` — the production
+        # endpoint picks the reader first but both must be bound to the
+        # main loop.
+        observer = _LoopObservingDB(db)
+        mock_recorder._db = observer
+        mock_recorder._reader_db = observer
+        mock_recorder.reader_db = observer
         mock_recorder._flush = AsyncMock()
         mock_recorder._buffer = []
         mock_recorder._config = debug_config
@@ -4117,6 +4155,8 @@ async def test_api_events_falls_back_to_inline_when_main_loop_is_mock(tmp_path, 
     await db.commit()
 
     mock_recorder._db = db
+    mock_recorder._reader_db = db
+    mock_recorder.reader_db = db
     mock_recorder._flush = AsyncMock()
     mock_recorder._buffer = []
     mock_recorder._config = debug_config

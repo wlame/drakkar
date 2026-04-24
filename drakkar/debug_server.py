@@ -1253,16 +1253,20 @@ def create_debug_app(
 
         # Flush + read must run on the main loop where the aiosqlite
         # connection was opened — see ``_dispatch_to_main_loop`` notes.
+        # Writes go through ``recorder._db`` (the writer); SELECTs go
+        # through ``recorder.reader_db`` so UI reads don't queue behind
+        # writer flushes.
         async def _read():
             await recorder._flush()
-            if not recorder._db:
+            reader = recorder.reader_db or recorder._db
+            if not reader:
                 return []
             query = """
                 SELECT DISTINCT labels FROM events
                 WHERE labels IS NOT NULL
                 LIMIT 100
             """
-            async with recorder._db.execute(query) as cursor:
+            async with reader.execute(query) as cursor:
                 return await cursor.fetchall()
 
         try:
@@ -1303,10 +1307,12 @@ def create_debug_app(
         """
 
         # Flush and SELECT must both execute on the main loop so the
-        # aiosqlite connection stays on its owning loop.
+        # aiosqlite connection stays on its owning loop. The SELECT uses
+        # the dedicated reader connection to avoid queuing behind flushes.
         async def _read():
             await recorder._flush()
-            if not recorder._db:
+            reader = recorder.reader_db or recorder._db
+            if not reader:
                 return None
             query = """
                 SELECT ts, task_id, duration, exit_code, metadata
@@ -1315,7 +1321,7 @@ def create_debug_app(
                 ORDER BY ts DESC
                 LIMIT 500
             """
-            async with recorder._db.execute(query) as cursor:
+            async with reader.execute(query) as cursor:
                 columns = [d[0] for d in cursor.description]
                 rows = await cursor.fetchall()
             return columns, rows
@@ -1431,12 +1437,15 @@ def create_debug_app(
         params.append(limit)
 
         # Flush pending events + the SELECT must both execute on the
-        # main loop where the aiosqlite connection lives.
+        # main loop where the aiosqlite connection lives. SELECT routes
+        # through the dedicated reader connection so UI queries don't
+        # queue behind writer flushes.
         async def _read():
             await recorder._flush()
-            if not recorder._db:
+            reader = recorder.reader_db or recorder._db
+            if not reader:
                 return None
-            async with recorder._db.execute(query, params) as cursor:
+            async with reader.execute(query, params) as cursor:
                 columns = [d[0] for d in cursor.description]
                 rows = await cursor.fetchall()
             return columns, rows
@@ -1459,11 +1468,13 @@ def create_debug_app(
         """
 
         # Flush + read on the main loop; post-processing stays here.
+        # SELECT goes through the reader connection.
         async def _read():
             await recorder._flush()
-            if not recorder._db:
+            reader = recorder.reader_db or recorder._db
+            if not reader:
                 return None
-            async with recorder._db.execute(query, [since]) as cursor:
+            async with reader.execute(query, [since]) as cursor:
                 columns = [d[0] for d in cursor.description]
                 rows = await cursor.fetchall()
             return columns, rows
@@ -1582,12 +1593,14 @@ def create_debug_app(
 
         # Dispatch the flush + SELECT to the main loop; this keeps the
         # aiosqlite connection on its owning loop even though the
-        # endpoint executes on the debug server's thread.
+        # endpoint executes on the debug server's thread. SELECT goes
+        # through the reader connection.
         async def _read():
             await recorder._flush()
-            if not recorder._db or not recorder._config.store_events:
+            reader = recorder.reader_db or recorder._db
+            if not reader or not recorder._config.store_events:
                 return None
-            async with recorder._db.execute(query, task_ids) as cursor:
+            async with reader.execute(query, task_ids) as cursor:
                 columns = [d[0] for d in cursor.description]
                 rows = await cursor.fetchall()
             return columns, rows
@@ -1672,15 +1685,17 @@ def create_debug_app(
         # Entire DB interaction (flush + SELECT + fetch) dispatches to
         # the main loop. Returning rows as dicts inside the coroutine
         # avoids carrying the aiosqlite cursor across the loop boundary.
+        # SELECT goes through the reader connection.
         async def _read():
             await recorder._flush()
-            if not recorder._db or not recorder._config.store_events:
+            reader = recorder.reader_db or recorder._db
+            if not reader or not recorder._config.store_events:
                 return []
             query = (
                 'SELECT ts, task_id, partition, offset, duration, metadata '
                 'FROM events WHERE event = ? ORDER BY id DESC LIMIT ?'
             )
-            async with recorder._db.execute(query, (event_name, limit)) as cur:
+            async with reader.execute(query, (event_name, limit)) as cur:
                 columns = [d[0] for d in cur.description]
                 rows = await cur.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]
@@ -1714,7 +1729,7 @@ def create_debug_app(
         # for rendering the message source in the UI), while
         # task_completed/task_failed carry the subprocess exit status.
         aux_by_id: dict[str, dict] = {}
-        if task_ids and recorder._db:
+        if task_ids and (recorder.reader_db or recorder._db):
             placeholders = ','.join(['?'] * len(task_ids))
             q = (
                 f'SELECT task_id, event, duration, exit_code, metadata '
@@ -1724,10 +1739,13 @@ def create_debug_app(
 
             # The aiosqlite connection lives on the main loop, so run
             # the SELECT + fetchall there and return plain Python data.
+            # Routes through the reader connection so UI lookups don't
+            # queue behind writer flushes.
             async def _read_aux():
-                if not recorder._db:
+                reader = recorder.reader_db or recorder._db
+                if not reader:
                     return [], []
-                async with recorder._db.execute(q, task_ids) as cur:
+                async with reader.execute(q, task_ids) as cur:
                     cols = [d[0] for d in cur.description]
                     aux_rows = await cur.fetchall()
                 return cols, aux_rows
@@ -1790,7 +1808,7 @@ def create_debug_app(
         # column indexes; the Python-side tuple match handles the final
         # (partition, offset) pairing — cheap given the small row count.
         consumed_by_key: dict[tuple, list[float]] = {}
-        if events and recorder._db:
+        if events and (recorder.reader_db or recorder._db):
             pairs = {
                 (e['partition'], e['offset'])
                 for e in events
@@ -1809,11 +1827,13 @@ def create_debug_app(
                 params: list = [*partitions, *offsets]
 
                 # SELECT runs on the main loop; collect rows into a
-                # plain list so no aiosqlite objects escape.
+                # plain list so no aiosqlite objects escape. Uses the
+                # reader connection.
                 async def _read_consumed():
-                    if not recorder._db:
+                    reader = recorder.reader_db or recorder._db
+                    if not reader:
                         return []
-                    async with recorder._db.execute(q, params) as cur:
+                    async with reader.execute(q, params) as cur:
                         return await cur.fetchall()
 
                 for row in await _dispatch_to_main_loop(_read_consumed()):
@@ -1997,12 +2017,14 @@ def create_debug_app(
         params: list = [req.partition, *req.offsets]
 
         # Flush + aggregate both run on the main loop. The cursor stays
-        # there; only the fetched rows cross back to our loop.
+        # there; only the fetched rows cross back to our loop. SELECT
+        # uses the reader connection.
         async def _read():
             await recorder._flush()
-            if not recorder._db or not recorder._config.store_events:
+            reader = recorder.reader_db or recorder._db
+            if not reader or not recorder._config.store_events:
                 return None
-            async with recorder._db.execute(q, params) as cur:
+            async with reader.execute(q, params) as cur:
                 return await cur.fetchall()
 
         rows = await _dispatch_to_main_loop(_read())

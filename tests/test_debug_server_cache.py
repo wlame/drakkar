@@ -64,7 +64,15 @@ def mock_recorder():
     rec.get_partition_summary.return_value = []
     rec.get_events.return_value = []
     rec.get_active_tasks.return_value = []
-    rec._db = None  # default: no events DB (periodic endpoint short-circuits)
+    # default: no events DB (periodic endpoint short-circuits). The real
+    # recorder exposes BOTH a writer (``_db``) and a reader (``_reader_db``
+    # / ``reader_db``) connection; explicitly null them all so the
+    # endpoints' ``reader_db or _db`` fallback sees a clean absence
+    # instead of the auto-generated MagicMock the AsyncMock spec would
+    # otherwise provide.
+    rec._db = None
+    rec._reader_db = None
+    rec.reader_db = None
     rec._flush = AsyncMock()
     rec._buffer = []
     return rec
@@ -133,7 +141,14 @@ class TestApiPeriodicSystemField:
                 ev,
             )
         await db.commit()
+        # Wire the same connection as both writer and reader — the debug
+        # server's SELECT path picks ``reader_db`` first, so the test
+        # fixture must set it explicitly (setting ``_db`` alone leaves
+        # ``reader_db`` as the fixture default of None and the SELECT
+        # short-circuits).
         mock_recorder._db = db
+        mock_recorder._reader_db = db
+        mock_recorder.reader_db = db
         return db
 
     async def test_system_true_when_metadata_has_system(self, tmp_path, mock_recorder, debug_config):

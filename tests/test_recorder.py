@@ -654,6 +654,174 @@ async def test_rotate_schema_creation_failure_does_not_swap(tmp_path):
     await rec.stop()
 
 
+# --- Dedicated reader connection (H3) ---
+
+
+async def test_start_creates_both_writer_and_reader_connections(tmp_path):
+    """start() must open both ``_db`` (writer) and ``_reader_db`` (reader)."""
+    import aiosqlite
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    # Both connection attributes must be set and be aiosqlite connections.
+    assert rec._db is not None
+    assert rec._reader_db is not None
+    assert isinstance(rec._db, aiosqlite.Connection)
+    assert isinstance(rec._reader_db, aiosqlite.Connection)
+    # The reader is a separate connection object, not an alias to the writer.
+    assert rec._db is not rec._reader_db
+    # The public property returns the reader connection.
+    assert rec.reader_db is rec._reader_db
+
+    await rec.stop()
+
+
+async def test_stop_closes_both_connections(tmp_path):
+    """stop() must close both the writer and the reader and None them out."""
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    writer = rec._db
+    reader = rec._reader_db
+    assert writer is not None
+    assert reader is not None
+
+    await rec.stop()
+
+    # Both references are cleared so a post-stop access returns None.
+    assert rec._db is None
+    assert rec._reader_db is None
+    assert rec.reader_db is None
+    # The underlying connections were closed — attempting to use them
+    # should raise a ValueError from aiosqlite (operation on closed
+    # connection). We check the reader first since stop() closes it
+    # first and the error surfaces deterministically.
+    with pytest.raises(ValueError):
+        async with reader.execute('SELECT 1') as cur:
+            await cur.fetchall()
+
+
+async def test_reader_sees_writer_writes(tmp_path):
+    """A row committed via the writer must be visible through the reader.
+
+    This is the core WAL-based invariant we rely on: the reader connection
+    is a separate aiosqlite connection on its own worker thread, but WAL
+    journaling lets it see committed snapshots produced by the writer.
+    """
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    assert rec._db is not None
+    assert rec._reader_db is not None
+
+    # Buffer an event, then flush to force a writer commit.
+    rec.record_consumed(make_msg(partition=7, offset=123))
+    await rec._flush()
+
+    # Query via the reader (not the writer) and assert the row is visible.
+    async with rec._reader_db.execute(
+        'SELECT partition, offset FROM events WHERE event = ?',
+        ('consumed',),
+    ) as cursor:
+        rows = await cursor.fetchall()
+
+    assert (7, 123) in rows
+
+    await rec.stop()
+
+
+async def test_rotate_rotates_reader_too(tmp_path):
+    """_rotate() must swap both writer AND reader to the new DB path."""
+    config = make_debug_config(tmp_path, retention_hours=24)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    old_writer = rec._db
+    old_reader = rec._reader_db
+
+    await rec._rotate()
+
+    # After rotation both connections are replaced (new objects, not
+    # aliases of the old ones). Note: _make_db_path timestamp has
+    # second-precision, so a rapid rotate in the same wall-clock second
+    # can reuse the filename; we assert on connection-object identity
+    # rather than path string to avoid that flake.
+    assert rec._db is not None
+    assert rec._reader_db is not None
+    assert rec._db is not old_writer
+    assert rec._reader_db is not old_reader
+
+    # The new reader must be usable — write via the writer then SELECT
+    # via the reader to confirm both point at the same (new) file.
+    rec.record_consumed(make_msg(partition=1, offset=999))
+    await rec._flush()
+    async with rec._reader_db.execute(
+        'SELECT partition, offset FROM events WHERE event = ?',
+        ('consumed',),
+    ) as cur:
+        rows = await cur.fetchall()
+    assert (1, 999) in rows
+
+    await rec.stop()
+
+
+async def test_concurrent_reader_and_writer_no_deadlock(tmp_path):
+    """A UI-style reader SELECT and a writer flush run concurrently without
+    deadlocking. WAL mode is what makes this safe — the reader sees a
+    snapshot while the writer commits.
+    """
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    assert rec._db is not None
+    assert rec._reader_db is not None
+
+    # Seed a baseline batch so the reader has rows to return while the
+    # writer is committing the next batch concurrently.
+    for offset in range(50):
+        rec.record_consumed(make_msg(offset=offset))
+    await rec._flush()
+
+    # Second batch not yet flushed — the writer work below will flush it.
+    for offset in range(50, 100):
+        rec.record_consumed(make_msg(offset=offset))
+
+    async def reader_task():
+        # Simulate a debug-UI SELECT on the reader connection.
+        async with rec._reader_db.execute('SELECT COUNT(*) FROM events') as cur:
+            row = await cur.fetchone()
+        return row[0] if row else 0
+
+    async def writer_task():
+        # Flush the buffered second batch to the writer.
+        await rec._flush()
+
+    # Run both concurrently under a generous timeout. If WAL isolation
+    # were missing OR connections shared a worker thread, this could
+    # deadlock or serialize pathologically; we expect both to complete
+    # well under the 2s budget.
+    reader_count, _ = await asyncio.wait_for(
+        asyncio.gather(reader_task(), writer_task()),
+        timeout=2.0,
+    )
+
+    # Reader ran at some point during the flush — count may be 50 or 100
+    # depending on ordering, but must be at least the pre-flush baseline.
+    assert reader_count >= 50
+
+    # After both finish, the final flush is durable and visible via the
+    # reader — confirms WAL snapshot isolation did not drop writes.
+    async with rec._reader_db.execute('SELECT COUNT(*) FROM events') as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] == 100
+
+    await rec.stop()
+
+
 # --- Pool stats in events ---
 
 
