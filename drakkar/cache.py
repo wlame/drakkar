@@ -2079,6 +2079,64 @@ class CacheEngine:
         return max(int(rows[-1][5]), cursor_ms)
 
     async def _sync_once(self) -> dict[str, list[tuple]]:
+        """Pull one batch of entries from every discovered peer with a
+        per-cycle wall-clock deadline.
+
+        This is a thin wrapper around ``_sync_inner`` that enforces a hard
+        cap on a single cycle's total wall-clock time. Without the cap, a
+        single slow peer (NFS lag, pathological disk contention, remote
+        hang) could keep ``_sync_inner`` in flight well past the next
+        scheduled cycle and starve the periodic task.
+
+        Deadline resolution:
+        - ``config.peer_sync.cycle_deadline_seconds`` when set explicitly.
+        - Otherwise ``interval_seconds * 0.9`` — strictly less than the
+          gap between invocations so the periodic loop always has slack
+          to schedule the next cycle even if this one hit the cap.
+
+        On timeout:
+        - Log a warning with the effective deadline.
+        - Increment ``cache_peer_sync_timeouts`` (unlabelled worker-level
+          counter — any nonzero rate signals a slow-peer or
+          peer-count-vs-interval imbalance).
+        - Return an empty dict. The periodic-task wrapper doesn't inspect
+          the return value; the important contract is that
+          ``_sync_once`` itself does not raise, so the periodic task
+          keeps running.
+
+        Returns:
+            Whatever ``_sync_inner`` produced on successful completion
+            (``{peer_name: list_of_row_tuples}``), or an empty dict if
+            the deadline fired. Tests that want to assert fetched rows
+            without triggering the deadline should either leave
+            ``cycle_deadline_seconds=None`` and rely on the default or
+            configure a generous explicit deadline.
+        """
+        cycle_deadline = self._config.peer_sync.cycle_deadline_seconds
+        # ``None`` is the default: derive from the interval so operators
+        # who never tune the deadline still get a reasonable bound. The
+        # 0.9 factor gives the periodic loop headroom to schedule the
+        # next cycle without overlapping.
+        deadline = cycle_deadline if cycle_deadline is not None else self._config.peer_sync.interval_seconds * 0.9
+        try:
+            return await asyncio.wait_for(self._sync_inner(), timeout=deadline)
+        except TimeoutError:
+            # Python 3.11+: ``asyncio.TimeoutError`` is an alias for the
+            # builtin ``TimeoutError``. Using the builtin name keeps this
+            # compatible with both aliases and avoids the extra attribute
+            # lookup at runtime.
+            metrics.cache_peer_sync_timeouts.inc()
+            await logger.awarning(
+                'cache_peer_sync_cycle_timeout',
+                category='cache',
+                deadline_seconds=deadline,
+            )
+            # Return silently — the periodic task must continue. Re-raising
+            # would crash the loop and leave peer-sync permanently
+            # disabled until the next worker restart.
+            return {}
+
+    async def _sync_inner(self) -> dict[str, list[tuple]]:
         """Pull one batch of entries from every discovered peer and apply
         them to the local DB via LWW UPSERT.
 
@@ -2089,6 +2147,11 @@ class CacheEngine:
         ``sync_entries_fetched`` / ``sync_entries_upserted`` counters.
         Task 13 (this change): cursor-based incremental pulls and
         per-peer error isolation.
+
+        Phase 2 Task 2: renamed from ``_sync_once`` to ``_sync_inner``;
+        the deadline-enforcing wrapper now owns the public
+        ``_sync_once`` name so every caller (periodic task, tests) picks
+        up the per-cycle cap transparently.
 
         Apply step details:
 

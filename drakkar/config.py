@@ -422,6 +422,23 @@ class CachePeerSyncConfig(BaseModel):
     interval_seconds: float = Field(default=30.0, gt=0)
     batch_size: int = Field(default=500, ge=1)
     timeout_seconds: float = Field(default=5.0, gt=0)
+    # ``cycle_deadline_seconds`` is a hard wall-clock cap on one peer-sync
+    # cycle. Without this bound, a single slow peer (NFS lag, disk
+    # contention, unresponsive remote) could keep ``_sync_once`` in flight
+    # indefinitely and starve the periodic task. ``None`` => default to
+    # ``interval_seconds * 0.9`` so the deadline is always strictly less
+    # than the gap between invocations. Minimum floor of 0.1s prevents
+    # operators from accidentally setting a value so tight that normal
+    # syncs can never complete.
+    cycle_deadline_seconds: float | None = Field(
+        default=None,
+        ge=0.1,
+        description=(
+            'Hard wall-clock cap on one peer-sync cycle. When None, defaults '
+            'to interval_seconds * 0.9. Prevents a single slow peer from '
+            'starving the periodic task.'
+        ),
+    )
 
 
 class CacheConfig(BaseModel):

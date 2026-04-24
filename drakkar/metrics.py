@@ -322,6 +322,23 @@ cache_sync_errors = Counter(
     ['peer'],
 )
 
+# Per-cycle deadline counter (Task 2 of Phase 2). Complements the per-peer
+# ``cache_sync_errors`` counter: that one ticks on a single peer failing,
+# this one ticks when the whole cycle (all peers combined) blew past the
+# wall-clock cap. Unlabelled — the deadline is a worker-level property so
+# per-peer labels would add cardinality without analytical value. Any
+# nonzero rate means the worker has more peers than ``interval_seconds``
+# can comfortably accommodate, or one peer's DB is pathologically slow.
+cache_peer_sync_timeouts = Counter(
+    'drakkar_cache_peer_sync_timeouts_total',
+    (
+        'Peer-sync cycles that hit the per-cycle deadline before completing. '
+        'Any nonzero rate indicates a slow peer or large peer count relative '
+        'to interval_seconds.'
+    ),
+    [],
+)
+
 # DB-size gauges refreshed by the cleanup loop. Counting DB rows on every
 # ``set``/``get`` would defeat the running-sum design used for the in-memory
 # gauges, so the DB view is updated at cleanup cadence (default 60s). Since
