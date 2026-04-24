@@ -52,6 +52,38 @@ class BaseSink(ABC, Generic[PayloadT]):
     sink_type: str = ''
     """Identifier for this sink type (e.g., 'kafka', 'postgres', 'mongo')."""
 
+    idempotent: bool = False
+    """Whether ``SinkManager`` MAY retry this sink on transient errors.
+
+    Contract:
+        When ``True``, SinkManager will automatically retry ``deliver()``
+        on transient errors (``ConnectionError``, ``TimeoutError``, etc.)
+        up to a small bounded number of attempts before delegating to
+        the ``on_delivery_error`` handler. Duplicate delivery MUST be safe
+        for the sink — this is only appropriate when one of the following
+        applies:
+
+        - the downstream system deduplicates (e.g. Kafka broker dedup on
+          message key with an idempotent producer);
+        - the operation is write-replace / upsert semantics (e.g. a Redis
+          ``SET`` of a fixed key, or a file that is fully rewritten);
+        - the operation carries an idempotency key the downstream honors
+          (e.g. an HTTP POST with ``Idempotency-Key`` header).
+
+        When ``False`` (the safe default), ``SinkManager`` does a single
+        ``deliver()`` attempt and routes any error straight to the
+        ``on_delivery_error`` handler. Retrying a non-idempotent sink
+        risks duplicate side effects (double INSERT, duplicate webhook
+        POSTs, appended-twice log lines) so we default to conservative
+        single-attempt delivery and require an explicit opt-in from the
+        sink author.
+
+        User-defined sinks can override this in subclasses. For example,
+        a custom webhook sink that supplies an ``Idempotency-Key`` header
+        may subclass ``HttpSink`` and set ``idempotent = True`` to opt
+        into automatic transient-error retries.
+    """
+
     def __init__(self, name: str, ui_url: str = '') -> None:
         self._name = name
         self._ui_url = ui_url

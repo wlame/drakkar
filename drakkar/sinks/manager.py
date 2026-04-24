@@ -23,6 +23,39 @@ from drakkar.models import CollectResult, DeliveryAction, DeliveryError
 from drakkar.sinks.base import BaseSink
 from drakkar.utils import redact_url
 
+# Exception types that we treat as "transient" and retry for an idempotent
+# sink before surfacing through ``on_delivery_error``. Kept narrow on
+# purpose — over-classifying (e.g., treating every ``Exception`` as
+# transient) would paper over real bugs and delay DLQ routing for
+# genuinely broken downstreams. asyncio-native timeouts and OS-level
+# connection errors cover the common "flaky network" case; sink-library
+# specific errors (aiokafka, asyncpg, etc.) usually subclass
+# ``ConnectionError`` or ``TimeoutError`` in practice, or raise a
+# library-specific exception that the sink implementation can remap
+# before re-raising. Users who need a broader classification can
+# subclass ``BaseSink`` and catch + re-raise as a ``ConnectionError``
+# inside their own ``deliver()`` method.
+_TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
+    ConnectionError,
+    TimeoutError,
+    asyncio.TimeoutError,
+)
+
+# Number of attempts made by the idempotent fast-retry before the error
+# surfaces through ``on_delivery_error``. This is intentionally small —
+# the idempotent retry is a quick best-effort to smooth out a single
+# blipped packet; if the downstream is truly down, we want the circuit
+# breaker + DLQ logic to see the outcome fast rather than burn budget.
+_IDEMPOTENT_MAX_ATTEMPTS = 3
+
+# Exponential backoff base for the idempotent fast-retry. At attempt i
+# (0-indexed among retries only, not counting the first attempt) we
+# sleep ``_IDEMPOTENT_BACKOFF_BASE * 2 ** i`` seconds — 50ms, 100ms,
+# 200ms for the default 3 attempts. Small enough to be invisible under
+# normal operation; large enough to let the downstream recover from a
+# momentary blip before we hammer it again.
+_IDEMPOTENT_BACKOFF_BASE = 0.05
+
 if TYPE_CHECKING:
     from drakkar.recorder import EventRecorder
     from drakkar.sinks.dlq import DLQSink
@@ -362,6 +395,87 @@ class SinkManager:
         ]
         await asyncio.gather(*coros)
 
+    async def _deliver_with_transient_retry(
+        self,
+        sink: BaseSink[Any],
+        sink_type: str,
+        sink_name: str,
+        payloads: list[BaseModel],
+        stats: SinkStats,
+    ) -> None:
+        """Run ``sink.deliver(payloads)`` with a bounded fast-retry on transient errors.
+
+        The retry budget is consulted ONLY when ``sink.idempotent is True``:
+        duplicate delivery is safe (broker-dedup, write-replace, etc.) so a
+        transient error (network blip, connection reset) is worth retrying
+        before we burn the user-facing ``on_delivery_error`` budget and
+        advance the circuit breaker. Non-idempotent sinks get a single
+        attempt — a retry could double-submit, and the caller's error
+        handler is the right place to decide SKIP / DLQ / RETRY.
+
+        Non-transient exceptions (``ValueError``, ``RuntimeError``, sink
+        configuration errors, etc.) are NOT retried even when the sink
+        is idempotent — they indicate a bug in the payload or the sink
+        itself, and a quick re-attempt won't change the outcome.
+
+        The retries happen INSIDE a single ``_deliver_to_sink`` attempt
+        from the circuit breaker's perspective: whether we made 1 or N
+        underlying attempts, the breaker sees exactly one ``record_*``
+        call for this delivery. That preserves the Phase 2 invariant
+        that a single batch with in-call retries counts as ONE consecutive
+        failure.
+        """
+        # Non-idempotent fast path: a single shot, exactly as before.
+        # We intentionally do NOT wrap in try/except here so the
+        # exception propagates unchanged to the caller's handling logic.
+        if not sink.idempotent:
+            await sink.deliver(payloads)
+            return
+
+        # Idempotent path: transient errors get a small number of quick
+        # retries with exponential backoff. Non-transient errors propagate
+        # on the first raise. Successful delivery returns immediately.
+        last_exception: BaseException | None = None
+        for attempt_idx in range(_IDEMPOTENT_MAX_ATTEMPTS):
+            try:
+                await sink.deliver(payloads)
+                return
+            except _TRANSIENT_ERRORS as exc:
+                last_exception = exc
+                # The last attempt has nothing to retry into — just
+                # re-raise so the caller's error handler sees the
+                # transient error exactly as it would on a non-idempotent
+                # sink.
+                if attempt_idx == _IDEMPOTENT_MAX_ATTEMPTS - 1:
+                    raise
+                # Count each in-call retry on the public counter so
+                # operators see the retry activity separately from the
+                # handler-driven RETRY action. ``stats.retry_count`` is
+                # NOT bumped here because that counter reflects handler
+                # decisions — the in-call retry is an internal fast-path
+                # and should not alter the operator-visible "how often
+                # did your handler return RETRY" signal.
+                sink_delivery_retries.labels(sink_type=sink_type, sink_name=sink_name).inc()
+                backoff = _IDEMPOTENT_BACKOFF_BASE * (2**attempt_idx)
+                await logger.adebug(
+                    'sink_idempotent_transient_retry',
+                    category='sink',
+                    sink_type=sink_type,
+                    sink_name=sink_name,
+                    attempt=attempt_idx + 1,
+                    backoff=backoff,
+                    error=redact_url(str(exc)),
+                )
+                await asyncio.sleep(backoff)
+
+        # Defensive: the loop above should always either ``return`` on
+        # success or ``raise`` on the terminal attempt. This line is
+        # unreachable under normal control flow but is kept explicit so
+        # a future refactor doesn't silently swallow ``last_exception``
+        # if the loop structure changes.
+        if last_exception is not None:
+            raise last_exception
+
     async def _deliver_to_sink(
         self,
         sink_type: str,
@@ -474,7 +588,20 @@ class SinkManager:
             while True:
                 try:
                     start = time.monotonic()
-                    await sink.deliver(payloads)
+                    # Idempotent sinks get a small fast-retry on transient
+                    # errors before the failure surfaces through
+                    # ``on_delivery_error``. Non-idempotent sinks take a
+                    # single shot (current behavior preserved).
+                    # Both paths count as ONE delivery attempt from the
+                    # circuit breaker's perspective — the transient-retry
+                    # loop is purely internal to this ``deliver`` call.
+                    await self._deliver_with_transient_retry(
+                        sink=sink,
+                        sink_type=sink_type,
+                        sink_name=sink_name,
+                        payloads=payloads,
+                        stats=stats,
+                    )
                     duration = time.monotonic() - start
                     stats.delivered_count += 1
                     stats.delivered_payloads += len(payloads)

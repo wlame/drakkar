@@ -29,6 +29,15 @@ class RedisSink(BaseSink[RedisPayload]):
 
     sink_type = 'redis'
 
+    # Redis ``SET`` is write-replace on a fixed key — re-executing the
+    # same command produces the same post-state regardless of how many
+    # times it ran. That makes RedisSink safe to retry on transient
+    # errors (connection reset mid-command, timeout, etc.), so we opt
+    # into automatic retry via ``idempotent=True``. TTLs are also set as
+    # part of the SET so the retry doesn't "refresh" a key that was
+    # already written in an earlier attempt in some surprising way.
+    idempotent = True
+
     def __init__(self, name: str, config: RedisSinkConfig) -> None:
         super().__init__(name, ui_url=config.ui_url)
         self._config = config

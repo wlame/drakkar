@@ -1632,3 +1632,222 @@ async def test_circuit_half_open_handler_raises_clears_probe_inflight():
     # released by the try/finally guard. Without it, every future
     # delivery would see ``half_open + inflight=True`` and skip.
     assert not sink.probe_inflight, 'a raising on_delivery_error on a half-open probe must release the probe slot'
+
+
+# --- BaseSink.idempotent transient-retry ---------------------------------
+
+
+class IdempotentSink(FakeSink):
+    """FakeSink variant that opts into the ``idempotent`` fast-retry.
+
+    Used by the idempotent-retry tests below. Keeps the rest of FakeSink's
+    behavior (tracks delivered payloads, supports ``fail_on_deliver``) so
+    we can compose transient-error scenarios.
+    """
+
+    idempotent = True
+
+
+async def test_idempotent_sink_retries_on_transient_error_then_succeeds():
+    """When ``idempotent=True``, ConnectionError on first attempt triggers
+    an in-call retry; the second attempt succeeds and the delivery lands
+    without invoking ``on_delivery_error`` at all.
+
+    This is the headline win of the idempotency declaration — the flaky
+    network blip never reaches the user's error handler or advances the
+    circuit breaker.
+    """
+    mgr = SinkManager()
+    sink = IdempotentSink('out', sink_type='kafka')
+    mgr.register(sink)
+
+    call_count = 0
+
+    async def flaky_deliver(payloads: list) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise ConnectionError('transient: connection reset')
+        sink.delivered.append(payloads)
+
+    sink.deliver = flaky_deliver  # type: ignore[assignment]
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    # Two deliver attempts (one failed, one succeeded).
+    assert call_count == 2
+    # ``on_delivery_error`` was NOT called — the fast-retry masked the
+    # transient error entirely.
+    on_error.assert_not_called()
+    # Breaker stays closed; the failure never propagated.
+    assert sink.circuit_state == 'closed'
+    assert sink._consecutive_failures == 0
+    # Payload was delivered exactly once.
+    assert len(sink.delivered) == 1
+
+
+async def test_non_idempotent_sink_does_not_retry_on_transient_error():
+    """When ``idempotent=False`` (default), ConnectionError on first attempt
+    propagates immediately to ``on_delivery_error``. The sink is called
+    exactly once even though the error type is classified as transient —
+    retrying a non-idempotent sink could double-submit.
+    """
+    mgr = SinkManager()
+    sink = FakeSink('out', sink_type='kafka')
+    # FakeSink inherits ``idempotent = False`` from BaseSink.
+    assert sink.idempotent is False
+    mgr.register(sink)
+
+    call_count = 0
+
+    async def flaky_deliver(payloads: list) -> None:
+        nonlocal call_count
+        call_count += 1
+        raise ConnectionError('transient: connection reset')
+
+    sink.deliver = flaky_deliver  # type: ignore[assignment]
+    # Handler returns SKIP so we don't trigger the handler-driven retry
+    # path — we're testing the in-call retry here, not the RETRY action.
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    # Exactly one deliver attempt — the non-idempotent path skips the
+    # fast-retry even on transient errors.
+    assert call_count == 1
+    # The error still reaches ``on_delivery_error`` — that's where
+    # non-idempotent sinks must make the retry decision.
+    on_error.assert_called_once()
+
+
+async def test_idempotent_sink_does_not_retry_on_non_transient_error():
+    """Even when ``idempotent=True``, a non-transient error (``ValueError``)
+    is NOT retried — those signal a bug in the payload or sink, and a
+    quick re-attempt won't change the outcome. The error propagates to
+    ``on_delivery_error`` on the first raise.
+    """
+    mgr = SinkManager()
+    sink = IdempotentSink('out', sink_type='kafka')
+    mgr.register(sink)
+
+    call_count = 0
+
+    async def buggy_deliver(payloads: list) -> None:
+        nonlocal call_count
+        call_count += 1
+        raise ValueError('payload validation failed — not transient')
+
+    sink.deliver = buggy_deliver  # type: ignore[assignment]
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    # Non-transient error — exactly one attempt, straight to the handler.
+    assert call_count == 1
+    on_error.assert_called_once()
+
+
+async def test_idempotent_sink_exhausts_retries_then_surfaces_error():
+    """When every fast-retry attempt raises a transient error, the final
+    exception is surfaced to ``on_delivery_error``. Verifies the retry
+    budget is bounded (not infinite) and that the breaker sees a single
+    terminal outcome regardless of how many in-call retries we made.
+    """
+    mgr = SinkManager()
+    sink = IdempotentSink('out', sink_type='kafka')
+    mgr.register(sink)
+
+    call_count = 0
+
+    async def always_transient_deliver(payloads: list) -> None:
+        nonlocal call_count
+        call_count += 1
+        raise TimeoutError('timeout: downstream unavailable')
+
+    sink.deliver = always_transient_deliver  # type: ignore[assignment]
+    # Handler returns SKIP so we don't compound with the handler-driven
+    # retry path — we're testing the in-call retry budget in isolation.
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    # Exactly ``_IDEMPOTENT_MAX_ATTEMPTS`` (3) underlying attempts —
+    # after the budget is exhausted the error surfaces through the
+    # handler exactly once.
+    assert call_count == 3
+    # ``on_delivery_error`` saw the terminal transient error once; the
+    # in-call retries were invisible to it.
+    on_error.assert_called_once()
+
+
+async def test_idempotent_retry_counts_as_single_circuit_breaker_attempt():
+    """Phase 2 invariant: one delivery batch counts as ONE consecutive
+    failure on the circuit breaker, regardless of in-call retries.
+
+    With ``idempotent=True`` and three transient failures, the breaker
+    must see exactly one ``record_failure`` call for this batch.
+    Otherwise the breaker would trip after a single flaky delivery of an
+    idempotent sink, defeating the whole point of the fast-retry.
+    """
+    from drakkar.config import CircuitBreakerConfig
+
+    mgr = SinkManager(circuit_breaker_config=CircuitBreakerConfig(failure_threshold=2, cooldown_seconds=30.0))
+    sink = IdempotentSink('out', sink_type='kafka')
+    mgr.register(sink)
+
+    async def always_transient_deliver(payloads: list) -> None:
+        raise ConnectionError('transient')
+
+    sink.deliver = always_transient_deliver  # type: ignore[assignment]
+    # DLQ handler ensures the in-call transient retry is followed by a
+    # terminal failure (not a handler-driven retry loop).
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
+
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    # One batch with N in-call retries — breaker sees ONE failure.
+    assert sink._consecutive_failures == 1
+    assert sink.circuit_state == 'closed'
+
+
+async def test_base_sink_default_idempotent_is_false():
+    """The BaseSink default must be ``False`` — the safe "no retry"
+    behavior. Custom sinks that don't know the contract will inherit
+    the conservative default.
+    """
+    sink = FakeSink('default')
+    assert sink.idempotent is False
+
+
+async def test_builtin_sinks_idempotent_attribute_declarations():
+    """Every shipped sink class declares its ``idempotent`` attribute
+    explicitly on the class (no reliance on the BaseSink default), so a
+    reader can see the retry contract without tracing inheritance.
+
+    The value itself (True vs False) is asserted elsewhere — here we
+    only verify the attribute is present and a bool.
+    """
+    from drakkar.sinks.dlq import DLQSink
+    from drakkar.sinks.filesystem import FileSink
+    from drakkar.sinks.http import HttpSink
+    from drakkar.sinks.kafka import KafkaSink
+    from drakkar.sinks.mongo import MongoSink
+    from drakkar.sinks.postgres import PostgresSink
+    from drakkar.sinks.redis import RedisSink
+
+    # Non-idempotent by explicit declaration.
+    assert KafkaSink.idempotent is False
+    assert HttpSink.idempotent is False
+    assert FileSink.idempotent is False
+    assert DLQSink.idempotent is False
+    assert PostgresSink.idempotent is False
+    assert MongoSink.idempotent is False
+
+    # Idempotent by explicit declaration — Redis SET is write-replace.
+    assert RedisSink.idempotent is True

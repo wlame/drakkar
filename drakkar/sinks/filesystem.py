@@ -33,6 +33,17 @@ class FileSink(BaseSink[FilePayload]):
 
     sink_type = 'filesystem'
 
+    # ``FileSink.deliver`` opens each target file with ``open(path, 'a')``
+    # — APPEND mode. A retried batch after a partially-succeeded write
+    # would duplicate records in the file (the previous lines are already
+    # on disk, the retry appends them again). Append-only JSONL without a
+    # dedup key is therefore NOT idempotent. We keep ``idempotent=False``
+    # so a transient IO error bubbles to ``on_delivery_error`` rather
+    # than silently doubling on retry. A user who implements a custom
+    # write-replace file sink (e.g., atomic-rename overwrite) may
+    # subclass and set ``idempotent = True``.
+    idempotent = False
+
     def __init__(self, name: str, config: FileSinkConfig) -> None:
         super().__init__(name, ui_url=config.ui_url)
         self._config = config

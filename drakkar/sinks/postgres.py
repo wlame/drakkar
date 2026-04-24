@@ -45,6 +45,15 @@ class PostgresSink(BaseSink[PostgresPayload]):
 
     sink_type = 'postgres'
 
+    # Plain ``INSERT`` is NOT idempotent — a retry after a partial batch
+    # or timeout can insert duplicate rows. We keep the safe default of
+    # ``False`` so transient DB errors route to ``on_delivery_error``
+    # instead of being auto-retried. Users whose schema has a unique
+    # constraint + ``ON CONFLICT DO NOTHING`` (or ``ON CONFLICT DO
+    # UPDATE`` for upsert semantics) can subclass and flip this to
+    # ``True`` to opt into automatic transient-error retry.
+    idempotent = False
+
     def __init__(self, name: str, config: PostgresSinkConfig) -> None:
         super().__init__(name, ui_url=config.ui_url)
         self._config = config

@@ -73,6 +73,16 @@ class DLQSink(BaseSink[BaseModel]):
 
     sink_type = 'dlq'
 
+    # Same rationale as ``KafkaSink.idempotent`` — the underlying
+    # ``AIOProducer`` is not configured with ``enable.idempotence=true``,
+    # so a retried produce can land the same DLQ record twice. Duplicate
+    # DLQ entries are harmless (operators inspect them manually), but we
+    # still default to ``False`` because DLQSink is driven through the
+    # dedicated ``send()`` path, not through the normal
+    # ``deliver()`` retry loop — SinkManager never retries DLQSink
+    # automatically. Kept explicit here for clarity of the contract.
+    idempotent = False
+
     def __init__(self, topic: str, brokers: str) -> None:
         super().__init__('dlq')
         self._topic = topic

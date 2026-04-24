@@ -33,6 +33,17 @@ class KafkaSink(BaseSink[KafkaPayload]):
 
     sink_type = 'kafka'
 
+    # The default ``AIOProducer`` configuration does NOT enable
+    # ``enable.idempotence=true`` (see ``connect()`` below). Without the
+    # broker-side deduplication that flag unlocks, a retried produce can
+    # land the same logical message twice under broker-failover / timeout
+    # scenarios. We therefore keep ``idempotent=False`` here as the safe
+    # default. Operators who configure the underlying producer with
+    # ``enable.idempotence=true`` + a stable message key + ``acks=all``
+    # can subclass ``KafkaSink`` and flip this flag to opt into automatic
+    # transient-error retry by the SinkManager.
+    idempotent = False
+
     def __init__(self, name: str, config: KafkaSinkConfig, brokers_fallback: str = '') -> None:
         super().__init__(name, ui_url=config.ui_url)
         self._config = config

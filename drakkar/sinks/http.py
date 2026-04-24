@@ -31,6 +31,18 @@ class HttpSink(BaseSink[HttpPayload]):
 
     sink_type = 'http'
 
+    # HTTP POST/PUT/etc. requests can have observable side effects on the
+    # receiver (a webhook endpoint creating records, sending notifications,
+    # charging a payment, etc.). Without an ``Idempotency-Key`` header the
+    # downstream honors, retrying a request that succeeded on the server
+    # but failed to return a response would double-submit. We default to
+    # ``idempotent=False`` so the SinkManager makes a single delivery
+    # attempt and delegates to ``on_delivery_error``. Users whose webhook
+    # receiver supports an idempotency key (Stripe, Shopify, custom APIs)
+    # can subclass ``HttpSink``, inject the key via ``config.headers``,
+    # and set ``idempotent = True`` to opt into automatic retry.
+    idempotent = False
+
     def __init__(self, name: str, config: HttpSinkConfig) -> None:
         super().__init__(name, ui_url=config.ui_url)
         self._config = config

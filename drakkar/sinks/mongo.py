@@ -29,6 +29,15 @@ class MongoSink(BaseSink[MongoPayload]):
 
     sink_type = 'mongo'
 
+    # ``insert_one`` / ``insert_many`` without a stable ``_id`` and
+    # unique-index is NOT idempotent — a retry can duplicate documents
+    # in the collection. We keep the safe default of ``False`` so
+    # transient Mongo errors route to ``on_delivery_error`` instead of
+    # being auto-retried. Users who set a deterministic ``_id`` on the
+    # payload (or use an upsert in a custom subclass) can flip this to
+    # ``True`` to opt into automatic transient-error retry.
+    idempotent = False
+
     def __init__(self, name: str, config: MongoSinkConfig) -> None:
         super().__init__(name, ui_url=config.ui_url)
         self._config = config

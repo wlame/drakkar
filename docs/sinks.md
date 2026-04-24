@@ -309,6 +309,74 @@ breaker sooner; long-recovery downstreams may want a longer cooldown.
 See [Configuration → Circuit Breaker](configuration.md#circuit-breaker-sinkscircuit_breaker)
 for the full knobs.
 
+### Retry contract
+
+Every `BaseSink` subclass declares an `idempotent: bool` class attribute that
+tells `SinkManager` whether duplicate delivery is safe. The flag drives a small
+fast-retry loop on transient errors *before* the failure reaches your
+`on_delivery_error` handler:
+
+| `idempotent` value | SinkManager behavior on transient error |
+|--------------------|------------------------------------------|
+| `True`  | Retry `deliver()` up to 3 times with exponential backoff (50ms / 100ms / 200ms). If still failing, surface the error to `on_delivery_error`. |
+| `False` (default) | Single attempt. Any error — transient or not — goes straight to `on_delivery_error`. |
+
+The transient-error classification covers `ConnectionError`, `TimeoutError`,
+and `asyncio.TimeoutError`. Every other exception (including `ValueError` and
+`RuntimeError`) is treated as non-transient and is not retried even when the
+sink is idempotent — those signal a bug in the payload or sink, and a quick
+re-attempt won't change the outcome.
+
+All fast-retries inside a single `deliver()` call count as **one delivery
+attempt** from the circuit breaker's perspective — whether the sink retried
+internally 1 or 3 times, the breaker sees exactly one terminal outcome
+(success or failure) per batch.
+
+#### When to set `idempotent = True`
+
+Opt in when duplicate delivery is provably safe:
+
+- **Broker-side dedup**: Kafka producer with `enable.idempotence=true` +
+  stable message key (the default `KafkaSink` does NOT enable this and
+  therefore keeps `idempotent = False`).
+- **Write-replace semantics**: Redis `SET` of a fixed key, filesystem
+  atomic-rename overwrite, S3 `PutObject` on a stable path.
+- **Idempotency keys**: HTTP `POST`/`PUT` with an `Idempotency-Key` header
+  the receiver honors (Stripe, Shopify, custom APIs).
+- **Upsert semantics**: Postgres `INSERT ... ON CONFLICT DO UPDATE`, Mongo
+  update-with-upsert on a deterministic `_id`.
+
+#### When to keep `idempotent = False`
+
+Keep the default when duplicate delivery has observable side effects:
+
+- Plain HTTP POST without an idempotency key.
+- Append-only file writes without a dedup key.
+- Plain INSERT without a unique constraint.
+- Any non-idempotent network call (payment API, notification dispatch, etc.).
+
+#### Built-in sink defaults
+
+| Sink | `idempotent` | Reason |
+|------|--------------|--------|
+| `KafkaSink` | `False` | Default producer config does not enable broker dedup. |
+| `HttpSink` | `False` | HTTP POST may have side effects without an idempotency key. |
+| `FileSink` | `False` | Append mode duplicates records on retry. |
+| `DLQSink` | `False` | Same as `KafkaSink`; DLQ also uses its own `send()` path. |
+| `PostgresSink` | `False` | Plain `INSERT` duplicates on retry. |
+| `MongoSink` | `False` | `insert_*` without a stable `_id` duplicates on retry. |
+| `RedisSink` | `True` | `SET` on a fixed key is write-replace. |
+
+Custom sinks inherit the safe default (`False`). Set the attribute explicitly
+on your subclass when you know duplicates are safe:
+
+```python
+class StripeWebhookSink(HttpSink):
+    """Webhook sink that attaches a Stripe idempotency key."""
+
+    idempotent = True  # Stripe dedups by Idempotency-Key header
+```
+
 ### Example
 
 ```python
