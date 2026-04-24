@@ -112,12 +112,21 @@ def make_config(**overrides) -> DrakkarConfig:
 
 def _setup_app_sinks(app: DrakkarApp) -> None:
     """Replace real sinks with async mocks."""
+    from unittest.mock import MagicMock
+
     app._build_sinks()
     for key, sink in app._sink_manager._sinks.items():
         mock_sink = AsyncMock()
         mock_sink.sink_type = sink.sink_type
         mock_sink.name = sink.name
         mock_sink._name = sink.name
+        # Circuit breaker hooks are sync methods on BaseSink. AsyncMock
+        # makes every attribute an AsyncMock by default (returns truthy
+        # coroutines), so _should_skip_delivery would look "open" to the
+        # manager and no delivery would ever happen. Force the defaults.
+        mock_sink._should_skip_delivery = MagicMock(return_value=False)
+        mock_sink._record_success = MagicMock()
+        mock_sink._record_failure = MagicMock()
         app._sink_manager._sinks[key] = mock_sink
         for i, s in enumerate(app._sink_manager._by_type[sink.sink_type]):
             if s.name == sink.name:

@@ -1002,3 +1002,272 @@ async def test_deliver_all_preserves_sink_stats_per_sink_under_gather():
     assert ok_b_stats.error_count == 0
     assert ok_b_stats.last_error is None
     assert ok_b_stats.last_error_ts is None
+
+
+# --- Circuit breaker (Phase 2 Task 7) ---
+#
+# The per-sink circuit breaker trips after `failure_threshold` consecutive
+# terminal failures (retries exhausted). While open, deliveries bypass the
+# sink entirely and route to DLQ. Cooldown elapses → next delivery is a
+# half-open probe → success closes, failure reopens with a renewed cooldown.
+
+
+def _make_breaker_manager(failure_threshold: int = 3, cooldown_seconds: float = 30.0) -> SinkManager:
+    """Build a SinkManager with a per-test circuit breaker config.
+
+    Keeping the threshold small (3) means tests only need a handful of
+    failures to exercise the trip transition.
+    """
+    from drakkar.config import CircuitBreakerConfig
+
+    return SinkManager(
+        circuit_breaker_config=CircuitBreakerConfig(
+            failure_threshold=failure_threshold,
+            cooldown_seconds=cooldown_seconds,
+        )
+    )
+
+
+async def test_circuit_trips_after_threshold_consecutive_failures():
+    """N consecutive terminal failures → circuit trips → next delivery is skipped."""
+    from drakkar.metrics import sink_circuit_open
+
+    mgr = _make_breaker_manager(failure_threshold=3, cooldown_seconds=30.0)
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    # DLQ action means each delivery becomes a terminal failure (no retries).
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+
+    # Three back-to-back deliveries all fail: circuit closed → open on 3rd.
+    for _ in range(3):
+        await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    assert sink.circuit_state == 'open'
+    gauge_value = sink_circuit_open.labels(sink_type='kafka', sink_name='out')._value.get()
+    assert gauge_value == 1.0
+
+    # The 4th delivery must skip the sink — sink.deliver is not called because
+    # the breaker bypasses it. We detect this by checking the sink never
+    # appended anything and the on_error handler got a "circuit open" error.
+    skipped_errors: list[DeliveryError] = []
+
+    async def capture(error: DeliveryError) -> DeliveryAction:
+        skipped_errors.append(error)
+        return DeliveryAction.DLQ
+
+    await mgr.deliver_all(result, on_delivery_error=capture, partition_id=0)
+
+    assert len(skipped_errors) == 1
+    assert skipped_errors[0].error == 'circuit open'
+    assert skipped_errors[0].sink_name == 'out'
+    # Sink was never touched for the skipped delivery — fail_on_deliver
+    # would have raised if it had been called. The only source of errors
+    # is the breaker gate reporting via on_delivery_error.
+
+
+async def test_circuit_skipped_delivery_routes_to_dlq():
+    """When the breaker is open, payloads reach the DLQ handler with error='circuit open'."""
+    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=30.0)
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    # Trip the circuit first.
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData(value=1))])
+    for _ in range(2):
+        await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+    assert sink.circuit_state == 'open'
+
+    # Circuit is open — next delivery routes to DLQ directly.
+    dlq_payloads: list[list] = []
+
+    async def dlq_handler(error: DeliveryError) -> DeliveryAction:
+        dlq_payloads.append(error.payloads)
+        return DeliveryAction.DLQ
+
+    skip_result = CollectResult(kafka=[KafkaPayload(data=SampleData(value=99))])
+    await mgr.deliver_all(skip_result, on_delivery_error=dlq_handler, partition_id=0)
+
+    # DLQ received the payloads without the sink being touched.
+    assert len(dlq_payloads) == 1
+    assert len(dlq_payloads[0]) == 1
+
+
+async def test_circuit_intermittent_failures_do_not_trip():
+    """fail, succeed, fail, succeed — consecutive counter resets on each success."""
+    mgr = _make_breaker_manager(failure_threshold=3, cooldown_seconds=30.0)
+    sink = FakeSink('out', sink_type='kafka')
+    mgr.register(sink)
+
+    call_count = 0
+    original_deliver = sink.deliver
+
+    async def flaky(payloads: list) -> None:
+        nonlocal call_count
+        call_count += 1
+        # Alternate failure / success — never three in a row.
+        if call_count % 2 == 1:
+            raise RuntimeError('transient')
+        await original_deliver(payloads)
+
+    sink.deliver = flaky  # type: ignore[assignment]
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)  # each failure terminal
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+
+    # 10 deliveries, 5 fail + 5 succeed, alternating. Each success resets
+    # the consecutive counter so the threshold (3) is never reached.
+    for _ in range(10):
+        await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    assert sink.circuit_state == 'closed'
+
+
+async def test_circuit_cooldown_elapses_half_open_success_closes():
+    """After cooldown, the next delivery is a half-open probe; success closes the circuit."""
+    from drakkar.metrics import sink_circuit_open
+
+    # Short cooldown so the test can wait through it cheaply.
+    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=0.05)
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+
+    # Trip the circuit.
+    for _ in range(2):
+        await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+    assert sink.circuit_state == 'open'
+
+    # Wait past the cooldown, then stop failing so the probe succeeds.
+    await asyncio.sleep(0.1)
+    sink.fail_on_deliver = False
+
+    # Next delivery is the half-open probe — it runs the real deliver path
+    # and succeeds, closing the circuit.
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    assert sink.circuit_state == 'closed'
+    gauge_value = sink_circuit_open.labels(sink_type='kafka', sink_name='out')._value.get()
+    assert gauge_value == 0.0
+    assert len(sink.delivered) == 1  # the successful probe
+
+
+async def test_circuit_half_open_failure_reopens_with_renewed_cooldown():
+    """Half-open probe failure → circuit snaps back to open + new cooldown."""
+    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=0.05)
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+
+    # Trip the circuit.
+    for _ in range(2):
+        await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+    assert sink.circuit_state == 'open'
+    first_opened_at = sink._circuit_opened_at
+    assert first_opened_at is not None
+
+    # Wait past cooldown — the next delivery becomes a probe, but the sink
+    # is still failing so the probe fails too. The circuit should reopen.
+    await asyncio.sleep(0.1)
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    assert sink.circuit_state == 'open'
+    # The open timestamp should have been renewed — second reopening is
+    # strictly later than the first.
+    second_opened_at = sink._circuit_opened_at
+    assert second_opened_at is not None
+    assert second_opened_at > first_opened_at
+
+
+async def test_circuit_trips_counter_increments_on_each_trip():
+    """sink_circuit_trips_total ticks once per closed→open transition."""
+    from drakkar.metrics import sink_circuit_trips
+
+    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=0.05)
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    before = sink_circuit_trips.labels(sink_type='kafka', sink_name='out')._value.get()
+
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+
+    # Trip #1 — closed → open.
+    for _ in range(2):
+        await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+    after_first = sink_circuit_trips.labels(sink_type='kafka', sink_name='out')._value.get()
+    assert after_first == before + 1
+
+    # Wait cooldown, fail the half-open probe → trip #2 (open → half_open → open).
+    await asyncio.sleep(0.1)
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    after_second = sink_circuit_trips.labels(sink_type='kafka', sink_name='out')._value.get()
+    assert after_second == before + 2
+
+
+async def test_circuit_preserves_stats_on_skip():
+    """Skipped (circuit-open) deliveries update error_count and last_error = 'circuit open'."""
+    mgr = _make_breaker_manager(failure_threshold=2, cooldown_seconds=30.0)
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+
+    # Trip.
+    for _ in range(2):
+        await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    # Snapshot stats pre-skip.
+    stats_before = mgr.get_all_stats()[('kafka', 'out')]
+    error_before = stats_before.error_count
+
+    # Run one skipped delivery — error_count should tick up by one, and the
+    # sentinel last_error preserves semantics for the debug UI.
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    stats_after = mgr.get_all_stats()[('kafka', 'out')]
+    assert stats_after.error_count == error_before + 1
+    assert stats_after.last_error == 'circuit open'
+    assert stats_after.last_error_ts is not None
+    # No delivery completed — delivered_count did not change.
+    assert stats_after.delivered_count == stats_before.delivered_count
+
+
+async def test_circuit_retries_with_in_run_failures_do_not_double_count():
+    """A single failing delivery with N retries counts as ONE consecutive failure.
+
+    With max_retries=3 and RETRY action, a failing sink makes up to 3 attempts
+    — but the breaker only sees the terminal outcome, not each retry. That
+    means failure_threshold=3 should not trip after a single batch; it needs
+    three independent batches with retries exhausted.
+    """
+    mgr = _make_breaker_manager(failure_threshold=3, cooldown_seconds=30.0)
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    on_error = AsyncMock(return_value=DeliveryAction.RETRY)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+
+    # One batch — retries exhausted → breaker sees ONE failure.
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, max_retries=3)
+    assert sink.circuit_state == 'closed'
+    assert sink._consecutive_failures == 1
+
+    # Two more batches — now at 3, should trip.
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, max_retries=3)
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, max_retries=3)
+    assert sink.circuit_state == 'open'

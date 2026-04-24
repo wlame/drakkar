@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from pydantic import BaseModel
 
+from drakkar.config import CircuitBreakerConfig
 from drakkar.metrics import sink_deliveries_skipped, sink_delivery_retries
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError
 from drakkar.sinks.base import BaseSink
@@ -73,10 +74,15 @@ class SinkManager:
         - Track per-sink delivery stats for the debug UI
     """
 
-    def __init__(self) -> None:
+    def __init__(self, circuit_breaker_config: CircuitBreakerConfig | None = None) -> None:
         self._sinks: dict[tuple[str, str], BaseSink[Any]] = {}
         self._by_type: dict[str, list[BaseSink[Any]]] = defaultdict(list)
         self._stats: dict[tuple[str, str], SinkStats] = {}
+        # The circuit breaker config is pushed onto each sink via register().
+        # None => default CircuitBreakerConfig (5 failures / 30s cooldown).
+        # Callers that build a SinkManager without a config (tests, standalone
+        # usage) get the default behavior automatically.
+        self._circuit_breaker_config: CircuitBreakerConfig = circuit_breaker_config or CircuitBreakerConfig()
 
     @property
     def sinks(self) -> dict[tuple[str, str], BaseSink[Any]]:
@@ -92,6 +98,8 @@ class SinkManager:
         """Register a sink instance.
 
         Raises ValueError if a sink with the same (type, name) already exists.
+        Also installs the manager's circuit breaker config on the sink so the
+        breaker uses operator-configured thresholds instead of the default.
         """
         key = (sink.sink_type, sink.name)
         if key in self._sinks:
@@ -99,6 +107,9 @@ class SinkManager:
         self._sinks[key] = sink
         self._by_type[sink.sink_type].append(sink)
         self._stats[key] = SinkStats()
+        # Push the breaker config to the sink so _should_skip_delivery and
+        # _record_failure read from the operator's settings, not the default.
+        sink.set_circuit_config(self._circuit_breaker_config)
 
     def get_sink_info(self) -> list[dict]:
         """Return list of all configured sinks with their type, name, and optional UI URL."""
@@ -275,14 +286,65 @@ class SinkManager:
         max_retries: int,
         recorder: EventRecorder | None,
     ) -> None:
-        """Deliver a single sink's payload group with retry + DLQ semantics.
+        """Deliver a single sink's payload group with retry + DLQ + circuit-breaker semantics.
 
         Extracted so sink groups can run under asyncio.gather; the retry loop,
         per-sink stats updates, and DLQ routing all run inside one coroutine
         so concurrent gather does not interleave a single sink's retries.
+
+        Circuit breaker:
+            Before the first delivery attempt we check the sink's breaker via
+            ``_should_skip_delivery``. When the breaker is open (and cooldown
+            hasn't elapsed), we skip the sink entirely and route the payloads
+            directly to the DLQ — no retry loop, no connection burn. The
+            breaker's own state machine handles the cooldown-to-half-open
+            transition on subsequent invocations.
+
+            On terminal outcomes (success or retries-exhausted) we call the
+            matching ``_record_*`` method so the breaker can accumulate
+            consecutive failures and trip when the threshold is hit.
         """
         sink = self._sinks[(sink_type, sink_name)]
         stats = self._stats[(sink_type, sink_name)]
+
+        # Circuit breaker gate. When the circuit is open and still cooling
+        # down, bypass the retry loop entirely and route the payloads to the
+        # DLQ. The breaker check itself is cheap (a time.monotonic + integer
+        # compare) so running it before every batch is fine. We surface the
+        # skip as an error_count tick + sentinel last_error so the debug UI
+        # and stats endpoints can explain why the sink received nothing.
+        if sink._should_skip_delivery():
+            stats.error_count += 1
+            stats.last_error = 'circuit open'
+            stats.last_error_ts = time.time()
+            if recorder:
+                recorder.record_sink_error(
+                    sink_type=sink_type,
+                    sink_name=sink_name,
+                    error='circuit open',
+                    attempt=0,
+                )
+            error = DeliveryError(
+                sink_name=sink_name,
+                sink_type=sink_type,
+                error='circuit open',
+                payloads=payloads,
+            )
+            # Let the caller's on_delivery_error run so it can route to DLQ.
+            # We ignore the returned action — the circuit breaker's decision
+            # overrides RETRY (we just tripped — retrying immediately would
+            # hammer the failing downstream) and SKIP (data loss bypassing
+            # the DLQ defeats the purpose of the breaker).
+            await on_delivery_error(error)
+            await logger.awarning(
+                'sink_delivery_circuit_open',
+                category='sink',
+                sink_type=sink_type,
+                sink_name=sink_name,
+                payload_count=len(payloads),
+            )
+            return
+
         attempt = 0
         while True:
             try:
@@ -293,6 +355,10 @@ class SinkManager:
                 stats.delivered_payloads += len(payloads)
                 stats.last_delivery_ts = time.time()
                 stats.last_delivery_duration = round(duration, 4)
+                # Terminal success — let the breaker close if it was probing
+                # (half_open), or simply reset the consecutive-failure count
+                # when the circuit was already closed.
+                sink._record_success()
                 if recorder:
                     recorder.record_sink_delivery(
                         sink_type=sink_type,
@@ -333,6 +399,11 @@ class SinkManager:
                     )
                     continue
                 elif action == DeliveryAction.SKIP:
+                    # SKIP is operator intent (handler returned SKIP) — treat
+                    # as "this delivery is not a true failure" from the breaker's
+                    # perspective, so we do NOT record a failure. The circuit
+                    # should only trip on infrastructure failure, not on user
+                    # code deciding to drop a batch.
                     sink_deliveries_skipped.labels(sink_type=sink_type, sink_name=sink_name).inc()
                     await logger.awarning(
                         'sink_delivery_skipped',
@@ -345,6 +416,9 @@ class SinkManager:
                 else:
                     # DLQ or RETRY exhausted — DLQ handling is done by the caller (app.py)
                     # since it needs access to the DLQ sink which lives outside the manager.
+                    # This is a terminal failure for the sink — tell the breaker
+                    # so consecutive failures can accumulate toward the trip threshold.
+                    sink._record_failure()
                     await logger.awarning(
                         'sink_delivery_failed_to_dlq',
                         category='sink',

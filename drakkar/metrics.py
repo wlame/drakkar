@@ -180,6 +180,28 @@ dlq_send_failures = Counter(
     'Total failed attempts to send messages to the dead letter queue',
 )
 
+# Per-sink circuit breaker observability (Phase 2 Task 7). The gauge maps to
+# three discrete circuit states so a single time-series makes the state
+# transitions visible on any Grafana line chart:
+#   0.0 — closed   (normal operation)
+#   0.5 — half_open (one probe delivery in flight; success closes, failure
+#                    reopens)
+#   1.0 — open     (cooldown in progress; all deliveries route to DLQ
+#                    without attempting the sink)
+# The trip counter ticks once per closed→open transition so operators can
+# compute trip frequency and alert on ``rate(..._total[5m]) > threshold``.
+sink_circuit_open = Gauge(
+    'drakkar_sink_circuit_open',
+    ('Sink circuit breaker state: 0.0=closed (normal), 0.5=half_open (probing), 1.0=open (tripped — routing to DLQ)'),
+    ['sink_type', 'sink_name'],
+)
+
+sink_circuit_trips = Counter(
+    'drakkar_sink_circuit_trips_total',
+    'Total sink circuit trips (closed→open transitions) per sink',
+    ['sink_type', 'sink_name'],
+)
+
 # --- Handler hooks ---
 
 handler_duration = Histogram(

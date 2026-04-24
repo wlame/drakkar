@@ -80,6 +80,8 @@ def test_config_no_sinks() -> DrakkarConfig:
 
 def _setup_app_sinks(app: DrakkarApp) -> None:
     """Build and register fake sinks so _handle_collect works without real connections."""
+    from unittest.mock import MagicMock
+
     app._build_sinks()
     # replace all registered sinks with async mocks
     for key, sink in app._sink_manager._sinks.items():
@@ -87,6 +89,13 @@ def _setup_app_sinks(app: DrakkarApp) -> None:
         mock_sink.sink_type = sink.sink_type
         mock_sink.name = sink.name
         mock_sink._name = sink.name
+        # Circuit breaker hooks are sync, called by SinkManager per delivery.
+        # AsyncMock would return truthy coroutines for _should_skip_delivery
+        # (treated as "skip me"), so override with plain MagicMocks that
+        # return sensible defaults for non-circuit-breaker tests.
+        mock_sink._should_skip_delivery = MagicMock(return_value=False)
+        mock_sink._record_success = MagicMock()
+        mock_sink._record_failure = MagicMock()
         app._sink_manager._sinks[key] = mock_sink
         # update _by_type
         for i, s in enumerate(app._sink_manager._by_type[sink.sink_type]):

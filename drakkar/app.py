@@ -121,7 +121,11 @@ class DrakkarApp:
 
         self._executor_pool: ExecutorPool | None = None
         self._consumer: KafkaConsumer | None = None
-        self._sink_manager: SinkManager = SinkManager()
+        # SinkManager receives the circuit breaker default so the breaker
+        # installed on each registered sink honors operator thresholds.
+        self._sink_manager: SinkManager = SinkManager(
+            circuit_breaker_config=self._config.sinks.circuit_breaker,
+        )
         self._dlq_sink: DLQSink | None = None
         self._recorder: EventRecorder | None = None
         self._debug_server = None

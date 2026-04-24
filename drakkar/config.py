@@ -168,6 +168,42 @@ class FileSinkConfig(BaseModel):
     ui_url: str = ''
 
 
+class CircuitBreakerConfig(BaseModel):
+    """Per-sink circuit breaker settings — shared default across all sinks.
+
+    The breaker guards a sink from burning pool slots when its downstream
+    is down. After ``failure_threshold`` consecutive failed deliveries the
+    circuit trips open — subsequent deliveries are NOT attempted, they
+    route straight to DLQ. After ``cooldown_seconds`` elapse the next
+    delivery is allowed through as a half-open probe; success closes the
+    circuit, failure reopens with a renewed cooldown.
+
+    This default applies uniformly to every configured sink. Per-sink
+    overrides can be added later — for v1 a single global default is
+    enough for operational resilience under a downstream outage.
+    """
+
+    failure_threshold: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            'Consecutive delivery failures before the circuit trips open. '
+            '5 = trip on the 5th consecutive failure (4 prior failures did '
+            'not trip, the 5th did). Intermittent failures with any success '
+            'in between do not accumulate.'
+        ),
+    )
+    cooldown_seconds: float = Field(
+        default=30.0,
+        ge=0.0,
+        description=(
+            'Time the circuit stays fully open before the next delivery is '
+            'allowed through as a half-open probe. While open, all deliveries '
+            'route directly to DLQ — no attempt is made on the sink.'
+        ),
+    )
+
+
 class SinksConfig(BaseModel):
     """Container for all configured sink instances, grouped by type.
 
@@ -189,6 +225,15 @@ class SinksConfig(BaseModel):
     http: dict[str, HttpSinkConfig] = Field(default_factory=dict)
     redis: dict[str, RedisSinkConfig] = Field(default_factory=dict)
     filesystem: dict[str, FileSinkConfig] = Field(default_factory=dict)
+    circuit_breaker: CircuitBreakerConfig = Field(
+        default_factory=CircuitBreakerConfig,
+        description=(
+            'Default circuit breaker config applied to every configured sink. '
+            'Per-sink overrides are not supported in v1 — if a sink needs a '
+            'different threshold/cooldown, adjust this default or add a '
+            'per-sink override in a future release.'
+        ),
+    )
 
     @property
     def is_empty(self) -> bool:
