@@ -182,10 +182,11 @@ async def test_connect_all_runs_sinks_in_parallel():
 async def test_connect_all_raises_when_any_sink_fails():
     """If one sink.connect() raises, connect_all propagates the first failure.
 
-    Semantic note: the other sinks may be mid-connect when the first failure
-    fires; asyncio.gather cancels their coroutines. This is NOT atomic
-    all-or-nothing — callers must not assume every sink is cleanly connected
-    or cleanly untouched after a raise.
+    Semantic note: connect_all uses ``return_exceptions=True`` internally so
+    every sink's connect runs to completion. The first exception observed
+    (by iteration order) is what propagates. Sinks that connected
+    successfully are closed before re-raising — see the partial-failure
+    cleanup tests below for the cleanup invariants.
     """
     mgr = SinkManager()
     mgr.register(FailConnectSink(name='bad', sink_type='kafka'))
@@ -199,6 +200,107 @@ async def test_connect_all_with_zero_sinks():
     """Empty sink list — asyncio.gather() with no args returns empty tuple cleanly."""
     mgr = SinkManager()
     await mgr.connect_all()  # should not raise
+
+
+# --- connect_all partial-failure cleanup ---
+
+
+class TrackingCloseSink(FakeSink):
+    """FakeSink that records whether close() was called.
+
+    Used by the partial-failure cleanup tests to assert that connect_all
+    closes the already-connected sinks when a peer's connect fails.
+    """
+
+    def __init__(self, name: str, sink_type: str = 'kafka', fail_on_connect: bool = False) -> None:
+        super().__init__(name=name, sink_type=sink_type)
+        self.fail_on_connect = fail_on_connect
+        self.close_call_count = 0
+
+    async def connect(self) -> None:
+        if self.fail_on_connect:
+            raise RuntimeError(f'connect failed: {self.name}')
+        self.connected = True
+
+    async def close(self) -> None:
+        # Count calls rather than overwriting — lets tests distinguish
+        # "called once" from "not called" from "called twice".
+        self.close_call_count += 1
+        self.closed = True
+
+
+class TrackingCloseFailSink(TrackingCloseSink):
+    """TrackingCloseSink whose close() raises — exercises cleanup-of-cleanup path."""
+
+    async def close(self) -> None:
+        self.close_call_count += 1
+        raise RuntimeError(f'close failed: {self.name}')
+
+
+async def test_connect_all_cleans_up_successfully_connected_sinks_on_partial_failure():
+    """When sink[1] fails to connect, the already-connected sinks[0] and sinks[2] get close()d.
+
+    Partial-failure cleanup: the operator expects startup to be atomic from
+    a resource-leak standpoint — a failed ``connect_all`` must not leave
+    open connections hanging around until process exit.
+    """
+    mgr = SinkManager()
+    s0 = TrackingCloseSink(name='s0', sink_type='kafka')
+    s1 = TrackingCloseSink(name='s1', sink_type='postgres', fail_on_connect=True)
+    s2 = TrackingCloseSink(name='s2', sink_type='mongo')
+    mgr.register(s0)
+    mgr.register(s1)
+    mgr.register(s2)
+
+    # The original connect exception from s1 must propagate — this is the
+    # signal the operator needs to see to diagnose the startup failure.
+    with pytest.raises(RuntimeError, match='connect failed: s1'):
+        await mgr.connect_all()
+
+    # s0 and s2 connected successfully, so their close() must have been
+    # called exactly once to release resources.
+    assert s0.close_call_count == 1, f's0.close should have been called once, got {s0.close_call_count}'
+    assert s2.close_call_count == 1, f's2.close should have been called once, got {s2.close_call_count}'
+
+    # s1 never connected (its connect raised) — there's nothing to close,
+    # so we must NOT have called close() on it. Calling close() on a sink
+    # that was never connected could crash or corrupt state.
+    assert s1.close_call_count == 0, (
+        f's1.close should NOT have been called (it never connected), got {s1.close_call_count}'
+    )
+
+
+async def test_connect_all_cleanup_close_failure_does_not_mask_original_exception():
+    """If close() also raises during cleanup, the ORIGINAL connect exception still propagates.
+
+    Cleanup errors are a distraction from the root cause — the operator
+    needs to see WHY startup failed, not WHY cleanup failed after that.
+    The test also checks that a failing close() on one sink does not block
+    close() of the others (return_exceptions=True on the cleanup gather).
+    """
+    mgr = SinkManager()
+    # s0 connects, but its close() raises — simulates a flaky cleanup path.
+    s0 = TrackingCloseFailSink(name='s0', sink_type='kafka')
+    # s1 fails to connect — this is the exception the operator should see.
+    s1 = TrackingCloseSink(name='s1', sink_type='postgres', fail_on_connect=True)
+    # s2 connects cleanly — its close() must still be called even though
+    # s0's close() raised first.
+    s2 = TrackingCloseSink(name='s2', sink_type='mongo')
+    mgr.register(s0)
+    mgr.register(s1)
+    mgr.register(s2)
+
+    # The ORIGINAL exception (s1's connect failure) propagates — NOT s0's
+    # close failure.
+    with pytest.raises(RuntimeError, match='connect failed: s1'):
+        await mgr.connect_all()
+
+    # Both s0 and s2 had close() called. s0's close raised, but that
+    # must not have prevented s2.close() from being called.
+    assert s0.close_call_count == 1
+    assert s2.close_call_count == 1, (
+        's2.close must still run even if s0.close raised — cleanup gather uses return_exceptions=True'
+    )
 
 
 # --- resolve_sink ---

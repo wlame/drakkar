@@ -132,18 +132,21 @@ class SinkManager:
         return dict(self._stats)
 
     async def connect_all(self) -> None:
-        """Connect all registered sinks in parallel.
+        """Connect all registered sinks in parallel, cleaning up on partial failure.
 
         Uses asyncio.gather to overlap connect latencies — wall-clock time
         becomes ~max(connect_latency) instead of sum. Cold-start saving
         when multiple sinks are configured (each sink's connect can do
         network I/O, schema probes, etc.).
 
-        Failure semantics: return_exceptions=False means the first failing
-        connect propagates immediately and gather cancels the pending coroutines.
-        Other sinks may be mid-connect when we raise — do not assume an
-        all-or-nothing atomic connect. Matches the previous serial loop's
-        fail-fast behavior.
+        Failure semantics: uses ``return_exceptions=True`` so every connect
+        runs to completion (success or failure). If ANY sink's connect
+        raised, we close the ones that succeeded — otherwise they would
+        leak open connections for the rest of the process lifetime — then
+        re-raise the FIRST connect exception we saw (preserving iteration
+        order). Cleanup failures during the close pass are logged at
+        warning level but never mask the original connect exception: the
+        operator needs to see why startup failed, not why cleanup did.
 
         Empty sink list: asyncio.gather() with no args returns an empty tuple.
         """
@@ -157,7 +160,58 @@ class SinkManager:
                 sink_name=sink.name,
             )
 
-        await asyncio.gather(*[_connect_one(sink) for sink in self._sinks.values()])
+        sinks = list(self._sinks.values())
+        # ``return_exceptions=True`` lets every connect finish (success or
+        # raise) instead of short-circuiting on the first raise. This is the
+        # prerequisite for cleaning up partially-connected sinks — we need
+        # to know which ones made it through so we can close them.
+        results = await asyncio.gather(
+            *[_connect_one(sink) for sink in sinks],
+            return_exceptions=True,
+        )
+
+        first_exception: BaseException | None = None
+        successful_sinks: list[BaseSink[Any]] = []
+        # ``strict=True`` guards against the impossible case where gather
+        # returned a different-length list than the inputs — cheap defensive
+        # check that catches framework regressions loudly.
+        for sink, result in zip(sinks, results, strict=True):
+            if isinstance(result, BaseException):
+                # Capture the first exception (by iteration order) as the
+                # one we re-raise — later exceptions are still reflected in
+                # per-sink state but the operator sees a single canonical
+                # cause.
+                if first_exception is None:
+                    first_exception = result
+            else:
+                successful_sinks.append(sink)
+
+        if first_exception is None:
+            return
+
+        # Partial failure: close the sinks that connected successfully so
+        # their connections don't leak. Use ``return_exceptions=True`` on
+        # the cleanup gather so a broken close() on one sink can't abort
+        # the cleanup of the others — every successful sink gets a shot at
+        # releasing its resources.
+        cleanup_results = await asyncio.gather(
+            *[sink.close() for sink in successful_sinks],
+            return_exceptions=True,
+        )
+        for sink, cleanup_result in zip(successful_sinks, cleanup_results, strict=True):
+            if isinstance(cleanup_result, BaseException):
+                # Log cleanup failure but never mask the original connect
+                # error — operators need the startup-failure signal, not
+                # the cleanup-failure signal, to diagnose the outage.
+                await logger.awarning(
+                    'sink_cleanup_after_connect_failure_error',
+                    category='sink',
+                    sink_type=sink.sink_type,
+                    sink_name=sink.name,
+                    error=str(cleanup_result),
+                )
+
+        raise first_exception
 
     async def close_all(self) -> None:
         """Close all registered sinks. Logs errors but doesn't raise."""
