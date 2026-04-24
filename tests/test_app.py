@@ -292,8 +292,12 @@ async def test_app_routes_circuit_open_to_dlq_sink(test_config):
     _setup_app_sinks(app)
 
     # Wire a fake DLQ sink so the force-DLQ branch has a target.
+    # The SinkManager reads ``self._dlq_sink`` from its own instance state
+    # now (not a per-call argument), so push it through ``attach_runtime``
+    # — the same call ``_async_run`` uses in production.
     dlq_sink = AsyncMock()
     app._dlq_sink = dlq_sink
+    app._sink_manager.attach_runtime(recorder=None, dlq_sink=dlq_sink)
 
     # Force one of the kafka sinks into open-circuit state. `_setup_app_sinks`
     # replaced the real sink with an AsyncMock, so we override the circuit

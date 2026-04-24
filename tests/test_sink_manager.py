@@ -747,18 +747,17 @@ async def test_stats_multiple_sinks_tracked_independently():
 
 async def test_stats_with_recorder():
     """Stats are recorded to EventRecorder when provided."""
-    mgr = SinkManager()
-    sink = FakeSink('out', sink_type='kafka')
-    mgr.register(sink)
-
     from unittest.mock import MagicMock
 
     recorder = MagicMock()
+    mgr = SinkManager(recorder=recorder)
+    sink = FakeSink('out', sink_type='kafka')
+    mgr.register(sink)
 
     result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
     on_error = AsyncMock(return_value=DeliveryAction.SKIP)
 
-    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, recorder=recorder)
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
 
     recorder.record_sink_delivery.assert_called_once()
     call_kwargs = recorder.record_sink_delivery.call_args
@@ -873,19 +872,18 @@ async def test_prometheus_retry_counter_per_sink():
 
 async def test_stats_error_with_recorder():
     """Errors are recorded to EventRecorder when provided."""
-    mgr = SinkManager()
+    from unittest.mock import MagicMock
+
+    recorder = MagicMock()
+    mgr = SinkManager(recorder=recorder)
     sink = FakeSink('out', sink_type='kafka')
     sink.fail_on_deliver = True
     mgr.register(sink)
 
-    from unittest.mock import MagicMock
-
-    recorder = MagicMock()
-
     result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
     on_error = AsyncMock(return_value=DeliveryAction.SKIP)
 
-    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, recorder=recorder)
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
 
     recorder.record_sink_error.assert_called_once()
     call_kwargs = recorder.record_sink_error.call_args
@@ -893,6 +891,36 @@ async def test_stats_error_with_recorder():
     assert call_kwargs[1]['sink_name'] == 'out'
     assert 'delivery failed' in call_kwargs[1]['error']
     assert call_kwargs[1]['attempt'] == 1
+
+
+async def test_deliver_all_tolerates_none_recorder_and_none_dlq_sink_on_failure():
+    """Contract test: SinkManager with recorder=None and dlq_sink=None must
+    not ``AttributeError`` when a sink fails. The None-tolerance of the
+    internal guards (``if self._recorder is not None``, ``if self._dlq_sink
+    is not None``) is what lets ``_async_run`` skip recorder wiring when
+    ``debug.enabled=False`` — and lets tests construct a bare manager for
+    unrelated assertions. Locks in the public contract introduced by Task 5.
+    """
+    mgr = SinkManager(recorder=None, dlq_sink=None)
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True  # every delivery raises
+    mgr.register(sink)
+
+    # Handler returns SKIP so the failing sink takes the SKIP exit path
+    # without retrying. The test does NOT care about the handler's return
+    # value — only that the None guards along the delivery path survive.
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+
+    # The critical assertion: this call must not raise AttributeError or
+    # similar from a bare ``None.record_*(...)`` or ``None.send(...)`` call.
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    # Sanity: the handler WAS consulted (proving we reached the error path),
+    # and stats reflect the single failure.
+    on_error.assert_awaited_once()
+    stats = mgr.get_all_stats()[('kafka', 'out')]
+    assert stats.error_count == 1
 
 
 # --- deliver_all parallelism ---

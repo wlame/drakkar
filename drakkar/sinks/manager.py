@@ -82,7 +82,12 @@ class SinkManager:
         - Track per-sink delivery stats for the debug UI
     """
 
-    def __init__(self, circuit_breaker_config: CircuitBreakerConfig | None = None) -> None:
+    def __init__(
+        self,
+        circuit_breaker_config: CircuitBreakerConfig | None = None,
+        recorder: EventRecorder | None = None,
+        dlq_sink: DLQSink | None = None,
+    ) -> None:
         self._sinks: dict[tuple[str, str], BaseSink[Any]] = {}
         self._by_type: dict[str, list[BaseSink[Any]]] = defaultdict(list)
         self._stats: dict[tuple[str, str], SinkStats] = {}
@@ -91,6 +96,34 @@ class SinkManager:
         # Callers that build a SinkManager without a config (tests, standalone
         # usage) get the default behavior automatically.
         self._circuit_breaker_config: CircuitBreakerConfig = circuit_breaker_config or CircuitBreakerConfig()
+        # Recorder + DLQ sink are owned by the app but accessed on every
+        # delivery. Holding references here keeps the ``deliver_all`` hot
+        # path signature minimal and removes the per-call plumbing from
+        # ``drakkar/app.py``. Both are ``None``-tolerant: tests (and
+        # pre-debug-enabled paths) can construct a SinkManager without
+        # them and the delivery code handles the absence via
+        # ``if self._recorder is not None`` / ``if self._dlq_sink is not None``
+        # guards inside ``_deliver_to_sink``.
+        self._recorder: EventRecorder | None = recorder
+        self._dlq_sink: DLQSink | None = dlq_sink
+
+    def attach_runtime(
+        self,
+        recorder: EventRecorder | None,
+        dlq_sink: DLQSink | None,
+    ) -> None:
+        """Inject recorder + DLQ sink after construction.
+
+        The ``DrakkarApp`` constructs the ``SinkManager`` in its own
+        ``__init__`` (before the recorder and DLQ sink exist) but the
+        SinkManager needs references to both during delivery. This setter
+        lets ``_async_run`` wire them up once they've been built, without
+        rebuilding the manager. Both arguments are assigned directly — pass
+        ``None`` to clear a reference (e.g., when debug is disabled and no
+        recorder was ever constructed).
+        """
+        self._recorder = recorder
+        self._dlq_sink = dlq_sink
 
     @property
     def sinks(self) -> dict[tuple[str, str], BaseSink[Any]]:
@@ -275,8 +308,6 @@ class SinkManager:
         on_delivery_error: DeliveryErrorCallback,
         partition_id: int,
         max_retries: int = 3,
-        recorder: EventRecorder | None = None,
-        dlq_sink: DLQSink | None = None,
     ) -> None:
         """Route and deliver all payloads in a CollectResult to their sinks.
 
@@ -286,19 +317,18 @@ class SinkManager:
         calls on_delivery_error and handles the returned action
         (DLQ, RETRY, SKIP) PER SINK — each sink retries independently.
 
+        Recorder + DLQ sink are read from instance state
+        (``self._recorder`` / ``self._dlq_sink``) — both are set via
+        ``__init__`` kwargs or the later ``attach_runtime`` setter. Holding
+        them as instance state keeps the hot path signature minimal and
+        avoids threading the same two objects through every delivery call.
+
         Args:
             result: The CollectResult from on_task_complete(),
                 on_message_complete(), or on_window_complete().
             on_delivery_error: Handler callback for delivery failures.
             partition_id: Source partition (for DLQ metadata).
             max_retries: Max delivery retry attempts before falling through to DLQ.
-            recorder: Optional EventRecorder for sink delivery/error events.
-            dlq_sink: Optional DLQ sink. When provided, the circuit-breaker
-                open path routes failed batches straight to the DLQ without
-                consulting ``on_delivery_error`` — a tripped breaker is
-                infrastructure failure, not operator intent, so SKIP/RETRY
-                semantics don't apply. When ``None``, callers rely on the
-                handler callback + app-level DLQ plumbing (pre-breaker path).
         """
         groups: dict[tuple[str, str], list[BaseModel]] = defaultdict(list)
 
@@ -326,9 +356,7 @@ class SinkManager:
                 payloads=groups[(sink_type, sink_name)],
                 on_delivery_error=on_delivery_error,
                 max_retries=max_retries,
-                recorder=recorder,
                 partition_id=partition_id,
-                dlq_sink=dlq_sink,
             )
             for (sink_type, sink_name) in groups
         ]
@@ -341,9 +369,7 @@ class SinkManager:
         payloads: list[BaseModel],
         on_delivery_error: DeliveryErrorCallback,
         max_retries: int,
-        recorder: EventRecorder | None,
         partition_id: int,
-        dlq_sink: DLQSink | None,
     ) -> None:
         """Deliver a single sink's payload group with retry + DLQ + circuit-breaker semantics.
 
@@ -390,8 +416,8 @@ class SinkManager:
             stats.error_count += 1
             stats.last_error = CIRCUIT_OPEN_ERROR
             stats.last_error_ts = time.time()
-            if recorder:
-                recorder.record_sink_error(
+            if self._recorder is not None:
+                self._recorder.record_sink_error(
                     sink_type=sink_type,
                     sink_name=sink_name,
                     error=CIRCUIT_OPEN_ERROR,
@@ -413,8 +439,8 @@ class SinkManager:
             # risk double-DLQ (typical app handlers route DLQ-action
             # results back to the same DLQ sink), so we keep the path
             # direct.
-            if dlq_sink:
-                await dlq_sink.send(error, partition_id=partition_id)
+            if self._dlq_sink is not None:
+                await self._dlq_sink.send(error, partition_id=partition_id)
             else:
                 # Legacy path: no DLQ sink wired. Fall back to handler-driven
                 # routing and hope the handler's DLQ plumbing lives upstream.
@@ -458,8 +484,8 @@ class SinkManager:
                     # (half_open), or simply reset the consecutive-failure count
                     # when the circuit was already closed.
                     sink.record_success()
-                    if recorder:
-                        recorder.record_sink_delivery(
+                    if self._recorder is not None:
+                        self._recorder.record_sink_delivery(
                             sink_type=sink_type,
                             sink_name=sink_name,
                             payload_count=len(payloads),
@@ -478,8 +504,8 @@ class SinkManager:
                     safe_error = redact_url(str(e))
                     stats.last_error = safe_error
                     stats.last_error_ts = time.time()
-                    if recorder:
-                        recorder.record_sink_error(
+                    if self._recorder is not None:
+                        self._recorder.record_sink_error(
                             sink_type=sink_type,
                             sink_name=sink_name,
                             error=safe_error,

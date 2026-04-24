@@ -347,6 +347,17 @@ class DrakkarApp:
         assert self._dlq_sink is not None
         await self._dlq_sink.connect()
 
+        # Wire recorder + DLQ into the sink manager now that both are ready.
+        # SinkManager was constructed in ``__init__`` (required by tests and
+        # by ``_build_sinks`` which registers sinks before we get here) with
+        # ``recorder=None`` / ``dlq_sink=None`` placeholders. Attaching now
+        # lets ``deliver_all`` read the refs directly from instance state
+        # instead of having callers thread them through on every call.
+        self._sink_manager.attach_runtime(
+            recorder=self._recorder,
+            dlq_sink=self._dlq_sink,
+        )
+
         # log sink topology
         await log.ainfo(
             'sinks_configured',
@@ -645,8 +656,6 @@ class DrakkarApp:
             result,
             on_delivery_error=_on_delivery_error,
             partition_id=partition_id,
-            recorder=self._recorder,
-            dlq_sink=self._dlq_sink,
         )
 
         if self._recorder:
