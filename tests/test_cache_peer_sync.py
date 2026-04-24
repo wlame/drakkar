@@ -389,6 +389,225 @@ async def test_peer_sync_default_deadline_derives_from_interval(tmp_path):
         await engine.stop()
 
 
+# --- concurrent peer-sync regression (Phase 2 Task 10) ---------------------
+#
+# Two dimensions of concurrency to pin down:
+#
+# 1. **Intra-cycle**: two ``_sync_once()`` calls fire on the same event loop
+#    at the same time (overlapping cycles). Real cause: a late-running
+#    periodic tick overlaps the next scheduled tick under load.
+# 2. **Cross-operation**: ``_sync_once()`` runs alongside ``_flush_once()``
+#    on the same writer connection. Real cause: a periodic flush tick
+#    overlaps a periodic sync tick — both acquire the writer through the
+#    same aiosqlite thread.
+#
+# Neither scenario holds an explicit lock in production — concurrency is
+# implicit through CPython's GIL (dict writes are atomic), aiosqlite's
+# single-thread serialization of SQL calls, and the per-peer error
+# isolation in ``_sync_inner``. These tests exercise the path to catch
+# regressions (e.g. someone refactors ``_peer_cursors`` into a class that
+# breaks atomic dict writes, or a future ``_sync_inner`` rewrite loses its
+# per-peer try/except).
+
+
+async def test_concurrent_sync_once_calls_dont_race(tmp_path):
+    """Two overlapping ``_sync_once`` calls plus a concurrent ``_flush_once``
+    on the same engine must complete without aiosqlite errors, and the
+    final local-DB state must be consistent (every peer row pulled, every
+    local set landed — no missing, no duplicate rows).
+
+    Why: Phase 1 review flagged that no test exercised
+    ``asyncio.gather(engine._sync_once(), engine._sync_once())``. A
+    regression in peer-cursor maintenance or in the shared-writer path
+    could let a race slip through unseen. This test gives us a
+    reproducible "two cycles and a flush in the same gather" scenario.
+
+    Why this is safe even without an explicit lock:
+     - ``_peer_cursors`` is a plain dict — reads and writes to individual
+       keys are atomic under CPython's GIL.
+     - ``_writer_db.executemany(...)`` goes through aiosqlite's single
+       background thread, so two concurrent coroutines' SQL calls
+       serialize at the connection level (no overlapping transactions).
+     - Per-peer errors inside ``_sync_inner`` are isolated, so even if one
+       concurrent call happens to observe a transient state inconsistency
+       from the other, it would be caught and logged, not raised.
+    """
+    engine = await _make_engine(
+        tmp_path,
+        worker_id='me',
+        cluster_name='prod',
+        cache_overrides={
+            'peer_sync': CachePeerSyncConfig(
+                enabled=True,
+                interval_seconds=30.0,
+                # Generous deadline — we don't want the deadline wrapper
+                # to mask any actual race by preempting a slow cycle.
+                cycle_deadline_seconds=10.0,
+            ),
+        },
+    )
+    try:
+        # Seed 2 peer DBs — matches the plan's "2 peer DBs" scenario.
+        # Different rows per peer so we can assert both peers' rows
+        # end up in the local DB.
+        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        await _seed_peer_cache_db(
+            tmp_path,
+            'peer1',
+            [
+                {'key': 'p1_k1', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1000},
+                {'key': 'p1_k2', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1001},
+            ],
+        )
+        await _seed_peer_live_db(tmp_path, 'peer2', cluster_name='prod')
+        await _seed_peer_cache_db(
+            tmp_path,
+            'peer2',
+            [
+                {'key': 'p2_k1', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 2000},
+                {'key': 'p2_k2', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 2001},
+            ],
+        )
+
+        # Seed the local cache with a local row so ``_flush_once`` has
+        # something to write alongside the two syncs.
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        assert cache is not None
+        cache.set('local_k1', 'v1', scope=CacheScope.LOCAL)
+
+        # Two ``_sync_once`` calls and one ``_flush_once`` in the SAME
+        # gather. Use ``return_exceptions=True`` so one coroutine's error
+        # doesn't cancel the others — we want to see every exception.
+        results = await asyncio.gather(
+            engine._sync_once(),  # type: ignore[reportPrivateUsage]
+            engine._sync_once(),  # type: ignore[reportPrivateUsage]
+            engine._flush_once(),  # type: ignore[reportPrivateUsage]
+            return_exceptions=True,
+        )
+
+        # No coroutine raised. The engine's contract for both methods is
+        # to return silently on transient errors (per-peer isolation,
+        # writer guard on None); an exception here means a real race.
+        for i, result in enumerate(results):
+            assert not isinstance(result, BaseException), f'coroutine {i} raised {type(result).__name__}: {result}'
+
+        # Final DB state: every peer row + the one local row. No
+        # duplicates (UPSERT via LWW guarantees one row per key even
+        # when both sync cycles UPSERT the same peer rows).
+        async with aiosqlite.connect(str(tmp_path / 'me-cache.db.actual')) as db:
+            cur = await db.execute('SELECT key FROM cache_entries ORDER BY key')
+            rows = await cur.fetchall()
+            await cur.close()
+        local_keys = [row[0] for row in rows]
+
+        # Set equality — every expected key present.
+        assert set(local_keys) == {'local_k1', 'p1_k1', 'p1_k2', 'p2_k1', 'p2_k2'}
+        # List length equality — no duplicates. (Redundant with the set
+        # check because ``cache_entries.key`` has a PRIMARY KEY
+        # constraint, but the assertion documents the invariant.)
+        assert len(local_keys) == len(set(local_keys)), f'duplicate keys in local DB: {local_keys}'
+    finally:
+        await engine.stop()
+
+
+async def test_concurrent_sync_across_cycles(tmp_path):
+    """Three concurrent ``_sync_once`` cycles run back-to-back via
+    ``asyncio.gather``. The peer cursor must be monotonic — it never
+    regresses from one cycle to the next, even when two cycles interleave
+    reads/writes of the cursor map.
+
+    The strict monotonicity contract (``_advance_cursor``: full-batch →
+    advance to last row's ``updated_at_ms``, partial-batch →
+    ``max(last_row_ts, cursor_ms)``) must survive concurrent invocation.
+    A regression where two overlapping cycles both read the same old
+    cursor value and one writes back a smaller value would skip rows on
+    the next cycle — hard to spot in production but trivially caught here.
+    """
+    # Use batch_size=2 so a peer with 4 rows takes multiple cycles to
+    # fully drain. The early cycles return full batches (cursor advances
+    # to the last row's ts); later cycles return partial batches (cursor
+    # stays at or above its last value).
+    engine = await _make_engine(
+        tmp_path,
+        worker_id='me',
+        cluster_name='prod',
+        cache_overrides={
+            'peer_sync': CachePeerSyncConfig(
+                enabled=True,
+                batch_size=2,
+                interval_seconds=30.0,
+                cycle_deadline_seconds=10.0,
+            ),
+        },
+    )
+    try:
+        await _seed_peer_live_db(tmp_path, 'peer1', cluster_name='prod')
+        # 4 rows with strictly increasing timestamps — cursor advances
+        # deterministically cycle by cycle.
+        await _seed_peer_cache_db(
+            tmp_path,
+            'peer1',
+            [
+                {'key': 'k1', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1000},
+                {'key': 'k2', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1001},
+                {'key': 'k3', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1002},
+                {'key': 'k4', 'scope': CacheScope.GLOBAL.value, 'updated_at_ms': 1003},
+            ],
+        )
+
+        # Snapshot the cursor map AFTER each gather call to assert
+        # monotonicity. Before the first cycle: no cursor at all.
+        assert 'peer1' not in engine._peer_cursors  # type: ignore[reportPrivateUsage]
+
+        cursor_history: list[int] = []
+
+        # Run 3 concurrent cycles. Each cycle calls ``_sync_once`` and
+        # independently advances the cursor. After gather returns,
+        # capture the final cursor value; repeat for 3 gather rounds.
+        for _ in range(3):
+            results = await asyncio.gather(
+                engine._sync_once(),  # type: ignore[reportPrivateUsage]
+                engine._sync_once(),  # type: ignore[reportPrivateUsage]
+                engine._sync_once(),  # type: ignore[reportPrivateUsage]
+                return_exceptions=True,
+            )
+            for i, result in enumerate(results):
+                assert not isinstance(result, BaseException), f'cycle {i} raised {type(result).__name__}: {result}'
+            # Cursor MUST exist after the first gather and MUST NOT
+            # regress across gathers.
+            current = engine._peer_cursors['peer1']  # type: ignore[reportPrivateUsage]
+            if cursor_history:
+                assert current >= cursor_history[-1], (
+                    f'cursor regressed: {cursor_history[-1]} -> {current}. Full history: {[*cursor_history, current]}'
+                )
+            cursor_history.append(current)
+
+        # After 3 rounds of 3 concurrent cycles each, every peer row
+        # must be in the local DB. 4 rows, batch_size=2 — even a single
+        # round would sync at least 2 rows; three rounds drain the peer
+        # completely (main pull of 2 rows on cycle 1, main pull of 2
+        # more on cycle 2, partial/zero pull on cycle 3). Concurrent
+        # cycles within a round may all race to the same cursor value,
+        # but the UPSERT path is idempotent so the outcome is the same.
+        async with aiosqlite.connect(str(tmp_path / 'me-cache.db.actual')) as db:
+            cur = await db.execute('SELECT key FROM cache_entries ORDER BY key')
+            rows = await cur.fetchall()
+            await cur.close()
+        local_keys = {row[0] for row in rows}
+        assert local_keys == {'k1', 'k2', 'k3', 'k4'}, (
+            f'all peer rows must be synced after 3 concurrent cycles; '
+            f'cursor history: {cursor_history}; local keys: {local_keys}'
+        )
+
+        # Final cursor must be at 1003 (last row's timestamp) once the
+        # peer is fully drained. If a race had advanced the cursor past
+        # 1003 (impossible given strict monotonicity in the SQL) or
+        # rolled it back below, this catches it.
+        assert cursor_history[-1] == 1003, f'cursor must settle at 1003 after full drain; history: {cursor_history}'
+    finally:
+        await engine.stop()
+
+
 # --- pytest configuration ---------------------------------------------------
 # All tests are async and use the project's auto asyncio_mode; no explicit
 # ``@pytest.mark.asyncio`` needed. ``pytest_plugins`` intentionally omitted.
