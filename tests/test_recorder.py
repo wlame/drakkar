@@ -5,6 +5,7 @@ import os
 from collections import deque
 from pathlib import Path
 
+import aiosqlite
 import pytest
 from pydantic import BaseModel
 
@@ -489,7 +490,6 @@ async def test_rotate_flushes_buffer_to_old_db(tmp_path):
     await rec._rotate()
 
     # buffer was flushed to old DB before rotation
-    import aiosqlite
 
     async with (
         aiosqlite.connect(old_path) as old_db,
@@ -659,7 +659,6 @@ async def test_rotate_schema_creation_failure_does_not_swap(tmp_path):
 
 async def test_start_creates_both_writer_and_reader_connections(tmp_path):
     """start() must open both ``_db`` (writer) and ``_reader_db`` (reader)."""
-    import aiosqlite
 
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
@@ -1085,7 +1084,6 @@ async def test_rotation_no_event_loss(tmp_path):
     await rec._rotate()  # flushes buffer to old DB, opens new DB
 
     # old DB should have all 4 events
-    import aiosqlite
 
     async with (
         aiosqlite.connect(old_path) as old_db,
@@ -1154,8 +1152,6 @@ async def test_rotation_new_db_has_schema(tmp_path):
 
     await rec._rotate()
     new_path = rec.db_path
-
-    import aiosqlite
 
     async with aiosqlite.connect(new_path) as db:
         # verify events table exists
@@ -1804,7 +1800,6 @@ async def test_store_events_false_no_flush_task(tmp_path):
 
 async def test_discover_workers_finds_other_worker(tmp_path):
     """discover_workers reads worker_config from another worker's live DB."""
-    import aiosqlite
 
     # create a fake other worker's DB
     other_db_path = tmp_path / 'other-worker-2026-03-24__10_00_00.db'
@@ -1872,7 +1867,6 @@ async def test_discover_workers_skips_own_symlink(tmp_path):
 
 async def test_discover_workers_skips_missing_config_table(tmp_path):
     """If another worker's DB has no worker_config table, it's skipped."""
-    import aiosqlite
 
     # create a DB without worker_config
     other_db = tmp_path / 'no-config-worker-2026-03-24__10_00_00.db'
@@ -2045,7 +2039,6 @@ async def test_stop_syncs_state_before_shutdown(tmp_path):
     await rec.stop()
 
     # verify by reopening the DB
-    import aiosqlite
 
     async with (
         aiosqlite.connect(db_path) as db,
@@ -2081,7 +2074,6 @@ async def _create_worker_db(
     offset=42,
 ):
     """Create a DB with worker_config + events for cross_trace testing."""
-    import aiosqlite
 
     async with aiosqlite.connect(str(db_path)) as db:
         await db.executescript(SCHEMA_WORKER_CONFIG)
@@ -3119,3 +3111,175 @@ async def test_recorder_dropped_events_not_incremented_when_skip_db(tmp_path):
     assert recorder_dropped_events._value.get() == before
 
     await rec.stop()
+
+
+# --- Task 12: aiosqlite error injection ----------------------------------
+#
+# Production recorders will sometimes hit aiosqlite ``OperationalError`` —
+# under contention (``database is locked``) or disk failure (``disk I/O
+# error``). These tests codify the recorder's current behaviour so we can
+# see it regress, and so a future hardening task (see plan) can re-write
+# them alongside the fix.
+#
+# CURRENT BEHAVIOUR (tested below):
+#
+#   - ``_flush`` drains the buffer into a local ``batch`` list BEFORE the
+#     ``executemany`` call. If ``executemany`` or ``commit`` raises, the
+#     events in ``batch`` are lost (they are not returned to the buffer).
+#   - The exception propagates out of ``_flush`` with no try/except.
+#   - ``_flush_loop`` also has no try/except around ``_flush``, so a
+#     failing flush kills ``_flush_task``.
+#
+# This is a gap relative to the cache engine, which restores the snapshot
+# on failure via ``restore_dirty``. The recorder should get the same
+# treatment — or at minimum catch the exception in ``_flush_loop`` so the
+# task survives. The plan captures this as a follow-up hardening task.
+# The tests below codify today's behaviour so any future fix will break
+# them intentionally (prompting an update at the same time as the fix).
+
+
+async def test_recorder_flush_handles_database_locked(tmp_path):
+    """``aiosqlite.OperationalError('database is locked')`` raised mid-
+    flush propagates out of ``_flush`` (no swallow today) and the
+    already-drained batch is lost from the buffer.
+
+    This test codifies today's behaviour. It also documents the gap: the
+    recorder has no retry/requeue path for transient lock errors, and the
+    ``_flush_loop`` has no try/except so the flush task dies on the first
+    such error. A future hardening task should:
+
+      1. catch the OperationalError inside ``_flush`` (or ``_flush_loop``),
+      2. log a warning with structured fields,
+      3. increment a drop-counter metric for observability,
+      4. keep the flush task alive so subsequent flushes can succeed.
+    """
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    try:
+        rec.record_consumed(make_msg(partition=0, offset=0))
+        rec.record_consumed(make_msg(partition=0, offset=1))
+        assert len(rec._buffer) == 2
+
+        # Patch executemany to simulate lock contention.
+        assert rec._db is not None
+        original_executemany = rec._db.executemany
+
+        async def locked_executemany(query, rows):
+            raise aiosqlite.OperationalError('database is locked')
+
+        rec._db.executemany = locked_executemany  # type: ignore[method-assign]
+
+        # Today: the error propagates through _flush.
+        with pytest.raises(aiosqlite.OperationalError, match='database is locked'):
+            await rec._flush()
+
+        # Today: the batch was drained into a local before the failing call,
+        # so the events are lost from the buffer (bug — future fix should
+        # requeue or at least tick a drop counter).
+        assert len(rec._buffer) == 0
+
+        # Restore executemany so subsequent operations work; verify the
+        # recorder can still flush future events normally once the lock
+        # clears.
+        rec._db.executemany = original_executemany  # type: ignore[method-assign]
+        rec.record_consumed(make_msg(partition=0, offset=2))
+        await rec._flush()
+        assert len(rec._buffer) == 0
+
+        # The last event made it to the DB.
+        events = await rec.get_events(partition=0)
+        assert len(events) == 1
+        assert events[0]['offset'] == 2
+    finally:
+        await rec.stop()
+
+
+async def test_recorder_flush_handles_disk_io_error(tmp_path):
+    """``aiosqlite.OperationalError('disk I/O error')`` on ``executemany``
+    behaves the same as the lock case: exception propagates out of
+    ``_flush``, already-drained batch is lost.
+
+    In production, disk I/O errors arise from the underlying filesystem
+    (volume full, ENOSPC, read-only remount). They typically surface at
+    the INSERT phase rather than COMMIT, because SQLite's default
+    autocommit mode means the write is flushed to the WAL as part of
+    ``executemany``.
+    """
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    try:
+        rec.record_consumed(make_msg(partition=0, offset=0))
+        rec.record_consumed(make_msg(partition=0, offset=1))
+        assert len(rec._buffer) == 2
+
+        assert rec._db is not None
+        original_executemany = rec._db.executemany
+
+        async def disk_failing_executemany(query, rows):
+            raise aiosqlite.OperationalError('disk I/O error')
+
+        rec._db.executemany = disk_failing_executemany  # type: ignore[method-assign]
+
+        with pytest.raises(aiosqlite.OperationalError, match='disk I/O error'):
+            await rec._flush()
+
+        # Batch already drained — buffer empty despite the failure.
+        assert len(rec._buffer) == 0
+
+        # Recovery: restore executemany and a subsequent flush succeeds.
+        rec._db.executemany = original_executemany  # type: ignore[method-assign]
+        rec.record_consumed(make_msg(partition=0, offset=2))
+        await rec._flush()
+
+        events = await rec.get_events(partition=0)
+        # Only the post-recovery event lands — the pre-failure batch was
+        # lost from the buffer before ``executemany`` was called (bug,
+        # documented in the module header above).
+        assert len(events) == 1
+        assert events[0]['offset'] == 2
+    finally:
+        await rec.stop()
+
+
+async def test_recorder_flush_executemany_failure_preserves_commit_absent(tmp_path):
+    """When ``executemany`` raises, ``commit`` is never reached.
+
+    Narrow follow-up to the two tests above. Ensures the failure path
+    doesn't accidentally commit partial results — important because
+    SQLite auto-commits in some isolation modes and we want to confirm
+    the error surfaces before commit rather than after.
+    """
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    try:
+        rec.record_consumed(make_msg(partition=0, offset=0))
+
+        assert rec._db is not None
+        commit_called = {'n': 0}
+        original_commit = rec._db.commit
+        original_executemany = rec._db.executemany
+
+        async def spy_commit():
+            commit_called['n'] += 1
+            return await original_commit()
+
+        async def locked_executemany(query, rows):
+            raise aiosqlite.OperationalError('database is locked')
+
+        rec._db.commit = spy_commit  # type: ignore[method-assign]
+        rec._db.executemany = locked_executemany  # type: ignore[method-assign]
+
+        with pytest.raises(aiosqlite.OperationalError):
+            await rec._flush()
+
+        # commit must not have been called — executemany failed first.
+        assert commit_called['n'] == 0
+    finally:
+        # Restore originals so stop()'s own _flush drain + close work.
+        if rec._db is not None:
+            rec._db.executemany = original_executemany  # type: ignore[method-assign]
+            rec._db.commit = original_commit  # type: ignore[method-assign]
+        await rec.stop()

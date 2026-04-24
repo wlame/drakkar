@@ -1104,3 +1104,226 @@ async def test_stop_final_drain_failure_is_logged_and_stop_completes(tmp_path, m
     assert engine._reader_db is None  # type: ignore[reportPrivateUsage]
     assert call_count['count'] >= 1, 'final drain was never called'
     assert 'cache_final_drain_failed' in captured_events
+
+
+# --- Task 12: aiosqlite error injection ----------------------------------
+#
+# Production workers will sometimes see ``OperationalError('database is
+# locked')`` under contention and ``OperationalError('disk I/O error')``
+# on volume-full or disk-failure. The framework must handle these without
+# crashing the worker.
+#
+# CacheEngine's ``_flush_once`` has a try/finally that restores the
+# snapshot on any failure (including non-cancelled exceptions), so the
+# dirty ops are preserved for retry on the next cycle. The exception
+# itself propagates out of ``_flush_once`` — it's ``run_periodic_task``
+# with ``on_error='continue'`` that keeps the loop alive. We test the
+# leaf behaviour here:
+#   1. ``_flush_once`` raises the underlying OperationalError
+#   2. ``_cache._dirty`` still contains the original ops (restore worked)
+#   3. Once the fault clears, the next ``_flush_once`` drains cleanly
+#
+# The corrupt-DB start test codifies that ``start()`` raises a clear
+# error rather than hanging or leaving the engine in a partially-
+# initialised state that silently misbehaves later.
+
+
+async def test_cache_flush_handles_database_locked(tmp_path):
+    """An ``aiosqlite.OperationalError('database is locked')`` raised mid-
+    flush must leave the dirty map intact so the next flush retries the
+    same ops. The engine must NOT lose pending writes on transient
+    contention — SQLite's ``database is locked`` is recoverable.
+
+    After the lock clears (patch removed), a subsequent ``_flush_once``
+    drains the restored snapshot to the DB. This is the basic contract
+    for operational resilience under concurrent readers/writers.
+    """
+    engine = await _make_engine(tmp_path)
+    await engine.start()
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        cache.set('k1', 'v1')
+        cache.set('k2', 'v2')
+
+        assert engine._writer_db is not None  # type: ignore[reportPrivateUsage]
+        original_executemany = engine._writer_db.executemany  # type: ignore[reportPrivateUsage]
+
+        calls = {'n': 0}
+
+        async def flaky_executemany(sql, params):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise aiosqlite.OperationalError('database is locked')
+            return await original_executemany(sql, params)
+
+        engine._writer_db.executemany = flaky_executemany  # type: ignore[reportPrivateUsage,assignment]
+
+        # First flush: OperationalError propagates. The dirty map must be
+        # restored so nothing is lost.
+        with pytest.raises(aiosqlite.OperationalError, match='database is locked'):
+            await engine._flush_once()  # type: ignore[reportPrivateUsage]
+
+        assert set(cache._dirty.keys()) == {'k1', 'k2'}  # type: ignore[reportPrivateUsage]
+
+        # Second flush (patch now returns real executemany) must succeed
+        # and land the same ops in the DB.
+        await engine._flush_once()  # type: ignore[reportPrivateUsage]
+        assert cache._dirty == {}  # type: ignore[reportPrivateUsage]
+
+        db_path = tmp_path / 'w1-cache.db.actual'
+        assert (await _fetch_row(db_path, 'k1')) is not None
+        assert (await _fetch_row(db_path, 'k2')) is not None
+    finally:
+        await engine.stop()
+
+
+async def test_cache_flush_handles_disk_io_error(tmp_path):
+    """An ``OperationalError('disk I/O error')`` mid-flush behaves the
+    same as the lock case at the engine level: snapshot restored, next
+    flush (once the fault clears) drains cleanly.
+
+    Real-world disk I/O errors are usually not transient on the same
+    disk, but the framework's contract is the same — don't lose dirty
+    ops, don't crash the loop. Recovery would typically happen at a
+    higher level (ops intervention: clear disk, restart worker).
+    """
+    engine = await _make_engine(tmp_path)
+    await engine.start()
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        cache.set('payload', 'must_survive')
+
+        assert engine._writer_db is not None  # type: ignore[reportPrivateUsage]
+        original_executemany = engine._writer_db.executemany  # type: ignore[reportPrivateUsage]
+
+        calls = {'n': 0}
+
+        async def disk_failing_executemany(sql, params):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise aiosqlite.OperationalError('disk I/O error')
+            return await original_executemany(sql, params)
+
+        engine._writer_db.executemany = disk_failing_executemany  # type: ignore[reportPrivateUsage,assignment]
+
+        with pytest.raises(aiosqlite.OperationalError, match='disk I/O error'):
+            await engine._flush_once()  # type: ignore[reportPrivateUsage]
+
+        # Dirty preserved for retry.
+        assert 'payload' in cache._dirty  # type: ignore[reportPrivateUsage]
+
+        # Subsequent flush succeeds.
+        await engine._flush_once()  # type: ignore[reportPrivateUsage]
+        db_path = tmp_path / 'w1-cache.db.actual'
+        assert (await _fetch_row(db_path, 'payload')) is not None
+    finally:
+        await engine.stop()
+
+
+async def test_cache_flush_error_does_not_corrupt_subsequent_flush(tmp_path):
+    """Multiple failing flushes followed by a successful one must keep
+    restoring the full dirty map each time, and the eventual success
+    drains all ops — not a partial subset. This guards against a restore
+    path that accidentally leaks state across failed cycles.
+    """
+    engine = await _make_engine(tmp_path)
+    await engine.start()
+    try:
+        cache = engine._cache  # type: ignore[reportPrivateUsage]
+        cache.set('a', 1)
+        cache.set('b', 2)
+        cache.set('c', 3)
+
+        assert engine._writer_db is not None  # type: ignore[reportPrivateUsage]
+        original_executemany = engine._writer_db.executemany  # type: ignore[reportPrivateUsage]
+
+        calls = {'n': 0}
+
+        async def fail_then_succeed(sql, params):
+            calls['n'] += 1
+            # Fail the first three flushes, succeed on the fourth. The
+            # dirty map must be intact each time.
+            if calls['n'] <= 3:
+                raise aiosqlite.OperationalError('database is locked')
+            return await original_executemany(sql, params)
+
+        engine._writer_db.executemany = fail_then_succeed  # type: ignore[reportPrivateUsage,assignment]
+
+        for _ in range(3):
+            with pytest.raises(aiosqlite.OperationalError):
+                await engine._flush_once()  # type: ignore[reportPrivateUsage]
+            assert set(cache._dirty.keys()) == {'a', 'b', 'c'}  # type: ignore[reportPrivateUsage]
+
+        # Fourth flush succeeds.
+        await engine._flush_once()  # type: ignore[reportPrivateUsage]
+        assert cache._dirty == {}  # type: ignore[reportPrivateUsage]
+
+        db_path = tmp_path / 'w1-cache.db.actual'
+        for key in ('a', 'b', 'c'):
+            assert (await _fetch_row(db_path, key)) is not None
+    finally:
+        await engine.stop()
+
+
+async def test_cache_engine_start_handles_corrupt_db(tmp_path):
+    """Starting the engine against a corrupt DB file must raise a clear
+    SQLite error rather than hanging or silently running the engine in a
+    half-initialised state.
+
+    SQLite doesn't detect malformed DB headers on ``connect`` — the error
+    surfaces when the schema DDL runs. That's enough for operators: they
+    see the failure at startup, not after their first write.
+
+    This test codifies the "fail-fast on corrupt DB" expectation. If we
+    ever decide to wrap ``start()`` in a recovery path (e.g. rename bad
+    file + retry), we'd revisit the assertion here.
+    """
+    # Pre-create a corrupt file at the path the engine will open. The
+    # engine's ``_cache_db_file_path`` uses a deterministic ``.actual``
+    # suffix per worker id, so we can stage the fault in advance.
+    corrupt_path = tmp_path / 'w1-cache.db.actual'
+    corrupt_path.write_bytes(b'not a valid sqlite file' * 1000)
+
+    engine = await _make_engine(tmp_path, worker_id='w1')
+    try:
+        with pytest.raises(aiosqlite.DatabaseError, match='file is not a database'):
+            await engine.start()
+
+        # The writer connection may have been opened (SQLite is lazy about
+        # validating the file) but schema creation failed — the reader is
+        # not yet open. stop() must still clean up cleanly.
+        assert engine._reader_db is None  # type: ignore[reportPrivateUsage]
+    finally:
+        # stop() tolerates a half-opened engine — this exercises that path
+        # too (no lingering connections, no exceptions).
+        await engine.stop()
+
+
+async def test_cache_engine_start_handles_connect_failure(tmp_path, monkeypatch):
+    """If ``aiosqlite.connect`` itself fails (e.g. permission error, I/O
+    failure), ``start()`` must raise a clear error — not swallow it and
+    leave the engine half-initialised.
+
+    We simulate the failure by monkey-patching ``aiosqlite.connect`` in
+    the ``cache`` module so the engine's call path hits our stub. The
+    raised ``OSError`` represents the class of early-startup failures
+    (disk unreadable, path permissions, missing parent dir despite
+    makedirs — all things that should surface to the operator).
+    """
+    from drakkar import cache as cache_module
+
+    async def failing_connect(*args, **kwargs):
+        raise OSError('permission denied')
+
+    monkeypatch.setattr(cache_module.aiosqlite, 'connect', failing_connect)
+
+    engine = await _make_engine(tmp_path, worker_id='w1')
+    with pytest.raises(OSError, match='permission denied'):
+        await engine.start()
+
+    # Engine didn't complete start; no writer or reader handles leaked.
+    assert engine._writer_db is None  # type: ignore[reportPrivateUsage]
+    assert engine._reader_db is None  # type: ignore[reportPrivateUsage]
+
+    # stop() on an un-started engine is safe.
+    await engine.stop()
