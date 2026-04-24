@@ -1004,6 +1004,44 @@ async def test_deliver_all_preserves_sink_stats_per_sink_under_gather():
     assert ok_b_stats.last_error_ts is None
 
 
+async def test_deliver_all_logs_unhandled_helper_exception_without_re_raising():
+    """If ``_deliver_to_sink`` leaks an exception (a bug, since the helper is
+    supposed to catch everything and route through on_delivery_error), the
+    surrounding ``asyncio.gather(return_exceptions=True)`` captures it. The
+    caller logs the leak via ``sink_deliver_helper_unhandled_exception`` but
+    does not re-raise so sibling sinks' successes are preserved.
+    """
+    import structlog
+
+    mgr = SinkManager()
+    sink = FakeSink('buggy', sink_type='kafka')
+    mgr.register(sink)
+
+    # Replace the helper with one that raises an arbitrary exception so we
+    # exercise the "unhandled leak" branch at the end of deliver_all. This
+    # would never happen in practice (the real helper catches everything),
+    # but the guard exists precisely because bugs can slip in.
+    async def buggy_helper(**kwargs):
+        raise RuntimeError('helper leaked an unexpected exception')
+
+    mgr._deliver_to_sink = buggy_helper  # type: ignore[assignment]
+
+    result = CollectResult(
+        kafka=[KafkaPayload(sink='buggy', data=SampleData())],
+    )
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
+
+    with structlog.testing.capture_logs() as logs:
+        # No exception propagates out — the gather wrapper swallows it and
+        # the manager logs it as an error instead.
+        await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    assert any(
+        log.get('event') == 'sink_deliver_helper_unhandled_exception' and log.get('sink_name') == 'buggy'
+        for log in logs
+    )
+
+
 # --- Circuit breaker (Phase 2 Task 7) ---
 #
 # The per-sink circuit breaker trips after `failure_threshold` consecutive

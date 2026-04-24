@@ -821,6 +821,112 @@ async def test_concurrent_reader_and_writer_no_deadlock(tmp_path):
     await rec.stop()
 
 
+async def test_stop_reader_close_failure_still_closes_writer(tmp_path):
+    """If reader.close() raises, stop() logs a warning, clears the reader,
+    and still closes the writer. The worker must leave a clean state.
+    """
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    assert rec._reader_db is not None
+    assert rec._db is not None
+
+    # Swap the reader for one whose close() raises. The writer must still
+    # go through its own close() branch after the failed reader close.
+    class _ExplodingClose:
+        async def close(self):
+            raise RuntimeError('simulated reader close failure')
+
+    rec._reader_db = _ExplodingClose()  # type: ignore[assignment]
+
+    # stop() should swallow the reader-close exception (logged as warning)
+    # and still transition the writer to closed + remove the live link.
+    await rec.stop()
+
+    assert rec._reader_db is None
+    assert rec._db is None
+
+
+async def test_rotate_new_reader_open_failure_rolls_back(tmp_path, monkeypatch):
+    """If _open_reader() raises on the new path, _rotate closes the freshly
+    opened new_db and leaves the previous writer/reader pair in place so the
+    worker stays usable.
+    """
+    from drakkar import recorder as recorder_module
+
+    config = make_debug_config(tmp_path, retention_hours=24)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    old_writer = rec._db
+    old_reader = rec._reader_db
+    old_path = rec.db_path
+
+    async def failing_open_reader(path):
+        raise RuntimeError('simulated new reader open failure')
+
+    monkeypatch.setattr(recorder_module, '_open_reader', failing_open_reader)
+
+    with pytest.raises(RuntimeError, match='simulated new reader open failure'):
+        await rec._rotate()
+
+    # Old writer/reader untouched — worker remains usable.
+    assert rec._db is old_writer
+    assert rec._reader_db is old_reader
+    assert rec.db_path == old_path
+
+    # Sanity: still usable after the failed rotate.
+    rec.record_consumed(make_msg(offset=7))
+    await rec._flush()
+    events = await rec.get_events()
+    assert any(e['offset'] == 7 for e in events)
+
+    await rec.stop()
+
+
+async def test_rotate_old_reader_close_failure_does_not_abort_rotation(tmp_path):
+    """_rotate logs a warning on old reader/writer close failure but still
+    completes. Post-rotation the new writer/reader are live.
+    """
+    config = make_debug_config(tmp_path, retention_hours=24)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    # Wrap the live reader with one that raises on close; the rotation
+    # exercises the warning-log branch and keeps going.
+    real_reader = rec._reader_db
+    assert real_reader is not None
+
+    class _ExplodingOnClose:
+        async def close(self):
+            # close the real underlying reader so the fd isn't leaked,
+            # then raise to exercise the warn path.
+            with contextlib.suppress(Exception):
+                await real_reader.close()
+            raise RuntimeError('simulated old reader close failure')
+
+    import contextlib  # local import to keep the fixture tight
+
+    rec._reader_db = _ExplodingOnClose()  # type: ignore[assignment]
+
+    # Rotation should complete despite the faulty close.
+    await rec._rotate()
+
+    # New reader/writer installed and usable.
+    assert rec._db is not None
+    assert rec._reader_db is not None
+    rec.record_consumed(make_msg(partition=2, offset=99))
+    await rec._flush()
+    async with rec._reader_db.execute(
+        'SELECT partition, offset FROM events WHERE event = ?',
+        ('consumed',),
+    ) as cur:
+        rows = await cur.fetchall()
+    assert (2, 99) in rows
+
+    await rec.stop()
+
+
 # --- Pool stats in events ---
 
 
