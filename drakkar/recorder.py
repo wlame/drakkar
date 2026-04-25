@@ -1,21 +1,36 @@
-"""Flight recorder — event log to timestamped SQLite files."""
+"""Flight recorder — event log to timestamped SQLite files.
+
+The schemas + standalone helpers (JSON encoding, env-secret sanitization,
+DB-file path management, IP detection) live in two sibling modules:
+
+- :mod:`drakkar.recorder_schema`  — DDL constants + canned trace queries.
+- :mod:`drakkar.recorder_helpers` — orjson-or-stdlib codec, secret patterns,
+  ``_format_dt``, ``_make_db_path``, ``_live_link_path``, ``_list_db_files``,
+  ``_open_reader``, ``detect_worker_ip``.
+
+This module re-imports them so external code (and ``mock.patch`` test sites)
+can keep using ``drakkar.recorder.X`` paths.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import fnmatch
 import glob
-import json
 import os
 import queue
-import socket
+
+# ``socket`` is re-imported here so test patches like
+# ``patch('drakkar.recorder.socket.socket', ...)`` still find the module on
+# this attribute path. The actual ``detect_worker_ip`` consumer lives in
+# :mod:`drakkar.recorder_helpers`, but ``socket`` is a shared module
+# reference — patching ``socket.socket`` via either attribute path replaces
+# the class globally for both modules.
+import socket  # noqa: F401
 import time
 from collections import deque
 from collections.abc import Callable
-from datetime import UTC, datetime
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import aiosqlite
 import structlog
@@ -37,267 +52,40 @@ from drakkar.models import (
     SourceMessage,
 )
 from drakkar.peer_discovery import discover_peer_dbs
+
+# Re-exports — keep the previous public surface so tests and external
+# imports of ``drakkar.recorder.<name>`` continue working without changes.
+# ``_encode_json``, ``_HAS_ORJSON`` and ``_SECRET_ENV_PATTERNS`` are not
+# referenced inside this module after the helper extraction but ARE
+# imported by tests; the ``noqa: F401`` markers silence the unused-import
+# warning while preserving the public attribute path on
+# ``drakkar.recorder``.
+from drakkar.recorder_helpers import (
+    _HAS_ORJSON,  # noqa: F401  (re-exported for tests)
+    _SECRET_ENV_PATTERNS,  # noqa: F401  (re-exported for tests)
+    _encode_json,  # noqa: F401  (re-exported for tests)
+    _encode_json_str,
+    _format_dt,
+    _list_db_files,
+    _live_link_path,
+    _make_db_path,
+    _open_reader,
+    _sanitize_env_value,
+    detect_worker_ip,
+)
+from drakkar.recorder_schema import (
+    _LABEL_TRACE_QUERY,
+    _TRACE_QUERY,
+    SCHEMA_EVENTS,
+    SCHEMA_WORKER_CONFIG,
+    SCHEMA_WORKER_STATE,
+)
 from drakkar.utils import redact_url
 
 if TYPE_CHECKING:
     from drakkar.config import DrakkarConfig
 
 logger = structlog.get_logger()
-
-# Fast JSON encoder for the recorder hot path. orjson is an optional
-# dependency (``pip install drakkar[perf]``) — when available, SQLite
-# payload encoding (args / metadata / labels) uses it for a ~2-4x speedup
-# over ``json.dumps``. When orjson is not installed we transparently
-# fall back to stdlib ``json`` so the recorder keeps working with the
-# same on-wire semantics.
-#
-# Contract:
-# - ``_encode_json(obj)`` returns BYTES (UTF-8). The low-level primitive
-#   — callers that want str use ``_encode_json_str(obj)`` which decodes
-#   once on the way out.
-# - The recorder stores TEXT columns in SQLite, which requires ``str``
-#   on insert; those sites use ``_encode_json_str``.
-# - Keys are SORTED so repeated encodes of the same dict produce
-#   identical output (deterministic hashes / cache dedup downstream).
-# - Non-JSON-native types fall back to ``default=str`` / orjson's
-#   built-in ``datetime`` + ``UUID`` handlers.
-# - Datetimes tagged with ``tzinfo=UTC`` end with "Z" in both paths
-#   (matches the existing ``isoformat().replace("+00:00", "Z")``
-#   convention used elsewhere in the code base).
-try:
-    import orjson
-
-    _HAS_ORJSON = True
-
-    def _encode_json(obj: Any) -> bytes:
-        """Encode ``obj`` as UTF-8 JSON bytes via orjson.
-
-        Options:
-        - ``OPT_SORT_KEYS``: deterministic output regardless of insertion order.
-        - ``OPT_UTC_Z``: UTC datetimes serialize as ``...Z`` (not ``+00:00``).
-        - ``OPT_NON_STR_KEYS``: coerce non-string dict keys (rare but safe).
-        The ``default=str`` hook catches anything orjson can't serialize
-        natively (custom classes etc.), matching the stdlib fallback.
-        """
-        return orjson.dumps(
-            obj,
-            option=orjson.OPT_SORT_KEYS | orjson.OPT_UTC_Z | orjson.OPT_NON_STR_KEYS,
-            default=str,
-        )
-except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
-    _HAS_ORJSON = False
-
-    def _encode_json(obj: Any) -> bytes:
-        """Stdlib fallback encoder (used when orjson is not installed).
-
-        Matches orjson byte-for-byte on common payloads:
-        - ``separators=(',', ':')`` → compact layout (no spaces).
-        - ``ensure_ascii=False`` → emit UTF-8 directly instead of
-          escaping non-ASCII (e.g. ``"naïve"`` stays as-is, not
-          ``"na\\u00efve"``). orjson always writes raw UTF-8.
-        - ``sort_keys=True`` → deterministic key order.
-        - ``default=str`` → fallback coercion for non-native types;
-          catches anything orjson's ``default=str`` would also catch.
-
-        These choices keep the on-disk recorder DB stable regardless of
-        which path (orjson vs. stdlib) produced the bytes, so swapping
-        the ``perf`` extra on/off does not change stored content.
-        """
-        return json.dumps(obj, sort_keys=True, default=str, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
-
-
-def _encode_json_str(obj: Any) -> str:
-    """Encode ``obj`` as a JSON string (UTF-8 text).
-
-    Thin wrapper over :func:`_encode_json` that decodes the bytes once so
-    the string-typed SQLite insert sites can use it transparently.
-    """
-    return _encode_json(obj).decode('utf-8')
-
-
-# Env var name patterns whose values get redacted before being written to the
-# recorder SQLite file. Applied case-insensitively. The recorder DB can be
-# downloaded via the debug UI, so writing raw secrets would effectively
-# publish them — this filter is the last line of defence.
-_SECRET_ENV_PATTERNS = (
-    '*PASSWORD*',
-    '*SECRET*',
-    '*TOKEN*',
-    '*_KEY',
-    '*API_KEY*',
-    '*CREDENTIAL*',
-    '*_DSN',
-)
-
-
-def _sanitize_env_value(name: str, value: str) -> str:
-    """Return a safe-to-store version of an env var value.
-
-    Redacts fully when the var name matches a common-secret pattern. For
-    other values, strips embedded credentials from URL-shaped strings
-    (handles DSNs, HTTP-with-basic-auth, Kafka SASL_SSL, etc.).
-    """
-    name_upper = name.upper()
-    if any(fnmatch.fnmatchcase(name_upper, p.upper()) for p in _SECRET_ENV_PATTERNS):
-        return '***' if value else ''
-    return redact_url(value)
-
-
-SCHEMA_EVENTS = """
-CREATE TABLE IF NOT EXISTS events (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts          REAL    NOT NULL,
-    dt          TEXT    NOT NULL,
-    event       TEXT    NOT NULL,
-    partition   INTEGER,
-    offset      INTEGER,
-    task_id     TEXT,
-    args        TEXT,
-    stdout_size INTEGER DEFAULT 0,
-    stdout      TEXT,
-    stderr      TEXT,
-    exit_code   INTEGER,
-    duration    REAL,
-    output_topic TEXT,
-    metadata    TEXT,
-    pid         INTEGER,
-    labels      TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_events_partition_offset ON events(partition, offset);
-CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
-CREATE INDEX IF NOT EXISTS idx_events_dt ON events(dt);
-CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id);
-CREATE INDEX IF NOT EXISTS idx_events_type ON events(event);
-CREATE INDEX IF NOT EXISTS idx_events_labels ON events(labels) WHERE labels IS NOT NULL;
-"""
-
-SCHEMA_WORKER_CONFIG = """
-CREATE TABLE IF NOT EXISTS worker_config (
-    id              INTEGER PRIMARY KEY CHECK (id = 1),
-    worker_name     TEXT NOT NULL,
-    cluster_name    TEXT,
-    ip_address      TEXT,
-    debug_port      INTEGER,
-    debug_url       TEXT,
-    kafka_brokers   TEXT,
-    source_topic    TEXT,
-    consumer_group  TEXT,
-    binary_path     TEXT,
-    max_executors     INTEGER,
-    task_timeout_seconds INTEGER,
-    max_retries     INTEGER,
-    window_size     INTEGER,
-    sinks_json      TEXT,
-    env_vars_json   TEXT,
-    created_at      REAL NOT NULL,
-    created_at_dt   TEXT NOT NULL
-);
-"""
-
-SCHEMA_WORKER_STATE = """
-CREATE TABLE IF NOT EXISTS worker_state (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    uptime_seconds      REAL,
-    assigned_partitions TEXT,
-    partition_count     INTEGER,
-    pool_active         INTEGER,
-    pool_max            INTEGER,
-    total_queued        INTEGER,
-    consumed_count      INTEGER,
-    completed_count     INTEGER,
-    failed_count        INTEGER,
-    produced_count      INTEGER,
-    committed_count     INTEGER,
-    paused              INTEGER,
-    updated_at          REAL NOT NULL,
-    updated_at_dt       TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_worker_state_updated ON worker_state(updated_at);
-"""
-
-_TRACE_QUERY = """
-    SELECT * FROM events
-    WHERE partition = ? AND (
-        offset = ?
-        OR task_id IN (
-            SELECT e.task_id FROM events e, json_each(json_extract(e.metadata, '$.source_offsets')) j
-            WHERE e.partition = ? AND e.event = 'task_started'
-            AND j.value = ?
-        )
-    )
-    ORDER BY id ASC
-"""
-
-
-_LABEL_TRACE_QUERY = """
-    SELECT * FROM events
-    WHERE task_id IN (
-        SELECT DISTINCT task_id FROM events
-        WHERE labels IS NOT NULL
-        AND json_extract(labels, ?) = ?
-        AND task_id IS NOT NULL
-    )
-    ORDER BY id ASC
-"""
-
-
-def _format_dt(ts: float) -> str:
-    """Format a Unix timestamp as 'YYYY-MM-DD HH:MM:SS.mmm'."""
-    dt = datetime.fromtimestamp(ts, tz=UTC)
-    return dt.strftime('%Y-%m-%d %H:%M:%S.') + f'{dt.microsecond // 1000:03d}'
-
-
-def _make_db_path(db_dir: str, worker_name: str) -> str:
-    """Generate a timestamped DB filename inside db_dir.
-
-    ('/shared', 'worker-1') -> '/shared/worker-1-2026-03-16__14_55_00.db'
-    """
-    ts = datetime.now(tz=UTC).strftime('%Y-%m-%d__%H_%M_%S')
-    return str(Path(db_dir) / f'{worker_name}-{ts}.db')
-
-
-def _live_link_path(db_dir: str, worker_name: str) -> str:
-    """Path for the live symlink: {db_dir}/{worker_name}-live.db."""
-    return str(Path(db_dir) / f'{worker_name}-live.db')
-
-
-def _list_db_files(db_dir: str, worker_name: str) -> list[str]:
-    """List all timestamped DB files for a worker, oldest first.
-
-    Excludes the -live.db symlink.
-    """
-    pattern = str(Path(db_dir) / f'{worker_name}-*.db')
-    live = _live_link_path(db_dir, worker_name)
-    files = [f for f in glob.glob(pattern) if f != live and not os.path.islink(f)]
-    files.sort()
-    return files
-
-
-async def _open_reader(db_path: str) -> aiosqlite.Connection:
-    """Open a read-only aiosqlite connection to ``db_path``.
-
-    Uses the ``file:...?mode=ro`` SQLite URI form so any write attempt
-    through this handle fails fast with an SQLite error. Each aiosqlite
-    connection spawns its own worker thread, which is the property that
-    lets debug-UI SELECTs run in parallel with writer flushes/commits.
-    """
-    return await aiosqlite.connect(f'file:{db_path}?mode=ro', uri=True)
-
-
-def detect_worker_ip() -> str:
-    """Detect the worker's outbound IP address.
-
-    Uses ``contextlib.closing`` so the UDP socket is always closed, even
-    if ``getsockname()`` raises. Without the wrapper an exception after
-    ``connect()`` would leak the file descriptor; this function is called
-    on every DB rotation so the leak would accumulate over days.
-    """
-    try:
-        with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as s:
-            s.connect(('10.255.255.255', 1))
-            return s.getsockname()[0]
-    except Exception:
-        return '127.0.0.1'
 
 
 class EventRecorder:

@@ -403,7 +403,7 @@ To require auth on the protected endpoints (database download, merge, message pr
 
 When the token is set, protected endpoints reject requests without a matching `Authorization: Bearer <token>` header (or `?token=<token>` query parameter); the WebSocket additionally validates the `Origin` header against `allowed_ws_origins` (or the request's `Host` header). Comparison uses `secrets.compare_digest` for timing-side-channel safety; leading/trailing whitespace in the configured token is stripped on load (a `auth_token: " "` of only spaces is treated as empty and the warning still fires).
 
-The unauthenticated-startup warning runs at `DrakkarApp._async_run()` startup, before the recorder and debug server are constructed. See `drakkar/app.py::_warn_if_debug_unauthenticated` for the implementation.
+The unauthenticated-startup warning runs at `DrakkarApp._async_run()` startup, before the recorder and debug server are constructed. See `drakkar/app_security.py::_warn_if_debug_unauthenticated` for the implementation.
 
 ### Core Settings
 

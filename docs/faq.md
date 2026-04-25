@@ -49,7 +49,7 @@ Any language. The executor launches a subprocess and communicates via stdin/stdo
 
 ### Why Python 3.13+?
 
-The floor is driven by **PEP 695 generic syntax** used across the codebase (e.g. `async def get[T: BaseModel](...)` in `drakkar/cache.py`). That syntax parses only on 3.12+, and Drakkar stabilized it on 3.13 where the type parameter machinery is mature and ty / mypy handle it cleanly. Python 3.14 is also supported (the package classifiers list both). Dropping the 3.13 floor would mean rewriting those signatures to the `TypeVar` / `Generic[T]` form — doable, but not planned pre-1.0.
+The floor is driven by **PEP 695 generic syntax** used across the codebase (e.g. `async def get[T: BaseModel](...)` in `drakkar/cache_memory.py`). That syntax parses only on 3.12+, and Drakkar stabilized it on 3.13 where the type parameter machinery is mature and ty / mypy handle it cleanly. Python 3.14 is also supported (the package classifiers list both). Dropping the 3.13 floor would mean rewriting those signatures to the `TypeVar` / `Generic[T]` form — doable, but not planned pre-1.0.
 
 ---
 
@@ -269,7 +269,7 @@ To silence it (i.e. require auth), pick one of:
 - **Set `debug.auth_token`** to a strong random value (`python -c "import secrets; print(secrets.token_urlsafe(32))"`) — recommended whenever the UI is reachable from anywhere outside a fully-trusted operator network.
 - **Set `debug.enabled=false`** — if the worker doesn't need the flight recorder at all (no observability cost reduction without removing the UI).
 
-See [Authentication](configuration.md#authentication) for the field semantics and the implementation at `drakkar/app.py::_warn_if_debug_unauthenticated`.
+See [Authentication](configuration.md#authentication) for the field semantics and the implementation at `drakkar/app_security.py::_warn_if_debug_unauthenticated`.
 
 ### What is the Message Probe tab?
 
@@ -368,7 +368,7 @@ See `drakkar/executor.py::ExecutorPool._launch` for the launch code. The binary 
 
 ### Why are peer workers trusted?
 
-The cache and recorder peer-sync mechanisms read other workers' SQLite files directly (see `drakkar/cache.py::CacheEngine._sync_loop` and `drakkar/recorder.py::cross_trace`). There's no per-write signature, no auth check, no schema-level integrity verification. Anyone who can write to the shared `db_dir` can inject cache entries or event rows that your workers will read.
+The cache and recorder peer-sync mechanisms read other workers' SQLite files directly (see `drakkar/cache_engine.py::CacheEngine._sync_inner` and `drakkar/recorder.py::EventRecorder.cross_trace`). There's no per-write signature, no auth check, no schema-level integrity verification. Anyone who can write to the shared `db_dir` can inject cache entries or event rows that your workers will read.
 
 Treat `db_dir` as a shared-trust boundary: any principal with write access to that directory has the same trust level as the workers themselves. On a shared filesystem (NFS, EFS), restrict directory permissions to the worker user.
 
@@ -378,7 +378,7 @@ Auth is opt-in (see [Is the debug UI safe](#is-the-debug-ui-safe-to-expose-to-a-
 
 1. **Default loopback bind** (`debug.host='127.0.0.1'`) — the UI is only reachable from the host out of the box, regardless of auth.
 2. **Startup warning when unauthenticated.** With `debug.enabled=true` and an empty `auth_token`, the worker emits a `debug_ui_unauthenticated` structured warning at startup naming the unauthenticated bind and the two opt-in paths (YAML key + env var). The worker continues starting — Drakkar treats this as a private-contour-friendly default, not a misconfiguration.
-3. **Bearer token + Origin check when `auth_token` is set.** Protected endpoints (database download, merge, probe) require `Authorization: Bearer <token>`; the WebSocket stream additionally validates the `Origin` header against `allowed_ws_origins` (or the `Host` header). See `drakkar/debug_server.py::_origin_allowed` and `_token_matches`.
+3. **Bearer token + Origin check when `auth_token` is set.** Protected endpoints (database download, merge, probe) require `Authorization: Bearer <token>`; the WebSocket stream additionally validates the `Origin` header against `allowed_ws_origins` (or the `Host` header). See `drakkar/debug_server_helpers.py::_origin_allowed` and `drakkar/debug_server.py::_token_matches`.
 
 Read-only HTTP pages are not token-gated regardless — auth applies to mutating / data-exposing endpoints and to the WebSocket event stream. If you put the UI on a non-loopback host outside a private network, set a strong `auth_token` and consider a reverse proxy with TLS.
 
@@ -391,7 +391,7 @@ Parse errors in `handler.deserialize_message` silently set `msg.payload=None` ra
 Two surfaces expose env vars:
 
 - **The recorder's `worker_config` table** — framework-level `ExecutorConfig.env` is **never written** to the recorder (it's omitted from the JSON payload entirely). Environment variables listed in `expose_env_vars` are captured by name, and secret-shaped names (`*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*_KEY`, `*API_KEY*`, `*CREDENTIAL*`, `*_DSN`) are redacted to `***`. Non-matching values with embedded URL credentials (`user:pass@host`) have the credentials stripped.
-- **The recorder's per-task `env` metadata** — `task.env` written by your handler is sanitized with the same secret-name patterns before being stored. The original task object is not mutated; only the recorded copy is redacted. See `drakkar/recorder.py::_sanitize_env_value` for the regex.
+- **The recorder's per-task `env` metadata** — `task.env` written by your handler is sanitized with the same secret-name patterns before being stored. The original task object is not mutated; only the recorded copy is redacted. See `drakkar/recorder_helpers.py::_sanitize_env_value` for the regex.
 
 The contract is "aggressive redact, accept false positives": `PASSWORD_RESET_URL` is redacted because it matches `*PASSWORD*`, even though a reset URL isn't a credential. Operators who need to expose these exact names should rename them — a leaked secret is a worse outcome than a logged URL.
 
