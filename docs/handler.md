@@ -19,6 +19,7 @@ right time during the message-processing pipeline. See [Configuration](configura
 | `on_assign(partitions)` | Kafka assigns partitions during rebalance | Once per rebalance event | `None` |
 | `on_revoke(partitions)` | Kafka revokes partitions during rebalance | Once per rebalance event | `None` |
 | `message_label(msg)` | Before logging each message in arrange | Once per message | `str` |
+| `task_priority(task)` | Before each task waits on the executor pool | Once per task (incl. retries) | sortable key (any `<`-comparable value) |
 
 Only `arrange()` is required. All other hooks have safe defaults.
 
@@ -555,6 +556,52 @@ async def on_revoke(self, partitions):
     for p in partitions:
         self.partition_cache.pop(p, None)
 ```
+
+---
+
+### task_priority
+
+```python
+def task_priority(self, task: ExecutorTask) -> Any
+```
+
+Returns a sortable priority key used to order tasks waiting on the executor pool. Smaller keys are scheduled first. Called once per task right before the task waits on the [`ExecutorPool`](executor.md#concurrency-and-backpressure)'s priority gate; **retries call it again**, but since `task.source_offsets` does not change between retries the result is identical.
+
+**Default:**
+
+```python
+def task_priority(self, task):
+    return min(task.source_offsets) if task.source_offsets else 0
+```
+
+This drains older Kafka messages first, which keeps `_MessageTracker` / `OffsetTracker` state in front of the watermark small — the slowest task in a fan-out no longer anchors the whole message in memory while later messages pile up behind it.
+
+**Why this matters.** With a plain FIFO semaphore (the pre-priority behaviour), one slow message in the middle of a window could keep its `_MessageTracker` alive long after later messages had already finished, blocking offset-commit progress and inflating `_message_trackers`. Priority ordering by oldest-offset turns that into "oldest first → fastest commit watermark progress".
+
+**Override patterns:**
+
+```python
+class PartitionAwareHandler(BaseDrakkarHandler):
+    """Keep partition fairness AND prefer older messages within each partition."""
+    def task_priority(self, task):
+        offset = min(task.source_offsets)
+        # Group every 1000 offsets into one tier so partitions roughly take turns.
+        return (offset // 1000, offset)
+
+
+class TieredHandler(BaseDrakkarHandler):
+    """Read a business-priority field stamped on the task by ``arrange()``."""
+    def task_priority(self, task):
+        # 0 = highest, 9 = lowest. Equal-tier tasks tiebreak by offset.
+        tier = task.metadata.get('tier', 5)
+        return (tier, min(task.source_offsets))
+```
+
+The return value can be **any heapq-comparable object** — int, tuple, or a class with `__lt__`. Equal-priority tasks tiebreak FIFO via the gate's internal sequence counter.
+
+**Tasks with `precomputed` set bypass the gate entirely** — `task_priority` is not called for them.
+
+**Error handling.** If `task_priority` raises, the framework logs a `priority_fn_failed` warning, ticks `drakkar_executor_priority_fn_errors_total`, and falls back to the default key. A buggy override never stalls a task.
 
 ---
 

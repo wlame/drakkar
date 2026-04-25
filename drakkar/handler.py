@@ -8,7 +8,7 @@ handles sink failures.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Generic, Protocol, get_args
+from typing import TYPE_CHECKING, Any, Generic, Protocol, get_args
 
 from pydantic import BaseModel
 
@@ -42,6 +42,7 @@ class DrakkarHandler(Protocol):
     cache: Cache | NoOpCache
 
     def message_label(self, msg: SourceMessage) -> str: ...
+    def task_priority(self, task: ExecutorTask) -> Any: ...
     async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig: ...
     async def on_ready(self, config: DrakkarConfig, db_pool: object) -> None: ...
     async def arrange(self, messages: list[SourceMessage], pending: PendingContext) -> list[ExecutorTask]: ...
@@ -159,6 +160,44 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
         Default: partition:offset
         """
         return f'{msg.partition}:{msg.offset}'
+
+    def task_priority(self, task: ExecutorTask) -> Any:
+        """Return a sortable priority key for ordering tasks waiting on the executor pool.
+
+        When the executor pool is saturated, queued tasks wake up in
+        ascending priority order — smaller keys first. The default is
+        ``min(task.source_offsets)``, so older Kafka messages drain
+        before newer ones. That keeps ``_MessageTracker`` /
+        ``OffsetTracker`` state in front of the watermark small: the
+        slowest task in a fan-out no longer anchors the whole message
+        in memory while later messages pile up behind it.
+
+        Override to inject business priority. The return value can be
+        any heapq-comparable object — int, tuple, or any class with
+        ``__lt__``. Two common patterns:
+
+        - **Partition-aware ordering** — keep partition fairness while
+          still preferring older messages within each partition::
+
+              def task_priority(self, task):
+                  return (task.source_offsets[0] // 1000, task.source_offsets[0])
+
+        - **Business priority field** — read a metadata field that
+          ``arrange()`` stamped on the task::
+
+              def task_priority(self, task):
+                  return (task.metadata.get('tier', 0), min(task.source_offsets))
+
+        Equal-priority tasks tiebreak FIFO via the gate's internal
+        sequence counter, so within a priority band behaviour matches
+        the pre-priority semaphore.
+
+        Errors from this method are logged + counted in
+        ``drakkar_executor_priority_fn_errors_total`` and the framework
+        falls back to ``min(task.source_offsets)`` so a buggy override
+        never stalls a task.
+        """
+        return min(task.source_offsets) if task.source_offsets else 0
 
     def deserialize_message(self, msg: SourceMessage) -> SourceMessage:
         """Deserialize msg.value into msg.payload using input_model.

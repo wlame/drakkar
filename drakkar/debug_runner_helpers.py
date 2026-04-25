@@ -21,7 +21,7 @@ from drakkar.models import ExecutorTask, SourceMessage
 def _make_value_preview(value: Any) -> str | None:
     """Return a short, single-line preview of ``value`` for the cache-call log.
 
-    Truncates to ~120 chars and collapses newlines to spaces so the UI
+    Truncates to ~240 chars and collapses newlines to spaces so the UI
     can render the cell on one line. Returns ``None`` for ``None``
     inputs so the UI cell stays empty (rather than displaying the
     literal string ``"None"``).
@@ -35,8 +35,8 @@ def _make_value_preview(value: Any) -> str | None:
     # already blown up earlier in the pipeline.
     text = repr(value)
     text = text.replace('\n', ' ').replace('\r', ' ')
-    if len(text) > 120:
-        text = text[:117] + '...'
+    if len(text) > 240:
+        text = text[:237] + '...'
     return text
 
 

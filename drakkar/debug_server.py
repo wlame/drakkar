@@ -234,7 +234,7 @@ def create_debug_app(
     #
     # The debug FastAPI server runs in its own thread + event loop so
     # heavy UI requests don't block the pipeline. Many shared asyncio
-    # primitives — ``ExecutorPool._semaphore``, the recorder's aiosqlite
+    # primitives — ``ExecutorPool._gate``, the recorder's aiosqlite
     # connection, the cache reader connection — are bound to the MAIN
     # event loop where ``DrakkarApp`` was constructed. Awaiting them from
     # this server's loop raises ``RuntimeError: <thing> is bound to a

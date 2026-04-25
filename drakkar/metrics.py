@@ -64,6 +64,17 @@ tasks_precomputed = Counter(
     ),
 )
 
+executor_priority_fn_errors = Counter(
+    'drakkar_executor_priority_fn_errors_total',
+    (
+        'Total times the user-supplied ``handler.task_priority(task)`` callable '
+        'raised an exception while computing a priority for an executor-pool '
+        'wait-queue entry. The framework falls back to the default priority '
+        '(min(source_offsets)) and the task is still scheduled — the counter '
+        'lets operators alert on a rate of >0 (almost always a handler bug).'
+    ),
+)
+
 # --- Windows/batches ---
 
 batch_duration = Histogram(

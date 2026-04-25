@@ -241,6 +241,12 @@ class DrakkarApp:
             env=self._config.executor.env,
             inherit_parent_env=self._config.executor.env_inherit_parent,
             inherit_deny_patterns=self._config.executor.env_inherit_deny,
+            # Wire the handler's priority hook into the pool's wait queue.
+            # Handlers that don't override ``task_priority`` get the
+            # framework default (smallest source offset → older messages
+            # drain first). See ``BaseDrakkarHandler.task_priority`` for
+            # the override contract.
+            priority_fn=self._handler.task_priority,
         )
 
         start_metrics_server(self._config.metrics)

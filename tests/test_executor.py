@@ -1,6 +1,7 @@
 """Tests for Drakkar executor pool."""
 
 import asyncio
+import contextlib
 import sys
 
 import pytest
@@ -983,3 +984,372 @@ async def test_killpg_process_lookup_error_swallowed(monkeypatch):
     # Verify our patched killpg was actually called — otherwise the test
     # would pass trivially if the code path skipped killpg entirely.
     assert len(calls) == 1, f'expected exactly one killpg call, got {len(calls)}'
+
+
+# --- _PriorityGate primitive --------------------------------------------------
+#
+# The gate is a custom semaphore-shaped allocator that selects the next
+# waiter from a min-heap rather than a deque. Tests below pin down the
+# four guarantees we rely on inside ExecutorPool:
+#
+#   1. Fast path (uncontended): acquire returns immediately, no heap touch.
+#   2. Slow path (contended):   wakes up in priority order; equal-priority
+#                               waiters tiebreak FIFO via the seq counter.
+#   3. Cancellation:            cancelled waiters become tombstones in the
+#                               heap and are skipped by release.
+#   4. Cancellation race:       if a waiter is cancelled AFTER receiving
+#                               the slot, the slot is released back so it
+#                               isn't lost.
+
+
+from drakkar.executor import _default_priority, _PriorityGate  # noqa: E402
+
+
+async def test_priority_gate_fast_path_no_heap_touch():
+    """When a slot is free and no one is waiting, acquire returns immediately."""
+    gate = _PriorityGate(2)
+    await gate.acquire(priority=100)
+    await gate.acquire(priority=200)
+    assert gate.available == 0
+    assert gate.waiters == 0
+
+
+async def test_priority_gate_release_with_no_waiters_bumps_available():
+    """Releasing on an empty heap restores the available counter."""
+    gate = _PriorityGate(1)
+    await gate.acquire()
+    assert gate.available == 0
+    gate.release()
+    assert gate.available == 1
+
+
+async def test_priority_gate_slow_path_serves_lowest_priority_first():
+    """Contended acquire wakes up smallest-priority waiter first."""
+    gate = _PriorityGate(1)
+    await gate.acquire(priority=0)  # holder
+
+    woken: list[int] = []
+
+    async def waiter(p: int) -> None:
+        await gate.acquire(priority=p)
+        woken.append(p)
+        gate.release()
+
+    # Deliberately push tasks in INVERTED priority order so any FIFO
+    # implementation would wake them in [9, 5, 1] rather than [1, 5, 9].
+    tasks = [
+        asyncio.create_task(waiter(9)),
+        asyncio.create_task(waiter(5)),
+        asyncio.create_task(waiter(1)),
+    ]
+    # Yield a few times so all three waiters reach the heap before the
+    # first release fires.
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    gate.release()  # frees the slot the holder claimed
+    await asyncio.gather(*tasks)
+
+    assert woken == [1, 5, 9]
+
+
+async def test_priority_gate_equal_priority_is_fifo_tiebreak():
+    """Waiters with the same priority wake in arrival order (stable)."""
+    gate = _PriorityGate(1)
+    await gate.acquire()  # holder
+
+    woken: list[str] = []
+
+    async def waiter(name: str) -> None:
+        await gate.acquire(priority=42)
+        woken.append(name)
+        gate.release()
+
+    tasks = [asyncio.create_task(waiter('a'))]
+    # Each await sleep gives the scheduler a chance to push 'a' onto the
+    # heap before 'b', and 'b' before 'c'.
+    await asyncio.sleep(0)
+    tasks.append(asyncio.create_task(waiter('b')))
+    await asyncio.sleep(0)
+    tasks.append(asyncio.create_task(waiter('c')))
+    await asyncio.sleep(0)
+
+    gate.release()
+    await asyncio.gather(*tasks)
+
+    assert woken == ['a', 'b', 'c']
+
+
+async def test_priority_gate_max_slots_zero_rejected():
+    """The gate refuses ``max_slots < 1`` — an unusable configuration."""
+    with pytest.raises(ValueError, match='max_slots must be >= 1'):
+        _PriorityGate(0)
+
+
+async def test_priority_gate_cancelled_waiter_becomes_tombstone():
+    """A waiter cancelled while pending is skipped by the next release."""
+    gate = _PriorityGate(1)
+    await gate.acquire()  # holder
+
+    woken: list[int] = []
+
+    async def cancellable_waiter() -> None:
+        await gate.acquire(priority=1)  # would wake first if alive
+        woken.append(1)
+        gate.release()
+
+    async def survivor() -> None:
+        await gate.acquire(priority=99)
+        woken.append(99)
+        gate.release()
+
+    cancel_task = asyncio.create_task(cancellable_waiter())
+    survivor_task = asyncio.create_task(survivor())
+    # Both reach the heap before any release.
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    # Cancel the priority-1 waiter; its heap entry stays as a tombstone.
+    cancel_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await cancel_task
+
+    # Release the holder's slot. The next release should pop the
+    # tombstone, skip it, and resolve the priority-99 waiter.
+    gate.release()
+    await survivor_task
+
+    # Cancelled waiter never completed; survivor did.
+    assert woken == [99]
+
+
+async def test_priority_gate_cancelled_after_slot_assigned_returns_slot():
+    """If a waiter is cancelled AFTER receiving the slot, the slot is given back.
+
+    This pins down the cancellation race in ``acquire``: ``release`` may
+    have already resolved the future when ``CancelledError`` fires at
+    the await point. The except-branch must call ``_release_slot`` so
+    the slot is not silently leaked.
+    """
+    gate = _PriorityGate(1)
+    await gate.acquire()  # holder
+
+    waiter_started = asyncio.Event()
+    waiter_resumed = asyncio.Event()
+
+    async def slow_consumer() -> None:
+        waiter_started.set()
+        await gate.acquire(priority=0)
+        # If we ever get here, the test setup failed — the cancel below
+        # should fire inside ``acquire`` after the slot is granted.
+        waiter_resumed.set()
+        gate.release()
+
+    waiter_task = asyncio.create_task(slow_consumer())
+    await waiter_started.wait()
+    # Yield so the waiter is parked on its future.
+    await asyncio.sleep(0)
+
+    # Pop the heap so the waiter's future receives the slot, then
+    # immediately cancel before the waiter resumes from ``await fut``.
+    gate.release()  # this resolves the waiter's future
+    waiter_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await waiter_task
+
+    # The cancelled-after-resolution waiter must have given the slot back.
+    # Available count returns to 1 (the holder's release path went to a
+    # tombstone-resolved future, that future cancellation released the
+    # slot back). Net: gate is fully released.
+    assert gate.available == 1
+    assert gate.waiters == 0
+    # And the body past ``await fut`` was never reached.
+    assert not waiter_resumed.is_set()
+
+
+# --- _default_priority -------------------------------------------------------
+
+
+def test_default_priority_returns_min_source_offset():
+    """Default priority is the smallest source_offset across the task's offsets."""
+    task = ExecutorTask(task_id='t', source_offsets=[100, 50, 200])
+    assert _default_priority(task) == 50
+
+
+def test_default_priority_zero_for_empty_source_offsets():
+    """Edge case: tasks with no source_offsets all share priority 0.
+
+    These degrade to FIFO via the gate's seq tiebreaker, which matches
+    the pre-priority semaphore behaviour.
+    """
+    task = ExecutorTask(task_id='t', source_offsets=[])
+    assert _default_priority(task) == 0
+
+
+# --- ExecutorPool priority integration ---------------------------------------
+#
+# These tests verify the wiring: ExecutorPool consults ``priority_fn`` to
+# order pending tasks when the pool is saturated, and falls back gracefully
+# when ``priority_fn`` raises.
+
+
+async def test_executor_pool_orders_waiters_by_priority():
+    """Saturated pool with priority_fn schedules tasks lowest-priority-first."""
+    # Pool size 1 forces serialization. We submit four tasks; the priority
+    # function reads ``task.metadata['p']`` so we can inject any order
+    # we like and watch the actual execution sequence.
+    completion_order: list[str] = []
+
+    pool = ExecutorPool(
+        binary_path='/bin/sh',
+        max_executors=1,
+        task_timeout_seconds=10,
+        priority_fn=lambda task: task.metadata.get('p', 0),
+    )
+
+    async def run(task_id: str, p: int) -> None:
+        task = ExecutorTask(
+            task_id=task_id,
+            args=['-c', f'echo {task_id}'],
+            metadata={'p': p},
+            source_offsets=[0],
+        )
+        result = await pool.execute(task)
+        completion_order.append(task.task_id)
+        assert result.exit_code == 0
+
+    # Pre-saturate by claiming the only slot via a slow holder, then
+    # queue three waiters with priorities [9, 1, 5] — non-monotone so
+    # any FIFO scheduler would produce [9, 1, 5] rather than [1, 5, 9].
+    holder_started = asyncio.Event()
+
+    async def holder() -> None:
+        task = ExecutorTask(
+            task_id='holder',
+            args=['-c', 'echo holder; sleep 0.05'],
+            source_offsets=[0],
+        )
+        holder_started.set()
+        result = await pool.execute(task)
+        completion_order.append(task.task_id)
+        assert result.exit_code == 0
+
+    holder_task = asyncio.create_task(holder())
+    await holder_started.wait()
+    await asyncio.sleep(0.01)  # let the holder claim the slot
+
+    waiters = [
+        asyncio.create_task(run('p9', 9)),
+        asyncio.create_task(run('p1', 1)),
+        asyncio.create_task(run('p5', 5)),
+    ]
+    await asyncio.gather(holder_task, *waiters)
+
+    # Holder finishes first (it had the slot from the start).
+    # Then waiters drain in priority order: 1, 5, 9.
+    assert completion_order == ['holder', 'p1', 'p5', 'p9']
+
+
+async def test_executor_pool_default_priority_is_min_source_offset():
+    """When no priority_fn is supplied, smaller source offsets drain first."""
+    completion_order: list[int] = []
+    pool = ExecutorPool(
+        binary_path='/bin/sh',
+        max_executors=1,
+        task_timeout_seconds=10,
+    )
+
+    async def run(offset: int) -> None:
+        task = ExecutorTask(
+            task_id=f't-{offset}',
+            args=['-c', f'echo {offset}'],
+            source_offsets=[offset],
+        )
+        await pool.execute(task)
+        completion_order.append(offset)
+
+    # Saturate with a slow holder, then queue waiters in shuffled order.
+    holder_started = asyncio.Event()
+
+    async def holder() -> None:
+        task = ExecutorTask(
+            task_id='holder',
+            args=['-c', 'echo holder; sleep 0.05'],
+            source_offsets=[-1],
+        )
+        holder_started.set()
+        await pool.execute(task)
+        completion_order.append(-1)
+
+    holder_task = asyncio.create_task(holder())
+    await holder_started.wait()
+    await asyncio.sleep(0.01)
+
+    waiters = [
+        asyncio.create_task(run(300)),
+        asyncio.create_task(run(100)),
+        asyncio.create_task(run(200)),
+    ]
+    await asyncio.gather(holder_task, *waiters)
+
+    # Holder runs first (priority -1, but it had the slot already).
+    # Remaining drain by smallest offset: 100, 200, 300.
+    assert completion_order == [-1, 100, 200, 300]
+
+
+async def test_executor_pool_priority_fn_raises_falls_back_to_default(monkeypatch):
+    """A buggy priority_fn must not stall a task; pool falls back + ticks metric."""
+    from drakkar import metrics as metrics_module
+
+    metric_calls = 0
+
+    def fake_inc():
+        nonlocal metric_calls
+        metric_calls += 1
+
+    monkeypatch.setattr(metrics_module.executor_priority_fn_errors, 'inc', fake_inc)
+
+    def angry_priority(task: ExecutorTask) -> int:
+        raise RuntimeError('priority hook is buggy')
+
+    pool = ExecutorPool(
+        binary_path='/bin/echo',
+        max_executors=1,
+        task_timeout_seconds=10,
+        priority_fn=angry_priority,
+    )
+    task = make_task('t-fallback')
+    result = await pool.execute(task)
+
+    # Task still runs successfully despite the failing hook.
+    assert result.exit_code == 0
+    # And the metric was bumped exactly once for the one task.
+    assert metric_calls == 1
+
+
+async def test_executor_pool_priority_does_not_break_precomputed_fast_path():
+    """Precomputed tasks skip the gate entirely; priority is irrelevant."""
+    captured: list[ExecutorTask] = []
+
+    def priority_fn(task: ExecutorTask) -> int:
+        captured.append(task)
+        return 0
+
+    pool = ExecutorPool(
+        binary_path='/bin/echo',
+        max_executors=1,
+        task_timeout_seconds=10,
+        priority_fn=priority_fn,
+    )
+    task = ExecutorTask(
+        task_id='t-pre',
+        source_offsets=[0],
+        precomputed=PrecomputedResult(stdout='cached', exit_code=0),
+    )
+    result = await pool.execute(task)
+
+    assert result.stdout == 'cached'
+    assert result.exit_code == 0
+    # Precomputed tasks return BEFORE _compute_priority; priority_fn
+    # must never be called for them.
+    assert captured == []

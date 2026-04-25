@@ -2085,12 +2085,12 @@ function renderProbeSectionInput(report) {
     }
     card.body.appendChild(probeMakeField('timestamp', tsText));
 
-    // Value preview — first 300 chars, scrollable <pre>.
+    // Value preview — first 600 chars, scrollable <pre>.
     var valuePre = document.createElement('pre');
     valuePre.className = 'text-xs font-mono whitespace-pre-wrap bg-cream-100 p-2 rounded';
     valuePre.style.cssText = 'max-height:120px;overflow-y:auto;';
     var valueStr = input.value == null ? '' : String(input.value);
-    valuePre.textContent = valueStr.length > 300 ? valueStr.slice(0, 300) + '...' : valueStr;
+    valuePre.textContent = valueStr.length > 600 ? valueStr.slice(0, 600) + '...' : valueStr;
     card.body.appendChild(probeMakeField('value (preview)', valuePre));
 
     card.body.appendChild(probeMakeField('message_label', report.message_label == null ? '(none)' : report.message_label));
@@ -2474,14 +2474,17 @@ function probeGroupPlannedSinksByType(planned) {
 }
 
 function probePayloadPreview(payload) {
-    // 100-char single-line preview of a payload. JSON.stringify so dicts
-    // render readably; newlines collapsed to spaces.
+    // 200-char single-line preview of a payload. JSON.stringify so dicts
+    // render readably; newlines collapsed to spaces. The cell also has
+    // ``max-width: 48rem`` + CSS ellipsis on top, so the visible width
+    // is what the column can accommodate; the longer cap here means
+    // hover-tooltip + click-to-expand show meaningfully more content.
     if (payload == null) return '';
     var s;
     try { s = JSON.stringify(payload); }
     catch (e) { s = String(payload); }
     s = s.replace(/\s+/g, ' ');
-    if (s.length > 100) s = s.slice(0, 100) + '...';
+    if (s.length > 200) s = s.slice(0, 200) + '...';
     return s;
 }
 
@@ -2657,7 +2660,7 @@ function probeShortCacheKey(key) {
     // First 40 chars of a cache key; callers also attach the full key via
     // the cell's ``title`` attribute so the operator can hover to see it.
     if (!key) return '';
-    return key.length > 40 ? key.slice(0, 40) + '...' : key;
+    return key.length > 80 ? key.slice(0, 80) + '...' : key;
 }
 
 function renderProbeSectionCacheCalls(report) {
@@ -2745,11 +2748,12 @@ function renderProbeSectionCacheCalls(report) {
 
         var tdPreview = document.createElement('td');
         tdPreview.className = 'py-1.5 px-3 font-mono text-xs text-gray-600';
-        tdPreview.style.maxWidth = '24rem';
+        tdPreview.style.maxWidth = '48rem';
         tdPreview.style.overflow = 'hidden';
         tdPreview.style.textOverflow = 'ellipsis';
         tdPreview.style.whiteSpace = 'nowrap';
         tdPreview.textContent = call.value_preview == null ? '' : String(call.value_preview);
+        tdPreview.title = call.value_preview == null ? '' : String(call.value_preview);
         tr.appendChild(tdPreview);
 
         tbody.appendChild(tr);
@@ -2970,7 +2974,7 @@ function renderProbeSectionErrors(report) {
         var msgSpan = document.createElement('span');
         msgSpan.className = 'text-xs text-red-700';
         var fullMsg = err.message == null ? '' : String(err.message);
-        msgSpan.textContent = fullMsg.length > 80 ? fullMsg.slice(0, 80) + '...' : fullMsg;
+        msgSpan.textContent = fullMsg.length > 160 ? fullMsg.slice(0, 160) + '...' : fullMsg;
         msgSpan.title = fullMsg;
         summary.appendChild(msgSpan);
 

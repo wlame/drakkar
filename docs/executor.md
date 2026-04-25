@@ -69,13 +69,13 @@ If all tasks use the same binary, set `executor.binary_path` in your config and 
 
 Each task goes through these steps:
 
-### 1. Enter Semaphore Queue
+### 1. Enter Priority Queue
 
-The task enters the waiting state (`waiting_count` incremented). It blocks on `async with semaphore` until a slot is available.
+The task enters the waiting state (`waiting_count` incremented). The framework asks the handler for the task's priority key (default: `min(task.source_offsets)` -- earliest message wins) and inserts the task into the executor pool's priority gate. While slots are available the gate behaves like a plain semaphore (acquire returns immediately); under saturation, contended waiters wake up in ascending priority order rather than FIFO arrival order. See [Task priority](#task-priority) below for the override hook.
 
 ### 2. Acquire Slot
 
-When the semaphore is acquired, `waiting_count` is decremented, `active_count` is incremented, and a slot ID (0 to `max_executors - 1`) is assigned from the available pool.
+When the gate releases the next slot to this task, `waiting_count` is decremented, `active_count` is incremented, and a slot ID (0 to `max_executors - 1`) is assigned from the available pool.
 
 ### 3. Launch Process
 
@@ -109,7 +109,7 @@ Four outcomes are possible:
 
 ### 7. Release Slot
 
-In the `finally` block (guaranteed to run), the slot ID is returned to the pool, `active_count` is decremented, and the semaphore is released for the next waiting task. If the process is still running (e.g., after a timeout), it is killed before release.
+In the `finally` block (guaranteed to run), the slot ID is returned to the pool, `active_count` is decremented, and the priority gate is released. The gate then pops the highest-priority waiter (smallest priority key) and resolves it -- skipping any cancellation tombstones from waiters that were cancelled while pending. If the process is still running (e.g., after a timeout), it is killed before release.
 
 ---
 
@@ -179,11 +179,29 @@ class MyHandler(BaseDrakkarHandler):
 
 ## Concurrency and Backpressure
 
-### Semaphore-based Concurrency
+### Priority-gated Concurrency
 
-`executor.max_executors` (default: 4) controls how many subprocesses run in parallel across all partitions. The `ExecutorPool` maintains an `asyncio.Semaphore` of this size. Tasks from any partition compete for the same pool.
+`executor.max_executors` (default: 4) controls how many subprocesses run in parallel across all partitions. The `ExecutorPool` maintains an internal `_PriorityGate` of this size that behaves like an `asyncio.Semaphore` with one extra rule: contended waiters wake up in priority order rather than FIFO. Tasks from any partition compete for the same pool, so a low-priority task on partition 7 can step ahead of a high-priority task on partition 3 when both are waiting.
 
-When all slots are occupied, additional tasks wait in the semaphore queue. The `waiting_count` property tracks how many tasks are queued, while `active_count` tracks how many are running.
+When all slots are occupied, additional tasks wait in the gate's heap. The `waiting_count` property tracks how many tasks are queued, while `active_count` tracks how many are running.
+
+### Task priority
+
+The framework asks the handler for each task's priority key via [`task_priority(task)`](handler.md#task_priority) before the task enters the gate. The default returns `min(task.source_offsets)` so older Kafka messages drain first -- this keeps `_MessageTracker` / `OffsetTracker` state in front of the watermark small and lets `on_message_complete` fire sooner.
+
+Override `task_priority` on your handler to inject business priority. Any value that supports `__lt__` (int, tuple, custom class) works; equal-priority tasks tiebreak FIFO via the gate's internal sequence counter, so within a priority band behaviour matches the pre-priority semaphore.
+
+```python
+class MyHandler(BaseDrakkarHandler):
+    def task_priority(self, task):
+        # Partition-aware: keep partition fairness AND prefer older
+        # messages within each partition.
+        return (task.source_offsets[0] // 1000, task.source_offsets[0])
+```
+
+If `task_priority` raises, the framework logs a warning, ticks `drakkar_executor_priority_fn_errors_total`, and falls back to the default key so the task is still scheduled. A buggy override never stalls a task.
+
+Tasks with `precomputed` set bypass the gate entirely (no slot, no priority) -- they were already shaped by the handler at `arrange()` time and run instantly.
 
 ### Kafka Consumer Backpressure
 

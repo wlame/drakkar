@@ -128,10 +128,15 @@ def test_make_value_preview_returns_none_for_none():
 
 
 def test_make_value_preview_truncates_long_strings():
-    """Preview truncates at 120 chars (117 + '...') so it fits on one UI row."""
-    preview = _make_value_preview('x' * 300)
+    """Preview truncates at 240 chars (237 + '...') so it fits on one UI row.
+
+    The cap was raised from 120 → 240 to make better use of the wide
+    Cache calls table in fullscreen — most realistic cached values fit
+    on a single row at the new width without needing a hover tooltip.
+    """
+    preview = _make_value_preview('x' * 500)
     assert preview is not None
-    assert len(preview) == 120
+    assert len(preview) == 240
     assert preview.endswith('...')
 
 
@@ -147,7 +152,7 @@ def test_make_value_preview_handles_dict():
     """dict values preview as their repr (verbatim structure)."""
     preview = _make_value_preview({'a': 1, 'b': 'two'})
     assert preview is not None
-    # repr of a small dict fits comfortably under the 120-char cap
+    # repr of a small dict fits comfortably under the 240-char cap
     assert "'a': 1" in preview
 
 

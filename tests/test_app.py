@@ -1235,19 +1235,20 @@ async def test_revoke_mid_window_no_offset_loss(test_config):
     # inflight_count > 0 is the first signal: arrange returned and
     # _execute_and_track was scheduled. But the coroutine may not have
     # actually launched the subprocess yet — we need a stronger signal.
-    # Poll for executor_pool semaphore acquisition (every in-flight task
-    # acquires the semaphore before starting the subprocess) so we know
-    # a subprocess really is running before we fire the revoke.
+    # Poll for executor_pool gate acquisition (every in-flight task
+    # acquires a slot from the priority gate before starting the
+    # subprocess) so we know a subprocess really is running before we
+    # fire the revoke.
     assert app._executor_pool is not None
-    semaphore = app._executor_pool._semaphore
+    gate = app._executor_pool._gate
     max_executors = 4  # matches the ExecutorPool constructor above
 
     await wait_for(
-        lambda: processor.inflight_count >= 1 and semaphore._value < max_executors,
+        lambda: processor.inflight_count >= 1 and gate.available < max_executors,
         timeout=5,
     )
     assert processor.inflight_count >= 1, 'precondition: at least one task must be in flight'
-    assert semaphore._value < max_executors, 'precondition: at least one executor semaphore slot must be held'
+    assert gate.available < max_executors, 'precondition: at least one executor pool slot must be held'
 
     # Fire revoke. _on_revoke pops the processor from app.processors
     # synchronously, then schedules _stop_processor as a background task.

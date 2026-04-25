@@ -5,15 +5,17 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import heapq
+import itertools
 import os
 import signal
 import sys
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from drakkar.metrics import tasks_precomputed
+from drakkar.metrics import executor_priority_fn_errors, tasks_precomputed
 from drakkar.models import ExecutorError, ExecutorResult, ExecutorTask
 
 if TYPE_CHECKING:
@@ -26,6 +28,150 @@ logger = structlog.get_logger()
 # below). Windows has no ``os.killpg`` / session semantics — fall back to the
 # parent-only kill on that platform.
 _IS_POSIX = sys.platform != 'win32'
+
+# ``priority_fn`` callable signature. The return value is anything ``heapq``
+# can compare with ``__lt__`` — typically an int (Kafka offset), a tuple
+# (e.g. ``(partition, offset)`` for partition-aware ordering), or any
+# user-defined sortable value. Smaller values get scheduled first.
+PriorityFn = Callable[[ExecutorTask], Any]
+
+
+def _default_priority(task: ExecutorTask) -> int:
+    """Default task-priority key: smallest source offset.
+
+    Earlier messages drain from the wait queue first. This keeps the
+    ``_MessageTracker`` / ``OffsetTracker`` state in front of the watermark
+    small — the slowest task in a fan-out no longer anchors the whole
+    message in memory.
+
+    Returns ``0`` for tasks with no ``source_offsets`` (synthetic tasks,
+    tests). Such tasks all share the same priority and degrade to the
+    gate's stable FIFO tiebreak — matching the semaphore's pre-priority
+    behaviour for those callers.
+    """
+    return min(task.source_offsets) if task.source_offsets else 0
+
+
+class _PriorityGate:
+    """Async slot-allocator that selects the next waiter from a min-heap.
+
+    Drop-in replacement for :class:`asyncio.Semaphore` with the same
+    ``acquire`` / ``release`` surface, except that contended ``acquire``
+    callers wake up in priority order rather than FIFO arrival order.
+    The recorder of who-goes-next is a heap of ``(priority, seq, future)``
+    triples; ``release`` pops the smallest priority and resolves that
+    future. Equal-priority callers are tiebroken by ``seq``, a monotone
+    counter that preserves insertion order — so within a priority band
+    we still behave like a FIFO semaphore.
+
+    Fast path: when a slot is free AND no one is waiting, ``acquire``
+    decrements the counter and returns immediately. Same overhead as
+    a Semaphore; the heap is never touched.
+
+    Cancellation: callers awaiting their future may be cancelled while
+    sitting in the heap. We use *lazy deletion* — the cancelled future
+    stays in the heap until ``release`` pops it, at which point it is
+    skipped (its slot pass-through goes to the next live waiter).
+    Eager removal would require an O(N) heap walk on every cancel; the
+    lazy variant is O(1) amortised against eventual ``release`` calls.
+
+    Cancellation race: if ``release`` resolved a future BUT the awaiter
+    was cancelled before consuming the slot, the slot would otherwise
+    leak. ``acquire``'s ``except CancelledError`` checks for that case
+    (``fut.done() and not fut.cancelled()``) and calls ``_release_slot``
+    to give the slot back so it isn't lost.
+
+    The gate is single-loop only — ``loop.create_future()`` binds each
+    waiter's future to the loop the awaiter is running on, just like
+    Semaphore. The same ``ExecutorPool`` invariant applies (one pool
+    per worker, one event loop per pool).
+    """
+
+    def __init__(self, max_slots: int) -> None:
+        if max_slots < 1:
+            raise ValueError(f'max_slots must be >= 1, got {max_slots}')
+        self._max = max_slots
+        self._available = max_slots
+        # Heap entries: (priority, seq, future). ``seq`` is the per-instance
+        # monotone counter that tiebreaks equal-priority waiters AND
+        # prevents heapq from ever comparing two ``Future`` objects (which
+        # raises TypeError because Future has no ``__lt__``).
+        self._heap: list[tuple[Any, int, asyncio.Future]] = []
+        self._seq = itertools.count()
+
+    @property
+    def available(self) -> int:
+        """Free slots, in [0, max_slots]. Drops to zero under saturation."""
+        return self._available
+
+    @property
+    def waiters(self) -> int:
+        """Approximate count of pending acquirers.
+
+        Includes cancellation tombstones that haven't been popped yet
+        — this is an upper bound, not a precise count. For a precise
+        gauge we would walk the heap and skip ``fut.cancelled()``,
+        which is O(N); the upper bound is fine for the metric's purpose
+        ("are we backed up").
+        """
+        return len(self._heap)
+
+    async def acquire(self, priority: Any = 0) -> None:
+        """Acquire a slot, possibly waiting in priority order.
+
+        ``priority`` may be any heapq-comparable value (int, tuple, etc.).
+        Smaller values are served first.
+        """
+        # Fast path: a slot is free and the heap is empty. This happens
+        # whenever the pool is undersubscribed and is the cheapest path
+        # — same overhead as a plain Semaphore.acquire() would have.
+        if self._available > 0 and not self._heap:
+            self._available -= 1
+            return
+
+        # Slow path: queue up in the priority heap and wait.
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        seq = next(self._seq)
+        heapq.heappush(self._heap, (priority, seq, fut))
+
+        try:
+            await fut
+        except asyncio.CancelledError:
+            # Cancellation race: if the future already received its slot
+            # via ``set_result`` (we were the next-best waiter and a
+            # release fired) but the await raised before we consumed it,
+            # the slot would otherwise leak. Hand it back so the next
+            # waiter — or the next acquire's fast path — can pick it up.
+            #
+            # If the future is still pending or already cancelled, we
+            # never received the slot. The heap still contains our
+            # entry as a tombstone; the next ``release`` will pop and
+            # skip it.
+            if fut.done() and not fut.cancelled():
+                self._release_slot()
+            raise
+
+    def release(self) -> None:
+        """Release one slot; wake the highest-priority pending waiter, if any."""
+        self._release_slot()
+
+    def _release_slot(self) -> None:
+        """Internal slot release. Skips cancellation tombstones lazily."""
+        while self._heap:
+            _, _, fut = heapq.heappop(self._heap)
+            if fut.cancelled():
+                # Tombstone — the awaiter was cancelled. Try the next.
+                continue
+            # Live waiter: hand them the slot. ``set_result`` is safe
+            # here because the future is neither cancelled nor done
+            # (the heap only ever holds futures we created and that
+            # have not yet been resolved).
+            fut.set_result(None)
+            return
+        # Heap is empty (or only had tombstones). Bump the available
+        # counter so the next acquire's fast path can pick it up.
+        self._available += 1
 
 
 class ExecutorPool:
@@ -50,7 +196,23 @@ class ExecutorPool:
         env: dict[str, str] | None = None,
         inherit_parent_env: bool = True,
         inherit_deny_patterns: list[str] | None = None,
+        priority_fn: PriorityFn | None = None,
     ) -> None:
+        """Configure the pool.
+
+        Args:
+            priority_fn: optional callable that returns a sortable
+                priority key for an :class:`ExecutorTask` waiting for a
+                slot. When the pool is saturated, callers wake up in
+                ascending priority order (smallest first). ``None``
+                (default) uses :func:`_default_priority`, which keys on
+                the task's smallest source offset — earlier Kafka
+                messages drain first so ``on_message_complete``
+                fires sooner, ``_message_trackers`` clears faster, and
+                the ``OffsetTracker`` watermark advances. The wiring
+                from the handler's ``task_priority`` method to this
+                kwarg lives in :class:`drakkar.app.DrakkarApp`.
+        """
         self._binary_path = binary_path
         self._max_executors = max_executors
         self._task_timeout = task_timeout_seconds
@@ -58,7 +220,11 @@ class ExecutorPool:
         self._inherit_parent_env = inherit_parent_env
         # Patterns are compared case-insensitively against env var names.
         self._inherit_deny_patterns = list(inherit_deny_patterns or [])
-        self._semaphore = asyncio.Semaphore(max_executors)
+        # Priority gate replaces ``asyncio.Semaphore``. Same acquire/release
+        # contract; contended waiters wake in priority order rather than
+        # FIFO. See ``_PriorityGate`` for the design.
+        self._gate = _PriorityGate(max_executors)
+        self._priority_fn: PriorityFn = priority_fn or _default_priority
         self._active_count = 0
         self._waiting_count = 0
         self._available_slots: list[int] = list(range(max_executors))
@@ -105,12 +271,18 @@ class ExecutorPool:
         if task.precomputed is not None:
             return self._execute_precomputed(task, recorder, partition_id)
 
+        # Compute the priority key BEFORE entering the gate. ``priority_fn``
+        # is operator-supplied (typically ``handler.task_priority``); a buggy
+        # override must not stall a task, so wrap the call in
+        # ``_compute_priority`` which logs + ticks a metric and falls back
+        # to the default on raise.
+        priority = self._compute_priority(task)
         self._waiting_count += 1
         waiting_decremented = False
         try:
             # `async with` would also work, but we need to guarantee
             # waiting_count rollback when cancellation fires before acquire.
-            await self._semaphore.acquire()
+            await self._gate.acquire(priority)
             try:
                 # Transition from "waiting" to "active". These two lines run
                 # with no `await` between them, so they are atomic w.r.t.
@@ -133,12 +305,37 @@ class ExecutorPool:
                     heapq.heappush(self._available_slots, slot)
                     self._active_count -= 1
             finally:
-                self._semaphore.release()
+                self._gate.release()
         finally:
             if not waiting_decremented:
                 # Cancelled before (or while) acquiring — the increment above
                 # was never paired with the inner decrement. Rollback now.
                 self._waiting_count -= 1
+
+    def _compute_priority(self, task: ExecutorTask) -> Any:
+        """Evaluate ``priority_fn(task)`` with a graceful fallback.
+
+        A user-supplied ``priority_fn`` may raise (logic bug, missing
+        attribute on a custom task subclass, etc.). Letting that
+        propagate would convert a buggy override into a hard task
+        failure — far worse than the original FIFO behaviour we are
+        replacing. Instead we tick
+        ``drakkar_executor_priority_fn_errors_total`` so operators see
+        the rate, log a warning with the failing task id, and fall back
+        to ``_default_priority`` so the task is still scheduled.
+        """
+        try:
+            return self._priority_fn(task)
+        except Exception as exc:
+            executor_priority_fn_errors.inc()
+            logger.warning(
+                'priority_fn_failed',
+                category='executor',
+                task_id=task.task_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return _default_priority(task)
 
     def _execute_precomputed(
         self,

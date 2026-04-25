@@ -3924,16 +3924,17 @@ async def test_probe_endpoint_empty_value_still_runs(mock_recorder, debug_config
 async def test_probe_endpoint_dispatches_to_drakkar_main_loop_when_different(
     mock_recorder, debug_config, _probe_mock_app
 ):
-    """Regression: the ``ExecutorPool.Semaphore`` crash when the endpoint
-    runs on a separate event loop from the pipeline.
+    """Regression: the ``ExecutorPool`` priority-gate crash when the
+    endpoint runs on a separate event loop from the pipeline.
 
     The debug FastAPI server runs in its own thread + event loop so
-    heavy requests don't block the pipeline. ``ExecutorPool._semaphore``
-    is an ``asyncio.Semaphore`` bound to the main loop where the
-    pool was constructed — acquiring it from a different loop raises
-    "bound to a different event loop" as soon as the pool is
-    contended. The endpoint must therefore dispatch ``runner.run`` back
-    to the main loop via ``asyncio.run_coroutine_threadsafe``.
+    heavy requests don't block the pipeline. ``ExecutorPool._gate``
+    is a custom asyncio primitive whose internal futures are bound to
+    the main loop where the pool was constructed — acquiring a slot
+    from a different loop raises "bound to a different event loop" as
+    soon as the pool is contended. The endpoint must therefore
+    dispatch ``runner.run`` back to the main loop via
+    ``asyncio.run_coroutine_threadsafe``.
 
     This test spawns a real background thread with its own loop,
     exposes it as ``drakkar_app.main_loop``, records which loop the
