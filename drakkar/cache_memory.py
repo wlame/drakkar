@@ -37,9 +37,9 @@ from drakkar.cache_models import (
     CacheScope,
     DirtyOp,
     Op,
-    _decode,
-    _encode,
     _now_ms,
+    decode_value,
+    encode_value,
 )
 
 
@@ -105,7 +105,7 @@ class Cache:
         Args:
             key: unique key within the worker's cache namespace.
             value: any JSON-serializable object, or a Pydantic model
-                (serialized via ``model_dump_json``). See ``_encode``.
+                (serialized via ``model_dump_json``). See ``encode_value``.
             ttl: optional time-to-live in **seconds**; ``None`` means
                 "never expires". Internally we convert to a wall-clock
                 ``expires_at_ms`` so downstream comparisons are trivial.
@@ -119,7 +119,7 @@ class Cache:
             - May trigger LRU eviction if ``max_memory_entries`` is set
               and the cap is now exceeded.
         """
-        encoded, size_bytes = _encode(value)
+        encoded, size_bytes = encode_value(value)
         now_ms = _now_ms()
         expires_at_ms = now_ms + int(ttl * 1000) if ttl is not None else None
 
@@ -206,7 +206,7 @@ class Cache:
             return None
         # access → MRU bump
         self._memory.move_to_end(key)
-        return _decode(entry.value)
+        return decode_value(entry.value)
 
     def attach_reader_db(self, reader_db: aiosqlite.Connection | None) -> None:
         """Wire the engine's reader aiosqlite connection into this Cache.
@@ -268,9 +268,9 @@ class Cache:
             # access → MRU bump
             self._memory.move_to_end(key)
             metrics.cache_hits.labels(source='memory').inc()
-            # ``_decode`` accepts ``as_type=None`` natively — no ternary
+            # ``decode_value`` accepts ``as_type=None`` natively — no ternary
             # needed to special-case the "no revival" branch.
-            return _decode(entry.value, as_type=as_type)
+            return decode_value(entry.value, as_type=as_type)
 
         # --- DB fallback ---
         if self._reader_db is None:
@@ -328,8 +328,8 @@ class Cache:
         self._maybe_evict()
 
         metrics.cache_hits.labels(source='db').inc()
-        # ``_decode`` accepts ``as_type=None`` — no ternary needed.
-        return _decode(warmed.value, as_type=as_type)
+        # ``decode_value`` accepts ``as_type=None`` — no ternary needed.
+        return decode_value(warmed.value, as_type=as_type)
 
     def delete(self, key: str) -> bool:
         """Remove ``key`` from memory and schedule a DB row deletion on next flush.

@@ -2,7 +2,7 @@
 
 Holds the leaf types and the (de)serialization contract so they can be
 exercised in isolation without spinning up SQLite or the engine. Every
-``set`` flows through ``_encode``; every ``get`` flows through ``_decode``.
+``set`` flows through ``encode_value``; every ``get`` flows through ``decode_value``.
 
 Scope model
 -----------
@@ -36,7 +36,7 @@ primitives, lists, dicts, and Pydantic models (which serialize via
    parsing is bounded to data values — no code paths to execute.
 
 For Pydantic-typed values, callers can pass ``as_type=SomeModel`` to
-``Cache.get()`` and ``_decode`` will revive the value through
+``Cache.get()`` and ``decode_value`` will revive the value through
 ``model_validate`` rather than returning a plain dict.
 """
 
@@ -81,9 +81,9 @@ class CacheEntry:
         key: primary key, unique per worker DB.
         scope: visibility (see ``CacheScope``).
         value: serialized JSON text — opaque to the engine, typed by the
-            caller via ``_encode`` / ``_decode``.
+            caller via ``encode_value`` / ``decode_value``.
         size_bytes: UTF-8 byte length of ``value``. Caller populates this
-            at construction time from ``_encode``'s second return value;
+            at construction time from ``encode_value``'s second return value;
             we store it rather than recomputing so the Prometheus
             ``bytes_in_memory`` gauge can maintain a running sum without
             walking the dict on every scrape.
@@ -114,7 +114,7 @@ class CacheEntry:
 # ---- JSON codec -------------------------------------------------------------
 
 
-def _encode(value: Any) -> tuple[str, int]:
+def encode_value(value: Any) -> tuple[str, int]:
     """Serialize a value to JSON text and report its UTF-8 byte length.
 
     The byte length is what SQLite will store and what Prometheus gauges
@@ -145,7 +145,7 @@ def _encode(value: Any) -> tuple[str, int]:
     return text, len(text.encode('utf-8'))
 
 
-def _decode[T: BaseModel](json_text: str, *, as_type: type[T] | None = None) -> Any:
+def decode_value[T: BaseModel](json_text: str, *, as_type: type[T] | None = None) -> Any:
     """Parse JSON text back to a Python value.
 
     Without ``as_type``, returns the raw ``json.loads`` result — primitives

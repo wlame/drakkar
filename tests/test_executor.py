@@ -986,7 +986,7 @@ async def test_killpg_process_lookup_error_swallowed(monkeypatch):
     assert len(calls) == 1, f'expected exactly one killpg call, got {len(calls)}'
 
 
-# --- _PriorityGate primitive --------------------------------------------------
+# --- PriorityGate primitive --------------------------------------------------
 #
 # The gate is a custom semaphore-shaped allocator that selects the next
 # waiter from a min-heap rather than a deque. Tests below pin down the
@@ -1002,12 +1002,12 @@ async def test_killpg_process_lookup_error_swallowed(monkeypatch):
 #                               isn't lost.
 
 
-from drakkar.executor import _default_priority, _PriorityGate  # noqa: E402
+from drakkar.executor import PriorityGate, default_priority  # noqa: E402
 
 
 async def test_priority_gate_fast_path_no_heap_touch():
     """When a slot is free and no one is waiting, acquire returns immediately."""
-    gate = _PriorityGate(2)
+    gate = PriorityGate(2)
     await gate.acquire(priority=100)
     await gate.acquire(priority=200)
     assert gate.available == 0
@@ -1016,7 +1016,7 @@ async def test_priority_gate_fast_path_no_heap_touch():
 
 async def test_priority_gate_release_with_no_waiters_bumps_available():
     """Releasing on an empty heap restores the available counter."""
-    gate = _PriorityGate(1)
+    gate = PriorityGate(1)
     await gate.acquire()
     assert gate.available == 0
     gate.release()
@@ -1025,7 +1025,7 @@ async def test_priority_gate_release_with_no_waiters_bumps_available():
 
 async def test_priority_gate_slow_path_serves_lowest_priority_first():
     """Contended acquire wakes up smallest-priority waiter first."""
-    gate = _PriorityGate(1)
+    gate = PriorityGate(1)
     await gate.acquire(priority=0)  # holder
 
     woken: list[int] = []
@@ -1055,7 +1055,7 @@ async def test_priority_gate_slow_path_serves_lowest_priority_first():
 
 async def test_priority_gate_equal_priority_is_fifo_tiebreak():
     """Waiters with the same priority wake in arrival order (stable)."""
-    gate = _PriorityGate(1)
+    gate = PriorityGate(1)
     await gate.acquire()  # holder
 
     woken: list[str] = []
@@ -1083,12 +1083,12 @@ async def test_priority_gate_equal_priority_is_fifo_tiebreak():
 async def test_priority_gate_max_slots_zero_rejected():
     """The gate refuses ``max_slots < 1`` — an unusable configuration."""
     with pytest.raises(ValueError, match='max_slots must be >= 1'):
-        _PriorityGate(0)
+        PriorityGate(0)
 
 
 async def test_priority_gate_cancelled_waiter_becomes_tombstone():
     """A waiter cancelled while pending is skipped by the next release."""
-    gate = _PriorityGate(1)
+    gate = PriorityGate(1)
     await gate.acquire()  # holder
 
     woken: list[int] = []
@@ -1131,7 +1131,7 @@ async def test_priority_gate_cancelled_after_slot_assigned_returns_slot():
     the await point. The except-branch must call ``_release_slot`` so
     the slot is not silently leaked.
     """
-    gate = _PriorityGate(1)
+    gate = PriorityGate(1)
     await gate.acquire()  # holder
 
     waiter_started = asyncio.Event()
@@ -1167,23 +1167,23 @@ async def test_priority_gate_cancelled_after_slot_assigned_returns_slot():
     assert not waiter_resumed.is_set()
 
 
-# --- _default_priority -------------------------------------------------------
+# --- default_priority -------------------------------------------------------
 
 
-def test_default_priority_returns_min_source_offset():
+def testdefault_priority_returns_min_source_offset():
     """Default priority is the smallest source_offset across the task's offsets."""
     task = ExecutorTask(task_id='t', source_offsets=[100, 50, 200])
-    assert _default_priority(task) == 50
+    assert default_priority(task) == 50
 
 
-def test_default_priority_zero_for_empty_source_offsets():
+def testdefault_priority_zero_for_empty_source_offsets():
     """Edge case: tasks with no source_offsets all share priority 0.
 
     These degrade to FIFO via the gate's seq tiebreaker, which matches
     the pre-priority semaphore behaviour.
     """
     task = ExecutorTask(task_id='t', source_offsets=[])
-    assert _default_priority(task) == 0
+    assert default_priority(task) == 0
 
 
 # --- ExecutorPool priority integration ---------------------------------------
@@ -1250,7 +1250,7 @@ async def test_executor_pool_orders_waiters_by_priority():
     assert completion_order == ['holder', 'p1', 'p5', 'p9']
 
 
-async def test_executor_pool_default_priority_is_min_source_offset():
+async def test_executor_pooldefault_priority_is_min_source_offset():
     """When no priority_fn is supplied, smaller source offsets drain first."""
     completion_order: list[int] = []
     pool = ExecutorPool(

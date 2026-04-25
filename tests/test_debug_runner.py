@@ -3254,7 +3254,7 @@ async def test_concurrent_probes_with_different_use_cache_dont_chain_proxies():
     """Probe B (use_cache=True) reads the REAL cache even if probe A (use_cache=False) is in flight.
 
     Regression test for the proxy-chaining bug: when probe B's
-    ``_RunState`` was built while probe A held the lock, probe B's
+    ``RunState`` was built while probe A held the lock, probe B's
     ``DebugCacheProxy`` captured A's proxy as its ``real`` backend. If
     A had ``use_cache=False``, every read from B (with
     ``use_cache=True``) would fall through A's proxy and get a false
@@ -3284,7 +3284,7 @@ async def test_concurrent_probes_with_different_use_cache_dont_chain_proxies():
 
     # Probe A: use_cache=False. While inside on_task_complete, A will
     # block on ``block`` — this ensures A holds the probe lock during
-    # the window when B's start_probe runs and creates B's _RunState.
+    # the window when B's start_probe runs and creates B's RunState.
     task_a = runner.start_probe(ProbeInput(value='A', offset=1, use_cache=False))
 
     # Wait a beat for A to actually enter on_task_complete (holding the lock).
@@ -3297,7 +3297,7 @@ async def test_concurrent_probes_with_different_use_cache_dont_chain_proxies():
     assert handler.read_value is None, 'probe A should have observed miss (use_cache=False)'
 
     # Now A is inside on_task_complete, holding the lock. Build probe B:
-    # this is when the bug would fire — B's _RunState was historically
+    # this is when the bug would fire — B's RunState was historically
     # built with real=handler.cache at this exact moment, which was A's
     # proxy (already installed by _run_locked). The fix moves proxy
     # construction to post-lock-acquire, so B's proxy will target the

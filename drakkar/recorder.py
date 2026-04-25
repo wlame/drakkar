@@ -5,8 +5,8 @@ DB-file path management, IP detection) live in two sibling modules:
 
 - :mod:`drakkar.recorder_schema`  — DDL constants + canned trace queries.
 - :mod:`drakkar.recorder_helpers` — orjson-or-stdlib codec, secret patterns,
-  ``_format_dt``, ``_make_db_path``, ``_live_link_path``, ``_list_db_files``,
-  ``_open_reader``, ``detect_worker_ip``.
+  ``format_dt``, ``make_db_path``, ``live_link_path``, ``list_db_files``,
+  ``open_reader``, ``detect_worker_ip``.
 
 This module re-imports them so external code (and ``mock.patch`` test sites)
 can keep using ``drakkar.recorder.X`` paths.
@@ -55,7 +55,7 @@ from drakkar.peer_discovery import discover_peer_dbs
 
 # Re-exports — keep the previous public surface so tests and external
 # imports of ``drakkar.recorder.<name>`` continue working without changes.
-# ``_encode_json``, ``_HAS_ORJSON`` and ``_SECRET_ENV_PATTERNS`` are not
+# ``encode_json``, ``_HAS_ORJSON`` and ``_SECRET_ENV_PATTERNS`` are not
 # referenced inside this module after the helper extraction but ARE
 # imported by tests; the ``noqa: F401`` markers silence the unused-import
 # warning while preserving the public attribute path on
@@ -63,15 +63,15 @@ from drakkar.peer_discovery import discover_peer_dbs
 from drakkar.recorder_helpers import (
     _HAS_ORJSON,  # noqa: F401  (re-exported for tests)
     _SECRET_ENV_PATTERNS,  # noqa: F401  (re-exported for tests)
-    _encode_json,  # noqa: F401  (re-exported for tests)
-    _encode_json_str,
-    _format_dt,
-    _list_db_files,
-    _live_link_path,
-    _make_db_path,
-    _open_reader,
-    _sanitize_env_value,
     detect_worker_ip,
+    encode_json,  # noqa: F401  (re-exported for tests)
+    encode_json_str,
+    format_dt,
+    list_db_files,
+    live_link_path,
+    make_db_path,
+    open_reader,
+    sanitize_env_value,
 )
 from drakkar.recorder_schema import (
     _LABEL_TRACE_QUERY,
@@ -228,7 +228,7 @@ class EventRecorder:
     async def start(self) -> None:
         self._running = True
         if self._config.db_dir:
-            self._db_path = _make_db_path(self._config.db_dir, self._worker_name)
+            self._db_path = make_db_path(self._config.db_dir, self._worker_name)
             # Open writer + apply PRAGMA + create schema + open reader in a
             # single try/except. A failure at any of these steps must close
             # whichever connections already opened — otherwise the caller
@@ -245,7 +245,7 @@ class EventRecorder:
                 # Open the dedicated reader connection AFTER schema creation
                 # so the reader always sees a ready DB. URI with ``mode=ro``
                 # rejects any accidental write attempt through this handle.
-                self._reader_db = await _open_reader(self._db_path)
+                self._reader_db = await open_reader(self._db_path)
             except Exception:
                 # Best-effort cleanup of whichever connections opened before
                 # the exception. Reset attrs so a retry of start() starts
@@ -292,7 +292,7 @@ class EventRecorder:
         gauge is refreshed to the new depth so operators can watch for
         contention without scraping internal state.
         """
-        event['dt'] = _format_dt(event['ts'])
+        event['dt'] = format_dt(event['ts'])
         if not skip_db:
             # deque(maxlen=N) accepts up to N items; when len == maxlen a
             # subsequent append drops the leftmost entry. We count one
@@ -330,7 +330,7 @@ class EventRecorder:
         """Create or update the {worker}-live.db symlink to the current DB."""
         if not self._config.db_dir or not self._db_path:
             return
-        link = _live_link_path(self._config.db_dir, self._worker_name)
+        link = live_link_path(self._config.db_dir, self._worker_name)
         target = os.path.basename(self._db_path)
         try:
             tmp = link + '.tmp'
@@ -343,7 +343,7 @@ class EventRecorder:
         """Remove the live symlink on graceful shutdown."""
         if not self._config.db_dir:
             return
-        link = _live_link_path(self._config.db_dir, self._worker_name)
+        link = live_link_path(self._config.db_dir, self._worker_name)
         try:
             if os.path.islink(link):
                 os.remove(link)
@@ -365,7 +365,7 @@ class EventRecorder:
         self._drakkar_config = drakkar_config
         if not self._db or not self._config.store_config:
             return
-        env_vars = {name: _sanitize_env_value(name, os.environ.get(name, '')) for name in self._config.expose_env_vars}
+        env_vars = {name: sanitize_env_value(name, os.environ.get(name, '')) for name in self._config.expose_env_vars}
         sinks: dict[str, list[str]] = {}
         sinks_cfg = drakkar_config.sinks
         if sinks_cfg:
@@ -394,10 +394,10 @@ class EventRecorder:
                 drakkar_config.executor.task_timeout_seconds,
                 drakkar_config.executor.max_retries,
                 drakkar_config.executor.window_size,
-                _encode_json_str(sinks),
-                _encode_json_str(env_vars),
+                encode_json_str(sinks),
+                encode_json_str(env_vars),
                 now,
-                _format_dt(now),
+                format_dt(now),
             ],
         )
         await self._db.commit()
@@ -423,7 +423,7 @@ class EventRecorder:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 app_state.get('uptime_seconds', 0),
-                _encode_json_str(app_state.get('assigned_partitions', [])),
+                encode_json_str(app_state.get('assigned_partitions', [])),
                 app_state.get('partition_count', 0),
                 app_state.get('pool_active', 0),
                 app_state.get('pool_max', 0),
@@ -435,7 +435,7 @@ class EventRecorder:
                 self._counters['committed'],
                 int(app_state.get('paused', False)),
                 now,
-                _format_dt(now),
+                format_dt(now),
             ],
         )
         await self._db.commit()
@@ -527,7 +527,7 @@ class EventRecorder:
                 'message_count': len(messages),
                 'task_count': len(tasks),
                 'message_labels': message_labels or [],
-                'metadata': _encode_json_str(
+                'metadata': encode_json_str(
                     {
                         'offsets': [m.offset for m in messages],
                         'task_ids': [t.task_id for t in tasks],
@@ -562,7 +562,7 @@ class EventRecorder:
             # The raw task.env stays untouched on the task object (subprocess
             # launch still needs real values); only the RECORDED copy is
             # redacted so the debug UI never exposes secrets.
-            metadata['env'] = {k: _sanitize_env_value(k, v) for k, v in task.env.items()}
+            metadata['env'] = {k: sanitize_env_value(k, v) for k, v in task.env.items()}
         if precomputed:
             # Neutral marker: a result was supplied by the handler and no
             # subprocess ran. The framework does not classify the reason
@@ -573,14 +573,14 @@ class EventRecorder:
             'event': 'task_started',
             'partition': partition,
             'task_id': task.task_id,
-            'args': _encode_json_str(task.args),
+            'args': encode_json_str(task.args),
             'pool_active': pool_active,
             'pool_waiting': pool_waiting,
             'slot': slot,
             'stdin_lines': stdin_lines,
             'stdin_size': stdin_size,
-            'metadata': _encode_json_str(metadata),
-            'labels': _encode_json_str(task.labels) if task.labels else None,
+            'metadata': encode_json_str(metadata),
+            'labels': encode_json_str(task.labels) if task.labels else None,
         }
         ws_threshold_ms = self._config.ws_min_duration_ms
         if ws_threshold_ms > 0:
@@ -633,15 +633,15 @@ class EventRecorder:
             'pid': result.pid,
             'pool_active': pool_active,
             'pool_waiting': pool_waiting,
-            'labels': _encode_json_str(result.task.labels) if result.task.labels else None,
+            'labels': encode_json_str(result.task.labels) if result.task.labels else None,
         }
         if precomputed:
             # Mirrored on the completion event so downstream queries /
             # dashboards can filter precomputed outcomes without joining
             # to task_started.
-            entry['metadata'] = _encode_json_str({'precomputed': True})
+            entry['metadata'] = encode_json_str({'precomputed': True})
         if include_output:
-            entry['args'] = _encode_json_str(result.task.args)
+            entry['args'] = encode_json_str(result.task.args)
         if include_output and self._config.store_output:
             entry['stdout'] = result.stdout
             entry['stderr'] = result.stderr
@@ -695,17 +695,17 @@ class EventRecorder:
             'pid': error.pid,
             'pool_active': pool_active,
             'pool_waiting': pool_waiting,
-            'metadata': _encode_json_str(
+            'metadata': encode_json_str(
                 {
                     'exception': error.exception,
                 }
             ),
-            'labels': _encode_json_str(task.labels) if task.labels else None,
+            'labels': encode_json_str(task.labels) if task.labels else None,
         }
         if duration_seconds is not None:
             entry['duration'] = duration_seconds
         if include_output:
-            entry['args'] = _encode_json_str(task.args)
+            entry['args'] = encode_json_str(task.args)
         if include_output and self._config.store_output:
             entry['stderr'] = error.stderr
         self._record(entry, skip_ws=False, skip_db=skip_db)
@@ -741,7 +741,7 @@ class EventRecorder:
                 'task_id': task_id,
                 'partition': partition,
                 'duration': round(duration, 4),
-                'metadata': _encode_json_str(
+                'metadata': encode_json_str(
                     {
                         'output_message_count': output_message_count,
                     }
@@ -773,7 +773,7 @@ class EventRecorder:
                 'partition': partition,
                 'offset': offset,
                 'duration': round(duration, 4),
-                'metadata': _encode_json_str(
+                'metadata': encode_json_str(
                     {
                         'task_count': task_count,
                         'succeeded': succeeded,
@@ -800,7 +800,7 @@ class EventRecorder:
                 'event': 'window_complete',
                 'partition': partition,
                 'duration': round(duration, 4),
-                'metadata': _encode_json_str(
+                'metadata': encode_json_str(
                     {
                         'window_id': window_id,
                         'task_count': task_count,
@@ -838,7 +838,7 @@ class EventRecorder:
             {
                 'ts': time.time(),
                 'event': 'sink_delivered',
-                'metadata': _encode_json_str(
+                'metadata': encode_json_str(
                     {
                         'sink_type': sink_type,
                         'sink_name': sink_name,
@@ -860,7 +860,7 @@ class EventRecorder:
             {
                 'ts': time.time(),
                 'event': 'sink_error',
-                'metadata': _encode_json_str(
+                'metadata': encode_json_str(
                     {
                         'sink_type': sink_type,
                         'sink_name': sink_name,
@@ -930,7 +930,7 @@ class EventRecorder:
                 'task_id': name,
                 'duration': duration,
                 'exit_code': 0 if status == 'ok' else 1,
-                'metadata': _encode_json_str(metadata),
+                'metadata': encode_json_str(metadata),
             }
         )
 
@@ -1424,7 +1424,7 @@ class EventRecorder:
         # open new DB and initialize schema BEFORE swapping. If schema
         # creation fails, close the orphaned connection and leave
         # self._db untouched so the caller can retry on the next tick.
-        new_path = _make_db_path(self._config.db_dir, self._worker_name)
+        new_path = make_db_path(self._config.db_dir, self._worker_name)
         new_db = await aiosqlite.connect(new_path)
         try:
             await new_db.execute('PRAGMA journal_mode=WAL')
@@ -1442,7 +1442,7 @@ class EventRecorder:
         # new writer (since we're no longer installing it) and leave the
         # previous writer/reader pair intact so the worker stays usable.
         try:
-            new_reader = await _open_reader(new_path)
+            new_reader = await open_reader(new_path)
         except Exception:
             with contextlib.suppress(Exception):
                 await new_db.close()
@@ -1491,7 +1491,7 @@ class EventRecorder:
 
         # delete DB files older than retention
         cutoff = time.time() - (self._config.retention_hours * 3600)
-        for db_file in _list_db_files(self._config.db_dir, self._worker_name):
+        for db_file in list_db_files(self._config.db_dir, self._worker_name):
             if db_file == new_path:
                 continue
             try:
@@ -1503,7 +1503,7 @@ class EventRecorder:
                 pass
 
         # enforce max file count
-        remaining = _list_db_files(self._config.db_dir, self._worker_name)
+        remaining = list_db_files(self._config.db_dir, self._worker_name)
         max_files = max(1, self._config.retention_max_events // 10_000)
         if len(remaining) > max_files:
             for old_file in remaining[:-max_files]:

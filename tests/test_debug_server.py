@@ -15,13 +15,13 @@ from starlette.testclient import TestClient
 
 from drakkar.config import DebugConfig, DrakkarConfig
 from drakkar.debug_server import (
-    _format_ts,
-    _format_ts_full,
-    _format_ts_ms,
-    _format_uptime,
-    _origin_allowed,
-    _worker_group,
     create_debug_app,
+    format_ts,
+    format_ts_full,
+    format_ts_ms,
+    format_uptime,
+    origin_allowed,
+    worker_group,
 )
 from drakkar.recorder import EventRecorder
 
@@ -171,109 +171,109 @@ async def client(debug_config, mock_recorder, mock_app):
 
 
 # ---------------------------------------------------------------------------
-# 1. Pure utility functions: _format_ts
+# 1. Pure utility functions: format_ts
 # ---------------------------------------------------------------------------
 
 
 class TestFormatTs:
-    def test_format_ts_none_returns_empty(self):
-        assert _format_ts(None) == ''
+    def testformat_ts_none_returns_empty(self):
+        assert format_ts(None) == ''
 
-    def test_format_ts_returns_hms(self):
-        result = _format_ts(1000.0)
+    def testformat_ts_returns_hms(self):
+        result = format_ts(1000.0)
         assert result != ''
         assert re.match(r'\d{2}:\d{2}:\d{2}$', result)
 
-    def test_format_ts_ms_none_returns_empty(self):
-        assert _format_ts_ms(None) == ''
+    def testformat_ts_ms_none_returns_empty(self):
+        assert format_ts_ms(None) == ''
 
-    def test_format_ts_ms_returns_hms_millis(self):
-        result = _format_ts_ms(1000.0)
+    def testformat_ts_ms_returns_hms_millis(self):
+        result = format_ts_ms(1000.0)
         assert result != ''
         assert re.match(r'\d{2}:\d{2}:\d{2}\.\d{3}$', result)
 
-    def test_format_ts_full_none_returns_empty(self):
-        assert _format_ts_full(None) == ''
+    def testformat_ts_full_none_returns_empty(self):
+        assert format_ts_full(None) == ''
 
-    def test_format_ts_full_returns_datetime_millis(self):
-        result = _format_ts_full(1000.0)
+    def testformat_ts_full_returns_datetime_millis(self):
+        result = format_ts_full(1000.0)
         assert result != ''
         assert re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$', result)
 
 
 class TestFormatUptime:
     def test_seconds(self):
-        assert _format_uptime(0) == '0s'
-        assert _format_uptime(45) == '45s'
-        assert _format_uptime(59) == '59s'
+        assert format_uptime(0) == '0s'
+        assert format_uptime(45) == '45s'
+        assert format_uptime(59) == '59s'
 
     def test_minutes(self):
-        assert _format_uptime(60) == '1m 0s'
-        assert _format_uptime(90) == '1m 30s'
-        assert _format_uptime(3599) == '59m 59s'
+        assert format_uptime(60) == '1m 0s'
+        assert format_uptime(90) == '1m 30s'
+        assert format_uptime(3599) == '59m 59s'
 
     def test_hours(self):
-        assert _format_uptime(3600) == '1h 0m'
-        assert _format_uptime(7200 + 1800) == '2h 30m'
-        assert _format_uptime(86399) == '23h 59m'
+        assert format_uptime(3600) == '1h 0m'
+        assert format_uptime(7200 + 1800) == '2h 30m'
+        assert format_uptime(86399) == '23h 59m'
 
     def test_days(self):
-        assert _format_uptime(86400) == '1d 0h'
-        assert _format_uptime(86400 * 3 + 3600 * 5) == '3d 5h'
-        assert _format_uptime(86400 * 29 + 3600 * 23) == '29d 23h'
+        assert format_uptime(86400) == '1d 0h'
+        assert format_uptime(86400 * 3 + 3600 * 5) == '3d 5h'
+        assert format_uptime(86400 * 29 + 3600 * 23) == '29d 23h'
 
     def test_months(self):
-        assert _format_uptime(86400 * 30) == '1mo 0d'
-        assert _format_uptime(86400 * 75) == '2mo 15d'
-        assert _format_uptime(86400 * 364) == '12mo 4d'
+        assert format_uptime(86400 * 30) == '1mo 0d'
+        assert format_uptime(86400 * 75) == '2mo 15d'
+        assert format_uptime(86400 * 364) == '12mo 4d'
 
     def test_years(self):
-        assert _format_uptime(86400 * 365) == '1y 0mo'
-        assert _format_uptime(86400 * 365 * 2 + 86400 * 90) == '2y 3mo'
+        assert format_uptime(86400 * 365) == '1y 0mo'
+        assert format_uptime(86400 * 365 * 2 + 86400 * 90) == '2y 3mo'
 
     def test_fractional_seconds_truncated(self):
-        assert _format_uptime(45.7) == '45s'
-        assert _format_uptime(90.999) == '1m 30s'
+        assert format_uptime(45.7) == '45s'
+        assert format_uptime(90.999) == '1m 30s'
 
 
 # ---------------------------------------------------------------------------
-# 1b. Pure utility functions: _worker_group
+# 1b. Pure utility functions: worker_group
 # ---------------------------------------------------------------------------
 
 
 class TestWorkerGroup:
     def test_strips_trailing_number_with_dash(self):
-        assert _worker_group('worker-1') == 'worker'
+        assert worker_group('worker-1') == 'worker'
 
     def test_compound_name_with_trailing_number(self):
-        assert _worker_group('worker-vip-2') == 'worker-vip'
+        assert worker_group('worker-vip-2') == 'worker-vip'
 
     def test_multi_digit_trailing_number(self):
-        assert _worker_group('slow-worker-05') == 'slow-worker'
+        assert worker_group('slow-worker-05') == 'slow-worker'
 
     def test_number_without_separator(self):
-        assert _worker_group('worker15') == 'worker'
+        assert worker_group('worker15') == 'worker'
 
     def test_no_trailing_number(self):
-        assert _worker_group('single') == 'single'
+        assert worker_group('single') == 'single'
 
     def test_strips_trailing_number_multiple(self):
-        assert _worker_group('worker-3') == 'worker'
-        assert _worker_group('worker-15') == 'worker'
+        assert worker_group('worker-3') == 'worker'
+        assert worker_group('worker-15') == 'worker'
 
     def test_preserves_middle_numbers(self):
-        assert _worker_group('worker-vip-1') == 'worker-vip'
-        assert _worker_group('worker-vip-2') == 'worker-vip'
+        assert worker_group('worker-vip-1') == 'worker-vip'
+        assert worker_group('worker-vip-2') == 'worker-vip'
 
     def test_underscore_separator(self):
-        assert _worker_group('slow_worker_05') == 'slow_worker'
+        assert worker_group('slow_worker_05') == 'slow_worker'
 
     def test_no_trailing_number_compound(self):
-        assert _worker_group('worker-vip') == 'worker-vip'
-        assert _worker_group('special') == 'special'
+        assert worker_group('worker-vip') == 'worker-vip'
+        assert worker_group('special') == 'special'
 
     def test_only_digits_returns_itself(self):
-        assert _worker_group('123') == '123'
+        assert worker_group('123') == '123'
 
 
 # ---------------------------------------------------------------------------
@@ -1294,15 +1294,15 @@ async def test_sink_breakdown_empty_offsets_returns_empty_map(
 # --- Hook-flag detection — hides unused completion-hook tabs ---
 
 
-def test_hook_flags_no_overrides_returns_all_false():
+def testhook_flags_no_overrides_returns_all_false():
     """Plain BaseDrakkarHandler subclass with no hook overrides → all False."""
-    from drakkar.debug_server import _hook_flags
+    from drakkar.debug_server import hook_flags
     from drakkar.handler import BaseDrakkarHandler
 
     class H(BaseDrakkarHandler):
         pass
 
-    flags = _hook_flags(H())
+    flags = hook_flags(H())
     assert flags == {
         'task_complete': False,
         'message_complete': False,
@@ -1310,9 +1310,9 @@ def test_hook_flags_no_overrides_returns_all_false():
     }
 
 
-def test_hook_flags_detects_overrides():
+def testhook_flags_detects_overrides():
     """Each overridden hook flips its flag; non-overridden stay False."""
-    from drakkar.debug_server import _hook_flags
+    from drakkar.debug_server import hook_flags
     from drakkar.handler import BaseDrakkarHandler
     from drakkar.models import CollectResult, ExecutorResult, MessageGroup
 
@@ -1325,7 +1325,7 @@ def test_hook_flags_detects_overrides():
 
         # on_window_complete NOT overridden — should stay False.
 
-    flags = _hook_flags(H())
+    flags = hook_flags(H())
     assert flags['task_complete'] is True
     assert flags['message_complete'] is True
     assert flags['window_complete'] is False
@@ -3158,7 +3158,7 @@ class TestWebSocketAuth:
 
 
 # ---------------------------------------------------------------------------
-# ``_origin_allowed`` helper — direct unit tests
+# ``origin_allowed`` helper — direct unit tests
 # ---------------------------------------------------------------------------
 # The helper lives at module scope (not nested inside ``create_debug_app``),
 # so we can call it directly with synthetic ``DebugConfig`` values and
@@ -3169,80 +3169,80 @@ class TestWebSocketAuth:
 
 
 class TestOriginAllowedHelper:
-    """Direct unit tests for ``_origin_allowed`` — no TestClient required."""
+    """Direct unit tests for ``origin_allowed`` — no TestClient required."""
 
     def test_absent_origin_accepted(self):
         """Non-browser clients omit Origin — accept (token was already checked)."""
         cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
-        assert _origin_allowed(None, 'testserver', cfg) is True
+        assert origin_allowed(None, 'testserver', cfg) is True
 
     def test_absent_origin_accepted_even_with_allowlist(self):
         """Absent Origin is accepted regardless of allowlist — we err on the
         side of letting authenticated tools connect rather than rejecting a
         missing header a malicious browser couldn't omit anyway."""
         cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
-        assert _origin_allowed(None, 'testserver', cfg) is True
+        assert origin_allowed(None, 'testserver', cfg) is True
 
     def test_allowlist_match_accepted(self):
         cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
-        assert _origin_allowed('https://ops.internal', 'ignored', cfg) is True
+        assert origin_allowed('https://ops.internal', 'ignored', cfg) is True
 
     def test_allowlist_case_insensitive(self):
         """Uppercase Origin must match lowercase allowlist entry."""
         cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
-        assert _origin_allowed('https://OPS.INTERNAL', 'ignored', cfg) is True
+        assert origin_allowed('https://OPS.INTERNAL', 'ignored', cfg) is True
 
     def test_allowlist_default_port_ignored(self):
         """Browsers strip :443 from https Origin but operators may write it
         explicitly in the allowlist. Normalization must treat the two forms
         as equal."""
         cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal:443'])
-        assert _origin_allowed('https://ops.internal', 'ignored', cfg) is True
+        assert origin_allowed('https://ops.internal', 'ignored', cfg) is True
 
     def test_allowlist_miss_rejected(self):
         cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
-        assert _origin_allowed('https://evil.com', 'ignored', cfg) is False
+        assert origin_allowed('https://evil.com', 'ignored', cfg) is False
 
     def test_same_origin_exact_match(self):
         cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
-        assert _origin_allowed('http://testserver', 'testserver', cfg) is True
+        assert origin_allowed('http://testserver', 'testserver', cfg) is True
 
     def test_same_origin_case_insensitive(self):
         cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
-        assert _origin_allowed('http://Example.com', 'example.com', cfg) is True
+        assert origin_allowed('http://Example.com', 'example.com', cfg) is True
 
     def test_same_origin_default_port_on_origin_missing_on_host(self):
         """Browser may send ``Origin: http://example.com`` (no port) while
         the Host header is ``example.com:80``. Normalization collapses both
         to ``(example.com, None)`` so the compare succeeds."""
         cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
-        assert _origin_allowed('http://example.com', 'example.com:80', cfg) is True
+        assert origin_allowed('http://example.com', 'example.com:80', cfg) is True
 
     def test_same_origin_default_port_on_host_missing_on_origin(self):
         """Inverse of the above: ``Origin: http://example.com:80`` + Host
         ``example.com`` must also match."""
         cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
-        assert _origin_allowed('http://example.com:80', 'example.com', cfg) is True
+        assert origin_allowed('http://example.com:80', 'example.com', cfg) is True
 
     def test_same_origin_non_default_port_mismatch_rejected(self):
         cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
-        assert _origin_allowed('http://example.com:8080', 'example.com:9090', cfg) is False
+        assert origin_allowed('http://example.com:8080', 'example.com:9090', cfg) is False
 
     def test_same_origin_ipv6_host_bracketed(self):
         """RFC 7230 allows ``Host: [::1]:8080`` for IPv6 literals."""
         cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
-        assert _origin_allowed('http://[::1]:8080', '[::1]:8080', cfg) is True
+        assert origin_allowed('http://[::1]:8080', '[::1]:8080', cfg) is True
 
     def test_same_origin_host_mismatch_rejected(self):
         cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
-        assert _origin_allowed('https://evil.com', 'testserver', cfg) is False
+        assert origin_allowed('https://evil.com', 'testserver', cfg) is False
 
     def test_malformed_origin_rejected(self):
         """Garbage in the Origin header must not cause the helper to raise —
         return False so the endpoint closes the connection cleanly."""
         cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
         # No scheme → urlparse returns empty hostname → mismatch
-        assert _origin_allowed('not-a-url', 'testserver', cfg) is False
+        assert origin_allowed('not-a-url', 'testserver', cfg) is False
 
 
 # ---------------------------------------------------------------------------
@@ -3865,7 +3865,7 @@ async def test_probe_endpoint_timeout_partial_includes_sink_records_from_complet
     """When timeout fires after on_task_complete produced a sink record, the partial captures it.
 
     Regression test for the "planned_sink_payloads lost on timeout" bug.
-    Before the ``_RunState`` refactor, the sink-flattening only ran at
+    Before the ``RunState`` refactor, the sink-flattening only ran at
     the very end of ``_run_stages``, so timeout cancellation lost any
     records captured by completed hooks. The per-run state now
     flattens on every ``to_report`` call so the partial sees them.

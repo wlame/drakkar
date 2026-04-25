@@ -8,7 +8,7 @@ import pytest
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
-from drakkar.app import DrakkarApp, _warn_if_debug_unauthenticated
+from drakkar.app import DrakkarApp, warn_if_debug_unauthenticated
 from drakkar.config import (
     DebugConfig,
     DrakkarConfig,
@@ -1075,7 +1075,7 @@ def test_warn_if_debug_unauthenticated_emits_warning(config_with_debug):
     """debug.enabled + empty auth_token emits a structured warning naming host:port."""
     config = config_with_debug(DebugConfig(enabled=True, host='0.0.0.0', auth_token=''))
     with capture_logs() as cap:
-        _warn_if_debug_unauthenticated(config)
+        warn_if_debug_unauthenticated(config)
 
     events = _captured_unauth_events(cap)
     assert len(events) == 1
@@ -1096,7 +1096,7 @@ def test_warn_if_debug_unauthenticated_silent_when_token_set(config_with_debug):
     """Setting auth_token (any non-empty value) silences the unauthenticated warning."""
     config = config_with_debug(DebugConfig(enabled=True, host='0.0.0.0', auth_token='secret-token'))
     with capture_logs() as cap:
-        _warn_if_debug_unauthenticated(config)
+        warn_if_debug_unauthenticated(config)
     assert _captured_unauth_events(cap) == []
 
 
@@ -1106,7 +1106,7 @@ def test_warn_if_debug_unauthenticated_warns_on_loopback_too(config_with_debug):
     silent path that masks the same default in dev vs prod)."""
     config = config_with_debug(DebugConfig(enabled=True, host='127.0.0.1', auth_token=''))
     with capture_logs() as cap:
-        _warn_if_debug_unauthenticated(config)
+        warn_if_debug_unauthenticated(config)
     assert len(_captured_unauth_events(cap)) == 1
 
 
@@ -1114,7 +1114,7 @@ def test_warn_if_debug_unauthenticated_silent_when_debug_disabled(config_with_de
     """debug.enabled=False means no debug server starts, so the warning is skipped."""
     config = config_with_debug(DebugConfig(enabled=False, host='0.0.0.0', auth_token=''))
     with capture_logs() as cap:
-        _warn_if_debug_unauthenticated(config)
+        warn_if_debug_unauthenticated(config)
     assert _captured_unauth_events(cap) == []
 
 
@@ -1126,7 +1126,7 @@ def test_warn_if_debug_unauthenticated_whitespace_token_treated_as_empty(config_
     # Pre-condition: the field validator already stripped the whitespace.
     assert config.debug.auth_token == ''
     with capture_logs() as cap:
-        _warn_if_debug_unauthenticated(config)
+        warn_if_debug_unauthenticated(config)
     assert len(_captured_unauth_events(cap)) == 1
 
 
@@ -1135,7 +1135,7 @@ def test_warn_if_debug_unauthenticated_host_independent(config_with_debug, host:
     """Warning fires for every host — auth gating is no longer host-based."""
     config = config_with_debug(DebugConfig(enabled=True, host=host, auth_token=''))
     with capture_logs() as cap:
-        _warn_if_debug_unauthenticated(config)
+        warn_if_debug_unauthenticated(config)
     events = _captured_unauth_events(cap)
     assert len(events) == 1
     assert events[0]['host'] == host

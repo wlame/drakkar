@@ -35,9 +35,9 @@ from drakkar.cache_models import (
     CacheScope,
     DirtyOp,
     Op,
-    _decode,
-    _encode,
     _now_ms,
+    decode_value,
+    encode_value,
 )
 from drakkar.cache_sql import (
     LWW_UPSERT_SQL,
@@ -64,7 +64,7 @@ __all__ = [
     'DirtyOp',
     'NoOpCache',
     'Op',
-    '_decode',
-    '_encode',
     '_now_ms',
+    'decode_value',
+    'encode_value',
 ]

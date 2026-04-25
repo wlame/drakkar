@@ -34,11 +34,11 @@ from drakkar.utils import redact_url
 # same on-wire semantics.
 #
 # Contract:
-# - ``_encode_json(obj)`` returns BYTES (UTF-8). The low-level primitive
-#   — callers that want str use ``_encode_json_str(obj)`` which decodes
+# - ``encode_json(obj)`` returns BYTES (UTF-8). The low-level primitive
+#   — callers that want str use ``encode_json_str(obj)`` which decodes
 #   once on the way out.
 # - The recorder stores TEXT columns in SQLite, which requires ``str``
-#   on insert; those sites use ``_encode_json_str``.
+#   on insert; those sites use ``encode_json_str``.
 # - Keys are SORTED so repeated encodes of the same dict produce
 #   identical output (deterministic hashes / cache dedup downstream).
 # - Non-JSON-native types fall back to ``default=str`` / orjson's
@@ -51,7 +51,7 @@ try:
 
     _HAS_ORJSON = True
 
-    def _encode_json(obj: Any) -> bytes:
+    def encode_json(obj: Any) -> bytes:
         """Encode ``obj`` as UTF-8 JSON bytes via orjson.
 
         Options:
@@ -69,7 +69,7 @@ try:
 except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
     _HAS_ORJSON = False
 
-    def _encode_json(obj: Any) -> bytes:
+    def encode_json(obj: Any) -> bytes:
         """Stdlib fallback encoder (used when orjson is not installed).
 
         Matches orjson byte-for-byte on common payloads:
@@ -88,13 +88,13 @@ except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
         return json.dumps(obj, sort_keys=True, default=str, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
 
 
-def _encode_json_str(obj: Any) -> str:
+def encode_json_str(obj: Any) -> str:
     """Encode ``obj`` as a JSON string (UTF-8 text).
 
-    Thin wrapper over :func:`_encode_json` that decodes the bytes once so
+    Thin wrapper over :func:`encode_json` that decodes the bytes once so
     the string-typed SQLite insert sites can use it transparently.
     """
-    return _encode_json(obj).decode('utf-8')
+    return encode_json(obj).decode('utf-8')
 
 
 # Env var name patterns whose values get redacted before being written to the
@@ -112,7 +112,7 @@ _SECRET_ENV_PATTERNS = (
 )
 
 
-def _sanitize_env_value(name: str, value: str) -> str:
+def sanitize_env_value(name: str, value: str) -> str:
     """Return a safe-to-store version of an env var value.
 
     Redacts fully when the var name matches a common-secret pattern. For
@@ -125,13 +125,13 @@ def _sanitize_env_value(name: str, value: str) -> str:
     return redact_url(value)
 
 
-def _format_dt(ts: float) -> str:
+def format_dt(ts: float) -> str:
     """Format a Unix timestamp as 'YYYY-MM-DD HH:MM:SS.mmm'."""
     dt = datetime.fromtimestamp(ts, tz=UTC)
     return dt.strftime('%Y-%m-%d %H:%M:%S.') + f'{dt.microsecond // 1000:03d}'
 
 
-def _make_db_path(db_dir: str, worker_name: str) -> str:
+def make_db_path(db_dir: str, worker_name: str) -> str:
     """Generate a timestamped DB filename inside db_dir.
 
     ('/shared', 'worker-1') -> '/shared/worker-1-2026-03-16__14_55_00.db'
@@ -140,24 +140,24 @@ def _make_db_path(db_dir: str, worker_name: str) -> str:
     return str(Path(db_dir) / f'{worker_name}-{ts}.db')
 
 
-def _live_link_path(db_dir: str, worker_name: str) -> str:
+def live_link_path(db_dir: str, worker_name: str) -> str:
     """Path for the live symlink: {db_dir}/{worker_name}-live.db."""
     return str(Path(db_dir) / f'{worker_name}-live.db')
 
 
-def _list_db_files(db_dir: str, worker_name: str) -> list[str]:
+def list_db_files(db_dir: str, worker_name: str) -> list[str]:
     """List all timestamped DB files for a worker, oldest first.
 
     Excludes the -live.db symlink.
     """
     pattern = str(Path(db_dir) / f'{worker_name}-*.db')
-    live = _live_link_path(db_dir, worker_name)
+    live = live_link_path(db_dir, worker_name)
     files = [f for f in glob.glob(pattern) if f != live and not os.path.islink(f)]
     files.sort()
     return files
 
 
-async def _open_reader(db_path: str) -> aiosqlite.Connection:
+async def open_reader(db_path: str) -> aiosqlite.Connection:
     """Open a read-only aiosqlite connection to ``db_path``.
 
     Uses the ``file:...?mode=ro`` SQLite URI form so any write attempt

@@ -34,23 +34,23 @@ from drakkar.config import DebugConfig
 from drakkar.debug_runner import DebugRunner, ProbeInput
 
 # Re-import the helpers that used to live here so test patches like
-# ``drakkar.debug_server._hook_flags`` keep working without changes.
-# ``_DEFAULT_PORTS`` / ``_normalize_hostport`` / ``_parse_host_header`` are
+# ``drakkar.debug_server.hook_flags`` keep working without changes.
+# ``_DEFAULT_PORTS`` / ``normalize_hostport`` / ``parse_host_header`` are
 # not referenced inside this module after the helper extraction but ARE
 # imported by tests via the original ``drakkar.debug_server.<name>``
 # path; ``noqa: F401`` keeps the re-export visible without tripping
 # ruff's unused-import check.
 from drakkar.debug_server_helpers import (
     _DEFAULT_PORTS,  # noqa: F401  (re-exported for tests)
-    _format_ts,
-    _format_ts_full,
-    _format_ts_ms,
-    _format_uptime,
-    _hook_flags,
-    _normalize_hostport,  # noqa: F401  (re-exported for tests)
-    _origin_allowed,
-    _parse_host_header,  # noqa: F401  (re-exported for tests)
-    _worker_group,  # noqa: F401  (re-exported for tests)
+    format_ts,
+    format_ts_full,
+    format_ts_ms,
+    format_uptime,
+    hook_flags,
+    normalize_hostport,  # noqa: F401  (re-exported for tests)
+    origin_allowed,
+    parse_host_header,  # noqa: F401  (re-exported for tests)
+    worker_group,  # noqa: F401  (re-exported for tests)
 )
 from drakkar.metrics import cache_gauge_snapshot
 from drakkar.recorder import EventRecorder
@@ -120,10 +120,10 @@ def create_debug_app(
     app = FastAPI(title='Drakkar Debug', docs_url=None, redoc_url=None)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.autoescape = True
-    templates.env.globals['format_ts'] = _format_ts  # ty: ignore[invalid-assignment]
-    templates.env.globals['format_ts_ms'] = _format_ts_ms  # ty: ignore[invalid-assignment]
-    templates.env.globals['format_ts_full'] = _format_ts_full  # ty: ignore[invalid-assignment]
-    templates.env.globals['format_uptime'] = _format_uptime  # ty: ignore[invalid-assignment]
+    templates.env.globals['format_ts'] = format_ts  # ty: ignore[invalid-assignment]
+    templates.env.globals['format_ts_ms'] = format_ts_ms  # ty: ignore[invalid-assignment]
+    templates.env.globals['format_ts_full'] = format_ts_full  # ty: ignore[invalid-assignment]
+    templates.env.globals['format_uptime'] = format_uptime  # ty: ignore[invalid-assignment]
 
     def _get_sink_ui_links() -> list[dict[str, str]]:
         """Return deduplicated sink UI links for the nav header."""
@@ -685,7 +685,7 @@ def create_debug_app(
                 'partition_count': len(drakkar_app.processors),
                 'max_ui_rows': config.max_ui_rows,
                 'ws_min_duration_ms': config.ws_min_duration_ms,
-                'hook_flags': _hook_flags(drakkar_app.handler)
+                'hook_flags': hook_flags(drakkar_app.handler)
                 if drakkar_app.handler
                 else {
                     'task_complete': False,
@@ -2032,13 +2032,13 @@ def create_debug_app(
                 return
 
             # --- Origin validation ---
-            # Delegate to ``_origin_allowed`` (module scope) so the
+            # Delegate to ``origin_allowed`` (module scope) so the
             # decision logic is directly unit-testable and the four
             # branches (absent origin / allowlist hit / allowlist miss /
             # same-origin fallback) are spelled out in one place.
             origin = ws.headers.get('origin')
             request_host = ws.headers.get('host', '')
-            if not _origin_allowed(origin, request_host, config):
+            if not origin_allowed(origin, request_host, config):
                 await ws.close(code=4403, reason='forbidden origin')
                 return
 

@@ -438,7 +438,7 @@ Per-source-message aggregation and per-message offset commit. Fires before any w
 
 Each terminal outcome (success, SKIP, retry-exhaustion, replacement) decrements `tracker.remaining` for every message the task contributes to. When a tracker hits zero, the message's `MessageGroup` is ready to fire.
 
-A `_MessageTracker.completion_fired` guard prevents double-firing in any pathological race.
+A `MessageTracker.completion_fired` guard prevents double-firing in any pathological race.
 
 ### 7.2 on_message_complete Hook
 

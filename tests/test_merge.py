@@ -10,7 +10,7 @@ from drakkar.merge import (
     scan_db,
     scan_directory,
 )
-from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, SCHEMA_WORKER_STATE, _format_dt
+from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, SCHEMA_WORKER_STATE, format_dt
 
 
 def _create_source_db(
@@ -53,7 +53,7 @@ def _create_source_db(
                 json.dumps({'kafka': ['results']}),
                 json.dumps({'WORKER_ID': worker_name}),
                 now,
-                _format_dt(now),
+                format_dt(now),
             ],
         )
 
@@ -67,7 +67,7 @@ def _create_source_db(
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     ev_ts,
-                    _format_dt(ev_ts),
+                    format_dt(ev_ts),
                     ev.get('event', 'consumed'),
                     ev.get('partition', 0),
                     ev.get('offset'),
@@ -110,7 +110,7 @@ def _create_source_db(
                     s.get('committed_count', 40),
                     s.get('paused', 0),
                     s_updated,
-                    _format_dt(s_updated),
+                    format_dt(s_updated),
                 ],
             )
 

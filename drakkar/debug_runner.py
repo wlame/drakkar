@@ -479,7 +479,7 @@ class DebugSinkCollector:
 
 
 @dataclass
-class _RunState:
+class RunState:
     """Per-run state for a single probe invocation.
 
     One instance lives for the lifetime of ONE ``DebugRunner.run()`` call
@@ -594,7 +594,7 @@ class DebugRunner:
       true even when production traffic is in flight.
 
     Partial reports:
-      Per-run state lives on a ``_RunState`` dataclass created fresh at
+      Per-run state lives on a ``RunState`` dataclass created fresh at
       the top of ``_run_locked``. ``start_probe`` attaches that state
       onto the returned ``asyncio.Task`` — ``partial_report_for(task)``
       reads it back and returns a truncated ``DebugReport``, even if
@@ -638,7 +638,7 @@ class DebugRunner:
         The endpoint calls this (instead of ``run`` directly) when it
         needs to distinguish "this probe's partial state" from "some
         earlier probe's partial state". The returned task carries a
-        ``_RunState`` object via ``partial_report_for`` — even if the
+        ``RunState`` object via ``partial_report_for`` — even if the
         task is cancelled before it acquires the probe lock, the
         endpoint will get back a valid empty ``DebugReport(truncated=
         True)`` rather than a stale blob from a previous probe.
@@ -662,13 +662,13 @@ class DebugRunner:
         ``truncated=True`` as a warning banner and shows whatever made
         it through.
         """
-        state: _RunState | None = getattr(task, '_drakkar_probe_state', None)
+        state: RunState | None = getattr(task, '_drakkar_probe_state', None)
         if state is None:  # pragma: no cover — only hit if caller uses a foreign task
             return DebugReport(input=ProbeInput(value=''), arrange=ProbeStageResult(), truncated=True)
         return state.to_report(truncated=True)
 
-    def _make_run_state(self, probe_input: ProbeInput) -> _RunState:
-        """Build a fresh ``_RunState`` for one probe invocation.
+    def _make_run_state(self, probe_input: ProbeInput) -> RunState:
+        """Build a fresh ``RunState`` for one probe invocation.
 
         Resolves Kafka sink instance names to their configured topics
         (from ``app_config.sinks.kafka[name].topic``). The sink
@@ -676,14 +676,14 @@ class DebugRunner:
         points at the real topic instead of the sink instance name.
 
         The ``DebugCacheProxy`` is intentionally NOT created here — see
-        the note on ``_RunState.cache_proxy``. It is constructed inside
+        the note on ``RunState.cache_proxy``. It is constructed inside
         ``_run_locked`` once the probe lock has been acquired so the
         proxy's ``real`` backend is the live cache, never a prior
         probe's proxy.
         """
         start_monotonic = time.monotonic()
         kafka_sink_topics = {name: cfg.topic for name, cfg in self._app_config.sinks.kafka.items()}
-        return _RunState(
+        return RunState(
             probe_input=probe_input,
             sink_collector=DebugSinkCollector(kafka_sink_topics=kafka_sink_topics),
             cache_proxy=None,
@@ -710,7 +710,7 @@ class DebugRunner:
         state = self._make_run_state(probe_input)
         return await self._run_with_state(state)
 
-    async def _run_with_state(self, state: _RunState) -> DebugReport:
+    async def _run_with_state(self, state: RunState) -> DebugReport:
         """Acquire the probe lock and execute the full run against ``state``.
 
         Shared body of ``run`` and ``start_probe``. Keeps the state
@@ -720,7 +720,7 @@ class DebugRunner:
         async with self._probe_lock:
             return await self._run_locked(state)
 
-    async def _run_locked(self, state: _RunState) -> DebugReport:
+    async def _run_locked(self, state: RunState) -> DebugReport:
         """Body of run() executed under the probe lock.
 
         Swaps ``handler.cache`` with the run's ``DebugCacheProxy`` for
@@ -774,7 +774,7 @@ class DebugRunner:
 
     # -- stage sequencing ----------------------------------------------------
 
-    async def _run_stages(self, *, state: _RunState, msg: SourceMessage) -> None:
+    async def _run_stages(self, *, state: RunState, msg: SourceMessage) -> None:
         """Run the arrange → per-task → window sequence with graceful error capture.
 
         Extracted into its own coroutine so the ``finally`` block in
@@ -885,7 +885,7 @@ class DebugRunner:
     # the pipeline. Keeping each stage in its own method keeps _run_stages
     # readable and mirrors the stage-by-stage rules documented in the plan.
 
-    def _run_deserialize(self, *, state: _RunState, msg: SourceMessage) -> bool:
+    def _run_deserialize(self, *, state: RunState, msg: SourceMessage) -> bool:
         """Run handler.deserialize_message with error capture. Returns True on success.
 
         Returning False signals the caller to stop — the parsed payload
@@ -911,7 +911,7 @@ class DebugRunner:
         state.parsed_payload = _serialize_payload(msg.payload)
         return True
 
-    def _run_message_label(self, *, state: _RunState, msg: SourceMessage) -> None:
+    def _run_message_label(self, *, state: RunState, msg: SourceMessage) -> None:
         """Run handler.message_label with error capture. Non-fatal on error."""
         with _stage('message_label'):
             try:
@@ -928,7 +928,7 @@ class DebugRunner:
     async def _run_arrange(
         self,
         *,
-        state: _RunState,
+        state: RunState,
         msg: SourceMessage,
         arrange_start: float,
     ) -> list[ExecutorTask] | None:
@@ -961,7 +961,7 @@ class DebugRunner:
     async def _run_on_message_complete(
         self,
         *,
-        state: _RunState,
+        state: RunState,
         msg: SourceMessage,
         all_scheduled_tasks: list[ExecutorTask],
         successful_terminal_results: list[ExecutorResult],
@@ -1024,7 +1024,7 @@ class DebugRunner:
     async def _run_on_window_complete(
         self,
         *,
-        state: _RunState,
+        state: RunState,
         msg: SourceMessage,
         all_terminal_results: list[ExecutorResult],
     ) -> None:
@@ -1067,7 +1067,7 @@ class DebugRunner:
     async def _process_task(
         self,
         *,
-        state: _RunState,
+        state: RunState,
         task: ExecutorTask,
         msg: SourceMessage,
         successful_terminal_results: list[ExecutorResult],
@@ -1149,7 +1149,7 @@ class DebugRunner:
     async def _handle_task_failure(
         self,
         *,
-        state: _RunState,
+        state: RunState,
         task: ExecutorTask,
         failed_entry: ProbeTaskEntry,
         exec_error: ExecutorTaskError,
@@ -1234,7 +1234,7 @@ class DebugRunner:
     async def _run_retry_loop(
         self,
         *,
-        state: _RunState,
+        state: RunState,
         task: ExecutorTask,
         msg: SourceMessage,
         successful_terminal_results: list[ExecutorResult],
@@ -1336,7 +1336,7 @@ class DebugRunner:
     async def _invoke_on_error(
         self,
         *,
-        state: _RunState,
+        state: RunState,
         task: ExecutorTask,
         exec_error: ExecutorTaskError,
     ) -> str | list[ExecutorTask] | None:
@@ -1367,7 +1367,7 @@ class DebugRunner:
     async def _execute_and_record_task(
         self,
         *,
-        state: _RunState,
+        state: RunState,
         task: ExecutorTask,
         msg: SourceMessage,
         successful_terminal_results: list[ExecutorResult],
@@ -1381,7 +1381,7 @@ class DebugRunner:
         Returns a tuple ``(entry, exec_error)``. ``exec_error`` is the
         caught ``ExecutorTaskError`` on subprocess-level failure, or
         ``None`` on success. Using a tuple return (rather than a scratch
-        slot on ``_RunState``) keeps the failure signal co-located with
+        slot on ``RunState``) keeps the failure signal co-located with
         the entry and removes the need for callers to read-then-clear a
         shared attribute.
 
@@ -1515,7 +1515,7 @@ class DebugRunner:
     def _build_probe_error(
         self,
         *,
-        state: _RunState,
+        state: RunState,
         stage: str,
         exc: BaseException,
     ) -> ProbeError:
@@ -1534,7 +1534,7 @@ class DebugRunner:
             occurred_at_ms=(time.monotonic() - state.start_monotonic) * 1000.0,
         )
 
-    def _record_error(self, *, state: _RunState, error: ProbeError) -> None:
+    def _record_error(self, *, state: RunState, error: ProbeError) -> None:
         """Append a ``ProbeError`` to the per-run errors list.
 
         Kept as a single choke-point so future code (metrics, structured

@@ -54,9 +54,9 @@ POLL_IDLE_SLEEP = 0.05  # seconds to sleep when Kafka poll returns no messages
 # Re-exported for backward compatibility — moved into
 # :mod:`drakkar.app_security` so the warning helper can be exercised in
 # isolation without importing the full ``DrakkarApp`` machinery. Test
-# imports of the form ``from drakkar.app import _warn_if_debug_unauthenticated``
+# imports of the form ``from drakkar.app import warn_if_debug_unauthenticated``
 # continue to work via this re-export.
-from drakkar.app_security import _warn_if_debug_unauthenticated  # noqa: E402
+from drakkar.app_security import warn_if_debug_unauthenticated  # noqa: E402
 
 
 class DrakkarApp:
@@ -272,7 +272,7 @@ class DrakkarApp:
             # and meant for private-network deployment, so this is
             # informational rather than fail-fast. See README §"Security &
             # trust model" for the rationale.
-            _warn_if_debug_unauthenticated(self._config)
+            warn_if_debug_unauthenticated(self._config)
 
             self._recorder = EventRecorder(
                 self._config.debug,

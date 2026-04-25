@@ -102,7 +102,7 @@ class Window:
 
 
 @dataclass
-class _MessageTracker:
+class MessageTracker:
     """Internal tracker for the task fan-out derived from a single source message.
 
     Keyed in ``PartitionProcessor._message_trackers`` by source offset
@@ -181,7 +181,7 @@ class PartitionProcessor:
         # Per-source-message trackers, keyed by offset (unique per partition).
         # Entries are added in _process_window before arrange() runs and
         # removed in _finalize_message_tracker when on_message_complete fires.
-        self._message_trackers: dict[int, _MessageTracker] = {}
+        self._message_trackers: dict[int, MessageTracker] = {}
 
     @property
     def partition_id(self) -> int:
@@ -327,7 +327,7 @@ class PartitionProcessor:
         for msg in messages:
             self._offset_tracker.register(msg.offset)
             self._handler.deserialize_message(msg)
-            self._message_trackers[msg.offset] = _MessageTracker(
+            self._message_trackers[msg.offset] = MessageTracker(
                 source_message=msg,
                 started_at=arrange_started_at,
             )
@@ -620,7 +620,7 @@ class PartitionProcessor:
             offset_lag.labels(partition=str(self._partition_id)).set(self._offset_tracker.pending_count)
             await self._try_commit()
 
-    async def _finalize_message_tracker(self, tracker: _MessageTracker) -> None:
+    async def _finalize_message_tracker(self, tracker: MessageTracker) -> None:
         """Fire ``on_message_complete`` for a fully-terminal message and
         complete its offset on the watermark tracker.
 

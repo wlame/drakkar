@@ -36,11 +36,11 @@ _IS_POSIX = sys.platform != 'win32'
 PriorityFn = Callable[[ExecutorTask], Any]
 
 
-def _default_priority(task: ExecutorTask) -> int:
+def default_priority(task: ExecutorTask) -> int:
     """Default task-priority key: smallest source offset.
 
     Earlier messages drain from the wait queue first. This keeps the
-    ``_MessageTracker`` / ``OffsetTracker`` state in front of the watermark
+    ``MessageTracker`` / ``OffsetTracker`` state in front of the watermark
     small — the slowest task in a fan-out no longer anchors the whole
     message in memory.
 
@@ -52,7 +52,7 @@ def _default_priority(task: ExecutorTask) -> int:
     return min(task.source_offsets) if task.source_offsets else 0
 
 
-class _PriorityGate:
+class PriorityGate:
     """Async slot-allocator that selects the next waiter from a min-heap.
 
     Drop-in replacement for :class:`asyncio.Semaphore` with the same
@@ -205,7 +205,7 @@ class ExecutorPool:
                 priority key for an :class:`ExecutorTask` waiting for a
                 slot. When the pool is saturated, callers wake up in
                 ascending priority order (smallest first). ``None``
-                (default) uses :func:`_default_priority`, which keys on
+                (default) uses :func:`default_priority`, which keys on
                 the task's smallest source offset — earlier Kafka
                 messages drain first so ``on_message_complete``
                 fires sooner, ``_message_trackers`` clears faster, and
@@ -222,9 +222,9 @@ class ExecutorPool:
         self._inherit_deny_patterns = list(inherit_deny_patterns or [])
         # Priority gate replaces ``asyncio.Semaphore``. Same acquire/release
         # contract; contended waiters wake in priority order rather than
-        # FIFO. See ``_PriorityGate`` for the design.
-        self._gate = _PriorityGate(max_executors)
-        self._priority_fn: PriorityFn = priority_fn or _default_priority
+        # FIFO. See ``PriorityGate`` for the design.
+        self._gate = PriorityGate(max_executors)
+        self._priority_fn: PriorityFn = priority_fn or default_priority
         self._active_count = 0
         self._waiting_count = 0
         self._available_slots: list[int] = list(range(max_executors))
@@ -322,7 +322,7 @@ class ExecutorPool:
         replacing. Instead we tick
         ``drakkar_executor_priority_fn_errors_total`` so operators see
         the rate, log a warning with the failing task id, and fall back
-        to ``_default_priority`` so the task is still scheduled.
+        to ``default_priority`` so the task is still scheduled.
         """
         try:
             return self._priority_fn(task)
@@ -335,7 +335,7 @@ class ExecutorPool:
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
-            return _default_priority(task)
+            return default_priority(task)
 
     def _execute_precomputed(
         self,

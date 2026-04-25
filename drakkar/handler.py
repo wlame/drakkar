@@ -167,7 +167,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
         When the executor pool is saturated, queued tasks wake up in
         ascending priority order — smaller keys first. The default is
         ``min(task.source_offsets)``, so older Kafka messages drain
-        before newer ones. That keeps ``_MessageTracker`` /
+        before newer ones. That keeps ``MessageTracker`` /
         ``OffsetTracker`` state in front of the watermark small: the
         slowest task in a fan-out no longer anchors the whole message
         in memory while later messages pile up behind it.

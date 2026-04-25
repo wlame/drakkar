@@ -30,7 +30,7 @@ from drakkar.config import DebugConfig
 _DEFAULT_PORTS = {'http': 80, 'https': 443, 'ws': 80, 'wss': 443}
 
 
-def _hook_flags(handler: object) -> dict[str, bool]:
+def hook_flags(handler: object) -> dict[str, bool]:
     """Detect which completion hooks the user's handler overrides.
 
     The Live view uses this to render only the tabs that actually have
@@ -68,7 +68,7 @@ def _hook_flags(handler: object) -> dict[str, bool]:
     }
 
 
-def _normalize_hostport(scheme: str, host: str, port: int | None) -> tuple[str, int | None]:
+def normalize_hostport(scheme: str, host: str, port: int | None) -> tuple[str, int | None]:
     """Lowercase host and drop default ports for a given scheme.
 
     Returns ``(host_lower, effective_port)`` where effective_port is ``None``
@@ -83,7 +83,7 @@ def _normalize_hostport(scheme: str, host: str, port: int | None) -> tuple[str, 
     return host_lower, port
 
 
-def _parse_host_header(host_header: str) -> tuple[str, int | None]:
+def parse_host_header(host_header: str) -> tuple[str, int | None]:
     """Split a Host header into ``(host, port)`` with IPv6-bracket support.
 
     RFC 7230 allows ``Host: [::1]:8080`` for IPv6 addresses. Using
@@ -118,7 +118,7 @@ def _parse_host_header(host_header: str) -> tuple[str, int | None]:
     return host_header.lower(), None
 
 
-def _origin_allowed(origin: str | None, host_header: str, config: DebugConfig) -> bool:
+def origin_allowed(origin: str | None, host_header: str, config: DebugConfig) -> bool:
     """Return True when a WebSocket handshake origin is allowed.
 
     Decision table (only consulted when ``auth_token`` is set — caller
@@ -151,7 +151,7 @@ def _origin_allowed(origin: str | None, host_header: str, config: DebugConfig) -
         except ValueError:
             return False
         origin_scheme = parsed_origin.scheme.lower()
-        origin_host_norm, origin_port_norm = _normalize_hostport(
+        origin_host_norm, origin_port_norm = normalize_hostport(
             origin_scheme,
             parsed_origin.hostname or '',
             parsed_origin.port,
@@ -162,7 +162,7 @@ def _origin_allowed(origin: str | None, host_header: str, config: DebugConfig) -
             except ValueError:
                 continue
             allowed_scheme = parsed_allowed.scheme.lower()
-            allowed_host_norm, allowed_port_norm = _normalize_hostport(
+            allowed_host_norm, allowed_port_norm = normalize_hostport(
                 allowed_scheme,
                 parsed_allowed.hostname or '',
                 parsed_allowed.port,
@@ -182,18 +182,18 @@ def _origin_allowed(origin: str | None, host_header: str, config: DebugConfig) -
         parsed_origin = urlparse(origin)
     except ValueError:
         return False
-    origin_host_norm, origin_port_norm = _normalize_hostport(
+    origin_host_norm, origin_port_norm = normalize_hostport(
         parsed_origin.scheme.lower(),
         parsed_origin.hostname or '',
         parsed_origin.port,
     )
-    host_host, host_port = _parse_host_header(host_header)
+    host_host, host_port = parse_host_header(host_header)
     # Compute the effective port for the Host header. We don't know the
     # scheme (Host header carries no scheme), so treat a missing port as
     # "default for scheme" based on the Origin's scheme — this matches
     # the common browser behavior of stripping default ports from Origin
     # while leaving them implicit in Host.
-    _, host_port_norm = _normalize_hostport(
+    _, host_port_norm = normalize_hostport(
         parsed_origin.scheme.lower() or 'http',
         host_host,
         host_port,
@@ -203,28 +203,28 @@ def _origin_allowed(origin: str | None, host_header: str, config: DebugConfig) -
     return origin_host_norm == host_host and origin_port_norm == host_port_norm
 
 
-def _format_ts(ts: float | None) -> str:
+def format_ts(ts: float | None) -> str:
     """Format a Unix timestamp as ``HH:MM:SS`` (UTC). Empty string for None."""
     if ts is None:
         return ''
     return datetime.fromtimestamp(ts, tz=UTC).strftime('%H:%M:%S')
 
 
-def _format_ts_ms(ts: float | None) -> str:
+def format_ts_ms(ts: float | None) -> str:
     """Format a Unix timestamp as ``HH:MM:SS.mmm`` (UTC). Empty string for None."""
     if ts is None:
         return ''
     return datetime.fromtimestamp(ts, tz=UTC).strftime('%H:%M:%S.%f')[:-3]
 
 
-def _format_ts_full(ts: float | None) -> str:
+def format_ts_full(ts: float | None) -> str:
     """Format a Unix timestamp as ``YYYY-MM-DD HH:MM:SS.mmm`` (UTC). Empty for None."""
     if ts is None:
         return ''
     return datetime.fromtimestamp(ts, tz=UTC).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
 
-def _format_uptime(seconds: float) -> str:
+def format_uptime(seconds: float) -> str:
     """Format uptime as a human-readable string, scaling to the largest unit."""
     s = int(seconds)
     if s < 60:
@@ -250,7 +250,7 @@ def _format_uptime(seconds: float) -> str:
     return f'{y}y {d_rem // 30}mo'
 
 
-def _worker_group(name: str) -> str:
+def worker_group(name: str) -> str:
     """Derive a group key by stripping trailing numbers and separator.
 
     ``worker-1``  → ``worker``

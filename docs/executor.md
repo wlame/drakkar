@@ -181,13 +181,13 @@ class MyHandler(BaseDrakkarHandler):
 
 ### Priority-gated Concurrency
 
-`executor.max_executors` (default: 4) controls how many subprocesses run in parallel across all partitions. The `ExecutorPool` maintains an internal `_PriorityGate` of this size that behaves like an `asyncio.Semaphore` with one extra rule: contended waiters wake up in priority order rather than FIFO. Tasks from any partition compete for the same pool, so a low-priority task on partition 7 can step ahead of a high-priority task on partition 3 when both are waiting.
+`executor.max_executors` (default: 4) controls how many subprocesses run in parallel across all partitions. The `ExecutorPool` maintains an internal `PriorityGate` of this size that behaves like an `asyncio.Semaphore` with one extra rule: contended waiters wake up in priority order rather than FIFO. Tasks from any partition compete for the same pool, so a low-priority task on partition 7 can step ahead of a high-priority task on partition 3 when both are waiting.
 
 When all slots are occupied, additional tasks wait in the gate's heap. The `waiting_count` property tracks how many tasks are queued, while `active_count` tracks how many are running.
 
 ### Task priority
 
-The framework asks the handler for each task's priority key via [`task_priority(task)`](handler.md#task_priority) before the task enters the gate. The default returns `min(task.source_offsets)` so older Kafka messages drain first -- this keeps `_MessageTracker` / `OffsetTracker` state in front of the watermark small and lets `on_message_complete` fire sooner.
+The framework asks the handler for each task's priority key via [`task_priority(task)`](handler.md#task_priority) before the task enters the gate. The default returns `min(task.source_offsets)` so older Kafka messages drain first -- this keeps `MessageTracker` / `OffsetTracker` state in front of the watermark small and lets `on_message_complete` fire sooner.
 
 Override `task_priority` on your handler to inject business priority. Any value that supports `__lt__` (int, tuple, custom class) works; equal-priority tasks tiebreak FIFO via the gate's internal sequence counter, so within a priority band behaviour matches the pre-priority semaphore.
 

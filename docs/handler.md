@@ -574,9 +574,9 @@ def task_priority(self, task):
     return min(task.source_offsets) if task.source_offsets else 0
 ```
 
-This drains older Kafka messages first, which keeps `_MessageTracker` / `OffsetTracker` state in front of the watermark small — the slowest task in a fan-out no longer anchors the whole message in memory while later messages pile up behind it.
+This drains older Kafka messages first, which keeps `MessageTracker` / `OffsetTracker` state in front of the watermark small — the slowest task in a fan-out no longer anchors the whole message in memory while later messages pile up behind it.
 
-**Why this matters.** With a plain FIFO semaphore (the pre-priority behaviour), one slow message in the middle of a window could keep its `_MessageTracker` alive long after later messages had already finished, blocking offset-commit progress and inflating `_message_trackers`. Priority ordering by oldest-offset turns that into "oldest first → fastest commit watermark progress".
+**Why this matters.** With a plain FIFO semaphore (the pre-priority behaviour), one slow message in the middle of a window could keep its `MessageTracker` alive long after later messages had already finished, blocking offset-commit progress and inflating `_message_trackers`. Priority ordering by oldest-offset turns that into "oldest first → fastest commit watermark progress".
 
 **Override patterns:**
 

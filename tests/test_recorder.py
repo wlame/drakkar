@@ -22,10 +22,10 @@ from drakkar.recorder import (
     SCHEMA_EVENTS,
     SCHEMA_WORKER_CONFIG,
     EventRecorder,
-    _format_dt,
-    _list_db_files,
-    _live_link_path,
-    _make_db_path,
+    format_dt,
+    list_db_files,
+    live_link_path,
+    make_db_path,
     detect_worker_ip,
 )
 from drakkar.recorder import (
@@ -94,35 +94,35 @@ async def recorder(tmp_path):
 # --- DB path generation ---
 
 
-def test_make_db_path_includes_timestamp():
-    path = _make_db_path('/tmp', 'worker-1')
+def testmake_db_path_includes_timestamp():
+    path = make_db_path('/tmp', 'worker-1')
     assert path.startswith('/tmp/worker-1-')
     assert path.endswith('.db')
     assert '__' in path  # YYYY-MM-DD__HH_MM_SS
 
 
-def test_make_db_path_uses_worker_name():
-    path = _make_db_path('/var/log', 'my-worker')
+def testmake_db_path_uses_worker_name():
+    path = make_db_path('/var/log', 'my-worker')
     assert path.startswith('/var/log/my-worker-')
 
 
-def test_list_db_files_returns_sorted(tmp_path):
+def testlist_db_files_returns_sorted(tmp_path):
     for name in [
         'test-worker-2026-03-16__14_00_00.db',
         'test-worker-2026-03-15__10_00_00.db',
         'test-worker-2026-03-16__15_00_00.db',
     ]:
         (tmp_path / name).touch()
-    files = _list_db_files(str(tmp_path), 'test-worker')
+    files = list_db_files(str(tmp_path), 'test-worker')
     assert len(files) == 3
     assert '10_00' in files[0]  # sorted oldest first
 
 
-def test_list_db_files_excludes_live_symlink(tmp_path):
+def testlist_db_files_excludes_live_symlink(tmp_path):
     (tmp_path / 'test-worker-2026-03-16__14_00_00.db').touch()
     live = tmp_path / 'test-worker-live.db'
     live.symlink_to('test-worker-2026-03-16__14_00_00.db')
-    files = _list_db_files(str(tmp_path), 'test-worker')
+    files = list_db_files(str(tmp_path), 'test-worker')
     assert len(files) == 1
     assert 'live' not in files[0]
 
@@ -531,7 +531,7 @@ async def test_rotate_enforces_max_file_count(tmp_path):
     await rec.start()
     await rec._rotate()
 
-    remaining = _list_db_files(str(tmp_path), WORKER_NAME)
+    remaining = list_db_files(str(tmp_path), WORKER_NAME)
     # should keep at most 1 old file + the new one
     assert len(remaining) <= 2
     await rec.stop()
@@ -741,7 +741,7 @@ async def test_rotate_rotates_reader_too(tmp_path):
     await rec._rotate()
 
     # After rotation both connections are replaced (new objects, not
-    # aliases of the old ones). Note: _make_db_path timestamp has
+    # aliases of the old ones). Note: make_db_path timestamp has
     # second-precision, so a rapid rotate in the same wall-clock second
     # can reuse the filename; we assert on connection-object identity
     # rather than path string to avoid that flake.
@@ -845,7 +845,7 @@ async def test_stop_reader_close_failure_still_closes_writer(tmp_path):
 
 
 async def test_rotate_new_reader_open_failure_rolls_back(tmp_path, monkeypatch):
-    """If _open_reader() raises on the new path, _rotate closes the freshly
+    """If open_reader() raises on the new path, _rotate closes the freshly
     opened new_db and leaves the previous writer/reader pair in place so the
     worker stays usable.
     """
@@ -859,10 +859,10 @@ async def test_rotate_new_reader_open_failure_rolls_back(tmp_path, monkeypatch):
     old_reader = rec._reader_db
     old_path = rec.db_path
 
-    async def failing_open_reader(path):
+    async def failingopen_reader(path):
         raise RuntimeError('simulated new reader open failure')
 
-    monkeypatch.setattr(recorder_module, '_open_reader', failing_open_reader)
+    monkeypatch.setattr(recorder_module, 'open_reader', failingopen_reader)
 
     with pytest.raises(RuntimeError, match='simulated new reader open failure'):
         await rec._rotate()
@@ -1910,13 +1910,13 @@ async def test_discover_workers_finds_other_worker(tmp_path):
                 '{}',
                 '{}',
                 1000.0,
-                _format_dt(1000.0),
+                format_dt(1000.0),
             ],
         )
         await db.commit()
 
     # create live symlink for the other worker
-    link = _live_link_path(str(tmp_path), 'other-worker')
+    link = live_link_path(str(tmp_path), 'other-worker')
     os.symlink(other_db_path.name, link)
 
     # start our recorder
@@ -1941,7 +1941,7 @@ async def test_discover_workers_skips_own_symlink(tmp_path):
     await rec.write_config(_make_drakkar_config())
 
     # our own live symlink exists
-    assert os.path.islink(_live_link_path(str(tmp_path), WORKER_NAME))
+    assert os.path.islink(live_link_path(str(tmp_path), WORKER_NAME))
 
     workers = await rec.discover_workers()
     assert len(workers) == 0
@@ -1957,7 +1957,7 @@ async def test_discover_workers_skips_missing_config_table(tmp_path):
         await db.execute('CREATE TABLE IF NOT EXISTS dummy (id INTEGER)')
         await db.commit()
 
-    link = _live_link_path(str(tmp_path), 'no-config-worker')
+    link = live_link_path(str(tmp_path), 'no-config-worker')
     os.symlink(other_db.name, link)
 
     config = make_debug_config(tmp_path)
@@ -1971,7 +1971,7 @@ async def test_discover_workers_skips_missing_config_table(tmp_path):
 
 async def test_discover_workers_handles_broken_symlink(tmp_path):
     """Broken symlink (target deleted) is handled gracefully."""
-    link = _live_link_path(str(tmp_path), 'ghost-worker')
+    link = live_link_path(str(tmp_path), 'ghost-worker')
     os.symlink('nonexistent-file.db', link)
 
     config = make_debug_config(tmp_path)
@@ -2006,7 +2006,7 @@ async def test_discover_workers_empty_when_no_db_dir():
 async def test_discover_workers_ignores_non_symlink_files(tmp_path):
     """Regular files matching *-live.db are not treated as workers."""
     # create a regular file (not a symlink) that looks like a live link
-    fake_link = _live_link_path(str(tmp_path), 'fake-worker')
+    fake_link = live_link_path(str(tmp_path), 'fake-worker')
     Path(fake_link).write_text('not a symlink')
 
     config = make_debug_config(tmp_path)
@@ -2139,7 +2139,7 @@ async def test_stop_removes_live_link(tmp_path):
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
-    link = _live_link_path(str(tmp_path), WORKER_NAME)
+    link = live_link_path(str(tmp_path), WORKER_NAME)
     assert os.path.islink(link)
 
     await rec.stop()
@@ -2184,7 +2184,7 @@ async def _create_worker_db(
                 '{}',
                 '{}',
                 1000.0,
-                _format_dt(1000.0),
+                format_dt(1000.0),
             ],
         )
         await db.execute(
@@ -2192,7 +2192,7 @@ async def _create_worker_db(
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             [
                 1000.0,
-                _format_dt(1000.0),
+                format_dt(1000.0),
                 'consumed',
                 partition,
                 offset,
@@ -2205,7 +2205,7 @@ async def _create_worker_db(
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             [
                 1001.0,
-                _format_dt(1001.0),
+                format_dt(1001.0),
                 'task_started',
                 partition,
                 None,
@@ -2235,7 +2235,7 @@ async def test_cross_trace_fallback_to_other_live_worker(tmp_path):
     await _create_worker_db(other_db_path, 'other-worker', partition=5, offset=99)
 
     # create live symlink
-    link = _live_link_path(str(tmp_path), 'other-worker')
+    link = live_link_path(str(tmp_path), 'other-worker')
     os.symlink(other_db_path.name, link)
 
     # start our recorder (has no events for partition=5 offset=99)
@@ -2279,7 +2279,7 @@ async def test_cross_trace_cluster_filtering(tmp_path):
         partition=5,
         offset=99,
     )
-    link = _live_link_path(str(tmp_path), 'other-worker')
+    link = live_link_path(str(tmp_path), 'other-worker')
     os.symlink(other_db_path.name, link)
 
     # our recorder is in 'my-cluster'
@@ -3440,14 +3440,14 @@ async def test_recorder_flush_rotation_between_failures_reroutes_to_new_db(tmp_p
 
         # Force a distinct rotated DB path deterministically, without the
         # ~1.1s real-time sleep that the previous implementation needed to
-        # roll the second-resolution timestamp in ``_make_db_path``. This
+        # roll the second-resolution timestamp in ``make_db_path``. This
         # keeps the test fast and removes a long wait from the suite.
         from drakkar import recorder as recorder_module
 
         unique_new_path = str(tmp_path / f'{WORKER_NAME}-rotated.db')
         monkeypatch.setattr(
             recorder_module,
-            '_make_db_path',
+            'make_db_path',
             lambda db_dir, worker_name: unique_new_path,
         )
 
@@ -3530,7 +3530,7 @@ async def test_recorder_flush_executemany_failure_does_not_commit(tmp_path):
 # --- JSON encoder helpers (orjson fast path + stdlib fallback) ---
 #
 # The recorder encodes payloads (args, metadata, labels, env_vars) via
-# ``_encode_json`` / ``_encode_json_str``. orjson is an optional
+# ``encode_json`` / ``encode_json_str``. orjson is an optional
 # dependency (``drakkar[perf]``) and when installed we take the fast
 # path; otherwise we fall back to ``json.dumps`` with matching options
 # so the bytes are identical. These tests pin that contract.
@@ -3563,25 +3563,25 @@ _ROUND_TRIP_PAYLOADS = [
 
 
 @pytest.mark.parametrize('payload', _ROUND_TRIP_PAYLOADS)
-def test_encode_json_round_trip(payload):
-    """``_encode_json(x)`` → ``json.loads`` → re-encode must be stable.
+def testencode_json_round_trip(payload):
+    """``encode_json(x)`` → ``json.loads`` → re-encode must be stable.
 
     Property: a payload that survives one encode/decode cycle must
     produce identical bytes when re-encoded. Catches encoder state bugs
     (e.g. non-deterministic key order) and ensures our options
     (``OPT_SORT_KEYS``) actually take effect.
     """
-    from drakkar.recorder import _encode_json
+    from drakkar.recorder import encode_json
 
-    encoded = _encode_json(payload)
+    encoded = encode_json(payload)
     decoded = json.loads(encoded)
-    re_encoded = _encode_json(decoded)
+    re_encoded = encode_json(decoded)
     assert encoded == re_encoded
     assert decoded == payload
 
 
 @pytest.mark.parametrize('payload', _ROUND_TRIP_PAYLOADS)
-def test_encode_json_orjson_stdlib_byte_parity(payload):
+def testencode_json_orjson_stdlib_byte_parity(payload):
     """Both encoder paths produce byte-for-byte identical output.
 
     Swapping the ``perf`` extra on/off (install/uninstall orjson) MUST
@@ -3596,7 +3596,7 @@ def test_encode_json_orjson_stdlib_byte_parity(payload):
     """
     from drakkar import recorder
 
-    fast_path_bytes = recorder._encode_json(payload)
+    fast_path_bytes = recorder.encode_json(payload)
 
     def stdlib_fallback(obj):
         return json.dumps(
@@ -3611,8 +3611,8 @@ def test_encode_json_orjson_stdlib_byte_parity(payload):
     assert fast_path_bytes == stdlib_bytes, f'fast-path bytes {fast_path_bytes!r} != stdlib bytes {stdlib_bytes!r}'
 
 
-def test_encode_json_monkeypatched_fallback_matches_orjson(monkeypatch):
-    """Force the stdlib fallback by patching ``_encode_json`` and
+def testencode_json_monkeypatched_fallback_matches_orjson(monkeypatch):
+    """Force the stdlib fallback by patching ``encode_json`` and
     verify that encoded output is still identical to the fast path.
 
     This exercises the ``except ImportError`` branch structurally — we
@@ -3623,7 +3623,7 @@ def test_encode_json_monkeypatched_fallback_matches_orjson(monkeypatch):
 
     # Capture the fast-path bytes before patching.
     payload = {'b': 1, 'a': 2, 'nested': {'y': 'val', 'x': 3}, 'unicode': 'naïve'}
-    fast_path_bytes = recorder._encode_json(payload)
+    fast_path_bytes = recorder.encode_json(payload)
 
     # Swap in the stdlib fallback (verbatim from recorder.py).
     def fallback(obj):
@@ -3635,13 +3635,13 @@ def test_encode_json_monkeypatched_fallback_matches_orjson(monkeypatch):
             ensure_ascii=False,
         ).encode('utf-8')
 
-    monkeypatch.setattr(recorder, '_encode_json', fallback)
-    fallback_bytes = recorder._encode_json(payload)
+    monkeypatch.setattr(recorder, 'encode_json', fallback)
+    fallback_bytes = recorder.encode_json(payload)
 
     assert fast_path_bytes == fallback_bytes
 
 
-def test_encode_json_datetime_utc_z_suffix():
+def testencode_json_datetime_utc_z_suffix():
     """UTC datetimes encode with a trailing ``Z``, not ``+00:00``.
 
     orjson's ``OPT_UTC_Z`` flag emits ``Z`` directly. The stdlib fallback
@@ -3649,17 +3649,17 @@ def test_encode_json_datetime_utc_z_suffix():
     writes ``+00:00``. This test pins the orjson behaviour; if we ever
     swap encoders the test will catch a regression in the format.
 
-    The recorder uses ``_format_dt`` for persisted timestamps (which
+    The recorder uses ``format_dt`` for persisted timestamps (which
     does the ``+00:00`` → ``Z`` swap itself), so the encoder's datetime
     handling only affects ad-hoc datetimes embedded inside payload
     dicts — still worth pinning.
     """
     from datetime import UTC, datetime
 
-    from drakkar.recorder import _HAS_ORJSON, _encode_json
+    from drakkar.recorder import _HAS_ORJSON, encode_json
 
     dt = datetime(2026, 4, 24, 12, 30, 45, tzinfo=UTC)
-    encoded = _encode_json({'ts': dt})
+    encoded = encode_json({'ts': dt})
 
     if _HAS_ORJSON:
         # orjson: native datetime support, OPT_UTC_Z → "Z" suffix.
@@ -3669,16 +3669,16 @@ def test_encode_json_datetime_utc_z_suffix():
         assert encoded == b'{"ts":"2026-04-24T12:30:45+00:00"}'
 
 
-def test_encode_json_str_decodes_bytes():
-    """``_encode_json_str`` returns a string that equals the bytes
+def testencode_json_str_decodes_bytes():
+    """``encode_json_str`` returns a string that equals the bytes
     decoded as UTF-8 — no hidden encoding differences."""
-    from drakkar.recorder import _encode_json, _encode_json_str
+    from drakkar.recorder import encode_json, encode_json_str
 
     payload = {'key': 'value', 'n': 42}
-    assert _encode_json_str(payload) == _encode_json(payload).decode('utf-8')
+    assert encode_json_str(payload) == encode_json(payload).decode('utf-8')
 
 
-def test_encode_json_non_json_native_types_via_default_str():
+def testencode_json_non_json_native_types_via_default_str():
     """Custom classes fall back to ``default=str`` (both paths).
 
     orjson raises ``TypeError`` on unsupported types by default; we pass
@@ -3690,10 +3690,10 @@ def test_encode_json_non_json_native_types_via_default_str():
     import uuid as _uuid
     from pathlib import Path
 
-    from drakkar.recorder import _encode_json
+    from drakkar.recorder import encode_json
 
     # pathlib.Path — both paths coerce via str(path).
-    encoded = _encode_json({'p': Path('/tmp/x')})
+    encoded = encode_json({'p': Path('/tmp/x')})
     decoded = json.loads(encoded)
     assert decoded == {'p': '/tmp/x'}
 
@@ -3701,7 +3701,7 @@ def test_encode_json_non_json_native_types_via_default_str():
     # stdlib uses default=str. Either way, the decoded JSON is the
     # canonical UUID string.
     sample_uuid = _uuid.UUID('12345678-1234-5678-1234-567812345678')
-    encoded = _encode_json({'uid': sample_uuid})
+    encoded = encode_json({'uid': sample_uuid})
     decoded = json.loads(encoded)
     assert decoded == {'uid': '12345678-1234-5678-1234-567812345678'}
 
@@ -3711,21 +3711,21 @@ def test_encode_json_non_json_native_types_via_default_str():
         def __str__(self) -> str:
             return 'custom-repr'
 
-    encoded = _encode_json({'obj': _Custom()})
+    encoded = encode_json({'obj': _Custom()})
     decoded = json.loads(encoded)
     assert decoded == {'obj': 'custom-repr'}
 
 
-def test_encode_json_sort_keys_deterministic():
+def testencode_json_sort_keys_deterministic():
     """``OPT_SORT_KEYS`` / ``sort_keys=True`` make output deterministic
     regardless of dict insertion order. Critical for cache dedup hashes
     downstream — two workers encoding the same logical payload must
     produce identical bytes even if they built the dict in different
     orders.
     """
-    from drakkar.recorder import _encode_json
+    from drakkar.recorder import encode_json
 
     a = {'z': 1, 'a': 2, 'm': 3}
     b = {'a': 2, 'm': 3, 'z': 1}
     c = {'m': 3, 'z': 1, 'a': 2}
-    assert _encode_json(a) == _encode_json(b) == _encode_json(c)
+    assert encode_json(a) == encode_json(b) == encode_json(c)

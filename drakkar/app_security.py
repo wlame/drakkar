@@ -13,7 +13,7 @@ from drakkar.config import DrakkarConfig
 logger = structlog.get_logger()
 
 
-def _warn_if_debug_unauthenticated(config: DrakkarConfig) -> None:
+def warn_if_debug_unauthenticated(config: DrakkarConfig) -> None:
     """Emit a startup warning when the debug UI is enabled without an ``auth_token``.
 
     Auth is opt-in by design: the debug UI is read-only (no endpoint stops a
