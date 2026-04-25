@@ -50,46 +50,51 @@ logger = structlog.get_logger()
 
 POLL_IDLE_SLEEP = 0.05  # seconds to sleep when Kafka poll returns no messages
 
-# Loopback hosts treated as safe for an unauthenticated debug UI. Anything
-# outside this set exposes operational data (events, config, probe) to other
-# machines, so we require an ``auth_token`` to be set before allowing startup.
-# Matched case-insensitively so ``LOCALHOST`` and ``127.0.0.1`` behave alike.
-_LOOPBACK_HOSTS: frozenset[str] = frozenset({'127.0.0.1', 'localhost', '::1'})
 
+def _warn_if_debug_unauthenticated(config: DrakkarConfig) -> None:
+    """Emit a startup warning when the debug UI is enabled without an ``auth_token``.
 
-class InsecureDebugConfigError(RuntimeError):
-    """Debug UI is configured in a way that exposes operational data without auth."""
+    Auth is opt-in by design: the debug UI is read-only (no endpoint stops a
+    worker, replays Kafka messages, mutates sinks, or fakes pipeline data),
+    and Drakkar is intended to run inside a private contour (VPC, internal
+    cluster network, operator-only ingress). Combined, that makes
+    "unauthenticated by default" a reasonable starting point — operators
+    who need a token can opt in by setting ``debug.auth_token``.
 
+    The warning fires once at startup whenever ``debug.enabled`` is True and
+    ``debug.auth_token`` is empty (the field validator on ``DebugConfig``
+    already strips whitespace, so this is a plain emptiness check). It is
+    informational only — the worker continues starting normally so a missing
+    token never blocks deployment in environments where auth genuinely is
+    not required.
 
-def _validate_debug_security(config: DrakkarConfig) -> None:
-    """Fail fast if the debug UI is bound to a non-loopback host without auth.
-
-    The debug UI serves the flight recorder (events, per-task output, worker
-    config, Kafka peek endpoints). Binding to a public interface without
-    ``auth_token`` set would leak all of that to anything on the network.
-
-    Whitespace-only ``auth_token`` values are treated as empty — a string of
-    spaces protects nothing but might fool an operator into thinking it does.
-    ``DebugConfig`` already strips the token on load (see the field validator),
-    so the check below is a plain emptiness test.
-
-    Raises:
-        InsecureDebugConfigError: When debug is enabled, bound to a
-            non-loopback host, and ``auth_token`` is empty or whitespace.
+    To enable token-based auth, either set ``debug.auth_token`` in your
+    YAML config or export ``DRAKKAR_DEBUG__AUTH_TOKEN=<32+ char value>``.
+    Once set, the WebSocket live-event stream additionally validates the
+    ``Origin`` header (against ``debug.allowed_ws_origins`` when configured,
+    otherwise against the request's ``Host`` header).
     """
     if not config.debug.enabled:
         return
-
-    host_normalized = config.debug.host.strip().lower()
-    if host_normalized in _LOOPBACK_HOSTS:
-        return
-
     if config.debug.auth_token != '':
         return
 
-    raise InsecureDebugConfigError(
-        f'Debug UI is bound to a non-loopback host ({config.debug.host}) without auth_token. '
-        'Either set debug.auth_token, or set debug.host=127.0.0.1, or set debug.enabled=false.'
+    logger.warning(
+        'debug_ui_unauthenticated',
+        category='lifecycle',
+        host=config.debug.host,
+        port=config.debug.port,
+        message=(
+            f'Debug UI bound to {config.debug.host}:{config.debug.port} is running '
+            'without auth_token — every endpoint (including the database download, '
+            'merge, and message-probe routes) is reachable to anyone who can reach '
+            'the port. The UI is read-only by design (cannot stop workers, replay '
+            'messages, or modify state) and intended for private-network deployments. '
+            'To enable bearer-token auth, set debug.auth_token in your YAML config '
+            'or export DRAKKAR_DEBUG__AUTH_TOKEN=<32+ char random value>; the '
+            'WebSocket stream then also validates Origin against '
+            'debug.allowed_ws_origins (or the request Host header).'
+        ),
     )
 
 
@@ -295,10 +300,12 @@ class DrakkarApp:
             )
 
         if self._config.debug.enabled:
-            # Fail fast before anything observable starts up. Raising here
-            # skips the recorder and debug server entirely — no half-started
-            # artifacts remain for the operator to clean up.
-            _validate_debug_security(self._config)
+            # Auth is opt-in. Emit a startup warning naming how to set a
+            # token when none is configured — the UI is read-only by design
+            # and meant for private-network deployment, so this is
+            # informational rather than fail-fast. See README §"Security &
+            # trust model" for the rationale.
+            _warn_if_debug_unauthenticated(self._config)
 
             self._recorder = EventRecorder(
                 self._config.debug,

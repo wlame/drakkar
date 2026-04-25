@@ -250,25 +250,26 @@ See [Observability — Debug UI](observability.md#debug-ui) for the endpoint inv
 
 ### Is the debug UI safe to expose to a team of operators?
 
-Drakkar layers three defenses:
+Auth is **opt-in by default**. The UI is read-only by design (no endpoint stops a worker, replays Kafka messages, mutates sinks, or fakes pipeline data) and Drakkar is intended to run inside a private contour, so the framework starts unauthenticated when `debug.auth_token` is empty (the default) and emits a structured `debug_ui_unauthenticated` warning at startup naming the host:port and the two opt-in paths (`debug.auth_token` in YAML or `DRAKKAR_DEBUG__AUTH_TOKEN` env var).
 
-1. **Default loopback binding.** `debug.host='127.0.0.1'` out of the box — the UI is only reachable from the host, not the network. Most development and local-operator flows work against the default.
-2. **Fail-fast on insecure non-loopback binds.** If you set `debug.host='0.0.0.0'` (or any non-loopback address) without a `debug.auth_token`, the worker raises `InsecureDebugConfigError` at startup rather than silently exposing the UI. Either set a strong token or keep the loopback default. See [Insecure-startup failure](configuration.md#insecure-startup-failure).
-3. **Auth + origin check on WebSocket.** The live-event WebSocket at `/ws` requires the same `auth_token` (bearer header or `?token=` query param); invalid tokens close with code 4401. When a token is configured, the handshake also validates the `Origin` header against `allowed_ws_origins` (explicit allowlist) or the `Host` header (same-origin fallback). Comparison uses `secrets.compare_digest`.
+For multi-operator setups, set a strong `debug.auth_token`:
 
-Even with all three layers, the read-only pages expose task stdout/stderr, task env (after [redaction](observability.md#flight-recorder)), cache contents, and live event streams. Restrict access to operators. Concurrent Message Probes serialize on an internal lock, and the probe temporarily replaces `handler.cache` — keep this in mind if you have many operators debugging the same worker simultaneously.
+1. **Bearer token on protected endpoints.** Once the token is set, `/api/debug/databases`, `/api/debug/merge`, `/debug/download/{filename}`, and `/api/debug/probe` all require an `Authorization: Bearer <token>` header (or `?token=<token>` query parameter). Comparison uses `secrets.compare_digest` to avoid timing side-channels.
+2. **WebSocket auth + origin check.** With a token configured, the live-event WebSocket at `/ws` also requires the same `auth_token`; invalid tokens close with code 4401. The handshake validates the `Origin` header against `allowed_ws_origins` (explicit allowlist) or the `Host` header (same-origin fallback).
+3. **Read-only pages remain accessible** — both before and after enabling auth. `/`, `/live`, `/partitions`, `/sinks`, `/history`, and the per-task pages serve flight-recorder content; gating is on the mutating / data-exposing endpoints listed above.
 
-### Why does my worker fail with `InsecureDebugConfigError` on startup?
+Even with auth, the read-only pages expose task stdout/stderr, task env (after [redaction](observability.md#flight-recorder)), cache contents, and live event streams. Restrict access to operators. Concurrent Message Probes serialize on an internal lock, and the probe temporarily replaces `handler.cache` — keep this in mind if you have many operators debugging the same worker simultaneously.
 
-You set `debug.enabled=true` + a non-loopback `debug.host` + no `debug.auth_token`. That combination publishes the debug UI (task stdout, env, cache contents, WebSocket event stream) without authentication — a security bug we refuse to let slip into production.
+### Why does my worker emit a `debug_ui_unauthenticated` warning at startup?
 
-Pick **one** of these remediations:
+You have `debug.enabled=true` and `debug.auth_token` is empty (the default). That's an intentional, supported configuration — Drakkar treats the debug UI as opt-in-auth because it is read-only and meant for private-network deployments. The warning is informational; the worker continues starting normally.
 
-- **Set `debug.auth_token`** to a strong random value (e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"`) — recommended for production where the UI needs to be reachable from ops tooling.
-- **Set `debug.host=127.0.0.1`** — UI only reachable from the host, ideal when operators SSH-tunnel or run a sidecar reverse proxy.
-- **Set `debug.enabled=false`** — if the worker doesn't need the flight recorder at all.
+To silence it (i.e. require auth), pick one of:
 
-See [Insecure-startup failure](configuration.md#insecure-startup-failure) for the full check and the implementation at `drakkar/app.py::_validate_debug_security`.
+- **Set `debug.auth_token`** to a strong random value (`python -c "import secrets; print(secrets.token_urlsafe(32))"`) — recommended whenever the UI is reachable from anywhere outside a fully-trusted operator network.
+- **Set `debug.enabled=false`** — if the worker doesn't need the flight recorder at all (no observability cost reduction without removing the UI).
+
+See [Authentication](configuration.md#authentication) for the field semantics and the implementation at `drakkar/app.py::_warn_if_debug_unauthenticated`.
 
 ### What is the Message Probe tab?
 
@@ -373,13 +374,13 @@ Treat `db_dir` as a shared-trust boundary: any principal with write access to th
 
 ### How is the debug UI protected?
 
-Three layers (see [Is the debug UI safe](#is-the-debug-ui-safe-to-expose-to-a-team-of-operators) above):
+Auth is opt-in (see [Is the debug UI safe](#is-the-debug-ui-safe-to-expose-to-a-team-of-operators) above):
 
-1. Loopback default (`debug.host='127.0.0.1'`).
-2. `InsecureDebugConfigError` at startup if you set a non-loopback host without an `auth_token`.
-3. Token + Origin check on the WebSocket stream (`drakkar/debug_server.py::_origin_allowed` and `_token_matches`).
+1. **Default loopback bind** (`debug.host='127.0.0.1'`) — the UI is only reachable from the host out of the box, regardless of auth.
+2. **Startup warning when unauthenticated.** With `debug.enabled=true` and an empty `auth_token`, the worker emits a `debug_ui_unauthenticated` structured warning at startup naming the unauthenticated bind and the two opt-in paths (YAML key + env var). The worker continues starting — Drakkar treats this as a private-contour-friendly default, not a misconfiguration.
+3. **Bearer token + Origin check when `auth_token` is set.** Protected endpoints (database download, merge, probe) require `Authorization: Bearer <token>`; the WebSocket stream additionally validates the `Origin` header against `allowed_ws_origins` (or the `Host` header). See `drakkar/debug_server.py::_origin_allowed` and `_token_matches`.
 
-Read-only HTTP pages are not token-gated — auth applies to mutating endpoints (merge, probe) and to the WebSocket event stream. If you put the UI on a non-loopback host, set a strong `auth_token` and consider a reverse proxy with TLS.
+Read-only HTTP pages are not token-gated regardless — auth applies to mutating / data-exposing endpoints and to the WebSocket event stream. If you put the UI on a non-loopback host outside a private network, set a strong `auth_token` and consider a reverse proxy with TLS.
 
 ### Why doesn't Drakkar validate Kafka message payloads?
 

@@ -6,8 +6,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
-from drakkar.app import DrakkarApp, InsecureDebugConfigError, _validate_debug_security
+from drakkar.app import DrakkarApp, _warn_if_debug_unauthenticated
 from drakkar.config import (
     DebugConfig,
     DrakkarConfig,
@@ -1049,66 +1050,95 @@ def config_with_debug(test_config_no_sinks):
     return _build
 
 
-def test_insecure_debug_config_raises_at_startup(config_with_debug):
-    """debug.enabled + non-loopback host + empty auth_token must fail fast."""
+# --- Unauthenticated debug-UI startup warning ---
+#
+# Auth is opt-in: ``debug.auth_token`` defaults to empty, which disables auth
+# on the entire debug UI. The framework emits a structured warning at startup
+# whenever debug is enabled without a token, so the unauthenticated posture
+# is visible in logs and operators have a clear path to enable auth.
+#
+# These tests pin down the helper's invariants:
+#   - warns when debug.enabled AND auth_token == ''
+#   - does NOT warn when auth_token is set (any non-empty value)
+#   - does NOT warn when debug.enabled is False
+#   - whitespace-only tokens are treated as empty (the field validator strips
+#     them on load, so the helper sees ``''`` and warns)
+#   - warning carries host/port + remediation pointers (YAML key + env var)
+
+
+def _captured_unauth_events(records: list[dict]) -> list[dict]:
+    """Filter captured structlog records down to the unauthenticated-debug events."""
+    return [e for e in records if e.get('event') == 'debug_ui_unauthenticated']
+
+
+def test_warn_if_debug_unauthenticated_emits_warning(config_with_debug):
+    """debug.enabled + empty auth_token emits a structured warning naming host:port."""
     config = config_with_debug(DebugConfig(enabled=True, host='0.0.0.0', auth_token=''))
-    with pytest.raises(InsecureDebugConfigError) as excinfo:
-        _validate_debug_security(config)
+    with capture_logs() as cap:
+        _warn_if_debug_unauthenticated(config)
 
-    # Error message should name all three remediation paths so the operator
-    # doesn't have to guess which knob to turn.
-    msg = str(excinfo.value)
-    assert '0.0.0.0' in msg
-    assert 'debug.auth_token' in msg
-    assert 'debug.host=127.0.0.1' in msg
-    assert 'debug.enabled=false' in msg
+    events = _captured_unauth_events(cap)
+    assert len(events) == 1
+    record = events[0]
+    assert record['log_level'] == 'warning'
+    assert record['host'] == '0.0.0.0'
+    assert record['port'] == config.debug.port
+    # The remediation message must name BOTH opt-in paths (YAML key + env
+    # var) so operators don't have to guess which knob to turn.
+    assert 'debug.auth_token' in record['message']
+    assert 'DRAKKAR_DEBUG__AUTH_TOKEN' in record['message']
+    # The "read-only by design" rationale is part of the message — operators
+    # reading the warning should immediately understand WHY this is opt-in.
+    assert 'read-only' in record['message']
 
 
-def test_debug_config_with_auth_token_allowed_on_any_host(config_with_debug):
-    """Non-loopback host is fine as long as auth_token is set."""
+def test_warn_if_debug_unauthenticated_silent_when_token_set(config_with_debug):
+    """Setting auth_token (any non-empty value) silences the unauthenticated warning."""
     config = config_with_debug(DebugConfig(enabled=True, host='0.0.0.0', auth_token='secret-token'))
-    _validate_debug_security(config)  # must not raise
+    with capture_logs() as cap:
+        _warn_if_debug_unauthenticated(config)
+    assert _captured_unauth_events(cap) == []
 
 
-def test_debug_config_localhost_allowed_without_auth_token(config_with_debug):
-    """Default host (127.0.0.1) stays safe without auth_token — dev workflow preserved."""
+def test_warn_if_debug_unauthenticated_warns_on_loopback_too(config_with_debug):
+    """Warning fires regardless of host — even on 127.0.0.1 with empty token,
+    so the unauthenticated posture is always visible in logs (no host-based
+    silent path that masks the same default in dev vs prod)."""
     config = config_with_debug(DebugConfig(enabled=True, host='127.0.0.1', auth_token=''))
-    _validate_debug_security(config)  # must not raise
+    with capture_logs() as cap:
+        _warn_if_debug_unauthenticated(config)
+    assert len(_captured_unauth_events(cap)) == 1
 
 
-@pytest.mark.parametrize('loopback', ['127.0.0.1', 'localhost', '::1', 'LOCALHOST', ' 127.0.0.1 '])
-def test_debug_config_loopback_variants_allowed(config_with_debug, loopback: str):
-    """Case-insensitive match with whitespace tolerance on loopback hosts."""
-    config = config_with_debug(DebugConfig(enabled=True, host=loopback, auth_token=''))
-    _validate_debug_security(config)  # must not raise
-
-
-def test_debug_config_disabled_skips_check(config_with_debug):
-    """debug.enabled=False means no debug server starts, so the check is a no-op."""
+def test_warn_if_debug_unauthenticated_silent_when_debug_disabled(config_with_debug):
+    """debug.enabled=False means no debug server starts, so the warning is skipped."""
     config = config_with_debug(DebugConfig(enabled=False, host='0.0.0.0', auth_token=''))
-    _validate_debug_security(config)  # must not raise
+    with capture_logs() as cap:
+        _warn_if_debug_unauthenticated(config)
+    assert _captured_unauth_events(cap) == []
 
 
-def test_debug_config_whitespace_only_auth_token_treated_as_empty(config_with_debug):
-    """A token of only spaces is not a real token — must still fail."""
+def test_warn_if_debug_unauthenticated_whitespace_token_treated_as_empty(config_with_debug):
+    """A token of only spaces is stripped to empty by the field validator, so
+    the helper sees ``''`` and warns. This prevents a 'spaces token' from
+    silently looking secured to a careless operator."""
     config = config_with_debug(DebugConfig(enabled=True, host='0.0.0.0', auth_token='   '))
-    with pytest.raises(InsecureDebugConfigError):
-        _validate_debug_security(config)
+    # Pre-condition: the field validator already stripped the whitespace.
+    assert config.debug.auth_token == ''
+    with capture_logs() as cap:
+        _warn_if_debug_unauthenticated(config)
+    assert len(_captured_unauth_events(cap)) == 1
 
 
-async def test_insecure_debug_config_raises_in_async_run(test_config):
-    """End-to-end: running DrakkarApp with insecure debug config raises before recorder starts."""
-    test_config.debug.enabled = True
-    test_config.debug.host = '0.0.0.0'
-    test_config.debug.auth_token = ''
-
-    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    with pytest.raises(InsecureDebugConfigError, match='non-loopback host'):
-        await app._async_run()
-
-    # Recorder and debug server must not have been touched — the gate ran first.
-    assert app._recorder is None
-    assert app._debug_server is None
+@pytest.mark.parametrize('host', ['127.0.0.1', 'localhost', '::1', '0.0.0.0', 'worker.internal'])
+def test_warn_if_debug_unauthenticated_host_independent(config_with_debug, host: str):
+    """Warning fires for every host — auth gating is no longer host-based."""
+    config = config_with_debug(DebugConfig(enabled=True, host=host, auth_token=''))
+    with capture_logs() as cap:
+        _warn_if_debug_unauthenticated(config)
+    events = _captured_unauth_events(cap)
+    assert len(events) == 1
+    assert events[0]['host'] == host
 
 
 # --- Rebalance mid-window: revoke while tasks are in flight ---

@@ -387,14 +387,24 @@ class DebugConfig(BaseModel):
     auth_token: str = Field(
         default='',
         description=(
-            'Bearer token for sensitive debug endpoints (database download, merge) '
-            'and for the WebSocket live-event stream. When empty, no authentication '
-            'is required. When set, protected HTTP endpoints require an '
-            'Authorization: Bearer <token> header or ?token=<token> query parameter; '
-            'WebSocket connections without a valid token are closed with code 4401. '
-            'Comparison uses ``secrets.compare_digest`` to avoid timing side-channels. '
-            'Trailing/leading whitespace is stripped on load to avoid silent '
-            'mismatches when YAML accidentally quotes spaces.'
+            'Bearer token for the debug UI. **Empty (the default) disables auth** '
+            'entirely — every endpoint (including database download, merge, and '
+            'message-probe) is reachable without credentials and the WebSocket '
+            'live-event stream skips both token and Origin checks. This is a '
+            'deliberate opt-in design: the UI is read-only (no endpoint stops a '
+            'worker, replays Kafka messages, mutates sinks, or fakes pipeline '
+            'data) and Drakkar is intended for deployment inside a private '
+            'contour (VPC / internal cluster / operator-only ingress). A startup '
+            'warning fires whenever debug is enabled without a token so the '
+            'unauthenticated posture is visible in logs. '
+            'When set to a non-empty value, protected HTTP endpoints require '
+            'an ``Authorization: Bearer <token>`` header or ``?token=<token>`` '
+            'query parameter; WebSocket connections without a valid token are '
+            'closed with code 4401, and the Origin header is validated against '
+            '``allowed_ws_origins`` (or the request Host header if that list is '
+            'empty). Comparison uses ``secrets.compare_digest`` to avoid timing '
+            'side-channels. Trailing/leading whitespace is stripped on load to '
+            'avoid silent mismatches when YAML accidentally quotes spaces.'
         ),
     )
     allowed_ws_origins: list[str] = Field(
