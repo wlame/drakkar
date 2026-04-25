@@ -678,7 +678,7 @@ async def test_start_registers_flush_task_as_system_periodic(tmp_path, monkeypat
     """
     import asyncio as _asyncio
 
-    from drakkar import cache as cache_module
+    from drakkar import cache_engine as cache_engine_module
 
     captured: list[dict] = []
 
@@ -694,7 +694,7 @@ async def test_start_registers_flush_task_as_system_periodic(tmp_path, monkeypat
         except _asyncio.CancelledError:
             raise
 
-    monkeypatch.setattr(cache_module, 'run_periodic_task', spy_run_periodic_task)
+    monkeypatch.setattr(cache_engine_module, 'run_periodic_task', spy_run_periodic_task)
 
     engine = await _make_engine(tmp_path, worker_id='w1')
     await engine.start()
@@ -830,7 +830,7 @@ async def test_flush_loop_error_does_not_stop_engine(tmp_path, monkeypatch):
     """
     import asyncio as _asyncio
 
-    from drakkar import cache as cache_module
+    from drakkar import cache_engine as cache_engine_module
 
     recorded_kwargs: dict = {}
 
@@ -842,7 +842,7 @@ async def test_flush_loop_error_does_not_stop_engine(tmp_path, monkeypatch):
         except _asyncio.CancelledError:
             raise
 
-    monkeypatch.setattr(cache_module, 'run_periodic_task', spy_run_periodic_task)
+    monkeypatch.setattr(cache_engine_module, 'run_periodic_task', spy_run_periodic_task)
 
     engine = await _make_engine(tmp_path, worker_id='w1')
     await engine.start()
@@ -1080,18 +1080,21 @@ async def test_stop_final_drain_failure_is_logged_and_stop_completes(tmp_path, m
 
     engine._flush_once = raising_flush_once  # type: ignore[reportPrivateUsage,assignment]
 
-    # Spy on logger.aexception — the final-drain exception handler uses it.
-    from drakkar import cache as cache_module
+    # Spy on logger.aexception — the final-drain exception handler in
+    # ``cache_engine.CacheEngine.stop()`` uses the logger defined in
+    # :mod:`drakkar.cache_engine` (a separate structlog proxy from the
+    # one in :mod:`drakkar.cache`), so patch there.
+    from drakkar import cache_engine as cache_engine_module
 
     captured_events: list[str] = []
-    original_aexception = cache_module.logger.aexception
+    original_aexception = cache_engine_module.logger.aexception
 
     async def spy_aexception(event: str, **kwargs):
         captured_events.append(event)
         # Let the real logger do its thing so formatting stays exercised.
         await original_aexception(event, **kwargs)
 
-    monkeypatch.setattr(cache_module.logger, 'aexception', spy_aexception)
+    monkeypatch.setattr(cache_engine_module.logger, 'aexception', spy_aexception)
 
     # stop() must complete even though the final drain raises.
     await engine.stop()

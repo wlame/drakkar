@@ -50,6 +50,7 @@ import aiosqlite
 import pytest
 
 from drakkar import cache as cache_module
+from drakkar import cache_engine as cache_engine_module
 from drakkar import metrics
 from drakkar.cache import (
     Cache,
@@ -973,7 +974,7 @@ async def test_sync_registered_as_system_periodic_task(tmp_path, monkeypatch):
         except _asyncio.CancelledError:
             raise
 
-    monkeypatch.setattr(cache_module, 'run_periodic_task', fake_run_periodic_task)
+    monkeypatch.setattr(cache_engine_module, 'run_periodic_task', fake_run_periodic_task)
 
     cache = Cache(origin_worker_id='me')
     engine = CacheEngine(
@@ -1018,7 +1019,7 @@ async def test_sync_not_registered_when_peer_sync_disabled(tmp_path, monkeypatch
         except _asyncio.CancelledError:
             raise
 
-    monkeypatch.setattr(cache_module, 'run_periodic_task', fake_run_periodic_task)
+    monkeypatch.setattr(cache_engine_module, 'run_periodic_task', fake_run_periodic_task)
 
     cache = Cache(origin_worker_id='me')
     engine = CacheEngine(

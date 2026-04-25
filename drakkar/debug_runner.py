@@ -39,17 +39,33 @@ The architecture splits responsibility across three pieces:
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import contextvars
 import time
 import traceback
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from drakkar.cache import CacheScope
+from drakkar.debug_runner_helpers import (
+    _build_source_message,
+    _failed_task_entry,
+    _make_value_preview,
+    _one_line_summary,
+    _serialize_payload,
+    _summarize_cache_calls,
+)
+from drakkar.debug_runner_models import (
+    DebugReport,
+    PlannedSinkRecord,
+    ProbeCacheCall,
+    ProbeError,
+    ProbeInput,
+    ProbeStageResult,
+    ProbeTaskEntry,
+    _probe_stage,
+    _stage,
+)
 from drakkar.executor import ExecutorTaskError
 from drakkar.models import (
     CollectResult,
@@ -69,310 +85,6 @@ if TYPE_CHECKING:
     from drakkar.handler import BaseDrakkarHandler
 
 
-# ---- probe-stage contextvar ------------------------------------------------
-#
-# The runner (Task 2) sets this before each hook call ('arrange',
-# 'task_complete:<id>', etc.) so the DebugCacheProxy can tag every cache
-# call with the hook that made it. Reset to 'unknown' after each hook.
-#
-# Using a ContextVar (rather than a plain attribute on the proxy) keeps
-# the proxy thread/task-agnostic: concurrent probes on the same handler
-# would each see their own stage tag. We still serialize probes with a
-# lock in Task 2 because swapping ``handler.cache`` is inherently
-# process-wide, but the contextvar is the right choice for the stage
-# tag itself.
-
-_probe_stage: contextvars.ContextVar[str] = contextvars.ContextVar(
-    'drakkar_probe_stage',
-    default='unknown',
-)
-
-
-@contextlib.contextmanager
-def _stage(name: str) -> Iterator[None]:
-    """Temporarily set the ``_probe_stage`` contextvar to ``name``.
-
-    Hook helpers wrap their body in ``with _stage('arrange'):`` so the
-    contextvar reflects the current stage for any ``DebugCacheProxy``
-    call the hook makes. The ``finally`` block always resets the
-    contextvar via the returned token — even if the hook raises — so a
-    later cache call outside the hook sees the previous stage rather
-    than a leaked "arrange" tag.
-    """
-    token = _probe_stage.set(name)
-    try:
-        yield
-    finally:
-        _probe_stage.reset(token)
-
-
-# ---- pydantic models for the report ----------------------------------------
-
-
-class ProbeInput(BaseModel):
-    """Body of the incoming probe request, and the echo shown in section A of the UI.
-
-    ``value`` is received as a UTF-8 string — the runner encodes it to
-    bytes when constructing the synthetic ``SourceMessage``. We keep it
-    as a string on the wire because the /debug tab posts JSON, and
-    base64-encoding the payload just to flip back immediately is noise.
-
-    Length caps defend against authenticated-DoS from posting huge
-    payloads through the debug endpoint — ~10MB per value / 64KB per
-    topic/key is more than enough for any realistic production message.
-    """
-
-    value: str = Field(
-        max_length=10_000_000,
-        description='Raw message value as text. Encoded to UTF-8 bytes before the synthetic SourceMessage is built.',
-    )
-    key: str | None = Field(
-        default=None,
-        max_length=65_536,
-        description='Optional Kafka message key. Encoded to UTF-8 bytes when set.',
-    )
-    partition: int = Field(default=0, ge=0, description='Synthetic partition id for the probe.')
-    offset: int = Field(default=0, ge=0, description='Synthetic offset for the probe.')
-    topic: str = Field(
-        default='',
-        max_length=65_536,
-        description='Synthetic topic name. The endpoint substitutes the configured source topic when this is empty.',
-    )
-    timestamp: int | None = Field(
-        default=None,
-        description='Kafka-style milliseconds timestamp. Defaults to time.time() * 1000 in the runner.',
-    )
-    use_cache: bool = Field(
-        default=False,
-        description='When true, cache reads forward to the live cache; writes are ALWAYS suppressed.',
-    )
-
-
-class ProbeCacheCall(BaseModel):
-    """One call made to the DebugCacheProxy during the probe.
-
-    ``outcome`` distinguishes ``hit`` / ``miss`` (read paths) from
-    ``suppressed`` (write paths that would have touched the real cache).
-    ``value_preview`` is a short human-readable slice of the value —
-    truncated to 120 chars with newlines collapsed so long payloads
-    fit on one UI row without bloating the report JSON.
-    """
-
-    op: Literal['get', 'set', 'peek', 'delete', 'contains'] = Field(description='Which proxy method was called.')
-    key: str = Field(description='Cache key involved.')
-    scope: str | None = Field(
-        default=None,
-        description=(
-            'CacheScope name for the call (LOCAL / CLUSTER / GLOBAL). '
-            'None for ops where scope is not meaningful (get/peek/delete/contains do not take a scope).'
-        ),
-    )
-    outcome: Literal['hit', 'miss', 'suppressed'] = Field(
-        description='hit / miss for reads; suppressed for writes (set/delete), since writes never reach the live cache.'
-    )
-    value_preview: str | None = Field(
-        default=None,
-        description='First ~120 chars of the value being set/returned. Newlines collapsed to spaces.',
-    )
-    origin_stage: str = Field(
-        description='The _probe_stage value at the time of the call (e.g. "arrange", "task_complete:t-abc").'
-    )
-    ms_since_start: float = Field(description='Elapsed milliseconds since the runner started this probe.')
-
-
-class ProbeStageResult(BaseModel):
-    """Generic container for the outcome of a single hook stage.
-
-    Used for ``arrange``, ``on_message_complete``, ``on_window_complete``.
-    ``error`` carries a one-line summary of any exception; the full
-    traceback goes into the top-level ``errors`` list on ``DebugReport``
-    so the UI can render all failures in one panel.
-    """
-
-    duration_seconds: float | None = Field(
-        default=None, description='Wall-clock duration of the hook invocation, in seconds.'
-    )
-    collect_result: CollectResult | None = Field(
-        default=None, description='CollectResult returned by the hook, if any.'
-    )
-    error: str | None = Field(
-        default=None, description='One-line summary of any raised exception. Full traceback goes in DebugReport.errors.'
-    )
-
-
-class ProbeTaskEntry(BaseModel):
-    """One row of the Tasks table in section C of the Message Probe UI.
-
-    ``status`` values:
-      - ``done``      — subprocess (or precomputed fast path) succeeded.
-      - ``failed``    — the task terminally failed after on_error.
-      - ``replaced``  — on_error returned a replacement list, original
-                        task is no longer the terminal outcome.
-    """
-
-    task_id: str = Field(description='Unique task identifier (ExecutorTask.task_id).')
-    parent_task_id: str | None = Field(
-        default=None, description='Optional parent task id (set when on_error returns replacements).'
-    )
-    labels: dict[str, str] = Field(default_factory=dict, description='User-defined labels carried on the ExecutorTask.')
-    source_offsets: list[int] = Field(default_factory=list, description='Source Kafka offsets that produced this task.')
-    precomputed: bool = Field(
-        default=False, description='True if the task was served via ExecutorTask.precomputed (no subprocess ran).'
-    )
-    status: Literal['done', 'failed', 'replaced'] = Field(
-        description='Terminal status of this task within the probe run.'
-    )
-    exit_code: int | None = Field(
-        default=None, description='Process exit code, or None if the task never produced one.'
-    )
-    duration_seconds: float | None = Field(
-        default=None, description='Wall-clock duration of the subprocess / precomputed fast path.'
-    )
-    stdin: str = Field(default='', description='Raw stdin text written to the subprocess (from ExecutorTask.stdin).')
-    stdout: str = Field(default='', description='Captured stdout. May be very large (multi-megabyte).')
-    stderr: str = Field(default='', description='Captured stderr. May be very large.')
-    subprocess_exception: str | None = Field(
-        default=None,
-        description='Exception message when the subprocess failed to launch or timed out.',
-    )
-    on_task_complete_duration: float | None = Field(
-        default=None,
-        description='Wall-clock duration of the on_task_complete hook for this task.',
-    )
-    on_task_complete_result: CollectResult | None = Field(
-        default=None,
-        description='CollectResult returned by on_task_complete for this task, if any.',
-    )
-    on_task_complete_error: str | None = Field(
-        default=None,
-        description='One-line summary if on_task_complete raised; traceback goes in DebugReport.errors.',
-    )
-    retry_of: str | None = Field(
-        default=None, description='task_id of the task this row retries (set when on_error returned RETRY).'
-    )
-    replacement_for: str | None = Field(
-        default=None, description='task_id of the task this row replaces (set for items in on_error replacement lists).'
-    )
-
-
-class ProbeError(BaseModel):
-    """One exception captured during the probe, aggregated in the Errors panel (section I)."""
-
-    stage: str = Field(
-        description='Stage identifier where the exception was raised (e.g. "arrange", "on_task_complete:t-abc").'
-    )
-    exception_class: str = Field(description='Fully qualified exception class name.')
-    message: str = Field(description='str(exception).')
-    traceback: str = Field(description='traceback.format_exc() output captured at the point of failure.')
-    occurred_at_ms: float = Field(description='Milliseconds since the probe started.')
-
-
-class PlannedSinkRecord(BaseModel):
-    """One record that WOULD have been written to a sink if this were a real run.
-
-    The runner never actually writes to a sink during a probe. This record
-    is built from the ``CollectResult`` payload field for the corresponding
-    sink type. ``extras`` carries type-specific metadata (e.g. Kafka key,
-    Postgres sink instance name, etc.) without bloating the core schema.
-    """
-
-    sink_type: Literal['kafka', 'postgres', 'mongo', 'http', 'redis', 'files'] = Field(
-        description='Which CollectResult field the payload came from.'
-    )
-    destination: str = Field(
-        description='Type-specific destination — topic for kafka, table for postgres, collection for mongo, sink instance name for http, key for redis, path for files.'
-    )
-    origin_stage: str = Field(
-        description='Which stage produced this sink record (e.g. "task_complete:t-abc", "message_complete", "window_complete").'
-    )
-    payload: Any = Field(description='The serialized payload data (from BaseModel.model_dump()).')
-    extras: dict[str, Any] = Field(
-        default_factory=dict, description='Type-specific metadata: kafka key, sink instance name, ttl, etc.'
-    )
-
-
-class DebugReport(BaseModel):
-    """Full report returned by the probe endpoint.
-
-    ``truncated=True`` signals that the runner did not complete every
-    stage — either the wall-clock timeout fired or an upstream hook
-    raised before the downstream stages could run. The UI renders a
-    warning banner when this is set.
-    """
-
-    input: ProbeInput = Field(description='Echo of the probe request, for the Input & Deserialization card.')
-    deserialize_error: ProbeError | None = Field(
-        default=None,
-        description='Captured exception from handler.deserialize_message, if any.',
-    )
-    parsed_payload: Any | None = Field(
-        default=None,
-        description='Parsed message payload. Typically a dict (Pydantic model dump) or None if no input_model is set.',
-    )
-    message_label: str | None = Field(
-        default=None, description='Output of handler.message_label for the synthetic SourceMessage.'
-    )
-    arrange: ProbeStageResult = Field(description='Outcome of the arrange() hook.')
-    tasks: list[ProbeTaskEntry] = Field(
-        default_factory=list, description='One entry per ExecutorTask run through the probe, in order.'
-    )
-    on_message_complete: ProbeStageResult | None = Field(
-        default=None, description='Outcome of the on_message_complete hook, if it ran.'
-    )
-    on_window_complete: ProbeStageResult | None = Field(
-        default=None, description='Outcome of the on_window_complete hook, if it ran.'
-    )
-    planned_sink_payloads: list[PlannedSinkRecord] = Field(
-        default_factory=list,
-        description='Flattened list of every payload that would have been written to a sink.',
-    )
-    cache_calls: list[ProbeCacheCall] = Field(
-        default_factory=list, description='Full log of every cache call made during the probe.'
-    )
-    cache_summary: dict[str, int] = Field(
-        default_factory=dict,
-        description='Counts keyed by calls / hits / misses / writes_suppressed. Derived from cache_calls.',
-    )
-    timing: dict[str, float] = Field(
-        default_factory=dict,
-        description='Per-stage wall-clock durations in seconds: total_wallclock, arrange, on_message_complete, on_window_complete.',
-    )
-    errors: list[ProbeError] = Field(
-        default_factory=list, description='Every exception captured during the probe, with full traceback.'
-    )
-    truncated: bool = Field(
-        default=False, description='True when the probe did not reach all stages (timeout or upstream failure).'
-    )
-
-
-# ---- helpers ---------------------------------------------------------------
-
-
-def _make_value_preview(value: Any) -> str | None:
-    """Return a short, single-line preview of ``value`` for the cache-call log.
-
-    Truncates to ~120 chars and collapses newlines to spaces so the UI
-    can render the cell on one line. Returns ``None`` for ``None``
-    inputs so the UI cell stays empty (rather than displaying the
-    literal string ``"None"``).
-    """
-    if value is None:
-        return None
-    # repr() handles bytes, numbers, dicts, Pydantic models; str() would
-    # silently lose bytes and re-raise on exotic types. We trust repr()
-    # not to raise — Python's stdlib objects always have a working
-    # repr, and user-provided values that would raise here would have
-    # already blown up earlier in the pipeline.
-    text = repr(value)
-    text = text.replace('\n', ' ').replace('\r', ' ')
-    if len(text) > 120:
-        text = text[:117] + '...'
-    return text
-
-
-# ---- cache proxy -----------------------------------------------------------
-
-
 class DebugCacheProxy:
     """Read-forwarding, write-suppressing wrapper around a live Cache / NoOpCache.
 
@@ -381,7 +93,25 @@ class DebugCacheProxy:
     unchanged when the runner swaps the handler's ``cache`` attribute
     for a proxy instance.
 
-    Behaviour:
+    Concurrent-traffic isolation
+    ----------------------------
+    The probe swaps ``handler.cache`` on the SHARED handler instance —
+    the same one the live worker uses for production messages. Without
+    a guard, any production task that calls ``self.cache.X`` while the
+    probe is in flight would (a) land in the probe's call log as
+    pollution and (b) have its writes silently dropped because the
+    proxy suppresses writes by design.
+
+    To prevent both, every entry point checks the ``_probe_stage``
+    contextvar. asyncio gives each task its own contextvar context, so
+    only the task that the probe is running in (which sets the stage
+    via ``with _stage('arrange')`` etc.) sees a non-default value.
+    Concurrent production tasks see the default ``'unknown'`` and the
+    proxy delegates straight to ``self._real`` with NO logging — fully
+    transparent. The probe report therefore contains only the probe's
+    own pipeline calls, and production cache writes survive.
+
+    Behaviour (probe-stage caller — ``_probe_stage.get() != 'unknown'``):
       - ``get`` / ``peek`` / ``__contains__`` forward to the real cache
         iff ``use_cache=True``; otherwise immediately return a miss
         (respecting the real return types of each method).
@@ -391,6 +121,12 @@ class DebugCacheProxy:
         write.
       - Every call appends one ``ProbeCacheCall`` to ``self.calls`` with
         ``origin_stage`` pulled from the ``_probe_stage`` contextvar.
+
+    Behaviour (production-task caller — ``_probe_stage.get() == 'unknown'``):
+      - Every method delegates directly to ``self._real`` with no log
+        entry. The proxy is invisible from the production task's
+        perspective — same return values, same side effects, same
+        latency profile.
 
     Note on scope kwarg:
       The live ``Cache.set`` takes ``scope=CacheScope.LOCAL`` but the
@@ -415,9 +151,13 @@ class DebugCacheProxy:
         Args:
             real: the live ``Cache`` or ``NoOpCache`` that the handler
                 had before the probe swapped it out. Reads fall through
-                to this when ``use_cache`` is True.
+                to this when ``use_cache`` is True. Production-task
+                calls (callers outside any ``_stage(...)`` block) ALWAYS
+                forward to this regardless of ``use_cache``.
             use_cache: UI checkbox — forward reads to the live cache
-                when True; otherwise always return a miss.
+                when True; otherwise always return a miss. Only consulted
+                for probe-stage callers; production-task callers go
+                straight through to ``real``.
             start_time: ``time.monotonic()`` timestamp when the probe
                 started. Used to compute ``ms_since_start`` on every
                 logged call.
@@ -428,6 +168,25 @@ class DebugCacheProxy:
         self.calls: list[ProbeCacheCall] = []
 
     # -- internals -----------------------------------------------------------
+
+    @staticmethod
+    def _is_probe_active() -> bool:
+        """Return True iff the calling asyncio task is inside a probe stage.
+
+        asyncio tasks each carry their own copy of the contextvar context.
+        The probe sets ``_probe_stage`` to a non-default value (e.g.
+        ``'arrange'``, ``'task_complete:<task_id>'``) inside the
+        ``with _stage(...)`` blocks that wrap every handler invocation in
+        :class:`DebugRunner`. Production tasks (the poll loop, partition
+        processors, ``@periodic`` background loops) never enter those
+        blocks, so they see the default ``'unknown'`` and we know the
+        call is NOT part of the current probe.
+
+        When False, callers must be passed transparently to ``self._real``
+        — logging or suppressing them would pollute the probe report and
+        silently drop production cache writes.
+        """
+        return _probe_stage.get() != 'unknown'
 
     def _ms_since_start(self) -> float:
         """Return elapsed milliseconds since the probe began, as a float."""
@@ -463,6 +222,9 @@ class DebugCacheProxy:
 
     async def get(self, key: str, *, as_type: type[BaseModel] | None = None) -> Any | None:
         """Async get — forwards to the real cache iff ``use_cache=True``, else miss."""
+        # Production-task caller: pass through with no log. See class docstring.
+        if not self._is_probe_active():
+            return await self._real.get(key, as_type=as_type)
         if self._use_cache:
             value = await self._real.get(key, as_type=as_type)
             outcome: Literal['hit', 'miss'] = 'hit' if value is not None else 'miss'
@@ -483,6 +245,9 @@ class DebugCacheProxy:
 
         Mirrors ``Cache.peek``: memory-only lookup, never hits the DB.
         """
+        # Production-task caller: pass through with no log. See class docstring.
+        if not self._is_probe_active():
+            return self._real.peek(key)
         if self._use_cache:
             value = self._real.peek(key)
             outcome: Literal['hit', 'miss'] = 'hit' if value is not None else 'miss'
@@ -499,6 +264,9 @@ class DebugCacheProxy:
 
     def __contains__(self, key: str) -> bool:
         """Membership test — forwards to real iff ``use_cache=True``, else False."""
+        # Production-task caller: pass through with no log. See class docstring.
+        if not self._is_probe_active():
+            return key in self._real
         if self._use_cache:
             present = key in self._real
             outcome: Literal['hit', 'miss'] = 'hit' if present else 'miss'
@@ -517,7 +285,17 @@ class DebugCacheProxy:
         ttl: float | None = None,
         scope: CacheScope = CacheScope.LOCAL,
     ) -> None:
-        """Suppressed write. Never touches the real cache. Still logs the call."""
+        """Suppressed write FOR THE PROBE; passes through for production callers.
+
+        Production tasks running concurrently with a probe must not have
+        their writes silently dropped — this would violate the README's
+        "no cache writes — zero footprint on the live system" guarantee.
+        See class docstring for the contextvar gating.
+        """
+        # Production-task caller: pass straight through to the real cache.
+        if not self._is_probe_active():
+            self._real.set(key, value, ttl=ttl, scope=scope)
+            return
         self._log_call(
             op='set',
             key=key,
@@ -525,20 +303,27 @@ class DebugCacheProxy:
             outcome='suppressed',
             value_preview=_make_value_preview(value),
         )
-        # Deliberate no-op. ``ttl`` is accepted for signature parity.
+        # Deliberate no-op for the probe path. ``ttl`` is accepted for
+        # signature parity.
         _ = ttl
 
     def delete(self, key: str) -> bool:
-        """Suppressed delete. Returns whether ``key`` was in live memory without mutating.
+        """Suppressed delete FOR THE PROBE; passes through for production callers.
 
-        Mirrors the real ``Cache.delete`` contract: returns True when the
-        key currently exists in memory, False otherwise. We DO NOT
-        actually delete; we just peek at the live cache (only when
-        ``use_cache=True``) to give handler code a truthful "was it
-        there" signal, which some branches read. With ``use_cache=False``
-        the proxy refuses to look at the live cache at all and returns
-        False, matching ``NoOpCache.delete``.
+        Probe-call semantics mirror the real ``Cache.delete`` contract:
+        returns True when the key currently exists in memory, False
+        otherwise. We DO NOT actually delete; we just peek at the live
+        cache (only when ``use_cache=True``) to give handler code a
+        truthful "was it there" signal, which some branches read. With
+        ``use_cache=False`` the proxy refuses to look at the live cache
+        at all and returns False, matching ``NoOpCache.delete``.
+
+        Production-task callers pass straight through and DO mutate the
+        real cache — same reasoning as ``set``.
         """
+        # Production-task caller: pass straight through.
+        if not self._is_probe_active():
+            return self._real.delete(key)
         present = False
         if self._use_cache:
             # ``peek`` is memory-only and never touches the DB; safe to
@@ -796,6 +581,18 @@ class DebugRunner:
       with an ``asyncio.Lock`` held by the runner — a second concurrent
       probe simply waits.
 
+      The probe lock does NOT block the live worker's traffic: the poll
+      loop, partition processors, and ``@periodic`` background tasks all
+      keep running on the same handler instance while the probe holds
+      the swapped cache. ``DebugCacheProxy`` distinguishes probe-task
+      callers from production-task callers via the ``_probe_stage``
+      contextvar (each asyncio task has its own context). Probe calls
+      get the log-and-suppress semantics; concurrent production calls
+      pass straight through to the real cache with no log entry. That's
+      what keeps the probe report clean of pollution AND keeps the
+      "no cache writes — zero footprint on the live system" guarantee
+      true even when production traffic is in flight.
+
     Partial reports:
       Per-run state lives on a ``_RunState`` dataclass created fresh at
       the top of ``_run_locked``. ``start_probe`` attaches that state
@@ -938,6 +735,15 @@ class DebugRunner:
         concurrent probes chain through each other (probe B's reads
         forwarding through probe A's proxy), breaking the documented
         ``use_cache=True`` contract for the second probe.
+
+        Concurrent production traffic safety:
+          The cache swap below is process-wide — the live worker's
+          asyncio tasks hit the same proxy. ``DebugCacheProxy`` checks
+          the ``_probe_stage`` contextvar on every entry point and
+          delegates production-task calls straight through to the real
+          cache. The probe report therefore contains only the probe's
+          own pipeline calls, and production cache writes survive. See
+          ``DebugCacheProxy`` class docstring for the full contract.
         """
         msg = _build_source_message(state.probe_input)
         original_cache = self._handler.cache
@@ -1735,116 +1541,3 @@ class DebugRunner:
         logging of captured errors) has one place to patch.
         """
         state.errors.append(error)
-
-
-# ---- small helpers used by DebugRunner -------------------------------------
-
-
-def _build_source_message(probe_input: ProbeInput) -> SourceMessage:
-    """Build a synthetic ``SourceMessage`` from the probe input.
-
-    - Encodes ``value`` and ``key`` as UTF-8 bytes (the on-wire Kafka shape).
-    - Defaults ``timestamp`` to the current wall-clock time in ms when
-      the input did not supply one (Kafka-style epoch ms).
-    """
-    timestamp = probe_input.timestamp
-    if timestamp is None:
-        timestamp = int(time.time() * 1000)
-    return SourceMessage(
-        topic=probe_input.topic,
-        partition=probe_input.partition,
-        offset=probe_input.offset,
-        key=probe_input.key.encode('utf-8') if probe_input.key is not None else None,
-        value=probe_input.value.encode('utf-8'),
-        timestamp=timestamp,
-    )
-
-
-def _serialize_payload(payload: Any) -> Any:
-    """Serialize ``msg.payload`` into a JSON-safe shape for the report.
-
-    ``deserialize_message`` typically sets ``msg.payload`` to a Pydantic
-    BaseModel instance. Pydantic models round-trip cleanly through
-    ``model_dump(mode='json')``; everything else (None, dict, primitive)
-    passes through unchanged so user handlers that store plain dicts
-    still work.
-    """
-    if payload is None:
-        return None
-    if isinstance(payload, BaseModel):
-        return payload.model_dump(mode='json')
-    return payload
-
-
-def _summarize_cache_calls(calls: list[ProbeCacheCall]) -> dict[str, int]:
-    """Compute the ``cache_summary`` counts used in the Cache calls header.
-
-    Keys: ``calls`` (total), ``hits`` (read+hit), ``misses`` (read+miss),
-    ``writes_suppressed`` (set/delete calls).
-    """
-    hits = sum(1 for c in calls if c.outcome == 'hit')
-    misses = sum(1 for c in calls if c.outcome == 'miss')
-    writes_suppressed = sum(1 for c in calls if c.outcome == 'suppressed')
-    return {
-        'calls': len(calls),
-        'hits': hits,
-        'misses': misses,
-        'writes_suppressed': writes_suppressed,
-    }
-
-
-def _one_line_summary(exc: BaseException) -> str:
-    """Short one-line summary of an exception for the stage's ``error`` field.
-
-    The full traceback is always captured separately on the top-level
-    ``DebugReport.errors`` list; this short form is what the UI shows
-    inline on the corresponding stage card (arrange, message_complete,
-    etc.) so the operator sees at-a-glance what went wrong.
-    """
-    message = str(exc) or '<no message>'
-    # Collapse any embedded newlines so the cell stays on one line.
-    message = message.replace('\n', ' ').replace('\r', ' ')
-    return f'{type(exc).__name__}: {message}'
-
-
-def _failed_task_entry(
-    *,
-    task: ExecutorTask,
-    error: ExecutorTaskError,
-    retry_of: str | None = None,
-    replacement_for: str | None = None,
-) -> ProbeTaskEntry:
-    """Build a ``ProbeTaskEntry`` for a subprocess-level task failure.
-
-    Used when ``ExecutorPool.execute`` raises ``ExecutorTaskError`` —
-    the task never produced a successful ``ExecutorResult``, so we
-    synthesise an entry from the ``ExecutorError`` attached to the
-    exception. The entry starts with ``status='failed'``; callers may
-    later flip it to ``'replaced'`` if on_error returns a replacement
-    list (see ``DebugRunner._handle_task_failure``).
-
-    ``retry_of`` / ``replacement_for`` thread through on_error retries
-    and replacement cascades so the UI can show the lineage of each
-    entry (see Tasks section C in the probe tab).
-    """
-    err = error.error
-    result = error.result
-    # Prefer the exception text when it's set (timeouts, launch failures);
-    # otherwise fall back to stderr for non-zero-exit-code failures.
-    subprocess_exception = err.exception or (err.stderr or None)
-    return ProbeTaskEntry(
-        task_id=task.task_id,
-        parent_task_id=task.parent_task_id,
-        labels=dict(task.labels),
-        source_offsets=list(task.source_offsets),
-        precomputed=task.precomputed is not None,
-        status='failed',
-        exit_code=err.exit_code,
-        duration_seconds=result.duration_seconds,
-        stdin=task.stdin or '',
-        stdout=result.stdout,
-        stderr=result.stderr,
-        subprocess_exception=subprocess_exception,
-        retry_of=retry_of,
-        replacement_for=replacement_for,
-    )

@@ -443,12 +443,12 @@ async def test_start_registers_cleanup_task_as_system_periodic(tmp_path, monkeyp
     ``name='cache.cleanup'``, ``system=True``, and
     ``on_error='continue'``.
 
-    As with the flush task in Task 8, we patch ``run_periodic_task`` on
-    the ``drakkar.cache`` module and capture the call kwargs for each
-    task. We allow multiple invocations (flush + cleanup) and pick the one
-    targeting the cleanup name.
+    As with the flush task, we patch ``run_periodic_task`` where the
+    engine imports it from — :mod:`drakkar.cache_engine` — and capture the
+    call kwargs for each task. We allow multiple invocations (flush +
+    cleanup) and pick the one targeting the cleanup name.
     """
-    from drakkar import cache as cache_module
+    from drakkar import cache_engine as cache_engine_module
 
     captured: list[dict] = []
 
@@ -460,7 +460,7 @@ async def test_start_registers_cleanup_task_as_system_periodic(tmp_path, monkeyp
         except asyncio.CancelledError:
             raise
 
-    monkeypatch.setattr(cache_module, 'run_periodic_task', spy_run_periodic_task)
+    monkeypatch.setattr(cache_engine_module, 'run_periodic_task', spy_run_periodic_task)
 
     engine = await _make_engine(tmp_path, worker_id='w1')
     await engine.start()

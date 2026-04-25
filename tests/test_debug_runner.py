@@ -100,12 +100,21 @@ def _make_proxy(
 
 @pytest.fixture(autouse=True)
 def _reset_probe_stage():
-    """Reset the probe-stage contextvar between tests so previous tests don't leak.
+    """Default the probe-stage contextvar to a probe-mode value for the test body.
+
+    The proxy distinguishes probe-task callers (any non-default
+    ``_probe_stage``) from concurrent production callers (the default
+    ``'unknown'``) — see ``DebugCacheProxy`` class docstring. Most of the
+    proxy tests in this file exercise probe-mode semantics (logging +
+    suppression) so we set the contextvar to a sentinel ``'test'`` before
+    every test. Tests that intentionally exercise the production-pass-
+    through path explicitly reset to ``'unknown'`` inside their own body
+    (see the ``concurrent-production isolation`` section below).
 
     Uses ``ContextVar.set`` + ``reset`` token pattern to guarantee the
-    default ('unknown') is restored even if the test raises.
+    previous value is restored even if the test raises.
     """
-    token = _probe_stage.set('unknown')
+    token = _probe_stage.set('test')
     yield
     _probe_stage.reset(token)
 
@@ -320,6 +329,191 @@ async def test_proxy_call_log_captures_origin_stage():
 
     assert proxy.calls[0].origin_stage == 'arrange'
     assert proxy.calls[1].origin_stage == 'task_complete:t-abc'
+
+
+# --- DebugCacheProxy: concurrent-production isolation -----------------------
+#
+# The probe swaps ``handler.cache`` on the SHARED handler instance — the
+# same one the live worker uses for production messages. Without a guard,
+# any production task that calls ``self.cache.X`` while a probe is in
+# flight would (a) land in the probe's call log as pollution and (b) have
+# its writes silently dropped because the proxy suppresses writes by
+# design.
+#
+# The proxy distinguishes probe callers from production callers via the
+# ``_probe_stage`` contextvar (asyncio gives each task its own context).
+# These tests pin down the four guarantees:
+#
+#   1. Read calls outside any ``_stage(...)`` block pass through to the
+#      real cache and return the real value (NOT a forced miss).
+#   2. Set calls outside any ``_stage(...)`` block actually mutate the
+#      real cache (NOT silently dropped).
+#   3. Delete calls outside any ``_stage(...)`` block actually mutate the
+#      real cache (NOT silently dropped).
+#   4. None of those production-origin calls land in ``proxy.calls`` —
+#      the probe report stays clean of pollution.
+
+
+@contextlib.contextmanager
+def _production_caller():
+    """Override the autouse fixture so the test body runs as a 'production task'.
+
+    The autouse ``_reset_probe_stage`` fixture sets ``_probe_stage='test'``
+    so default proxy tests stay in probe-mode. The pass-through tests
+    below are about the OPPOSITE behavior — what happens when a non-probe
+    asyncio task hits the proxy. Resetting the contextvar to ``'unknown'``
+    inside this context manager simulates that. The previous value is
+    restored on exit so the autouse cleanup still works correctly.
+    """
+    token = _probe_stage.set('unknown')
+    try:
+        yield
+    finally:
+        _probe_stage.reset(token)
+
+
+async def test_proxy_get_passes_through_to_real_cache_outside_probe_stage():
+    """Production-task get (no ``_probe_stage`` set) returns the real value, no log entry."""
+    real = _fresh_cache()
+    real.set('present-key', 'real-value')
+    proxy = _make_proxy(real=real, use_cache=False)
+
+    with _production_caller():
+        # ``_probe_stage`` is 'unknown'. The proxy must pass through to the
+        # real cache despite ``use_cache=False`` — that flag is a probe
+        # knob, not a production gate.
+        value = await proxy.get('present-key')
+
+    assert value == 'real-value'
+    # No call recorded — production traffic must not pollute the probe log.
+    assert proxy.calls == []
+
+
+def test_proxy_peek_passes_through_outside_probe_stage():
+    """Production-task peek pulls from the real cache and skips the log."""
+    real = _fresh_cache()
+    real.set('k', 'v')
+    proxy = _make_proxy(real=real, use_cache=False)
+
+    with _production_caller():
+        assert proxy.peek('k') == 'v'
+    assert proxy.calls == []
+
+
+def test_proxy_contains_passes_through_outside_probe_stage():
+    """Production-task ``in`` check pulls from the real cache and skips the log."""
+    real = _fresh_cache()
+    real.set('k', 'v')
+    proxy = _make_proxy(real=real, use_cache=False)
+
+    with _production_caller():
+        assert 'k' in proxy
+        assert 'missing' not in proxy
+    assert proxy.calls == []
+
+
+def test_proxy_set_writes_to_real_cache_outside_probe_stage():
+    """Production-task set ACTUALLY MUTATES the real cache.
+
+    This is the load-bearing fix for the "no cache writes — zero footprint
+    on the live system" guarantee. Before the contextvar gate, the proxy
+    suppressed every set unconditionally; concurrent production traffic
+    during a probe lost its writes silently.
+    """
+    real = _fresh_cache()
+    proxy = _make_proxy(real=real, use_cache=False)
+
+    with _production_caller():
+        proxy.set('new-key', 'new-value', ttl=60.0, scope=CacheScope.CLUSTER)
+
+    # The write must have landed in the real cache.
+    assert real.peek('new-key') == 'new-value'
+    # And the probe log must NOT contain it (production-origin, transparent).
+    assert proxy.calls == []
+
+
+def test_proxy_delete_mutates_real_cache_outside_probe_stage():
+    """Production-task delete ACTUALLY REMOVES the entry from the real cache."""
+    real = _fresh_cache()
+    real.set('k', 'v')
+    proxy = _make_proxy(real=real, use_cache=False)
+
+    with _production_caller():
+        result = proxy.delete('k')
+
+    assert result is True
+    assert real.peek('k') is None  # actually deleted
+    assert proxy.calls == []
+
+
+async def test_concurrent_production_traffic_does_not_pollute_probe_log():
+    """End-to-end: a sibling task hammering the proxy while a probe stage is
+    running must not show up in the probe's call log, and its writes must
+    survive in the real cache.
+
+    Mirrors the integration-runtime scenario where the live worker's poll
+    loop processes Kafka messages concurrent with a Message Probe pasted
+    by an operator. The probe and the production task each have their own
+    asyncio contextvar context — the probe sets ``_probe_stage`` inside
+    its task, the production task does not.
+    """
+    real = _fresh_cache()
+    proxy = _make_proxy(real=real, use_cache=False)
+
+    # ``done`` flips after the probe-stage block exits. The production task
+    # writes one entry per loop iteration until then.
+    done = asyncio.Event()
+    written_keys: list[str] = []
+
+    async def production_task() -> None:
+        # Production task simulates a sibling asyncio task — its
+        # contextvar context defaults to the autouse 'test' value, which
+        # the proxy would still treat as probe-mode. Reset to 'unknown'
+        # so the proxy correctly classifies this as production-origin.
+        _probe_stage.set('unknown')
+        n = 0
+        while not done.is_set():
+            key = f'prod-{n}'
+            proxy.set(key, f'value-{n}', ttl=10.0, scope=CacheScope.LOCAL)
+            written_keys.append(key)
+            n += 1
+            # Yield so the probe coroutine can interleave.
+            await asyncio.sleep(0)
+
+    prod_handle = asyncio.create_task(production_task())
+    # Brief warm-up so production has fired several writes before the probe
+    # enters its stage.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    # Run a couple of probe-stage operations. Production keeps running.
+    token = _probe_stage.set('arrange')
+    try:
+        await proxy.get('probe-key-1')
+        proxy.peek('probe-key-2')
+        # Continue yielding so production gets more interleaved writes
+        # while we're inside the probe stage.
+        for _ in range(3):
+            await asyncio.sleep(0)
+    finally:
+        _probe_stage.reset(token)
+
+    done.set()
+    await prod_handle
+
+    # 1. Probe log contains EXACTLY two entries — the probe's get + peek.
+    #    Production task's many ``set`` calls are absent.
+    assert len(proxy.calls) == 2, (
+        f'expected 2 probe-origin calls, got {len(proxy.calls)}: {[(c.op, c.key, c.origin_stage) for c in proxy.calls]}'
+    )
+    assert {c.op for c in proxy.calls} == {'get', 'peek'}
+    assert all(c.origin_stage == 'arrange' for c in proxy.calls)
+    assert all(c.key.startswith('probe-key-') for c in proxy.calls)
+
+    # 2. Every production write survived in the real cache. None were dropped.
+    assert len(written_keys) > 0  # sanity: production did run
+    for key in written_keys:
+        assert real.peek(key) is not None, f'production write for {key} was silently dropped'
 
 
 async def test_proxy_ms_since_start_is_monotonic():

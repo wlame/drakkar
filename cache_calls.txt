@@ -1,0 +1,947 @@
+ms from start	origin stage	op	key	scope	outcome	value preview
+132.7	arrange	peek	match|pytest|/project/tests/test_app.py|...	-	miss
+132.7	arrange	get	match|pytest|/project/tests/test_app.py|...	-	miss
+1078.0	unknown	set	match|logger|/project/drakkar|15	CLUSTER	suppressed	"logger = structlog.get_logger()\n log = logger.bind(periodic_task=name, interval_seconds=seconds)\n# Module-level...
+2957.8	unknown	set	match|json|/project/drakkar|15	CLUSTER	suppressed	' sinks_json TEXT,\n env_vars_json TEXT,\n# json_each() join walks the ``source_offsets`` array stored o...
+3514.5	unknown	set	match|Histogram|Counter|Gauge|/project/t...	CLUSTER	suppressed	''
+4625.1	unknown	set	match|import|/project/drakkar|6	CLUSTER	suppressed	'from __future__ import annotations\nimport asyncio\nimport time\nfrom collections.abc import Callable, Coroutine\nfr...
+5399.4	unknown	set	match|Histogram|Counter|Gauge|/project/d...	CLUSTER	suppressed	'from prometheus_client import Counter, Gauge, Histogram, Info, start_http_server\nmessages_consumed = Counter(\nexec...
+6125.9	unknown	set	match|assert|/project/drakkar/templates|...	CLUSTER	suppressed	''
+6897.1	unknown	set	match|offset|/project/drakkar/templates|...	CLUSTER	suppressed	' {% if e.offset is not none %}\n <a href="/debug#trace/{{ partition_id }}/{{ e.offset ...
+7635.2	unknown	set	match|render|html|/project/drakkar/templ...	CLUSTER	suppressed	'{% extends "base.html" %}\n{% extends "base.html" %}\n{% from \'_kafka_ui_icon.html\' import kafka_ui_icon %}\n<!DOC...
+8589.0	unknown	set	match|producer|/project/tests/test_app.p...	CLUSTER	suppressed	''
+9273.8	unknown	set	match|conftest|/project/tests/test_app.p...	CLUSTER	suppressed	'from tests.conftest import wait_for\n'
+9275.4	unknown	set	match|import|/project/drakkar|4	CLUSTER	suppressed	'warning shape can be exercised without importing the full app.\nfrom __future__ import annotations\nimport structlog...
+9887.1	unknown	set	match|import|/project/drakkar/models.py|...	CLUSTER	suppressed	'import os\nimport time\nfrom enum import StrEnum\nfrom typing import Any, TypeVar\nfrom pydantic import BaseModel, F...
+10604.2	unknown	set	match|import|/project/drakkar|7	CLUSTER	suppressed	'from drakkar.app import DrakkarApp\nfrom drakkar.cache import CacheScope\nfrom drakkar.config import DrakkarConfig, ...
+12746.3	unknown	set	match|structlog|/project/drakkar|14	CLUSTER	suppressed	'import structlog\nlogger = structlog.get_logger()\nimport structlog\nlogger = structlog.get_logger()\nimport structl...
+13246.0	unknown	set	match|structlog|/project/tests/test_cons...	CLUSTER	suppressed	''
+15623.9	unknown	set	match|mock|/project/drakkar|14	CLUSTER	suppressed	'This module re-imports them so external code (and ``mock.patch`` test sites)\n # ``mock_app.handler`` / ``_execut...
+15886.9	unknown	set	match|mock|/project/tests/test_consumer....	CLUSTER	suppressed	"from unittest.mock import AsyncMock, MagicMock, patch\ndef make_mock_message(topic='test-source', partition=0, offse...
+17169.9	unknown	set	match|json|/project/drakkar|8	CLUSTER	suppressed	' The framework serializes `data` via `model_dump_json().encode()` as the\n description=\'Payload model. Se...
+17448.4	unknown	set	match|return|/project/drakkar|8	CLUSTER	suppressed	' return\n # glob returns symlinks themselves, not their targets, which is what we want\n """Row factory...
+19002.8	unknown	set	match|async def|/project/drakkar/recorde...	CLUSTER	suppressed	' async def flush(self) -> None:\n async def _create_schema(self, db: aiosqlite.Connection) -> None:\n async...
+19282.9	unknown	set	match|Exception|/project/drakkar/partiti...	CLUSTER	suppressed	' except Exception as e:\n except Exception as e:\n except Exception as e:\n except E...
+20829.1	unknown	set	match|Exception|/project/drakkar/recorde...	CLUSTER	suppressed	' # Exception: failed tasks always go to WS regardless of duration.\n except Exception:\n ...
+21116.2	unknown	set	match|TODO|FIXME|HACK|/project/drakkar/p...	CLUSTER	suppressed	''
+21323.1	unknown	set	match|assert|/project/tests/test_partiti...	CLUSTER	suppressed	" assert window.is_complete\n assert not window2.is_complete\n assert not window.is_complete\n assert pro...
+21532.4	unknown	set	match|flush|/project/tests/test_partitio...	CLUSTER	suppressed	''
+22660.1	unknown	set	match|TODO|FIXME|HACK|/project/drakkar/r...	CLUSTER	suppressed	''
+23367.6	unknown	set	match|\basync\b|/project/drakkar/consume...	CLUSTER	suppressed	' async def subscribe(self) -> None:\n async def _handle_assign(self, consumer: object, partitions: list[TopicP...
+24415.8	unknown	set	match|pytest|/project/tests/test_app.py|...	CLUSTER	suppressed	'import pytest\n@pytest.fixture\n@pytest.fixture\n with pytest.raises(SinkNotConfiguredError, match="No \'mongo\' ...
+24486.6	unknown	set	match|consumer|/project/drakkar/consumer...	CLUSTER	suppressed	'"""Kafka consumer wrapper for Drakkar framework.\nfrom drakkar.metrics import consumer_errors, offsets_committed, re...
+24619.4	unknown	set	match|TODO|FIXME|HACK|/project/tests/tes...	CLUSTER	suppressed	''
+24928.9	unknown	set	match|import|/project/drakkar|8	CLUSTER	suppressed	'import logging\nimport sys\nfrom pathlib import Path\nfrom typing import TextIO\nimport structlog\nfrom drakkar.conf...
+24946.5	unknown	peek	match|error|/project/drakkar/app.py|12	-	miss
+24946.5	unknown	get	match|error|/project/drakkar/app.py|12	-	miss
+24946.5	unknown	peek	match|commit|/project/drakkar/db.py|14	-	miss
+24946.5	unknown	get	match|commit|/project/drakkar/db.py|14	-	miss
+24946.5	unknown	peek	match|async with|/project/drakkar/db.py|...	-	miss
+24946.5	unknown	get	match|async with|/project/drakkar/db.py|...	-	miss
+24946.5	unknown	peek	match|commit|/project/drakkar/templates|...	-	miss
+24946.5	unknown	get	match|commit|/project/drakkar/templates|...	-	miss
+24946.5	unknown	peek	match|render|html|/project/drakkar/templ...	-	miss
+24946.5	unknown	get	match|render|html|/project/drakkar/templ...	-	miss
+24946.5	unknown	peek	match|await|/project/drakkar/templates|1...	-	miss
+24946.5	unknown	get	match|await|/project/drakkar/templates|1...	-	miss
+24946.5	unknown	peek	match|window|/project/drakkar/partition....	-	miss
+24946.5	unknown	get	match|window|/project/drakkar/partition....	-	miss
+24946.5	unknown	peek	match|window|/project/drakkar/templates|...	-	miss
+24946.6	unknown	get	match|window|/project/drakkar/templates|...	-	miss
+24946.6	unknown	peek	match|render|html|/project/drakkar/parti...	-	miss
+24946.6	unknown	get	match|render|html|/project/drakkar/parti...	-	miss
+24946.6	unknown	peek	match|import|/project/drakkar|167	-	miss
+24946.6	unknown	get	match|import|/project/drakkar|167	-	miss
+24946.6	unknown	peek	match|import|/project/drakkar/debug_serv...	-	miss
+24946.6	unknown	get	match|import|/project/drakkar/debug_serv...	-	miss
+24946.6	unknown	peek	match|import|/project/tests/conftest.py|...	-	miss
+24946.6	unknown	get	match|import|/project/tests/conftest.py|...	-	miss
+24946.6	unknown	peek	match|fixture|/project/drakkar|167	-	miss
+24946.6	unknown	get	match|fixture|/project/drakkar|167	-	miss
+24946.6	unknown	peek	match|fixture|/project/tests/conftest.py...	-	miss
+24946.6	unknown	get	match|fixture|/project/tests/conftest.py...	-	miss
+24946.6	unknown	peek	match|template|/project/drakkar/debug_se...	-	miss
+24946.6	unknown	get	match|template|/project/drakkar/debug_se...	-	miss
+24946.6	unknown	peek	match|request|/project/drakkar/debug_ser...	-	miss
+24946.6	unknown	get	match|request|/project/drakkar/debug_ser...	-	miss
+24946.6	unknown	peek	match|test_.*error|/project/drakkar/hand...	-	miss
+24946.6	unknown	get	match|test_.*error|/project/drakkar/hand...	-	miss
+24946.6	unknown	peek	match|test_.*error|/project/tests|5	-	miss
+24946.6	unknown	get	match|test_.*error|/project/tests|5	-	miss
+24946.6	unknown	peek	match|ExecutorPool|/project/drakkar/exec...	-	miss
+24946.6	unknown	get	match|ExecutorPool|/project/drakkar/exec...	-	miss
+24946.6	unknown	peek	match|async with|/project/drakkar/execut...	-	miss
+24946.6	unknown	get	match|async with|/project/drakkar/execut...	-	miss
+24946.6	unknown	peek	match|BaseDrakkarHandler|/project/drakka...	-	miss
+24946.6	unknown	get	match|BaseDrakkarHandler|/project/drakka...	-	miss
+24946.6	unknown	peek	match|BaseDrakkarHandler|/project/drakka...	-	miss
+24946.6	unknown	get	match|BaseDrakkarHandler|/project/drakka...	-	miss
+24951.3	unknown	peek	match|json|/project/tests/test_models.py...	-	miss
+24951.3	unknown	get	match|json|/project/tests/test_models.py...	-	miss
+24951.3	unknown	peek	match|json|/project/drakkar|4	-	miss
+24951.3	unknown	get	match|json|/project/drakkar|4	-	miss
+24951.3	unknown	peek	match|raise\s+\w+|/project/drakkar/parti...	-	miss
+24951.3	unknown	get	match|raise\s+\w+|/project/drakkar/parti...	-	miss
+24951.3	unknown	peek	match|raise\s+\w+|/project/drakkar|1	-	miss
+24951.3	unknown	get	match|raise\s+\w+|/project/drakkar|1	-	miss
+24951.3	unknown	peek	match|asyncio|/project/drakkar/partition...	-	miss
+24951.3	unknown	get	match|asyncio|/project/drakkar/partition...	-	miss
+24951.3	unknown	peek	match|asyncio|/project/drakkar|1	-	miss
+24951.3	unknown	get	match|asyncio|/project/drakkar|1	-	miss
+24951.3	unknown	peek	match|partition|/project/drakkar/partiti...	-	miss
+24951.3	unknown	get	match|partition|/project/drakkar/partiti...	-	miss
+24951.3	unknown	peek	match|partition|/project/drakkar|1	-	miss
+24951.3	unknown	get	match|partition|/project/drakkar|1	-	miss
+24951.3	unknown	peek	match|\basync\b|/project/drakkar|14	-	miss
+24951.3	unknown	get	match|\basync\b|/project/drakkar|14	-	miss
+24951.3	unknown	peek	match|self\._|/project/drakkar|14	-	miss
+24951.3	unknown	get	match|self\._|/project/drakkar|14	-	miss
+24951.3	unknown	peek	match|structlog|/project/drakkar|2	-	miss
+24951.3	unknown	get	match|structlog|/project/drakkar|2	-	miss
+24951.3	unknown	peek	match|ExecutorPool|/project/drakkar/exec...	-	miss
+24951.3	unknown	get	match|ExecutorPool|/project/drakkar/exec...	-	miss
+24951.3	unknown	peek	match|await|/project/drakkar/executor.py...	-	miss
+24951.3	unknown	get	match|await|/project/drakkar/executor.py...	-	miss
+24951.4	unknown	peek	match|json|/project/tests|4	-	miss
+24951.4	unknown	get	match|json|/project/tests|4	-	miss
+24951.4	unknown	peek	match|conftest|/project/drakkar|4	-	miss
+24951.4	unknown	get	match|conftest|/project/drakkar|4	-	miss
+24951.4	unknown	peek	match|conftest|/project/tests|4	-	miss
+24951.4	unknown	get	match|conftest|/project/tests|4	-	miss
+24951.4	unknown	peek	match|json|/project/drakkar/models.py|8	-	miss
+24951.4	unknown	get	match|json|/project/drakkar/models.py|8	-	miss
+24951.4	unknown	peek	match|SourceMessage|ExecutorTask|/projec...	-	miss
+24951.4	unknown	get	match|SourceMessage|ExecutorTask|/projec...	-	miss
+24951.4	unknown	peek	match|flush|/project/drakkar/models.py|8	-	miss
+24951.4	unknown	get	match|flush|/project/drakkar/models.py|8	-	miss
+24951.4	unknown	peek	match|warning|/project/drakkar/partition...	-	miss
+24951.4	unknown	get	match|warning|/project/drakkar/partition...	-	miss
+24951.4	unknown	peek	match|warning|/project/drakkar|10	-	miss
+24951.4	unknown	get	match|warning|/project/drakkar|10	-	miss
+24951.4	unknown	peek	match|time\.|/project/drakkar/partition....	-	miss
+24951.4	unknown	get	match|time\.|/project/drakkar/partition....	-	miss
+24951.4	unknown	peek	match|time\.|/project/drakkar|10	-	miss
+24951.4	unknown	get	match|time\.|/project/drakkar|10	-	miss
+24951.4	unknown	peek	match|async def|/project/drakkar/partiti...	-	miss
+24951.4	unknown	get	match|async def|/project/drakkar/partiti...	-	miss
+24951.4	unknown	peek	match|async def|/project/drakkar/recorde...	-	miss
+24951.4	unknown	get	match|async def|/project/drakkar/recorde...	-	miss
+24951.4	unknown	peek	match|flush|/project/drakkar/partition.p...	-	miss
+24951.4	unknown	get	match|flush|/project/drakkar/partition.p...	-	miss
+24951.4	unknown	peek	match|flush|/project/drakkar/recorder.py...	-	miss
+24951.4	unknown	get	match|flush|/project/drakkar/recorder.py...	-	miss
+24951.4	unknown	peek	match|CREATE TABLE|/project/drakkar/part...	-	miss
+24951.4	unknown	get	match|CREATE TABLE|/project/drakkar/part...	-	miss
+24951.4	unknown	peek	match|CREATE TABLE|/project/drakkar/reco...	-	miss
+24951.4	unknown	get	match|CREATE TABLE|/project/drakkar/reco...	-	miss
+24970.7	unknown	peek	match|import|/project/drakkar|8	-	miss
+24970.7	unknown	get	match|import|/project/drakkar|8	-	miss
+24970.7	unknown	peek	match|error|/project/drakkar/app.py|8	-	miss
+24970.7	unknown	get	match|error|/project/drakkar/app.py|8	-	miss
+24970.7	unknown	peek	match|error|/project/drakkar/consumer.py...	-	miss
+24970.8	unknown	get	match|error|/project/drakkar/consumer.py...	-	miss
+24970.8	unknown	peek	match|import|/project/drakkar/app.py|3	-	miss
+24970.8	unknown	get	match|import|/project/drakkar/app.py|3	-	miss
+24970.8	unknown	peek	match|import|/project/drakkar/consumer.p...	-	miss
+24970.8	unknown	get	match|import|/project/drakkar/consumer.p...	-	miss
+24970.8	unknown	peek	match|async def|/project/drakkar/partiti...	-	miss
+24970.8	unknown	get	match|async def|/project/drakkar/partiti...	-	miss
+24970.8	unknown	peek	match|import|/project/drakkar/partition....	-	miss
+24970.8	unknown	get	match|import|/project/drakkar/partition....	-	miss
+24970.8	unknown	peek	match|assert|/project/drakkar/recorder.p...	-	miss
+24970.8	unknown	get	match|assert|/project/drakkar/recorder.p...	-	miss
+24970.8	unknown	peek	match|assert|/project/drakkar/debug_serv...	-	miss
+24970.8	unknown	get	match|assert|/project/drakkar/debug_serv...	-	miss
+24970.8	unknown	peek	match|CREATE TABLE|/project/drakkar/reco...	-	miss
+24970.8	unknown	get	match|CREATE TABLE|/project/drakkar/reco...	-	miss
+24970.8	unknown	peek	match|CREATE TABLE|/project/drakkar/debu...	-	miss
+24970.8	unknown	get	match|CREATE TABLE|/project/drakkar/debu...	-	miss
+24970.8	unknown	peek	match|request|/project/drakkar/recorder....	-	miss
+24970.8	unknown	get	match|request|/project/drakkar/recorder....	-	miss
+24970.8	unknown	peek	match|request|/project/drakkar/debug_ser...	-	miss
+24970.8	unknown	get	match|request|/project/drakkar/debug_ser...	-	miss
+24970.8	unknown	peek	match|warning|/project/drakkar/producer....	-	miss
+24970.8	unknown	get	match|warning|/project/drakkar/producer....	-	miss
+24970.8	unknown	peek	match|async def|/project/drakkar/produce...	-	miss
+24970.8	unknown	get	match|async def|/project/drakkar/produce...	-	miss
+24970.8	unknown	peek	match|await|/project/drakkar/producer.py...	-	miss
+24970.8	unknown	get	match|await|/project/drakkar/producer.py...	-	miss
+24971.0	unknown	peek	match|INSERT INTO|/project/drakkar/db.py...	-	miss
+24971.0	unknown	get	match|INSERT INTO|/project/drakkar/db.py...	-	miss
+24971.0	unknown	peek	match|async with|/project/drakkar/db.py|...	-	miss
+24971.0	unknown	get	match|async with|/project/drakkar/db.py|...	-	miss
+24976.7	unknown	peek	match|async with|/project/drakkar/db.py|...	-	miss
+24976.7	unknown	get	match|async with|/project/drakkar/db.py|...	-	miss
+24976.7	unknown	peek	match|import|/project/tests/test_models....	-	miss
+24976.7	unknown	get	match|import|/project/tests/test_models....	-	miss
+24976.7	unknown	peek	match|def test_|/project/tests/test_mode...	-	miss
+24976.7	unknown	get	match|def test_|/project/tests/test_mode...	-	miss
+24976.7	unknown	peek	match|return|/project/drakkar/executor.p...	-	miss
+24976.7	unknown	get	match|return|/project/drakkar/executor.p...	-	miss
+24976.7	unknown	peek	match|return|/project/drakkar/offsets.py...	-	miss
+24976.7	unknown	get	match|return|/project/drakkar/offsets.py...	-	miss
+24976.7	unknown	peek	match|async def|/project/drakkar/partiti...	-	miss
+24976.7	unknown	get	match|async def|/project/drakkar/partiti...	-	miss
+24976.7	unknown	peek	match|metrics|/project/drakkar/partition...	-	miss
+24976.7	unknown	get	match|metrics|/project/drakkar/partition...	-	miss
+24976.7	unknown	peek	match|error|/project/drakkar/app.py|12	-	miss
+24976.7	unknown	get	match|error|/project/drakkar/app.py|12	-	miss
+24976.7	unknown	peek	match|await|/project/drakkar/app.py|2	-	miss
+24976.7	unknown	get	match|await|/project/drakkar/app.py|2	-	miss
+24976.7	unknown	peek	match|await|/project/drakkar/producer.py...	-	miss
+24976.7	unknown	get	match|await|/project/drakkar/producer.py...	-	miss
+24976.7	unknown	peek	match|import|/project/drakkar|8	-	miss
+24976.7	unknown	get	match|import|/project/drakkar|8	-	miss
+24976.7	unknown	peek	match|INSERT INTO|/project/drakkar/recor...	-	miss
+24976.7	unknown	get	match|INSERT INTO|/project/drakkar/recor...	-	miss
+24976.7	unknown	peek	match|INSERT INTO|/project/drakkar/db.py...	-	miss
+24976.7	unknown	get	match|INSERT INTO|/project/drakkar/db.py...	-	miss
+24976.7	unknown	peek	match|SELECT|/project/drakkar/recorder.p...	-	miss
+24976.7	unknown	get	match|SELECT|/project/drakkar/recorder.p...	-	miss
+24976.8	unknown	peek	match|SELECT|/project/drakkar/db.py|11	-	miss
+24976.8	unknown	get	match|SELECT|/project/drakkar/db.py|11	-	miss
+24976.8	unknown	peek	match|partition|/project/drakkar/partiti...	-	miss
+24976.8	unknown	get	match|partition|/project/drakkar/partiti...	-	miss
+24976.8	unknown	peek	match|partition|/project/drakkar/metrics...	-	miss
+24976.8	unknown	get	match|partition|/project/drakkar/metrics...	-	miss
+24976.8	unknown	peek	match|metrics|/project/drakkar/metrics.p...	-	miss
+24976.8	unknown	get	match|metrics|/project/drakkar/metrics.p...	-	miss
+24976.8	unknown	peek	match|signal|/project/drakkar/app.py|2	-	miss
+24976.8	unknown	get	match|signal|/project/drakkar/app.py|2	-	miss
+24976.8	unknown	peek	match|signal|/project/drakkar/db.py|2	-	miss
+24976.8	unknown	get	match|signal|/project/drakkar/db.py|2	-	miss
+24976.8	unknown	peek	match|INSERT INTO|/project/drakkar/app.p...	-	miss
+24976.8	unknown	get	match|INSERT INTO|/project/drakkar/app.p...	-	miss
+25002.7	unknown	peek	match|def\s+\w+|/project/drakkar/handler...	-	miss
+25002.7	unknown	get	match|def\s+\w+|/project/drakkar/handler...	-	miss
+25002.7	unknown	peek	match|\basync\b|/project/drakkar/db.py|9	-	miss
+25002.7	unknown	get	match|\basync\b|/project/drakkar/db.py|9	-	miss
+25002.8	unknown	peek	match|INSERT INTO|/project/drakkar/db.py...	-	miss
+25002.8	unknown	get	match|INSERT INTO|/project/drakkar/db.py...	-	miss
+25002.8	unknown	peek	match|request|/project/drakkar/db.py|9	-	miss
+25002.8	unknown	get	match|request|/project/drakkar/db.py|9	-	miss
+25002.8	unknown	peek	match|import|/project/drakkar|10	-	miss
+25002.8	unknown	get	match|import|/project/drakkar|10	-	miss
+25002.8	unknown	peek	match|signal|/project/drakkar/app.py|10	-	miss
+25002.8	unknown	get	match|signal|/project/drakkar/app.py|10	-	miss
+25002.8	unknown	peek	match|signal|/project/drakkar/consumer.p...	-	miss
+25002.8	unknown	get	match|signal|/project/drakkar/consumer.p...	-	miss
+25002.8	unknown	peek	match|consumer|/project/drakkar/app.py|1...	-	miss
+25002.8	unknown	get	match|consumer|/project/drakkar/app.py|1...	-	miss
+25002.8	unknown	peek	match|consumer|/project/drakkar/consumer...	-	miss
+25002.8	unknown	get	match|consumer|/project/drakkar/consumer...	-	miss
+25002.8	unknown	peek	match|error|/project/drakkar/app.py|15	-	miss
+25002.8	unknown	get	match|error|/project/drakkar/app.py|15	-	miss
+25002.8	unknown	peek	match|error|/project/drakkar/offsets.py|...	-	miss
+25002.8	unknown	get	match|error|/project/drakkar/offsets.py|...	-	miss
+25002.8	unknown	peek	match|return|/project/drakkar/app.py|15	-	miss
+25002.8	unknown	get	match|return|/project/drakkar/app.py|15	-	miss
+25002.8	unknown	peek	match|return|/project/drakkar/offsets.py...	-	miss
+25002.8	unknown	get	match|return|/project/drakkar/offsets.py...	-	miss
+25002.8	unknown	peek	match|commit|/project/drakkar/executor.p...	-	miss
+25002.8	unknown	get	match|commit|/project/drakkar/executor.p...	-	miss
+25002.8	unknown	peek	match|commit|/project/drakkar/app.py|12	-	miss
+25002.8	unknown	get	match|commit|/project/drakkar/app.py|12	-	miss
+25002.8	unknown	peek	match|ExecutorPool|/project/drakkar/exec...	-	miss
+25002.8	unknown	get	match|ExecutorPool|/project/drakkar/exec...	-	miss
+25002.9	unknown	peek	match|ExecutorPool|/project/drakkar/app....	-	miss
+25002.9	unknown	get	match|ExecutorPool|/project/drakkar/app....	-	miss
+25002.9	unknown	peek	match|import|/project/drakkar/recorder.p...	-	miss
+25002.9	unknown	get	match|import|/project/drakkar/recorder.p...	-	miss
+25002.9	unknown	peek	match|Exception|/project/drakkar|10	-	miss
+25002.9	unknown	get	match|Exception|/project/drakkar|10	-	miss
+25002.9	unknown	peek	match|Exception|/project/drakkar/recorde...	-	miss
+25002.9	unknown	get	match|Exception|/project/drakkar/recorde...	-	miss
+25002.9	unknown	peek	match|async def|/project/drakkar/partiti...	-	miss
+25002.9	unknown	get	match|async def|/project/drakkar/partiti...	-	miss
+25002.9	unknown	peek	match|TODO|FIXME|HACK|/project/drakkar/p...	-	miss
+25002.9	unknown	get	match|TODO|FIXME|HACK|/project/drakkar/p...	-	miss
+25002.9	unknown	peek	match|SourceMessage|ExecutorTask|/projec...	-	miss
+25002.9	unknown	get	match|SourceMessage|ExecutorTask|/projec...	-	miss
+25002.9	unknown	peek	match|warning|/project/drakkar/partition...	-	miss
+25002.9	unknown	get	match|warning|/project/drakkar/partition...	-	miss
+25002.9	unknown	peek	match|signal|/project/tests/test_app.py|...	-	miss
+25002.9	unknown	get	match|signal|/project/tests/test_app.py|...	-	miss
+25002.9	unknown	peek	match|pytest|/project/tests/test_app.py|...	-	miss
+25002.9	unknown	get	match|pytest|/project/tests/test_app.py|...	-	miss
+25002.9	unknown	peek	match|mock|/project/tests/test_app.py|9	-	miss
+25002.9	unknown	get	match|mock|/project/tests/test_app.py|9	-	miss
+25019.5	unknown	peek	match|import|/project/drakkar|12	-	miss
+25019.5	unknown	get	match|import|/project/drakkar|12	-	miss
+25019.5	unknown	peek	match|async def test_|/project/drakkar|1...	-	miss
+25019.5	unknown	get	match|async def test_|/project/drakkar|1...	-	miss
+25019.6	unknown	peek	match|raise\s+\w+|/project/drakkar|10	-	miss
+25019.6	unknown	get	match|raise\s+\w+|/project/drakkar|10	-	miss
+25019.6	unknown	peek	match|error|/project/drakkar/app.py|5	-	miss
+25019.6	unknown	get	match|error|/project/drakkar/app.py|5	-	miss
+25019.7	unknown	peek	match|mock|/project/drakkar/app.py|1	-	miss
+25019.7	unknown	get	match|mock|/project/drakkar/app.py|1	-	miss
+25019.7	unknown	peek	match|conftest|/project/drakkar|5	-	miss
+25019.7	unknown	get	match|conftest|/project/drakkar|5	-	miss
+25019.7	unknown	peek	match|commit|/project/drakkar|11	-	miss
+25019.7	unknown	get	match|commit|/project/drakkar|11	-	miss
+25019.7	unknown	peek	match|time\.|/project/drakkar|11	-	miss
+25019.7	unknown	get	match|time\.|/project/drakkar|11	-	miss
+25019.7	unknown	peek	match|CREATE TABLE|/project/drakkar/reco...	-	miss
+25019.7	unknown	get	match|CREATE TABLE|/project/drakkar/reco...	-	miss
+25019.7	unknown	peek	match|BaseDrakkarHandler|/project/drakka...	-	miss
+25019.7	unknown	get	match|BaseDrakkarHandler|/project/drakka...	-	miss
+25019.7	unknown	peek	match|def __init__|/project/drakkar|12	-	miss
+25019.7	unknown	get	match|def __init__|/project/drakkar|12	-	miss
+25019.7	unknown	peek	match|BaseDrakkarHandler|/project/drakka...	-	miss
+25019.7	unknown	get	match|BaseDrakkarHandler|/project/drakka...	-	miss
+25019.8	unknown	peek	match|\basync\b|/project/drakkar|2	-	miss
+25019.8	unknown	get	match|\basync\b|/project/drakkar|2	-	miss
+25019.8	unknown	peek	match|tailwind|/project/drakkar|2	-	miss
+25019.8	unknown	get	match|tailwind|/project/drakkar|2	-	miss
+25019.8	unknown	peek	match|producer|/project/drakkar|2	-	miss
+25019.8	unknown	get	match|producer|/project/drakkar|2	-	miss
+25083.2	unknown	peek	match|error|/project/drakkar/app.py|4	-	miss
+25083.2	unknown	get	match|error|/project/drakkar/app.py|4	-	miss
+25083.2	unknown	peek	match|conftest|/project/drakkar/app.py|2	-	miss
+25083.2	unknown	get	match|conftest|/project/drakkar/app.py|2	-	miss
+25083.3	unknown	peek	match|assert|/project/tests/test_partiti...	-	miss
+25083.3	unknown	get	match|assert|/project/tests/test_partiti...	-	miss
+25083.3	unknown	peek	match|assert|/project/drakkar/consumer.p...	-	miss
+25083.3	unknown	get	match|assert|/project/drakkar/consumer.p...	-	miss
+25083.3	unknown	peek	match|SELECT|/project/drakkar/recorder.p...	-	miss
+25083.3	unknown	get	match|SELECT|/project/drakkar/recorder.p...	-	miss
+25083.3	unknown	peek	match|warning|/project/drakkar/recorder....	-	miss
+25083.3	unknown	get	match|warning|/project/drakkar/recorder....	-	miss
+25083.3	unknown	peek	match|import|/project/drakkar|11	-	miss
+25083.3	unknown	get	match|import|/project/drakkar|11	-	miss
+25083.3	unknown	peek	match|import|/project/drakkar/debug_serv...	-	miss
+25083.3	unknown	get	match|import|/project/drakkar/debug_serv...	-	miss
+25083.3	unknown	peek	match|logger|/project/drakkar/db.py|13	-	miss
+25083.3	unknown	get	match|logger|/project/drakkar/db.py|13	-	miss
+25083.3	unknown	peek	match|logger|/project/drakkar/logging.py...	-	miss
+25083.3	unknown	get	match|logger|/project/drakkar/logging.py...	-	miss
+25083.3	unknown	peek	match|TODO|FIXME|HACK|/project/drakkar/p...	-	miss
+25083.3	unknown	get	match|TODO|FIXME|HACK|/project/drakkar/p...	-	miss
+25083.3	unknown	peek	match|warning|/project/drakkar/partition...	-	miss
+25083.3	unknown	get	match|warning|/project/drakkar/partition...	-	miss
+25083.3	unknown	peek	match|test_.*error|/project/drakkar/part...	-	miss
+25083.3	unknown	get	match|test_.*error|/project/drakkar/part...	-	miss
+25083.3	unknown	peek	match|Histogram|Counter|Gauge|/project/d...	-	miss
+25083.3	unknown	get	match|Histogram|Counter|Gauge|/project/d...	-	miss
+25083.4	unknown	peek	match|Histogram|Counter|Gauge|/project/d...	-	miss
+25083.4	unknown	get	match|Histogram|Counter|Gauge|/project/d...	-	miss
+25083.4	unknown	peek	match|offset|/project/drakkar/offsets.py...	-	miss
+25083.4	unknown	get	match|offset|/project/drakkar/offsets.py...	-	miss
+25083.4	unknown	peek	match|offset|/project/drakkar/metrics.py...	-	miss
+25083.4	unknown	get	match|offset|/project/drakkar/metrics.py...	-	miss
+25083.4	unknown	peek	match|test_.*error|/project/drakkar/prod...	-	miss
+25083.4	unknown	get	match|test_.*error|/project/drakkar/prod...	-	miss
+25083.4	unknown	peek	match|test_.*error|/project/tests|12	-	miss
+25083.4	unknown	get	match|test_.*error|/project/tests|12	-	miss
+25103.8	unknown	peek	match|async def|/project/drakkar/partiti...	-	miss
+25103.9	unknown	get	match|async def|/project/drakkar/partiti...	-	miss
+25103.9	unknown	peek	match|consumer|/project/drakkar/partitio...	-	miss
+25103.9	unknown	get	match|consumer|/project/drakkar/partitio...	-	miss
+25103.9	unknown	peek	match|logger|/project/drakkar/logging.py...	-	miss
+25103.9	unknown	get	match|logger|/project/drakkar/logging.py...	-	miss
+25103.9	unknown	peek	match|async def test_|/project/drakkar/l...	-	miss
+25103.9	unknown	get	match|async def test_|/project/drakkar/l...	-	miss
+25103.9	unknown	peek	match|import|/project/drakkar/app.py|4	-	miss
+25103.9	unknown	get	match|import|/project/drakkar/app.py|4	-	miss
+25103.9	unknown	peek	match|import|/project/drakkar/consumer.p...	-	miss
+25103.9	unknown	get	match|import|/project/drakkar/consumer.p...	-	miss
+25103.9	unknown	peek	match|error|/project/drakkar/app.py|13	-	miss
+25103.9	unknown	get	match|error|/project/drakkar/app.py|13	-	miss
+25103.9	unknown	peek	match|signal|/project/drakkar/app.py|13	-	miss
+25103.9	unknown	get	match|signal|/project/drakkar/app.py|13	-	miss
+25103.9	unknown	peek	match|raise\s+\w+|/project/drakkar|4	-	miss
+25103.9	unknown	get	match|raise\s+\w+|/project/drakkar|4	-	miss
+25103.9	unknown	peek	match|error|/project/drakkar|4	-	miss
+25103.9	unknown	get	match|error|/project/drakkar|4	-	miss
+25103.9	unknown	peek	match|structlog|/project/drakkar/handler...	-	miss
+25103.9	unknown	get	match|structlog|/project/drakkar/handler...	-	miss
+25103.9	unknown	peek	match|structlog|/project/drakkar|15	-	miss
+25103.9	unknown	get	match|structlog|/project/drakkar|15	-	miss
+25103.9	unknown	peek	match|commit|/project/drakkar/app.py|223	-	miss
+25103.9	unknown	get	match|commit|/project/drakkar/app.py|223	-	miss
+25103.9	unknown	peek	match|commit|/project/drakkar/producer.p...	-	miss
+25103.9	unknown	get	match|commit|/project/drakkar/producer.p...	-	miss
+25104.0	unknown	peek	match|await|/project/drakkar/app.py|223	-	miss
+25104.0	unknown	get	match|await|/project/drakkar/app.py|223	-	miss
+25104.0	unknown	peek	match|await|/project/drakkar/producer.py...	-	miss
+25104.0	unknown	get	match|await|/project/drakkar/producer.py...	-	miss
+25104.0	unknown	peek	match|assert|/project/drakkar/app.py|8	-	miss
+25104.0	unknown	get	match|assert|/project/drakkar/app.py|8	-	miss
+25114.6	unknown	peek	match|import|/project/drakkar|15	-	miss
+25114.6	unknown	get	match|import|/project/drakkar|15	-	miss
+25114.7	unknown	peek	match|json|/project/drakkar|5	-	miss
+25114.7	unknown	get	match|json|/project/drakkar|5	-	miss
+25114.7	unknown	peek	match|producer|/project/drakkar|14	-	miss
+25114.7	unknown	get	match|producer|/project/drakkar|14	-	miss
+25114.7	unknown	peek	match|producer|/project/drakkar/producer...	-	miss
+25114.7	unknown	get	match|producer|/project/drakkar/producer...	-	miss
+25114.7	unknown	peek	match|error|/project/drakkar/app.py|15	-	miss
+25114.7	unknown	get	match|error|/project/drakkar/app.py|15	-	miss
+25114.7	unknown	peek	match|pytest|/project/drakkar/templates|...	-	miss
+25114.7	unknown	get	match|pytest|/project/drakkar/templates|...	-	miss
+25114.7	unknown	peek	match|tailwind|/project/drakkar/template...	-	miss
+25114.7	unknown	get	match|tailwind|/project/drakkar/template...	-	miss
+25114.7	unknown	peek	match|async with|/project/drakkar/templa...	-	miss
+25114.7	unknown	get	match|async with|/project/drakkar/templa...	-	miss
+25114.7	unknown	peek	match|flush|/project/drakkar/recorder.py...	-	miss
+25114.7	unknown	get	match|flush|/project/drakkar/recorder.py...	-	miss
+25114.7	unknown	peek	match|flush|/project/drakkar/consumer.py...	-	miss
+25114.7	unknown	get	match|flush|/project/drakkar/consumer.py...	-	miss
+25114.7	unknown	peek	match|template|/project/drakkar/debug_se...	-	miss
+25114.7	unknown	get	match|template|/project/drakkar/debug_se...	-	miss
+25114.7	unknown	peek	match|SourceMessage|ExecutorTask|/projec...	-	miss
+25114.7	unknown	get	match|SourceMessage|ExecutorTask|/projec...	-	miss
+25114.7	unknown	peek	match|async with|/project/drakkar/debug_...	-	miss
+25114.7	unknown	get	match|async with|/project/drakkar/debug_...	-	miss
+25114.7	unknown	peek	match|structlog|/project/drakkar|7	-	miss
+25114.7	unknown	get	match|structlog|/project/drakkar|7	-	miss
+25114.7	unknown	peek	match|consumer|/project/drakkar|15	-	miss
+25114.7	unknown	get	match|consumer|/project/drakkar|15	-	miss
+25114.7	unknown	peek	match|render|html|/project/drakkar|15	-	miss
+25114.7	unknown	get	match|render|html|/project/drakkar|15	-	miss
+25114.7	unknown	peek	match|consumer|/project/drakkar/consumer...	-	miss
+25114.7	unknown	get	match|consumer|/project/drakkar/consumer...	-	miss
+25220.7	unknown	peek	match|pytest|/project/tests/test_app.py|...	-	miss
+25220.7	unknown	get	match|pytest|/project/tests/test_app.py|...	-	miss
+25220.7	unknown	peek	match|async def|/project/drakkar/partiti...	-	miss
+25220.7	unknown	get	match|async def|/project/drakkar/partiti...	-	miss
+25220.7	unknown	peek	match|async def|/project/drakkar/debug_s...	-	miss
+25220.7	unknown	get	match|async def|/project/drakkar/debug_s...	-	miss
+25220.8	unknown	peek	match|def\s+\w+|/project/drakkar/handler...	-	miss
+25220.8	unknown	get	match|def\s+\w+|/project/drakkar/handler...	-	miss
+25220.8	unknown	peek	match|def\s+\w+|/project/drakkar/consume...	-	miss
+25220.8	unknown	get	match|def\s+\w+|/project/drakkar/consume...	-	miss
+25220.8	unknown	peek	match|consumer|/project/drakkar/handler....	-	miss
+25220.8	unknown	get	match|consumer|/project/drakkar/handler....	-	miss
+25220.8	unknown	peek	match|consumer|/project/drakkar/consumer...	-	miss
+25220.8	unknown	get	match|consumer|/project/drakkar/consumer...	-	miss
+25220.8	unknown	peek	match|raise\s+\w+|/project/drakkar/model...	-	miss
+25220.8	unknown	get	match|raise\s+\w+|/project/drakkar/model...	-	miss
+25220.8	unknown	peek	match|raise\s+\w+|/project/drakkar|10	-	miss
+25220.8	unknown	get	match|raise\s+\w+|/project/drakkar|10	-	miss
+25220.8	unknown	peek	match|class\s+\w+|/project/drakkar/model...	-	miss
+25220.8	unknown	get	match|class\s+\w+|/project/drakkar/model...	-	miss
+25220.8	unknown	peek	match|class\s+\w+|/project/drakkar|10	-	miss
+25220.8	unknown	get	match|class\s+\w+|/project/drakkar|10	-	miss
+25220.8	unknown	peek	match|error|/project/drakkar/app.py|6	-	miss
+25220.8	unknown	get	match|error|/project/drakkar/app.py|6	-	miss
+25220.8	unknown	peek	match|return|/project/drakkar/models.py|...	-	miss
+25220.8	unknown	get	match|return|/project/drakkar/models.py|...	-	miss
+25220.8	unknown	peek	match|import|/project/drakkar/partition....	-	miss
+25220.8	unknown	get	match|import|/project/drakkar/partition....	-	miss
+25220.8	unknown	peek	match|json|/project/drakkar|12	-	miss
+25220.8	unknown	get	match|json|/project/drakkar|12	-	miss
+25220.8	unknown	peek	match|json|/project/drakkar/debug_server...	-	miss
+25220.8	unknown	get	match|json|/project/drakkar/debug_server...	-	miss
+25220.8	unknown	peek	match|request|/project/drakkar|12	-	miss
+25220.8	unknown	get	match|request|/project/drakkar|12	-	miss
+25220.8	unknown	peek	match|request|/project/drakkar/debug_ser...	-	miss
+25220.8	unknown	get	match|request|/project/drakkar/debug_ser...	-	miss
+25220.8	unknown	peek	match|import|/project/drakkar|7	-	miss
+25220.9	unknown	get	match|import|/project/drakkar|7	-	miss
+25220.9	unknown	peek	match|\basync\b|/project/drakkar|6	-	miss
+25220.9	unknown	get	match|\basync\b|/project/drakkar|6	-	miss
+25220.9	unknown	peek	match|producer|/project/drakkar|6	-	miss
+25220.9	unknown	get	match|producer|/project/drakkar|6	-	miss
+25220.9	unknown	peek	match|render|html|/project/drakkar|6	-	miss
+25220.9	unknown	get	match|render|html|/project/drakkar|6	-	miss
+25271.6	unknown	peek	match|commit|/project/drakkar/models.py|...	-	miss
+25271.6	unknown	get	match|commit|/project/drakkar/models.py|...	-	miss
+25271.6	unknown	peek	match|SourceMessage|ExecutorTask|/projec...	-	miss
+25271.6	unknown	get	match|SourceMessage|ExecutorTask|/projec...	-	miss
+25271.6	unknown	peek	match|ExecutorPool|/project/tests/test_c...	-	miss
+25271.6	unknown	get	match|ExecutorPool|/project/tests/test_c...	-	miss
+25271.6	unknown	peek	match|mock|/project/tests/test_consumer....	-	miss
+25271.6	unknown	get	match|mock|/project/tests/test_consumer....	-	miss
+25271.6	unknown	peek	match|window|/project/drakkar/partition....	-	miss
+25271.6	unknown	get	match|window|/project/drakkar/partition....	-	miss
+25271.7	unknown	peek	match|window|/project/drakkar/config.py|...	-	miss
+25271.7	unknown	get	match|window|/project/drakkar/config.py|...	-	miss
+25271.7	unknown	peek	match|self\._|/project/drakkar/partition...	-	miss
+25271.7	unknown	get	match|self\._|/project/drakkar/partition...	-	miss
+25271.7	unknown	peek	match|self\._|/project/drakkar/config.py...	-	miss
+25271.7	unknown	get	match|self\._|/project/drakkar/config.py...	-	miss
+25271.7	unknown	peek	match|INSERT INTO|/project/drakkar/db.py...	-	miss
+25271.7	unknown	get	match|INSERT INTO|/project/drakkar/db.py...	-	miss
+25271.7	unknown	peek	match|INSERT INTO|/project/drakkar|13	-	miss
+25271.7	unknown	get	match|INSERT INTO|/project/drakkar|13	-	miss
+25271.7	unknown	peek	match|time\.|/project/drakkar/db.py|13	-	miss
+25271.7	unknown	get	match|time\.|/project/drakkar/db.py|13	-	miss
+25271.7	unknown	peek	match|time\.|/project/drakkar|13	-	miss
+25271.7	unknown	get	match|time\.|/project/drakkar|13	-	miss
+25271.7	unknown	peek	match|signal|/project/drakkar/handler.py...	-	miss
+25271.7	unknown	get	match|signal|/project/drakkar/handler.py...	-	miss
+25271.7	unknown	peek	match|signal|/project/drakkar/app.py|10	-	miss
+25271.7	unknown	get	match|signal|/project/drakkar/app.py|10	-	miss
+25271.7	unknown	peek	match|BaseDrakkarHandler|/project/drakka...	-	miss
+25271.7	unknown	get	match|BaseDrakkarHandler|/project/drakka...	-	miss
+25271.7	unknown	peek	match|BaseDrakkarHandler|/project/drakka...	-	miss
+25271.7	unknown	get	match|BaseDrakkarHandler|/project/drakka...	-	miss
+25271.7	unknown	peek	match|class\s+\w+|/project/drakkar/handl...	-	miss
+25271.7	unknown	get	match|class\s+\w+|/project/drakkar/handl...	-	miss
+25271.7	unknown	peek	match|class\s+\w+|/project/drakkar/app.p...	-	miss
+25271.7	unknown	get	match|class\s+\w+|/project/drakkar/app.p...	-	miss
+25271.7	unknown	peek	match|def __init__|/project/drakkar|14	-	miss
+25271.7	unknown	get	match|def __init__|/project/drakkar|14	-	miss
+25271.7	unknown	peek	match|partition|/project/drakkar|14	-	miss
+25271.7	unknown	get	match|partition|/project/drakkar|14	-	miss
+25271.7	unknown	peek	match|window|/project/drakkar|14	-	miss
+25271.7	unknown	get	match|window|/project/drakkar|14	-	miss
+25271.7	unknown	peek	match|ExecutorPool|/project/drakkar/exec...	-	miss
+25271.8	unknown	get	match|ExecutorPool|/project/drakkar/exec...	-	miss
+25271.8	unknown	peek	match|ExecutorPool|/project/drakkar/db.p...	-	miss
+25271.8	unknown	get	match|ExecutorPool|/project/drakkar/db.p...	-	miss
+25271.8	unknown	peek	match|INSERT INTO|/project/drakkar/execu...	-	miss
+25271.8	unknown	get	match|INSERT INTO|/project/drakkar/execu...	-	miss
+25271.8	unknown	peek	match|metrics|/project/drakkar/executor....	-	miss
+25271.8	unknown	get	match|metrics|/project/drakkar/executor....	-	miss
+25271.8	unknown	peek	match|metrics|/project/drakkar/db.py|1	-	miss
+25271.8	unknown	get	match|metrics|/project/drakkar/db.py|1	-	miss
+25271.8	unknown	peek	match|error|/project/drakkar/app.py|7	-	miss
+25271.8	unknown	get	match|error|/project/drakkar/app.py|7	-	miss
+25271.8	unknown	peek	match|error|/project/drakkar/partition.p...	-	miss
+25271.8	unknown	get	match|error|/project/drakkar/partition.p...	-	miss
+25271.8	unknown	peek	match|window|/project/drakkar/app.py|3	-	miss
+25271.8	unknown	get	match|window|/project/drakkar/app.py|3	-	miss
+25271.8	unknown	peek	match|import|/project/drakkar|6	-	miss
+25271.8	unknown	get	match|import|/project/drakkar|6	-	miss
+25271.8	unknown	peek	match|error|/project/drakkar/config.py|7	-	miss
+25271.8	unknown	get	match|error|/project/drakkar/config.py|7	-	miss
+25271.8	unknown	peek	match|INSERT INTO|/project/drakkar/app.p...	-	miss
+25271.8	unknown	get	match|INSERT INTO|/project/drakkar/app.p...	-	miss
+25271.8	unknown	peek	match|INSERT INTO|/project/drakkar/confi...	-	miss
+25271.8	unknown	get	match|INSERT INTO|/project/drakkar/confi...	-	miss
+25295.4	unknown	peek	match|assert|/project|8	-	miss
+25295.4	unknown	get	match|assert|/project|8	-	miss
+25295.4	unknown	peek	match|assert|/project/tests/test_partiti...	-	miss
+25295.4	unknown	get	match|assert|/project/tests/test_partiti...	-	miss
+25295.4	unknown	peek	match|TODO|FIXME|HACK|/project|8	-	miss
+25295.4	unknown	get	match|TODO|FIXME|HACK|/project|8	-	miss
+25295.4	unknown	peek	match|TODO|FIXME|HACK|/project/tests/tes...	-	miss
+25295.4	unknown	get	match|TODO|FIXME|HACK|/project/tests/tes...	-	miss
+25295.4	unknown	peek	match|conftest|/project|8	-	miss
+25295.4	unknown	get	match|conftest|/project|8	-	miss
+25295.5	unknown	peek	match|conftest|/project/tests/test_parti...	-	miss
+25295.5	unknown	get	match|conftest|/project/tests/test_parti...	-	miss
+25295.5	unknown	peek	match|Histogram|Counter|Gauge|/project/d...	-	miss
+25295.5	unknown	get	match|Histogram|Counter|Gauge|/project/d...	-	miss
+25295.5	unknown	peek	match|Histogram|Counter|Gauge|/project/d...	-	miss
+25295.5	unknown	get	match|Histogram|Counter|Gauge|/project/d...	-	miss
+25295.5	unknown	peek	match|Exception|/project/drakkar/recorde...	-	miss
+25295.5	unknown	get	match|Exception|/project/drakkar/recorde...	-	miss
+25295.5	unknown	peek	match|Exception|/project/drakkar/metrics...	-	miss
+25295.5	unknown	get	match|Exception|/project/drakkar/metrics...	-	miss
+25295.5	unknown	peek	match|error|/project/drakkar/app.py|242	-	miss
+25295.5	unknown	get	match|error|/project/drakkar/app.py|242	-	miss
+25295.5	unknown	peek	match|metrics|/project/drakkar/app.py|24...	-	miss
+25295.5	unknown	get	match|metrics|/project/drakkar/app.py|24...	-	miss
+25295.5	unknown	peek	match|asyncio|/project/drakkar|8	-	miss
+25295.5	unknown	get	match|asyncio|/project/drakkar|8	-	miss
+25295.5	unknown	peek	match|asyncio|/project/drakkar/producer....	-	miss
+25295.5	unknown	get	match|asyncio|/project/drakkar/producer....	-	miss
+25295.5	unknown	peek	match|await|/project/drakkar|8	-	miss
+25295.5	unknown	get	match|await|/project/drakkar|8	-	miss
+25295.5	unknown	peek	match|await|/project/drakkar/producer.py...	-	miss
+25295.5	unknown	get	match|await|/project/drakkar/producer.py...	-	miss
+25295.5	unknown	peek	match|import|/project/drakkar|1	-	miss
+25295.5	unknown	get	match|import|/project/drakkar|1	-	miss
+25295.5	unknown	peek	match|request|/project/drakkar|1	-	miss
+25295.5	unknown	get	match|request|/project/drakkar|1	-	miss
+25295.5	unknown	peek	match|async def test_|/project/drakkar|1	-	miss
+25295.5	unknown	get	match|async def test_|/project/drakkar|1	-	miss
+25295.5	unknown	peek	match|ExecutorPool|/project/drakkar|8	-	miss
+25295.5	unknown	get	match|ExecutorPool|/project/drakkar|8	-	miss
+25295.5	unknown	peek	match|CREATE TABLE|/project/drakkar|8	-	miss
+25295.5	unknown	get	match|CREATE TABLE|/project/drakkar|8	-	miss
+25295.6	unknown	peek	match|time\.|/project/drakkar|8	-	miss
+25295.6	unknown	get	match|time\.|/project/drakkar|8	-	miss
+25295.6	unknown	peek	match|INSERT INTO|/project/drakkar/metri...	-	miss
+25295.6	unknown	get	match|INSERT INTO|/project/drakkar/metri...	-	miss
+25295.6	unknown	peek	match|class\s+\w+|/project/drakkar/metri...	-	miss
+25295.6	unknown	get	match|class\s+\w+|/project/drakkar/metri...	-	miss
+25295.6	unknown	peek	match|conftest|/project/drakkar/app.py|4	-	miss
+25295.6	unknown	get	match|conftest|/project/drakkar/app.py|4	-	miss
+25381.3	unknown	peek	match|def test_|/project/tests/test_mode...	-	miss
+25381.3	unknown	get	match|def test_|/project/tests/test_mode...	-	miss
+25381.3	unknown	peek	match|render|html|/project/tests/test_mo...	-	miss
+25381.3	unknown	get	match|render|html|/project/tests/test_mo...	-	miss
+25381.3	unknown	peek	match|async def test_|/project/tests/tes...	-	miss
+25381.3	unknown	get	match|async def test_|/project/tests/tes...	-	miss
+25381.4	unknown	peek	match|pytest|/project/tests/test_app.py|...	-	miss
+25381.4	unknown	get	match|pytest|/project/tests/test_app.py|...	-	miss
+25381.4	unknown	peek	match|warning|/project/tests/test_app.py...	-	miss
+25381.4	unknown	get	match|warning|/project/tests/test_app.py...	-	miss
+25381.4	unknown	peek	match|partition|/project/drakkar/partiti...	-	miss
+25381.4	unknown	get	match|partition|/project/drakkar/partiti...	-	miss
+25381.4	unknown	peek	match|Histogram|Counter|Gauge|/project/d...	-	miss
+25381.4	unknown	get	match|Histogram|Counter|Gauge|/project/d...	-	miss
+25381.4	unknown	peek	match|Histogram|Counter|Gauge|/project/d...	-	miss
+25381.4	unknown	get	match|Histogram|Counter|Gauge|/project/d...	-	miss
+25381.4	unknown	peek	match|json|/project/drakkar|215	-	miss
+25381.4	unknown	get	match|json|/project/drakkar|215	-	miss
+25381.4	unknown	peek	match|json|/project/drakkar/metrics.py|2...	-	miss
+25381.4	unknown	get	match|json|/project/drakkar/metrics.py|2...	-	miss
+25381.4	unknown	peek	match|structlog|/project/drakkar|215	-	miss
+25381.4	unknown	get	match|structlog|/project/drakkar|215	-	miss
+25381.4	unknown	peek	match|structlog|/project/drakkar/metrics...	-	miss
+25381.4	unknown	get	match|structlog|/project/drakkar/metrics...	-	miss
+25381.4	unknown	peek	match|import|/project/drakkar|4	-	miss
+25381.4	unknown	get	match|import|/project/drakkar|4	-	miss
+25381.4	unknown	peek	match|error|/project/drakkar/app.py|13	-	miss
+25381.4	unknown	get	match|error|/project/drakkar/app.py|13	-	miss
+25381.4	unknown	peek	match|window|/project/drakkar/app.py|7	-	miss
+25381.4	unknown	get	match|window|/project/drakkar/app.py|7	-	miss
+25381.4	unknown	peek	match|async def|/project/drakkar/partiti...	-	miss
+25381.4	unknown	get	match|async def|/project/drakkar/partiti...	-	miss
+25381.4	unknown	peek	match|Histogram|Counter|Gauge|/project/d...	-	miss
+25381.4	unknown	get	match|Histogram|Counter|Gauge|/project/d...	-	miss
+25381.4	unknown	peek	match|logger|/project/drakkar/partition....	-	miss
+25381.4	unknown	get	match|logger|/project/drakkar/partition....	-	miss
+25381.4	unknown	peek	match|mock|/project/drakkar/app.py|13	-	miss
+25381.4	unknown	get	match|mock|/project/drakkar/app.py|13	-	miss
+25381.4	unknown	peek	match|class\s+\w+|/project/drakkar/model...	-	miss
+25381.4	unknown	get	match|class\s+\w+|/project/drakkar/model...	-	miss
+25390.6	unknown	peek	match|import|/project/drakkar/consumer.p...	-	miss
+25390.6	unknown	get	match|import|/project/drakkar/consumer.p...	-	miss
+25390.6	unknown	peek	match|await|/project/drakkar/consumer.py...	-	miss
+25390.6	unknown	get	match|await|/project/drakkar/consumer.py...	-	miss
+25390.6	unknown	peek	match|test_.*error|/project/drakkar/cons...	-	miss
+25390.6	unknown	get	match|test_.*error|/project/drakkar/cons...	-	miss
+25390.6	unknown	peek	match|offset|/project/drakkar/models.py|...	-	miss
+25390.6	unknown	get	match|offset|/project/drakkar/models.py|...	-	miss
+25390.6	unknown	peek	match|commit|/project/drakkar/models.py|...	-	miss
+25390.6	unknown	get	match|commit|/project/drakkar/models.py|...	-	miss
+25390.6	unknown	peek	match|class\s+\w+|/project/drakkar/model...	-	miss
+25390.6	unknown	get	match|class\s+\w+|/project/drakkar/model...	-	miss
+25390.6	unknown	peek	match|error|/project/drakkar/recorder.py...	-	miss
+25390.6	unknown	get	match|error|/project/drakkar/recorder.py...	-	miss
+25390.7	unknown	peek	match|error|/project/drakkar/app.py|249	-	miss
+25390.7	unknown	get	match|error|/project/drakkar/app.py|249	-	miss
+25390.7	unknown	peek	match|INSERT INTO|/project/drakkar/recor...	-	miss
+25390.7	unknown	get	match|INSERT INTO|/project/drakkar/recor...	-	miss
+25390.7	unknown	peek	match|INSERT INTO|/project/drakkar/app.p...	-	miss
+25390.7	unknown	get	match|INSERT INTO|/project/drakkar/app.p...	-	miss
+25390.7	unknown	peek	match|flush|/project/drakkar/recorder.py...	-	miss
+25390.7	unknown	get	match|flush|/project/drakkar/recorder.py...	-	miss
+25390.7	unknown	peek	match|flush|/project/drakkar/app.py|249	-	miss
+25390.7	unknown	get	match|flush|/project/drakkar/app.py|249	-	miss
+25390.7	unknown	peek	match|self\._|/project/drakkar/config.py...	-	miss
+25390.7	unknown	get	match|self\._|/project/drakkar/config.py...	-	miss
+25390.7	unknown	peek	match|async def|/project/drakkar/partiti...	-	miss
+25390.7	unknown	get	match|async def|/project/drakkar/partiti...	-	miss
+25390.7	unknown	peek	match|Exception|/project/drakkar/partiti...	-	miss
+25390.7	unknown	get	match|Exception|/project/drakkar/partiti...	-	miss
+25390.7	unknown	peek	match|async with|/project/drakkar/db.py|...	-	miss
+25390.7	unknown	get	match|async with|/project/drakkar/db.py|...	-	miss
+25390.7	unknown	peek	match|async with|/project/drakkar/produc...	-	miss
+25390.7	unknown	get	match|async with|/project/drakkar/produc...	-	miss
+25390.7	unknown	peek	match|await|/project/drakkar/db.py|14	-	miss
+25390.7	unknown	get	match|await|/project/drakkar/db.py|14	-	miss
+25390.7	unknown	peek	match|await|/project/drakkar/producer.py...	-	miss
+25390.7	unknown	get	match|await|/project/drakkar/producer.py...	-	miss
+25390.7	unknown	peek	match|async def test_|/project/drakkar/r...	-	miss
+25390.7	unknown	get	match|async def test_|/project/drakkar/r...	-	miss
+25390.7	unknown	peek	match|async def test_|/project/tests/tes...	-	miss
+25390.7	unknown	get	match|async def test_|/project/tests/tes...	-	miss
+25390.7	unknown	peek	match|Exception|/project/drakkar/recorde...	-	miss
+25390.7	unknown	get	match|Exception|/project/drakkar/recorde...	-	miss
+25390.8	unknown	peek	match|Exception|/project/tests/test_metr...	-	miss
+25390.8	unknown	get	match|Exception|/project/tests/test_metr...	-	miss
+25390.8	unknown	peek	match|request|/project/drakkar/debug_ser...	-	miss
+25390.8	unknown	get	match|request|/project/drakkar/debug_ser...	-	miss
+25390.8	unknown	peek	match|import|/project/drakkar|2	-	miss
+25390.8	unknown	get	match|import|/project/drakkar|2	-	miss
+25390.8	unknown	peek	match|asyncio|/project/drakkar|2	-	miss
+25390.8	unknown	get	match|asyncio|/project/drakkar|2	-	miss
+25390.9	unknown	peek	match|error|/project/drakkar/app.py|15	-	miss
+25390.9	unknown	get	match|error|/project/drakkar/app.py|15	-	miss
+25390.9	unknown	peek	match|conftest|/project/drakkar/app.py|3	-	miss
+25390.9	unknown	get	match|conftest|/project/drakkar/app.py|3	-	miss
+25390.9	unknown	peek	match|class\s+\w+|/project/drakkar/app.p...	-	miss
+25390.9	unknown	get	match|class\s+\w+|/project/drakkar/app.p...	-	miss
+25391.0	unknown	peek	match|structlog|/project/drakkar/executo...	-	miss
+25391.0	unknown	get	match|structlog|/project/drakkar/executo...	-	miss
+25391.0	unknown	peek	match|structlog|/project/drakkar|157	-	miss
+25391.0	unknown	get	match|structlog|/project/drakkar|157	-	miss
+25391.0	unknown	peek	match|ExecutorPool|/project/drakkar/exec...	-	miss
+25391.0	unknown	get	match|ExecutorPool|/project/drakkar/exec...	-	miss
+25391.0	unknown	peek	match|ExecutorPool|/project/drakkar|3	-	miss
+25391.0	unknown	get	match|ExecutorPool|/project/drakkar|3	-	miss
+25391.0	unknown	peek	match|async def test_|/project/drakkar/o...	-	miss
+25391.0	unknown	get	match|async def test_|/project/drakkar/o...	-	miss
+25391.0	unknown	peek	match|return|/project/drakkar/offsets.py...	-	miss
+25391.0	unknown	get	match|return|/project/drakkar/offsets.py...	-	miss
+25391.0	unknown	peek	match|consumer|/project/drakkar/offsets....	-	miss
+25391.0	unknown	get	match|consumer|/project/drakkar/offsets....	-	miss
+25391.0	unknown	peek	match|await|/project/drakkar/app.py|15	-	miss
+25391.0	unknown	get	match|await|/project/drakkar/app.py|15	-	miss
+25391.0	unknown	peek	match|INSERT INTO|/project/drakkar/consu...	-	miss
+25391.0	unknown	get	match|INSERT INTO|/project/drakkar/consu...	-	miss
+25391.0	unknown	peek	match|metrics|/project/drakkar/consumer....	-	miss
+25391.0	unknown	get	match|metrics|/project/drakkar/consumer....	-	miss
+25391.0	unknown	peek	match|consumer|/project/drakkar/consumer...	-	miss
+25391.0	unknown	get	match|consumer|/project/drakkar/consumer...	-	miss
+25391.0	unknown	peek	match|async with|/project/drakkar/db.py|...	-	miss
+25391.0	unknown	get	match|async with|/project/drakkar/db.py|...	-	miss
+25391.0	unknown	peek	match|def __init__|/project/drakkar|157	-	miss
+25391.0	unknown	get	match|def __init__|/project/drakkar|157	-	miss
+25391.0	unknown	peek	match|mock|/project/tests/test_consumer....	-	miss
+25391.0	unknown	get	match|mock|/project/tests/test_consumer....	-	miss
+25391.0	unknown	peek	match|async def test_|/project/tests/tes...	-	miss
+25391.0	unknown	get	match|async def test_|/project/tests/tes...	-	miss
+25391.0	unknown	peek	match|async def test_|/project/drakkar/a...	-	miss
+25391.0	unknown	get	match|async def test_|/project/drakkar/a...	-	miss
+25391.0	unknown	peek	match|render|html|/project/drakkar/db.py...	-	miss
+25391.0	unknown	get	match|render|html|/project/drakkar/db.py...	-	miss
+25391.0	unknown	peek	match|render|html|/project/drakkar/templ...	-	miss
+25391.0	unknown	get	match|render|html|/project/drakkar/templ...	-	miss
+25391.0	unknown	peek	match|async with|/project/drakkar/templa...	-	miss
+25391.1	unknown	get	match|async with|/project/drakkar/templa...	-	miss
+25412.4	unknown	peek	match|json|/project/drakkar|7	-	miss
+25412.4	unknown	get	match|json|/project/drakkar|7	-	miss
+25412.5	unknown	peek	match|SourceMessage|ExecutorTask|/projec...	-	miss
+25412.5	unknown	get	match|SourceMessage|ExecutorTask|/projec...	-	miss
+25412.5	unknown	peek	match|SourceMessage|ExecutorTask|/projec...	-	miss
+25412.5	unknown	get	match|SourceMessage|ExecutorTask|/projec...	-	miss
+25445.8	unknown	peek	match|async def|/project/drakkar/partiti...	-	miss
+25445.9	unknown	get	match|async def|/project/drakkar/partiti...	-	miss
+25445.9	unknown	peek	match|template|/project/drakkar/partitio...	-	miss
+25445.9	unknown	get	match|template|/project/drakkar/partitio...	-	miss
+25445.9	unknown	peek	match|fixture|/project/tests|12	-	miss
+25445.9	unknown	get	match|fixture|/project/tests|12	-	miss
+25445.9	unknown	peek	match|def test_|/project/tests|12	-	miss
+25445.9	unknown	get	match|def test_|/project/tests|12	-	miss
+25445.9	unknown	peek	match|test_.*error|/project/tests|12	-	miss
+25445.9	unknown	get	match|test_.*error|/project/tests|12	-	miss
+25445.9	unknown	peek	match|signal|/project/drakkar/partition....	-	miss
+25445.9	unknown	get	match|signal|/project/drakkar/partition....	-	miss
+25445.9	unknown	peek	match|signal|/project/drakkar/app.py|13	-	miss
+25445.9	unknown	get	match|signal|/project/drakkar/app.py|13	-	miss
+25445.9	unknown	peek	match|warning|/project/drakkar/partition...	-	miss
+25445.9	unknown	get	match|warning|/project/drakkar/partition...	-	miss
+25445.9	unknown	peek	match|warning|/project/drakkar/app.py|13	-	miss
+25445.9	unknown	get	match|warning|/project/drakkar/app.py|13	-	miss
+25445.9	unknown	peek	match|async def|/project/drakkar/templat...	-	miss
+25445.9	unknown	get	match|async def|/project/drakkar/templat...	-	miss
+25445.9	unknown	peek	match|tailwind|/project/drakkar/partitio...	-	miss
+25445.9	unknown	get	match|tailwind|/project/drakkar/partitio...	-	miss
+25445.9	unknown	peek	match|tailwind|/project/drakkar/template...	-	miss
+25445.9	unknown	get	match|tailwind|/project/drakkar/template...	-	miss
+25445.9	unknown	peek	match|def test_|/project/drakkar/partiti...	-	miss
+25445.9	unknown	get	match|def test_|/project/drakkar/partiti...	-	miss
+25445.9	unknown	peek	match|def test_|/project/drakkar/templat...	-	miss
+25445.9	unknown	get	match|def test_|/project/drakkar/templat...	-	miss
+25446.0	unknown	peek	match|import|/project/drakkar|5	-	miss
+25446.0	unknown	get	match|import|/project/drakkar|5	-	miss
+25446.0	unknown	peek	match|SELECT|/project/drakkar/recorder.p...	-	miss
+25446.0	unknown	get	match|SELECT|/project/drakkar/recorder.p...	-	miss
+25446.0	unknown	peek	match|SELECT|/project|8	-	miss
+25446.0	unknown	get	match|SELECT|/project|8	-	miss
+25446.0	unknown	peek	match|time\.|/project/drakkar|13	-	miss
+25446.0	unknown	get	match|time\.|/project/drakkar|13	-	miss
+25446.0	unknown	peek	match|async def|/project/tests/test_part...	-	miss
+25446.0	unknown	get	match|async def|/project/tests/test_part...	-	miss
+25446.0	unknown	peek	match|mock|/project/drakkar/partition.py...	-	miss
+25446.0	unknown	get	match|mock|/project/drakkar/partition.py...	-	miss
+25446.0	unknown	peek	match|mock|/project/tests/test_partition...	-	miss
+25446.0	unknown	get	match|mock|/project/tests/test_partition...	-	miss
+25446.0	unknown	peek	match|signal|/project/drakkar|1	-	miss
+25446.0	unknown	get	match|signal|/project/drakkar|1	-	miss
+25446.0	unknown	peek	match|structlog|/project/drakkar|10	-	miss
+25446.0	unknown	get	match|structlog|/project/drakkar|10	-	miss
+25446.0	unknown	peek	match|structlog|/project/tests/test_cons...	-	miss
+25446.0	unknown	get	match|structlog|/project/tests/test_cons...	-	miss
+25446.0	unknown	peek	match|mock|/project/drakkar|10	-	miss
+25446.0	unknown	get	match|mock|/project/drakkar|10	-	miss
+25446.0	unknown	peek	match|mock|/project/tests/test_consumer....	-	miss
+25446.0	unknown	get	match|mock|/project/tests/test_consumer....	-	miss
+25449.5	unknown	peek	match|async def|/project/drakkar/partiti...	-	miss
+25449.6	unknown	get	match|async def|/project/drakkar/partiti...	-	miss
+25449.6	unknown	peek	match|error|/project/drakkar/app.py|13	-	miss
+25449.6	unknown	get	match|error|/project/drakkar/app.py|13	-	miss
+25449.6	unknown	peek	match|import|/project/drakkar/app.py|13	-	miss
+25449.6	unknown	get	match|import|/project/drakkar/app.py|13	-	miss
+25449.6	unknown	peek	match|consumer|/project/drakkar/app.py|1...	-	miss
+25449.6	unknown	get	match|consumer|/project/drakkar/app.py|1...	-	miss
+25449.6	unknown	peek	match|import|/project/tests/conftest.py|...	-	miss
+25449.6	unknown	get	match|import|/project/tests/conftest.py|...	-	miss
+25449.6	unknown	peek	match|fixture|/project/tests/conftest.py...	-	miss
+25449.6	unknown	get	match|fixture|/project/tests/conftest.py...	-	miss
+25449.6	unknown	peek	match|render|html|/project/tests/conftes...	-	miss
+25449.6	unknown	get	match|render|html|/project/tests/conftes...	-	miss
+25449.6	unknown	peek	match|raise\s+\w+|/project/drakkar/recor...	-	miss
+25449.6	unknown	get	match|raise\s+\w+|/project/drakkar/recor...	-	miss
+25449.6	unknown	peek	match|raise\s+\w+|/project/drakkar|14	-	miss
+25449.6	unknown	get	match|raise\s+\w+|/project/drakkar|14	-	miss
+25449.6	unknown	peek	match|CREATE TABLE|/project/drakkar/reco...	-	miss
+25449.6	unknown	get	match|CREATE TABLE|/project/drakkar/reco...	-	miss
+25449.6	unknown	peek	match|CREATE TABLE|/project/drakkar|14	-	miss
+25449.6	unknown	get	match|CREATE TABLE|/project/drakkar|14	-	miss
+25449.6	unknown	peek	match|import|/project/drakkar/recorder.p...	-	miss
+25449.6	unknown	get	match|import|/project/drakkar/recorder.p...	-	miss
+25449.6	unknown	peek	match|import|/project/drakkar|14	-	miss
+25449.6	unknown	get	match|import|/project/drakkar|14	-	miss
+25449.6	unknown	peek	match|def __init__|/project/drakkar|1	-	miss
+25449.6	unknown	get	match|def __init__|/project/drakkar|1	-	miss
+25449.6	unknown	peek	match|producer|/project/drakkar/partitio...	-	miss
+25449.6	unknown	get	match|producer|/project/drakkar/partitio...	-	miss
+25449.6	unknown	peek	match|signal|/project/drakkar/templates|...	-	miss
+25449.6	unknown	get	match|signal|/project/drakkar/templates|...	-	miss
+25449.7	unknown	peek	match|render|html|/project/drakkar/templ...	-	miss
+25449.7	unknown	get	match|render|html|/project/drakkar/templ...	-	miss
+25470.9	unknown	peek	match|import|/project/drakkar|6	-	miss
+25470.9	unknown	get	match|import|/project/drakkar|6	-	miss
+25471.0	unknown	peek	match|raise\s+\w+|/project/drakkar|6	-	miss
+25471.0	unknown	get	match|raise\s+\w+|/project/drakkar|6	-	miss
+25471.0	unknown	peek	match|template|/project/drakkar|14	-	miss
+25471.0	unknown	get	match|template|/project/drakkar|14	-	miss
+25471.0	unknown	peek	match|template|/project/drakkar/debug_se...	-	miss
+25471.0	unknown	get	match|template|/project/drakkar/debug_se...	-	miss
+25522.3	unknown	peek	match|consumer|/project/drakkar/template...	-	miss
+25522.3	unknown	get	match|consumer|/project/drakkar/template...	-	miss
+25522.3	unknown	peek	match|render|html|/project/drakkar/templ...	-	miss
+25522.3	unknown	get	match|render|html|/project/drakkar/templ...	-	miss
+25522.4	unknown	peek	match|signal|/project/drakkar/app.py|8	-	miss
+25522.4	unknown	get	match|signal|/project/drakkar/app.py|8	-	miss
+25522.4	unknown	peek	match|request|/project/drakkar/app.py|8	-	miss
+25522.4	unknown	get	match|request|/project/drakkar/app.py|8	-	miss
+25522.4	unknown	peek	match|import|/project/drakkar/recorder.p...	-	miss
+25522.4	unknown	get	match|import|/project/drakkar/recorder.p...	-	miss
+25522.4	unknown	peek	match|import|/project/drakkar|7	-	miss
+25522.4	unknown	get	match|import|/project/drakkar|7	-	miss
+25522.4	unknown	peek	match|Exception|/project/drakkar/recorde...	-	miss
+25522.4	unknown	get	match|Exception|/project/drakkar/recorde...	-	miss
+25522.4	unknown	peek	match|Exception|/project/drakkar|2	-	miss
+25522.4	unknown	get	match|Exception|/project/drakkar|2	-	miss
+25522.4	unknown	peek	match|assert|/project/tests/test_partiti...	-	miss
+25522.4	unknown	get	match|assert|/project/tests/test_partiti...	-	miss
+25522.4	unknown	peek	match|assert|/project/drakkar|193	-	miss
+25522.4	unknown	get	match|assert|/project/drakkar|193	-	miss
+25522.4	unknown	peek	match|\basync\b|/project/tests/test_part...	-	miss
+25522.4	unknown	get	match|\basync\b|/project/tests/test_part...	-	miss
+25522.4	unknown	peek	match|\basync\b|/project/drakkar|193	-	miss
+25522.4	unknown	get	match|\basync\b|/project/drakkar|193	-	miss
+25522.4	unknown	peek	match|return|/project/drakkar/offsets.py...	-	miss
+25522.4	unknown	get	match|return|/project/drakkar/offsets.py...	-	miss
+25522.4	unknown	peek	match|class\s+\w+|/project/drakkar/model...	-	miss
+25522.4	unknown	get	match|class\s+\w+|/project/drakkar/model...	-	miss
+25522.4	unknown	peek	match|class\s+\w+|/project/tests|13	-	miss
+25522.4	unknown	get	match|class\s+\w+|/project/tests|13	-	miss
+25522.4	unknown	peek	match|assert|/project/drakkar/recorder.p...	-	miss
+25522.4	unknown	get	match|assert|/project/drakkar/recorder.p...	-	miss
+25522.4	unknown	peek	match|CREATE TABLE|/project/drakkar/reco...	-	miss
+25522.4	unknown	get	match|CREATE TABLE|/project/drakkar/reco...	-	miss
+25522.4	unknown	peek	match|import|/project/drakkar/consumer.p...	-	miss
+25522.4	unknown	get	match|import|/project/drakkar/consumer.p...	-	miss
+25522.4	unknown	peek	match|async def|/project/drakkar/partiti...	-	miss
+25522.4	unknown	get	match|async def|/project/drakkar/partiti...	-	miss
+25522.5	unknown	peek	match|async def|/project/tests/test_metr...	-	miss
+25522.5	unknown	get	match|async def|/project/tests/test_metr...	-	miss
+25579.8	unknown	peek	match|error|/project/drakkar/app.py|7	-	miss
+25579.8	unknown	get	match|error|/project/drakkar/app.py|7	-	miss
+25579.9	unknown	peek	match|error|/project/drakkar/consumer.py...	-	miss
+25579.9	unknown	get	match|error|/project/drakkar/consumer.py...	-	miss
+25579.9	unknown	peek	match|consumer|/project/drakkar/app.py|2	-	miss
+25579.9	unknown	get	match|consumer|/project/drakkar/app.py|2	-	miss
+25579.9	unknown	peek	match|consumer|/project/drakkar/consumer...	-	miss
+25579.9	unknown	get	match|consumer|/project/drakkar/consumer...	-	miss
+25579.9	unknown	peek	match|raise\s+\w+|/project/drakkar|1	-	miss
+25579.9	unknown	get	match|raise\s+\w+|/project/drakkar|1	-	miss
+25579.9	unknown	peek	match|metrics|/project/drakkar|1	-	miss
+25579.9	unknown	get	match|metrics|/project/drakkar|1	-	miss
+25579.9	unknown	peek	match|\basync\b|/project/drakkar/partiti...	-	miss
+25579.9	unknown	get	match|\basync\b|/project/drakkar/partiti...	-	miss
+25579.9	unknown	peek	match|\basync\b|/project/drakkar|12	-	miss
+25579.9	unknown	get	match|\basync\b|/project/drakkar|12	-	miss
+25579.9	unknown	peek	match|window|/project/drakkar/partition....	-	miss
+25579.9	unknown	get	match|window|/project/drakkar/partition....	-	miss
+25579.9	unknown	peek	match|window|/project/drakkar|12	-	miss
+25579.9	unknown	get	match|window|/project/drakkar|12	-	miss
+25579.9	unknown	peek	match|import|/project/drakkar|9	-	miss
+25579.9	unknown	get	match|import|/project/drakkar|9	-	miss
+25579.9	unknown	peek	match|async with|/project/drakkar|9	-	miss
+25579.9	unknown	get	match|async with|/project/drakkar|9	-	miss
+25579.9	unknown	peek	match|signal|/project/drakkar/config.py|...	-	miss
+25579.9	unknown	get	match|signal|/project/drakkar/config.py|...	-	miss
+25579.9	unknown	peek	match|signal|/project/tests/test_app.py|...	-	miss
+25579.9	unknown	get	match|signal|/project/tests/test_app.py|...	-	miss
+25580.0	unknown	peek	match|pytest|/project/drakkar/config.py|...	-	miss
+25580.0	unknown	get	match|pytest|/project/drakkar/config.py|...	-	miss
+25580.0	unknown	peek	match|pytest|/project/tests/test_app.py|...	-	miss
+25580.0	unknown	get	match|pytest|/project/tests/test_app.py|...	-	miss
+25580.0	unknown	peek	match|self\._|/project/drakkar/config.py...	-	miss
+25580.0	unknown	get	match|self\._|/project/drakkar/config.py...	-	miss
+25580.0	unknown	peek	match|self\._|/project/tests/test_app.py...	-	miss
+25580.0	unknown	get	match|self\._|/project/tests/test_app.py...	-	miss
+25580.0	unknown	peek	match|logger|/project/drakkar/logging.py...	-	miss
+25580.0	unknown	get	match|logger|/project/drakkar/logging.py...	-	miss
+25580.0	unknown	peek	match|CREATE TABLE|/project/drakkar/reco...	-	miss
+25580.0	unknown	get	match|CREATE TABLE|/project/drakkar/reco...	-	miss
+25580.0	unknown	peek	match|template|/project/drakkar/app.py|7	-	miss
+25580.0	unknown	get	match|template|/project/drakkar/app.py|7	-	miss
+25580.0	unknown	peek	match|async def|/project/drakkar/partiti...	-	miss
+25580.0	unknown	get	match|async def|/project/drakkar/partiti...	-	miss
+25580.0	unknown	peek	match|import|/project/drakkar/partition....	-	miss
+25580.0	unknown	get	match|import|/project/drakkar/partition....	-	miss
+25580.0	unknown	peek	match|offset|/project/drakkar/partition....	-	miss
+25580.0	unknown	get	match|offset|/project/drakkar/partition....	-	miss
+25802.6	unknown	peek	match|partition|/project/drakkar/partiti...	-	miss
+25802.6	unknown	get	match|partition|/project/drakkar/partiti...	-	miss
+25802.6	unknown	peek	match|import|/project/drakkar|15	-	miss
+25802.6	unknown	get	match|import|/project/drakkar|15	-	miss
+25802.6	unknown	peek	match|import|/project/drakkar/offsets.py...	-	miss
+25802.6	unknown	get	match|import|/project/drakkar/offsets.py...	-	miss
+25802.6	unknown	peek	match|return|/project/drakkar|9	-	miss
+25802.6	unknown	get	match|return|/project/drakkar|9	-	miss
+25802.7	unknown	peek	match|return|/project/drakkar/offsets.py...	-	miss
+25802.7	unknown	get	match|return|/project/drakkar/offsets.py...	-	miss
+25802.7	unknown	peek	match|Exception|/project/drakkar|9	-	miss
+25802.7	unknown	get	match|Exception|/project/drakkar|9	-	miss
+25802.7	unknown	peek	match|Exception|/project/drakkar/offsets...	-	miss
+25802.7	unknown	get	match|Exception|/project/drakkar/offsets...	-	miss
+25802.7	unknown	peek	match|window|/project/drakkar/partition....	-	miss
+25802.7	unknown	get	match|window|/project/drakkar/partition....	-	miss
+25802.7	unknown	peek	match|window|/project/drakkar/models.py|...	-	miss
+25802.7	unknown	get	match|window|/project/drakkar/models.py|...	-	miss
+25802.7	unknown	peek	match|class\s+\w+|/project/drakkar/parti...	-	miss
+25802.7	unknown	get	match|class\s+\w+|/project/drakkar/parti...	-	miss
+25802.7	unknown	peek	match|class\s+\w+|/project/drakkar/model...	-	miss
+25802.7	unknown	get	match|class\s+\w+|/project/drakkar/model...	-	miss
+25802.7	unknown	peek	match|logger|/project/drakkar/logging.py...	-	miss
+25802.7	unknown	get	match|logger|/project/drakkar/logging.py...	-	miss
+25802.7	unknown	peek	match|logger|/project/drakkar|8	-	miss
+25802.7	unknown	get	match|logger|/project/drakkar|8	-	miss
+25802.7	unknown	peek	match|def __init__|/project/drakkar/logg...	-	miss
+25802.7	unknown	get	match|def __init__|/project/drakkar/logg...	-	miss
+25802.7	unknown	peek	match|def __init__|/project/drakkar|8	-	miss
+25802.7	unknown	get	match|def __init__|/project/drakkar|8	-	miss
+25802.7	unknown	peek	match|class\s+\w+|/project/drakkar/loggi...	-	miss
+25802.7	unknown	get	match|class\s+\w+|/project/drakkar/loggi...	-	miss
+25802.7	unknown	peek	match|class\s+\w+|/project/drakkar|8	-	miss
+25802.7	unknown	get	match|class\s+\w+|/project/drakkar|8	-	miss
+25802.7	unknown	peek	match|SELECT|/project/drakkar/recorder.p...	-	miss
+25802.7	unknown	get	match|SELECT|/project/drakkar/recorder.p...	-	miss
+25802.7	unknown	peek	match|async def|/project/drakkar/partiti...	-	miss
+25802.7	unknown	get	match|async def|/project/drakkar/partiti...	-	miss
+25802.7	unknown	peek	match|async def|/project/drakkar|15	-	miss
+25802.7	unknown	get	match|async def|/project/drakkar|15	-	miss
+25802.7	unknown	peek	match|import|/project/drakkar/partition....	-	miss
+25802.7	unknown	get	match|import|/project/drakkar/partition....	-	miss
+25802.8	unknown	peek	match|SourceMessage|ExecutorTask|/projec...	-	miss
+25802.8	unknown	get	match|SourceMessage|ExecutorTask|/projec...	-	miss
+25923.8	unknown	peek	match|def\s+\w+|/project/drakkar/handler...	-	miss
+25923.8	unknown	get	match|def\s+\w+|/project/drakkar/handler...	-	miss
+25923.8	unknown	peek	match|def test_|/project/drakkar/handler...	-	miss
+25923.8	unknown	get	match|def test_|/project/drakkar/handler...	-	miss
+25966.3	unknown	set	match|logger|/project/drakkar|8	CLUSTER	suppressed	"# Module-level logger preserved here too so external code that did\n# ``from drakkar.cache import logger`` (or refer...
+26030.2	unknown	set	match|flush|/project/drakkar|8	CLUSTER	suppressed	'# (flush entries), cross-worker replication (sync fetched/upserted/errors),\n# "throughput not state transitions" co...
+27791.8	unknown	set	match|mock|/project/tests/test_consumer....	CLUSTER	suppressed	"from unittest.mock import AsyncMock, MagicMock, patch\ndef make_mock_message(topic='test-source', partition=0, offse...
+28245.8	unknown	set	match|commit|/project/drakkar|3	CLUSTER	suppressed	' \'Number of pending (uncommitted) offsets per partition\',\n# --- Offset commits ---\noffsets_committed = Counte...
+28875.7	unknown	set	match|structlog|/project/drakkar/executo...	CLUSTER	suppressed	'import structlog\nlogger = structlog.get_logger()\n'
+30079.3	unknown	set	match|TODO|FIXME|HACK|/project/drakkar/p...	CLUSTER	suppressed	''
+30424.2	unknown	set	match|error|/project/drakkar|8	CLUSTER	suppressed	' ``on_error`` list-return. It is incremented at schedule time and\n - collect results/errors into the user...
+31442.6	unknown	set	match|error|/project/drakkar/app.py|6	CLUSTER	suppressed	" on_error=meta.on_error,\n logger.warning('async_callback_failed', category='lifecycle...
+32113.7	unknown	set	match|commit|/project/drakkar/app.py|11	CLUSTER	suppressed	' on_commit=self._handle_commit,\n """Drain in-flight tasks, commit final offsets, then sto...
+34283.2	unknown	set	match|fixture|/project/tests/conftest.py...	CLUSTER	suppressed	'"""Shared test fixtures for Drakkar tests."""\n """Simple output model used in test fixtures."""\n@pytest.fixture...
+34566.2	task_complete:rg-18a991eb55b245cd-95f7e00f	set	match|pytest|/project/tests/test_app.py|...	CLUSTER	suppressed	'import pytest\n@pytest.fixture\n@pytest.fixture\n with pytest.raises(SinkNotConfiguredError, match="No \'mongo\' ...

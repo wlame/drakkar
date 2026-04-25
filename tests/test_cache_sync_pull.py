@@ -36,6 +36,7 @@ import aiosqlite
 import pytest
 
 from drakkar import cache as cache_module
+from drakkar import cache_engine as cache_engine_module
 from drakkar.cache import (
     Cache,
     CacheEngine,
@@ -190,7 +191,7 @@ async def test_sync_calls_discover_peer_dbs_with_expected_args(tmp_path, monkeyp
             return
             yield  # type: ignore[unreachable]
 
-        monkeypatch.setattr(cache_module, 'discover_peer_dbs', fake_discover)
+        monkeypatch.setattr(cache_engine_module, 'discover_peer_dbs', fake_discover)
 
         await engine._sync_once()  # type: ignore[reportPrivateUsage]
 
@@ -371,7 +372,7 @@ async def test_sync_disabled_is_no_op(tmp_path, monkeypatch):
             return
             yield  # type: ignore[unreachable]
 
-        monkeypatch.setattr(cache_module, 'discover_peer_dbs', fake_discover)
+        monkeypatch.setattr(cache_engine_module, 'discover_peer_dbs', fake_discover)
 
         pulled = await engine._sync_once()  # type: ignore[reportPrivateUsage]
 
@@ -404,7 +405,7 @@ async def test_sync_disabled_when_store_config_off(tmp_path, monkeypatch):
             return
             yield  # type: ignore[unreachable]
 
-        monkeypatch.setattr(cache_module, 'discover_peer_dbs', fake_discover)
+        monkeypatch.setattr(cache_engine_module, 'discover_peer_dbs', fake_discover)
 
         await engine._sync_once()  # type: ignore[reportPrivateUsage]
 
