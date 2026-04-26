@@ -24,6 +24,11 @@ htmlcov/
 coverage.xml
 .tox/
 
+# Linting / type-checking caches
+.ruff_cache/
+.mypy_cache/
+.ty_cache/
+
 # MkDocs build output
 site/
 
