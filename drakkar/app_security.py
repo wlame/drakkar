@@ -31,7 +31,7 @@ def warn_if_debug_unauthenticated(config: DrakkarConfig) -> None:
     not required.
 
     To enable token-based auth, either set ``debug.auth_token`` in your
-    YAML config or export ``DRAKKAR_DEBUG__AUTH_TOKEN=<32+ char value>``.
+    YAML config or export ``DK_DEBUG__AUTH_TOKEN=<32+ char value>``.
     Once set, the WebSocket live-event stream additionally validates the
     ``Origin`` header (against ``debug.allowed_ws_origins`` when configured,
     otherwise against the request's ``Host`` header).
@@ -53,7 +53,7 @@ def warn_if_debug_unauthenticated(config: DrakkarConfig) -> None:
             'the port. The UI is read-only by design (cannot stop workers, replay '
             'messages, or modify state) and intended for private-network deployments. '
             'To enable bearer-token auth, set debug.auth_token in your YAML config '
-            'or export DRAKKAR_DEBUG__AUTH_TOKEN=<32+ char random value>; the '
+            'or export DK_DEBUG__AUTH_TOKEN=<32+ char random value>; the '
             'WebSocket stream then also validates Origin against '
             'debug.allowed_ws_origins (or the request Host header).'
         ),

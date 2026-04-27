@@ -171,37 +171,37 @@ def test_drakkar_config_cache_custom():
     assert cfg.cache.flush_interval_seconds == 0.5
 
 
-# --- Environment variable overrides (DRAKKAR_CACHE__* via pydantic-settings) ---
+# --- Environment variable overrides (DK_CACHE__* via pydantic-settings) ---
 
 
 def test_cache_config_env_override_enabled(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv('DRAKKAR_EXECUTOR__BINARY_PATH', '/bin/true')
-    monkeypatch.setenv('DRAKKAR_CACHE__ENABLED', 'true')
+    monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
+    monkeypatch.setenv('DK_CACHE__ENABLED', 'true')
     cfg = DrakkarConfig()
     assert cfg.cache.enabled is True
 
 
 def test_cache_config_env_override_nested_peer_sync(monkeypatch: pytest.MonkeyPatch):
-    """DRAKKAR_CACHE__PEER_SYNC__INTERVAL_SECONDS=60 should set the nested
+    """DK_CACHE__PEER_SYNC__INTERVAL_SECONDS=60 should set the nested
     peer_sync.interval_seconds field. Exercises the two-level nested delimiter.
     """
-    monkeypatch.setenv('DRAKKAR_EXECUTOR__BINARY_PATH', '/bin/true')
-    monkeypatch.setenv('DRAKKAR_CACHE__ENABLED', 'true')
-    monkeypatch.setenv('DRAKKAR_CACHE__PEER_SYNC__INTERVAL_SECONDS', '60')
+    monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
+    monkeypatch.setenv('DK_CACHE__ENABLED', 'true')
+    monkeypatch.setenv('DK_CACHE__PEER_SYNC__INTERVAL_SECONDS', '60')
     cfg = DrakkarConfig()
     assert cfg.cache.enabled is True
     assert cfg.cache.peer_sync.interval_seconds == 60.0
 
 
 def test_cache_config_env_override_db_dir(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv('DRAKKAR_EXECUTOR__BINARY_PATH', '/bin/true')
-    monkeypatch.setenv('DRAKKAR_CACHE__DB_DIR', '/srv/cache')
+    monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
+    monkeypatch.setenv('DK_CACHE__DB_DIR', '/srv/cache')
     cfg = DrakkarConfig()
     assert cfg.cache.db_dir == '/srv/cache'
 
 
 def test_cache_config_env_override_max_memory_entries(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv('DRAKKAR_EXECUTOR__BINARY_PATH', '/bin/true')
-    monkeypatch.setenv('DRAKKAR_CACHE__MAX_MEMORY_ENTRIES', '2000')
+    monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/true')
+    monkeypatch.setenv('DK_CACHE__MAX_MEMORY_ENTRIES', '2000')
     cfg = DrakkarConfig()
     assert cfg.cache.max_memory_entries == 2000

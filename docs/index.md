@@ -186,7 +186,7 @@ sinks:
       dsn: "postgresql://user:pass@localhost:5432/mydb"
 ```
 
-All config fields support env var override with `DRAKKAR_` prefix and `__` for nesting (e.g. `DRAKKAR_EXECUTOR__MAX_EXECUTORS=16`).
+All config fields support env var override with `DK_` prefix and `__` for nesting (e.g. `DK_EXECUTOR__MAX_EXECUTORS=16`).
 
 ### Run
 

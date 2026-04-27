@@ -242,7 +242,7 @@ logging:
   output: /var/log/{cluster_name}/{worker_id}.jsonl
 ```
 
-Environment variable override: `DRAKKAR_LOGGING__OUTPUT=/var/log/drakkar/worker.log`
+Environment variable override: `DK_LOGGING__OUTPUT=/var/log/drakkar/worker.log`
 
 ### Automatic Context Fields
 

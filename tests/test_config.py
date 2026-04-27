@@ -370,20 +370,20 @@ def test_load_config_missing_file():
 
 
 def test_load_config_from_env_var(minimal_config_yaml_file: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv('DRAKKAR_CONFIG', str(minimal_config_yaml_file))
+    monkeypatch.setenv('DK_CONFIG', str(minimal_config_yaml_file))
     cfg = load_config()
     assert cfg.executor.binary_path == '/usr/bin/echo'
 
 
 def test_load_config_env_override(minimal_config_yaml_file: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv('DRAKKAR_KAFKA__BROKERS', 'override:9092')
+    monkeypatch.setenv('DK_KAFKA__BROKERS', 'override:9092')
     cfg = load_config(minimal_config_yaml_file)
     assert cfg.kafka.brokers == 'override:9092'
 
 
 def test_load_config_no_path_no_env_requires_executor(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv('DRAKKAR_CONFIG', raising=False)
-    monkeypatch.setenv('DRAKKAR_EXECUTOR__BINARY_PATH', '/usr/bin/test')
+    monkeypatch.delenv('DK_CONFIG', raising=False)
+    monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/usr/bin/test')
     cfg = load_config()
     assert cfg.executor.binary_path == '/usr/bin/test'
 
@@ -396,9 +396,9 @@ def test_load_config_empty_yaml(tmp_path: Path):
 
 
 def test_drakkar_config_env_nested_delimiter(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv('DRAKKAR_EXECUTOR__BINARY_PATH', '/usr/bin/test')
-    monkeypatch.setenv('DRAKKAR_EXECUTOR__MAX_EXECUTORS', '16')
-    monkeypatch.setenv('DRAKKAR_KAFKA__SOURCE_TOPIC', 'my-topic')
+    monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/usr/bin/test')
+    monkeypatch.setenv('DK_EXECUTOR__MAX_EXECUTORS', '16')
+    monkeypatch.setenv('DK_KAFKA__SOURCE_TOPIC', 'my-topic')
     cfg = DrakkarConfig()
     assert cfg.executor.binary_path == '/usr/bin/test'
     assert cfg.executor.max_executors == 16

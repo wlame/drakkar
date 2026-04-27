@@ -1,5 +1,5 @@
 # Drakkar integration test configuration
-# All values can be overridden with env vars: DRAKKAR_KAFKA__BROKERS, etc.
+# All values can be overridden with env vars: DK_KAFKA__BROKERS, etc.
 
 worker_name_env: "WORKER_ID"
 cluster_name: "main cluster"
@@ -151,7 +151,7 @@ debug:
   state_sync_interval_seconds: 10
   expose_env_vars:
     - "WORKER_ID"
-    - "DRAKKAR_CONFIG"
+    - "DK_CONFIG"
   retention_hours: 24
   retention_max_events: 100000
   store_output: true

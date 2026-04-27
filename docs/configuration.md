@@ -10,21 +10,21 @@ Drakkar resolves its configuration from three sources, applied in order. Later s
 
 1. **Built-in defaults** -- every field has a default value in the Pydantic models.
 2. **YAML file** -- structured configuration loaded from disk.
-3. **Environment variables** -- `DRAKKAR_`-prefixed env vars, deep-merged on top of YAML.
+3. **Environment variables** -- `DK_`-prefixed env vars, deep-merged on top of YAML.
 
 ### YAML File Resolution
 
 The YAML file path is determined by the first match:
 
 1. The `config_path` argument passed to `DrakkarApp`.
-2. The `DRAKKAR_CONFIG` environment variable.
+2. The `DK_CONFIG` environment variable.
 3. If neither is set, Drakkar runs with env-only configuration (all defaults + env overrides).
 
 ```python
 # Option 1: explicit path
 app = DrakkarApp(handler=MyHandler(), config_path='drakkar.yaml')
 
-# Option 2: env var (set DRAKKAR_CONFIG=/etc/drakkar/config.yaml)
+# Option 2: env var (set DK_CONFIG=/etc/drakkar/config.yaml)
 app = DrakkarApp(handler=MyHandler())
 
 # Option 3: inline config object (no file needed)
@@ -44,17 +44,17 @@ app = DrakkarApp(
 
 ### Environment Variable Overrides
 
-Environment variables use the `DRAKKAR_` prefix with `__` (double underscore) as the nesting delimiter:
+Environment variables use the `DK_` prefix with `__` (double underscore) as the nesting delimiter:
 
 ```bash
 # Override kafka.brokers
-export DRAKKAR_KAFKA__BROKERS=kafka-prod:9092
+export DK_KAFKA__BROKERS=kafka-prod:9092
 
 # Override executor.max_executors
-export DRAKKAR_EXECUTOR__MAX_EXECUTORS=16
+export DK_EXECUTOR__MAX_EXECUTORS=16
 
 # Override debug.port
-export DRAKKAR_DEBUG__PORT=9000
+export DK_DEBUG__PORT=9000
 ```
 
 Env vars are parsed into a nested dict structure and deep-merged on top of the YAML values. Leaf values from env vars always win over YAML values; nested dicts are merged recursively.
@@ -80,7 +80,7 @@ Top-level settings that control worker identity and cluster grouping.
 ```yaml
 worker_name_env: HOSTNAME
 cluster_name: search-cluster
-cluster_name_env: DRAKKAR_CLUSTER
+cluster_name_env: DK_CLUSTER
 ```
 
 ---
@@ -147,7 +147,7 @@ Controls the subprocess executor pool that runs user-defined binaries.
 | `binary_path` | `str \| None` | `None` | min length 1 if set | Default binary path for all tasks. If `None`, each [ExecutorTask](executor.md#executortask) returned by [arrange()](handler.md#arrange-required) must provide its own `binary_path`, otherwise the task fails with a clear error. See [Binary Path Resolution](executor.md#binary-path-resolution). |
 | `env` | `dict[str, str]` | `{}` | | Environment variables passed to all executor subprocesses. Merged on top of the (filtered) parent process env. Per-task `ExecutorTask.env` overrides these on conflict. See [Environment Variables](executor.md#environment-variables). |
 | `env_inherit_parent` | `bool` | `true` | | When `true`, the parent process env is passed to subprocesses (with `env_inherit_deny` patterns applied). Set `false` to run subprocesses with only `executor.env` + `ExecutorTask.env` — fully isolated from the parent env. |
-| `env_inherit_deny` | `list[str]` | see below | | Case-insensitive `fnmatch` patterns matched against parent env var names. Matching vars are **not** inherited by subprocesses even when `env_inherit_parent` is `true`. Default excludes `DRAKKAR_*` internals and common secret names so operator-configured secrets never leak to executor binaries. Set to `[]` to trust the full parent env. Default patterns: `DRAKKAR_*`, `*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*_KEY`, `*_DSN`, `*CREDENTIAL*`. |
+| `env_inherit_deny` | `list[str]` | see below | | Case-insensitive `fnmatch` patterns matched against parent env var names. Matching vars are **not** inherited by subprocesses even when `env_inherit_parent` is `true`. Default excludes `DK_*` internals and common secret names so operator-configured secrets never leak to executor binaries. Set to `[]` to trust the full parent env. Default patterns: `DK_*`, `*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*_KEY`, `*_DSN`, `*CREDENTIAL*`. |
 | `max_executors` | `int` | `4` | >= 1 | Maximum number of concurrent subprocesses. Controls the `asyncio.Semaphore` size -- tasks beyond this limit wait in a queue. See [Concurrency and Backpressure](executor.md#concurrency-and-backpressure). |
 | `task_timeout_seconds` | `int` | `120` | >= 1 | Wall-clock timeout (seconds) per subprocess. If a process exceeds this, it is killed and treated as a failure. |
 | `window_size` | `int` | `100` | >= 1 | Maximum number of messages collected per [arrange()](handler.md#arrange-required) [window](executor.md#windowing). Larger windows allow more batching in `arrange()`; smaller windows reduce latency. |
@@ -399,7 +399,7 @@ To require auth on the protected endpoints (database download, merge, message pr
 
 - **Generate a strong value:** `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 - **Configure via YAML:** set `debug.auth_token: <value>` in your config.
-- **Or via environment:** export `DRAKKAR_DEBUG__AUTH_TOKEN=<value>` (overrides YAML when both are set).
+- **Or via environment:** export `DK_DEBUG__AUTH_TOKEN=<value>` (overrides YAML when both are set).
 
 When the token is set, protected endpoints reject requests without a matching `Authorization: Bearer <token>` header (or `?token=<token>` query parameter); the WebSocket additionally validates the `Origin` header against `allowed_ws_origins` (or the request's `Host` header). Comparison uses `secrets.compare_digest` for timing-side-channel safety; leading/trailing whitespace in the configured token is stripped on load (a `auth_token: " "` of only spaces is treated as empty and the warning still fires).
 
@@ -527,7 +527,7 @@ A complete `drakkar.yaml` with all sections filled in:
 # --- Worker identity ---
 worker_name_env: HOSTNAME          # read worker name from $HOSTNAME
 cluster_name: search-cluster       # static cluster name
-cluster_name_env: DRAKKAR_CLUSTER  # override cluster from env if set
+cluster_name_env: DK_CLUSTER  # override cluster from env if set
 
 # --- Kafka source ---
 kafka:
@@ -656,43 +656,43 @@ Common environment variables and their corresponding YAML paths:
 
 | Environment Variable | YAML Path | Example Value |
 |---------------------|-----------|---------------|
-| `DRAKKAR_CONFIG` | *(file path, not a config field)* | `/etc/drakkar/config.yaml` |
-| `DRAKKAR_WORKER_NAME_ENV` | `worker_name_env` | `HOSTNAME` |
-| `DRAKKAR_CLUSTER_NAME` | `cluster_name` | `search-cluster` |
-| `DRAKKAR_CLUSTER_NAME_ENV` | `cluster_name_env` | `K8S_CLUSTER` |
-| `DRAKKAR_KAFKA__BROKERS` | `kafka.brokers` | `kafka:9092` |
-| `DRAKKAR_KAFKA__SOURCE_TOPIC` | `kafka.source_topic` | `my-events` |
-| `DRAKKAR_KAFKA__CONSUMER_GROUP` | `kafka.consumer_group` | `my-workers` |
-| `DRAKKAR_KAFKA__MAX_POLL_RECORDS` | `kafka.max_poll_records` | `200` |
-| `DRAKKAR_KAFKA__MAX_POLL_INTERVAL_MS` | `kafka.max_poll_interval_ms` | `600000` |
-| `DRAKKAR_KAFKA__SESSION_TIMEOUT_MS` | `kafka.session_timeout_ms` | `60000` |
-| `DRAKKAR_KAFKA__HEARTBEAT_INTERVAL_MS` | `kafka.heartbeat_interval_ms` | `5000` |
-| `DRAKKAR_EXECUTOR__BINARY_PATH` | `executor.binary_path` | `/usr/bin/my-tool` |
-| `DRAKKAR_EXECUTOR__MAX_EXECUTORS` | `executor.max_executors` | `16` |
-| `DRAKKAR_EXECUTOR__TASK_TIMEOUT_SECONDS` | `executor.task_timeout_seconds` | `300` |
-| `DRAKKAR_EXECUTOR__WINDOW_SIZE` | `executor.window_size` | `50` |
-| `DRAKKAR_EXECUTOR__MAX_RETRIES` | `executor.max_retries` | `5` |
-| `DRAKKAR_EXECUTOR__DRAIN_TIMEOUT_SECONDS` | `executor.drain_timeout_seconds` | `10` |
-| `DRAKKAR_EXECUTOR__BACKPRESSURE_HIGH_MULTIPLIER` | `executor.backpressure_high_multiplier` | `16` |
-| `DRAKKAR_EXECUTOR__BACKPRESSURE_LOW_MULTIPLIER` | `executor.backpressure_low_multiplier` | `2` |
-| `DRAKKAR_DLQ__TOPIC` | `dlq.topic` | `my-events-dlq` |
-| `DRAKKAR_DLQ__BROKERS` | `dlq.brokers` | `kafka:9092` |
-| `DRAKKAR_METRICS__ENABLED` | `metrics.enabled` | `true` |
-| `DRAKKAR_METRICS__PORT` | `metrics.port` | `9090` |
-| `DRAKKAR_LOGGING__LEVEL` | `logging.level` | `DEBUG` |
-| `DRAKKAR_LOGGING__FORMAT` | `logging.format` | `console` |
-| `DRAKKAR_LOGGING__OUTPUT` | `logging.output` | `/var/log/drakkar/worker.log` |
-| `DRAKKAR_DEBUG__ENABLED` | `debug.enabled` | `false` |
-| `DRAKKAR_DEBUG__HOST` | `debug.host` | `0.0.0.0` |
-| `DRAKKAR_DEBUG__PORT` | `debug.port` | `9000` |
-| `DRAKKAR_DEBUG__AUTH_TOKEN` | `debug.auth_token` | `32-char-random-string` |
-| `DRAKKAR_DEBUG__ALLOWED_WS_ORIGINS` | `debug.allowed_ws_origins` | `["https://ops.internal"]` |
-| `DRAKKAR_DEBUG__DB_DIR` | `debug.db_dir` | `/shared/debug` |
-| `DRAKKAR_DEBUG__STORE_EVENTS` | `debug.store_events` | `true` |
-| `DRAKKAR_DEBUG__STORE_CONFIG` | `debug.store_config` | `true` |
-| `DRAKKAR_DEBUG__STORE_STATE` | `debug.store_state` | `true` |
-| `DRAKKAR_DEBUG__STORE_OUTPUT` | `debug.store_output` | `false` |
-| `DRAKKAR_DEBUG__PROMETHEUS_URL` | `debug.prometheus_url` | `http://prometheus:9090` |
+| `DK_CONFIG` | *(file path, not a config field)* | `/etc/drakkar/config.yaml` |
+| `DK_WORKER_NAME_ENV` | `worker_name_env` | `HOSTNAME` |
+| `DK_CLUSTER_NAME` | `cluster_name` | `search-cluster` |
+| `DK_CLUSTER_NAME_ENV` | `cluster_name_env` | `K8S_CLUSTER` |
+| `DK_KAFKA__BROKERS` | `kafka.brokers` | `kafka:9092` |
+| `DK_KAFKA__SOURCE_TOPIC` | `kafka.source_topic` | `my-events` |
+| `DK_KAFKA__CONSUMER_GROUP` | `kafka.consumer_group` | `my-workers` |
+| `DK_KAFKA__MAX_POLL_RECORDS` | `kafka.max_poll_records` | `200` |
+| `DK_KAFKA__MAX_POLL_INTERVAL_MS` | `kafka.max_poll_interval_ms` | `600000` |
+| `DK_KAFKA__SESSION_TIMEOUT_MS` | `kafka.session_timeout_ms` | `60000` |
+| `DK_KAFKA__HEARTBEAT_INTERVAL_MS` | `kafka.heartbeat_interval_ms` | `5000` |
+| `DK_EXECUTOR__BINARY_PATH` | `executor.binary_path` | `/usr/bin/my-tool` |
+| `DK_EXECUTOR__MAX_EXECUTORS` | `executor.max_executors` | `16` |
+| `DK_EXECUTOR__TASK_TIMEOUT_SECONDS` | `executor.task_timeout_seconds` | `300` |
+| `DK_EXECUTOR__WINDOW_SIZE` | `executor.window_size` | `50` |
+| `DK_EXECUTOR__MAX_RETRIES` | `executor.max_retries` | `5` |
+| `DK_EXECUTOR__DRAIN_TIMEOUT_SECONDS` | `executor.drain_timeout_seconds` | `10` |
+| `DK_EXECUTOR__BACKPRESSURE_HIGH_MULTIPLIER` | `executor.backpressure_high_multiplier` | `16` |
+| `DK_EXECUTOR__BACKPRESSURE_LOW_MULTIPLIER` | `executor.backpressure_low_multiplier` | `2` |
+| `DK_DLQ__TOPIC` | `dlq.topic` | `my-events-dlq` |
+| `DK_DLQ__BROKERS` | `dlq.brokers` | `kafka:9092` |
+| `DK_METRICS__ENABLED` | `metrics.enabled` | `true` |
+| `DK_METRICS__PORT` | `metrics.port` | `9090` |
+| `DK_LOGGING__LEVEL` | `logging.level` | `DEBUG` |
+| `DK_LOGGING__FORMAT` | `logging.format` | `console` |
+| `DK_LOGGING__OUTPUT` | `logging.output` | `/var/log/drakkar/worker.log` |
+| `DK_DEBUG__ENABLED` | `debug.enabled` | `false` |
+| `DK_DEBUG__HOST` | `debug.host` | `0.0.0.0` |
+| `DK_DEBUG__PORT` | `debug.port` | `9000` |
+| `DK_DEBUG__AUTH_TOKEN` | `debug.auth_token` | `32-char-random-string` |
+| `DK_DEBUG__ALLOWED_WS_ORIGINS` | `debug.allowed_ws_origins` | `["https://ops.internal"]` |
+| `DK_DEBUG__DB_DIR` | `debug.db_dir` | `/shared/debug` |
+| `DK_DEBUG__STORE_EVENTS` | `debug.store_events` | `true` |
+| `DK_DEBUG__STORE_CONFIG` | `debug.store_config` | `true` |
+| `DK_DEBUG__STORE_STATE` | `debug.store_state` | `true` |
+| `DK_DEBUG__STORE_OUTPUT` | `debug.store_output` | `false` |
+| `DK_DEBUG__PROMETHEUS_URL` | `debug.prometheus_url` | `http://prometheus:9090` |
 
 !!! tip
-    The `DRAKKAR_CONFIG` variable is special -- it sets the YAML file path, not a config field. It is excluded from the env-var-to-config merge.
+    The `DK_CONFIG` variable is special -- it sets the YAML file path, not a config field. It is excluded from the env-var-to-config merge.

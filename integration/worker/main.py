@@ -1,7 +1,7 @@
 """Worker entry point — starts the Drakkar application.
 
 Usage:
-    WORKER_ID=worker-1 DRAKKAR_CONFIG=/app/drakkar.yaml python main.py
+    WORKER_ID=worker-1 DK_CONFIG=/app/drakkar.yaml python main.py
 """
 
 import os
@@ -15,7 +15,7 @@ import drakkar as dk
 
 
 def main() -> None:
-    config_path = os.environ.get('DRAKKAR_CONFIG', '/app/drakkar.yaml')
+    config_path = os.environ.get('DK_CONFIG', '/app/drakkar.yaml')
 
     app = dk.DrakkarApp(
         handler=RipgrepHandler(),
