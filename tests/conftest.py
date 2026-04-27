@@ -5,25 +5,13 @@ from pathlib import Path
 
 import pytest
 import yaml
-from pydantic import BaseModel
 
 from drakkar.models import (
-    CollectResult,
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
-    KafkaPayload,
-    PendingContext,
-    PostgresPayload,
     SourceMessage,
 )
-
-
-class SampleOutput(BaseModel):
-    """Simple output model used in test fixtures."""
-
-    id: int = 1
-    status: str = 'done'
 
 
 async def wait_for(condition, timeout=5.0, interval=0.05):
@@ -75,26 +63,6 @@ def executor_error(executor_task: ExecutorTask) -> ExecutorError:
         task=executor_task,
         exit_code=1,
         stderr='error: file not found',
-    )
-
-
-@pytest.fixture
-def pending_context(executor_task: ExecutorTask) -> PendingContext:
-    return PendingContext(
-        pending_tasks=[executor_task],
-        pending_task_ids={executor_task.task_id},
-    )
-
-
-@pytest.fixture
-def collect_result() -> CollectResult:
-    return CollectResult(
-        kafka=[
-            KafkaPayload(key=b'out-key', data=SampleOutput()),
-        ],
-        postgres=[
-            PostgresPayload(table='results', data=SampleOutput()),
-        ],
     )
 
 

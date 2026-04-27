@@ -19,7 +19,7 @@ import json
 import pytest
 from pydantic import BaseModel
 
-from drakkar.cache import CacheEntry, CacheScope, decode_value, encode_value
+from drakkar.cache import CacheScope, decode_value, encode_value
 
 # --- CacheScope --------------------------------------------------------------
 
@@ -40,67 +40,6 @@ def test_cache_scope_is_str_enum():
     # StrEnum members double as str instances
     assert isinstance(CacheScope.LOCAL, str)
     assert CacheScope.LOCAL == 'local'
-
-
-# --- CacheEntry --------------------------------------------------------------
-
-
-def test_cache_entry_requires_all_fields():
-    """Every field is required — the engine always populates all of them
-    when constructing an entry (no silent defaults for timestamps)."""
-    entry = CacheEntry(
-        key='k1',
-        scope=CacheScope.LOCAL,
-        value='"hello"',
-        size_bytes=7,
-        created_at_ms=100,
-        updated_at_ms=100,
-        expires_at_ms=None,
-        origin_worker_id='worker-a',
-    )
-    assert entry.key == 'k1'
-    assert entry.scope == CacheScope.LOCAL
-    assert entry.value == '"hello"'
-    assert entry.size_bytes == 7
-    assert entry.created_at_ms == 100
-    assert entry.updated_at_ms == 100
-    assert entry.expires_at_ms is None
-    assert entry.origin_worker_id == 'worker-a'
-
-
-def test_cache_entry_expires_at_ms_is_optional():
-    """`expires_at_ms=None` is the "never expires" sentinel — matches the
-    nullable column in the SQL schema."""
-    entry = CacheEntry(
-        key='k',
-        scope=CacheScope.GLOBAL,
-        value='null',
-        size_bytes=4,
-        created_at_ms=1,
-        updated_at_ms=1,
-        expires_at_ms=None,
-        origin_worker_id='w1',
-    )
-    assert entry.expires_at_ms is None
-
-
-def test_cache_entry_size_bytes_matches_serialized_length():
-    """`size_bytes` is the byte length of the serialized JSON — the caller
-    populates it at construction time, so here we just assert the field is
-    preserved exactly as given."""
-    value_json = json.dumps({'a': 1, 'b': 'two'})
-    size = len(value_json.encode('utf-8'))
-    entry = CacheEntry(
-        key='k',
-        scope=CacheScope.LOCAL,
-        value=value_json,
-        size_bytes=size,
-        created_at_ms=10,
-        updated_at_ms=10,
-        expires_at_ms=None,
-        origin_worker_id='w1',
-    )
-    assert entry.size_bytes == size
 
 
 # --- encode_value -----------------------------------------------------------------
