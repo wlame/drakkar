@@ -161,10 +161,10 @@ services:
         condition: service_healthy
     environment:
       WORKER_ID: worker-1
-      DRAKKAR_CONFIG: /app/drakkar.yaml
-      DRAKKAR_METRICS__PORT: "9090"
-      DRAKKAR_DEBUG__PORT: "8081"
-      DRAKKAR_DEBUG__DEBUG_URL: "http://localhost:8081/"
+      DK_CONFIG: /app/drakkar.yaml
+      DK_METRICS__PORT: "9090"
+      DK_DEBUG__PORT: "8081"
+      DK_DEBUG__DEBUG_URL: "http://localhost:8081/"
     ports:
       - "9090:9090"
       - "8081:8081"
@@ -189,10 +189,10 @@ services:
         condition: service_healthy
     environment:
       WORKER_ID: worker-2
-      DRAKKAR_CONFIG: /app/drakkar.yaml
-      DRAKKAR_METRICS__PORT: "9091"
-      DRAKKAR_DEBUG__PORT: "8082"
-      DRAKKAR_DEBUG__DEBUG_URL: "http://localhost:8082/"
+      DK_CONFIG: /app/drakkar.yaml
+      DK_METRICS__PORT: "9091"
+      DK_DEBUG__PORT: "8082"
+      DK_DEBUG__DEBUG_URL: "http://localhost:8082/"
     ports:
       - "9091:9091"
       - "8082:8082"
@@ -217,10 +217,10 @@ services:
         condition: service_healthy
     environment:
       WORKER_ID: worker-3
-      DRAKKAR_CONFIG: /app/drakkar.yaml
-      DRAKKAR_METRICS__PORT: "9093"
-      DRAKKAR_DEBUG__PORT: "8083"
-      DRAKKAR_DEBUG__DEBUG_URL: "http://localhost:8083/"
+      DK_CONFIG: /app/drakkar.yaml
+      DK_METRICS__PORT: "9093"
+      DK_DEBUG__PORT: "8083"
+      DK_DEBUG__DEBUG_URL: "http://localhost:8083/"
     ports:
       - "9093:9093"
       - "8083:8083"
@@ -239,10 +239,10 @@ services:
         condition: service_completed_successfully
     environment:
       WORKER_ID: fast-worker-1
-      DRAKKAR_CONFIG: /app/drakkar.yaml
-      DRAKKAR_METRICS__PORT: "9094"
-      DRAKKAR_DEBUG__PORT: "8084"
-      DRAKKAR_DEBUG__DEBUG_URL: "http://localhost:8084/"
+      DK_CONFIG: /app/drakkar.yaml
+      DK_METRICS__PORT: "9094"
+      DK_DEBUG__PORT: "8084"
+      DK_DEBUG__DEBUG_URL: "http://localhost:8084/"
     ports:
       - "9094:9094"
       - "8084:8084"
@@ -259,10 +259,10 @@ services:
         condition: service_completed_successfully
     environment:
       WORKER_ID: fast-worker-2
-      DRAKKAR_CONFIG: /app/drakkar.yaml
-      DRAKKAR_METRICS__PORT: "9095"
-      DRAKKAR_DEBUG__PORT: "8085"
-      DRAKKAR_DEBUG__DEBUG_URL: "http://localhost:8085/"
+      DK_CONFIG: /app/drakkar.yaml
+      DK_METRICS__PORT: "9095"
+      DK_DEBUG__PORT: "8085"
+      DK_DEBUG__DEBUG_URL: "http://localhost:8085/"
     ports:
       - "9095:9095"
       - "8085:8085"

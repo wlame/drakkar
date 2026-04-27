@@ -1086,7 +1086,7 @@ def test_warn_if_debug_unauthenticated_emits_warning(config_with_debug):
     # The remediation message must name BOTH opt-in paths (YAML key + env
     # var) so operators don't have to guess which knob to turn.
     assert 'debug.auth_token' in record['message']
-    assert 'DRAKKAR_DEBUG__AUTH_TOKEN' in record['message']
+    assert 'DK_DEBUG__AUTH_TOKEN' in record['message']
     # The "read-only by design" rationale is part of the message — operators
     # reading the warning should immediately understand WHY this is opt-in.
     assert 'read-only' in record['message']

@@ -395,9 +395,9 @@ async def test_config_env_passed_to_subprocess():
         binary_path=sys.executable,
         max_executors=2,
         task_timeout_seconds=10,
-        env={'DRAKKAR_TEST_CONFIG_VAR': 'from_config'},
+        env={'DK_TEST_CONFIG_VAR': 'from_config'},
     )
-    task = make_task(args=['-c', 'import os; print(os.environ.get("DRAKKAR_TEST_CONFIG_VAR", ""))'])
+    task = make_task(args=['-c', 'import os; print(os.environ.get("DK_TEST_CONFIG_VAR", ""))'])
     result = await pool.execute(task)
     assert result.exit_code == 0
     assert result.stdout.strip() == 'from_config'
@@ -408,9 +408,9 @@ async def test_task_env_passed_to_subprocess():
     pool = ExecutorPool(binary_path=sys.executable, max_executors=2, task_timeout_seconds=10)
     task = ExecutorTask(
         task_id='t-env',
-        args=['-c', 'import os; print(os.environ.get("DRAKKAR_TEST_TASK_VAR", ""))'],
+        args=['-c', 'import os; print(os.environ.get("DK_TEST_TASK_VAR", ""))'],
         source_offsets=[0],
-        env={'DRAKKAR_TEST_TASK_VAR': 'from_task'},
+        env={'DK_TEST_TASK_VAR': 'from_task'},
     )
     result = await pool.execute(task)
     assert result.exit_code == 0
@@ -444,7 +444,7 @@ async def test_env_includes_parent_environment():
         binary_path=sys.executable,
         max_executors=2,
         task_timeout_seconds=10,
-        env={'DRAKKAR_TEST_EXTRA': 'extra'},
+        env={'DK_TEST_EXTRA': 'extra'},
     )
     task = make_task(args=['-c', 'import os; print(os.environ.get("PATH", "missing"))'])
     result = await pool.execute(task)
@@ -553,34 +553,34 @@ async def test_cancel_during_execution_does_not_leak_active_count():
 
 
 async def test_inherit_deny_patterns_filter_drakkar_internals(monkeypatch):
-    """DRAKKAR_* env vars must not leak into the subprocess by default.
+    """DK_* env vars must not leak into the subprocess by default.
 
-    Framework internals (e.g. DRAKKAR_SINKS__POSTGRES__MAIN__DSN) can
+    Framework internals (e.g. DK_SINKS__POSTGRES__MAIN__DSN) can
     contain connection strings with embedded credentials. Inheriting them
     unfiltered exposes those secrets to the executor binary.
     """
-    monkeypatch.setenv('DRAKKAR_SINKS__POSTGRES__MAIN__DSN', 'postgres://u:p@h/db')
+    monkeypatch.setenv('DK_SINKS__POSTGRES__MAIN__DSN', 'postgres://u:p@h/db')
     monkeypatch.setenv('OTHER_OK_VAR', 'visible')
 
     pool = ExecutorPool(
         binary_path=sys.executable,
         max_executors=1,
         task_timeout_seconds=10,
-        inherit_deny_patterns=['DRAKKAR_*'],
+        inherit_deny_patterns=['DK_*'],
     )
     task = make_task(
         args=[
             '-c',
             (
                 'import os; '
-                'print(os.environ.get("DRAKKAR_SINKS__POSTGRES__MAIN__DSN", "<missing>")); '
+                'print(os.environ.get("DK_SINKS__POSTGRES__MAIN__DSN", "<missing>")); '
                 'print(os.environ.get("OTHER_OK_VAR", "<missing>"))'
             ),
         ],
     )
     result = await pool.execute(task)
     lines = result.stdout.strip().splitlines()
-    assert lines[0] == '<missing>', f'DRAKKAR_* var leaked: {lines[0]!r}'
+    assert lines[0] == '<missing>', f'DK_* var leaked: {lines[0]!r}'
     assert lines[1] == 'visible', 'non-secret var should still pass through'
 
 
@@ -649,11 +649,11 @@ async def test_is_env_key_denied_is_case_insensitive():
         binary_path='/bin/echo',
         max_executors=1,
         task_timeout_seconds=10,
-        inherit_deny_patterns=['DRAKKAR_*'],
+        inherit_deny_patterns=['DK_*'],
     )
-    assert pool._is_env_key_denied('DRAKKAR_FOO')
-    assert pool._is_env_key_denied('drakkar_foo')
-    assert not pool._is_env_key_denied('HAS_DRAKKAR_SUFFIX')
+    assert pool._is_env_key_denied('DK_FOO')
+    assert pool._is_env_key_denied('dk_foo')
+    assert not pool._is_env_key_denied('HAS_DK_SUFFIX')
     assert not pool._is_env_key_denied('OTHER')
 
 

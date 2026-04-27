@@ -247,7 +247,7 @@ Override per-worker via environment:
 
 ```yaml
 # docker-compose.yml → worker-1 → environment
-DRAKKAR_EXECUTOR__MAX_EXECUTORS: "8"
+DK_EXECUTOR__MAX_EXECUTORS: "8"
 ```
 
 ### Test with fewer partitions

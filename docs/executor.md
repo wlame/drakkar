@@ -328,7 +328,7 @@ is applied case-insensitively to env var names, and matching vars are
 stripped before the subprocess starts. The default patterns are:
 
 ```
-DRAKKAR_*        # framework internals (KAFKA__BROKERS, SINKS__*__DSN, ...)
+DK_*        # framework internals (KAFKA__BROKERS, SINKS__*__DSN, ...)
 *PASSWORD*
 *SECRET*
 *TOKEN*
@@ -337,8 +337,8 @@ DRAKKAR_*        # framework internals (KAFKA__BROKERS, SINKS__*__DSN, ...)
 *CREDENTIAL*
 ```
 
-This keeps operator-configured secrets — most commonly the `DRAKKAR_*`
-env overrides like `DRAKKAR_SINKS__POSTGRES__MAIN__DSN` — from reaching
+This keeps operator-configured secrets — most commonly the `DK_*`
+env overrides like `DK_SINKS__POSTGRES__MAIN__DSN` — from reaching
 the executor binary where they could be read, logged, or exfiltrated.
 
 Two knobs control the behavior:
@@ -347,7 +347,7 @@ Two knobs control the behavior:
 executor:
   env_inherit_parent: true         # false = fully isolated from parent env
   env_inherit_deny:                # override the default patterns
-    - DRAKKAR_*
+    - DK_*
     - '*PASSWORD*'
     - '*SECRET*'
     - '*TOKEN*'
@@ -380,7 +380,7 @@ executor:
 These are useful for connection strings, feature flags, or paths that
 are the same for every task but shouldn't be hardcoded in the binary.
 
-Environment variable override: `DRAKKAR_EXECUTOR__ENV='{"KEY": "value"}'`
+Environment variable override: `DK_EXECUTOR__ENV='{"KEY": "value"}'`
 
 ### Per-task env
 
@@ -472,9 +472,9 @@ executor:
 | `backpressure_high_multiplier` | `int` | `32` | 1 | Pause threshold = `max_executors` x this. |
 | `backpressure_low_multiplier` | `int` | `4` | 1 | Resume threshold = max(1, `max_executors` x this). |
 
-Environment variable overrides use the `DRAKKAR_EXECUTOR__` prefix:
+Environment variable overrides use the `DK_EXECUTOR__` prefix:
 
 ```bash
-DRAKKAR_EXECUTOR__MAX_EXECUTORS=8
-DRAKKAR_EXECUTOR__TASK_TIMEOUT_SECONDS=300
+DK_EXECUTOR__MAX_EXECUTORS=8
+DK_EXECUTOR__TASK_TIMEOUT_SECONDS=300
 ```

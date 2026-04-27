@@ -419,7 +419,7 @@ class ExecutorPool:
         Precedence: (filtered) parent env → ExecutorConfig.env → ExecutorTask.env.
 
         Parent-env inheritance is filtered through ``inherit_deny_patterns``
-        to avoid leaking framework-internal config (DRAKKAR_*) and common
+        to avoid leaking framework-internal config (DK_*) and common
         secrets (passwords, tokens, DSNs, keys) to the executor subprocess.
 
         Returns None (= inherit parent env verbatim) ONLY in the rare case

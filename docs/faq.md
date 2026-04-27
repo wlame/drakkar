@@ -200,7 +200,7 @@ A stable plugin API (entry-points-based `SinkRegistry`) is on the Phase 4 roadma
 
 ### How do I configure a worker?
 
-YAML file + env overrides (`DRAKKAR_` prefix, `__` nesting). See [Configuration Loading](configuration.md#configuration-loading).
+YAML file + env overrides (`DK_` prefix, `__` nesting). See [Configuration Loading](configuration.md#configuration-loading).
 
 ### How do I stagger a rolling deploy so my fleet doesn't cascade-rebalance?
 
@@ -231,7 +231,7 @@ Drakkar does not ship blessed Helm charts or Kustomize overlays yet — a refere
 - **Prometheus metrics** on a configurable port for `prometheus-operator` `ServiceMonitor`.
 - **Stateful considerations**: each worker needs a unique `worker_id` (set via the env var named in `worker_name_env`, default `WORKER_ID`) and a per-worker DB path (recorder + cache SQLite files). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `debug.db_dir` / `cache.db_dir`, or use a shared `ReadWriteMany` volume (NFS, EFS) if you want cluster-wide peer sync.
 
-Typical shape: one `StatefulSet` (or `Deployment` with a PVC per replica) × N replicas = N Kafka consumer-group members. Replica count ≤ partition count. Env-var overrides follow the `DRAKKAR_` prefix + `__` nesting convention (see [Configuration Loading](configuration.md#configuration-loading)).
+Typical shape: one `StatefulSet` (or `Deployment` with a PVC per replica) × N replicas = N Kafka consumer-group members. Replica count ≤ partition count. Env-var overrides follow the `DK_` prefix + `__` nesting convention (see [Configuration Loading](configuration.md#configuration-loading)).
 
 ---
 
@@ -250,7 +250,7 @@ See [Observability — Debug UI](observability.md#debug-ui) for the endpoint inv
 
 ### Is the debug UI safe to expose to a team of operators?
 
-Auth is **opt-in by default**. The UI is read-only by design (no endpoint stops a worker, replays Kafka messages, mutates sinks, or fakes pipeline data) and Drakkar is intended to run inside a private contour, so the framework starts unauthenticated when `debug.auth_token` is empty (the default) and emits a structured `debug_ui_unauthenticated` warning at startup naming the host:port and the two opt-in paths (`debug.auth_token` in YAML or `DRAKKAR_DEBUG__AUTH_TOKEN` env var).
+Auth is **opt-in by default**. The UI is read-only by design (no endpoint stops a worker, replays Kafka messages, mutates sinks, or fakes pipeline data) and Drakkar is intended to run inside a private contour, so the framework starts unauthenticated when `debug.auth_token` is empty (the default) and emits a structured `debug_ui_unauthenticated` warning at startup naming the host:port and the two opt-in paths (`debug.auth_token` in YAML or `DK_DEBUG__AUTH_TOKEN` env var).
 
 For multi-operator setups, set a strong `debug.auth_token`:
 

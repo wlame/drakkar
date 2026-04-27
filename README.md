@@ -214,7 +214,7 @@ Drakkar has an explicit trust model that operators should understand before prod
 
 1. **Handler binary is fully trusted.** `executor.binary_path` is operator-configured; message bytes flow to the binary's stdin without sanitization. The binary runs with the worker's privileges (plus any env overrides from `ExecutorConfig.env` or per-task `env`).
 2. **Peer workers sharing `db_dir` are fully trusted.** The cache and recorder peer-sync mechanisms have no cryptographic authentication of peer writes. Anyone who can write to the shared directory can inject cache entries or event rows that your workers will read. Treat `db_dir` as a shared-trust boundary.
-3. **The debug UI is an operator tool, not a public surface.** Authentication is **opt-in by default** — `debug.auth_token` is empty out of the box, the UI runs unauthenticated, and a structured warning (`debug_ui_unauthenticated`) fires at startup naming the host:port and the two opt-in paths (`debug.auth_token` in YAML or `DRAKKAR_DEBUG__AUTH_TOKEN` env var). To require auth, set the token to a 32+ character random value (e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"`); protected endpoints (database download, merge, message probe) and the WebSocket live-event stream then require `Authorization: Bearer <token>` (or `?token=<token>`). When a token is set, the WebSocket also validates the `Origin` header (against `debug.allowed_ws_origins` when configured, otherwise against the request's `Host` header). Even with auth, the debug UI exposes subprocess stdout/stderr, per-task env (after redaction), cache contents, and live event streams; restrict access to operators only.
+3. **The debug UI is an operator tool, not a public surface.** Authentication is **opt-in by default** — `debug.auth_token` is empty out of the box, the UI runs unauthenticated, and a structured warning (`debug_ui_unauthenticated`) fires at startup naming the host:port and the two opt-in paths (`debug.auth_token` in YAML or `DK_DEBUG__AUTH_TOKEN` env var). To require auth, set the token to a 32+ character random value (e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"`); protected endpoints (database download, merge, message probe) and the WebSocket live-event stream then require `Authorization: Bearer <token>` (or `?token=<token>`). When a token is set, the WebSocket also validates the `Origin` header (against `debug.allowed_ws_origins` when configured, otherwise against the request's `Host` header). Even with auth, the debug UI exposes subprocess stdout/stderr, per-task env (after redaction), cache contents, and live event streams; restrict access to operators only.
 
 **Why is auth opt-out by default?** The debug UI is **read-only by design** — no endpoint stops a running worker, replays Kafka messages, mutates configured sinks, or fakes pipeline data. The Message Probe runs the handler against pasted input but is enforced (with tests) to produce zero side effects: no sink writes, no offset commits, no recorder rows, no cache writes, no peer sync. Combined with Drakkar's expected deployment posture — inside a private contour (VPC, internal cluster network, operator-only ingress) — the framework treats "unauthenticated by default + structured startup warning" as the right balance between out-of-the-box ergonomics and operator visibility. Operators who deploy in any non-private context (public internet, multi-tenant host, hostile network segment) should treat the warning as a prompt to set `auth_token` before the worker accepts traffic.
 4. **Kafka producers are trusted for availability, not correctness.** Drakkar deserializes message payloads via `handler.deserialize_message`; parse errors silently set `msg.payload=None` rather than DLQ-ing the message or raising. A malicious producer cannot execute code in the worker, but can cause handlers to see unexpected `None` payloads unless your handler validates.
@@ -307,12 +307,12 @@ WORKER_ID=worker-2 python main.py
 
 ## Configuration
 
-All config fields support environment variable override with `DRAKKAR_` prefix and `__` for nesting:
+All config fields support environment variable override with `DK_` prefix and `__` for nesting:
 
 ```bash
-DRAKKAR_KAFKA__BROKERS=kafka:9092
-DRAKKAR_EXECUTOR__MAX_EXECUTORS=16
-DRAKKAR_DEBUG__PORT=8081
+DK_KAFKA__BROKERS=kafka:9092
+DK_EXECUTOR__MAX_EXECUTORS=16
+DK_DEBUG__PORT=8081
 ```
 
 ## Observability

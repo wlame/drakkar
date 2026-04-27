@@ -11,7 +11,7 @@ import drakkar as dk
 
 
 def main() -> None:
-    config_path = os.environ.get('DRAKKAR_CONFIG', '/app/drakkar.yaml')
+    config_path = os.environ.get('DK_CONFIG', '/app/drakkar.yaml')
 
     app = dk.DrakkarApp(
         handler=SymbolCountHandler(),

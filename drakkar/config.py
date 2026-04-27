@@ -1,7 +1,7 @@
 """Configuration loading for Drakkar framework.
 
 Supports YAML files with environment variable overrides.
-Use DRAKKAR_ prefix with __ for nesting (e.g., DRAKKAR_KAFKA__BROKERS).
+Use DK_ prefix with __ for nesting (e.g., DK_KAFKA__BROKERS).
 """
 
 import os
@@ -304,7 +304,7 @@ class ExecutorConfig(BaseModel):
     )
     env_inherit_deny: list[str] = Field(
         default_factory=lambda: [
-            'DRAKKAR_*',  # framework internals (SINKS__, KAFKA__, DEBUG__, ...)
+            'DK_*',  # framework internals (SINKS__, KAFKA__, DEBUG__, ...)
             '*PASSWORD*',
             '*SECRET*',
             '*TOKEN*',
@@ -315,7 +315,7 @@ class ExecutorConfig(BaseModel):
         description=(
             'Case-insensitive fnmatch patterns against parent env var names. '
             'Matching vars are NOT inherited by subprocesses, even when '
-            'env_inherit_parent is True. Default excludes DRAKKAR_* internals '
+            'env_inherit_parent is True. Default excludes DK_* internals '
             'and common secret names so handler-configured secrets do not '
             'leak to executor binaries. Set to [] to fully trust the parent '
             'environment.'
@@ -596,7 +596,7 @@ class DrakkarConfig(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_prefix='DRAKKAR_',
+        env_prefix='DK_',
         env_nested_delimiter='__',
     )
 
@@ -690,14 +690,14 @@ def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
 
     YAML file path is resolved in order:
     1. Explicit config_path argument
-    2. DRAKKAR_CONFIG environment variable
+    2. DK_CONFIG environment variable
     3. Falls back to env-only config
 
-    Environment variables override YAML values. Use DRAKKAR_ prefix
-    with __ for nesting (e.g., DRAKKAR_KAFKA__BROKERS).
+    Environment variables override YAML values. Use DK_ prefix
+    with __ for nesting (e.g., DK_KAFKA__BROKERS).
     """
     if config_path is None:
-        config_path = os.environ.get('DRAKKAR_CONFIG')
+        config_path = os.environ.get('DK_CONFIG')
 
     if config_path is not None:
         path = Path(config_path)
@@ -708,13 +708,13 @@ def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
             yaml_data = yaml.safe_load(f) or {}
 
         # pydantic-settings ignores env vars for nested models when init
-        # kwargs are passed. Fix: extract DRAKKAR_* env vars, parse them
+        # kwargs are passed. Fix: extract DK_* env vars, parse them
         # into nested structure, and deep-merge on top of YAML.
-        env_overrides = _parse_env_overrides('DRAKKAR_', '__')
+        env_overrides = _parse_env_overrides('DK_', '__')
         merged = _deep_merge(yaml_data, env_overrides)
         return DrakkarConfig(**merged)
 
-    env_overrides = _parse_env_overrides('DRAKKAR_', '__')
+    env_overrides = _parse_env_overrides('DK_', '__')
     return DrakkarConfig(**env_overrides)
 
 
