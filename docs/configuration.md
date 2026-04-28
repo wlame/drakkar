@@ -2,6 +2,9 @@
 
 Drakkar configuration is built on [pydantic-settings](https://docs.pydantic-dev.github.io/pydantic-settings/) and supports YAML files, environment variable overrides, and inline Python objects. Every option has a sensible default so you can start with a minimal config and grow from there.
 
+!!! tip "Looking for an annotated example?"
+    The companion **[Config Reference](config-reference.md)** page is a single `drakkar.yaml` showing **every** field with a one-line comment and its `DK_*` env-var override. Use it to scan what's available; come back here for the deep tables and prose.
+
 ---
 
 ## Configuration Loading
@@ -519,180 +522,52 @@ debug:
 
 ---
 
-## Full Example YAML
+## Cache (`cache:`)
 
-A complete `drakkar.yaml` with all sections filled in:
+A handler-accessible key/value cache with in-memory hot reads, write-behind SQLite persistence, and optional cross-worker peer-sync. **Disabled by default** -- when `enabled: false`, `handler.cache` is a no-op stub so handler code can call `self.cache.set(...)` unconditionally without `if` guards.
+
+See [Cache](cache.md) for the full API (`set` / `peek` / `get` / `delete`) and the [periodic loops](cache.md#how-it-flows) (flush, cleanup, peer-sync).
+
+### Cache Settings
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `enabled` | `bool` | `false` | | Master switch. When `false`, the cache is a no-op stub. When `true` without a `db_dir` (anywhere), the engine warns and continues without persistence -- in-memory only. |
+| `db_dir` | `str` | `''` | | Directory for the per-worker `<worker_id>-cache.db` SQLite file. Empty falls back to [`debug.db_dir`](#debug-flight-recorder-debug). Use a **shared** filesystem (NFS, EFS) for peer-sync to discover other workers' cache files. |
+| `flush_interval_seconds` | `float` | `3.0` | > 0 | Interval (seconds) for the write-behind loop that drains dirty in-memory entries to SQLite. Lower = less data loss on crash; higher = less write amplification. |
+| `cleanup_interval_seconds` | `float` | `60.0` | > 0 | Interval (seconds) for the loop that deletes rows whose `expires_at_ms` has passed and refreshes Prometheus DB-size gauges. |
+| `max_memory_entries` | `int \| null` | `10000` | >= 1 or `null` | Cap for the in-memory LRU. `null` = unbounded (a startup warning fires so the choice is visible in logs). The DB is the source of truth, so eviction never loses data -- evicted entries re-warm on the next `get()`. |
+
+### Peer Sync (`cache.peer_sync:`) {#cache-peer-sync}
+
+The peer-sync loop pulls recent entries from sibling workers' `-cache.db` files (LWW merge by `updated_at_ms`). Requires `debug.store_config: true` for autodiscovery -- if disabled, peer sync silently no-ops.
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `enabled` | `bool` | `true` | | When `false`, only the local SQLite is used -- no cross-worker propagation. Flush and cleanup loops still run. |
+| `interval_seconds` | `float` | `30.0` | > 0 | Interval (seconds) between peer-sync cycles. |
+| `batch_size` | `int` | `500` | >= 1 | Maximum rows pulled from each peer per cycle. |
+| `timeout_seconds` | `float` | `5.0` | > 0 | Per-peer read timeout (seconds). One slow peer cannot block the rest. |
+| `cycle_deadline_seconds` | `float \| null` | `null` | >= 0.1 and `<` `interval_seconds` | Hard wall-clock cap on a single sync cycle. `null` derives `interval_seconds * 0.9`. Must be strictly less than `interval_seconds` -- config load fails otherwise so the misconfiguration surfaces at startup. |
 
 ```yaml
-# --- Worker identity ---
-worker_name_env: HOSTNAME          # read worker name from $HOSTNAME
-cluster_name: search-cluster       # static cluster name
-cluster_name_env: DK_CLUSTER  # override cluster from env if set
-
-# --- Kafka source ---
-kafka:
-  brokers: kafka-1:9092,kafka-2:9092,kafka-3:9092
-  source_topic: search-requests
-  consumer_group: search-workers
-  max_poll_records: 200
-  max_poll_interval_ms: 600000     # 10 minutes (long-running tasks)
-  session_timeout_ms: 60000        # 60 seconds
-  heartbeat_interval_ms: 5000      # 5 seconds
-
-# --- Executor pool ---
-executor:
-  binary_path: /usr/local/bin/search-engine
-  max_executors: 8
-  task_timeout_seconds: 300        # 5 minutes per task
-  window_size: 50
-  max_retries: 3
-  drain_timeout_seconds: 10
-  backpressure_high_multiplier: 16 # pause at 8 * 16 = 128 queued
-  backpressure_low_multiplier: 2   # resume at max(1, 8 * 2) = 16 queued
-
-# --- Output sinks ---
-sinks:
-  kafka:
-    search-results:
-      topic: search-results
-    analytics:
-      topic: analytics-events
-      brokers: kafka-analytics:9092  # separate cluster
-      ui_url: http://kafka-ui.internal:8080
-
-  postgres:
-    main-db:
-      dsn: postgresql://app:secret@db:5432/search
-      pool_min: 5
-      pool_max: 20
-      ui_url: http://pgadmin.internal:5050
-
-  mongo:
-    logs:
-      uri: mongodb://mongo:27017
-      database: search_logs
-      ui_url: http://mongo-express.internal:8081
-
-  http:
-    webhook:
-      url: https://api.example.com/results
-      method: POST
-      timeout_seconds: 15
-      headers:
-        Authorization: "Bearer my-api-token"
-        X-Source: drakkar
-      max_retries: 5
-      ui_url: https://api.example.com/docs
-
-  redis:
-    cache:
-      url: redis://redis:6379/0
-      key_prefix: "search:"
-      ui_url: http://redis-insight.internal:8001
-
-  filesystem:
-    archive:
-      base_path: /data/archive
-      ui_url: http://filebrowser.internal:8080
-
-# --- Dead letter queue ---
-dlq:
-  topic: search-requests-dlq       # explicit DLQ topic
-  brokers: ""                       # inherit from kafka.brokers
-
-# --- Prometheus metrics ---
-metrics:
+cache:
   enabled: true
-  port: 9090
-
-# --- Logging ---
-logging:
-  level: INFO
-  format: json                      # "json" for production, "console" for dev
-  output: stderr                    # stderr | stdout | file path (supports {worker_id}, {cluster_name})
-
-# --- Debug flight recorder ---
-debug:
-  enabled: true
-  port: 8080
-  debug_url: ""                     # set if behind a reverse proxy
-  db_dir: /shared/drakkar-debug     # shared filesystem for autodiscovery
-  store_events: true
-  store_config: true
-  store_state: true
-  state_sync_interval_seconds: 10
-  expose_env_vars:
-    - GIT_SHA
-    - DEPLOY_ENV
-    - K8S_POD_NAME
-  rotation_interval_minutes: 60
-  retention_hours: 48
-  retention_max_events: 200000
-  store_output: true
-  flush_interval_seconds: 5
-  max_buffer: 50000
-  max_flush_retries: 3
-  max_ui_rows: 5000
-  log_min_duration_ms: 1000
-  ws_min_duration_ms: 500
-  event_min_duration_ms: 0
-  output_min_duration_ms: 500
-  prometheus_url: http://prometheus:9090
-  prometheus_rate_interval: 5m
-  prometheus_worker_label: 'worker_id="{worker_id}"'
-  prometheus_cluster_label: 'cluster="{cluster_name}"'
-  custom_links:
-    - name: Grafana
-      url: http://grafana:3000/d/drakkar?var-worker={worker_id}
-    - name: Logs
-      url: http://kibana:5601/app/discover#/?_a=(query:(match_phrase:(worker_id:'{worker_id}')))
+  db_dir: /shared/drakkar-cache       # empty falls back to debug.db_dir
+  flush_interval_seconds: 3.0
+  cleanup_interval_seconds: 60.0
+  max_memory_entries: 10000           # null = unbounded (warns)
+  peer_sync:
+    enabled: true
+    interval_seconds: 30.0
+    batch_size: 500
+    timeout_seconds: 5.0
+    cycle_deadline_seconds: null      # null = interval_seconds * 0.9
 ```
 
 ---
 
-## Environment Variable Reference
+## Annotated `drakkar.yaml` example
 
-Common environment variables and their corresponding YAML paths:
+A copy-paste-ready YAML showing **every** field with one-line comments and the matching `DK_*` env-var override sits on its own page: **[Config Reference](config-reference.md)**. Use this page (Configuration) for the deep tables and prose; use the Reference for a quick scan of "what can I change here?"
 
-| Environment Variable | YAML Path | Example Value |
-|---------------------|-----------|---------------|
-| `DK_CONFIG` | *(file path, not a config field)* | `/etc/drakkar/config.yaml` |
-| `DK_WORKER_NAME_ENV` | `worker_name_env` | `HOSTNAME` |
-| `DK_CLUSTER_NAME` | `cluster_name` | `search-cluster` |
-| `DK_CLUSTER_NAME_ENV` | `cluster_name_env` | `K8S_CLUSTER` |
-| `DK_KAFKA__BROKERS` | `kafka.brokers` | `kafka:9092` |
-| `DK_KAFKA__SOURCE_TOPIC` | `kafka.source_topic` | `my-events` |
-| `DK_KAFKA__CONSUMER_GROUP` | `kafka.consumer_group` | `my-workers` |
-| `DK_KAFKA__MAX_POLL_RECORDS` | `kafka.max_poll_records` | `200` |
-| `DK_KAFKA__MAX_POLL_INTERVAL_MS` | `kafka.max_poll_interval_ms` | `600000` |
-| `DK_KAFKA__SESSION_TIMEOUT_MS` | `kafka.session_timeout_ms` | `60000` |
-| `DK_KAFKA__HEARTBEAT_INTERVAL_MS` | `kafka.heartbeat_interval_ms` | `5000` |
-| `DK_EXECUTOR__BINARY_PATH` | `executor.binary_path` | `/usr/bin/my-tool` |
-| `DK_EXECUTOR__MAX_EXECUTORS` | `executor.max_executors` | `16` |
-| `DK_EXECUTOR__TASK_TIMEOUT_SECONDS` | `executor.task_timeout_seconds` | `300` |
-| `DK_EXECUTOR__WINDOW_SIZE` | `executor.window_size` | `50` |
-| `DK_EXECUTOR__MAX_RETRIES` | `executor.max_retries` | `5` |
-| `DK_EXECUTOR__DRAIN_TIMEOUT_SECONDS` | `executor.drain_timeout_seconds` | `10` |
-| `DK_EXECUTOR__BACKPRESSURE_HIGH_MULTIPLIER` | `executor.backpressure_high_multiplier` | `16` |
-| `DK_EXECUTOR__BACKPRESSURE_LOW_MULTIPLIER` | `executor.backpressure_low_multiplier` | `2` |
-| `DK_DLQ__TOPIC` | `dlq.topic` | `my-events-dlq` |
-| `DK_DLQ__BROKERS` | `dlq.brokers` | `kafka:9092` |
-| `DK_METRICS__ENABLED` | `metrics.enabled` | `true` |
-| `DK_METRICS__PORT` | `metrics.port` | `9090` |
-| `DK_LOGGING__LEVEL` | `logging.level` | `DEBUG` |
-| `DK_LOGGING__FORMAT` | `logging.format` | `console` |
-| `DK_LOGGING__OUTPUT` | `logging.output` | `/var/log/drakkar/worker.log` |
-| `DK_DEBUG__ENABLED` | `debug.enabled` | `false` |
-| `DK_DEBUG__HOST` | `debug.host` | `0.0.0.0` |
-| `DK_DEBUG__PORT` | `debug.port` | `9000` |
-| `DK_DEBUG__AUTH_TOKEN` | `debug.auth_token` | `32-char-random-string` |
-| `DK_DEBUG__ALLOWED_WS_ORIGINS` | `debug.allowed_ws_origins` | `["https://ops.internal"]` |
-| `DK_DEBUG__DB_DIR` | `debug.db_dir` | `/shared/debug` |
-| `DK_DEBUG__STORE_EVENTS` | `debug.store_events` | `true` |
-| `DK_DEBUG__STORE_CONFIG` | `debug.store_config` | `true` |
-| `DK_DEBUG__STORE_STATE` | `debug.store_state` | `true` |
-| `DK_DEBUG__STORE_OUTPUT` | `debug.store_output` | `false` |
-| `DK_DEBUG__PROMETHEUS_URL` | `debug.prometheus_url` | `http://prometheus:9090` |
-
-!!! tip
-    The `DK_CONFIG` variable is special -- it sets the YAML file path, not a config field. It is excluded from the env-var-to-config merge.
