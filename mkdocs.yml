@@ -48,7 +48,6 @@ theme:
 
 nav:
   - Home: index.md
-  - FAQ: faq.md
   - Handler: handler.md
   - Cache: cache.md
   - Fan-out (one message → many tasks): fan-out.md
@@ -61,6 +60,8 @@ nav:
   - Config Calculator: calculator.md
   - Integration Tests: integration.md
   - Data Flow: data-flow.md
+  - Config Reference: config-reference.md
+  - FAQ: faq.md
 
 markdown_extensions:
   # Python Markdown
