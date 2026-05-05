@@ -86,6 +86,7 @@ select = [
 ]
 ignore = [
     "ANN401", # dynamically typed expressions (Any)
+    "ANN202", # missing return type for nested/private functions (FastAPI route handlers)
     "ANN002", # missing type annotation for *args
     "ANN003", # missing type annotation for **kwargs
     "E501",   # line too long (handled by formatter)
@@ -99,6 +100,7 @@ quote-style = "single"
 
 [dependency-groups]
 dev = [
+    "pytest>=9.0.3",
     "ty>=0.0.24",
 ]
 

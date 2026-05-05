@@ -39,7 +39,7 @@ from httpx import ASGITransport, AsyncClient
 
 from drakkar.cache import Cache, CacheEngine
 from drakkar.config import CacheConfig, DebugConfig, DrakkarConfig
-from drakkar.debug_server import create_debug_app
+from drakkar.debug.server import create_debug_app
 from drakkar.recorder import EventRecorder
 
 # ---------------------------------------------------------------------------

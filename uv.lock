@@ -2,9 +2,6 @@ version = 1
 revision = 3
 requires-python = ">=3.13"
 
-# [options]
-# exclude-newer = "2026-04-14T00:00:00Z"
-
 [[package]]
 name = "aiosqlite"
 version = "0.22.1"
@@ -470,6 +467,7 @@ perf = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "pytest" },
     { name = "ty" },
 ]
 
@@ -499,7 +497,10 @@ requires-dist = [
 provides-extras = ["dev", "perf"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "ty", specifier = ">=0.0.24" }]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3" },
+    { name = "ty", specifier = ">=0.0.24" },
+]
 
 [[package]]
 name = "pydantic"

@@ -25,9 +25,9 @@ import aiosqlite
 import structlog
 
 from drakkar import metrics
-from drakkar.cache_memory import Cache
-from drakkar.cache_models import CacheScope, _now_ms
-from drakkar.cache_sql import (
+from drakkar.cache.memory import Cache
+from drakkar.cache.models import CacheScope, _now_ms
+from drakkar.cache.sql import (
     LWW_UPSERT_SQL,
     PEER_CLUSTER_CACHE_TTL_SECONDS,
     SCHEMA_CACHE_ENTRIES,
@@ -624,7 +624,7 @@ class CacheEngine:
         # Local import to avoid a cycle: cache_engine ↔ cache_memory both
         # import each other at module load otherwise. Op is in cache_models
         # which has no dependencies on either, so this is safe.
-        from drakkar.cache_models import Op
+        from drakkar.cache.models import Op
 
         for key, op in snapshot.items():
             if op.op is Op.SET:

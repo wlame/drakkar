@@ -448,7 +448,7 @@ async def test_start_registers_cleanup_task_as_system_periodic(tmp_path, monkeyp
     call kwargs for each task. We allow multiple invocations (flush +
     cleanup) and pick the one targeting the cleanup name.
     """
-    from drakkar import cache_engine as cache_engine_module
+    import drakkar.cache.engine as cache_engine_module
 
     captured: list[dict] = []
 

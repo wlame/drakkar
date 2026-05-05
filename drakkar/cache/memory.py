@@ -32,7 +32,7 @@ import aiosqlite
 from pydantic import BaseModel
 
 from drakkar import metrics
-from drakkar.cache_models import (
+from drakkar.cache.models import (
     CacheEntry,
     CacheScope,
     DirtyOp,

@@ -678,7 +678,7 @@ async def test_start_registers_flush_task_as_system_periodic(tmp_path, monkeypat
     """
     import asyncio as _asyncio
 
-    from drakkar import cache_engine as cache_engine_module
+    import drakkar.cache.engine as cache_engine_module
 
     captured: list[dict] = []
 
@@ -830,7 +830,7 @@ async def test_flush_loop_error_does_not_stop_engine(tmp_path, monkeypatch):
     """
     import asyncio as _asyncio
 
-    from drakkar import cache_engine as cache_engine_module
+    import drakkar.cache.engine as cache_engine_module
 
     recorded_kwargs: dict = {}
 
@@ -1084,7 +1084,7 @@ async def test_stop_final_drain_failure_is_logged_and_stop_completes(tmp_path, m
     # ``cache_engine.CacheEngine.stop()`` uses the logger defined in
     # :mod:`drakkar.cache_engine` (a separate structlog proxy from the
     # one in :mod:`drakkar.cache`), so patch there.
-    from drakkar import cache_engine as cache_engine_module
+    import drakkar.cache.engine as cache_engine_module
 
     captured_events: list[str] = []
     original_aexception = cache_engine_module.logger.aexception

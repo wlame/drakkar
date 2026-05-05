@@ -47,7 +47,7 @@ from drakkar.utils import redact_url
 #   (matches the existing ``isoformat().replace("+00:00", "Z")``
 #   convention used elsewhere in the code base).
 try:
-    import orjson
+    import orjson  # ty: ignore[unresolved-import]
 
     _HAS_ORJSON = True
 

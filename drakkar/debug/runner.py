@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel
 
 from drakkar.cache import CacheScope
-from drakkar.debug_runner_helpers import (
+from drakkar.debug.runner_helpers import (
     _build_source_message,
     _failed_task_entry,
     _make_value_preview,
@@ -55,7 +55,7 @@ from drakkar.debug_runner_helpers import (
     _serialize_payload,
     _summarize_cache_calls,
 )
-from drakkar.debug_runner_models import (
+from drakkar.debug.runner_models import (
     DebugReport,
     PlannedSinkRecord,
     ProbeCacheCall,

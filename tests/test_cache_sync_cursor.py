@@ -49,8 +49,8 @@ from typing import Any
 import aiosqlite
 import pytest
 
+import drakkar.cache.engine as cache_engine_module
 from drakkar import cache as cache_module
-from drakkar import cache_engine as cache_engine_module
 from drakkar import metrics
 from drakkar.cache import (
     Cache,

@@ -849,7 +849,7 @@ async def test_rotate_new_reader_open_failure_rolls_back(tmp_path, monkeypatch):
     opened new_db and leaves the previous writer/reader pair in place so the
     worker stays usable.
     """
-    from drakkar import recorder as recorder_module
+    from drakkar.recorder import core as recorder_module
 
     config = make_debug_config(tmp_path, retention_hours=24)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
@@ -3442,7 +3442,7 @@ async def test_recorder_flush_rotation_between_failures_reroutes_to_new_db(tmp_p
         # ~1.1s real-time sleep that the previous implementation needed to
         # roll the second-resolution timestamp in ``make_db_path``. This
         # keeps the test fast and removes a long wait from the suite.
-        from drakkar import recorder as recorder_module
+        from drakkar.recorder import core as recorder_module
 
         unique_new_path = str(tmp_path / f'{WORKER_NAME}-rotated.db')
         monkeypatch.setattr(
@@ -3972,7 +3972,7 @@ async def test_cross_trace_by_label_swallows_db_open_exception(tmp_path, monkeyp
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
-    from drakkar import recorder as recorder_module
+    from drakkar.recorder import core as recorder_module
 
     real_connect = recorder_module.aiosqlite.connect
 
@@ -4237,7 +4237,7 @@ async def test_start_rolls_back_when_reader_open_fails(tmp_path, monkeypatch):
     """If ``open_reader()`` raises during ``start()`` the writer must be
     closed too — otherwise the half-opened writer leaks its fd / file lock
     and a retry of ``start()`` collides with itself."""
-    from drakkar import recorder as recorder_module
+    from drakkar.recorder import core as recorder_module
 
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)

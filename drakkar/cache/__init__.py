@@ -2,13 +2,13 @@
 
 The implementation has been split across four sibling modules:
 
-- :mod:`drakkar.cache_models`  — ``CacheScope``, ``CacheEntry``, JSON codec,
+- :mod:`drakkar.cache.models`  — ``CacheScope``, ``CacheEntry``, JSON codec,
   ``Op``, ``DirtyOp``, ``_now_ms``.
-- :mod:`drakkar.cache_memory`  — ``Cache`` and ``NoOpCache`` (handler-facing
+- :mod:`drakkar.cache.memory`  — ``Cache`` and ``NoOpCache`` (handler-facing
   in-memory layer + DB fallback for ``get``).
-- :mod:`drakkar.cache_sql`     — ``SCHEMA_CACHE_ENTRIES``, ``LWW_UPSERT_SQL``,
+- :mod:`drakkar.cache.sql`     — ``SCHEMA_CACHE_ENTRIES``, ``LWW_UPSERT_SQL``,
   ``PEER_CLUSTER_CACHE_TTL_SECONDS``.
-- :mod:`drakkar.cache_engine`  — ``CacheEngine`` (SQLite write-behind, cleanup
+- :mod:`drakkar.cache.engine`  — ``CacheEngine`` (SQLite write-behind, cleanup
   loop, peer-sync).
 
 This module re-exports the public API so existing call sites and tests can
@@ -28,9 +28,9 @@ from __future__ import annotations
 import aiosqlite  # noqa: F401
 import structlog
 
-from drakkar.cache_engine import CacheEngine
-from drakkar.cache_memory import Cache, NoOpCache
-from drakkar.cache_models import (
+from drakkar.cache.engine import CacheEngine
+from drakkar.cache.memory import Cache, NoOpCache
+from drakkar.cache.models import (
     CacheEntry,
     CacheScope,
     DirtyOp,
@@ -39,7 +39,7 @@ from drakkar.cache_models import (
     decode_value,
     encode_value,
 )
-from drakkar.cache_sql import (
+from drakkar.cache.sql import (
     LWW_UPSERT_SQL,
     PEER_CLUSTER_CACHE_TTL_SECONDS,
     SCHEMA_CACHE_ENTRIES,

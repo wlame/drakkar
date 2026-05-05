@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from starlette.testclient import TestClient
 
 from drakkar.config import DebugConfig, DrakkarConfig
-from drakkar.debug_server import (
+from drakkar.debug.server import (
     create_debug_app,
     format_ts,
     format_ts_full,
@@ -1296,7 +1296,7 @@ async def test_sink_breakdown_empty_offsets_returns_empty_map(
 
 def testhook_flags_no_overrides_returns_all_false():
     """Plain BaseDrakkarHandler subclass with no hook overrides → all False."""
-    from drakkar.debug_server import hook_flags
+    from drakkar.debug.server import hook_flags
     from drakkar.handler import BaseDrakkarHandler
 
     class H(BaseDrakkarHandler):
@@ -1312,7 +1312,7 @@ def testhook_flags_no_overrides_returns_all_false():
 
 def testhook_flags_detects_overrides():
     """Each overridden hook flips its flag; non-overridden stay False."""
-    from drakkar.debug_server import hook_flags
+    from drakkar.debug.server import hook_flags
     from drakkar.handler import BaseDrakkarHandler
     from drakkar.models import CollectResult, ExecutorResult, MessageGroup
 
@@ -2454,17 +2454,17 @@ class TestDebugServerClass:
     async def test_start_creates_server_and_thread(self, debug_config, mock_recorder, mock_app):
         from unittest.mock import patch
 
-        from drakkar.debug_server import DebugServer
+        from drakkar.debug.server import DebugServer
 
         server = DebugServer(debug_config, mock_recorder, mock_app)
         assert server._server is None
         assert server._thread is None
 
         with (
-            patch('drakkar.debug_server.uvicorn.Server') as mock_uvi_server,
-            patch('drakkar.debug_server.uvicorn.Config') as mock_uvi_config,
-            patch('drakkar.debug_server.threading.Thread') as mock_thread,
-            patch('drakkar.debug_server.logger') as mock_logger,
+            patch('drakkar.debug.server.uvicorn.Server') as mock_uvi_server,
+            patch('drakkar.debug.server.uvicorn.Config') as mock_uvi_config,
+            patch('drakkar.debug.server.threading.Thread') as mock_thread,
+            patch('drakkar.debug.server.logger') as mock_logger,
         ):
             mock_uvi_server.return_value = MagicMock()
             mock_uvi_config.return_value = MagicMock()
@@ -2483,13 +2483,13 @@ class TestDebugServerClass:
     async def test_stop_signals_exit_and_joins(self, debug_config, mock_recorder, mock_app):
         from unittest.mock import patch
 
-        from drakkar.debug_server import DebugServer
+        from drakkar.debug.server import DebugServer
 
         server = DebugServer(debug_config, mock_recorder, mock_app)
         server._server = MagicMock()
         server._thread = MagicMock()
 
-        with patch('drakkar.debug_server.logger') as mock_logger:
+        with patch('drakkar.debug.server.logger') as mock_logger:
             mock_logger.ainfo = AsyncMock()
             await server.stop()
 
@@ -2499,11 +2499,11 @@ class TestDebugServerClass:
     async def test_stop_when_not_started(self, debug_config, mock_recorder, mock_app):
         from unittest.mock import patch
 
-        from drakkar.debug_server import DebugServer
+        from drakkar.debug.server import DebugServer
 
         server = DebugServer(debug_config, mock_recorder, mock_app)
 
-        with patch('drakkar.debug_server.logger') as mock_logger:
+        with patch('drakkar.debug.server.logger') as mock_logger:
             mock_logger.ainfo = AsyncMock()
             await server.stop()  # should not raise
 
@@ -2921,7 +2921,7 @@ class TestWebSocketAuth:
         """
         import secrets as secrets_mod
 
-        from drakkar import debug_server as ds
+        from drakkar.debug import server as ds
 
         captured_calls: list[tuple[str, str]] = []
         real_compare = secrets_mod.compare_digest
@@ -3822,7 +3822,7 @@ async def test_probe_endpoint_timeout_returns_partial_report_with_truncated_true
       3. ``handler.cache`` is the ORIGINAL object after the request
          (the runner's ``finally`` block ran during cancellation cascade)
     """
-    import drakkar.debug_server as debug_server_mod
+    import drakkar.debug.server as debug_server_mod
     from drakkar.config import ExecutorConfig
 
     handler = _ProbeTestHandler(task_count=1)
@@ -3870,7 +3870,7 @@ async def test_probe_endpoint_timeout_partial_includes_sink_records_from_complet
     records captured by completed hooks. The per-run state now
     flattens on every ``to_report`` call so the partial sees them.
     """
-    import drakkar.debug_server as debug_server_mod
+    import drakkar.debug.server as debug_server_mod
     from drakkar.config import ExecutorConfig
 
     handler = _ProbeTestHandler(task_count=1)

@@ -1,7 +1,7 @@
 """Debug web UI for Drakkar workers — FastAPI + Jinja2 templates.
 
 Helpers (auth/origin checks, timestamp formatters, hook-flag detection)
-live in :mod:`drakkar.debug_server_helpers`. The request-body Pydantic
+live in :mod:`drakkar.debug.server_helpers`. The request-body Pydantic
 models (``_ArrangeTaskLookupRequest``, ``_SinkBreakdownRequest``,
 ``_ProbeRequest``) MUST stay defined here because FastAPI's "single
 Pydantic param = request body" heuristic only fires when the model and
@@ -31,7 +31,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from drakkar.config import DebugConfig
-from drakkar.debug_runner import DebugRunner, ProbeInput
+from drakkar.debug.runner import DebugRunner, ProbeInput
 
 # Re-import the helpers that used to live here so test patches like
 # ``drakkar.debug_server.hook_flags`` keep working without changes.
@@ -40,7 +40,7 @@ from drakkar.debug_runner import DebugRunner, ProbeInput
 # imported by tests via the original ``drakkar.debug_server.<name>``
 # path; ``noqa: F401`` keeps the re-export visible without tripping
 # ruff's unused-import check.
-from drakkar.debug_server_helpers import (
+from drakkar.debug.server_helpers import (
     _DEFAULT_PORTS,  # noqa: F401  (re-exported for tests)
     format_ts,
     format_ts_full,
@@ -108,7 +108,7 @@ logger = structlog.get_logger()
 
 WS_DRAIN_SLEEP = 0.02  # seconds to sleep when WebSocket event queue is empty
 
-TEMPLATES_DIR = Path(__file__).parent / 'templates'
+TEMPLATES_DIR = Path(__file__).parent.parent / 'templates'
 
 
 def create_debug_app(

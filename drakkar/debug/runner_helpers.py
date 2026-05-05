@@ -13,7 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from drakkar.debug_runner_models import ProbeCacheCall, ProbeInput, ProbeTaskEntry
+from drakkar.debug.runner_models import ProbeCacheCall, ProbeInput, ProbeTaskEntry
 from drakkar.executor import ExecutorTaskError
 from drakkar.models import ExecutorTask, SourceMessage
 

@@ -3,8 +3,8 @@
 The schemas + standalone helpers (JSON encoding, env-secret sanitization,
 DB-file path management, IP detection) live in two sibling modules:
 
-- :mod:`drakkar.recorder_schema`  — DDL constants + canned trace queries.
-- :mod:`drakkar.recorder_helpers` — orjson-or-stdlib codec, secret patterns,
+- :mod:`drakkar.recorder.schema`  — DDL constants + canned trace queries.
+- :mod:`drakkar.recorder.helpers` — orjson-or-stdlib codec, secret patterns,
   ``format_dt``, ``make_db_path``, ``live_link_path``, ``list_db_files``,
   ``open_reader``, ``detect_worker_ip``.
 
@@ -23,7 +23,7 @@ import queue
 # ``socket`` is re-imported here so test patches like
 # ``patch('drakkar.recorder.socket.socket', ...)`` still find the module on
 # this attribute path. The actual ``detect_worker_ip`` consumer lives in
-# :mod:`drakkar.recorder_helpers`, but ``socket`` is a shared module
+# :mod:`drakkar.recorder.helpers`, but ``socket`` is a shared module
 # reference — patching ``socket.socket`` via either attribute path replaces
 # the class globally for both modules.
 import socket  # noqa: F401
@@ -60,7 +60,7 @@ from drakkar.peer_discovery import discover_peer_dbs
 # imported by tests; the ``noqa: F401`` markers silence the unused-import
 # warning while preserving the public attribute path on
 # ``drakkar.recorder``.
-from drakkar.recorder_helpers import (
+from drakkar.recorder.helpers import (
     _HAS_ORJSON,  # noqa: F401  (re-exported for tests)
     _SECRET_ENV_PATTERNS,  # noqa: F401  (re-exported for tests)
     detect_worker_ip,
@@ -73,7 +73,7 @@ from drakkar.recorder_helpers import (
     open_reader,
     sanitize_env_value,
 )
-from drakkar.recorder_schema import (
+from drakkar.recorder.schema import (
     _LABEL_TRACE_QUERY,
     _TRACE_QUERY,
     SCHEMA_EVENTS,

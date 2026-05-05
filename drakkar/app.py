@@ -283,7 +283,7 @@ class DrakkarApp:
             await self._recorder.start()
             await self._recorder.write_config(self._config)
 
-            from drakkar.debug_server import DebugServer
+            from drakkar.debug.server import DebugServer
 
             self._debug_server = DebugServer(
                 config=self._config.debug,
