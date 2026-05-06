@@ -340,13 +340,12 @@ class AppLifecycle:
         await app._consumer.subscribe()
 
         # Claim the watchdog slot for this run NOW — only once we're
-        # committed to running. ``write()`` truncates the file to an
-        # empty body which is the SIGKILL signature; deferring the call
-        # to this point ensures a startup-stage exception (above) leaves
-        # any previous watchdog state untouched and never falsely flags
-        # the next startup as OOM-killed.
-        if self._watchdog is not None:
-            self._watchdog.write()
+        # committed to running. See ``_claim_watchdog_slot`` for the
+        # OSError-tolerance contract; deferring the call to this point
+        # ensures a startup-stage exception (above) leaves any previous
+        # watchdog state untouched and never falsely flags the next
+        # startup as OOM-killed.
+        await self._claim_watchdog_slot()
 
         app._running = True
 
@@ -506,6 +505,35 @@ class AppLifecycle:
         except Exception as e:
             logger.warning('async_callback_failed', category='lifecycle', error=str(e))
 
+    async def _claim_watchdog_slot(self) -> None:
+        """Write the per-worker watchdog file, tolerating ``OSError``.
+
+        ``WatchdogFile.write`` lazily creates the data directory and
+        writes an empty body to the file (the SIGKILL signature). On a
+        read-only mount, missing volume, no space, or insufficient
+        permissions either step can raise ``OSError`` — the watchdog
+        is observability-only and the rest of the worker is fully
+        functional without it, so we catch the exception, log a
+        structured ``watchdog_write_failed`` warning, and disable the
+        watchdog for this run by setting ``self._watchdog = None``.
+        ``mark_clean`` later short-circuits when the field is None.
+
+        Idempotent on re-entry: if the watchdog is already disabled
+        the method is a no-op.
+        """
+        if self._watchdog is None:
+            return
+        try:
+            self._watchdog.write()
+        except OSError as exc:
+            await logger.awarning(
+                'watchdog_write_failed',
+                category='watchdog',
+                path=str(self._watchdog.path),
+                error=str(exc),
+            )
+            self._watchdog = None
+
     async def _stop_processor(self, processor: PartitionProcessor) -> None:
         """Drain in-flight tasks, commit final offsets, then stop.
 
@@ -604,112 +632,199 @@ class AppLifecycle:
         drain_timeout = app._config.executor.drain_timeout_seconds
         await log.ainfo('draining_executors', category='lifecycle', timeout=drain_timeout)
         drained_cleanly = False
+        # Drain-and-teardown wrapped in try/finally so the teardown phase
+        # (mark_clean + final commits + processor.stop + cache/recorder/
+        # debug-server/sinks/DLQ/consumer.close) ALWAYS runs even when
+        # the drain itself raises an unexpected exception. Without this
+        # structure, a non-TimeoutError out of ``_drain_all_processors``
+        # (e.g. RuntimeError, OSError, an upstream CancelledError) would
+        # escape ``_shutdown`` and skip every cleanup step below — leaking
+        # connections, partial writes, and a stale (empty-body) watchdog
+        # file that the next startup would mis-classify as a SIGKILL.
         try:
-            await asyncio.wait_for(self._drain_all_processors(), timeout=drain_timeout)
-            drained_cleanly = True
-            await log.ainfo('executors_drained', category='lifecycle')
-        except TimeoutError:
-            # Surface the drain-timeout event as a Prometheus counter so
-            # operators can alert on ``rate(...[5m]) > 0`` instead of
-            # parsing logs for the ``drain_timeout`` warning.
-            drain_timeout_hit.inc()
-            await log.awarning(
-                'drain_timeout',
-                category='lifecycle',
-                msg=f'some executors did not finish in {drain_timeout}s; skipping final commit',
-            )
-
-        # Mark the watchdog clean as soon as the drain phase has been
-        # accounted for — drain-timeout is captured by
-        # ``drakkar_drain_timeout_hit_total`` and is NOT an OOM kill, so
-        # we should not leave the watchdog body empty in that case.
-        # Conflating the two muddles dashboards: a slow shutdown looks
-        # identical to a SIGKILL. Marking clean here means the OOM
-        # counter only ticks for the genuinely-empty-body case (process
-        # killed before reaching this line). Wrapped in try/except so a
-        # filesystem hiccup at the very end does not mask the drain
-        # outcome — observability over availability would be the wrong
-        # tradeoff at this layer.
-        if self._watchdog is not None:
             try:
-                self._watchdog.mark_clean()
-            except OSError as exc:
+                await asyncio.wait_for(self._drain_all_processors(), timeout=drain_timeout)
+                drained_cleanly = True
+                await log.ainfo('executors_drained', category='lifecycle')
+            except TimeoutError:
+                # Surface the drain-timeout event as a Prometheus counter so
+                # operators can alert on ``rate(...[5m]) > 0`` instead of
+                # parsing logs for the ``drain_timeout`` warning.
+                drain_timeout_hit.inc()
                 await log.awarning(
-                    'watchdog_mark_clean_failed',
-                    category='watchdog',
+                    'drain_timeout',
+                    category='lifecycle',
+                    msg=f'some executors did not finish in {drain_timeout}s; skipping final commit',
+                )
+            except Exception as exc:
+                # Any non-TimeoutError raised during drain is logged as a
+                # distinct event so it does not get conflated with the
+                # benign "some tasks took too long" timeout case. We do
+                # NOT increment ``drain_timeout_hit`` here — this is a
+                # different failure mode (drain bug, processor invariant
+                # violation, OS error mid-drain) and should be alerted
+                # on its own metric in the future. ``drained_cleanly``
+                # stays False so the post-drain final-commit phase is
+                # skipped (preferring at-least-once duplication over
+                # silent loss, same rationale as the timeout branch).
+                await log.aerror(
+                    'drain_exception',
+                    category='lifecycle',
+                    error=str(exc),
+                    exc_type=type(exc).__name__,
+                )
+        finally:
+            # Mark the watchdog clean as soon as the drain phase has been
+            # accounted for — drain-timeout / drain-exception are both
+            # captured by their own observability and are NOT OOM kills,
+            # so we should not leave the watchdog body empty in either
+            # case. Conflating the two muddles dashboards: a slow / buggy
+            # shutdown looks identical to a SIGKILL. Marking clean here
+            # means the OOM counter only ticks for the genuinely-empty-
+            # body case (process killed before reaching this line).
+            # Wrapped in try/except so a filesystem hiccup at the very
+            # end does not mask the drain outcome — observability over
+            # availability would be the wrong tradeoff at this layer.
+            if self._watchdog is not None:
+                try:
+                    self._watchdog.mark_clean()
+                except OSError as exc:
+                    await log.awarning(
+                        'watchdog_mark_clean_failed',
+                        category='watchdog',
+                        error=str(exc),
+                    )
+
+            # Only commit final offsets if drain succeeded cleanly. After
+            # a timeout / drain-exception we cannot be sure tasks have
+            # stopped running, so committing here would silently skip
+            # in-flight work on restart — preferring at-least-once
+            # duplication over silent loss.
+            if drained_cleanly:
+                for processor in list(app._processors.values()):
+                    committable = processor.offset_tracker.committable()
+                    if committable is not None and app._consumer:
+                        try:
+                            await app._consumer.commit({processor.partition_id: committable})
+                            processor.offset_tracker.acknowledge_commit(committable)
+                        except Exception as e:
+                            await log.awarning(
+                                'final_commit_failed',
+                                category='kafka',
+                                partition=processor.partition_id,
+                                error=str(e),
+                            )
+
+            # Stop every partition processor regardless of drain outcome.
+            # ``processor.stop()`` is idempotent on already-drained
+            # processors, and skipping it on a drain failure would leak
+            # the processor's worker tasks.
+            for processor in list(app._processors.values()):
+                try:
+                    await processor.stop()
+                except Exception as exc:
+                    await log.awarning(
+                        'processor_stop_failed',
+                        category='lifecycle',
+                        partition=processor.partition_id,
+                        error=str(exc),
+                    )
+            app._processors.clear()
+
+            # Wait for background tasks scheduled by rebalance callbacks
+            # (_stop_processor from revoke, on_assign/revoke handler hooks,
+            # backpressure pauses) to complete BEFORE we close the
+            # consumer. These tasks hold references to self._consumer;
+            # closing it while they run would cause use-after-close
+            # errors and skip their final commits.
+            if app._background_tasks:
+                bg_snapshot = list(app._background_tasks)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*bg_snapshot, return_exceptions=True),
+                        timeout=drain_timeout,
+                    )
+                except TimeoutError:
+                    await log.awarning(
+                        'background_task_drain_timeout',
+                        category='lifecycle',
+                        count=len(bg_snapshot),
+                    )
+
+            # Stop the cache engine BEFORE the recorder so the engine's
+            # final flush (``_flush_once`` called inside
+            # ``CacheEngine.stop()``) can still record its
+            # ``periodic_run`` event through the recorder. If we stopped
+            # the recorder first, that last event would be dropped —
+            # users lose observability on the most critical flush of the
+            # lifecycle (the one that persists whatever was in memory
+            # when shutdown signalled). Each subsystem stop is wrapped
+            # individually so a failure in one does not skip the others.
+            if app._cache_engine is not None:
+                try:
+                    await app._cache_engine.stop()
+                except Exception as exc:
+                    await log.awarning(
+                        'cache_engine_stop_failed',
+                        category='lifecycle',
+                        error=str(exc),
+                    )
+                app._cache_engine = None
+
+            if app._recorder:
+                try:
+                    await app._recorder.stop()
+                except Exception as exc:
+                    await log.awarning(
+                        'recorder_stop_failed',
+                        category='lifecycle',
+                        error=str(exc),
+                    )
+
+            if app._debug_server:
+                try:
+                    await app._debug_server.stop()
+                except Exception as exc:
+                    await log.awarning(
+                        'debug_server_stop_failed',
+                        category='lifecycle',
+                        error=str(exc),
+                    )
+
+            # close all sinks and DLQ. ``close_all`` already swallows
+            # per-sink errors internally; only an unexpected framework
+            # bug in close_all itself can raise here, but we still wrap
+            # it so the consumer close on the next line still runs.
+            try:
+                await app._sink_manager.close_all()
+            except Exception as exc:
+                await log.awarning(
+                    'sink_manager_close_failed',
+                    category='lifecycle',
                     error=str(exc),
                 )
+            if app._dlq_sink:
+                try:
+                    await app._dlq_sink.close()
+                except Exception as exc:
+                    await log.awarning(
+                        'dlq_sink_close_failed',
+                        category='lifecycle',
+                        error=str(exc),
+                    )
 
-        # Only commit final offsets if drain succeeded cleanly. After a
-        # timeout we cannot be sure tasks have stopped running, so committing
-        # here would silently skip in-flight work on restart — preferring
-        # at-least-once duplication over silent loss.
-        if drained_cleanly:
-            for processor in list(app._processors.values()):
-                committable = processor.offset_tracker.committable()
-                if committable is not None and app._consumer:
-                    try:
-                        await app._consumer.commit({processor.partition_id: committable})
-                        processor.offset_tracker.acknowledge_commit(committable)
-                    except Exception as e:
-                        await log.awarning(
-                            'final_commit_failed',
-                            category='kafka',
-                            partition=processor.partition_id,
-                            error=str(e),
-                        )
+            if app._consumer:
+                try:
+                    await app._consumer.close()
+                except Exception as exc:
+                    await log.awarning(
+                        'consumer_close_failed',
+                        category='lifecycle',
+                        error=str(exc),
+                    )
 
-        for processor in list(app._processors.values()):
-            await processor.stop()
-        app._processors.clear()
-
-        # Wait for background tasks scheduled by rebalance callbacks
-        # (_stop_processor from revoke, on_assign/revoke handler hooks,
-        # backpressure pauses) to complete BEFORE we close the consumer.
-        # These tasks hold references to self._consumer; closing it while
-        # they run would cause use-after-close errors and skip their final
-        # commits.
-        if app._background_tasks:
-            bg_snapshot = list(app._background_tasks)
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*bg_snapshot, return_exceptions=True),
-                    timeout=drain_timeout,
-                )
-            except TimeoutError:
-                await log.awarning(
-                    'background_task_drain_timeout',
-                    category='lifecycle',
-                    count=len(bg_snapshot),
-                )
-
-        # Stop the cache engine BEFORE the recorder so the engine's final
-        # flush (``_flush_once`` called inside ``CacheEngine.stop()``) can
-        # still record its ``periodic_run`` event through the recorder. If
-        # we stopped the recorder first, that last event would be dropped —
-        # users lose observability on the most critical flush of the
-        # lifecycle (the one that persists whatever was in memory when
-        # shutdown signalled).
-        if app._cache_engine is not None:
-            await app._cache_engine.stop()
-            app._cache_engine = None
-
-        if app._recorder:
-            await app._recorder.stop()
-
-        if app._debug_server:
-            await app._debug_server.stop()
-
-        # close all sinks and DLQ
-        await app._sink_manager.close_all()
-        if app._dlq_sink:
-            await app._dlq_sink.close()
-
-        if app._consumer:
-            await app._consumer.close()
-
-        await log.ainfo('drakkar_stopped', category='lifecycle')
-        close_logging()
+            await log.ainfo('drakkar_stopped', category='lifecycle')
+            close_logging()
 
     async def _drain_all_processors(self) -> None:
         """Wait for all partition processors to finish queued + in-flight work."""

@@ -176,6 +176,13 @@ state" promise and writing into a read-only container volume. The
 disable is logged at startup as `watchdog_disabled_no_db_dir` so
 operators can see the OOM signal is off.
 
+If the watchdog write itself fails (read-only mount, permission denied,
+no space), the worker logs a structured warning
+`watchdog_write_failed` with `path` and `error`, then **disables the
+watchdog for the rest of the run** and continues startup. The watchdog
+is observability-only — losing the OOM signal is preferable to
+crashing the worker over a misconfigured volume mount.
+
 **Operator interpretation:** any nonzero rate on
 `drakkar_suspected_oom_kills_total` should be correlated with
 container-runtime pod-restart events. A spike usually maps to one of:

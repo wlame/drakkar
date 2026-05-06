@@ -709,6 +709,57 @@ skips that entry. One broken plugin never crashes the worker — operators
 see the warning in their log aggregator and remove or fix the offending
 package.
 
+### Routing payloads to a plugin sink
+
+Plugin sinks receive payloads through the `custom` field on
+`CollectResult`. Each `CustomPayload.sink` names the configured plugin
+sink instance (one of the keys you put under `sinks.custom.<type>` in
+your config); the framework looks the instance up by name across all
+plugin sinks, validates it at startup-time *and* per-result, and hands
+your `data` field to the sink's `deliver()` method as-is.
+
+```python
+import drakkar as dk
+from pydantic import BaseModel
+
+class MyOutput(BaseModel):
+    request_id: str
+    payload: dict
+
+class SearchHandler(dk.BaseDrakkarHandler):
+    async def on_task_complete(self, result):
+        out = MyOutput(request_id='abc', payload={'matches': 12})
+        return dk.CollectResult(
+            custom=[
+                dk.CustomPayload(sink='primary', data=out),
+                dk.CustomPayload(sink='secondary', data=out),
+            ],
+        )
+```
+
+The corresponding config:
+
+```yaml
+sinks:
+  custom:
+    my_custom:
+      primary:
+        endpoint: 'https://api.example.com/v1/ingest'
+      secondary:
+        endpoint: 'https://api.example.com/v1/audit'
+```
+
+`my_custom` here is the entry-point key your `pyproject.toml` declared
+(`MyCustomSink.sink_type`); `primary` / `secondary` are the instance
+names the handler routes to via `CustomPayload.sink`.
+
+If the handler returns a `CustomPayload` with a `sink` name that no
+configured plugin instance owns, `SinkManager.validate_collect` raises
+`SinkNotConfiguredError` *before* any payload is delivered — same
+fail-loud guarantee as for the built-in sinks. If the same instance
+name is shared across two plugin sink types, `AmbiguousSinkError` is
+raised so operators rename one to disambiguate.
+
 ---
 
 ## CollectResult

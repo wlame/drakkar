@@ -1599,3 +1599,109 @@ async def test_lifecycle_shutdown_no_watchdog_does_not_crash(test_config):
     # No assertion needed beyond "does not raise" — the guard inside
     # ``_shutdown`` must short-circuit on ``self._watchdog is None``.
     await lifecycle._shutdown()
+
+
+async def test_lifecycle_shutdown_drain_exception_still_runs_teardown(test_config, tmp_path, monkeypatch):
+    """A non-TimeoutError out of ``_drain_all_processors`` must NOT skip
+    the rest of shutdown. The watchdog must still be marked clean (it's
+    not an OOM kill) and every subsystem teardown call must still run.
+    Without the try/finally restructure in ``_shutdown``, a drain bug
+    (RuntimeError, OSError, etc.) would leak open connections and
+    leave a stale watchdog file the next startup would mis-classify as
+    a SIGKILL.
+    """
+    from drakkar.lifecycle import AppLifecycle
+    from drakkar.watchdog import WatchdogFile
+
+    test_config.debug.db_dir = str(tmp_path)
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._consumer = AsyncMock()
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+
+    lifecycle = AppLifecycle(app)
+
+    # Force the drain coroutine to raise something other than TimeoutError.
+    async def _exploding_drain() -> None:
+        raise RuntimeError('drain bug — processor invariant violated')
+
+    monkeypatch.setattr(lifecycle, '_drain_all_processors', _exploding_drain)
+
+    # Pre-populate a watchdog file so we can verify ``mark_clean`` ran.
+    watchdog = WatchdogFile(data_dir=tmp_path, worker_id=app._worker_id)
+    watchdog.write()
+    lifecycle._watchdog = watchdog
+    assert watchdog.path.exists()
+
+    # Track sink_manager.close_all and consumer.close so we can assert
+    # the teardown phase runs fully even when drain blew up.
+    sink_close_mock = AsyncMock()
+    monkeypatch.setattr(app._sink_manager, 'close_all', sink_close_mock)
+    dlq_close_mock = AsyncMock()
+    app._dlq_sink.close = dlq_close_mock
+    consumer_close_mock = AsyncMock()
+    app._consumer.close = consumer_close_mock
+
+    # The drain raised a non-TimeoutError but ``_shutdown`` itself must NOT.
+    # Every teardown step must still have executed.
+    await lifecycle._shutdown()
+
+    assert not watchdog.path.exists(), 'mark_clean must run even on drain exception'
+    sink_close_mock.assert_awaited_once()
+    dlq_close_mock.assert_awaited_once()
+    consumer_close_mock.assert_awaited_once()
+
+
+async def test_lifecycle_claim_watchdog_slot_tolerates_oserror(test_config, tmp_path, monkeypatch):
+    """A failing ``watchdog.write()`` (e.g. read-only mount, permission
+    denied, no space) must NOT propagate out of
+    ``AppLifecycle._claim_watchdog_slot`` — the watchdog is
+    observability-only and the rest of the worker is fully functional
+    without it. The lifecycle must catch ``OSError``, log a warning,
+    and disable the watchdog by setting ``self._watchdog = None`` so
+    later ``mark_clean`` calls short-circuit cleanly.
+    """
+    from drakkar.lifecycle import AppLifecycle
+    from drakkar.watchdog import WatchdogFile
+
+    test_config.debug.db_dir = str(tmp_path)
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    lifecycle = AppLifecycle(app)
+
+    watchdog = WatchdogFile(data_dir=tmp_path, worker_id=app._worker_id)
+
+    def _failing_write() -> None:
+        raise OSError('Read-only file system')
+
+    # Replace the bound ``write`` method so the lifecycle helper hits
+    # the ``except OSError`` branch.
+    monkeypatch.setattr(watchdog, 'write', _failing_write)
+    lifecycle._watchdog = watchdog
+
+    # The contract: no exception escapes, watchdog is disabled.
+    await lifecycle._claim_watchdog_slot()
+
+    assert lifecycle._watchdog is None
+
+    # And mark_clean during shutdown is now a no-op (idempotent guard).
+    app._consumer = AsyncMock()
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+    await lifecycle._shutdown()  # must not raise
+
+
+async def test_lifecycle_claim_watchdog_slot_no_op_when_disabled(test_config):
+    """When the watchdog is already disabled (disk-less mode, prior
+    write failure), ``_claim_watchdog_slot`` is a clean no-op.
+    """
+    from drakkar.lifecycle import AppLifecycle
+
+    test_config.debug.db_dir = ''  # disk-less
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    lifecycle = AppLifecycle(app)
+    assert lifecycle._watchdog is None
+
+    # Must not raise, must leave the field as None.
+    await lifecycle._claim_watchdog_slot()
+    assert lifecycle._watchdog is None

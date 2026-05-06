@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from drakkar.models import (
     CollectResult,
+    CustomPayload,
     DeliveryAction,
     DeliveryError,
     FilePayload,
@@ -599,6 +600,123 @@ async def test_deliver_all_empty_result():
 
     await mgr.deliver_all(CollectResult(), on_delivery_error=on_error, partition_id=0)
     on_error.assert_not_called()
+
+
+# --- Plugin (custom) sink routing ---
+# These tests cover the end-to-end data path for sinks registered under
+# a non-built-in ``sink_type``: validate_collect must accept their
+# CustomPayload entries, and deliver_all must route those payloads
+# through ``BaseSink.deliver`` like any other sink.
+
+
+async def test_validate_collect_accepts_known_custom_sink():
+    """A CustomPayload targeting a registered plugin sink validates."""
+    mgr = SinkManager()
+    plugin = FakeSink('primary', sink_type='my_plugin')
+    mgr.register(plugin)
+
+    result = CollectResult(custom=[CustomPayload(sink='primary', data=SampleData())])
+    mgr.validate_collect(result)  # should not raise
+
+
+def test_validate_collect_rejects_unknown_custom_sink_name():
+    """A CustomPayload naming a non-existent plugin instance raises."""
+    mgr = SinkManager()
+    mgr.register(FakeSink('primary', sink_type='my_plugin'))
+
+    result = CollectResult(custom=[CustomPayload(sink='nonexistent', data=SampleData())])
+    with pytest.raises(SinkNotConfiguredError, match='No plugin sink instance named'):
+        mgr.validate_collect(result)
+
+
+def test_validate_collect_rejects_empty_custom_sink_name():
+    """CustomPayload.sink must be explicit — empty is not the convenience default."""
+    mgr = SinkManager()
+    mgr.register(FakeSink('primary', sink_type='my_plugin'))
+
+    result = CollectResult(custom=[CustomPayload(sink='', data=SampleData())])
+    with pytest.raises(SinkNotConfiguredError, match=r'CustomPayload\.sink is empty'):
+        mgr.validate_collect(result)
+
+
+def test_validate_collect_rejects_ambiguous_custom_sink_name():
+    """Two plugin sinks of different types sharing a name → AmbiguousSinkError."""
+    mgr = SinkManager()
+    mgr.register(FakeSink('shared', sink_type='plugin_a'))
+    mgr.register(FakeSink('shared', sink_type='plugin_b'))
+
+    result = CollectResult(custom=[CustomPayload(sink='shared', data=SampleData())])
+    with pytest.raises(AmbiguousSinkError, match='shared across multiple sink types'):
+        mgr.validate_collect(result)
+
+
+async def test_deliver_all_routes_custom_payload_to_plugin_sink():
+    """End-to-end: a CustomPayload reaches the plugin sink's deliver()."""
+    mgr = SinkManager()
+    plugin = FakeSink('primary', sink_type='my_plugin')
+    other = FakeSink('out', sink_type='kafka')
+    mgr.register(plugin)
+    mgr.register(other)
+
+    payload = CustomPayload(sink='primary', data=SampleData(value=99))
+    result = CollectResult(custom=[payload])
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    # The plugin sink saw exactly one batch with our payload.
+    assert len(plugin.delivered) == 1
+    assert len(plugin.delivered[0]) == 1
+    assert plugin.delivered[0][0] is payload
+    # The unrelated kafka sink received nothing.
+    assert other.delivered == []
+    on_error.assert_not_called()
+
+
+async def test_deliver_all_groups_multiple_custom_payloads_per_instance():
+    """Multiple CustomPayloads to the same plugin sink instance batch together."""
+    mgr = SinkManager()
+    plugin = FakeSink('primary', sink_type='my_plugin')
+    mgr.register(plugin)
+
+    result = CollectResult(
+        custom=[
+            CustomPayload(sink='primary', data=SampleData(value=1)),
+            CustomPayload(sink='primary', data=SampleData(value=2)),
+            CustomPayload(sink='primary', data=SampleData(value=3)),
+        ],
+    )
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    assert len(plugin.delivered) == 1  # one batched call
+    assert len(plugin.delivered[0]) == 3
+
+
+async def test_deliver_all_routes_to_named_custom_instances():
+    """Two plugin sink instances of the same type each get only their payloads."""
+    mgr = SinkManager()
+    a = FakeSink('alpha', sink_type='my_plugin')
+    b = FakeSink('beta', sink_type='my_plugin')
+    mgr.register(a)
+    mgr.register(b)
+
+    result = CollectResult(
+        custom=[
+            CustomPayload(sink='alpha', data=SampleData(value=1)),
+            CustomPayload(sink='beta', data=SampleData(value=2)),
+            CustomPayload(sink='alpha', data=SampleData(value=3)),
+        ],
+    )
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    assert len(a.delivered) == 1
+    assert len(a.delivered[0]) == 2  # alpha got two payloads
+    assert len(b.delivered) == 1
+    assert len(b.delivered[0]) == 1  # beta got one payload
 
 
 # --- Delivery error handling ---

@@ -8,6 +8,7 @@ from drakkar.config import DrakkarConfig, load_config
 from drakkar.handler import BaseDrakkarHandler, DrakkarHandler
 from drakkar.models import (
     CollectResult,
+    CustomPayload,
     DeliveryAction,
     DeliveryError,
     ErrorAction,
@@ -33,6 +34,7 @@ __all__ = [
     'CacheLike',
     'CacheScope',
     'CollectResult',
+    'CustomPayload',
     'DeliveryAction',
     'DeliveryError',
     'DrakkarApp',
