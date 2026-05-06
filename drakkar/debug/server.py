@@ -1,43 +1,48 @@
 """Debug web UI for Drakkar workers — FastAPI + Jinja2 templates.
 
-Helpers (auth/origin checks, timestamp formatters, hook-flag detection)
-live in :mod:`drakkar.debug.server_helpers`. The request-body Pydantic
-models (``_ArrangeTaskLookupRequest``, ``_SinkBreakdownRequest``,
-``_ProbeRequest``) MUST stay defined here because FastAPI's "single
-Pydantic param = request body" heuristic only fires when the model and
-the endpoint function are in the same module — an imported model is
-treated as a query parameter and surfaces as a 422 error at runtime.
+The route handlers are split across four sibling modules to keep this
+factory thin:
+
+  * ``routes_pages``  — HTML pages, health probes, WebSocket, top-level
+    JSON APIs (dashboard, sinks, workers, processors).
+  * ``routes_live``   — ``/live`` page + ``/api/live/*`` + ``/api/recent-tasks``
+    + ``/api/events``.
+  * ``routes_debug``  — ``/debug`` page + ``/api/debug/*`` (databases,
+    trace, metrics, periodic, probe, download).
+  * ``routes_cache``  — ``/api/debug/cache/*`` endpoints.
+
+Each routes module defines a ``create_*_router(deps)`` factory that
+returns an ``APIRouter`` and is mounted into the app via
+``include_router``. The shared helpers (auth/origin checks, cross-thread
+dispatch, prometheus-link builder, etc.) hang off ``DebugDeps`` so the
+routers can reach them through one parameter.
+
+Helpers that are pure functions (no closure over ``drakkar_app`` or
+``config``) live in :mod:`drakkar.debug.server_helpers`.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import secrets
 import threading
-import time
 from collections.abc import Coroutine, Sequence
-from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 import structlog
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
 
 from drakkar.config import DebugConfig
-from drakkar.debug.runner import DebugRunner, ProbeInput
 
 # Re-import the helpers that used to live here so test patches like
-# ``drakkar.debug_server.hook_flags`` keep working without changes.
+# ``drakkar.debug.server.hook_flags`` keep working without changes.
 # ``_DEFAULT_PORTS`` / ``normalize_hostport`` / ``parse_host_header`` are
 # not referenced inside this module after the helper extraction but ARE
-# imported by tests via the original ``drakkar.debug_server.<name>``
+# imported by tests via the original ``drakkar.debug.server.<name>``
 # path; ``noqa: F401`` keeps the re-export visible without tripping
 # ruff's unused-import check.
 from drakkar.debug.server_helpers import (
@@ -46,52 +51,13 @@ from drakkar.debug.server_helpers import (
     format_ts_full,
     format_ts_ms,
     format_uptime,
-    hook_flags,
+    hook_flags,  # noqa: F401  (re-exported for tests)
     normalize_hostport,  # noqa: F401  (re-exported for tests)
-    origin_allowed,
+    origin_allowed,  # noqa: F401  (re-exported for tests)
     parse_host_header,  # noqa: F401  (re-exported for tests)
     worker_group,  # noqa: F401  (re-exported for tests)
 )
-from drakkar.metrics import cache_gauge_snapshot
 from drakkar.recorder import EventRecorder
-
-
-# ``/api/live/arrange-tasks`` request body — kept at module scope so
-# FastAPI's automatic "single Pydantic param = request body" detection
-# fires. Nested class definitions inside the ``create_debug_app`` factory
-# don't trigger the same heuristic and end up being treated as query
-# parameters (surfaces as 422 "Field required" responses).
-class _ArrangeTaskLookupRequest(BaseModel):
-    task_ids: list[str] = Field(default_factory=list, max_length=5000)
-
-
-# ``/api/live/sink-breakdown`` request body — also at module scope for the
-# same reason. Aggregates ``produced`` events by ``output_topic`` (sink
-# name) for a given (partition, offsets[]) tuple. Called from the
-# completion-hook sidebars (Task Results, Message Results, Window
-# Results) to show per-sink-type output counts on demand.
-class _SinkBreakdownRequest(BaseModel):
-    partition: int
-    offsets: list[int] = Field(default_factory=list, max_length=5000)
-
-
-# ``/api/debug/probe`` request body — module-scope per the same FastAPI
-# heuristic as the two classes above. Mirrors ``ProbeInput`` from
-# ``drakkar.debug_runner``. FastAPI requires the body model to be
-# DEFINED in the same module as the endpoint function for its "single
-# pydantic param = body" heuristic to fire; an imported model ends up
-# being treated as a query parameter and surfaces as 422
-# (``feedback/fastapi_body_model_scope``). The two-model layout is
-# ugly but forced on us by FastAPI.
-class _ProbeRequest(BaseModel):
-    value: str = Field(max_length=10_000_000)
-    key: str | None = Field(default=None, max_length=65_536)
-    partition: int = Field(default=0, ge=0)
-    offset: int = Field(default=0, ge=0)
-    topic: str = Field(default='', max_length=65_536)
-    timestamp: int | None = None
-    use_cache: bool = False
-
 
 # Extra headroom (in seconds) on top of ``2 * task_timeout_seconds`` for
 # the probe's wall-clock timeout. Covers arrange + two round-trips of
@@ -111,23 +77,36 @@ WS_DRAIN_SLEEP = 0.02  # seconds to sleep when WebSocket event queue is empty
 TEMPLATES_DIR = Path(__file__).parent.parent / 'templates'
 
 
-def create_debug_app(
-    config: DebugConfig,
-    recorder: EventRecorder,
-    drakkar_app: DrakkarApp,
-) -> FastAPI:
-    """Create the FastAPI debug application."""
-    app = FastAPI(title='Drakkar Debug', docs_url=None, redoc_url=None)
-    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-    templates.env.autoescape = True
-    templates.env.globals['format_ts'] = format_ts  # ty: ignore[invalid-assignment]
-    templates.env.globals['format_ts_ms'] = format_ts_ms  # ty: ignore[invalid-assignment]
-    templates.env.globals['format_ts_full'] = format_ts_full  # ty: ignore[invalid-assignment]
-    templates.env.globals['format_uptime'] = format_uptime  # ty: ignore[invalid-assignment]
+class DebugDeps:
+    """Shared dependencies + helpers passed to each route-module factory.
 
-    def _get_sink_ui_links() -> list[dict[str, str]]:
+    Routes don't capture ``drakkar_app`` / ``recorder`` / ``config`` /
+    ``templates`` directly; they reach them through this object. Pure
+    helpers that need access to the live app/config (auth, kafka-UI URL
+    builder, prometheus-link builder, cross-thread dispatch) are methods
+    here so the router factories don't have to plumb them individually.
+
+    The constants below (``WS_DRAIN_SLEEP``, ``PROBE_TIMEOUT_HEADROOM_SECONDS``)
+    stay at module scope so tests can monkeypatch them.
+    """
+
+    def __init__(
+        self,
+        config: DebugConfig,
+        recorder: EventRecorder,
+        drakkar_app: DrakkarApp,
+        templates: Jinja2Templates,
+    ) -> None:
+        self.config = config
+        self.recorder = recorder
+        self.drakkar_app = drakkar_app
+        self.templates = templates
+
+    # --- Sink-UI / Kafka-UI helpers (also wired into Jinja globals) ---
+
+    def get_sink_ui_links(self) -> list[dict[str, str]]:
         """Return deduplicated sink UI links for the nav header."""
-        mgr = drakkar_app.sink_manager
+        mgr = self.drakkar_app.sink_manager
         if not mgr:
             return []
         seen: set[str] = set()
@@ -146,9 +125,7 @@ def create_debug_app(
             )
         return links
 
-    templates.env.globals['get_sink_ui_links'] = _get_sink_ui_links  # ty: ignore[invalid-assignment]
-
-    def _is_cache_enabled() -> bool:
+    def is_cache_enabled(self) -> bool:
         """Template helper — returns True when the cache page should be visible.
 
         Used by ``base.html`` to conditionally render the Cache nav link.
@@ -156,21 +133,17 @@ def create_debug_app(
         that a cache engine that's swapped in/out at runtime (unit tests
         frequently do this) is reflected immediately without a page reload.
         """
-        return drakkar_app.cache_engine is not None
+        return self.drakkar_app.cache_engine is not None
 
-    templates.env.globals['is_cache_enabled'] = _is_cache_enabled  # ty: ignore[invalid-assignment]
+    def kafka_ui_message_url(self, topic: str, partition: int, offset: int) -> str:
+        """Build a Kafka-UI deep-link URL for a single message.
 
-    # --- Kafka-UI deep-link helper ---
-    #
-    # Builds a URL that opens Kafka-UI (the provectus tool) filtered to a
-    # single Kafka message. Requires both ``kafka.ui_url`` and
-    # ``kafka.ui_cluster_name`` in config — returns '' when either is
-    # missing so callers (Jinja templates and JS) can treat it as a feature
-    # toggle. The ``%3A%3A`` literal is the URL-encoded form of ``::``
-    # that Kafka-UI expects in the seekTo parameter.
-
-    def _kafka_ui_message_url(topic: str, partition: int, offset: int) -> str:
-        kcfg = drakkar_app._config.kafka
+        Returns '' when ``kafka.ui_url`` or ``kafka.ui_cluster_name`` is
+        absent, so callers (Jinja templates and JS) can treat it as a
+        feature toggle. The ``%3A%3A`` literal is the URL-encoded form of
+        ``::`` that Kafka-UI expects in the seekTo parameter.
+        """
+        kcfg = self.drakkar_app._config.kafka
         if not kcfg.ui_url or not kcfg.ui_cluster_name or not topic:
             return ''
         base = kcfg.ui_url.rstrip('/')
@@ -179,17 +152,9 @@ def create_debug_app(
         seek = f'{int(partition)}%3A%3A{int(offset)}'
         return f'{base}/ui/clusters/{cluster}/all-topics/{topic_q}/messages?seekType=OFFSET&seekTo={seek}&limit=1'
 
-    templates.env.globals['kafka_ui_message_url'] = _kafka_ui_message_url  # ty: ignore[invalid-assignment]
-    templates.env.globals['kafka_source_topic'] = drakkar_app._config.kafka.source_topic  # ty: ignore[invalid-assignment]
-    # The JS-rendered pages (history, live) need to build these URLs too.
-    # Expose the raw bits so the templates can inject them into a JS
-    # constants block once and let the renderers compose URLs per-row.
-    templates.env.globals['kafka_ui_base'] = drakkar_app._config.kafka.ui_url.rstrip('/')  # ty: ignore[invalid-assignment]
-    templates.env.globals['kafka_ui_cluster'] = drakkar_app._config.kafka.ui_cluster_name  # ty: ignore[invalid-assignment]
+    # --- Auth ---
 
-    # --- Auth dependency for sensitive endpoints ---
-
-    def _token_matches(provided: str | None) -> bool:
+    def token_matches(self, provided: str | None) -> bool:
         """Timing-safe comparison of a provided token against the configured token.
 
         ``secrets.compare_digest`` raises ``TypeError`` on non-str/bytes inputs
@@ -205,28 +170,30 @@ def create_debug_app(
         mistakenly configures a non-ASCII ``auth_token`` in YAML simply
         locks everyone out with a clean 401 instead of 500s.
         """
-        if not provided or not config.auth_token:
+        if not provided or not self.config.auth_token:
             return False
         try:
-            return secrets.compare_digest(provided, config.auth_token)
+            return secrets.compare_digest(provided, self.config.auth_token)
         except TypeError:
             # Non-ASCII operands raise TypeError; treat as auth failure.
             return False
 
-    async def _require_auth(
+    async def require_auth(
+        self,
         request: Request,
         token: str | None = Query(default=None),
     ) -> None:
-        """Check bearer token for protected endpoints (download, merge).
+        """Check bearer token for protected endpoints (download, merge, probe).
 
-        Skipped when auth_token is empty (no auth configured).
-        Accepts token via Authorization header or ?token= query parameter.
+        Skipped when ``auth_token`` is empty (no auth configured). Accepts
+        token via ``Authorization: Bearer`` header or ``?token=`` query
+        parameter (browsers can't set headers on file downloads).
         """
-        if not config.auth_token:
+        if not self.config.auth_token:
             return
         auth_header = request.headers.get('authorization', '')
         header_token = auth_header.removeprefix('Bearer ').strip() if auth_header.startswith('Bearer ') else ''
-        if _token_matches(header_token) or _token_matches(token):
+        if self.token_matches(header_token) or self.token_matches(token):
             return
         raise HTTPException(status_code=401, detail='Invalid or missing auth token')
 
@@ -240,7 +207,7 @@ def create_debug_app(
     # this server's loop raises ``RuntimeError: <thing> is bound to a
     # different event loop`` under contention.
     #
-    # ``_dispatch_to_main_loop`` mirrors the pattern proven in
+    # ``dispatch_to_main_loop`` mirrors the pattern proven in
     # ``api_debug_probe``: when ``drakkar_app.main_loop`` is a real event
     # loop and is NOT our running loop, schedule ``coro`` on the main
     # loop via ``asyncio.run_coroutine_threadsafe`` and await the result
@@ -251,21 +218,9 @@ def create_debug_app(
     # Only cross-thread aiosqlite reads and processor-internal snapshots
     # need to go through this helper. Pure Python work (template
     # rendering, counters, constants) can stay on the endpoint's loop.
-    #
-    # TODO: propagate cancellation. When the UI endpoint is cancelled
-    # (client disconnect, request timeout), ``asyncio.wrap_future``
-    # cancels the wrapping ``asyncio.Future``, but the underlying
-    # ``concurrent.futures.Future.cancel()`` is a no-op on an already-
-    # running coroutine — so the main-loop coroutine keeps running until
-    # it completes naturally. For SQLite reads this is typically a few
-    # milliseconds and acceptable; a user-written probe that takes
-    # several seconds and is then cancelled will still consume main-loop
-    # work. A full fix would wrap ``coro`` in a shim that polls a
-    # cancellation flag and raises into the main-loop coroutine via
-    # ``loop.call_soon_threadsafe``.
-    async def _dispatch_to_main_loop(coro: Coroutine[Any, Any, Any]) -> Any:
+    async def dispatch_to_main_loop(self, coro: Coroutine[Any, Any, Any]) -> Any:
         current_loop = asyncio.get_running_loop()
-        candidate_loop = drakkar_app.main_loop
+        candidate_loop = self.drakkar_app.main_loop
         if isinstance(candidate_loop, asyncio.AbstractEventLoop) and candidate_loop is not current_loop:
             # Cross-thread: dispatch back to the main loop. The future
             # returned by ``run_coroutine_threadsafe`` is a
@@ -276,7 +231,8 @@ def create_debug_app(
         # Same-loop (or no real main loop in tests): run inline.
         return await coro
 
-    async def _flush_and_select(
+    async def flush_and_select(
+        self,
         query: str,
         params: Sequence[Any] = (),
     ) -> tuple[list[str], list] | None:
@@ -286,7 +242,7 @@ def create_debug_app(
         pattern shared by 11 debug-server endpoints. Reads go through
         ``recorder.reader_db`` (the dedicated reader aiosqlite connection
         opened alongside the writer) so UI queries don't queue behind
-        writer flushes. Dispatches via ``_dispatch_to_main_loop`` so the
+        writer flushes. Dispatches via ``dispatch_to_main_loop`` so the
         connection stays on its owning loop when the debug server runs
         in a separate thread.
 
@@ -297,6 +253,7 @@ def create_debug_app(
         whatever empty response shape their endpoint uses
         (``JSONResponse([])``, ``{}``, etc.).
         """
+        recorder = self.recorder
 
         async def _inner() -> tuple[list[str], list] | None:
             await recorder.flush()
@@ -308,26 +265,29 @@ def create_debug_app(
                 rows: list = list(await cur.fetchall())
             return columns, rows
 
-        return await _dispatch_to_main_loop(_inner())
+        return await self.dispatch_to_main_loop(_inner())
 
-    async def _get_lag() -> dict[int, dict]:
-        consumer = drakkar_app._consumer
-        if not consumer or not drakkar_app.processors:
+    async def get_lag(self) -> dict[int, dict]:
+        """Return per-partition lag info for currently assigned partitions."""
+        consumer = self.drakkar_app._consumer
+        if not consumer or not self.drakkar_app.processors:
             return {}
         try:
             return await consumer.get_partition_lag(
-                list(drakkar_app.processors.keys()),
+                list(self.drakkar_app.processors.keys()),
             )
         except Exception:
             return {}
 
     # --- Prometheus link builder ---
 
-    def _build_prometheus_links() -> dict:
+    def build_prometheus_links(self) -> dict:
         """Build Prometheus graph URLs for dashboard cards and metrics panel.
 
-        Returns empty dicts/lists when prometheus_url is not configured.
+        Returns empty dicts/lists when ``prometheus_url`` is not configured.
         """
+        config = self.config
+        drakkar_app = self.drakkar_app
         prom_url = config.prometheus_url.rstrip('/')
         if not prom_url:
             return {'card_links': {}, 'worker_links': [], 'cluster_links': []}
@@ -360,7 +320,6 @@ def create_debug_app(
         cf = _expand(config.prometheus_cluster_label) if config.prometheus_cluster_label else ''
 
         def _graph_url(expr: str, range_input: str = '1h') -> str:
-
             return f'{prom_url}/graph?g0.expr={quote(expr)}&g0.tab=0&g0.range_input={range_input}'
 
         # Links for dashboard stat cards (worker-filtered)
@@ -458,1615 +417,63 @@ def create_debug_app(
 
         return {'card_links': card_links, 'worker_links': worker_links, 'cluster_links': cluster_links}
 
-    # --- Kubernetes probes (unauthenticated by design) ---
-    #
-    # ``/healthz`` and ``/readyz`` intentionally skip the ``_require_auth``
-    # dependency: Kubernetes probes have no facility for bearer tokens, and
-    # the endpoints expose only liveness / readiness signals — nothing that
-    # leaks message content, partition state, or operator credentials.
-    # They are fast-path (no I/O, no recorder access) so the kubelet's
-    # sub-second probe budget is respected even under load.
-    #
-    # Contract:
-    #   - ``/healthz`` — liveness: always 200 while the process is running
-    #     and the FastAPI loop is responsive. Kubernetes restarts the pod
-    #     on failure.
-    #   - ``/readyz`` — readiness: 200 only when ``DrakkarApp.is_ready`` is
-    #     True AND every registered sink reports ``is_connected``. 503
-    #     otherwise with a ``reasons`` list pointing at what's missing.
-    #     Kubernetes removes the pod from service endpoints on failure
-    #     (without restarting it).
 
-    @app.get('/healthz')
-    async def healthz() -> JSONResponse:
-        """Liveness probe — returns 200 as long as the event loop is alive."""
-        return JSONResponse({'status': 'ok'})
-
-    @app.get('/readyz')
-    async def readyz() -> JSONResponse:
-        """Readiness probe — 200 iff the worker is ready AND all sinks are connected."""
-        reasons: list[str] = []
-        if not drakkar_app.is_ready:
-            reasons.append('not_started')
-        # ``sink_manager`` is always constructed in ``DrakkarApp.__init__``
-        # and ``all_connected`` returns True for an empty manager, so we
-        # can consult it directly. Startup validation rejects a zero-sink
-        # config before the debug server is mounted.
-        mgr = drakkar_app.sink_manager
-        if not mgr.all_connected():
-            for sink_id in mgr.disconnected_sink_names():
-                reasons.append(f'sink_{sink_id}_not_connected')
-        if reasons:
-            return JSONResponse({'status': 'not_ready', 'reasons': reasons}, status_code=503)
-        return JSONResponse({'status': 'ready'})
-
-    @app.get('/', response_class=HTMLResponse)
-    async def dashboard(request: Request):
-        stats = await recorder.get_stats()
-        processors = drakkar_app.processors
-        pool = drakkar_app._executor_pool
-        consumer = drakkar_app._consumer
-        partition_ids = sorted(processors.keys())
-        total_lag = 0
-        if consumer and partition_ids:
-            try:
-                total_lag = await consumer.get_total_lag(partition_ids)
-            except Exception:
-                pass
-        # Expand custom link URL templates
-        custom_links = []
-        if config.custom_links:
-            tpl_vars = {
-                'worker_id': drakkar_app._worker_id,
-                'cluster_name': drakkar_app._cluster_name or '',
-                'metrics_port': str(drakkar_app._config.metrics.port),
-                'debug_port': str(config.port),
-            }
-            for link in config.custom_links:
-                url = link.get('url', '')
-                for key, val in tpl_vars.items():
-                    url = url.replace('{' + key + '}', val)
-                custom_links.append({'name': link.get('name', url), 'url': url})
-
-        return templates.TemplateResponse(
-            request,
-            'dashboard.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'uptime': time.monotonic() - drakkar_app._start_time,
-                'stats': stats,
-                'partition_count': len(processors),
-                'partitions': partition_ids,
-                'pool_active': pool.active_count if pool else 0,
-                'pool_max': pool.max_executors if pool else 0,
-                'total_lag': total_lag,
-                'prom': _build_prometheus_links(),
-                'custom_links': custom_links,
-            },
-        )
-
-    @app.get('/partitions', response_class=HTMLResponse)
-    async def partitions(request: Request):
-        # ``get_partition_summary`` internally does ``self._db.execute(...)``;
-        # dispatch to the main loop so the aiosqlite cursor stays there.
-        summary = await _dispatch_to_main_loop(recorder.get_partition_summary())
-        processors = drakkar_app.processors
-        lag_data = await _get_lag()
-        for s in summary:
-            pid = s['partition']
-            proc = processors.get(pid)
-            s['queue_size'] = proc.queue_size if proc else 0
-            s['pending_offsets'] = proc.offset_tracker.pending_count if proc else 0
-            s['is_live'] = pid in processors
-            lag = lag_data.get(pid, {})
-            s['committed_offset'] = lag.get('committed', s.get('last_committed_offset'))
-            s['high_watermark'] = lag.get('high_watermark')
-            s['lag'] = lag.get('lag', 0)
-        return templates.TemplateResponse(
-            request,
-            'partitions.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'summary': summary,
-            },
-        )
-
-    @app.get('/partitions/{partition_id}', response_class=HTMLResponse)
-    async def partition_detail(
-        request: Request,
-        partition_id: int,
-        page: int = Query(default=0, ge=0),
-    ):
-        limit = 50
-        events = await _dispatch_to_main_loop(
-            recorder.get_events(
-                partition=partition_id,
-                limit=limit,
-                offset=page * limit,
-            )
-        )
-        return templates.TemplateResponse(
-            request,
-            'partition_detail.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'partition_id': partition_id,
-                'events': events,
-                'page': page,
-                'has_next': len(events) == limit,
-            },
-        )
-
-    @app.get('/live', response_class=HTMLResponse)
-    async def live(request: Request):
-        # All three reads (active tasks + two event queries) touch the
-        # main-loop aiosqlite connection. Batch them into one dispatch
-        # so the whole page builds from a single cross-thread hop.
-        async def _read_from_main():
-            active_rows = await recorder.get_active_tasks()
-            finished_rows = await recorder.get_events(
-                event_type='task_completed',
-                limit=config.max_ui_rows,
-            )
-            failed_rows = await recorder.get_events(
-                event_type='task_failed',
-                limit=1000,
-            )
-            return active_rows, finished_rows, failed_rows
-
-        active, finished, failed = await _dispatch_to_main_loop(_read_from_main())
-        now = time.time()
-        for task in active:
-            task['elapsed'] = now - task['ts'] if task.get('ts') else 0
-        # split tasks: running (have task_started in DB) vs pending (no task_started yet)
-        processors = drakkar_app.processors
-        active_task_ids = {t['task_id'] for t in active}
-        running_tasks = {}
-        pending_tasks = {}
-
-        # ``proc._pending_tasks``, ``_arranging``, ``_arrange_start``, and
-        # ``_arrange_labels`` are mutated exclusively on the main loop.
-        # Snapshot them via a small coroutine dispatched there so a list
-        # slice doesn't shear while the main loop mutates the underlying
-        # container.
-        async def _snapshot_processors():
-            snapshot: dict = {}
-            arranging_data: list[dict] = []
-            for proc in processors.values():
-                pending_items = list(proc._pending_tasks.items())
-                pid_entries: list[tuple[str, object, int, object]] = []
-                for tid, t in pending_items:
-                    pid_entries.append((tid, t.args, proc.partition_id, t.source_offsets))
-                snapshot[proc.partition_id] = pid_entries
-                if proc._arranging:
-                    arranging_data.append(
-                        {
-                            'partition': proc.partition_id,
-                            'duration': round(now - proc._arrange_start, 2),
-                            'message_count': len(proc._arrange_labels),
-                            'labels': list(proc._arrange_labels[:10]),
-                        }
-                    )
-            return snapshot, arranging_data
-
-        pending_snapshot, arranging = await _dispatch_to_main_loop(_snapshot_processors())
-        for _pid, entries in pending_snapshot.items():
-            for tid, args, partition_id, source_offsets in entries:
-                entry = {
-                    'task_id': tid,
-                    'args': args,
-                    'partition': partition_id,
-                    'source_offsets': source_offsets,
-                }
-                if tid in active_task_ids:
-                    running_tasks[tid] = entry
-                else:
-                    pending_tasks[tid] = entry
-
-        recent_finished = sorted(finished + failed, key=lambda e: e.get('ts', 0), reverse=True)[: config.max_ui_rows]
-
-        # ``partition_count`` powers the Arrange tab's "last N batches" cap
-        # (3 x partition_count) so the live list stays stable-sized regardless
-        # of how many partitions the broker has assigned to this worker.
-        # ``hook_flags`` hides completion-hook tabs (Task/Message/Window
-        # Results) for hooks the handler doesn't implement.
-        return templates.TemplateResponse(
-            request,
-            'live.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'running_tasks': running_tasks,
-                'pending_tasks': pending_tasks,
-                'recent_finished': recent_finished,
-                'arranging': arranging,
-                'pool_active': drakkar_app._executor_pool.active_count if drakkar_app._executor_pool else 0,
-                'pool_waiting': drakkar_app._executor_pool.waiting_count if drakkar_app._executor_pool else 0,
-                'pool_max': drakkar_app._executor_pool.max_executors if drakkar_app._executor_pool else 0,
-                'partition_count': len(drakkar_app.processors),
-                'max_ui_rows': config.max_ui_rows,
-                'ws_min_duration_ms': config.ws_min_duration_ms,
-                'hook_flags': hook_flags(drakkar_app.handler)
-                if drakkar_app.handler
-                else {
-                    'task_complete': False,
-                    'message_complete': False,
-                    'window_complete': False,
-                },
-            },
-        )
-
-    @app.get('/task/{task_id}', response_class=HTMLResponse)
-    async def task_detail(request: Request, task_id: str):
-        # Strip retry composite key suffix (e.g. "task-abc:r1234567.89" → "task-abc")
-        base_id = task_id.split(':r')[0] if ':r' in task_id else task_id
-        events = await _dispatch_to_main_loop(recorder.get_task_events(base_id))
-        started = next((e for e in events if e['event'] == 'task_started'), None)
-        completed = next((e for e in events if e['event'] == 'task_completed'), None)
-        failed = next((e for e in events if e['event'] == 'task_failed'), None)
-        finished = completed or failed
-        duration = finished['duration'] if finished and finished.get('duration') else None
-        if not duration and started and finished:
-            duration = finished['ts'] - started['ts']
-        import json
-
-        source_offsets = None
-        task_env = None
-        if started and started.get('metadata'):
-            try:
-                meta = json.loads(started['metadata'])
-                source_offsets = meta.get('source_offsets')
-                task_env = meta.get('env')
-            except (json.JSONDecodeError, TypeError):
-                pass
-        args = None
-        if started and started.get('args'):
-            try:
-                args = json.loads(started['args'])
-            except (json.JSONDecodeError, TypeError):
-                args = started['args']
-        labels = None
-        if started and started.get('labels'):
-            try:
-                labels = json.loads(started['labels'])
-            except (json.JSONDecodeError, TypeError):
-                pass
-        pid = (completed or failed or {}).get('pid') or (started or {}).get('pid')
-        return templates.TemplateResponse(
-            request,
-            'task_detail.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'task_id': task_id,
-                'events': events,
-                'started': started,
-                'completed': completed,
-                'failed': failed,
-                'duration': duration,
-                'source_offsets': source_offsets,
-                'args': args,
-                'labels': labels,
-                'task_env': task_env,
-                'partition': started['partition'] if started else None,
-                'pid': pid,
-                'binary_path': drakkar_app._config.executor.binary_path,
-            },
-        )
-
-    @app.get('/history', response_class=HTMLResponse)
-    async def history(
-        request: Request,
-        partition: str | None = Query(default=None),
-        event_type: str | None = Query(default=None),
-        page: int = Query(default=0, ge=0),
-    ):
-        part_int = int(partition) if partition and partition.strip() else None
-        evt_type = event_type if event_type and event_type.strip() else None
-        limit = 100
-        events = await _dispatch_to_main_loop(
-            recorder.get_events(
-                partition=part_int,
-                event_type=evt_type,
-                limit=limit,
-                offset=page * limit,
-            )
-        )
-        return templates.TemplateResponse(
-            request,
-            'history.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'events': events,
-                'page': page,
-                'has_next': len(events) == limit,
-                'filter_partition': part_int,
-                'filter_event_type': evt_type,
-                'partitions': sorted(drakkar_app.processors.keys()),
-                'max_ui_rows': config.max_ui_rows,
-            },
-        )
-
-    @app.get('/sinks', response_class=HTMLResponse)
-    async def sinks_page(request: Request):
-        mgr = drakkar_app.sink_manager
-        info = mgr.get_sink_info()
-        all_stats = mgr.get_all_stats()
-        sinks_data = []
-        for item in info:
-            key = (item['sink_type'], item['name'])
-            stats = all_stats.get(key)
-            sinks_data.append(
-                {
-                    **item,
-                    'delivered_count': stats.delivered_count if stats else 0,
-                    'delivered_payloads': stats.delivered_payloads if stats else 0,
-                    'error_count': stats.error_count if stats else 0,
-                    'retry_count': stats.retry_count if stats else 0,
-                    'last_delivery_ts': stats.last_delivery_ts if stats else None,
-                    'last_delivery_duration': stats.last_delivery_duration if stats else None,
-                    'last_error': stats.last_error if stats else None,
-                    'last_error_ts': stats.last_error_ts if stats else None,
-                }
-            )
-        return templates.TemplateResponse(
-            request,
-            'sinks.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'sinks': sinks_data,
-            },
-        )
-
-    # --- Debug databases page ---
-
-    @app.get('/debug', response_class=HTMLResponse)
-    async def debug_databases(request: Request):
-        return templates.TemplateResponse(
-            request,
-            'debug.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'db_dir': config.db_dir,
-                'config_summary': drakkar_app.config_summary,
-            },
-        )
-
-    # --- Cache page + JSON API ---
-    #
-    # All cache routes 404 when the cache is disabled (``cache_engine`` is
-    # None). This keeps stale bookmarks / open browser tabs from rendering a
-    # half-broken page after a config change. The reader connection on the
-    # engine is shared with ``Cache.get`` fallback — no additional thread is
-    # spun up for UI queries; SELECTs run on the same aiosqlite worker thread.
-
-    def _cache_reader_or_404():
-        """Fetch the shared reader connection or raise 404.
-
-        All cache routes (HTML + JSON) funnel through this so we have a
-        single source of truth for "cache not active". Returns the aiosqlite
-        connection; the caller uses it like any other reader DB.
-
-        Uses the public ``reader_db`` property on ``CacheEngine`` rather
-        than reaching into the underscore-prefixed attribute so the
-        encapsulation of the engine stays intact.
-        """
-        engine = drakkar_app.cache_engine
-        if engine is None or engine.reader_db is None:
-            raise HTTPException(status_code=404, detail='Cache is disabled')
-        return engine.reader_db
-
-    @app.get('/api/debug/cache/entries')
-    async def api_debug_cache_entries(
-        # ``ge=0, le=1000`` enforces the bounds at the FastAPI layer —
-        # requests outside the range get a 422 response instead of reaching
-        # the handler. Default 200 mirrors the UI page size.
-        limit: int = Query(default=200, ge=0, le=1000),
-        offset: int = Query(default=0, ge=0),
-        scope: str | None = Query(default=None),
-        search: str | None = Query(default=None),
-        expired_only: bool = Query(default=False),
-    ):
-        """Paginated listing of cache rows with optional filters.
-
-        Query params:
-          limit         — rows per page (default 200, enforced [0, 1000])
-          offset        — pagination offset
-          scope         — exact scope match (``local``/``cluster``/``global``)
-          search        — substring match against key (case-sensitive)
-          expired_only  — show only expired rows (``expires_at_ms <= now_ms``)
-
-        Returns ``{entries, total, limit, offset}``; ``total`` is the count
-        matching the filters (not the clamped-page length), so the UI can
-        render "N of M" pagination without a second round-trip.
-        """
-        reader = _cache_reader_or_404()
-
-        conditions: list[str] = []
-        params: list = []
-        if scope is not None:
-            conditions.append('scope = ?')
-            params.append(scope)
-        if search:
-            # SQL LIKE with a substring pattern (``%search%``). User-typed
-            # input can contain literal ``%`` or ``_`` which LIKE would
-            # otherwise interpret as wildcards. We pick ``|`` as the ESCAPE
-            # char (not ``\`` — SQLite + Python string-escaping gets
-            # brittle with backslashes) and prefix each wildcard char
-            # with it.
-            conditions.append("key LIKE ? ESCAPE '|'")
-            safe_search = search.replace('|', '||').replace('%', '|%').replace('_', '|_')
-            params.append('%' + safe_search + '%')
-        if expired_only:
-            now_ms = int(time.time() * 1000)
-            # ``<= ?`` matches the inclusive cleanup convention in
-            # ``drakkar.cache`` — an entry whose ``expires_at_ms`` equals
-            # ``now_ms`` is expired and should surface in the expired_only
-            # filter too.
-            conditions.append('expires_at_ms IS NOT NULL AND expires_at_ms <= ?')
-            params.append(now_ms)
-
-        where = f'WHERE {" AND ".join(conditions)}' if conditions else ''
-
-        # total count for pagination. A DB corruption or schema drift would
-        # otherwise surface as "empty cache" in the UI — log at warning
-        # so operators see the signal even when the UI masks the failure.
-        # The cache reader aiosqlite connection is bound to the main
-        # loop (opened inside ``CacheEngine.start()``), so dispatch the
-        # COUNT there too.
-        async def _read_count():
-            async with reader.execute(f'SELECT COUNT(*) FROM cache_entries {where}', params) as cursor:
-                return await cursor.fetchone()
-
-        try:
-            row = await _dispatch_to_main_loop(_read_count())
-            total = row[0] if row else 0
-        except Exception as exc:
-            await logger.awarning(
-                'debug_cache_entries_count_failed',
-                category='debug',
-                error=str(exc),
-                where=where,
-            )
-            total = 0
-
-        entries: list[dict] = []
-        if limit > 0:
-            query = (
-                'SELECT key, scope, value, size_bytes, created_at_ms, updated_at_ms, '
-                'expires_at_ms, origin_worker_id FROM cache_entries '
-                f'{where} ORDER BY updated_at_ms DESC LIMIT ? OFFSET ?'
-            )
-
-            async def _read_rows():
-                async with reader.execute(query, [*params, limit, offset]) as cursor:
-                    columns = [d[0] for d in cursor.description]
-                    rows = await cursor.fetchall()
-                return columns, rows
-
-            try:
-                columns, rows = await _dispatch_to_main_loop(_read_rows())
-                for r in rows:
-                    entries.append(dict(zip(columns, r, strict=False)))
-            except Exception as exc:
-                await logger.awarning(
-                    'debug_cache_entries_query_failed',
-                    category='debug',
-                    error=str(exc),
-                    where=where,
-                    limit=limit,
-                    offset=offset,
-                )
-                entries = []
-
-        return JSONResponse(
-            {
-                'entries': entries,
-                'total': total,
-                'limit': limit,
-                'offset': offset,
-            }
-        )
-
-    @app.get('/api/debug/cache/entry/{key:path}')
-    async def api_debug_cache_entry(key: str):
-        """Return a single entry by exact key, with the value decoded from JSON.
-
-        Uses ``{key:path}`` so colons (a common separator in cache keys) and
-        other URL-special chars pass through unchanged. 404 when the key
-        doesn't exist. On JSON decode failure (corruption / legacy data),
-        the ``raw_value`` field carries the original string for the UI to
-        display as-is.
-        """
-        reader = _cache_reader_or_404()
-
-        # Reads via the cache engine's reader connection rather than the
-        # recorder's ``_flush_and_select`` helper: this endpoint queries
-        # the cache_entries table, not the events table, and there's
-        # nothing to flush on the recorder side.
-        async def _read():
-            async with reader.execute(
-                'SELECT key, scope, value, size_bytes, created_at_ms, updated_at_ms, '
-                'expires_at_ms, origin_worker_id FROM cache_entries WHERE key = ?',
-                (key,),
-            ) as cursor:
-                columns = [d[0] for d in cursor.description]
-                row = await cursor.fetchone()
-            return columns, row
-
-        try:
-            columns, row = await _dispatch_to_main_loop(_read())
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f'Failed to read cache entry: {exc}') from exc
-
-        if row is None:
-            raise HTTPException(status_code=404, detail='Cache entry not found')
-
-        entry = dict(zip(columns, row, strict=False))
-        # Try to decode the JSON value; on failure carry the raw string so
-        # the UI can show something rather than 500ing the request.
-        raw_value = entry.pop('value')
-        try:
-            entry['value'] = json.loads(raw_value)
-            entry['raw_value'] = raw_value
-        except (json.JSONDecodeError, TypeError):
-            entry['value'] = None
-            entry['raw_value'] = raw_value
-
-        return JSONResponse(entry)
-
-    @app.get('/api/debug/cache/stats')
-    async def api_debug_cache_stats():
-        """Return a snapshot of the four cache gauges.
-
-        Values come from the live Prometheus gauges — same numbers you'd
-        see in the /metrics scrape, just wrapped in a JSON envelope for
-        the UI's stat cards. Reading a gauge is O(1); we never walk the
-        DB or memory dict here.
-
-        Delegates to ``metrics.cache_gauge_snapshot`` so the endpoint
-        doesn't depend on prometheus_client internals (``_value.get()``
-        was a private attribute and could break silently on a library
-        upgrade).
-        """
-        if drakkar_app.cache_engine is None:
-            raise HTTPException(status_code=404, detail='Cache is disabled')
-
-        return JSONResponse(cache_gauge_snapshot())
-
-    @app.get('/api/debug/databases', dependencies=[Depends(_require_auth)])
-    async def api_debug_databases():
-        """List all debug database files in db_dir with stats."""
-        from drakkar.merge import scan_directory
-
-        databases = scan_directory(config.db_dir)
-        return JSONResponse(
-            [
-                {
-                    'filename': db.filename,
-                    'path': db.path,
-                    'worker_name': db.worker_name,
-                    'cluster_name': db.cluster_name,
-                    'event_count': db.event_count,
-                    'event_counts': db.event_counts,
-                    'first_event_ts': db.first_event_ts,
-                    'last_event_ts': db.last_event_ts,
-                    'has_events': db.has_events,
-                    'has_config': db.has_config,
-                    'has_state': db.has_state,
-                    'size_bytes': db.size_bytes,
-                }
-                for db in databases
-            ]
-        )
-
-    @app.post('/api/debug/merge', dependencies=[Depends(_require_auth)])
-    async def api_debug_merge(request: Request):
-        """Merge selected database files into one."""
-        import asyncio
-        from datetime import datetime
-
-        from drakkar.merge import merge_databases
-
-        body = await request.json()
-        filenames = body.get('filenames', [])
-        if len(filenames) < 2:
-            return JSONResponse({'error': 'Select at least 2 databases'}, status_code=400)
-
-        # resolve to full paths, validate they exist in db_dir
-        db_paths = []
-        for fn in filenames:
-            # prevent directory traversal
-            if '/' in fn or '\\' in fn or fn.startswith('.'):
-                return JSONResponse({'error': f'Invalid filename: {fn}'}, status_code=400)
-            full = os.path.join(config.db_dir, fn)
-            if not os.path.realpath(full).startswith(os.path.realpath(config.db_dir) + os.sep):
-                return JSONResponse({'error': f'Invalid path: {fn}'}, status_code=400)
-            if not os.path.isfile(full):
-                return JSONResponse({'error': f'File not found: {fn}'}, status_code=404)
-            db_paths.append(full)
-
-        ts = datetime.now(tz=UTC).strftime('%Y-%m-%d__%H_%M_%S')
-        output_name = f'merged-{ts}.db'
-        output_path = os.path.join(config.db_dir, output_name)
-
-        result = await asyncio.to_thread(merge_databases, db_paths, output_path)
-
-        return JSONResponse(
-            {
-                'filename': output_name,
-                'worker_count': result.worker_count,
-                'event_count': result.event_count,
-                'state_count': result.state_count,
-                'cluster_name': result.cluster_name,
-                'source_files': result.source_files,
-            }
-        )
-
-    @app.get('/api/debug/trace')
-    async def api_debug_trace(
-        partition: int = Query(),
-        offset: int = Query(),
-    ):
-        """Trace a message across all workers in the same cluster."""
-        events = await _dispatch_to_main_loop(recorder.cross_trace(partition, offset))
-        return JSONResponse(events)
-
-    @app.get('/api/debug/label-keys')
-    async def api_debug_label_keys():
-        """Return distinct label keys found in events."""
-        query = """
-            SELECT DISTINCT labels FROM events
-            WHERE labels IS NOT NULL
-            LIMIT 100
-        """
-        # No try/except: ``_flush_and_select`` already maps DB-absent to
-        # ``None`` (handled below) and any real exception here is a bug
-        # (malformed SQL, recorder internal state corruption) that should
-        # surface loudly rather than be silently hidden behind an empty
-        # response. Fail-loud beats a silently-empty label dropdown.
-        result = await _flush_and_select(query)
-        if result is None:
-            return JSONResponse([])
-        _columns, rows = result
-        keys: set[str] = set()
-        for (labels_json,) in rows:
-            try:
-                parsed = json.loads(labels_json)
-                keys.update(parsed.keys())
-            except (json.JSONDecodeError, TypeError, AttributeError):
-                pass
-        return JSONResponse(sorted(keys))
-
-    @app.get('/api/debug/trace-by-label')
-    async def api_debug_trace_by_label(
-        key: str = Query(),
-        value: str = Query(),
-    ):
-        """Trace tasks by label value across all workers in the cluster."""
-        events = await _dispatch_to_main_loop(recorder.cross_trace_by_label(key, value))
-        return JSONResponse(events)
-
-    @app.get('/api/debug/metrics')
-    async def api_debug_metrics():
-        """Return all registered Prometheus metrics with current values."""
-        from drakkar.metrics import collect_all_metrics
-
-        return JSONResponse(collect_all_metrics())
-
-    @app.get('/api/debug/periodic')
-    async def api_debug_periodic():
-        """Return periodic task run history from the flight recorder.
-
-        Groups events by task name and returns the latest run, total counts,
-        and recent history for each task.
-        """
-        query = """
-            SELECT ts, task_id, duration, exit_code, metadata
-            FROM events
-            WHERE event = 'periodic_run'
-            ORDER BY ts DESC
-            LIMIT 500
-        """
-        # No try/except — see ``api_debug_label_keys`` for rationale.
-        # ``_flush_and_select`` returns ``None`` on DB-absent; any raised
-        # exception is a real bug and should surface.
-        result = await _flush_and_select(query)
-        if result is None:
-            return JSONResponse([])
-        columns, rows = result
-
-        # group by task name. We also surface a per-task ``system: bool``
-        # derived from the event's ``metadata.system``. Framework-internal
-        # loops (cache.flush / cache.sync / cache.cleanup, etc.) set this to
-        # True so the debug UI can render a [system] pill and operators can
-        # distinguish them from user-defined ``@periodic`` handler methods.
-        # When the key is absent (older rows, user tasks) we default to False
-        # — the field is always present in the response for UI simplicity.
-        tasks: dict[str, dict] = {}
-        for row in rows:
-            entry = dict(zip(columns, row, strict=False))
-            name = entry['task_id']
-            meta = {}
-            if entry.get('metadata'):
-                try:
-                    meta = json.loads(entry['metadata'])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            status = meta.get('status', 'ok')
-            error = meta.get('error', '')
-            # system flag: latest value wins if events disagree (shouldn't
-            # happen under normal use, but we iterate ts-DESC so first seen
-            # == latest event for the task)
-            is_system = bool(meta.get('system', False))
-
-            if name not in tasks:
-                tasks[name] = {
-                    'name': name,
-                    'last_run_ts': entry['ts'],
-                    'last_duration': entry['duration'],
-                    'last_status': status,
-                    'last_error': error,
-                    'system': is_system,
-                    'total_ok': 0,
-                    'total_error': 0,
-                    'recent': [],
-                }
-            t = tasks[name]
-            if status == 'ok':
-                t['total_ok'] += 1
-            else:
-                t['total_error'] += 1
-            if len(t['recent']) < 20:
-                t['recent'].append(
-                    {
-                        'ts': entry['ts'],
-                        'duration': entry['duration'],
-                        'status': status,
-                        'error': error,
-                    }
-                )
-
-        result = sorted(tasks.values(), key=lambda t: t['name'])
-        return JSONResponse(result)
-
-    @app.get('/debug/download/{filename}', dependencies=[Depends(_require_auth)])
-    async def debug_download(filename: str):
-        """Download a database file from db_dir."""
-        # prevent directory traversal
-        if '/' in filename or '\\' in filename or filename.startswith('.'):
-            return JSONResponse({'error': 'Invalid filename'}, status_code=400)
-        full = os.path.join(config.db_dir, filename)
-        if not os.path.realpath(full).startswith(os.path.realpath(config.db_dir) + os.sep):
-            return JSONResponse({'error': 'Invalid path'}, status_code=400)
-        if not os.path.isfile(full):
-            return JSONResponse({'error': 'File not found'}, status_code=404)
-        return FileResponse(
-            path=full,
-            filename=filename,
-            media_type='application/x-sqlite3',
-        )
-
-    # --- JSON API endpoints for JS-driven pages ---
-
-    @app.get('/api/events')
-    async def api_events(
-        partitions: str | None = Query(default=None),
-        event_types: str | None = Query(default=None),
-        after_id: int = Query(default=0),
-        limit: int = Query(default=200, le=10000),
-    ):
-        """Get events as JSON. Supports multiple partitions/types as comma-separated."""
-        part_list = [int(p) for p in partitions.split(',') if p.strip()] if partitions else None
-        type_list = [t.strip() for t in event_types.split(',') if t.strip()] if event_types else None
-
-        conditions = []
-        params: list = []
-        if part_list:
-            placeholders = ','.join(['?'] * len(part_list))
-            conditions.append(f'partition IN ({placeholders})')
-            params.extend(part_list)
-        if type_list:
-            placeholders = ','.join(['?'] * len(type_list))
-            conditions.append(f'event IN ({placeholders})')
-            params.extend(type_list)
-        if after_id > 0:
-            conditions.append('id > ?')
-            params.append(after_id)
-
-        where = f'WHERE {" AND ".join(conditions)}' if conditions else ''
-        query = f'SELECT * FROM events {where} ORDER BY id DESC LIMIT ?'
-        params.append(limit)
-
-        result = await _flush_and_select(query, params)
-        if result is None:
-            return JSONResponse([])
-        columns, rows = result
-        return JSONResponse([dict(zip(columns, row, strict=False)) for row in rows])
-
-    @app.get('/api/recent-tasks')
-    async def api_recent_tasks(minutes: int = Query(default=2)):
-        """Get tasks from the last N minutes for timeline visualization."""
-        since = time.time() - (minutes * 60)
-        query = """
-            SELECT * FROM events
-            WHERE event IN ('task_started', 'task_completed', 'task_failed')
-            AND ts >= ?
-            ORDER BY ts ASC
-        """
-        result = await _flush_and_select(query, [since])
-        if result is None:
-            return JSONResponse([])
-        columns, rows = result
-        events = [dict(zip(columns, row, strict=False)) for row in rows]
-
-        # group events into timeline entries — one entry per execution attempt.
-        # retries (same task_id with multiple task_started) produce separate entries:
-        # previous attempts get composite keys (task_id:r{ts}), the latest keeps
-        # the original task_id so WS events can match it.
-        tasks: dict[str, dict] = {}
-        for e in events:
-            tid = e.get('task_id')
-            if not tid:
-                continue
-
-            if e['event'] == 'task_started':
-                # if this task_id already has a current entry, archive it as a retry
-                if tid in tasks:
-                    old = tasks[tid]
-                    archive_key = tid + ':r' + str(old['start_ts'])
-                    tasks[archive_key] = old
-                    old['task_id'] = archive_key
-                    if old['end_ts'] is None:
-                        old['end_ts'] = e['ts']
-                        old['status'] = 'failed'
-
-                slot = None
-                meta = None
-                if e.get('metadata'):
-                    try:
-                        meta = json.loads(e['metadata'])
-                        slot = meta.get('slot')
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                labels = None
-                if e.get('labels'):
-                    try:
-                        labels = json.loads(e['labels'])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                task_env = meta.get('env') if meta else None
-                tasks[tid] = {
-                    'task_id': tid,
-                    'partition': e.get('partition'),
-                    'start_ts': e['ts'],
-                    'end_ts': None,
-                    'duration': None,
-                    'status': 'running',
-                    'args': e.get('args'),
-                    'pid': e.get('pid'),
-                    'slot': slot,
-                    'labels': labels,
-                    'env': task_env,
-                }
-
-            elif e['event'] in ('task_completed', 'task_failed'):
-                if tid in tasks:
-                    t = tasks[tid]
-                    t['end_ts'] = e['ts']
-                    t['status'] = 'completed' if e['event'] == 'task_completed' else 'failed'
-                    t['duration'] = e.get('duration')
-                    if e.get('pid'):
-                        t['pid'] = e['pid']
-
-        pool = drakkar_app._executor_pool
-        max_lanes = pool.max_executors if pool else 8
-
-        # Apply ws_min_duration_ms filtering: hide fast completed tasks
-        # from the live UI, same as the WebSocket path. Running tasks
-        # (duration unknown) and failed tasks (always visible) are kept.
-        ws_threshold_s = recorder.config.ws_min_duration_ms / 1000.0
-        result = []
-        for t in tasks.values():
-            if not t['start_ts']:
-                continue
-            if t['status'] == 'completed' and t['duration'] is not None and t['duration'] < ws_threshold_s:
-                continue
-            result.append(t)
-        return JSONResponse({'tasks': result, 'lane_count': max_lanes})
-
-    # Lookup-by-task-ID endpoint for the Arrange tab. Unlike /api/recent-tasks
-    # this does NOT filter by ``minutes`` and does NOT apply the
-    # ``ws_min_duration_ms`` threshold — callers pass exactly the task_ids
-    # they want state for, and we return whatever the recorder has within
-    # its retention window (default 24h). This fills the gap where batches
-    # in the Arrange tab are older than the 10-min timeline window but
-    # their task state is still authoritative in the DB.
-    @app.post('/api/live/arrange-tasks')
-    async def api_live_arrange_tasks(req: _ArrangeTaskLookupRequest):
-        """Return the current state of specific task_ids as a map.
-
-        Used by the Arrange tab's sidebar + list row progress. Payload:
-        ``{"task_ids": ["rg-...", "rg-..."]}``. Response: ``{"<task_id>":
-        {status, start_ts, end_ts, duration, partition, source_offsets,
-        pid, labels, exit_code}}``. Unknown IDs are simply absent from
-        the response map — callers treat missing keys as "not in DB yet".
-        """
-        task_ids = [t for t in req.task_ids if t]
-        if not task_ids:
-            return JSONResponse({})
-
-        placeholders = ','.join(['?'] * len(task_ids))
-        query = f"""
-            SELECT task_id, event, ts, duration, partition, metadata,
-                   exit_code, pid, args, labels
-            FROM events
-            WHERE task_id IN ({placeholders})
-              AND event IN ('task_started', 'task_completed', 'task_failed')
-            ORDER BY task_id, id ASC
-        """
-
-        # Short-circuit when recorder event storage is disabled — no point
-        # flushing + SELECTing against an empty table. ``_flush_and_select``
-        # would still dispatch to the main loop and return rows, but they'd
-        # always be empty.
-        if not recorder.config.store_events:
-            return JSONResponse({})
-        query_result = await _flush_and_select(query, task_ids)
-        if query_result is None:
-            return JSONResponse({})
-        columns, rows = query_result
-        events = [dict(zip(columns, row, strict=False)) for row in rows]
-
-        # ``by_id`` aggregates event rows per task_id — one entry per task.
-        # Named distinctly from ``query_result`` above so readers (and ty)
-        # don't have to track a variable that changes types mid-function.
-        by_id: dict[str, dict] = {}
-        for e in events:
-            tid = e['task_id']
-            t = by_id.setdefault(
-                tid,
-                {
-                    'task_id': tid,
-                    'status': 'unknown',
-                    'start_ts': None,
-                    'end_ts': None,
-                    'duration': None,
-                    'partition': None,
-                    'source_offsets': None,
-                    'pid': None,
-                    'args': None,
-                    'labels': None,
-                    'exit_code': None,
-                },
-            )
-            if e['event'] == 'task_started':
-                t['start_ts'] = e['ts']
-                # ``running`` is provisional — overwritten on the next row
-                # if a completion event exists for the same task_id.
-                if t['status'] == 'unknown':
-                    t['status'] = 'running'
-                t['partition'] = e.get('partition')
-                t['pid'] = e.get('pid')
-                t['args'] = e.get('args')
-                if e.get('metadata'):
-                    try:
-                        meta = json.loads(e['metadata'])
-                        t['source_offsets'] = meta.get('source_offsets')
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                if e.get('labels'):
-                    try:
-                        t['labels'] = json.loads(e['labels'])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-            elif e['event'] in ('task_completed', 'task_failed'):
-                t['end_ts'] = e['ts']
-                t['status'] = 'completed' if e['event'] == 'task_completed' else 'failed'
-                t['duration'] = e.get('duration')
-                t['exit_code'] = e.get('exit_code')
-                if e.get('pid'):
-                    t['pid'] = e['pid']
-
-        return JSONResponse(by_id)
-
-    # ------------------------------------------------------------------
-    # Completion-hook result feeds for the Live view's three new tabs:
-    #   * Task Results     — one row per on_task_complete()  call
-    #   * Message Results  — one row per on_message_complete() call
-    #   * Window Results   — one row per on_window_complete() call
-    # Each endpoint returns the most recent N rows ordered by ts DESC.
-    # No joins: all the user-visible columns are already in the event's
-    # metadata JSON (see recorder.record_task_complete etc.). Sink-type
-    # breakdown is fetched lazily by the sidebar via /api/live/sink-breakdown.
-    # ------------------------------------------------------------------
-
-    async def _fetch_events(event_name: str, limit: int) -> list[dict]:
-        """Common helper for the three completion-hook endpoints.
-
-        Returns raw events (ts DESC, limited) as list of dicts, or empty
-        list when recorder storage is disabled. Callers parse metadata
-        themselves because each event type has different metadata shape.
-        """
-        if not recorder.config.store_events:
-            return []
-        query = (
-            'SELECT ts, task_id, partition, offset, duration, metadata '
-            'FROM events WHERE event = ? ORDER BY id DESC LIMIT ?'
-        )
-        result = await _flush_and_select(query, (event_name, limit))
-        if result is None:
-            return []
-        columns, rows = result
-        return [dict(zip(columns, row, strict=False)) for row in rows]
-
-    def _parse_meta(raw: str | None) -> dict:
-        if not raw:
-            return {}
-        try:
-            parsed = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-
-    @app.get('/api/live/task-results')
-    async def api_live_task_results(limit: int = Query(default=200, ge=0, le=5000)):
-        """Latest N ``task_complete`` events with their matching exec state.
-
-        For each task_complete row we pair the subprocess-level outcome
-        (task_completed or task_failed) by task_id so the UI can surface
-        both the exec duration (how long the subprocess ran) and the hook
-        duration (how long on_task_complete took). Exec state comes from
-        a single extra SELECT with ``task_id IN (...)`` — one round-trip
-        per page, not per row.
-        """
-        events = await _fetch_events('task_complete', limit)
-        task_ids = [e['task_id'] for e in events if e.get('task_id')]
-        # Batch lookup across three related event types in one query —
-        # task_started carries ``source_offsets`` in metadata (essential
-        # for rendering the message source in the UI), while
-        # task_completed/task_failed carry the subprocess exit status.
-        aux_by_id: dict[str, dict] = {}
-        if task_ids and recorder.reader_db:
-            placeholders = ','.join(['?'] * len(task_ids))
-            q = (
-                f'SELECT task_id, event, duration, exit_code, metadata '
-                f'FROM events WHERE task_id IN ({placeholders}) '
-                f"AND event IN ('task_started', 'task_completed', 'task_failed')"
-            )
-
-            # The aiosqlite connection lives on the main loop, so run
-            # the SELECT + fetchall there and return plain Python data.
-            # Routes through the reader connection so UI lookups don't
-            # queue behind writer flushes.
-            async def _read_aux():
-                reader = recorder.reader_db
-                if not reader:
-                    return [], []
-                async with reader.execute(q, task_ids) as cur:
-                    cols = [d[0] for d in cur.description]
-                    aux_rows = await cur.fetchall()
-                return cols, aux_rows
-
-            cols, aux_rows = await _dispatch_to_main_loop(_read_aux())
-            for row in aux_rows:
-                ex = dict(zip(cols, row, strict=False))
-                entry = aux_by_id.setdefault(
-                    ex['task_id'],
-                    {'exec_duration': None, 'status': None, 'exit_code': None, 'source_offsets': None},
-                )
-                if ex['event'] == 'task_started':
-                    started_meta = _parse_meta(ex.get('metadata'))
-                    so = started_meta.get('source_offsets')
-                    if isinstance(so, list):
-                        entry['source_offsets'] = so
-                else:
-                    # Last-write-wins on retries within the batch.
-                    entry['exec_duration'] = ex.get('duration')
-                    entry['status'] = 'completed' if ex['event'] == 'task_completed' else 'failed'
-                    entry['exit_code'] = ex.get('exit_code')
-        result = []
-        for e in events:
-            meta = _parse_meta(e.get('metadata'))
-            aux = aux_by_id.get(e.get('task_id') or '', {})
-            result.append(
-                {
-                    'ts': e['ts'],
-                    'task_id': e.get('task_id'),
-                    'partition': e.get('partition'),
-                    'source_offsets': aux.get('source_offsets'),
-                    'hook_duration': e.get('duration'),
-                    'exec_duration': aux.get('exec_duration'),
-                    'status': aux.get('status'),
-                    'exit_code': aux.get('exit_code'),
-                    'output_message_count': meta.get('output_message_count', 0),
-                }
-            )
-        return JSONResponse(result)
-
-    @app.get('/api/live/message-results')
-    async def api_live_message_results(limit: int = Query(default=200, ge=0, le=5000)):
-        """Latest N ``message_complete`` events.
-
-        All summary data lives in metadata (task_count / succeeded /
-        failed / replaced / output_message_count). In addition we pair
-        each row with its matching ``consumed`` event (by partition +
-        offset) so the response carries ``end_to_end_duration`` — the
-        wall-clock time from poll to on_message_complete finish, which
-        includes arrange time, task scheduling, subprocess execution,
-        and hook runtime. For a message that was consumed multiple
-        times (replay after restart), we pick the most recent consumed
-        event whose ts is <= message_complete.ts.
-        """
-        events = await _fetch_events('message_complete', limit)
-
-        # Batch lookup of consumed events for the exact (partition, offset)
-        # set that appears in this batch of message_complete rows. Filters
-        # by partition IN (...) AND offset IN (...) to let SQLite use the
-        # column indexes; the Python-side tuple match handles the final
-        # (partition, offset) pairing — cheap given the small row count.
-        consumed_by_key: dict[tuple, list[float]] = {}
-        if events and recorder.reader_db:
-            pairs = {
-                (e['partition'], e['offset'])
-                for e in events
-                if e.get('partition') is not None and e.get('offset') is not None
-            }
-            if pairs:
-                partitions = sorted({p for p, _ in pairs})
-                offsets = sorted({o for _, o in pairs})
-                pp = ','.join(['?'] * len(partitions))
-                oo = ','.join(['?'] * len(offsets))
-                q = (
-                    f'SELECT partition, offset, ts FROM events '
-                    f"WHERE event = 'consumed' "
-                    f'AND partition IN ({pp}) AND offset IN ({oo})'
-                )
-                params: list = [*partitions, *offsets]
-
-                # SELECT runs on the main loop; collect rows into a
-                # plain list so no aiosqlite objects escape. Uses the
-                # reader connection.
-                async def _read_consumed():
-                    reader = recorder.reader_db
-                    if not reader:
-                        return []
-                    async with reader.execute(q, params) as cur:
-                        return await cur.fetchall()
-
-                for row in await _dispatch_to_main_loop(_read_consumed()):
-                    consumed_by_key.setdefault((row[0], row[1]), []).append(row[2])
-
-        result = []
-        for e in events:
-            meta = _parse_meta(e.get('metadata'))
-            end_to_end = None
-            candidates = consumed_by_key.get((e.get('partition'), e.get('offset')))
-            if candidates:
-                mc_ts = e['ts']
-                # Most recent consumed_ts that's <= message_complete ts.
-                # A later consumed would be a subsequent re-poll; this
-                # message_complete corresponds to the most-recent-prior
-                # poll of the same (partition, offset).
-                best = max((c for c in candidates if c <= mc_ts), default=None)
-                if best is not None:
-                    end_to_end = round(mc_ts - best, 4)
-            result.append(
-                {
-                    'ts': e['ts'],
-                    'partition': e.get('partition'),
-                    'offset': e.get('offset'),
-                    'duration': e.get('duration'),
-                    'end_to_end_duration': end_to_end,
-                    'task_count': meta.get('task_count', 0),
-                    'succeeded': meta.get('succeeded', 0),
-                    'failed': meta.get('failed', 0),
-                    'replaced': meta.get('replaced', 0),
-                    'output_message_count': meta.get('output_message_count', 0),
-                }
-            )
-        return JSONResponse(result)
-
-    @app.get('/api/live/window-results')
-    async def api_live_window_results(limit: int = Query(default=200, ge=0, le=5000)):
-        """Latest N ``window_complete`` events. Metadata carries
-        window_id, task_count, output_message_count."""
-        events = await _fetch_events('window_complete', limit)
-        result = []
-        for e in events:
-            meta = _parse_meta(e.get('metadata'))
-            result.append(
-                {
-                    'ts': e['ts'],
-                    'partition': e.get('partition'),
-                    'window_id': meta.get('window_id'),
-                    'duration': e.get('duration'),
-                    'task_count': meta.get('task_count', 0),
-                    'output_message_count': meta.get('output_message_count', 0),
-                }
-            )
-        return JSONResponse(result)
-
-    # Shared DebugRunner instance. The runner holds an ``asyncio.Lock``
-    # that serializes overlapping probes; keeping a single instance per
-    # FastAPI app means that lock is actually shared across requests.
-    # Built lazily on first use so tests that don't exercise the probe
-    # endpoint don't pay the wiring cost (and so tests can freely swap
-    # ``mock_app.handler`` / ``_executor_pool`` before the first call).
-    # NOTE: The runner is built lazily on first call and then cached for
-    # the life of the app. Tests that swap the handler or executor pool
-    # AFTER the first probe request won't see their changes take effect.
-    # Test fixtures swap these before touching the endpoint, so this is
-    # fine in practice — but callers should be aware.
-    _probe_runner: DebugRunner | None = None
-
-    def _get_probe_runner() -> DebugRunner:
-        # ``nonlocal`` lets this closure mutate the outer binding without
-        # the list-of-one trick. The outer name stays a plain
-        # ``DebugRunner | None`` so ty narrows cleanly after the check.
-        nonlocal _probe_runner
-        if _probe_runner is None:
-            # The executor pool is created during ``DrakkarApp.run`` and
-            # lives for the whole process; by the time the probe endpoint
-            # is reachable it's always non-None. Guard here so ty's
-            # ``ExecutorPool | None`` narrowing is happy.
-            pool = drakkar_app._executor_pool
-            if pool is None:
-                raise HTTPException(status_code=503, detail='executor pool not ready')
-            _probe_runner = DebugRunner(
-                handler=drakkar_app.handler,
-                executor_pool=pool,
-                app_config=drakkar_app._config,
-            )
-        return _probe_runner
-
-    @app.post('/api/debug/probe', dependencies=[Depends(_require_auth)])
-    async def api_debug_probe(req: _ProbeRequest) -> JSONResponse:
-        """Run a single-message probe through the live handler pipeline.
-
-        The probe executes arrange → executor → on_task_complete →
-        on_message_complete → on_window_complete exactly like the
-        production path, but with zero side-effects (no sinks, no
-        recorder rows, no cache writes, no offset commits). Concurrent
-        requests serialize on the runner's internal ``asyncio.Lock``.
-
-        Returns 200 with a ``DebugReport``. If the wall-clock timeout
-        fires (``2 * task_timeout_seconds + PROBE_TIMEOUT_HEADROOM_SECONDS``),
-        also returns 200 but with ``truncated=true`` and whatever partial
-        state the runner had captured up to the cancellation point.
-        """
-        runner = _get_probe_runner()
-        # Default empty topic to the configured source topic so handlers
-        # that key on ``msg.topic`` see a realistic value. The model
-        # itself accepts an empty topic to support callers that
-        # deliberately want to probe with no topic set.
-        topic = req.topic or drakkar_app._config.kafka.source_topic
-        probe_input = ProbeInput(
-            value=req.value,
-            key=req.key,
-            partition=req.partition,
-            offset=req.offset,
-            topic=topic,
-            timestamp=req.timestamp,
-            use_cache=req.use_cache,
-        )
-        # Timeout = 2x the per-task timeout + headroom. ``config`` here is
-        # ``DebugConfig``; the executor timeout lives on the full
-        # ``DrakkarConfig`` reachable via ``drakkar_app._config``.
-        timeout = 2 * drakkar_app._config.executor.task_timeout_seconds + PROBE_TIMEOUT_HEADROOM_SECONDS
-        # Build the per-run state here so we own a reference for the
-        # truncated-partial-report path even when the actual probe
-        # coroutine runs on a different event loop (and thus an
-        # asyncio.Task we can't see).
-        state = runner._make_run_state(probe_input)
-        current_loop = asyncio.get_running_loop()
-        # CRITICAL: the ExecutorPool.semaphore is an ``asyncio.Semaphore``
-        # bound to the loop where the pool was constructed (the main
-        # DrakkarApp loop). The debug FastAPI server typically runs in a
-        # separate thread + loop, so we must dispatch the probe back to
-        # that main loop — otherwise ``semaphore.acquire()`` raises
-        # "bound to a different event loop" as soon as the pool has
-        # contention. When ``drakkar_app.main_loop`` is a real loop and
-        # is NOT our running loop, use the cross-thread path. Otherwise
-        # (same-loop in tests, or loop unavailable) we run inline.
-        candidate_loop = drakkar_app.main_loop
-        if isinstance(candidate_loop, asyncio.AbstractEventLoop) and candidate_loop is not current_loop:
-            # Cross-thread: dispatch to the main loop. On timeout,
-            # cancel the future and sleep briefly so the main-loop
-            # task can run its ``finally`` and restore handler.cache
-            # before we return the partial report.
-            run_future = asyncio.run_coroutine_threadsafe(runner._run_with_state(state), candidate_loop)
-            try:
-                report = await asyncio.wait_for(asyncio.wrap_future(run_future), timeout=timeout)
-            except TimeoutError:
-                run_future.cancel()
-                await asyncio.sleep(0.1)
-                report = state.to_report(truncated=True)
-        else:
-            # Same-loop: plain asyncio. ``wait_for`` already awaits the
-            # cancelled task's ``finally`` before raising, so the cache
-            # is restored by the time we reach the except branch.
-            run_task = asyncio.create_task(runner._run_with_state(state))
-            try:
-                report = await asyncio.wait_for(run_task, timeout=timeout)
-            except TimeoutError:
-                report = state.to_report(truncated=True)
-        return JSONResponse(report.model_dump(mode='json'))
-
-    @app.post('/api/live/sink-breakdown')
-    async def api_live_sink_breakdown(req: _SinkBreakdownRequest):
-        """Group ``produced`` events by ``output_topic`` (sink name) for
-        a given (partition, offsets) filter.
-
-        Called from the completion-hook sidebars. Task Results sidebar
-        passes the task's source_offsets; Message Results passes
-        ``[offset]``; Window Results passes the list of offsets covered.
-        Response: ``{"<sink_name>": <count>}``. Empty map when the filter
-        matches nothing (no fabrication of zero-count entries).
-        """
-        if not req.offsets:
-            return JSONResponse({})
-        if not recorder.config.store_events:
-            return JSONResponse({})
-        placeholders = ','.join(['?'] * len(req.offsets))
-        q = (
-            f'SELECT output_topic, COUNT(*) as n FROM events '
-            f"WHERE event = 'produced' AND partition = ? "
-            f'AND offset IN ({placeholders}) GROUP BY output_topic'
-        )
-        params: list = [req.partition, *req.offsets]
-
-        result = await _flush_and_select(q, params)
-        if result is None:
-            return JSONResponse({})
-        _columns, rows = result
-        out: dict[str, int] = {}
-        for row in rows:
-            topic = row[0] or '(unknown)'
-            out[topic] = int(row[1])
-        return JSONResponse(out)
-
-    @app.get('/api/dashboard')
-    async def api_dashboard():
-        """Dashboard data as JSON for JS refresh."""
-        stats = await recorder.get_stats()
-        processors = drakkar_app.processors
-        pool = drakkar_app._executor_pool
-        partition_ids = sorted(processors.keys())
-        consumer = drakkar_app._consumer
-        total_lag = 0
-        if consumer and partition_ids:
-            try:
-                total_lag = await consumer.get_total_lag(partition_ids)
-            except Exception:
-                pass
-        return JSONResponse(
-            {
-                'uptime': time.monotonic() - drakkar_app._start_time,
-                'stats': stats,
-                'partition_count': len(processors),
-                'partitions': partition_ids,
-                'pool_active': pool.active_count if pool else 0,
-                'pool_max': pool.max_executors if pool else 0,
-                'total_lag': total_lag,
-            }
-        )
-
-    @app.get('/api/sinks')
-    async def api_sinks():
-        """Sink configuration and live delivery stats."""
-        mgr = drakkar_app.sink_manager
-        info = mgr.get_sink_info()
-        all_stats = mgr.get_all_stats()
-        result = []
-        for item in info:
-            key = (item['sink_type'], item['name'])
-            stats = all_stats.get(key)
-            result.append(
-                {
-                    **item,
-                    'delivered_count': stats.delivered_count if stats else 0,
-                    'delivered_payloads': stats.delivered_payloads if stats else 0,
-                    'error_count': stats.error_count if stats else 0,
-                    'retry_count': stats.retry_count if stats else 0,
-                    'last_delivery_ts': stats.last_delivery_ts if stats else None,
-                    'last_delivery_duration': stats.last_delivery_duration if stats else None,
-                    'last_error': stats.last_error if stats else None,
-                    'last_error_ts': stats.last_error_ts if stats else None,
-                }
-            )
-        return JSONResponse(result)
-
-    @app.get('/api/debug/processors')
-    async def api_debug_processors():
-        """Dump internal state of all partition processors for diagnostics."""
-
-        # Build the full per-processor snapshot on the main loop. These
-        # containers (``_sorted_offsets``, ``_offsets``, ``_arrange_labels``,
-        # ``_active_tasks``) are mutated exclusively by the main loop; a
-        # list slice from another thread can shear while the main loop
-        # rebalances. Collecting everything inside one coroutine pinned
-        # to the main loop keeps the snapshot internally consistent.
-        async def _snapshot():
-            snap: dict = {}
-            for pid, proc in sorted(drakkar_app.processors.items()):
-                tracker = proc.offset_tracker
-                sorted_offsets = list(tracker._sorted_offsets[:20])
-                offset_states = {o: str(tracker._offsets.get(o, '?')) for o in sorted_offsets}
-                arrange_info = None
-                if proc._arranging:
-                    arrange_info = {
-                        'duration': round(time.time() - proc._arrange_start, 2),
-                        'message_count': len(proc._arrange_labels),
-                        'labels': list(proc._arrange_labels[:20]),
-                    }
-                entry: dict = {
-                    'queue_size': proc.queue_size,
-                    'inflight_count': proc.inflight_count,
-                    'arranging': proc._arranging,
-                    'arrange': arrange_info,
-                    'pending_count': tracker.pending_count,
-                    'completed_count': tracker.completed_count,
-                    'total_tracked': tracker.total_tracked,
-                    'last_committed': tracker.last_committed,
-                    'committable': tracker.committable(),
-                    'first_offsets': sorted_offsets,
-                    'offset_states': offset_states,
-                    'active_task_count': len(proc._active_tasks),
-                }
-                # show stuck task details — ``task.get_stack()`` reads the
-                # frame state of the coroutine as of now, so it must run
-                # on the main loop where the task lives to get an
-                # accurate snapshot.
-                stuck = []
-                for task in list(proc._active_tasks):
-                    if not task.done():
-                        frames = task.get_stack(limit=5)
-                        stack_lines = []
-                        for frame in frames:
-                            stack_lines.append(f'{frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}')
-                        stuck.append(
-                            {
-                                'name': task.get_name(),
-                                'stack': stack_lines,
-                            }
-                        )
-                if stuck:
-                    entry['stuck_tasks'] = stuck
-                snap[pid] = entry
-            return snap
-
-        result = await _dispatch_to_main_loop(_snapshot())
-        pool = drakkar_app._executor_pool
-        return JSONResponse(
-            {
-                'processors': result,
-                'pool_active': pool.active_count if pool else 0,
-                'pool_waiting': pool.waiting_count if pool else 0,
-                'pool_max': pool.max_executors if pool else 0,
-            }
-        )
-
-    # --- Workers autodiscovery API ---
-
-    @app.get('/api/workers')
-    async def api_workers():
-        """Discover live workers sharing the same db_dir, including self.
-
-        Each worker gets a ``url`` field (debug_url if set, else http://ip:port),
-        a ``cluster`` field from the stored cluster_name (falls back to
-        auto-derived group from worker name), and ``is_current`` for self.
-
-        Workers are sorted: clustered first (by cluster then name),
-        unclustered at the end (sorted by name).
-        """
-        # ``discover_workers`` only opens transient aiosqlite connections
-        # against peer live-DB symlinks — it never touches ``recorder._db``
-        # or any primitive bound to the main loop. No dispatch needed;
-        # the connections created inside the coroutine are bound to
-        # whichever loop invokes it, which is fine for a one-shot read.
-        workers = await recorder.discover_workers()
-
-        # add the current worker to the list
-        current_entry = {
-            'worker_name': drakkar_app._worker_id,
-            'cluster_name': drakkar_app._cluster_name or None,
-            'ip_address': None,
-            'debug_port': config.port,
-            'debug_url': config.debug_url or None,
-        }
-        workers.append(current_entry)
-
-        for w in workers:
-            w['url'] = w.get('debug_url') or f'http://{w.get("ip_address", "127.0.0.1")}:{w.get("debug_port", 8080)}/'
-            w['cluster'] = w.get('cluster_name') or ''
-            w['is_current'] = w.get('worker_name') == drakkar_app._worker_id
-
-        # sort: clustered workers first (by cluster name, then worker name),
-        # unclustered at the end sorted by worker name
-        workers.sort(
-            key=lambda w: (
-                0 if w['cluster'] else 1,
-                w['cluster'],
-                w.get('worker_name', ''),
-            )
-        )
-        return JSONResponse(workers)
-
-    # --- WebSocket endpoint for live event streaming ---
-
-    @app.websocket('/ws')
-    async def ws_events(ws: WebSocket):
-        """Stream recorder events to connected clients in real-time.
-
-        Uses a thread-safe queue (stdlib queue.Queue) since the recorder
-        writes from the main thread and Uvicorn runs in a separate thread.
-
-        Authentication: when ``config.auth_token`` is set, the client must
-        provide a matching token either via the ``Authorization: Bearer``
-        header (non-browser clients) or the ``?token=`` query parameter
-        (browsers, which cannot set custom headers on WS handshakes).
-
-        Origin validation: when ``auth_token`` is set, the ``Origin``
-        header (if present) must match the configured allowlist. With an
-        empty allowlist we fall back to same-origin: the origin's host
-        must equal the request's ``Host`` header. Absent ``Origin`` is
-        treated as same-origin (non-browser clients typically don't send
-        it). When ``auth_token`` is empty we skip both checks to preserve
-        the dev workflow.
-        """
-        import queue as queue_mod
-
-        # --- Auth gate (WebSocket) ---
-        # FastAPI's Depends() works on websocket endpoints, but keeping the
-        # auth check inline lets us call ws.close() with a specific 4xxx
-        # code that the browser can surface — HTTPException during the
-        # handshake drops the connection without a useful reason.
-        if config.auth_token:
-            auth_header = ws.headers.get('authorization', '')
-            header_token = auth_header.removeprefix('Bearer ').strip() if auth_header.startswith('Bearer ') else ''
-            query_token = ws.query_params.get('token')
-            if not (_token_matches(header_token) or _token_matches(query_token)):
-                # 4401: application-specific unauthorized (RFC 6455 reserves
-                # 4000-4999 for app use). Browsers expose this code via the
-                # WebSocket close event.
-                await ws.close(code=4401, reason='unauthorized')
-                return
-
-            # --- Origin validation ---
-            # Delegate to ``origin_allowed`` (module scope) so the
-            # decision logic is directly unit-testable and the four
-            # branches (absent origin / allowlist hit / allowlist miss /
-            # same-origin fallback) are spelled out in one place.
-            origin = ws.headers.get('origin')
-            request_host = ws.headers.get('host', '')
-            if not origin_allowed(origin, request_host, config):
-                await ws.close(code=4403, reason='forbidden origin')
-                return
-
-        await ws.accept()
-        q = recorder.subscribe()
-        try:
-            while True:
-                # drain all available events from queue in one batch
-                batch = []
-                try:
-                    batch.append(q.get(timeout=0.1))
-                    # grab more without blocking
-                    while len(batch) < 100:
-                        batch.append(q.get_nowait())
-                except queue_mod.Empty:
-                    pass
-                if not batch:
-                    await asyncio.sleep(WS_DRAIN_SLEEP)
-                    continue
-                try:
-                    for event in batch:
-                        await ws.send_text(json.dumps(event, default=str))
-                except Exception:
-                    break
-        except WebSocketDisconnect:
-            pass
-        finally:
-            recorder.unsubscribe(q)
+def create_debug_app(
+    config: DebugConfig,
+    recorder: EventRecorder,
+    drakkar_app: DrakkarApp,
+) -> FastAPI:
+    """Create the FastAPI debug application.
+
+    Wires up Jinja templates with the format helpers + sink-link / kafka-UI
+    helpers, then mounts the four route modules onto the app. Each route
+    module receives a single ``DebugDeps`` parameter that exposes shared
+    state and helpers.
+    """
+    # Local imports break a routes_* → server module cycle: each routes
+    # module imports ``DebugDeps`` from this module, and this module
+    # imports the route factories. Pulling them in at call time keeps the
+    # module-import graph acyclic.
+    from drakkar.debug.routes_cache import create_cache_router
+    from drakkar.debug.routes_debug import create_debug_router
+    from drakkar.debug.routes_live import create_live_router
+    from drakkar.debug.routes_pages import create_pages_router
+
+    app = FastAPI(title='Drakkar Debug', docs_url=None, redoc_url=None)
+    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    templates.env.autoescape = True
+    templates.env.globals['format_ts'] = format_ts  # ty: ignore[invalid-assignment]
+    templates.env.globals['format_ts_ms'] = format_ts_ms  # ty: ignore[invalid-assignment]
+    templates.env.globals['format_ts_full'] = format_ts_full  # ty: ignore[invalid-assignment]
+    templates.env.globals['format_uptime'] = format_uptime  # ty: ignore[invalid-assignment]
+
+    deps = DebugDeps(
+        config=config,
+        recorder=recorder,
+        drakkar_app=drakkar_app,
+        templates=templates,
+    )
+
+    # Jinja globals that need access to the live app/config — bound
+    # methods on ``deps`` so config changes (e.g. cache engine swapped
+    # in/out at runtime in tests) are reflected on the next render.
+    templates.env.globals['get_sink_ui_links'] = deps.get_sink_ui_links  # ty: ignore[invalid-assignment]
+    templates.env.globals['is_cache_enabled'] = deps.is_cache_enabled  # ty: ignore[invalid-assignment]
+    templates.env.globals['kafka_ui_message_url'] = deps.kafka_ui_message_url  # ty: ignore[invalid-assignment]
+    templates.env.globals['kafka_source_topic'] = drakkar_app._config.kafka.source_topic  # ty: ignore[invalid-assignment]
+    # The JS-rendered pages (history, live) need to build these URLs too.
+    # Expose the raw bits so the templates can inject them into a JS
+    # constants block once and let the renderers compose URLs per-row.
+    templates.env.globals['kafka_ui_base'] = drakkar_app._config.kafka.ui_url.rstrip('/')  # ty: ignore[invalid-assignment]
+    templates.env.globals['kafka_ui_cluster'] = drakkar_app._config.kafka.ui_cluster_name  # ty: ignore[invalid-assignment]
+
+    # Mount the four route modules. Order doesn't matter for correctness
+    # (FastAPI matches by path), but grouping reads naturally as
+    # pages → live → debug → cache.
+    app.include_router(create_pages_router(deps))
+    app.include_router(create_live_router(deps))
+    app.include_router(create_debug_router(deps))
+    app.include_router(create_cache_router(deps))
 
     return app
 
@@ -2117,3 +524,20 @@ class DebugServer:
         if self._thread:
             self._thread.join(timeout=5.0)
         await logger.ainfo('debug_server_stopped', category='debug')
+
+
+# ---------------------------------------------------------------------------
+# Re-exports for tests that still import request-body models from
+# ``drakkar.debug.server``. Kept at the bottom because importing the routes
+# modules above triggers their module-level Pydantic class definitions,
+# which we then surface here for backwards compatibility.
+# ---------------------------------------------------------------------------
+
+# Tests + the historical public surface expect these names on the server
+# module. Import lazily-after-module-load: routes_live and routes_debug
+# define their request-body models at module scope.
+from drakkar.debug.routes_debug import _ProbeRequest  # noqa: E402, F401
+from drakkar.debug.routes_live import (  # noqa: E402, F401
+    _ArrangeTaskLookupRequest,
+    _SinkBreakdownRequest,
+)

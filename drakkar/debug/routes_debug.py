@@ -1,0 +1,401 @@
+"""Debug page + ``/api/debug/*`` (databases, trace, metrics, periodic, probe, download).
+
+Routes:
+  * ``/debug``                       — debug HTML page.
+  * ``/api/debug/databases``         — list of debug DB files.
+  * ``/api/debug/merge``             — merge multiple DB files.
+  * ``/debug/download/{filename}``   — download a single DB file.
+  * ``/api/debug/trace``             — cross-worker trace for one (partition, offset).
+  * ``/api/debug/label-keys``        — distinct label keys across events.
+  * ``/api/debug/trace-by-label``    — cross-worker trace by (key, value).
+  * ``/api/debug/metrics``           — Prometheus metric snapshot as JSON.
+  * ``/api/debug/periodic``          — periodic-task run history.
+  * ``/api/debug/probe``             — single-message probe through the live handler.
+
+The request-body Pydantic model ``_ProbeRequest`` MUST be at module
+scope for FastAPI's "single Pydantic param = request body" heuristic to
+fire — an imported model is treated as a query parameter and surfaces
+as 422 errors at runtime.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from datetime import UTC
+from typing import TYPE_CHECKING
+
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from pydantic import BaseModel, Field
+
+from drakkar.debug.runner import DebugRunner, ProbeInput
+
+if TYPE_CHECKING:
+    from drakkar.debug.server import DebugDeps
+
+logger = structlog.get_logger()
+
+
+# ``/api/debug/probe`` request body — module-scope per the FastAPI
+# "single Pydantic param = body" heuristic: an imported model is
+# treated as a query parameter and surfaces as 422 errors. Mirrors
+# ``ProbeInput`` from ``drakkar.debug.runner``.
+class _ProbeRequest(BaseModel):
+    value: str = Field(max_length=10_000_000)
+    key: str | None = Field(default=None, max_length=65_536)
+    partition: int = Field(default=0, ge=0)
+    offset: int = Field(default=0, ge=0)
+    topic: str = Field(default='', max_length=65_536)
+    timestamp: int | None = None
+    use_cache: bool = False
+
+
+def create_debug_router(deps: DebugDeps) -> APIRouter:
+    """Build the router that owns the debug page + ``/api/debug/*`` endpoints (excluding cache)."""
+    router = APIRouter()
+    config = deps.config
+    recorder = deps.recorder
+    drakkar_app = deps.drakkar_app
+    templates = deps.templates
+
+    # --- Debug databases page ---
+
+    @router.get('/debug', response_class=HTMLResponse)
+    async def debug_databases(request: Request):
+        return templates.TemplateResponse(
+            request,
+            'debug.html',
+            {
+                'worker_id': drakkar_app._worker_id,
+                'db_dir': config.db_dir,
+                'config_summary': drakkar_app.config_summary,
+            },
+        )
+
+    @router.get('/api/debug/databases', dependencies=[Depends(deps.require_auth)])
+    async def api_debug_databases():
+        """List all debug database files in db_dir with stats."""
+        from drakkar.merge import scan_directory
+
+        databases = scan_directory(config.db_dir)
+        return JSONResponse(
+            [
+                {
+                    'filename': db.filename,
+                    'path': db.path,
+                    'worker_name': db.worker_name,
+                    'cluster_name': db.cluster_name,
+                    'event_count': db.event_count,
+                    'event_counts': db.event_counts,
+                    'first_event_ts': db.first_event_ts,
+                    'last_event_ts': db.last_event_ts,
+                    'has_events': db.has_events,
+                    'has_config': db.has_config,
+                    'has_state': db.has_state,
+                    'size_bytes': db.size_bytes,
+                }
+                for db in databases
+            ]
+        )
+
+    @router.post('/api/debug/merge', dependencies=[Depends(deps.require_auth)])
+    async def api_debug_merge(request: Request):
+        """Merge selected database files into one."""
+        from datetime import datetime
+
+        from drakkar.merge import merge_databases
+
+        body = await request.json()
+        filenames = body.get('filenames', [])
+        if len(filenames) < 2:
+            return JSONResponse({'error': 'Select at least 2 databases'}, status_code=400)
+
+        # resolve to full paths, validate they exist in db_dir
+        db_paths = []
+        for fn in filenames:
+            # prevent directory traversal
+            if '/' in fn or '\\' in fn or fn.startswith('.'):
+                return JSONResponse({'error': f'Invalid filename: {fn}'}, status_code=400)
+            full = os.path.join(config.db_dir, fn)
+            if not os.path.realpath(full).startswith(os.path.realpath(config.db_dir) + os.sep):
+                return JSONResponse({'error': f'Invalid path: {fn}'}, status_code=400)
+            if not os.path.isfile(full):
+                return JSONResponse({'error': f'File not found: {fn}'}, status_code=404)
+            db_paths.append(full)
+
+        ts = datetime.now(tz=UTC).strftime('%Y-%m-%d__%H_%M_%S')
+        output_name = f'merged-{ts}.db'
+        output_path = os.path.join(config.db_dir, output_name)
+
+        result = await asyncio.to_thread(merge_databases, db_paths, output_path)
+
+        return JSONResponse(
+            {
+                'filename': output_name,
+                'worker_count': result.worker_count,
+                'event_count': result.event_count,
+                'state_count': result.state_count,
+                'cluster_name': result.cluster_name,
+                'source_files': result.source_files,
+            }
+        )
+
+    @router.get('/api/debug/trace')
+    async def api_debug_trace(
+        partition: int = Query(),
+        offset: int = Query(),
+    ):
+        """Trace a message across all workers in the same cluster."""
+        events = await deps.dispatch_to_main_loop(recorder.cross_trace(partition, offset))
+        return JSONResponse(events)
+
+    @router.get('/api/debug/label-keys')
+    async def api_debug_label_keys():
+        """Return distinct label keys found in events."""
+        query = """
+            SELECT DISTINCT labels FROM events
+            WHERE labels IS NOT NULL
+            LIMIT 100
+        """
+        # No try/except: ``flush_and_select`` already maps DB-absent to
+        # ``None`` (handled below) and any real exception here is a bug
+        # (malformed SQL, recorder internal state corruption) that should
+        # surface loudly rather than be silently hidden behind an empty
+        # response. Fail-loud beats a silently-empty label dropdown.
+        result = await deps.flush_and_select(query)
+        if result is None:
+            return JSONResponse([])
+        _columns, rows = result
+        keys: set[str] = set()
+        for (labels_json,) in rows:
+            try:
+                parsed = json.loads(labels_json)
+                keys.update(parsed.keys())
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+        return JSONResponse(sorted(keys))
+
+    @router.get('/api/debug/trace-by-label')
+    async def api_debug_trace_by_label(
+        key: str = Query(),
+        value: str = Query(),
+    ):
+        """Trace tasks by label value across all workers in the cluster."""
+        events = await deps.dispatch_to_main_loop(recorder.cross_trace_by_label(key, value))
+        return JSONResponse(events)
+
+    @router.get('/api/debug/metrics')
+    async def api_debug_metrics():
+        """Return all registered Prometheus metrics with current values."""
+        from drakkar.metrics import collect_all_metrics
+
+        return JSONResponse(collect_all_metrics())
+
+    @router.get('/api/debug/periodic')
+    async def api_debug_periodic():
+        """Return periodic task run history from the flight recorder.
+
+        Groups events by task name and returns the latest run, total counts,
+        and recent history for each task.
+        """
+        query = """
+            SELECT ts, task_id, duration, exit_code, metadata
+            FROM events
+            WHERE event = 'periodic_run'
+            ORDER BY ts DESC
+            LIMIT 500
+        """
+        # No try/except — see ``api_debug_label_keys`` for rationale.
+        # ``flush_and_select`` returns ``None`` on DB-absent; any raised
+        # exception is a real bug and should surface.
+        result = await deps.flush_and_select(query)
+        if result is None:
+            return JSONResponse([])
+        columns, rows = result
+
+        # group by task name. We also surface a per-task ``system: bool``
+        # derived from the event's ``metadata.system``. Framework-internal
+        # loops (cache.flush / cache.sync / cache.cleanup, etc.) set this to
+        # True so the debug UI can render a [system] pill and operators can
+        # distinguish them from user-defined ``@periodic`` handler methods.
+        # When the key is absent (older rows, user tasks) we default to False
+        # — the field is always present in the response for UI simplicity.
+        tasks: dict[str, dict] = {}
+        for row in rows:
+            entry = dict(zip(columns, row, strict=False))
+            name = entry['task_id']
+            meta = {}
+            if entry.get('metadata'):
+                try:
+                    meta = json.loads(entry['metadata'])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            status = meta.get('status', 'ok')
+            error = meta.get('error', '')
+            # system flag: latest value wins if events disagree (shouldn't
+            # happen under normal use, but we iterate ts-DESC so first seen
+            # == latest event for the task)
+            is_system = bool(meta.get('system', False))
+
+            if name not in tasks:
+                tasks[name] = {
+                    'name': name,
+                    'last_run_ts': entry['ts'],
+                    'last_duration': entry['duration'],
+                    'last_status': status,
+                    'last_error': error,
+                    'system': is_system,
+                    'total_ok': 0,
+                    'total_error': 0,
+                    'recent': [],
+                }
+            t = tasks[name]
+            if status == 'ok':
+                t['total_ok'] += 1
+            else:
+                t['total_error'] += 1
+            if len(t['recent']) < 20:
+                t['recent'].append(
+                    {
+                        'ts': entry['ts'],
+                        'duration': entry['duration'],
+                        'status': status,
+                        'error': error,
+                    }
+                )
+
+        return JSONResponse(sorted(tasks.values(), key=lambda t: t['name']))
+
+    @router.get('/debug/download/{filename}', dependencies=[Depends(deps.require_auth)])
+    async def debug_download(filename: str):
+        """Download a database file from db_dir."""
+        # prevent directory traversal
+        if '/' in filename or '\\' in filename or filename.startswith('.'):
+            return JSONResponse({'error': 'Invalid filename'}, status_code=400)
+        full = os.path.join(config.db_dir, filename)
+        if not os.path.realpath(full).startswith(os.path.realpath(config.db_dir) + os.sep):
+            return JSONResponse({'error': 'Invalid path'}, status_code=400)
+        if not os.path.isfile(full):
+            return JSONResponse({'error': 'File not found'}, status_code=404)
+        return FileResponse(
+            path=full,
+            filename=filename,
+            media_type='application/x-sqlite3',
+        )
+
+    # Shared DebugRunner instance. The runner holds an ``asyncio.Lock``
+    # that serializes overlapping probes; keeping a single instance per
+    # FastAPI app means that lock is actually shared across requests.
+    # Built lazily on first use so tests that don't exercise the probe
+    # endpoint don't pay the wiring cost (and so tests can freely swap
+    # ``mock_app.handler`` / ``_executor_pool`` before the first call).
+    # NOTE: The runner is built lazily on first call and then cached for
+    # the life of the app. Tests that swap the handler or executor pool
+    # AFTER the first probe request won't see their changes take effect.
+    # Test fixtures swap these before touching the endpoint, so this is
+    # fine in practice — but callers should be aware.
+    probe_state: dict[str, DebugRunner | None] = {'runner': None}
+
+    def _get_probe_runner() -> DebugRunner:
+        # Single-key dict so the closure can mutate the slot without a
+        # ``nonlocal`` declaration. ``ty`` narrows the after-check value
+        # cleanly.
+        existing = probe_state['runner']
+        if existing is None:
+            # The executor pool is created during ``DrakkarApp.run`` and
+            # lives for the whole process; by the time the probe endpoint
+            # is reachable it's always non-None. Guard here so ty's
+            # ``ExecutorPool | None`` narrowing is happy.
+            pool = drakkar_app._executor_pool
+            if pool is None:
+                raise HTTPException(status_code=503, detail='executor pool not ready')
+            existing = DebugRunner(
+                handler=drakkar_app.handler,
+                executor_pool=pool,
+                app_config=drakkar_app._config,
+            )
+            probe_state['runner'] = existing
+        return existing
+
+    @router.post('/api/debug/probe', dependencies=[Depends(deps.require_auth)])
+    async def api_debug_probe(req: _ProbeRequest) -> JSONResponse:
+        """Run a single-message probe through the live handler pipeline.
+
+        The probe executes arrange → executor → on_task_complete →
+        on_message_complete → on_window_complete exactly like the
+        production path, but with zero side-effects (no sinks, no
+        recorder rows, no cache writes, no offset commits). Concurrent
+        requests serialize on the runner's internal ``asyncio.Lock``.
+
+        Returns 200 with a ``DebugReport``. If the wall-clock timeout
+        fires (``2 * task_timeout_seconds + PROBE_TIMEOUT_HEADROOM_SECONDS``),
+        also returns 200 but with ``truncated=true`` and whatever partial
+        state the runner had captured up to the cancellation point.
+        """
+        # Import lazily so monkeypatching ``PROBE_TIMEOUT_HEADROOM_SECONDS``
+        # on ``drakkar.debug.server`` (the back-compat re-export site)
+        # is observed at request time.
+        from drakkar.debug import server as server_module
+
+        runner = _get_probe_runner()
+        # Default empty topic to the configured source topic so handlers
+        # that key on ``msg.topic`` see a realistic value. The model
+        # itself accepts an empty topic to support callers that
+        # deliberately want to probe with no topic set.
+        topic = req.topic or drakkar_app._config.kafka.source_topic
+        probe_input = ProbeInput(
+            value=req.value,
+            key=req.key,
+            partition=req.partition,
+            offset=req.offset,
+            topic=topic,
+            timestamp=req.timestamp,
+            use_cache=req.use_cache,
+        )
+        # Timeout = 2x the per-task timeout + headroom. ``config`` here is
+        # ``DebugConfig``; the executor timeout lives on the full
+        # ``DrakkarConfig`` reachable via ``drakkar_app._config``.
+        timeout = 2 * drakkar_app._config.executor.task_timeout_seconds + server_module.PROBE_TIMEOUT_HEADROOM_SECONDS
+        # Build the per-run state here so we own a reference for the
+        # truncated-partial-report path even when the actual probe
+        # coroutine runs on a different event loop (and thus an
+        # asyncio.Task we can't see).
+        state = runner._make_run_state(probe_input)
+        current_loop = asyncio.get_running_loop()
+        # CRITICAL: the ExecutorPool.semaphore is an ``asyncio.Semaphore``
+        # bound to the loop where the pool was constructed (the main
+        # DrakkarApp loop). The debug FastAPI server typically runs in a
+        # separate thread + loop, so we must dispatch the probe back to
+        # that main loop — otherwise ``semaphore.acquire()`` raises
+        # "bound to a different event loop" as soon as the pool has
+        # contention. When ``drakkar_app.main_loop`` is a real loop and
+        # is NOT our running loop, use the cross-thread path. Otherwise
+        # (same-loop in tests, or loop unavailable) we run inline.
+        candidate_loop = drakkar_app.main_loop
+        if isinstance(candidate_loop, asyncio.AbstractEventLoop) and candidate_loop is not current_loop:
+            # Cross-thread: dispatch to the main loop. On timeout,
+            # cancel the future and sleep briefly so the main-loop
+            # task can run its ``finally`` and restore handler.cache
+            # before we return the partial report.
+            run_future = asyncio.run_coroutine_threadsafe(runner._run_with_state(state), candidate_loop)
+            try:
+                report = await asyncio.wait_for(asyncio.wrap_future(run_future), timeout=timeout)
+            except TimeoutError:
+                run_future.cancel()
+                await asyncio.sleep(0.1)
+                report = state.to_report(truncated=True)
+        else:
+            # Same-loop: plain asyncio. ``wait_for`` already awaits the
+            # cancelled task's ``finally`` before raising, so the cache
+            # is restored by the time we reach the except branch.
+            run_task = asyncio.create_task(runner._run_with_state(state))
+            try:
+                report = await asyncio.wait_for(run_task, timeout=timeout)
+            except TimeoutError:
+                report = state.to_report(truncated=True)
+        return JSONResponse(report.model_dump(mode='json'))
+
+    return router
