@@ -22,6 +22,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+from drakkar.concurrency import dispatch_to_loop
 from drakkar.metrics import cache_gauge_snapshot
 
 if TYPE_CHECKING:
@@ -114,7 +115,7 @@ def create_cache_router(deps: DebugDeps) -> APIRouter:
                 return await cursor.fetchone()
 
         try:
-            row = await deps.dispatch_to_main_loop(_read_count())
+            row = await dispatch_to_loop(_read_count(), deps.drakkar_app.main_loop)
             total = row[0] if row else 0
         except Exception as exc:
             await logger.awarning(
@@ -140,7 +141,7 @@ def create_cache_router(deps: DebugDeps) -> APIRouter:
                 return columns, rows
 
             try:
-                columns, rows = await deps.dispatch_to_main_loop(_read_rows())
+                columns, rows = await dispatch_to_loop(_read_rows(), deps.drakkar_app.main_loop)
                 for r in rows:
                     entries.append(dict(zip(columns, r, strict=False)))
             except Exception as exc:
@@ -190,7 +191,7 @@ def create_cache_router(deps: DebugDeps) -> APIRouter:
             return columns, row
 
         try:
-            columns, row = await deps.dispatch_to_main_loop(_read())
+            columns, row = await dispatch_to_loop(_read(), deps.drakkar_app.main_loop)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f'Failed to read cache entry: {exc}') from exc
 

@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from drakkar.concurrency import dispatch_to_loop
 from drakkar.debug.runner import DebugRunner, ProbeInput
 
 if TYPE_CHECKING:
@@ -152,7 +153,7 @@ def create_debug_router(deps: DebugDeps) -> APIRouter:
         offset: int = Query(),
     ):
         """Trace a message across all workers in the same cluster."""
-        events = await deps.dispatch_to_main_loop(recorder.cross_trace(partition, offset))
+        events = await dispatch_to_loop(recorder.cross_trace(partition, offset), deps.drakkar_app.main_loop)
         return JSONResponse(events)
 
     @router.get('/api/debug/label-keys')
@@ -187,7 +188,7 @@ def create_debug_router(deps: DebugDeps) -> APIRouter:
         value: str = Query(),
     ):
         """Trace tasks by label value across all workers in the cluster."""
-        events = await deps.dispatch_to_main_loop(recorder.cross_trace_by_label(key, value))
+        events = await dispatch_to_loop(recorder.cross_trace_by_label(key, value), deps.drakkar_app.main_loop)
         return JSONResponse(events)
 
     @router.get('/api/debug/metrics')

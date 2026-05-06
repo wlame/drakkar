@@ -4023,8 +4023,8 @@ async def test_probe_endpoint_defaults_topic_to_configured_source_topic(mock_rec
 # the endpoint's loop directly — ``run_coroutine_threadsafe`` must
 # marshal the call back. We exercise ``/api/events`` here because it's
 # the simplest aiosqlite-reading endpoint; the same helper
-# (``_dispatch_to_main_loop``) wraps every cross-thread read in the
-# module.
+# (``drakkar.concurrency.dispatch_to_loop``) wraps every cross-thread
+# read in the module.
 # ---------------------------------------------------------------------------
 
 
@@ -4143,9 +4143,10 @@ async def test_api_events_dispatches_to_drakkar_main_loop_when_different(
 
 async def test_api_events_falls_back_to_inline_when_main_loop_is_mock(tmp_path, mock_recorder, debug_config, mock_app):
     """When ``main_loop`` is a ``MagicMock`` (the default unit-test path),
-    ``_dispatch_to_main_loop`` must fall back to inline execution so the
-    test suite doesn't need a real background thread. Regression for the
-    MagicMock-guard in ``isinstance(candidate_loop, asyncio.AbstractEventLoop)``.
+    ``drakkar.concurrency.dispatch_to_loop`` must fall back to inline
+    execution so the test suite doesn't need a real background thread.
+    Regression for the MagicMock-guard in
+    ``isinstance(target_loop, asyncio.AbstractEventLoop)``.
     """
     import aiosqlite
 

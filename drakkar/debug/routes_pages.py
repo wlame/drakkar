@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from drakkar.concurrency import dispatch_to_loop
 from drakkar.debug.server_helpers import origin_allowed
 
 if TYPE_CHECKING:
@@ -139,7 +140,7 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
     async def partitions(request: Request):
         # ``get_partition_summary`` internally does ``self._db.execute(...)``;
         # dispatch to the main loop so the aiosqlite cursor stays there.
-        summary = await deps.dispatch_to_main_loop(recorder.get_partition_summary())
+        summary = await dispatch_to_loop(recorder.get_partition_summary(), deps.drakkar_app.main_loop)
         processors = drakkar_app.processors
         lag_data = await deps.get_lag()
         for s in summary:
@@ -168,12 +169,13 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
         page: int = Query(default=0, ge=0),
     ):
         limit = 50
-        events = await deps.dispatch_to_main_loop(
+        events = await dispatch_to_loop(
             recorder.get_events(
                 partition=partition_id,
                 limit=limit,
                 offset=page * limit,
-            )
+            ),
+            deps.drakkar_app.main_loop,
         )
         return templates.TemplateResponse(
             request,
@@ -191,7 +193,7 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
     async def task_detail(request: Request, task_id: str):
         # Strip retry composite key suffix (e.g. "task-abc:r1234567.89" → "task-abc")
         base_id = task_id.split(':r')[0] if ':r' in task_id else task_id
-        events = await deps.dispatch_to_main_loop(recorder.get_task_events(base_id))
+        events = await dispatch_to_loop(recorder.get_task_events(base_id), deps.drakkar_app.main_loop)
         started = next((e for e in events if e['event'] == 'task_started'), None)
         completed = next((e for e in events if e['event'] == 'task_completed'), None)
         failed = next((e for e in events if e['event'] == 'task_failed'), None)
@@ -253,13 +255,14 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
         part_int = int(partition) if partition and partition.strip() else None
         evt_type = event_type if event_type and event_type.strip() else None
         limit = 100
-        events = await deps.dispatch_to_main_loop(
+        events = await dispatch_to_loop(
             recorder.get_events(
                 partition=part_int,
                 event_type=evt_type,
                 limit=limit,
                 offset=page * limit,
-            )
+            ),
+            deps.drakkar_app.main_loop,
         )
         return templates.TemplateResponse(
             request,
@@ -419,7 +422,7 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
                 snap[pid] = entry
             return snap
 
-        result = await deps.dispatch_to_main_loop(_snapshot())
+        result = await dispatch_to_loop(_snapshot(), deps.drakkar_app.main_loop)
         pool = drakkar_app._executor_pool
         return JSONResponse(
             {

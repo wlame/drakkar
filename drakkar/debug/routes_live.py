@@ -26,6 +26,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from drakkar.concurrency import dispatch_to_loop
 from drakkar.debug.server_helpers import hook_flags
 
 if TYPE_CHECKING:
@@ -74,7 +75,7 @@ def create_live_router(deps: DebugDeps) -> APIRouter:
             )
             return active_rows, finished_rows, failed_rows
 
-        active, finished, failed = await deps.dispatch_to_main_loop(_read_from_main())
+        active, finished, failed = await dispatch_to_loop(_read_from_main(), deps.drakkar_app.main_loop)
         now = time.time()
         for task in active:
             task['elapsed'] = now - task['ts'] if task.get('ts') else 0
@@ -109,7 +110,7 @@ def create_live_router(deps: DebugDeps) -> APIRouter:
                     )
             return snapshot, arranging_data
 
-        pending_snapshot, arranging = await deps.dispatch_to_main_loop(_snapshot_processors())
+        pending_snapshot, arranging = await dispatch_to_loop(_snapshot_processors(), deps.drakkar_app.main_loop)
         for _pid, entries in pending_snapshot.items():
             for tid, args, partition_id, source_offsets in entries:
                 entry = {
@@ -444,7 +445,7 @@ def create_live_router(deps: DebugDeps) -> APIRouter:
                     aux_rows = await cur.fetchall()
                 return cols, aux_rows
 
-            cols, aux_rows = await deps.dispatch_to_main_loop(_read_aux())
+            cols, aux_rows = await dispatch_to_loop(_read_aux(), deps.drakkar_app.main_loop)
             for row in aux_rows:
                 ex = dict(zip(cols, row, strict=False))
                 entry = aux_by_id.setdefault(
@@ -524,7 +525,7 @@ def create_live_router(deps: DebugDeps) -> APIRouter:
                     async with reader.execute(q, params) as cur:
                         return await cur.fetchall()
 
-                for row in await deps.dispatch_to_main_loop(_read_consumed()):
+                for row in await dispatch_to_loop(_read_consumed(), deps.drakkar_app.main_loop):
                     consumed_by_key.setdefault((row[0], row[1]), []).append(row[2])
 
         result = []

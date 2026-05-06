@@ -144,8 +144,8 @@ class EventRecorder:
             'committed': 0,
         }
         # Serialize ``_flush`` calls. The periodic ``_flush_loop`` and
-        # debug endpoints (via ``_dispatch_to_main_loop``) can both
-        # schedule flushes on the main loop. Both paths drain
+        # debug endpoints (via ``drakkar.concurrency.dispatch_to_loop``)
+        # can both schedule flushes on the main loop. Both paths drain
         # ``self._buffer`` and observe ``recorder_flush_duration``; without
         # a lock, two concurrent flushes could each grab half of the
         # buffer and race on the histogram observation. The lock is

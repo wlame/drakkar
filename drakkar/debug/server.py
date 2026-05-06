@@ -23,10 +23,9 @@ Helpers that are pure functions (no closure over ``drakkar_app`` or
 
 from __future__ import annotations
 
-import asyncio
 import secrets
 import threading
-from collections.abc import Coroutine, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -36,6 +35,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.templating import Jinja2Templates
 
+from drakkar.concurrency import dispatch_to_loop
 from drakkar.config import DebugConfig
 
 # Re-import the helpers that used to live here so test patches like
@@ -184,40 +184,6 @@ class DebugDeps:
             return
         raise HTTPException(status_code=401, detail='Invalid or missing auth token')
 
-    # --- Cross-thread dispatch helper ---
-    #
-    # The debug FastAPI server runs in its own thread + event loop so
-    # heavy UI requests don't block the pipeline. Many shared asyncio
-    # primitives — ``ExecutorPool._gate``, the recorder's aiosqlite
-    # connection, the cache reader connection — are bound to the MAIN
-    # event loop where ``DrakkarApp`` was constructed. Awaiting them from
-    # this server's loop raises ``RuntimeError: <thing> is bound to a
-    # different event loop`` under contention.
-    #
-    # ``dispatch_to_main_loop`` mirrors the pattern proven in
-    # ``api_debug_probe``: when ``drakkar_app.main_loop`` is a real event
-    # loop and is NOT our running loop, schedule ``coro`` on the main
-    # loop via ``asyncio.run_coroutine_threadsafe`` and await the result
-    # here with ``asyncio.wrap_future``. When the loops match (typical
-    # in the unit-test path that skips the background thread) or
-    # ``main_loop`` is a MagicMock (no real loop available), run inline.
-    #
-    # Only cross-thread aiosqlite reads and processor-internal snapshots
-    # need to go through this helper. Pure Python work (template
-    # rendering, counters, constants) can stay on the endpoint's loop.
-    async def dispatch_to_main_loop(self, coro: Coroutine[Any, Any, Any]) -> Any:
-        current_loop = asyncio.get_running_loop()
-        candidate_loop = self.drakkar_app.main_loop
-        if isinstance(candidate_loop, asyncio.AbstractEventLoop) and candidate_loop is not current_loop:
-            # Cross-thread: dispatch back to the main loop. The future
-            # returned by ``run_coroutine_threadsafe`` is a
-            # ``concurrent.futures.Future``; ``asyncio.wrap_future``
-            # turns it into an awaitable on the current loop.
-            fut = asyncio.run_coroutine_threadsafe(coro, candidate_loop)
-            return await asyncio.wrap_future(fut)
-        # Same-loop (or no real main loop in tests): run inline.
-        return await coro
-
     async def flush_and_select(
         self,
         query: str,
@@ -229,7 +195,7 @@ class DebugDeps:
         pattern shared by 11 debug-server endpoints. Reads go through
         ``recorder.reader_db`` (the dedicated reader aiosqlite connection
         opened alongside the writer) so UI queries don't queue behind
-        writer flushes. Dispatches via ``dispatch_to_main_loop`` so the
+        writer flushes. Dispatches via ``dispatch_to_loop`` so the
         connection stays on its owning loop when the debug server runs
         in a separate thread.
 
@@ -252,7 +218,7 @@ class DebugDeps:
                 rows: list = list(await cur.fetchall())
             return columns, rows
 
-        return await self.dispatch_to_main_loop(_inner())
+        return await dispatch_to_loop(_inner(), self.drakkar_app.main_loop)
 
     async def get_lag(self) -> dict[int, dict]:
         """Return per-partition lag info for currently assigned partitions."""
