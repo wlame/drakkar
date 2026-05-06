@@ -175,7 +175,7 @@ class TestDebugModes:
         app._consumer.commit = AsyncMock()
 
         assert app._recorder is None
-        app._on_assign([0, 1])
+        app._lifecycle._on_assign([0, 1])
         assert len(app.processors) == 2
 
         for proc in app.processors.values():
@@ -188,8 +188,8 @@ class TestDebugModes:
         app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
         app._consumer = AsyncMock()
 
-        app._on_assign([0, 1])
-        app._on_revoke([0])
+        app._lifecycle._on_assign([0, 1])
+        app._lifecycle._on_revoke([0])
         await asyncio.sleep(0.3)
 
         assert 0 not in app.processors
@@ -227,7 +227,7 @@ class TestDebugModes:
 
         assert app._recorder is None
         assert app._debug_server is None
-        await app._shutdown()
+        await app._lifecycle._shutdown()
 
         app._consumer.close.assert_called_once()
         app._dlq_sink.close.assert_called_once()
@@ -242,7 +242,7 @@ class TestDebugModes:
         app._recorder = AsyncMock()
         app._debug_server = AsyncMock()
 
-        await app._shutdown()
+        await app._lifecycle._shutdown()
 
         app._recorder.stop.assert_called_once()
         app._debug_server.stop.assert_called_once()
@@ -583,7 +583,7 @@ class TestSinkModes:
         config = make_config(sinks=SinksConfig())
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         with pytest.raises(SinkNotConfiguredError, match='No sinks configured'):
-            await app._async_run()
+            await app._lifecycle._async_run()
 
     async def test_single_sink_default_resolution(self):
         """With one kafka sink, empty sink name in payload auto-resolves."""
@@ -724,7 +724,7 @@ class TestCombinedModes:
         _setup_app_sinks(app)
         app._dlq_sink = AsyncMock()
 
-        app._on_assign([0])
+        app._lifecycle._on_assign([0])
         proc = app.processors[0]
         proc.enqueue(make_msg(offset=0))
 
@@ -759,7 +759,7 @@ class TestCombinedModes:
         _setup_app_sinks(app)
         app._dlq_sink = AsyncMock()
 
-        app._on_assign([0])
+        app._lifecycle._on_assign([0])
         proc = app.processors[0]
 
         for i in range(3):
@@ -793,7 +793,7 @@ class TestCombinedModes:
         _setup_app_sinks(app)
         app._dlq_sink = AsyncMock()
 
-        app._on_assign([0])
+        app._lifecycle._on_assign([0])
         proc = app.processors[0]
         proc.enqueue(make_msg(offset=0))
 
@@ -835,7 +835,7 @@ class TestBackpressureEdgeCases:
         assert high_watermark == 1
         assert low_watermark == 1
 
-        app._on_assign([0])
+        app._lifecycle._on_assign([0])
         proc = app.processors[0]
         proc._queue.put_nowait(make_msg(offset=0))
 

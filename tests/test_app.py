@@ -222,7 +222,7 @@ async def test_app_on_assign_creates_processors(test_config):
     app._consumer = MagicMock()
     app._consumer.commit = AsyncMock()
 
-    app._on_assign([0, 1, 2])
+    app._lifecycle._on_assign([0, 1, 2])
     assert len(app.processors) == 3
 
     for proc in app.processors.values():
@@ -237,10 +237,10 @@ async def test_app_on_revoke_removes_processors(test_config):
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
     app._consumer = AsyncMock()
 
-    app._on_assign([0, 1, 2])
+    app._lifecycle._on_assign([0, 1, 2])
     assert len(app.processors) == 3
 
-    app._on_revoke([1])
+    app._lifecycle._on_revoke([1])
     await asyncio.sleep(0.3)
     assert 1 not in app.processors
     assert len(app.processors) == 2
@@ -402,7 +402,7 @@ async def test_app_no_sinks_raises(test_config_no_sinks):
     """Starting with no sinks configured raises SinkNotConfiguredError."""
     app = DrakkarApp(handler=SimpleHandler(), config=test_config_no_sinks)
     with pytest.raises(SinkNotConfiguredError, match='No sinks configured'):
-        await app._async_run()
+        await app._lifecycle._async_run()
 
 
 # --- Signal handling ---
@@ -411,7 +411,7 @@ async def test_app_no_sinks_raises(test_config_no_sinks):
 async def test_app_handle_signal(test_config):
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._running = True
-    app._handle_signal()
+    app._lifecycle._handle_signal()
     assert not app._running
 
 
@@ -425,7 +425,7 @@ async def test_app_shutdown_closes_sinks(test_config):
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
-    await app._shutdown()
+    await app._lifecycle._shutdown()
 
     app._consumer.close.assert_called_once()
     app._dlq_sink.close.assert_called_once()
@@ -444,14 +444,14 @@ async def test_app_shutdown_drains_executors(test_config):
     from drakkar.executor import ExecutorPool
 
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._on_assign([0])
+    app._lifecycle._on_assign([0])
     await asyncio.sleep(0.1)
 
     msg = SourceMessage(topic='t', partition=0, offset=0, value=b'x', timestamp=0)
     app.processors[0].enqueue(msg)
     await asyncio.sleep(0.3)
 
-    await app._shutdown()
+    await app._lifecycle._shutdown()
     assert len(app.processors) == 0
 
 
@@ -469,12 +469,12 @@ async def test_stop_processor_handles_arrange_error(test_config):
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
     app._consumer = AsyncMock()
 
-    app._on_assign([0])
+    app._lifecycle._on_assign([0])
     msg = SourceMessage(topic='t', partition=0, offset=0, value=b'x', timestamp=0)
     app.processors[0].enqueue(msg)
     await asyncio.sleep(0.3)
 
-    app._on_revoke([0])
+    app._lifecycle._on_revoke([0])
     await asyncio.sleep(0.5)
     assert 0 not in app.processors
 
@@ -494,7 +494,7 @@ async def test_safe_call_catches_handler_errors(test_config):
     app._consumer = MagicMock()
     app._consumer.commit = AsyncMock()
 
-    app._on_assign([0])
+    app._lifecycle._on_assign([0])
     await asyncio.sleep(0.2)
 
     for proc in app.processors.values():
@@ -579,7 +579,7 @@ async def test_app_total_queued_with_processors(test_config):
     app._consumer = MagicMock()
     app._consumer.commit = AsyncMock()
 
-    app._on_assign([0, 1])
+    app._lifecycle._on_assign([0, 1])
     assert app._total_queued() == 0
 
     msg0 = SourceMessage(topic='t', partition=0, offset=0, value=b'x', timestamp=0)
@@ -605,7 +605,7 @@ async def test_app_backpressure_pauses_and_resumes(test_config):
     app._consumer = AsyncMock()
     app._running = True
 
-    app._on_assign([0])
+    app._lifecycle._on_assign([0])
     await asyncio.sleep(0.05)
 
     # config: max_executors=2, high_mult=32, low_mult=4 → high=64, low=8
@@ -669,8 +669,8 @@ async def test_newly_assigned_partition_is_paused_when_backpressure_active(test_
 
     # Simulate the poll loop having already entered the paused state.
     app._paused = True
-    app._on_assign([0])
-    app._on_assign([5, 7])
+    app._lifecycle._on_assign([0])
+    app._lifecycle._on_assign([5, 7])
 
     # Let the background pause task run.
     await asyncio.sleep(0.05)
@@ -695,7 +695,7 @@ async def test_newly_assigned_partition_not_paused_when_unpaused(test_config):
     app._consumer = AsyncMock()
 
     assert not app._paused
-    app._on_assign([0, 1])
+    app._lifecycle._on_assign([0, 1])
     await asyncio.sleep(0.05)
 
     # Pause must NOT have been invoked for these assignments.
@@ -722,7 +722,7 @@ async def test_shutdown_cancels_periodic_tasks(test_config):
     task = asyncio.create_task(fake_periodic())
     app._periodic_tasks.append(task)
 
-    await app._shutdown()
+    await app._lifecycle._shutdown()
 
     assert task.cancelled() or task.done()
     assert len(app._periodic_tasks) == 0
@@ -742,7 +742,7 @@ async def test_shutdown_final_commit_failure_is_logged(test_config):
     mock_consumer.commit.side_effect = RuntimeError('commit failed during rebalance')
     app._consumer = mock_consumer
 
-    app._on_assign([0])
+    app._lifecycle._on_assign([0])
 
     # Force a committable offset
     app.processors[0]._offset_tracker.register(0)
@@ -752,7 +752,7 @@ async def test_shutdown_final_commit_failure_is_logged(test_config):
     app._dlq_sink = AsyncMock()
 
     # Should not raise despite commit failure
-    await app._shutdown()
+    await app._lifecycle._shutdown()
     assert len(app.processors) == 0
 
 
@@ -794,7 +794,7 @@ async def test_shutdown_awaits_background_tasks_before_closing_consumer(test_con
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
-    await app._shutdown()
+    await app._lifecycle._shutdown()
 
     # commit MUST appear before close — proving background task completed first
     assert order == ['commit', 'close'], f'ordering violated: {order}'
@@ -831,7 +831,7 @@ async def test_stop_processor_skips_commit_on_drain_timeout(test_config):
     # register an offset and never complete it — drain() will spin until timeout
     proc._offset_tracker.register(42)
 
-    await app._stop_processor(proc)
+    await app._lifecycle._stop_processor(proc)
 
     # After a drain timeout, commit MUST NOT have been called for this partition.
     # (Consumer may have been called for other reasons earlier — but not commit.)
@@ -852,11 +852,11 @@ async def test_shutdown_skips_commit_on_drain_timeout(test_config):
     _setup_app_sinks(app)
     app._dlq_sink = AsyncMock()
 
-    app._on_assign([0])
+    app._lifecycle._on_assign([0])
     # register an offset without completing — drain will hang until timeout
     app.processors[0]._offset_tracker.register(99)
 
-    await app._shutdown()
+    await app._lifecycle._shutdown()
 
     # Commit must not have been called for the hung partition.
     assert app._consumer.commit.call_count == 0, (
@@ -879,7 +879,7 @@ async def test_shutdown_stops_recorder_and_debug_server(test_config):
     app._recorder = mock_recorder
     app._debug_server = mock_debug_server
 
-    await app._shutdown()
+    await app._lifecycle._shutdown()
 
     mock_recorder.stop.assert_called_once()
     mock_debug_server.stop.assert_called_once()
@@ -897,7 +897,7 @@ async def test_poll_loop_dispatches_messages_to_processors(test_config):
     app._consumer = AsyncMock()
     app._running = True
 
-    app._on_assign([0, 1])
+    app._lifecycle._on_assign([0, 1])
     await asyncio.sleep(0.01)
 
     msg0 = SourceMessage(topic='t', partition=0, offset=10, value=b'x', timestamp=0)
@@ -914,7 +914,7 @@ async def test_poll_loop_dispatches_messages_to_processors(test_config):
 
     app._consumer.poll_batch = _poll_once
 
-    await app._poll_loop()
+    await app._lifecycle._poll_loop()
 
     assert app.processors[0].queue_size >= 0  # message was consumed (may already be processed)
     assert app.processors[1].queue_size >= 0
@@ -959,7 +959,7 @@ async def test_poll_loop_pauses_on_high_watermark(test_config):
 
     app._consumer.poll_batch = _poll_then_stop
 
-    await app._poll_loop()
+    await app._lifecycle._poll_loop()
 
     app._consumer.pause.assert_called()
     assert app._paused
@@ -988,7 +988,7 @@ async def test_poll_loop_consumer_idle_metric(test_config):
     app._consumer.poll_batch = _empty_poll
 
     before = consumer_idle._value.get()
-    await app._poll_loop()
+    await app._lifecycle._poll_loop()
     after = consumer_idle._value.get()
 
     assert after > before
@@ -1004,7 +1004,7 @@ async def test_poll_loop_executor_idle_waste_metric(test_config):
     app._consumer = AsyncMock()
     app._running = True
 
-    app._on_assign([0])
+    app._lifecycle._on_assign([0])
     await asyncio.sleep(0.01)
 
     # put messages in queue, keep executor idle (active_count=0)
@@ -1023,7 +1023,7 @@ async def test_poll_loop_executor_idle_waste_metric(test_config):
     app._consumer.poll_batch = _empty_poll
 
     before = executor_idle_waste._value.get()
-    await app._poll_loop()
+    await app._lifecycle._poll_loop()
     after = executor_idle_waste._value.get()
 
     assert after > before
@@ -1224,7 +1224,7 @@ async def test_revoke_mid_window_no_offset_loss(test_config):
     mock_consumer = AsyncMock()
     app._consumer = mock_consumer
 
-    app._on_assign([0])
+    app._lifecycle._on_assign([0])
     processor = app.processors[0]
 
     # Enqueue 3 messages; arrange will schedule 3 subprocess tasks.
@@ -1252,7 +1252,7 @@ async def test_revoke_mid_window_no_offset_loss(test_config):
 
     # Fire revoke. _on_revoke pops the processor from app.processors
     # synchronously, then schedules _stop_processor as a background task.
-    app._on_revoke([0])
+    app._lifecycle._on_revoke([0])
     assert 0 not in app.processors, 'processor must be popped from app.processors immediately on revoke'
 
     # Wait for the background _stop_processor task to finish draining,
@@ -1327,7 +1327,7 @@ async def test_revoke_mid_window_clean_drain_commits_finished_messages(test_conf
     mock_consumer = AsyncMock()
     app._consumer = mock_consumer
 
-    app._on_assign([0])
+    app._lifecycle._on_assign([0])
     processor = app.processors[0]
 
     for offset in (200, 201, 202):
@@ -1335,7 +1335,7 @@ async def test_revoke_mid_window_clean_drain_commits_finished_messages(test_conf
 
     await wait_for(lambda: processor.inflight_count >= 1, timeout=5)
 
-    app._on_revoke([0])
+    app._lifecycle._on_revoke([0])
     await wait_for(lambda: len(app._background_tasks) == 0, timeout=10)
 
     # Processor removed, no zombie.
@@ -1400,7 +1400,7 @@ async def test_revoke_while_arrange_running(test_config):
     mock_consumer = AsyncMock()
     app._consumer = mock_consumer
 
-    app._on_assign([0])
+    app._lifecycle._on_assign([0])
     processor = app.processors[0]
 
     processor.enqueue(SourceMessage(topic='t', partition=0, offset=50, value=b'x', timestamp=0))
@@ -1411,7 +1411,7 @@ async def test_revoke_while_arrange_running(test_config):
     assert processor._arranging is True, 'processor must be mid-arrange when revoke fires'
 
     # Fire revoke mid-arrange.
-    app._on_revoke([0])
+    app._lifecycle._on_revoke([0])
     assert 0 not in app.processors
 
     # The background _stop_processor must complete — processor stops
@@ -1428,3 +1428,84 @@ async def test_revoke_while_arrange_running(test_config):
     # somewhere in stop(). If the test reaches here, clean stop worked.
     assert processor.inflight_count == 0
     assert not processor._offset_tracker.has_pending()
+
+
+# --- AppLifecycle: focused unit tests ---
+
+
+async def test_lifecycle_shutdown_drains_and_flips_ready(test_config):
+    """Construct AppLifecycle directly against a DrakkarApp and verify
+    that _shutdown drains the processors collection and flips is_ready
+    off — the two invariants the lifecycle owns on the way out.
+
+    This is the focused unit test promised by Phase 4 Task 3: it exercises
+    the lifecycle as an isolated object rather than indirectly via
+    ``app._shutdown``, so a future regression in the back-reference wiring
+    will surface here even if the higher-level integration tests still pass.
+    """
+    from drakkar.executor import ExecutorPool
+    from drakkar.lifecycle import AppLifecycle
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+
+    # Pretend we're already running and ready — _shutdown must flip both off.
+    app._running = True
+    app.is_ready = True
+
+    # Spin up one processor so the drain path actually has work to do.
+    app._lifecycle._on_assign([0])
+    assert 0 in app.processors
+
+    # Construct a fresh AppLifecycle around the same app instance and
+    # invoke _shutdown through it directly. Both lifecycles share state
+    # via the back-reference, so they observe the same processor map.
+    lifecycle = AppLifecycle(app)
+    await lifecycle._shutdown()
+
+    # Invariants the lifecycle owns on the way out:
+    #   - is_ready is False (so a Kubernetes readiness probe fails fast)
+    #   - all processors drained out of app._processors (no zombies)
+    #   - sinks closed (delegated to SinkManager.close_all)
+    assert app.is_ready is False
+    assert len(app.processors) == 0
+    app._consumer.close.assert_called_once()
+
+
+def test_lifecycle_handle_signal_flips_running_off(test_config):
+    """_handle_signal must trigger graceful shutdown by flipping the app's
+    _running flag — the poll loop reads this on every iteration and exits
+    when False. The signal handler is sync (registered via
+    loop.add_signal_handler) so this test is sync too.
+    """
+    from drakkar.lifecycle import AppLifecycle
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._running = True
+    lifecycle = AppLifecycle(app)
+
+    lifecycle._handle_signal()
+
+    assert app._running is False
+
+
+async def test_lifecycle_back_reference_shares_state(test_config):
+    """AppLifecycle holds only a back-reference to DrakkarApp; mutations
+    on either side must be visible on the other. This guards against a
+    future refactor that accidentally copies app state into the lifecycle.
+    """
+    from drakkar.lifecycle import AppLifecycle
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    lifecycle = AppLifecycle(app)
+
+    # Mutate via app, observe via lifecycle.
+    app._running = True
+    assert lifecycle._app._running is True
+
+    # Mutate via lifecycle, observe via app.
+    lifecycle._app._paused = True
+    assert app._paused is True

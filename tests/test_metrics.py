@@ -477,7 +477,7 @@ async def test_on_assign_sets_assigned_partitions_gauge():
     app._consumer = MagicMock()
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
 
-    app._on_assign([10, 11, 12])
+    app._lifecycle._on_assign([10, 11, 12])
 
     assert gauge_val(assigned_partitions) == len(app.processors)
 
@@ -499,10 +499,10 @@ async def test_on_revoke_decreases_assigned_partitions_gauge():
     app._consumer = AsyncMock()
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
 
-    app._on_assign([20, 21, 22])
+    app._lifecycle._on_assign([20, 21, 22])
     assert gauge_val(assigned_partitions) == len(app.processors)
 
-    app._on_revoke([21])
+    app._lifecycle._on_revoke([21])
     await asyncio.sleep(0.3)
     assert gauge_val(assigned_partitions) == len(app.processors)
 
@@ -717,7 +717,7 @@ async def test_executor_idle_waste_accumulates_when_messages_queued():
     app._running = True
 
     # assign a partition and put messages in queue
-    app._on_assign([0])
+    app._lifecycle._on_assign([0])
     await asyncio.sleep(0.01)
 
     for i in range(10):
@@ -755,7 +755,7 @@ async def test_executor_idle_waste_zero_when_pool_busy():
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=4, task_timeout_seconds=10)
     app._consumer = AsyncMock()
     app._running = True
-    app._on_assign([0])
+    app._lifecycle._on_assign([0])
     await asyncio.sleep(0.01)
 
     for i in range(10):
@@ -789,7 +789,7 @@ async def test_executor_idle_waste_zero_when_queues_empty():
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=4, task_timeout_seconds=10)
     app._consumer = AsyncMock()
     app._running = True
-    app._on_assign([0])
+    app._lifecycle._on_assign([0])
     await asyncio.sleep(0.01)
 
     before = counter_val(executor_idle_waste)
@@ -855,7 +855,7 @@ async def test_total_waiting_excludes_inflight():
     app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=4, task_timeout_seconds=10)
     app._consumer = AsyncMock()
     app._running = True
-    app._on_assign([0])
+    app._lifecycle._on_assign([0])
     await asyncio.sleep(0.01)
 
     # put 5 in queue, simulate 3 inflight

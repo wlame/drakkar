@@ -391,7 +391,7 @@ async def test_shutdown_stops_cache_before_recorder(tmp_path) -> None:
     # _shutdown also awaits the debug server; stub to a no-op.
     app._debug_server = AsyncMock()
 
-    await app._shutdown()
+    await app._lifecycle._shutdown()
 
     # Core invariant: cache engine stops BEFORE recorder.
     assert 'cache_engine_stop' in order
@@ -418,7 +418,7 @@ async def test_shutdown_skips_cache_stop_when_engine_not_started(tmp_path) -> No
 
     # _cache_engine is None — shutdown branch must skip cleanly.
     assert app._cache_engine is None
-    await app._shutdown()
+    await app._lifecycle._shutdown()
 
     # Recorder shutdown still happens — cache skipping must not suppress it.
     app._recorder.stop.assert_awaited_once()
