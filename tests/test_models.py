@@ -16,6 +16,7 @@ from drakkar.models import (
     PrecomputedResult,
     RedisPayload,
     SourceMessage,
+    TaskOrigin,
     make_task_id,
 )
 
@@ -223,3 +224,91 @@ def test_executor_task_with_precomputed_result():
     assert t.args == []  # unused when precomputed
     assert t.precomputed.stdout == 'cached payload'
     assert make_task_id('task').startswith('task-')
+
+
+# --- TaskOrigin / origin / client_name / request_id ---
+
+
+def test_executor_task_origin_default_kafka():
+    """The historical Kafka path is the default — operators don't have to opt in."""
+    t = ExecutorTask(task_id='t-default', source_offsets=[0])
+    assert t.origin == 'kafka'
+    assert t.client_name is None
+    assert t.request_id is None
+
+
+def test_executor_task_origin_http_propagates_through_model_dump():
+    """Webapp tasks carry origin/client/request through serialization round-trips."""
+    t = ExecutorTask(
+        task_id='t-http',
+        source_offsets=[0],
+        origin='http',
+        client_name='tenant-A',
+        request_id='req_20260506T184231_0042',
+    )
+    dumped = t.model_dump()
+    assert dumped['origin'] == 'http'
+    assert dumped['client_name'] == 'tenant-A'
+    assert dumped['request_id'] == 'req_20260506T184231_0042'
+
+    restored = ExecutorTask.model_validate(dumped)
+    assert restored.origin == 'http'
+    assert restored.client_name == 'tenant-A'
+    assert restored.request_id == 'req_20260506T184231_0042'
+
+
+def test_executor_task_kafka_origin_round_trip_uses_defaults():
+    """Round-tripping a Kafka task without explicit origin keeps the defaults."""
+    t = ExecutorTask(task_id='t-k', source_offsets=[1])
+    restored = ExecutorTask.model_validate(t.model_dump())
+    assert restored.origin == 'kafka'
+    assert restored.client_name is None
+    assert restored.request_id is None
+
+
+def test_message_group_origin_defaults_kafka():
+    """MessageGroup defaults match ExecutorTask defaults — Kafka path needs no changes."""
+    group = MessageGroup(source_message=_msg(), started_at=0.0, finished_at=0.0)
+    assert group.origin == 'kafka'
+    assert group.client_name is None
+    assert group.request_id is None
+
+
+def test_message_group_origin_http_round_trip():
+    """Webapp-origin MessageGroups serialise their tagging fields end-to-end."""
+    group = MessageGroup(
+        source_message=_msg(),
+        tasks=[],
+        results=[],
+        errors=[],
+        started_at=1.0,
+        finished_at=2.0,
+        origin='http',
+        client_name='tenant-A',
+        request_id='req_20260506T184231_0042',
+    )
+    dumped = group.model_dump()
+    assert dumped['origin'] == 'http'
+    assert dumped['client_name'] == 'tenant-A'
+    assert dumped['request_id'] == 'req_20260506T184231_0042'
+
+    restored = MessageGroup.model_validate(dumped)
+    assert restored.origin == 'http'
+    assert restored.client_name == 'tenant-A'
+    assert restored.request_id == 'req_20260506T184231_0042'
+
+
+def test_executor_task_origin_rejects_unknown_value():
+    """``TaskOrigin`` is a closed Literal — bogus values must fail validation."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        ExecutorTask(task_id='t-bad', source_offsets=[0], origin='websocket')  # type: ignore[arg-type]
+
+
+def test_task_origin_alias_exposes_the_two_known_values():
+    """``TaskOrigin`` is a public type alias importable from drakkar.models."""
+    from typing import get_args
+
+    assert set(get_args(TaskOrigin)) == {'kafka', 'http'}

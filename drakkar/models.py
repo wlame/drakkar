@@ -7,9 +7,16 @@ and the CollectResult that routes data to configured sinks.
 import os
 import time
 from enum import StrEnum
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, Field
+
+# Marks where a task / message-group originated. ``'kafka'`` is the historical
+# source path (consumer poll → arrange → executor). ``'http'`` is the webapp
+# pipeline path (synchronous POST → arrange_http_request → executor). Stored on
+# ``ExecutorTask`` and ``MessageGroup`` so the priority gate, debug UI, and
+# recorder can distinguish the two without re-deriving it from upstream state.
+TaskOrigin = Literal['kafka', 'http']
 
 
 def make_task_id(prefix: str = 't') -> str:
@@ -167,6 +174,33 @@ class ExecutorTask(BaseModel):
             'failure -> its parent -> ... up to the arrange()-produced root.'
         ),
     )
+    origin: TaskOrigin = Field(
+        default='kafka',
+        description=(
+            'Where this task originated. ``"kafka"`` for the historical '
+            'consumer→arrange path, ``"http"`` for tasks produced by '
+            '``arrange_http_request`` on the webapp pipeline. Read by the '
+            'priority gate (``handler.task_priority``), the debug UI '
+            '(rendering color/labels), and the recorder.'
+        ),
+    )
+    client_name: str | None = Field(
+        default=None,
+        description=(
+            'Name of the webapp client that triggered this task. Populated '
+            'only for ``origin == "http"`` tasks; ``None`` for Kafka-origin '
+            'tasks. Matches a ``WebClientConfig.name`` from the webapp '
+            'config block.'
+        ),
+    )
+    request_id: str | None = Field(
+        default=None,
+        description=(
+            'Framework-assigned request id for the originating webapp '
+            'request. Populated only for ``origin == "http"`` tasks; '
+            '``None`` for Kafka-origin tasks. See ``make_request_id``.'
+        ),
+    )
 
 
 class ExecutorResult(BaseModel):
@@ -276,6 +310,30 @@ class MessageGroup(BaseModel):
     finished_at: float = Field(
         default=0.0,
         description='Monotonic timestamp when the last task reached a terminal state.',
+    )
+    origin: TaskOrigin = Field(
+        default='kafka',
+        description=(
+            'Origin of the source message that produced this group. '
+            '``"kafka"`` for consumer-driven groups, ``"http"`` for groups '
+            'synthesised by the webapp runner. Mirrors the same field on '
+            'each contained ``ExecutorTask``.'
+        ),
+    )
+    client_name: str | None = Field(
+        default=None,
+        description=(
+            'Webapp client name that triggered this group. ``None`` for '
+            'Kafka-origin groups; populated only for ``origin == "http"``.'
+        ),
+    )
+    request_id: str | None = Field(
+        default=None,
+        description=(
+            'Framework-assigned request id for the originating webapp '
+            'request. ``None`` for Kafka-origin groups; populated only for '
+            '``origin == "http"``.'
+        ),
     )
 
     @property
