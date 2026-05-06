@@ -39,6 +39,7 @@ from drakkar.cache.models import (
     decode_value,
     encode_value,
 )
+from drakkar.cache.protocol import CacheLike
 from drakkar.cache.sql import (
     LWW_UPSERT_SQL,
     PEER_CLUSTER_CACHE_TTL_SECONDS,
@@ -60,6 +61,7 @@ __all__ = [
     'Cache',
     'CacheEngine',
     'CacheEntry',
+    'CacheLike',
     'CacheScope',
     'DirtyOp',
     'NoOpCache',

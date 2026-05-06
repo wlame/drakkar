@@ -12,8 +12,14 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, get_args
 
 from pydantic import BaseModel
 
+# Imported at runtime (not under ``TYPE_CHECKING``) so the ``cache: CacheLike``
+# annotations on the classes below are resolvable by tools that evaluate
+# annotations eagerly. ``protocol`` is side-effect-free and dependency-light;
+# importing it here does not pull in ``drakkar.cache.engine`` or any other
+# heavy module, so there is no circular-import risk.
+from drakkar.cache.protocol import CacheLike
+
 if TYPE_CHECKING:
-    from drakkar.cache import Cache, NoOpCache
     from drakkar.config import DrakkarConfig
 
 from drakkar.models import (
@@ -38,8 +44,10 @@ class DrakkarHandler(Protocol):
     output_model: type[BaseModel] | None
     # Handler-facing cache. Always non-None by the time user hooks are called:
     # either a real Cache (when cache.enabled=true) or a NoOpCache stub
-    # (disabled path). See BaseDrakkarHandler.cache for the default stub.
-    cache: Cache | NoOpCache
+    # (disabled path). Typed structurally as :class:`CacheLike` so test doubles
+    # and alternate backends satisfy the contract without subclassing the
+    # concrete classes — see :mod:`drakkar.cache.protocol`.
+    cache: CacheLike
 
     def message_label(self, msg: SourceMessage) -> str: ...
     def task_priority(self, task: ExecutorTask) -> Any: ...
@@ -143,7 +151,12 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
     # definition) because the ``NoOpCache`` import is deferred — module-level
     # import would trigger a circular import between ``handler.py`` and
     # ``cache.py`` at load time.
-    cache: Cache | NoOpCache
+    #
+    # Typed as :class:`CacheLike` (a structural Protocol) rather than the
+    # concrete ``Cache | NoOpCache`` Union so tests can substitute a hand-rolled
+    # fake without subclassing — and so future alternate cache backends
+    # (Redis-backed, distributed, etc.) satisfy the contract structurally.
+    cache: CacheLike
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)

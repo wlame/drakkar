@@ -79,7 +79,7 @@ from drakkar.models import (
 )
 
 if TYPE_CHECKING:
-    from drakkar.cache import Cache, NoOpCache
+    from drakkar.cache import CacheLike
     from drakkar.config import DrakkarConfig
     from drakkar.executor import ExecutorPool
     from drakkar.handler import BaseDrakkarHandler
@@ -141,7 +141,7 @@ class DebugCacheProxy:
 
     def __init__(
         self,
-        real: Cache | NoOpCache,
+        real: CacheLike,
         *,
         use_cache: bool,
         start_time: float,
@@ -149,11 +149,11 @@ class DebugCacheProxy:
         """Wire up the proxy.
 
         Args:
-            real: the live ``Cache`` or ``NoOpCache`` that the handler
-                had before the probe swapped it out. Reads fall through
-                to this when ``use_cache`` is True. Production-task
-                calls (callers outside any ``_stage(...)`` block) ALWAYS
-                forward to this regardless of ``use_cache``.
+            real: the live cache (any object satisfying :class:`CacheLike`)
+                that the handler had before the probe swapped it out. Reads
+                fall through to this when ``use_cache`` is True. Production-
+                task calls (callers outside any ``_stage(...)`` block)
+                ALWAYS forward to this regardless of ``use_cache``.
             use_cache: UI checkbox — forward reads to the live cache
                 when True; otherwise always return a miss. Only consulted
                 for probe-stage callers; production-task callers go
@@ -756,11 +756,12 @@ class DebugRunner:
             use_cache=state.use_cache,
             start_time=state.start_monotonic,
         )
-        # Use setattr to dodge the static type check — DebugCacheProxy
-        # duck-types the Cache surface (verified by tests) but isn't in
-        # the Cache | NoOpCache union ty sees on the handler attribute.
-        # Keeping the swap out of the type system is intentional: the
-        # proxy should never leak beyond the probe.
+        # ``DebugCacheProxy`` structurally satisfies :class:`CacheLike`
+        # (handler.cache's declared type), so a direct assignment would
+        # type-check. We still go through ``setattr`` here to keep the
+        # swap conspicuously distinct from regular attribute writes — the
+        # probe should never leak beyond its scope, and the explicit
+        # ``setattr`` makes the swap point easy to spot in audits.
         setattr(self._handler, 'cache', state.cache_proxy)  # noqa: B010
         try:
             await self._run_stages(state=state, msg=msg)
