@@ -264,10 +264,18 @@ def test_sink_manager_resolves_registered_type_by_name() -> None:
     references a sink type by name, the registry returns the class, the
     framework instantiates it and registers the instance with the
     manager.
+
+    ``entry_points`` is patched so the SinkManager constructor doesn't
+    inadvertently load whatever ``drakkar.sinks`` plugins happen to be
+    installed in the test environment — any such side effect would
+    make this test environment-dependent.
     """
     SinkRegistry.register('custom', _CustomSink)
-
-    mgr = SinkManager()
+    # Force the registry's discover() pass to a no-op for SinkManager
+    # construction so the test cannot pick up a real installed plugin.
+    SinkRegistry._discovered = False
+    with patch('drakkar.sinks.registry.entry_points', return_value=[]):
+        mgr = SinkManager()
 
     # The manager exposes the registry lookup so DrakkarApp can resolve
     # config-named sink types without reaching into the registry directly.
@@ -286,7 +294,9 @@ def test_sink_manager_resolves_registered_type_by_name() -> None:
 
 
 def test_sink_manager_resolve_sink_class_returns_none_for_unknown() -> None:
-    mgr = SinkManager()
+    SinkRegistry._discovered = False
+    with patch('drakkar.sinks.registry.entry_points', return_value=[]):
+        mgr = SinkManager()
     assert mgr.resolve_sink_class('definitely_not_a_real_sink_type') is None
 
 

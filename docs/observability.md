@@ -155,21 +155,26 @@ distinguish three termination modes:
 | File **present**, body == `CLEAN_EXIT` | Prior shutdown wrote the marker but a process death between the write and the unlink left the file behind. Still a clean exit. | No log, no metric. |
 | File **present**, body empty (or anything else) | Prior process was killed before `_shutdown` reached `mark_clean` — almost always SIGKILL from the OOM-killer, a kubelet pod-pressure eviction, or a kernel panic. | Structured warning `previous_run_ended_unexpectedly` (category `watchdog`) with `worker_id` and `watchdog_path` fields, plus `drakkar_suspected_oom_kills_total` increment. |
 
-The watchdog file is created in `AppLifecycle._async_run` (right after
-`worker_id` resolution) and deleted at the end of `_shutdown` only when
-the drain phase succeeded. If the drain hit
-`executor.drain_timeout_seconds` we deliberately leave the file in place
-so the next startup treats the worker as suspect — symmetric with the
-`drakkar_drain_timeout_hit_total` counter and consistent with the
-"surface uncertainty rather than silently mark clean" stance taken by
-the rest of the shutdown path.
+The watchdog file is created in `AppLifecycle._async_run` once the
+worker is committed to running (the actual `write()` happens just before
+`subscribe()` returns and the poll loop starts) and deleted as soon as
+the drain phase has been accounted for in `_shutdown`. A
+`drain_timeout` is treated as a clean (if slow) shutdown for the
+watchdog's purposes — its dedicated counter
+`drakkar_drain_timeout_hit_total` already covers that case. Conflating
+"drain was slow" with "process was SIGKILLed" would muddle dashboards,
+so the OOM counter `drakkar_suspected_oom_kills_total` is reserved for
+the genuinely-empty-body signature: process killed before reaching
+`mark_clean`.
 
 The file lives in `debug.db_dir` (default `/tmp`), the same directory
 used by the recorder and cache engine. If `debug.db_dir` is empty —
-fully disk-less deployment — the watchdog falls back to the worker's
-current working directory. The file is one tiny ASCII file per worker
-(zero or `CLEAN_EXIT` bytes), so it does not break the "no SQLite"
-guarantee of an empty `db_dir`.
+fully disk-less deployment — the watchdog is **disabled** for that run
+(no file written, no metric increment), since the alternative of
+falling back to the worker's CWD risks both breaking the "no on-disk
+state" promise and writing into a read-only container volume. The
+disable is logged at startup as `watchdog_disabled_no_db_dir` so
+operators can see the OOM signal is off.
 
 **Operator interpretation:** any nonzero rate on
 `drakkar_suspected_oom_kills_total` should be correlated with

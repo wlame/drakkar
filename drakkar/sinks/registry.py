@@ -102,6 +102,15 @@ class SinkRegistry:
         if not inspect.isclass(sink_cls) or not issubclass(sink_cls, BaseSink):
             raise TypeError(f'sink class must be a subclass of BaseSink, got {sink_cls!r}')
 
+        # Reject abstract classes — both BaseSink itself and any subclass
+        # that left an abstract method unimplemented. Instantiating one
+        # would raise TypeError at delivery time; failing fast at
+        # registration gives a clear, sourced error instead of a confusing
+        # "Can't instantiate abstract class …" trace from deep inside
+        # SinkManager._build_sinks.
+        if inspect.isabstract(sink_cls):
+            raise TypeError(f'sink class must be concrete (no unimplemented abstract methods), got {sink_cls!r}')
+
         cls._registered[name] = sink_cls
 
     @classmethod

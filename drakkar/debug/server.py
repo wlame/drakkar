@@ -72,8 +72,6 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-WS_DRAIN_SLEEP = 0.02  # seconds to sleep when WebSocket event queue is empty
-
 TEMPLATES_DIR = Path(__file__).parent.parent / 'templates'
 
 
@@ -86,8 +84,8 @@ class DebugDeps:
     builder, prometheus-link builder, cross-thread dispatch) are methods
     here so the router factories don't have to plumb them individually.
 
-    The constants below (``WS_DRAIN_SLEEP``, ``PROBE_TIMEOUT_HEADROOM_SECONDS``)
-    stay at module scope so tests can monkeypatch them.
+    ``PROBE_TIMEOUT_HEADROOM_SECONDS`` stays at module scope so tests
+    can monkeypatch it.
     """
 
     def __init__(

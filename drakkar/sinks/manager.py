@@ -169,24 +169,6 @@ class SinkManager:
         """
         return SinkRegistry.get(type_name)
 
-    def attach_runtime(
-        self,
-        recorder: EventRecorder | None,
-        dlq_sink: DLQSink | None,
-    ) -> None:
-        """Inject recorder + DLQ sink after construction.
-
-        The ``DrakkarApp`` constructs the ``SinkManager`` in its own
-        ``__init__`` (before the recorder and DLQ sink exist) but the
-        SinkManager needs references to both during delivery. This setter
-        lets ``_async_run`` wire them up once they've been built, without
-        rebuilding the manager. Both arguments are assigned directly — pass
-        ``None`` to clear a reference (e.g., when debug is disabled and no
-        recorder was ever constructed).
-        """
-        self._recorder = recorder
-        self._dlq_sink = dlq_sink
-
     @property
     def sinks(self) -> dict[tuple[str, str], BaseSink[Any]]:
         """All registered sinks keyed by (sink_type, name)."""
@@ -418,9 +400,11 @@ class SinkManager:
 
         Recorder + DLQ sink are read from instance state
         (``self._recorder`` / ``self._dlq_sink``) — both are set via
-        ``__init__`` kwargs or the later ``attach_runtime`` setter. Holding
-        them as instance state keeps the hot path signature minimal and
-        avoids threading the same two objects through every delivery call.
+        ``__init__`` kwargs or wired directly by
+        ``AppLifecycle._async_run`` once the recorder and DLQ sink have
+        been built. Holding them as instance state keeps the hot path
+        signature minimal and avoids threading the same two objects
+        through every delivery call.
 
         Args:
             result: The CollectResult from on_task_complete(),

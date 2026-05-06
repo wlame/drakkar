@@ -118,19 +118,36 @@ class AppLifecycle:
         # Watchdog file for OOM / SIGKILL detection. Resolves the durable
         # directory from ``config.debug.db_dir`` (the canonical location
         # for per-worker durable files in this codebase — already used by
-        # the recorder and the cache engine). Falls back to the current
-        # working directory if ``db_dir`` is empty (e.g. fully disk-less
-        # deployment where the operator deliberately disabled all SQLite
-        # files), so the OOM signal still works even in that mode. The
-        # watchdog itself is just one tiny text file per worker, so it
-        # does not break the "no SQLite" guarantee of an empty db_dir.
-        watchdog_dir = Path(app._config.debug.db_dir) if app._config.debug.db_dir else Path('.')
-        self._watchdog = WatchdogFile(data_dir=watchdog_dir, worker_id=app._worker_id)
-        # Detect a possible SIGKILL from the prior run BEFORE we claim
-        # the slot for this run — order matters: ``write`` truncates the
-        # file, so the check must happen first.
-        self._watchdog.check_previous()
-        self._watchdog.write()
+        # the recorder and the cache engine). When ``db_dir`` is empty —
+        # fully disk-less deployment where the operator deliberately
+        # disabled every on-disk file — we skip the watchdog entirely
+        # rather than fall back to the worker's CWD: the CWD is often a
+        # read-only volume in containers, and falling back there would
+        # either crash or break the "no on-disk state" promise. Operators
+        # opting into disk-less mode forfeit the OOM signal; that tradeoff
+        # is documented in ``docs/observability.md``.
+        #
+        # We CONSTRUCT the WatchdogFile here (so ``check_previous`` runs
+        # before any startup work — order matters: a startup that crashes
+        # before subscribe must still have read the previous run's
+        # watchdog), but the actual ``write()`` (which truncates the file
+        # to empty body, the SIGKILL signature) is deferred until we are
+        # committed to running. Otherwise an exception during sink
+        # connect / consumer.subscribe / on_startup would leave the empty
+        # body and falsely flag the next startup as OOM-killed.
+        if app._config.debug.db_dir:
+            watchdog_dir = Path(app._config.debug.db_dir)
+            self._watchdog = WatchdogFile(data_dir=watchdog_dir, worker_id=app._worker_id)
+            # Detect a possible SIGKILL from the prior run BEFORE we
+            # claim the slot for this run.
+            self._watchdog.check_previous()
+        else:
+            self._watchdog = None
+            await log.ainfo(
+                'watchdog_disabled_no_db_dir',
+                category='watchdog',
+                reason='debug.db_dir is empty — OOM/SIGKILL detection disabled for this run',
+            )
 
         bind_contextvars(hook='on_startup')
         app._config = await app._handler.on_startup(app._config)
@@ -245,13 +262,13 @@ class AppLifecycle:
         # Wire recorder + DLQ into the sink manager now that both are ready.
         # SinkManager was constructed in ``__init__`` (required by tests and
         # by ``_build_sinks`` which registers sinks before we get here) with
-        # ``recorder=None`` / ``dlq_sink=None`` placeholders. Attaching now
-        # lets ``deliver_all`` read the refs directly from instance state
-        # instead of having callers thread them through on every call.
-        app._sink_manager.attach_runtime(
-            recorder=app._recorder,
-            dlq_sink=app._dlq_sink,
-        )
+        # ``recorder=None`` / ``dlq_sink=None`` placeholders. Direct attribute
+        # assignment lets ``deliver_all`` read the refs straight from
+        # instance state instead of having callers thread them through on
+        # every call. We don't have a dedicated setter — this is a one-time
+        # wiring step at the boundary between construction and runtime.
+        app._sink_manager._recorder = app._recorder
+        app._sink_manager._dlq_sink = app._dlq_sink
 
         # log sink topology
         await log.ainfo(
@@ -314,6 +331,16 @@ class AppLifecycle:
             await log.ainfo('startup_align_done', category='lifecycle', slept_seconds=round(slept, 3))
 
         await app._consumer.subscribe()
+
+        # Claim the watchdog slot for this run NOW — only once we're
+        # committed to running. ``write()`` truncates the file to an
+        # empty body which is the SIGKILL signature; deferring the call
+        # to this point ensures a startup-stage exception (above) leaves
+        # any previous watchdog state untouched and never falsely flags
+        # the next startup as OOM-killed.
+        if self._watchdog is not None:
+            self._watchdog.write()
+
         app._running = True
 
         loop = asyncio.get_running_loop()
@@ -585,6 +612,27 @@ class AppLifecycle:
                 msg=f'some executors did not finish in {drain_timeout}s; skipping final commit',
             )
 
+        # Mark the watchdog clean as soon as the drain phase has been
+        # accounted for — drain-timeout is captured by
+        # ``drakkar_drain_timeout_hit_total`` and is NOT an OOM kill, so
+        # we should not leave the watchdog body empty in that case.
+        # Conflating the two muddles dashboards: a slow shutdown looks
+        # identical to a SIGKILL. Marking clean here means the OOM
+        # counter only ticks for the genuinely-empty-body case (process
+        # killed before reaching this line). Wrapped in try/except so a
+        # filesystem hiccup at the very end does not mask the drain
+        # outcome — observability over availability would be the wrong
+        # tradeoff at this layer.
+        if self._watchdog is not None:
+            try:
+                self._watchdog.mark_clean()
+            except OSError as exc:
+                await log.awarning(
+                    'watchdog_mark_clean_failed',
+                    category='watchdog',
+                    error=str(exc),
+                )
+
         # Only commit final offsets if drain succeeded cleanly. After a
         # timeout we cannot be sure tasks have stopped running, so committing
         # here would silently skip in-flight work on restart — preferring
@@ -652,16 +700,6 @@ class AppLifecycle:
 
         if app._consumer:
             await app._consumer.close()
-
-        # Mark the watchdog file clean ONLY when the drain succeeded.
-        # A drain timeout means tasks may still be in flight and the
-        # next startup should treat this run as suspect — leaving the
-        # watchdog body empty preserves that signal. ``mark_clean``
-        # writes ``CLEAN_EXIT`` then unlinks; if the unlink races with
-        # an external cleanup, the marker still tells the next startup
-        # the run was clean.
-        if drained_cleanly and self._watchdog is not None:
-            self._watchdog.mark_clean()
 
         await log.ainfo('drakkar_stopped', category='lifecycle')
         close_logging()

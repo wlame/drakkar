@@ -26,18 +26,19 @@ Configured sinks (any combination)
 ```
 
 - **Per-partition independent pipelines** with offset watermark tracking
-- **Pluggable sinks** -- configure any combination of Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem
+- **Pluggable sinks** -- configure any combination of Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem; third-party sinks register via entry points (see [`docs/sinks.md#custom-sinks-plugin-api`](docs/sinks.md#custom-sinks-plugin-api))
 - **Dead letter queue** -- failed deliveries go to a DLQ Kafka topic with error metadata
 - **Cooperative-sticky rebalancing** -- non-revoked partitions continue without interruption
 - **Backpressure** via Kafka pause/resume -- memory stays bounded regardless of consumer lag
 - **Subprocess executor pool** with semaphore-based concurrency limiting
 - **Typed message models** -- define Pydantic schemas for input/output, get auto-deserialization
-- **Cache (optional)** -- `self.cache` key/value store with memory + write-behind SQLite + eventually-consistent peer sync across workers ([docs](docs/cache.md))
+- **Cache (optional)** -- `self.cache` key/value store with memory + write-behind SQLite + eventually-consistent peer sync across workers; pluggable backends conform to the public `CacheLike` protocol ([docs](docs/cache.md))
 - **Built-in debug UI** (FastAPI) with executor timeline, partition lag, message tracing
 - **Flight recorder** -- SQLite event log with retention and rotation
-- **Prometheus metrics** -- pipeline, executor, and per-sink metrics
+- **Prometheus metrics** -- pipeline, executor, per-sink, and shutdown / drain metrics
 - **Structured JSON logging** -- ECS-compatible, ready for Elastic
-- **Kubernetes-ready** -- unauthenticated `/healthz` and `/readyz` probes; see [`docs/deployment.md`](docs/deployment.md)
+- **Kubernetes-ready** -- unauthenticated `/healthz` and `/readyz` probes plus reference manifests in [`deploy/k8s/`](deploy/k8s/); see [`docs/deployment.md`](docs/deployment.md)
+- **Crash detection** -- watchdog file distinguishes clean restarts from SIGKILL/OOM-kill on the next startup, with `drakkar_suspected_oom_kills_total` and a structured warning ([`docs/observability.md`](docs/observability.md))
 - **Perf extras** -- `pip install "py-drakkar[perf]"` enables the `orjson` fast path for recorder JSON encoding
 - **DLQ replay** -- `scripts/replay_dlq.py` reads dead-lettered records and republishes them to a target topic (see [`docs/sinks.md#dlq-replay`](docs/sinks.md#dlq-replay))
 
@@ -352,6 +353,9 @@ Exposed at `:9090/metrics`. Key metrics:
 - `drakkar_offset_lag{partition}`, `drakkar_assigned_partitions`
 - `drakkar_handler_duration_seconds{hook}`
 - `drakkar_worker_info` (worker_id, version, consumer_group)
+- `drakkar_uncommitted_offsets_at_stop`, `drakkar_inflight_at_stop` -- shutdown snapshots
+- `drakkar_drain_timeout_hit_total` -- drain exceeded `executor.drain_timeout_seconds`
+- `drakkar_suspected_oom_kills_total` -- watchdog detected the previous run did not exit cleanly
 
 ### Structured logging
 

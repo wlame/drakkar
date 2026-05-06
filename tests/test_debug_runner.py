@@ -1102,18 +1102,17 @@ async def test_runner_restores_handler_cache_after_run():
 # --- DebugRunner: mid-run partial report ------------------------------------
 
 
-async def test_runner_partial_report_for_mid_run_is_truncated():
-    """partial_report_for(task) called mid-run reflects only completed-so-far tasks.
+async def test_runner_partial_report_mid_run_is_truncated():
+    """``state.to_report(truncated=True)`` mid-run reflects only completed-so-far tasks.
 
-    The handler's on_task_complete hook inspects the runner's partial
-    state the moment task 0 finishes, before task 1 has been submitted.
-    At that point the partial should carry truncated=True and the task
-    list should still be empty (the runner appends the entry AFTER the
-    hook returns).
+    The handler's on_task_complete hook captures a snapshot the moment
+    task 0 finishes, before task 1 has been submitted. The runner
+    appends the ProbeTaskEntry to ``state.tasks`` AFTER the hook
+    returns, so the snapshot still reflects zero completed tasks.
 
-    Uses the production entrypoint (``start_probe`` +
-    ``partial_report_for``) — the same path the /api/debug/probe
-    endpoint takes on a wall-clock timeout.
+    Uses the same low-level entrypoint the ``/api/debug/probe``
+    endpoint uses — ``_make_run_state`` + ``_run_with_state`` — so the
+    test mirrors production wiring.
     """
     captured: dict[str, Any] = {}
     handler = _HappyPathHandler(task_count=2)
@@ -1123,16 +1122,12 @@ async def test_runner_partial_report_for_mid_run_is_truncated():
         app_config=_make_config(),
     )
 
-    # ``start_probe`` creates the task synchronously (doesn't run yet —
-    # the loop has to yield first), so we can install the hook after
-    # the task exists but before it executes. The hook captures the
-    # partial via ``partial_report_for(task)``, which is what the
-    # endpoint uses.
-    run_task = runner.start_probe(ProbeInput(value='x', offset=1))
+    state = runner._make_run_state(ProbeInput(value='x', offset=1))
+    run_task = asyncio.create_task(runner._run_with_state(state))
 
     def _snapshot(h: _HappyPathHandler, result: ExecutorResult) -> None:
         if h.on_task_complete_calls == 1:
-            captured['report'] = DebugRunner.partial_report_for(run_task)
+            captured['report'] = state.to_report(truncated=True)
 
     handler.on_task_complete_hook = _snapshot
 
@@ -1157,27 +1152,6 @@ async def test_runner_partial_report_for_mid_run_is_truncated():
     # The full run still completes correctly.
     assert final.truncated is False
     assert len(final.tasks) == 2
-
-
-async def test_runner_partial_report_for_foreign_task_returns_empty_shape():
-    """partial_report_for() on a task without probe state returns a valid empty report.
-
-    Mirrors the endpoint-path fallback when a caller's wall-clock
-    timeout fires before ``start_probe`` even got scheduled. We feed
-    the method a completed asyncio task that carries no
-    ``_drakkar_probe_state`` attribute — the method should not raise
-    and should return a truncated stub report.
-    """
-
-    async def _noop() -> DebugReport:
-        return DebugReport(input=ProbeInput(value=''), arrange=ProbeStageResult(), truncated=False)
-
-    foreign_task: asyncio.Task[DebugReport] = asyncio.create_task(_noop())
-    await foreign_task
-    report = DebugRunner.partial_report_for(foreign_task)
-    assert report.truncated is True
-    assert report.tasks == []
-    assert report.input.value == ''
 
 
 # --- Task 2b: Safety guarantee negative-assertion tests ---------------------
@@ -3163,13 +3137,16 @@ async def test_runner_probe_lock_serializes_overlapping_runs():
 # ---- Cross-probe contamination: partial reports don't leak state ----------
 
 
-async def test_partial_report_for_independent_task_is_not_contaminated():
-    """Two concurrent start_probe calls → each task's partial reflects ONLY its own state.
+async def test_independent_run_states_are_not_contaminated():
+    """Two concurrent runs each own their own ``RunState`` — synthesizing
+    a truncated partial from one state must NOT leak data from the other.
 
-    Regression test for the "cross-probe contamination" bug: when a
+    Regression test for the "cross-probe contamination" bug: if a
     probe's wait_for times out while it is still waiting on the probe
-    lock, the partial report must be the EMPTY stub, not some other
-    probe's in-flight state.
+    lock, the endpoint synthesizes a truncated report from its own
+    ``RunState`` (``state.to_report(truncated=True)``). That report
+    must reflect the cancelled probe's empty state, not whatever the
+    other probe was doing.
     """
     handler = _HappyPathHandler(task_count=1)
     runner = DebugRunner(
@@ -3177,16 +3154,18 @@ async def test_partial_report_for_independent_task_is_not_contaminated():
         executor_pool=_make_executor_pool(),
         app_config=_make_config(),
     )
-    # Start probe A — it will run to completion on its own.
-    task_a = runner.start_probe(ProbeInput(value='A', offset=1))
-    # Start probe B — it waits on the lock (acquired by A).
-    task_b = runner.start_probe(ProbeInput(value='B', offset=2))
+    # Build state A and start it — it will run to completion.
+    state_a = runner._make_run_state(ProbeInput(value='A', offset=1))
+    task_a = asyncio.create_task(runner._run_with_state(state_a))
+    # Build state B and start it — it waits on the lock (acquired by A).
+    state_b = runner._make_run_state(ProbeInput(value='B', offset=2))
+    task_b = asyncio.create_task(runner._run_with_state(state_b))
     # Immediately cancel B BEFORE it acquires the lock to simulate a
     # wait_for timeout on the endpoint side.
     task_b.cancel()
-    # Reading B's partial report must reflect B's empty state — NOT any
-    # data from A's in-flight or completed state.
-    b_report = DebugRunner.partial_report_for(task_b)
+    # Reading B's partial report from B's own state must reflect B's
+    # empty state — NOT any data from A's in-flight or completed state.
+    b_report = state_b.to_report(truncated=True)
     assert b_report.truncated is True
     assert b_report.input.value == 'B'
     assert b_report.tasks == []  # B never ran any task
@@ -3284,8 +3263,9 @@ async def test_concurrent_probes_with_different_use_cache_dont_chain_proxies():
 
     # Probe A: use_cache=False. While inside on_task_complete, A will
     # block on ``block`` — this ensures A holds the probe lock during
-    # the window when B's start_probe runs and creates B's RunState.
-    task_a = runner.start_probe(ProbeInput(value='A', offset=1, use_cache=False))
+    # the window when B's RunState is built.
+    state_a = runner._make_run_state(ProbeInput(value='A', offset=1, use_cache=False))
+    task_a = asyncio.create_task(runner._run_with_state(state_a))
 
     # Wait a beat for A to actually enter on_task_complete (holding the lock).
     # A small sleep is fine — on_task_complete is reached after arrange
@@ -3307,7 +3287,8 @@ async def test_concurrent_probes_with_different_use_cache_dont_chain_proxies():
     # observed value here — we release A first, wait for B to acquire
     # the lock and run, then check the captured value.
     handler.read_value = '__unset__'  # reset before B runs
-    task_b = runner.start_probe(ProbeInput(value='B', offset=2, use_cache=True))
+    state_b = runner._make_run_state(ProbeInput(value='B', offset=2, use_cache=True))
+    task_b = asyncio.create_task(runner._run_with_state(state_b))
 
     # Let A finish so B can acquire the lock.
     block.set()

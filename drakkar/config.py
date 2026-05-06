@@ -6,6 +6,7 @@ Use DK_ prefix with __ for nesting (e.g., DK_KAFKA__BROKERS).
 
 import os
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import structlog
@@ -225,6 +226,26 @@ class SinksConfig(BaseModel):
     http: dict[str, HttpSinkConfig] = Field(default_factory=dict)
     redis: dict[str, RedisSinkConfig] = Field(default_factory=dict)
     filesystem: dict[str, FileSinkConfig] = Field(default_factory=dict)
+    # Plugin-discovered (entry-point-registered) sink instances. Maps a
+    # sink type name (e.g. 'my_custom') to a dict of named instances:
+    # ``{ 'instance-1': { ...config... }, 'instance-2': { ... } }``.
+    # ``DrakkarApp._build_sinks`` consults ``SinkRegistry.get(type_name)``
+    # for each top-level key; unknown names raise at startup so a typo
+    # in YAML fails loud rather than silently dropping a sink.
+    #
+    # The instance config is a free-form ``dict[str, Any]`` because
+    # plugin authors define the shape — Drakkar cannot validate it
+    # ahead of time. The plugin's ``__init__(name, config)`` receives
+    # the dict and can wrap it in its own Pydantic model for validation.
+    custom: dict[str, dict[str, dict[str, Any]]] = Field(
+        default_factory=dict,
+        description=(
+            'Plugin-discovered sink instances. Top-level keys are sink type '
+            'names registered via [project.entry-points."drakkar.sinks"]; '
+            'second-level keys are instance names; leaf dicts are plugin-'
+            'defined config passed verbatim to the sink class constructor.'
+        ),
+    )
     circuit_breaker: CircuitBreakerConfig = Field(
         default_factory=CircuitBreakerConfig,
         description=(
@@ -238,7 +259,7 @@ class SinksConfig(BaseModel):
     @property
     def is_empty(self) -> bool:
         """True if no sinks of any type are configured."""
-        return not any([self.kafka, self.postgres, self.mongo, self.http, self.redis, self.filesystem])
+        return not any([self.kafka, self.postgres, self.mongo, self.http, self.redis, self.filesystem, self.custom])
 
     def summary(self) -> dict[str, list[str]]:
         """Return a dict of sink type → list of instance names.
@@ -258,6 +279,9 @@ class SinksConfig(BaseModel):
             result['redis'] = list(self.redis.keys())
         if self.filesystem:
             result['filesystem'] = list(self.filesystem.keys())
+        for type_name, instances in self.custom.items():
+            if instances:
+                result[type_name] = list(instances.keys())
         return result
 
 

@@ -313,11 +313,11 @@ async def test_app_routes_circuit_open_to_dlq_sink(test_config):
 
     # Wire a fake DLQ sink so the force-DLQ branch has a target.
     # The SinkManager reads ``self._dlq_sink`` from its own instance state
-    # now (not a per-call argument), so push it through ``attach_runtime``
-    # — the same call ``_async_run`` uses in production.
+    # now (not a per-call argument), so set it directly — the same one-time
+    # wiring ``_async_run`` does in production.
     dlq_sink = AsyncMock()
     app._dlq_sink = dlq_sink
-    app._sink_manager.attach_runtime(recorder=None, dlq_sink=dlq_sink)
+    app._sink_manager._dlq_sink = dlq_sink
 
     # Force one of the kafka sinks into open-circuit state. `_setup_app_sinks`
     # replaced the real sink with an AsyncMock, so we override the circuit
@@ -1509,3 +1509,95 @@ async def test_lifecycle_back_reference_shares_state(test_config):
     # Mutate via lifecycle, observe via app.
     lifecycle._app._paused = True
     assert app._paused is True
+
+
+# --- Lifecycle: watchdog wiring -------------------------------------------
+
+
+async def test_lifecycle_shutdown_marks_watchdog_clean_on_clean_drain(test_config, tmp_path):
+    """``_shutdown`` calls ``mark_clean`` on the watchdog after a clean
+    drain so the next startup does not falsely flag this run as OOM-killed.
+    """
+    from drakkar.lifecycle import AppLifecycle
+    from drakkar.watchdog import WatchdogFile
+
+    # Force the watchdog dir to a writable temp path so the test never
+    # races a real on-disk file from a developer machine.
+    test_config.debug.db_dir = str(tmp_path)
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._consumer = AsyncMock()
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+    app._running = True
+
+    lifecycle = AppLifecycle(app)
+    # Pre-populate the watchdog as ``_async_run`` would. We construct it
+    # explicitly because this test bypasses the full startup sequence.
+    watchdog = WatchdogFile(data_dir=tmp_path, worker_id=app._worker_id)
+    watchdog.write()
+    lifecycle._watchdog = watchdog
+
+    assert watchdog.path.exists()
+    await lifecycle._shutdown()
+    # mark_clean writes ``CLEAN_EXIT`` then unlinks → file is gone.
+    assert not watchdog.path.exists()
+
+
+async def test_lifecycle_shutdown_marks_watchdog_clean_on_drain_timeout(test_config, tmp_path, monkeypatch):
+    """A drain timeout is NOT an OOM kill. The watchdog must still be
+    marked clean so dashboards stop conflating "shutdown was slow" with
+    "process was SIGKILLed". ``drakkar_drain_timeout_hit_total`` already
+    captures the slow-drain signal separately.
+    """
+    from drakkar.lifecycle import AppLifecycle
+    from drakkar.watchdog import WatchdogFile
+
+    test_config.debug.db_dir = str(tmp_path)
+    # Tighten the drain timeout so the test runs quickly.
+    test_config.executor.drain_timeout_seconds = 1
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._consumer = AsyncMock()
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+
+    lifecycle = AppLifecycle(app)
+
+    # Force ``_drain_all_processors`` to time out. Patch on the
+    # instance so other tests are unaffected.
+    async def _slow_drain() -> None:
+        await asyncio.sleep(10)  # well past drain_timeout_seconds
+
+    monkeypatch.setattr(lifecycle, '_drain_all_processors', _slow_drain)
+
+    watchdog = WatchdogFile(data_dir=tmp_path, worker_id=app._worker_id)
+    watchdog.write()
+    lifecycle._watchdog = watchdog
+
+    await lifecycle._shutdown()
+    # File is unlinked by ``mark_clean`` even though drain timed out —
+    # the drain-timeout counter, not the OOM counter, owns that signal.
+    assert not watchdog.path.exists()
+
+
+async def test_lifecycle_shutdown_no_watchdog_does_not_crash(test_config):
+    """When ``debug.db_dir`` is empty the watchdog is skipped entirely;
+    ``_shutdown`` must still complete without referencing the missing
+    watchdog object.
+    """
+    from drakkar.lifecycle import AppLifecycle
+
+    test_config.debug.db_dir = ''  # disk-less mode
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._consumer = AsyncMock()
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+
+    lifecycle = AppLifecycle(app)
+    assert lifecycle._watchdog is None
+
+    # No assertion needed beyond "does not raise" — the guard inside
+    # ``_shutdown`` must short-circuit on ``self._watchdog is None``.
+    await lifecycle._shutdown()

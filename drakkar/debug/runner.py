@@ -594,13 +594,15 @@ class DebugRunner:
       true even when production traffic is in flight.
 
     Partial reports:
-      Per-run state lives on a ``RunState`` dataclass created fresh at
-      the top of ``_run_locked``. ``start_probe`` attaches that state
-      onto the returned ``asyncio.Task`` — ``partial_report_for(task)``
-      reads it back and returns a truncated ``DebugReport``, even if
-      the task was cancelled before it acquired the probe lock. This
-      task-scoped attachment is what prevents cross-probe contamination
-      between an earlier cancelled probe and a subsequent one.
+      Per-run state lives on a ``RunState`` dataclass built by
+      ``_make_run_state`` and threaded through ``_run_with_state``. The
+      probe endpoint owns its own reference to that state so it can
+      synthesize a truncated ``DebugReport`` directly via
+      ``state.to_report(truncated=True)`` when its wall-clock timeout
+      fires — independent of whether the underlying ``asyncio.Task`` had
+      acquired the probe lock yet. Per-state isolation is what prevents
+      cross-probe contamination: each call gets a fresh ``RunState``
+      and the runner itself stays stateless across concurrent requests.
     """
 
     def __init__(
@@ -629,43 +631,6 @@ class DebugRunner:
         # process-wide, so two overlapping probes would clobber each
         # other's restore step without this lock.
         self._probe_lock = asyncio.Lock()
-
-    # -- incremental partial-report machinery --------------------------------
-
-    def start_probe(self, probe_input: ProbeInput) -> asyncio.Task[DebugReport]:
-        """Create a run task whose partial state is scoped to that specific task.
-
-        The endpoint calls this (instead of ``run`` directly) when it
-        needs to distinguish "this probe's partial state" from "some
-        earlier probe's partial state". The returned task carries a
-        ``RunState`` object via ``partial_report_for`` — even if the
-        task is cancelled before it acquires the probe lock, the
-        endpoint will get back a valid empty ``DebugReport(truncated=
-        True)`` rather than a stale blob from a previous probe.
-        """
-        state = self._make_run_state(probe_input)
-        task: asyncio.Task[DebugReport] = asyncio.create_task(self._run_with_state(state))
-        # Attach the state to the task. Using setattr keeps the runner
-        # stateless across concurrent requests — each task's state is
-        # self-contained.
-        setattr(task, '_drakkar_probe_state', state)  # noqa: B010
-        return task
-
-    @staticmethod
-    def partial_report_for(task: asyncio.Task[DebugReport]) -> DebugReport:
-        """Build a truncated ``DebugReport`` from the state attached to ``task``.
-
-        Companion of ``start_probe``. The state may be partially filled
-        (probe was running when cancelled) or completely empty (probe
-        was still queued on the lock when the endpoint timed out). In
-        both cases we produce a valid DebugReport — the UI renders
-        ``truncated=True`` as a warning banner and shows whatever made
-        it through.
-        """
-        state: RunState | None = getattr(task, '_drakkar_probe_state', None)
-        if state is None:  # pragma: no cover — only hit if caller uses a foreign task
-            return DebugReport(input=ProbeInput(value=''), arrange=ProbeStageResult(), truncated=True)
-        return state.to_report(truncated=True)
 
     def _make_run_state(self, probe_input: ProbeInput) -> RunState:
         """Build a fresh ``RunState`` for one probe invocation.
@@ -702,10 +667,11 @@ class DebugRunner:
         — even if the handler raises or the task is cancelled by the
         endpoint's wall-clock timeout.
 
-        Unit tests typically call this directly for its convenience —
-        the endpoint uses ``start_probe`` + ``wait_for`` +
-        ``partial_report_for`` instead so it can return a correctly-
-        scoped partial on timeout.
+        Unit tests typically call this directly for its convenience.
+        The probe endpoint instead builds its own ``RunState`` via
+        ``_make_run_state`` and drives ``_run_with_state`` so it can
+        synthesize a truncated partial report on its own wall-clock
+        timeout without depending on task-attached state.
         """
         state = self._make_run_state(probe_input)
         return await self._run_with_state(state)
@@ -713,7 +679,7 @@ class DebugRunner:
     async def _run_with_state(self, state: RunState) -> DebugReport:
         """Acquire the probe lock and execute the full run against ``state``.
 
-        Shared body of ``run`` and ``start_probe``. Keeps the state
+        Shared body of ``run`` and the probe endpoint. Keeps the state
         object as a plain parameter so no mutable attribute lives on
         the runner for the endpoint path.
         """
@@ -757,18 +723,15 @@ class DebugRunner:
             start_time=state.start_monotonic,
         )
         # ``DebugCacheProxy`` structurally satisfies :class:`CacheLike`
-        # (handler.cache's declared type), so a direct assignment would
-        # type-check. We still go through ``setattr`` here to keep the
-        # swap conspicuously distinct from regular attribute writes — the
-        # probe should never leak beyond its scope, and the explicit
-        # ``setattr`` makes the swap point easy to spot in audits.
-        setattr(self._handler, 'cache', state.cache_proxy)  # noqa: B010
+        # (handler.cache's declared type), so direct assignment is
+        # type-safe.
+        self._handler.cache = state.cache_proxy
         try:
             await self._run_stages(state=state, msg=msg)
         finally:
             # Restore cache even if a hook raised or the task was
             # cancelled (wall-clock timeout path).
-            setattr(self._handler, 'cache', original_cache)  # noqa: B010
+            self._handler.cache = original_cache
 
         state.timing['total_wallclock'] = time.monotonic() - state.start_monotonic
         return state.to_report(truncated=False)

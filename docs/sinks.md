@@ -660,6 +660,35 @@ After `pip install my-package` (or `uv sync` in a workspace that
 declares the dependency), Drakkar picks up the new sink at startup
 without any further wiring.
 
+### Configuring instances
+
+Plugin sinks are declared under `sinks.custom.<type>.<instance>` in
+the worker config. The `<type>` segment must match the entry-point
+key; `<instance>` is whatever name your handler uses to route
+payloads. The leaf dict is passed verbatim as the second argument to
+your sink's constructor (`MyCustomSink(name, config)`), so you can
+shape it however your sink expects:
+
+```yaml
+sinks:
+  kafka:
+    results:
+      topic: "search-results"
+  custom:
+    my_custom:
+      primary:
+        endpoint: "https://api.example.com/v1/ingest"
+        api_key: "xxx"
+      secondary:
+        endpoint: "https://api.example.com/v1/audit"
+        api_key: "xxx"
+```
+
+If the `<type>` is not registered (plugin missing or entry-point
+typo), `DrakkarApp._build_sinks` raises a `ValueError` at startup
+listing the known types — failing loud beats a silently-dropped
+sink.
+
 ### Inspecting registered sinks
 
 ```python

@@ -193,23 +193,6 @@ def test_mark_clean_writes_marker_before_unlink(tmp_path: Path, monkeypatch: pyt
     assert not wd.path.exists()
 
 
-def test_mark_clean_tolerates_missing_file(watchdog: WatchdogFile) -> None:
-    """Calling ``mark_clean`` without a prior ``write`` must not raise.
-
-    The shutdown path may run before the watchdog-write step in
-    aborted-boot scenarios; ``mark_clean`` is documented as idempotent.
-    """
-    assert not watchdog.path.exists()
-
-    # ``write_text`` on a non-existent file actually CREATES the file
-    # (Path.write_text uses open mode 'w'), so this scenario writes the
-    # CLEAN_EXIT marker and then unlinks it. Either way, no exception.
-    watchdog.mark_clean()
-
-    # End state: the file does not linger after mark_clean.
-    assert not watchdog.path.exists()
-
-
 def test_mark_clean_after_external_unlink_is_idempotent(
     watchdog: WatchdogFile, monkeypatch: pytest.MonkeyPatch
 ) -> None:

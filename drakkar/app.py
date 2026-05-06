@@ -195,7 +195,20 @@ class DrakkarApp:
         asyncio.run(self._lifecycle._async_run())
 
     def _build_sinks(self) -> None:
-        """Create sink instances from config and register with SinkManager."""
+        """Create sink instances from config and register with SinkManager.
+
+        Built-in sinks (kafka, postgres, mongo, http, redis, filesystem)
+        are constructed directly — their config models are typed and
+        well-known. Plugin-discovered sinks declared under
+        ``sinks.custom.<type>.<instance>`` go through
+        ``SinkRegistry.get(type)`` which is populated by
+        ``SinkManager.discover()`` during the manager's construction
+        (see :class:`drakkar.sinks.registry.SinkRegistry`). Unknown type
+        names raise loudly so a typo or a missing plugin install
+        surfaces at startup rather than silently dropping data.
+        """
+        from drakkar.sinks.registry import SinkRegistry
+
         kafka_brokers = self._config.kafka.brokers
 
         for name, cfg in self._config.sinks.kafka.items():
@@ -215,6 +228,32 @@ class DrakkarApp:
 
         for name, cfg in self._config.sinks.filesystem.items():
             self._sink_manager.register(FileSink(name, cfg))
+
+        # Plugin-discovered sinks. Each top-level key in ``sinks.custom``
+        # is a sink type name (matches the entry-point key in the plugin's
+        # pyproject.toml); the registry resolves it to the plugin class.
+        # Instances are constructed via ``cls(name, instance_cfg)`` —
+        # plugin authors are expected to accept the same ``(name, config)``
+        # signature the built-in sinks use.
+        for sink_type, instances in self._config.sinks.custom.items():
+            sink_cls = SinkRegistry.get(sink_type)
+            if sink_cls is None:
+                raise ValueError(
+                    f'Unknown sink type {sink_type!r} declared under sinks.custom — '
+                    f'no class registered under that name. '
+                    f'Known types: {SinkRegistry.all_names()!r}. '
+                    f'Make sure the plugin is installed and exposes the right '
+                    f'[project.entry-points."drakkar.sinks"] entry.'
+                )
+            for instance_name, instance_cfg in instances.items():
+                # ``BaseSink.__init__`` declares ``(name, ui_url='')`` for
+                # the built-in sinks; plugin authors are free to widen
+                # the second parameter to a config dict / Pydantic model
+                # since the type checker can't see across the
+                # entry-point boundary. ty understandably flags the
+                # mismatch — silence it: the plugin contract documented
+                # in docs/sinks.md is the source of truth here.
+                self._sink_manager.register(sink_cls(instance_name, instance_cfg))  # ty: ignore[invalid-argument-type]
 
     def _build_dlq(self) -> None:
         """Create the DLQ sink from config."""

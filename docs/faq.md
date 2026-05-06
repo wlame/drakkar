@@ -186,13 +186,15 @@ Name each in config (`sinks.kafka.results`, `sinks.kafka.audit`); your handler r
 
 ### How do I add a custom sink type?
 
-There's no plugin registry yet — sink types are built into `DrakkarApp._build_sinks()` (see `drakkar/app.py`). Today the path to a custom sink is:
-
-1. Subclass `BaseSink[YourPayloadT]` from `drakkar.sinks.base`; set the `sink_type` class attribute and implement `connect()`, `deliver(payloads)`, and `close()`.
-2. Handle your own retries internally — the `SinkManager` records failures and trips a circuit breaker, but delegates retry policy to the sink. Design your `deliver()` to be safe to re-enter (idempotent writes) so that framework-level duplicates (at-least-once delivery) don't cause trouble downstream.
-3. Register your sink instance with the framework's `SinkManager` in your bootstrap code (currently requires a small fork of `DrakkarApp._build_sinks` or a monkey-patch).
-
-A stable plugin API (entry-points-based `SinkRegistry`) is on the Phase 4 roadmap — it will let you add sink types without forking the app bootstrap. Until then, an in-tree contribution is often the easier path if the sink type is generally useful.
+Drakkar discovers third-party sinks via Python's standard
+`importlib.metadata` entry points. Subclass
+`BaseSink[YourPayloadT]` from `drakkar.sinks.base`, register it under
+`[project.entry-points."drakkar.sinks"]` in your plugin's
+`pyproject.toml`, and reference it in your worker config under
+`sinks.custom.<type>.<instance>`. See
+[Custom sinks (plugin API)](sinks.md#custom-sinks-plugin-api) for the
+full contract — `BaseSink` interface, entry-point declaration, the
+config layout `_build_sinks` consumes, and failure modes.
 
 ---
 
