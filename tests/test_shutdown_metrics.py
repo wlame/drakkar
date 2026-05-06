@@ -15,7 +15,7 @@ share state because each one targets a distinct metric or a delta read.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -95,8 +95,6 @@ def _setup_app_sinks(app: DrakkarApp) -> None:
     fields are pinned to plain values to avoid AsyncMock auto-coroutines
     surprising the SinkManager.
     """
-    from unittest.mock import MagicMock
-
     app._build_sinks()
     for key, sink in app._sink_manager._sinks.items():
         mock_sink = AsyncMock()

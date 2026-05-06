@@ -3822,7 +3822,7 @@ async def test_probe_endpoint_timeout_returns_partial_report_with_truncated_true
       3. ``handler.cache`` is the ORIGINAL object after the request
          (the runner's ``finally`` block ran during cancellation cascade)
     """
-    import drakkar.debug.server as debug_server_mod
+    import drakkar.debug.routes_debug as routes_debug_mod
     from drakkar.config import ExecutorConfig
 
     handler = _ProbeTestHandler(task_count=1)
@@ -3842,7 +3842,7 @@ async def test_probe_endpoint_timeout_returns_partial_report_with_truncated_true
     _probe_mock_app._config = DrakkarConfig(
         executor=ExecutorConfig(task_timeout_seconds=1, binary_path='/nonexistent'),
     )
-    monkeypatch.setattr(debug_server_mod, 'PROBE_TIMEOUT_HEADROOM_SECONDS', -1.9)
+    monkeypatch.setattr(routes_debug_mod, 'PROBE_TIMEOUT_HEADROOM_SECONDS', -1.9)
 
     fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
@@ -3870,7 +3870,7 @@ async def test_probe_endpoint_timeout_partial_includes_sink_records_from_complet
     records captured by completed hooks. The per-run state now
     flattens on every ``to_report`` call so the partial sees them.
     """
-    import drakkar.debug.server as debug_server_mod
+    import drakkar.debug.routes_debug as routes_debug_mod
     from drakkar.config import ExecutorConfig
 
     handler = _ProbeTestHandler(task_count=1)
@@ -3887,7 +3887,7 @@ async def test_probe_endpoint_timeout_partial_includes_sink_records_from_complet
     _probe_mock_app._config = DrakkarConfig(
         executor=ExecutorConfig(task_timeout_seconds=1, binary_path='/nonexistent'),
     )
-    monkeypatch.setattr(debug_server_mod, 'PROBE_TIMEOUT_HEADROOM_SECONDS', -1.9)
+    monkeypatch.setattr(routes_debug_mod, 'PROBE_TIMEOUT_HEADROOM_SECONDS', -1.9)
 
     fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)

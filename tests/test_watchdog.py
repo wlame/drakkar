@@ -34,9 +34,9 @@ WORKER_ID = 'test-worker-7'
 def watchdog(tmp_path: Path) -> WatchdogFile:
     """Construct a :class:`WatchdogFile` rooted at a fresh temp dir.
 
-    The constructor creates the directory if missing; ``tmp_path`` is
-    already created by pytest so the test exercises the
-    ``mkdir(exist_ok=True)`` no-op branch.
+    The constructor performs no disk I/O; directory creation happens
+    lazily inside :meth:`WatchdogFile.write`. ``tmp_path`` is already
+    created by pytest so this fixture leaves disk state untouched.
     """
     return WatchdogFile(data_dir=tmp_path, worker_id=WORKER_ID)
 
@@ -224,28 +224,50 @@ def test_mark_clean_after_external_unlink_is_idempotent(
     watchdog.mark_clean()
 
 
-# --- Constructor side-effects ---
+# --- Lazy directory creation ---
 
 
-def test_constructor_creates_data_dir(tmp_path: Path) -> None:
-    """Constructor creates ``data_dir`` if missing, with parents.
+def test_constructor_does_not_touch_disk(tmp_path: Path) -> None:
+    """Constructing on a missing directory does NOT create it.
 
-    Lets callers pass a config-driven path without coordinating dir
-    creation with the recorder / cache engine.
+    Disk I/O is deferred to :meth:`write` — mirrors the lazy-init
+    pattern used by ``EventRecorder`` and ``CacheEngine`` so callers
+    can build a :class:`WatchdogFile` even when the data dir is not
+    yet available.
     """
     nested = tmp_path / 'a' / 'b' / 'c'
     assert not nested.exists()
 
     wd = WatchdogFile(data_dir=nested, worker_id=WORKER_ID)
 
-    assert nested.is_dir()
+    # Constructor must not have created the directory.
+    assert not nested.exists()
     assert wd.path.parent == nested
 
 
-def test_constructor_idempotent_on_existing_dir(tmp_path: Path) -> None:
+def test_write_creates_data_dir_lazily(tmp_path: Path) -> None:
+    """``write`` creates ``data_dir`` (with parents) on first call.
+
+    Previously the constructor did this work; moved here so a startup
+    that builds a watchdog but never reaches ``write`` (e.g., aborts
+    in ``on_startup``) leaves no leftover directory on disk.
+    """
+    nested = tmp_path / 'a' / 'b' / 'c'
+    wd = WatchdogFile(data_dir=nested, worker_id=WORKER_ID)
+    assert not nested.exists()
+
+    wd.write()
+
+    assert nested.is_dir()
+    assert wd.path.exists()
+
+
+def test_write_idempotent_on_existing_dir(tmp_path: Path) -> None:
     """A pre-existing data dir is fine — ``mkdir(exist_ok=True)`` no-ops."""
-    # tmp_path already exists; constructing should not raise.
     wd = WatchdogFile(data_dir=tmp_path, worker_id=WORKER_ID)
+    # tmp_path already exists; ``write`` should succeed without raising.
+    wd.write()
+    assert wd.path.exists()
     assert wd.path.parent == tmp_path
 
 

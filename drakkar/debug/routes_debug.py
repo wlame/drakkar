@@ -23,10 +23,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -36,7 +35,12 @@ from drakkar.debug.runner import DebugRunner, ProbeInput
 if TYPE_CHECKING:
     from drakkar.debug.server import DebugDeps
 
-logger = structlog.get_logger()
+# Extra headroom (in seconds) on top of ``2 * task_timeout_seconds`` for
+# the probe's wall-clock timeout. Covers arrange + two round-trips of
+# hook work + serialization overhead. Exposed at module scope so tests
+# can monkeypatch it to a small value without plumbing a timeout arg
+# through the endpoint signature.
+PROBE_TIMEOUT_HEADROOM_SECONDS: float = 30.0
 
 
 # ``/api/debug/probe`` request body — module-scope per the FastAPI
@@ -104,7 +108,6 @@ def create_debug_router(deps: DebugDeps) -> APIRouter:
     @router.post('/api/debug/merge', dependencies=[Depends(deps.require_auth)])
     async def api_debug_merge(request: Request):
         """Merge selected database files into one."""
-        from datetime import datetime
 
         from drakkar.merge import merge_databases
 
@@ -335,11 +338,6 @@ def create_debug_router(deps: DebugDeps) -> APIRouter:
         also returns 200 but with ``truncated=true`` and whatever partial
         state the runner had captured up to the cancellation point.
         """
-        # Import lazily so monkeypatching ``PROBE_TIMEOUT_HEADROOM_SECONDS``
-        # on ``drakkar.debug.server`` (the back-compat re-export site)
-        # is observed at request time.
-        from drakkar.debug import server as server_module
-
         runner = _get_probe_runner()
         # Default empty topic to the configured source topic so handlers
         # that key on ``msg.topic`` see a realistic value. The model
@@ -358,7 +356,10 @@ def create_debug_router(deps: DebugDeps) -> APIRouter:
         # Timeout = 2x the per-task timeout + headroom. ``config`` here is
         # ``DebugConfig``; the executor timeout lives on the full
         # ``DrakkarConfig`` reachable via ``drakkar_app._config``.
-        timeout = 2 * drakkar_app._config.executor.task_timeout_seconds + server_module.PROBE_TIMEOUT_HEADROOM_SECONDS
+        # Read the constant via this module's globals so tests can
+        # monkeypatch ``PROBE_TIMEOUT_HEADROOM_SECONDS`` and have the
+        # patched value observed at request time without a lazy import.
+        timeout = 2 * drakkar_app._config.executor.task_timeout_seconds + PROBE_TIMEOUT_HEADROOM_SECONDS
         # Build the per-run state here so we own a reference for the
         # truncated-partial-report path even when the actual probe
         # coroutine runs on a different event loop (and thus an

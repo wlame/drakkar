@@ -59,14 +59,6 @@ from drakkar.debug.server_helpers import (
 )
 from drakkar.recorder import EventRecorder
 
-# Extra headroom (in seconds) on top of ``2 * task_timeout_seconds`` for
-# the probe's wall-clock timeout. Covers arrange + two round-trips of
-# hook work + serialization overhead. Exposed at module scope so tests
-# can monkeypatch it to a small value without plumbing a timeout arg
-# through the endpoint signature.
-PROBE_TIMEOUT_HEADROOM_SECONDS: float = 30.0
-
-
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
 
@@ -83,9 +75,6 @@ class DebugDeps:
     helpers that need access to the live app/config (auth, kafka-UI URL
     builder, prometheus-link builder, cross-thread dispatch) are methods
     here so the router factories don't have to plumb them individually.
-
-    ``PROBE_TIMEOUT_HEADROOM_SECONDS`` stays at module scope so tests
-    can monkeypatch it.
     """
 
     def __init__(

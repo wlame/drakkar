@@ -49,9 +49,11 @@ class WatchdogFile:
     :meth:`mark_clean` at the very end of a successful shutdown.
 
     The path is composed as ``{data_dir}/{worker_id}.watchdog``. The
-    constructor creates ``data_dir`` if it does not yet exist (with
-    parents) so callers do not have to coordinate directory creation
-    with the recorder / cache engine.
+    constructor performs no disk I/O — directory creation is deferred
+    to :meth:`write`, mirroring the lazy-initialisation pattern used by
+    ``EventRecorder`` and ``CacheEngine`` (both defer disk work to
+    ``start()``). :meth:`check_previous` works on a missing directory
+    (treated as "no prior run").
     """
 
     def __init__(self, data_dir: Path, worker_id: str) -> None:
@@ -62,12 +64,6 @@ class WatchdogFile:
         self._data_dir = Path(data_dir)
         self._worker_id = worker_id
         self._path = self._data_dir / f'{worker_id}.watchdog'
-
-        # Ensure the durable directory exists. ``parents=True`` lets us
-        # accept paths like ``/var/drakkar/data`` even on first boot;
-        # ``exist_ok=True`` keeps the call idempotent for repeated
-        # constructions in tests.
-        self._data_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def path(self) -> Path:
@@ -128,7 +124,15 @@ class WatchdogFile:
         with :data:`CLEAN_EXIT_MARKER` before unlinking. ``write_text``
         with mode ``'w'`` truncates any pre-existing file so a crashed
         prior run's leftover content cannot leak into this one.
+
+        The data directory is created lazily here — the constructor
+        does no disk I/O, so callers can build a :class:`WatchdogFile`
+        for a not-yet-existing path and the directory only materialises
+        when this method actually claims the slot. ``parents=True`` lets
+        us accept paths like ``/var/drakkar/data`` on first boot;
+        ``exist_ok=True`` keeps the call idempotent.
         """
+        self._data_dir.mkdir(parents=True, exist_ok=True)
         self._path.write_text('', encoding='utf-8')
 
     def mark_clean(self) -> None:

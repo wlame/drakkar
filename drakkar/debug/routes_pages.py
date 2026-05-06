@@ -27,7 +27,6 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-import structlog
 from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -35,8 +34,6 @@ from drakkar.debug.server_helpers import origin_allowed
 
 if TYPE_CHECKING:
     from drakkar.debug.server import DebugDeps
-
-logger = structlog.get_logger()
 
 WS_DRAIN_SLEEP = 0.02  # seconds to sleep when WebSocket event queue is empty
 

@@ -22,7 +22,6 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -31,8 +30,6 @@ from drakkar.debug.server_helpers import hook_flags
 
 if TYPE_CHECKING:
     from drakkar.debug.server import DebugDeps
-
-logger = structlog.get_logger()
 
 
 # ``/api/live/arrange-tasks`` request body — kept at module scope so

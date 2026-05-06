@@ -83,8 +83,6 @@ def test_config_no_sinks() -> DrakkarConfig:
 
 def _setup_app_sinks(app: DrakkarApp) -> None:
     """Build and register fake sinks so _handle_collect works without real connections."""
-    from unittest.mock import MagicMock
-
     app._build_sinks()
     # replace all registered sinks with async mocks
     for key, sink in app._sink_manager._sinks.items():
@@ -312,12 +310,12 @@ async def test_app_routes_circuit_open_to_dlq_sink(test_config):
     _setup_app_sinks(app)
 
     # Wire a fake DLQ sink so the force-DLQ branch has a target.
-    # The SinkManager reads ``self._dlq_sink`` from its own instance state
-    # now (not a per-call argument), so set it directly — the same one-time
-    # wiring ``_async_run`` does in production.
+    # SinkManager reads ``self._dlq_sink`` from its own instance state, so
+    # use ``attach_runtime`` — the same one-time wiring ``_async_run`` does
+    # in production. Recorder stays None for this test.
     dlq_sink = AsyncMock()
     app._dlq_sink = dlq_sink
-    app._sink_manager._dlq_sink = dlq_sink
+    app._sink_manager.attach_runtime(recorder=None, dlq_sink=dlq_sink)
 
     # Force one of the kafka sinks into open-circuit state. `_setup_app_sinks`
     # replaced the real sink with an AsyncMock, so we override the circuit

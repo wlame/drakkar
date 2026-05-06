@@ -14,7 +14,9 @@ a back-reference. See :mod:`drakkar.lifecycle` for the rationale.
 import asyncio
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
 import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
@@ -29,6 +31,7 @@ from drakkar.logging import setup_logging
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError
 from drakkar.partition import PartitionProcessor
 from drakkar.recorder import EventRecorder
+from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq import DLQSink
 from drakkar.sinks.filesystem import FileSink
 from drakkar.sinks.http import HttpSink
@@ -245,15 +248,16 @@ class DrakkarApp:
                     f'Make sure the plugin is installed and exposes the right '
                     f'[project.entry-points."drakkar.sinks"] entry.'
                 )
+            # ``BaseSink.__init__`` declares ``(name, ui_url='')`` for the
+            # built-in sinks, but plugin authors widen the second parameter
+            # to a config dict / Pydantic model. ty cannot see across the
+            # entry-point boundary, so we cast ``sink_cls`` to a callable
+            # taking two ``Any`` positionals before invoking it. The plugin
+            # contract documented in docs/sinks.md is the source of truth
+            # for the constructor signature, not the local type-check view.
+            sink_factory = cast(Callable[[str, Any], BaseSink[Any]], sink_cls)
             for instance_name, instance_cfg in instances.items():
-                # ``BaseSink.__init__`` declares ``(name, ui_url='')`` for
-                # the built-in sinks; plugin authors are free to widen
-                # the second parameter to a config dict / Pydantic model
-                # since the type checker can't see across the
-                # entry-point boundary. ty understandably flags the
-                # mismatch — silence it: the plugin contract documented
-                # in docs/sinks.md is the source of truth here.
-                self._sink_manager.register(sink_cls(instance_name, instance_cfg))  # ty: ignore[invalid-argument-type]
+                self._sink_manager.register(sink_factory(instance_name, instance_cfg))
 
     def _build_dlq(self) -> None:
         """Create the DLQ sink from config."""

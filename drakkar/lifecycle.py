@@ -43,6 +43,7 @@ import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import __version__
+from drakkar.app_security import warn_if_debug_unauthenticated
 from drakkar.cache import Cache, CacheEngine
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
@@ -64,6 +65,7 @@ from drakkar.partition import PartitionProcessor
 from drakkar.periodic import discover_periodic_tasks, run_periodic_task
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.manager import SinkNotConfiguredError
+from drakkar.utils import wait_for_aligned_startup
 from drakkar.watchdog import WatchdogFile
 
 if TYPE_CHECKING:
@@ -139,8 +141,17 @@ class AppLifecycle:
             watchdog_dir = Path(app._config.debug.db_dir)
             self._watchdog = WatchdogFile(data_dir=watchdog_dir, worker_id=app._worker_id)
             # Detect a possible SIGKILL from the prior run BEFORE we
-            # claim the slot for this run.
-            self._watchdog.check_previous()
+            # claim the slot for this run. ``check_previous`` returns
+            # True when no suspect-OOM signature was found; logging that
+            # at info level lets operators confirm the watchdog ran
+            # without grepping the warn-only suspect path.
+            previous_run_clean = self._watchdog.check_previous()
+            if previous_run_clean:
+                await log.ainfo(
+                    'watchdog_previous_run_clean',
+                    category='watchdog',
+                    worker_id=app._worker_id,
+                )
         else:
             self._watchdog = None
             await log.ainfo(
@@ -201,8 +212,6 @@ class AppLifecycle:
             # and meant for private-network deployment, so this is
             # informational rather than fail-fast. See README §"Security &
             # trust model" for the rationale.
-            from drakkar.app_security import warn_if_debug_unauthenticated
-
             warn_if_debug_unauthenticated(app._config)
 
             app._recorder = EventRecorder(
@@ -262,13 +271,13 @@ class AppLifecycle:
         # Wire recorder + DLQ into the sink manager now that both are ready.
         # SinkManager was constructed in ``__init__`` (required by tests and
         # by ``_build_sinks`` which registers sinks before we get here) with
-        # ``recorder=None`` / ``dlq_sink=None`` placeholders. Direct attribute
-        # assignment lets ``deliver_all`` read the refs straight from
-        # instance state instead of having callers thread them through on
-        # every call. We don't have a dedicated setter — this is a one-time
-        # wiring step at the boundary between construction and runtime.
-        app._sink_manager._recorder = app._recorder
-        app._sink_manager._dlq_sink = app._dlq_sink
+        # ``recorder=None`` / ``dlq_sink=None`` placeholders. ``attach_runtime``
+        # is the named one-time wiring step at the boundary between
+        # construction and runtime — same pattern as ``BaseSink.mark_connected``.
+        app._sink_manager.attach_runtime(
+            recorder=app._recorder,
+            dlq_sink=app._dlq_sink,
+        )
 
         # log sink topology
         await log.ainfo(
@@ -314,8 +323,6 @@ class AppLifecycle:
         # on a single Kafka consumer-group rebalance instead of N. See
         # KafkaConfig.startup_align_* for tuning and rationale.
         if app._config.kafka.startup_align_enabled:
-            from drakkar.utils import wait_for_aligned_startup
-
             min_wait = app._config.kafka.startup_min_wait_seconds
             interval = app._config.kafka.startup_align_interval_seconds
             target_wall = math.ceil((time.time() + min_wait) / interval) * interval
