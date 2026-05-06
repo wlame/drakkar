@@ -51,9 +51,12 @@ from drakkar.metrics import (
     backpressure_active,
     consumer_idle,
     discover_handler_metrics,
+    drain_timeout_hit,
     executor_idle_waste,
+    inflight_at_stop,
     start_metrics_server,
     total_queued,
+    uncommitted_offsets_at_stop,
     worker_info,
 )
 from drakkar.partition import PartitionProcessor
@@ -501,6 +504,28 @@ class AppLifecycle:
         log = logger.bind(worker_id=app._worker_id)
         await log.ainfo('drakkar_shutting_down', category='lifecycle')
 
+        # Snapshot the drain-phase observability gauges BEFORE doing any
+        # drain work. We always call ``.set()`` (even with ``0``) so the
+        # gauge reads as "this is the value at the moment shutdown began"
+        # rather than "stale value from earlier in the run". See
+        # ``drakkar.metrics`` for the metric docstrings.
+        #
+        # Uncommitted offsets: sum the per-partition offset-tracker pending
+        # counts across every assigned partition. ``pending_count`` is the
+        # canonical accessor used elsewhere in the framework (e.g. the
+        # ``drakkar_offset_lag`` per-partition gauge updated on every
+        # message complete in ``PartitionProcessor``).
+        uncommitted_total = sum(processor.offset_tracker.pending_count for processor in app._processors.values())
+        uncommitted_offsets_at_stop.set(uncommitted_total)
+
+        # In-flight executor tasks: read the pool's running ``active_count``,
+        # which is the same accessor used by ``ExecutorPool`` to drive the
+        # ``drakkar_executor_pool_active`` gauge during normal operation.
+        # The pool may be ``None`` if shutdown is invoked before startup
+        # completed (defensive programming for tests / aborted boot).
+        inflight_total = app._executor_pool.active_count if app._executor_pool is not None else 0
+        inflight_at_stop.set(inflight_total)
+
         # Flip readiness off IMMEDIATELY so a Kubernetes readiness probe
         # that fires between now and ``close_all`` fails — the pod is
         # taken out of the service endpoints before we start tearing down
@@ -526,6 +551,10 @@ class AppLifecycle:
             drained_cleanly = True
             await log.ainfo('executors_drained', category='lifecycle')
         except TimeoutError:
+            # Surface the drain-timeout event as a Prometheus counter so
+            # operators can alert on ``rate(...[5m]) > 0`` instead of
+            # parsing logs for the ``drain_timeout`` warning.
+            drain_timeout_hit.inc()
             await log.awarning(
                 'drain_timeout',
                 category='lifecycle',

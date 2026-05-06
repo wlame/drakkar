@@ -133,6 +133,14 @@ Cache flush/sync/cleanup loop durations are captured by the existing
 `periodic_task_duration{name="cache.flush|cache.sync|cache.cleanup"}`
 histogram — no dedicated cache-only timing histograms.
 
+#### Shutdown
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `drakkar_uncommitted_offsets_at_stop` | Gauge | -- | Snapshot at `_shutdown` start: count of Kafka offsets that were registered in-flight but not yet committed when shutdown began. Summed across all assigned partitions via each `OffsetTracker.pending_count`. Always set (even to `0`) so the gauge reflects the most recent shutdown rather than a stale prior value. |
+| `drakkar_inflight_at_stop` | Gauge | -- | Snapshot at `_shutdown` start: number of in-flight executor subprocesses (`ExecutorPool.active_count`) running user code when shutdown began. Always set, including to `0`. |
+| `drakkar_drain_timeout_hit_total` | Counter | -- | Incremented each time `_drain_all_processors` exceeded `executor.drain_timeout_seconds` before all partition processors finished draining. A nonzero rate signals workers being killed mid-flight — either the timeout is too tight or handlers are stuck. |
+
 ### User-Defined Metrics
 
 You can declare Prometheus metrics as class attributes on your handler -- see [Custom Prometheus Metrics](handler.md#custom-prometheus-metrics) for the handler-side setup. The framework auto-discovers them via `discover_handler_metrics()`, which scans the handler's class hierarchy (MRO) for any `prometheus_client` metric instances (`Counter`, `Gauge`, `Histogram`, `Summary`, `Info`).

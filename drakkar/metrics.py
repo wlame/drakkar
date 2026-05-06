@@ -531,6 +531,65 @@ recorder_requeue_overflow = Counter(
 )
 
 
+# --- Shutdown ---
+#
+# Operational visibility for the drain phase: when a worker stops, what
+# state was it in? These three metrics let operators answer "what was lost
+# or delayed when this pod stopped?" without parsing logs.
+#
+# All three are emitted from ``AppLifecycle._shutdown`` (see
+# ``drakkar.lifecycle``):
+#
+#   drakkar_uncommitted_offsets_at_stop
+#       Snapshot of offsets that had been registered as in-flight but were
+#       not yet committed at the moment shutdown began. Set ONCE per
+#       shutdown, before drain runs. Even a value of ``0`` is meaningful —
+#       it confirms the drain phase started clean. Sums offset_tracker
+#       pending counts across every partition this worker owned.
+#
+#   drakkar_inflight_at_stop
+#       Snapshot of the executor pool's ``active_count`` — how many
+#       subprocesses were still running user code when shutdown began.
+#       Set ONCE per shutdown, before drain runs.
+#
+#   drakkar_drain_timeout_hit_total
+#       Increments each time ``_drain_all_processors`` exceeds its
+#       ``drain_timeout_seconds`` budget without finishing. A nonzero
+#       rate means workers are being killed mid-flight — investigate
+#       whether the timeout is too tight or whether handlers are stuck.
+#
+# The two gauges are deliberately ``set`` (not ``inc``) so a re-scrape
+# after restart does not accumulate state from prior runs; the counter
+# uses ``inc`` so multiple drains across pod restarts add up cleanly
+# at the Prometheus aggregation layer.
+
+uncommitted_offsets_at_stop = Gauge(
+    'drakkar_uncommitted_offsets_at_stop',
+    (
+        'Count of Kafka offsets that were registered in-flight but not yet '
+        'committed when shutdown began. Snapshot taken once at the start of '
+        '_shutdown, summed across all assigned partitions.'
+    ),
+)
+
+inflight_at_stop = Gauge(
+    'drakkar_inflight_at_stop',
+    (
+        'Count of in-flight executor tasks (active subprocesses) when '
+        'shutdown began. Snapshot taken once at the start of _shutdown.'
+    ),
+)
+
+drain_timeout_hit = Counter(
+    'drakkar_drain_timeout_hit_total',
+    (
+        'Incremented each time _drain_all_processors timed out before all '
+        'partition processors finished draining. Nonzero rate signals '
+        'workers being killed mid-flight.'
+    ),
+)
+
+
 # --- Periodic tasks ---
 
 periodic_task_runs = Counter(
