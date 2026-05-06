@@ -1,8 +1,11 @@
 """Shared utility functions for Drakkar framework."""
 
 import asyncio
+import datetime as _dt
+import itertools
 import math
 import re
+import threading
 import time
 from collections.abc import Awaitable, Callable
 
@@ -10,6 +13,68 @@ from collections.abc import Awaitable, Callable
 def redact_url(url: str) -> str:
     """Redact credentials from URIs. Replaces user:pass@ with ***:***@."""
     return re.sub(r'://[^@/]+@', '://***:***@', url)
+
+
+# Module-level monotone counter for ``make_request_id``. Locked so the
+# generator stays correct under threaded use (the webapp event loop runs in a
+# separate thread from the main pipeline loop). ``itertools.count`` is itself
+# atomic in CPython for single ``next()`` calls, but we keep the lock to make
+# the contract portable and the timestamp-snapshot + counter-increment atomic
+# as a pair.
+_REQUEST_ID_COUNTER = itertools.count(start=1)
+_REQUEST_ID_LOCK = threading.Lock()
+_REQUEST_ID_MAX_LEN = 64
+
+
+def make_request_id(prefix: str = 'req') -> str:
+    """Generate a webapp request ID.
+
+    Format: ``<prefix>_<UTC-timestamp>_<monotone-counter>``
+    Example: ``req_20260506T184231_0042``
+
+    The timestamp uses UTC compact ISO-8601 form (``YYYYMMDDTHHMMSS``) so IDs
+    sort lexicographically by creation time within the same monotone-counter
+    epoch. The monotone counter is module-level — consecutive calls always
+    produce different IDs, even within the same second, even across threads.
+
+    Mirrors the role of :func:`drakkar.models.make_task_id` but uses a
+    human-readable timestamp (operators read these IDs in logs and HTTP
+    responses; task IDs are framework-internal and use a hex format for
+    compactness).
+    """
+    with _REQUEST_ID_LOCK:
+        # ``utcnow()`` is deprecated in 3.13; use the timezone-aware form and
+        # format manually to keep the compact ``YYYYMMDDTHHMMSS`` shape.
+        now = _dt.datetime.now(_dt.UTC)
+        ts = now.strftime('%Y%m%dT%H%M%S')
+        seq = next(_REQUEST_ID_COUNTER)
+    return f'{prefix}_{ts}_{seq:04d}'
+
+
+def validate_request_id(rid: str) -> None:
+    """Validate a webapp request ID supplied by user code.
+
+    Enforces three invariants the framework relies on for safe inclusion in
+    log labels, HTTP response bodies, and recorder rows:
+
+    * length ``<= 64`` characters
+    * ASCII-only (no non-ASCII characters such as ``é``)
+    * no whitespace (no spaces, tabs, newlines, or other ``str.isspace``
+      characters)
+
+    Raises :class:`ValueError` with a message that names the offending input
+    so operators can quickly find the bad handler override.
+
+    Used internally by the webapp framework when validating request IDs
+    returned from the optional ``http_request_id`` handler hook. Not part of
+    the public API surface.
+    """
+    if len(rid) > _REQUEST_ID_MAX_LEN:
+        raise ValueError(f'request_id too long (max {_REQUEST_ID_MAX_LEN} chars, got {len(rid)}): {rid!r}')
+    if not rid.isascii():
+        raise ValueError(f'request_id must be ASCII-only: {rid!r}')
+    if any(ch.isspace() for ch in rid):
+        raise ValueError(f'request_id must not contain whitespace: {rid!r}')
 
 
 async def wait_for_aligned_startup(

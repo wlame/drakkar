@@ -25,9 +25,11 @@ from drakkar.models import (
     PrecomputedResult,
     RedisPayload,
     SourceMessage,
+    TaskOrigin,
     make_task_id,
 )
 from drakkar.periodic import periodic
+from drakkar.utils import make_request_id
 
 __all__ = [
     'BaseDrakkarHandler',
@@ -54,7 +56,9 @@ __all__ = [
     'PrecomputedResult',
     'RedisPayload',
     'SourceMessage',
+    'TaskOrigin',
     'load_config',
+    'make_request_id',
     'make_task_id',
     'periodic',
 ]
