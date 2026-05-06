@@ -1,0 +1,33 @@
+# Drakkar worker — Service.
+#
+# Intentionally ClusterIP-only. The debug port hosts a read-only
+# operator UI that is unauthenticated by default; exposing it via
+# LoadBalancer or Ingress without first setting DK_DEBUG__AUTH_TOKEN
+# would put cache contents, subprocess output, and live event streams
+# on the public internet. Keep the Service ClusterIP and reach it via
+# `kubectl port-forward` or an internal-only ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: drakkar-worker
+  namespace: <namespace>  # <-- set to your target namespace
+  labels:
+    app: drakkar-worker
+spec:
+  type: ClusterIP
+  selector:
+    app: drakkar-worker
+  ports:
+    # Debug UI + /healthz + /readyz. Service endpoints follow the
+    # readinessProbe, so during rolling deploys only ready pods
+    # receive debug-UI traffic.
+    - name: debug
+      port: 8080
+      targetPort: debug
+      protocol: TCP
+    # Prometheus scrape target. Annotate the Service or add a
+    # ServiceMonitor (Prometheus Operator) to pick this up.
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP

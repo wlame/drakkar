@@ -1,0 +1,150 @@
+# Drakkar worker — Deployment.
+#
+# Reference manifest, not a Helm chart. Copy into your repo and tune.
+# See deploy/k8s/README.md for the list of placeholders that must be
+# substituted before applying.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drakkar-worker
+  namespace: <namespace>  # <-- set to your target namespace
+  labels:
+    app: drakkar-worker
+spec:
+  # Static replica count. Scaling is delegated to the HPA in hpa.yaml —
+  # change the HPA's min/max rather than this number when you want more
+  # or fewer pods. Three is a sensible starting point because Kafka
+  # cooperative-sticky rebalances spread load across at least 2 workers
+  # without single-pod-restart blackouts.
+  replicas: 3
+  selector:
+    matchLabels:
+      app: drakkar-worker
+  # Cooperative-sticky Kafka rebalancing tolerates a brief overlap
+  # between old and new pods, but the safest rolling pattern is one
+  # pod at a time — each new pod triggers a rebalance, so updating
+  # several at once stalls consumption fleet-wide.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: drakkar-worker
+    spec:
+      # 60s gives the worker time to drain in-flight executor tasks and
+      # commit Kafka offsets before SIGKILL. Tune in tandem with
+      # executor.drain_timeout_seconds in your DrakkarConfig.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: worker
+          # <-- replace with your built image, e.g. ghcr.io/wlame/drakkar-worker:0.12.0
+          image: <image>:<tag>
+          imagePullPolicy: IfNotPresent
+          ports:
+            # Debug HTTP port. Hosts /healthz, /readyz, and the operator
+            # debug UI (read-only by default — see auth note below).
+            - name: debug
+              containerPort: 8080
+              protocol: TCP
+            # Prometheus metrics — exposed on a separate port so the
+            # debug UI can be locked down without affecting scraping.
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          # Liveness: the framework's /healthz endpoint always returns
+          # 200 while the asyncio loop is alive; a failure here means
+          # the process is wedged and Kubernetes should restart the pod.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: debug
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness: /readyz returns 200 only after sinks are connected
+          # and the consumer has its initial partition assignment. Until
+          # then the pod stays out of the Service endpoints — handy
+          # during rolling deploys.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: debug
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Resource sizing is workload-dependent. The defaults below are
+          # a starting point — measure with your real handler binary
+          # and tune. Memory limit should leave headroom above the
+          # cache and recorder buffers (cache.max_memory_entries,
+          # debug.max_buffer) plus subprocess RSS.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          env:
+            # WORKER_ID is read by Drakkar at startup (config field
+            # worker_name_env, default "WORKER_ID"). Pulling it from
+            # the pod metadata gives every replica a unique, stable
+            # identity that matches kubectl's pod listing.
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Path to the YAML config mounted from the ConfigMap below.
+            - name: DK_CONFIG
+              value: /etc/drakkar/drakkar.yaml
+            # Per-field overrides — handy for rotating credentials or
+            # changing a single value without re-rolling the ConfigMap.
+            # Anything matching DK_<SECTION>__<FIELD> wins over the
+            # YAML at config load time.
+            - name: DK_KAFKA__BROKERS
+              valueFrom:
+                secretKeyRef:
+                  name: drakkar-secrets  # <-- create this Secret
+                  key: kafka_brokers
+                  optional: true
+            # Debug UI auth token. Empty (or unset) leaves the UI
+            # unauthenticated — only acceptable when the Service is
+            # ClusterIP-only on a private network. For any non-private
+            # exposure, populate this from a Secret.
+            - name: DK_DEBUG__AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: drakkar-secrets
+                  key: debug_auth_token
+                  optional: true
+          volumeMounts:
+            # Mount the YAML config read-only at the path DK_CONFIG points to.
+            - name: config
+              mountPath: /etc/drakkar
+              readOnly: true
+            # Writable scratch for the recorder/cache SQLite files. An
+            # emptyDir is fine because these files are per-pod and
+            # rebuilt on restart; persistent storage is only needed
+            # when you want post-mortem access after a pod terminates.
+            - name: data
+              mountPath: /var/lib/drakkar
+          # preStop sleep gives the kube-proxy / Service endpoint
+          # controller time to drop this pod from rotation before the
+          # process receives SIGTERM. Without it, requests can race the
+          # endpoint update and hit a draining pod. Independent from
+          # terminationGracePeriodSeconds — that bound starts AFTER
+          # this hook completes.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]
+      volumes:
+        - name: config
+          configMap:
+            name: drakkar-config
+        - name: data
+          emptyDir: {}

@@ -1,0 +1,106 @@
+# Drakkar worker — ConfigMap.
+#
+# Mounted by the Deployment at /etc/drakkar/drakkar.yaml. The path is
+# pointed to by the DK_CONFIG env var.
+#
+# Override patterns:
+#   - Edit drakkar.yaml below and `kubectl apply -f configmap.yaml`,
+#     then `kubectl rollout restart deployment/drakkar-worker` so pods
+#     pick up the new file.
+#   - For single-field tweaks (rotate broker list, change a port,
+#     toggle debug.enabled) prefer DK_<SECTION>__<FIELD> env vars on
+#     the Deployment — they win over the YAML at config load time and
+#     don't require re-applying the ConfigMap. Examples:
+#       DK_KAFKA__BROKERS=kafka:9092
+#       DK_DEBUG__PORT=8080
+#       DK_DEBUG__AUTH_TOKEN=<token>
+#       DK_EXECUTOR__MAX_EXECUTORS=16
+#
+# All fields below match the real DrakkarConfig schema (see
+# drakkar/config.py). Tune for your workload before applying.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: drakkar-config
+  namespace: <namespace>  # <-- set to your target namespace
+  labels:
+    app: drakkar-worker
+data:
+  drakkar.yaml: |
+    # Worker name comes from the WORKER_ID env var, set by the
+    # Deployment from metadata.name. Override `worker_name_env` if
+    # your platform uses a different env var convention.
+    worker_name_env: "WORKER_ID"
+    cluster_name: "<cluster_name>"  # <-- e.g. "prod-eu-west-1"
+
+    kafka:
+      brokers: "<kafka_brokers>"  # <-- e.g. "kafka-bootstrap.kafka:9092"
+      source_topic: "<source_topic>"  # <-- e.g. "input-events"
+      consumer_group: "drakkar-workers"
+      max_poll_records: 100
+      max_poll_interval_ms: 300000
+      session_timeout_ms: 45000
+      heartbeat_interval_ms: 3000
+
+    executor:
+      binary_path: "<binary_path>"  # <-- e.g. "/usr/local/bin/my-handler"
+      max_executors: 4
+      task_timeout_seconds: 120
+      window_size: 100
+      max_retries: 3
+      # drain_timeout_seconds should be <= the Deployment's
+      # terminationGracePeriodSeconds (60s) minus the preStop sleep
+      # (10s) so the worker has time to drain before SIGKILL.
+      drain_timeout_seconds: 30
+
+    sinks:
+      kafka:
+        results:
+          topic: "<output_topic>"  # <-- e.g. "output-results"
+
+    dlq:
+      # Empty topic auto-derives "<source_topic>_dlq".
+      topic: ""
+
+    metrics:
+      enabled: true
+      port: 9090
+
+    logging:
+      level: "INFO"
+      format: "json"
+      output: "stderr"
+
+    debug:
+      enabled: true
+      # 0.0.0.0 binds on all interfaces inside the pod so kube-probes
+      # and the Service can reach the port. Keep auth_token set in a
+      # Secret if the Service is ever exposed beyond ClusterIP.
+      host: "0.0.0.0"
+      port: 8080
+      # Override via DK_DEBUG__AUTH_TOKEN from a Secret in the
+      # Deployment. Leaving this empty keeps the read-only UI
+      # unauthenticated — acceptable only on a private network.
+      auth_token: ""
+      # Matches the emptyDir volumeMount in deployment.yaml. The
+      # recorder and cache SQLite files live here.
+      db_dir: "/var/lib/drakkar"
+      store_events: true
+      store_config: true
+      store_state: true
+      retention_hours: 24
+      retention_max_events: 100000
+
+    cache:
+      # Off by default — flip to true if your handler uses
+      # `self.cache`. db_dir empty falls back to debug.db_dir above.
+      enabled: false
+      db_dir: ""
+      flush_interval_seconds: 3.0
+      cleanup_interval_seconds: 60.0
+      max_memory_entries: 10000
+      peer_sync:
+        enabled: true
+        interval_seconds: 30.0
+        batch_size: 500
+        timeout_seconds: 5.0

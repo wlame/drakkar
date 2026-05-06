@@ -1,0 +1,54 @@
+# Drakkar worker — HorizontalPodAutoscaler.
+#
+# CPU-based autoscaling is a reasonable starting point: most Drakkar
+# workers are CPU-bound on the executor subprocess, so CPU utilization
+# correlates well with throughput. It does NOT, however, react to
+# Kafka consumer lag — a worker that is keeping up with current
+# arrival rate stays at low CPU even when a backlog is growing.
+#
+# For lag-aware scaling, install KEDA (https://keda.sh) and replace
+# this manifest with a `ScaledObject` using the `kafka` trigger that
+# scales on `lagThreshold`. Example trigger snippet:
+#
+#   triggers:
+#     - type: kafka
+#       metadata:
+#         bootstrapServers: kafka:9092
+#         consumerGroup: drakkar-workers
+#         topic: input-events
+#         lagThreshold: "1000"
+#
+# Until KEDA is in place, the HPA below gives basic horizontal
+# elasticity for steady-state load shifts.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: drakkar-worker
+  namespace: <namespace>  # <-- set to your target namespace
+  labels:
+    app: drakkar-worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: drakkar-worker
+  # minReplicas matches the Deployment's static replicas — keep them
+  # in sync so an HPA never tries to scale below the floor you'd set
+  # by hand. maxReplicas is a safety cap; tune for your Kafka
+  # partition count (no point having more workers than partitions).
+  minReplicas: 3
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  # Avoid thrashing on bursty CPU. Stabilization windows give the
+  # signal time to settle before another scale event fires.
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
