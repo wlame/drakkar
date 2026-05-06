@@ -140,6 +140,46 @@ histogram — no dedicated cache-only timing histograms.
 | `drakkar_uncommitted_offsets_at_stop` | Gauge | -- | Snapshot at `_shutdown` start: count of Kafka offsets that were registered in-flight but not yet committed when shutdown began. Summed across all assigned partitions via each `OffsetTracker.pending_count`. Always set (even to `0`) so the gauge reflects the most recent shutdown rather than a stale prior value. |
 | `drakkar_inflight_at_stop` | Gauge | -- | Snapshot at `_shutdown` start: number of in-flight executor subprocesses (`ExecutorPool.active_count`) running user code when shutdown began. Always set, including to `0`. |
 | `drakkar_drain_timeout_hit_total` | Counter | -- | Incremented each time `_drain_all_processors` exceeded `executor.drain_timeout_seconds` before all partition processors finished draining. A nonzero rate signals workers being killed mid-flight — either the timeout is too tight or handlers are stuck. |
+| `drakkar_suspected_oom_kills_total` | Counter | -- | Incremented at startup when the previous run left a watchdog file at `{debug.db_dir}/{worker_id}.watchdog` whose body lacked the `CLEAN_EXIT` marker. That signature means the prior process was killed before reaching the normal shutdown path — typically OOM-killer SIGKILL, kubelet pod-pressure eviction, or kernel panic. See *OOM / SIGKILL detection* below. |
+
+#### OOM / SIGKILL detection
+
+Drakkar writes a small **watchdog file** at `{debug.db_dir}/{worker_id}.watchdog`
+during startup and removes it as the last step of a clean shutdown. The
+file's presence and contents at the next startup let the framework
+distinguish three termination modes:
+
+| Watchdog state at startup | Previous run | Action |
+|----|----|----|
+| File **absent** | First run, or prior shutdown completed cleanly and unlinked the file. | No log, no metric. |
+| File **present**, body == `CLEAN_EXIT` | Prior shutdown wrote the marker but a process death between the write and the unlink left the file behind. Still a clean exit. | No log, no metric. |
+| File **present**, body empty (or anything else) | Prior process was killed before `_shutdown` reached `mark_clean` — almost always SIGKILL from the OOM-killer, a kubelet pod-pressure eviction, or a kernel panic. | Structured warning `previous_run_ended_unexpectedly` (category `watchdog`) with `worker_id` and `watchdog_path` fields, plus `drakkar_suspected_oom_kills_total` increment. |
+
+The watchdog file is created in `AppLifecycle._async_run` (right after
+`worker_id` resolution) and deleted at the end of `_shutdown` only when
+the drain phase succeeded. If the drain hit
+`executor.drain_timeout_seconds` we deliberately leave the file in place
+so the next startup treats the worker as suspect — symmetric with the
+`drakkar_drain_timeout_hit_total` counter and consistent with the
+"surface uncertainty rather than silently mark clean" stance taken by
+the rest of the shutdown path.
+
+The file lives in `debug.db_dir` (default `/tmp`), the same directory
+used by the recorder and cache engine. If `debug.db_dir` is empty —
+fully disk-less deployment — the watchdog falls back to the worker's
+current working directory. The file is one tiny ASCII file per worker
+(zero or `CLEAN_EXIT` bytes), so it does not break the "no SQLite"
+guarantee of an empty `db_dir`.
+
+**Operator interpretation:** any nonzero rate on
+`drakkar_suspected_oom_kills_total` should be correlated with
+container-runtime pod-restart events. A spike usually maps to one of:
+container memory limit too low, a memory leak in handler code, a
+sibling pod evicting this worker, or a node-level OOM. Pair the metric
+with `drakkar_uncommitted_offsets_at_stop` and
+`drakkar_inflight_at_stop` from the previous run (Prometheus retains
+the last-set value across restarts) to gauge how much in-flight work
+was lost.
 
 ### User-Defined Metrics
 

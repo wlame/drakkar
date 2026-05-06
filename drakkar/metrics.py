@@ -589,6 +589,22 @@ drain_timeout_hit = Counter(
     ),
 )
 
+# OOM / SIGKILL detection — increments when the previous run's watchdog
+# file is present at startup but lacks the ``CLEAN_EXIT`` marker. That
+# signature means the process died before ``AppLifecycle._shutdown``
+# could call ``WatchdogFile.mark_clean`` — typically an OOM-killer SIGKILL,
+# a kubelet pod-pressure eviction, or a kernel panic. Operators can alert
+# on ``rate(...[5m]) > 0`` to correlate pod restarts with memory incidents.
+# See ``drakkar.watchdog`` for the file-format contract.
+suspected_oom_kills = Counter(
+    'drakkar_suspected_oom_kills_total',
+    (
+        'Incremented at startup when the previous run left a watchdog file '
+        'without the CLEAN_EXIT marker — signature of SIGKILL / OOM-killer '
+        'termination that prevented the normal shutdown path from running.'
+    ),
+)
+
 
 # --- Periodic tasks ---
 

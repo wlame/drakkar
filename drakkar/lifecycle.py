@@ -36,6 +36,7 @@ import signal
 import time
 from collections.abc import Coroutine
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
@@ -63,6 +64,7 @@ from drakkar.partition import PartitionProcessor
 from drakkar.periodic import discover_periodic_tasks, run_periodic_task
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.manager import SinkNotConfiguredError
+from drakkar.watchdog import WatchdogFile
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
@@ -92,6 +94,11 @@ class AppLifecycle:
         # Back-reference. We use a single attribute to keep the boundary
         # explicit: every read or write goes through ``self._app.X``.
         self._app = drakkar_app
+        # Watchdog file for OOM/SIGKILL detection across restarts.
+        # Constructed in ``_async_run`` once we know the worker_id and
+        # the resolved data directory; held here so tests can reach it
+        # via ``app._lifecycle._watchdog``.
+        self._watchdog: WatchdogFile | None = None
 
     async def _async_run(self) -> None:
         """Full async startup → poll-loop → shutdown sequence.
@@ -107,6 +114,23 @@ class AppLifecycle:
         app._loop = asyncio.get_running_loop()
 
         log = logger.bind(worker_id=app._worker_id)
+
+        # Watchdog file for OOM / SIGKILL detection. Resolves the durable
+        # directory from ``config.debug.db_dir`` (the canonical location
+        # for per-worker durable files in this codebase — already used by
+        # the recorder and the cache engine). Falls back to the current
+        # working directory if ``db_dir`` is empty (e.g. fully disk-less
+        # deployment where the operator deliberately disabled all SQLite
+        # files), so the OOM signal still works even in that mode. The
+        # watchdog itself is just one tiny text file per worker, so it
+        # does not break the "no SQLite" guarantee of an empty db_dir.
+        watchdog_dir = Path(app._config.debug.db_dir) if app._config.debug.db_dir else Path('.')
+        self._watchdog = WatchdogFile(data_dir=watchdog_dir, worker_id=app._worker_id)
+        # Detect a possible SIGKILL from the prior run BEFORE we claim
+        # the slot for this run — order matters: ``write`` truncates the
+        # file, so the check must happen first.
+        self._watchdog.check_previous()
+        self._watchdog.write()
 
         bind_contextvars(hook='on_startup')
         app._config = await app._handler.on_startup(app._config)
@@ -628,6 +652,16 @@ class AppLifecycle:
 
         if app._consumer:
             await app._consumer.close()
+
+        # Mark the watchdog file clean ONLY when the drain succeeded.
+        # A drain timeout means tasks may still be in flight and the
+        # next startup should treat this run as suspect — leaving the
+        # watchdog body empty preserves that signal. ``mark_clean``
+        # writes ``CLEAN_EXIT`` then unlinks; if the unlink races with
+        # an external cleanup, the marker still tells the next startup
+        # the run was clean.
+        if drained_cleanly and self._watchdog is not None:
+            self._watchdog.mark_clean()
 
         await log.ainfo('drakkar_stopped', category='lifecycle')
         close_logging()
