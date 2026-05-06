@@ -21,6 +21,7 @@ from drakkar.config import CircuitBreakerConfig
 from drakkar.metrics import sink_deliveries_skipped, sink_delivery_retries
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError
 from drakkar.sinks.base import BaseSink
+from drakkar.sinks.registry import SinkRegistry
 from drakkar.utils import redact_url
 
 # Exception types that we treat as "transient" and retry for an idempotent
@@ -149,6 +150,24 @@ class SinkManager:
         # guards inside ``_deliver_to_sink``.
         self._recorder: EventRecorder | None = recorder
         self._dlq_sink: DLQSink | None = dlq_sink
+
+        # Run plugin discovery once at construction so any third-party
+        # sinks installed via ``[project.entry-points."drakkar.sinks"]``
+        # are visible to ``resolve_sink_class``. ``discover()`` is
+        # idempotent — repeated SinkManager construction (in tests, in
+        # restart loops) does not re-walk the entry-point table.
+        SinkRegistry.discover()
+
+    def resolve_sink_class(self, type_name: str) -> type[BaseSink[Any]] | None:
+        """Look up a sink class by its registered type name.
+
+        Returns ``None`` when the name is not registered so the caller
+        can decide between hard failure (config explicitly named an
+        unknown sink type) and silent skip (optional plugin not
+        installed). Used by :class:`drakkar.app.DrakkarApp` when it
+        materialises sink instances from config.
+        """
+        return SinkRegistry.get(type_name)
 
     def attach_runtime(
         self,

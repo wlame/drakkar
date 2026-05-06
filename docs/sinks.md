@@ -587,6 +587,101 @@ Individual payload paths must have existing parent directories.
 
 ---
 
+## Custom sinks (plugin API)
+
+Drakkar discovers third-party sink types through Python's standard
+[`importlib.metadata` entry points](https://docs.python.org/3/library/importlib.metadata.html#entry-points).
+A plugin package registers a `BaseSink` subclass under the
+`drakkar.sinks` group, and `SinkRegistry.discover()` (called once when
+`SinkManager` is constructed) loads it automatically — no monkey-patches,
+no fork of Drakkar.
+
+The same registry holds the built-in sinks. `SinkRegistry.get(name)`
+returns the class registered under that name, whether it shipped with
+Drakkar or arrived through a plugin. A plugin may override a built-in by
+re-registering the same name (for example, a custom `kafka` sink with
+extra metrics).
+
+### BaseSink contract
+
+Subclass [`drakkar.sinks.base.BaseSink`](https://github.com/wlame/drakkar/blob/main/drakkar/sinks/base.py) and implement three async methods:
+
+```python
+from drakkar.sinks.base import BaseSink
+from pydantic import BaseModel
+
+class MyCustomPayload(BaseModel):
+    """Whatever shape your sink consumes."""
+    value: str
+
+class MyCustomSink(BaseSink[MyCustomPayload]):
+    sink_type = 'my_custom'           # canonical type name (used in config)
+    idempotent = False                # see "Retry contract" above
+
+    def __init__(self, name: str, config) -> None:
+        super().__init__(name)
+        self._config = config
+
+    async def connect(self) -> None:
+        """Open the underlying client. Raise on failure — the worker
+        crashes fast with a clear startup error.
+        """
+
+    async def deliver(self, payloads: list[MyCustomPayload]) -> None:
+        """Send a batch. Raise on failure — the framework handles
+        retries, DLQ routing, and circuit-breaker bookkeeping.
+        """
+
+    async def close(self) -> None:
+        """Release resources. Should not raise — log and continue."""
+```
+
+The `idempotent` class attribute and the circuit-breaker / retry
+behaviour described under [Retry contract](#retry-contract) apply to
+custom sinks identically. You do not call `mark_connected` /
+`mark_disconnected` or any of the `record_*` circuit-breaker methods
+yourself — `SinkManager` drives those.
+
+### Entry-point declaration
+
+In your plugin's `pyproject.toml`:
+
+```toml
+[project.entry-points."drakkar.sinks"]
+my_custom = "my_package.sinks:MyCustomSink"
+```
+
+The left side (`my_custom`) is the registry key — it is what
+`SinkRegistry.get()` returns your class for, and it is the type name
+operators use in their Drakkar config. The right side is a standard
+`module:attribute` reference resolvable by `EntryPoint.load()`.
+
+After `pip install my-package` (or `uv sync` in a workspace that
+declares the dependency), Drakkar picks up the new sink at startup
+without any further wiring.
+
+### Inspecting registered sinks
+
+```python
+from drakkar.sinks import SinkRegistry
+
+SinkRegistry.discover()                      # idempotent — safe to call repeatedly
+print(SinkRegistry.all_names())              # ['filesystem', 'http', 'kafka', 'my_custom', ...]
+print(SinkRegistry.get('my_custom'))         # <class 'my_package.sinks.MyCustomSink'>
+print(SinkRegistry.get('not_installed'))     # None — get() never raises
+```
+
+### Failure modes
+
+If a plugin entry point fails to load (missing dependency, ImportError,
+non-`BaseSink` target), `SinkRegistry.discover()` logs a structured
+`sink_registry_entry_point_load_failed` (or `..._invalid`) warning and
+skips that entry. One broken plugin never crashes the worker — operators
+see the warning in their log aggregator and remove or fix the offending
+package.
+
+---
+
 ## CollectResult
 
 `CollectResult` is the return type of [on_task_complete()](handler.md#on_task_complete), [on_message_complete()](handler.md#on_message_complete), and [on_window_complete()](handler.md#on_window_complete). It has
