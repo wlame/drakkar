@@ -241,6 +241,14 @@ class RipgrepHandler(
                             'repeat': merged_repeat,
                             'would_have_run': [str(merged_repeat), pattern, file_path],
                         },
+                        # Marker env var so the cache-hit nature of this task
+                        # is visible in the debug UI's per-task env section
+                        # and in the recorder. No subprocess actually runs,
+                        # so the value is purely for traceability — operators
+                        # who land on a "CLI: []" task can confirm at a glance
+                        # that it was a cache short-circuit, not an empty
+                        # subprocess invocation.
+                        env={'PRECOMPUTED_RESULT': 'taken-from-cache'},
                         labels={
                             'source': 'cache',
                             'fan_in_count': str(len(contributing_msgs)),
