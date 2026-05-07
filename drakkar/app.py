@@ -88,6 +88,15 @@ class DrakkarApp:
         self._dlq_sink: DLQSink | None = None
         self._recorder: EventRecorder | None = None
         self._debug_server = None
+        # Webapp HTTP server — constructed in lifecycle._async_run when
+        # webapp.enabled=true. ``None`` otherwise (the lifecycle never
+        # touches the field on the disabled path). Held here so the
+        # shutdown sequence can signal/stop it alongside the debug
+        # server. Forward-declared as ``Any`` to avoid pulling
+        # ``drakkar.webapp.server`` into the import graph at app
+        # construction time (the webapp depends on FastAPI; users who
+        # never enable it shouldn't pay the import cost).
+        self._webapp: Any = None
         # Framework cache — constructed in lifecycle._async_run when
         # cache.enabled=true, else the handler keeps its default NoOpCache
         # stub. Held here so _shutdown can stop the engine in the correct

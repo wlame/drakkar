@@ -287,6 +287,34 @@ class AppLifecycle:
             dlq_topic=app._dlq_sink.topic,
         )
 
+        # Webapp HTTP server. Constructed AFTER sinks connect (so the
+        # readyz/health gate the route uses is meaningful) and BEFORE
+        # consumer subscribe (so the route is reachable even during the
+        # short window before the first poll completes — at which point
+        # the not_ready 503 gate keeps requests from racing the pipeline).
+        # Wrapped in try/except so a webapp construction failure does
+        # NOT abort startup — sink and consumer setup is the critical
+        # path; the webapp is optional infrastructure that an operator
+        # can disable on the next config reload.
+        if app._config.webapp.enabled:
+            try:
+                from drakkar.webapp import WebApp
+
+                app._webapp = WebApp(app, app._config.webapp)
+                app._webapp.start_in_thread()
+                # 5s is generous for a clean uvicorn bind on a free port;
+                # tests use the same default. A startup-time TimeoutError
+                # is logged and the worker proceeds without the webapp.
+                app._webapp.wait_until_ready(timeout=5.0)
+            except Exception as exc:
+                await log.aerror(
+                    'webapp_start_failed',
+                    category='webapp',
+                    error=str(exc),
+                    exc_type=type(exc).__name__,
+                )
+                app._webapp = None
+
         app._consumer = KafkaConsumer(
             config=app._config.kafka,
             on_assign=self._on_assign,
@@ -590,6 +618,23 @@ class AppLifecycle:
         log = logger.bind(worker_id=app._worker_id)
         await log.ainfo('drakkar_shutting_down', category='lifecycle')
 
+        # Flip the webapp shutdown gate FIRST — ahead of any drain work.
+        # New HTTP requests immediately receive a 503 with
+        # ``status='shutdown'`` while in-flight requests continue draining
+        # naturally. Wrapped in try/except so a webapp-internal hiccup
+        # never aborts the wider teardown sequence (sinks, recorder,
+        # consumer.close all still need to run).
+        if app._webapp is not None:
+            try:
+                app._webapp.shutdown_event.set()
+                await log.ainfo('webapp_shutdown_starting', category='webapp')
+            except Exception as exc:
+                await log.awarning(
+                    'webapp_shutdown_event_set_failed',
+                    category='webapp',
+                    error=str(exc),
+                )
+
         # Snapshot the drain-phase observability gauges BEFORE doing any
         # drain work. We always call ``.set()`` (even with ``0``) so the
         # gauge reads as "this is the value at the moment shutdown began"
@@ -790,6 +835,23 @@ class AppLifecycle:
                         category='lifecycle',
                         error=str(exc),
                     )
+
+            # Stop the webapp uvicorn thread. ``stop`` is a sync method
+            # (the webapp owns its own thread/loop, not an asyncio task)
+            # and bounds its join on ``drain_timeout`` so a stuck request
+            # cannot prevent worker shutdown. Wrapped in try/except so a
+            # filesystem / thread hiccup at the very end does not skip
+            # the consumer close on the next line.
+            if app._webapp is not None:
+                try:
+                    app._webapp.stop(drain_timeout=app._config.executor.drain_timeout_seconds)
+                except Exception as exc:
+                    await log.awarning(
+                        'webapp_stop_failed',
+                        category='webapp',
+                        error=str(exc),
+                    )
+                app._webapp = None
 
             # close all sinks and DLQ. ``close_all`` already swallows
             # per-sink errors internally; only an unexpected framework

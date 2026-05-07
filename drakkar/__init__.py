@@ -30,6 +30,7 @@ from drakkar.models import (
 )
 from drakkar.periodic import periodic
 from drakkar.utils import make_request_id
+from drakkar.webapp import SinkDeliverySummary, WebReport, WebRequestContext
 
 __all__ = [
     'BaseDrakkarHandler',
@@ -55,10 +56,13 @@ __all__ = [
     'PostgresPayload',
     'PrecomputedResult',
     'RedisPayload',
+    'SinkDeliverySummary',
     'SourceMessage',
     'TaskOrigin',
     'WebAppConfig',
     'WebClientConfig',
+    'WebReport',
+    'WebRequestContext',
     'load_config',
     'make_request_id',
     'make_task_id',

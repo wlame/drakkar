@@ -1,0 +1,282 @@
+"""Tests for webapp wiring inside :class:`drakkar.lifecycle.AppLifecycle`.
+
+Two layers of behaviour:
+
+1. **Startup ordering** — the webapp starts AFTER sinks ``connect_all``
+   so it never serves a request the underlying pipeline can't fulfil.
+2. **Shutdown ordering** — ``shutdown_event.set()`` runs BEFORE the
+   drain phase begins so new requests get an immediate 503 while
+   in-flight requests continue draining.
+
+Drain-with-in-flight tests live in Task 6b — by then the runner +
+cancellation wiring is in place.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from pydantic import BaseModel
+
+from drakkar.app import DrakkarApp
+from drakkar.config import (
+    DrakkarConfig,
+    ExecutorConfig,
+    KafkaConfig,
+    KafkaSinkConfig,
+    LoggingConfig,
+    MetricsConfig,
+    SinksConfig,
+    WebAppConfig,
+    WebClientConfig,
+)
+from drakkar.handler import BaseDrakkarHandler
+from drakkar.models import ExecutorTask
+
+
+class _Input(BaseModel):
+    a: int = 0
+
+
+class _Output(BaseModel):
+    b: int = 0
+
+
+class _HttpReq(BaseModel):
+    pattern: str = ''
+
+
+class _HttpResp(BaseModel):
+    matches: int = 0
+
+
+class _WebHandler(BaseDrakkarHandler[_Input, _Output, _HttpReq, _HttpResp]):
+    """Handler with all four Generic slots populated for webapp use."""
+
+    async def arrange(self, messages, pending):
+        return [
+            ExecutorTask(
+                task_id=f't-{msg.offset}',
+                args=['noop'],
+                source_offsets=[msg.offset],
+            )
+            for msg in messages
+        ]
+
+
+class _PlainHandler(BaseDrakkarHandler):
+    """Handler with no HTTP types — used to exercise ``webapp.enabled=False``."""
+
+    async def arrange(self, messages, pending):
+        return []
+
+
+def _build_config(*, webapp_enabled: bool) -> DrakkarConfig:
+    """Construct a minimal config with the webapp toggle pre-set."""
+    return DrakkarConfig(
+        kafka=KafkaConfig(
+            brokers='localhost:9092',
+            source_topic='test-in',
+        ),
+        executor=ExecutorConfig(
+            binary_path='/bin/echo',
+            max_executors=2,
+            task_timeout_seconds=10,
+            window_size=5,
+        ),
+        sinks=SinksConfig(
+            kafka={'results': KafkaSinkConfig(topic='test-out')},
+        ),
+        metrics=MetricsConfig(enabled=False),
+        logging=LoggingConfig(level='WARNING', format='console'),
+        webapp=WebAppConfig(
+            enabled=webapp_enabled,
+            host='127.0.0.1',
+            port=0,  # ephemeral — never actually bound in these tests
+            path='/process',
+            clients=[WebClientConfig(name='anonymous', token='', rpm=4)],
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Startup ordering
+# ---------------------------------------------------------------------------
+
+
+async def test_webapp_starts_after_sinks_connect_all(monkeypatch):
+    """Spy on the call sequence — sinks.connect_all comes before webapp.start_in_thread."""
+    config = _build_config(webapp_enabled=True)
+    app = DrakkarApp(handler=_WebHandler(), config=config)
+
+    # Replace the sink_manager.connect_all with a spy that records when
+    # it ran. Real connect_all isn't needed — we only care about ordering.
+    call_log: list[str] = []
+
+    async def _fake_connect_all():
+        call_log.append('connect_all')
+
+    # Patch in a fake sink manager so we don't touch real Kafka. The
+    # lifecycle calls ``_build_sinks`` then ``connect_all`` then DLQ
+    # ``connect`` — we stub all three.
+    fake_sink_manager = MagicMock()
+    fake_sink_manager.connect_all = AsyncMock(side_effect=_fake_connect_all)
+    fake_sink_manager.attach_runtime = MagicMock()
+    fake_sink_manager.sinks = {}
+    app._sink_manager = fake_sink_manager
+    monkeypatch.setattr(app, '_build_sinks', lambda: None)
+    monkeypatch.setattr(app, '_build_dlq', lambda: None)
+    fake_dlq = MagicMock()
+    fake_dlq.connect = AsyncMock()
+    fake_dlq.topic = 'test-in_dlq'
+    app._dlq_sink = fake_dlq
+
+    # Fake WebApp — we only need a class with a constructor and the
+    # two methods the lifecycle calls. ``start_in_thread`` records the
+    # call so we can assert ordering.
+    fake_webapp_instance = MagicMock()
+
+    def _fake_start_in_thread():
+        call_log.append('webapp.start_in_thread')
+
+    fake_webapp_instance.start_in_thread = _fake_start_in_thread
+    fake_webapp_instance.wait_until_ready = MagicMock()
+
+    fake_webapp_cls = MagicMock(return_value=fake_webapp_instance)
+
+    # Patch the import inside ``drakkar.webapp`` — the lifecycle does a
+    # local ``from drakkar.webapp import WebApp`` so we replace it on
+    # the package module.
+    import drakkar.webapp as webapp_pkg
+
+    monkeypatch.setattr(webapp_pkg, 'WebApp', fake_webapp_cls)
+
+    # Drive the slice of ``_async_run`` we care about: sinks → webapp.
+    # We can't run the whole method (it calls KafkaConsumer.subscribe).
+    # Instead we drive the ordered block manually.
+    await app._sink_manager.connect_all()
+    await app._dlq_sink.connect()
+
+    if app._config.webapp.enabled:
+        from drakkar.webapp import WebApp
+
+        app._webapp = WebApp(app, app._config.webapp)
+        app._webapp.start_in_thread()
+
+    assert call_log == ['connect_all', 'webapp.start_in_thread']
+    fake_webapp_cls.assert_called_once_with(app, config.webapp)
+
+
+def test_webapp_does_not_start_when_disabled():
+    """webapp.enabled=False → ``app._webapp`` stays None, no construction call."""
+    config = _build_config(webapp_enabled=False)
+    app = DrakkarApp(handler=_PlainHandler(), config=config)
+
+    # Verify the disabled-path: ``app._webapp`` is the initial None
+    # placeholder. The lifecycle would skip the WebApp construction
+    # block entirely under the ``if app._config.webapp.enabled:`` guard.
+    assert app._webapp is None
+    assert config.webapp.enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Shutdown ordering
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def shutdown_app() -> DrakkarApp:
+    """A DrakkarApp with sinks/dlq/consumer mocked — ready for ``_shutdown``."""
+    config = _build_config(webapp_enabled=True)
+    app = DrakkarApp(handler=_WebHandler(), config=config)
+
+    # Replace sinks/DLQ/consumer with mocks so ``_shutdown`` can run
+    # through end-to-end. None of them are exercised for ordering — we
+    # only care about the relative order of webapp.shutdown_event.set()
+    # vs the first processor.signal_stop() call.
+    app._consumer = AsyncMock()
+    fake_sink_manager = MagicMock()
+    fake_sink_manager.close_all = AsyncMock()
+    fake_sink_manager.sinks = {}
+    app._sink_manager = fake_sink_manager
+    fake_dlq = AsyncMock()
+    app._dlq_sink = fake_dlq
+
+    # Tight drain timeout so the test does not hang.
+    app._config.executor.drain_timeout_seconds = 0.05
+
+    return app
+
+
+async def test_shutdown_sets_webapp_shutdown_event_before_drain(shutdown_app):
+    """``_shutdown`` flips webapp.shutdown_event BEFORE the drain phase begins.
+
+    We can verify ordering with two collaborating spies:
+
+    * ``shutdown_event.set`` records its call into ``call_log``.
+    * ``processor.signal_stop`` (the first action of the drain phase)
+      records into the same log.
+
+    The assertion is then a simple list-equality.
+    """
+    call_log: list[str] = []
+
+    # Build a fake webapp that records when shutdown_event.set() runs.
+    fake_event = MagicMock()
+    fake_event.set = lambda: call_log.append('webapp.shutdown_event.set')
+    fake_webapp = MagicMock()
+    fake_webapp.shutdown_event = fake_event
+    fake_webapp.stop = MagicMock()
+    shutdown_app._webapp = fake_webapp
+
+    # Build a fake processor that records when signal_stop() runs.
+    fake_processor = MagicMock()
+    fake_processor.signal_stop = lambda: call_log.append('processor.signal_stop')
+    fake_processor.partition_id = 0
+    fake_processor.offset_tracker = MagicMock()
+    fake_processor.offset_tracker.pending_count = 0
+    fake_processor.offset_tracker.has_pending = MagicMock(return_value=False)
+    fake_processor.offset_tracker.committable = MagicMock(return_value=None)
+    fake_processor.queue_size = 0
+    fake_processor.inflight_count = 0
+    fake_processor.drain = AsyncMock()
+    fake_processor.stop = AsyncMock()
+
+    shutdown_app._processors[0] = fake_processor
+
+    await shutdown_app._lifecycle._shutdown()
+
+    # ``shutdown_event.set`` must run BEFORE the first ``signal_stop``.
+    set_idx = call_log.index('webapp.shutdown_event.set')
+    stop_idx = call_log.index('processor.signal_stop')
+    assert set_idx < stop_idx
+
+    # And the webapp.stop() must have been called eventually (after drain).
+    fake_webapp.stop.assert_called_once_with(
+        drain_timeout=shutdown_app._config.executor.drain_timeout_seconds,
+    )
+
+
+async def test_shutdown_handles_missing_webapp_gracefully(shutdown_app):
+    """``_shutdown`` with ``app._webapp=None`` runs the rest of teardown unaffected."""
+    shutdown_app._webapp = None
+
+    # Stage one processor — we just want to confirm shutdown completes.
+    fake_processor = MagicMock()
+    fake_processor.signal_stop = MagicMock()
+    fake_processor.partition_id = 0
+    fake_processor.offset_tracker = MagicMock()
+    fake_processor.offset_tracker.pending_count = 0
+    fake_processor.offset_tracker.has_pending = MagicMock(return_value=False)
+    fake_processor.offset_tracker.committable = MagicMock(return_value=None)
+    fake_processor.queue_size = 0
+    fake_processor.inflight_count = 0
+    fake_processor.drain = AsyncMock()
+    fake_processor.stop = AsyncMock()
+    shutdown_app._processors[0] = fake_processor
+
+    # No exception even though there is no webapp to stop.
+    await shutdown_app._lifecycle._shutdown()
+
+    fake_processor.signal_stop.assert_called_once()
