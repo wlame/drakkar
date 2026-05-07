@@ -133,6 +133,18 @@ Cache flush/sync/cleanup loop durations are captured by the existing
 `periodic_task_duration{name="cache.flush|cache.sync|cache.cleanup"}`
 histogram — no dedicated cache-only timing histograms.
 
+#### Webapp
+
+Emitted only when [`webapp.enabled=true`](webapp.md). Track per-client request volume, latency, capacity headroom, and drop rates. Status labels are drawn from a closed set documented in [Webapp → Status codes](webapp.md#status-codes): `ok | timeout | error | rate_limited | auth_failed | shutdown | not_ready | capacity`. The `client` label is bounded by the configured client list plus the fixed `unauthenticated` sentinel for auth-failed / pre-auth gate hits, so cardinality stays small.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `drakkar_webapp_requests_total` | Counter | `client`, `status` | One increment per HTTP request, labelled by the matched client name and the terminal outcome. Replaces a separate `webapp_rate_limited_total` -- query `drakkar_webapp_requests_total{status='rate_limited'}` instead. |
+| `drakkar_webapp_request_duration_seconds` | Histogram | `client`, `status` | Server-side wall-clock duration of HTTP requests. Buckets: 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30 -- covers sub-second work and the default 30s `request_timeout_seconds` budget. The duration starts at route entry and ends at response emission, so it includes auth + rate-limit + body parsing as well as the runner. |
+| `drakkar_webapp_inflight` | Gauge | -- | Number of HTTP requests currently being processed by the runner on T1. Incremented on runner entry, decremented in `finally`. **Alert on `drakkar_webapp_inflight > webapp.max_concurrent` to spot semaphore-leak bugs** -- a permit accidentally held past response would surface here. |
+| `drakkar_webapp_dropped_after_timeout_total` | Counter | `client` | Requests whose pipeline result was dropped on T1 after T2 had already returned a 504 to the caller. Incremented at each cancellation gate (post-execute and pre-`on_http_request_complete`). A high rate signals either a too-tight `request_timeout_seconds` or a slow subprocess pipeline -- correlate with `drakkar_executor_duration_seconds`. |
+| `drakkar_webapp_rpm_limit` | Gauge | `client` | Configured rpm cap per client. **Informational gauge** set once at webapp startup and never updated thereafter (the cap is a config field; operators edit YAML and restart). Read alongside `drakkar_webapp_requests_total{status='rate_limited'}` to confirm deployed limits match the workload's expectations. |
+
 #### Shutdown
 
 | Metric | Type | Labels | Description |
@@ -484,9 +496,9 @@ Each database file can contain up to three tables, controlled by the `store_even
 
 Stores processing events across the full pipeline lifecycle.
 
-Key columns: `ts`, `dt`, `event`, `partition`, `offset`, `task_id`, `args`, `stdout`, `stderr`, `exit_code`, `duration`, `output_topic`, `metadata` (JSON), `pid`, `labels` (JSON).
+Key columns: `ts`, `dt`, `event`, `partition`, `offset`, `task_id`, `args`, `stdout`, `stderr`, `exit_code`, `duration`, `output_topic`, `metadata` (JSON), `pid`, `labels` (JSON), `origin` (`'kafka'` or `'http'`, default `'kafka'`), `client_name` (webapp client name; `NULL` for Kafka-origin rows), `request_id` (webapp framework id; `NULL` for Kafka-origin rows).
 
-Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, and `labels` (partial, where not null).
+Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (partial, where not null), `origin`, and `request_id` (partial, where not null).
 
 **Event types:**
 
@@ -507,8 +519,37 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, and `labels` (
 | `assigned` | Partition assigned during rebalance | `partition` |
 | `revoked` | Partition revoked during rebalance | `partition` |
 | `periodic_run` | Periodic task execution completes | `task_id` (task name), `duration`, `exit_code` (0=ok, 1=error), `metadata` (status, error) |
+| `webapp_request_received` | One HTTP request passed auth + rate-limit + body parsing and is about to dispatch to T1 | `origin='http'`, `client_name`, `request_id`, `metadata` (started_at, body_bytes) |
+| `webapp_request_completed` | An HTTP request returned 200 to the caller | `origin='http'`, `client_name`, `request_id`, `duration`, `metadata` (status='ok', duration_ms) |
+| `webapp_request_timeout` | T2's `asyncio.wait_for` tripped its `request_timeout_seconds` budget; client received a 504 | `origin='http'`, `client_name`, `request_id`, `duration`, `metadata` (duration_ms) |
+| `webapp_request_rate_limited` | Per-client rpm window full; client received a 429 | `origin='http'`, `client_name`, `metadata` (rpm_limit, requests_in_window) |
+| `webapp_request_auth_failed` | `Authorization` header missing or naming a non-configured token; client received a 401 | `origin='http'`, `metadata` (token_prefix -- redacted to first 4 chars) |
+| `webapp_request_dropped_after_timeout` | T1 reached a cancellation gate after T2 had already 504'd. Marks pipeline work the framework managed to skip thanks to cooperative cancellation. | `origin='http'`, `client_name`, `request_id` |
+
+For HTTP-origin rows, `partition=-1` is used as a synthetic partition value so they remain distinct from any real Kafka partition without requiring a separate table. Filter by `origin='http'` to see all webapp activity, or by `request_id=...` to walk the full lifecycle of one HTTP request (received → task_started → task_completed → completed/timeout/dropped).
 
 Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`, `stderr` are omitted for fast tasks below `output_min_duration_ms`. Events below `event_min_duration_ms` are not stored at all.
+
+!!! warning "Recorder upgrade story (delete pre-webapp DBs)"
+    The webapp release added three columns to the `events` table --
+    `origin`, `client_name`, `request_id` -- without a migration
+    framework. Recorder DBs are observability-only, already rotated and
+    disposable, so a one-shot delete on upgrade is preferable to a
+    migration runner that exists only to add three optional columns.
+
+    **On upgrade**, operators delete pre-existing per-worker recorder
+    DBs in `debug.db_dir` before restarting workers. New rotation-cycle
+    DBs include the new columns automatically.
+
+    The framework detects the schema mismatch at startup: the recorder
+    runs `PRAGMA table_info(events)` immediately after opening each DB
+    and raises `RecorderSchemaError` when `origin` / `client_name` /
+    `request_id` are missing. The exception propagates through
+    `AppLifecycle._async_run` and aborts startup with the actionable
+    next step in the message: delete the offending DB(s) under `db_dir`
+    and restart. Without this fail-fast check, pre-webapp DBs would
+    surface a confusing `OperationalError: no such column` mid-request
+    on the first HTTP event the recorder tried to write.
 
 #### `worker_config` -- Autodiscovery
 

@@ -337,6 +337,35 @@ cache:
 
 ---
 
+## Webapp (`webapp:`)
+
+📚 [Deep details](configuration.md#webapp-webapp) · [Webapp page](webapp.md)
+
+Optional synchronous-HTTP entry point. **Disabled by default**. When `enabled=true`, the handler must declare `HttpRequestT` / `HttpResponseT` as the third and fourth generic parameters of `BaseDrakkarHandler`.
+
+```yaml
+webapp:
+  enabled: false                   # master switch; false = no FastAPI server. env: DK_WEBAPP__ENABLED
+  host: '0.0.0.0'                  # uvicorn bind interface. env: DK_WEBAPP__HOST
+  port: 8090                       # uvicorn bind port. env: DK_WEBAPP__PORT
+  path: '/process'                 # single POST route; must start with '/'. env: DK_WEBAPP__PATH
+  sinks_enabled: false             # when true, route on_message_complete payloads through SinkManager. env: DK_WEBAPP__SINKS_ENABLED
+  request_timeout_seconds: 30.0    # per-request budget; > 0. env: DK_WEBAPP__REQUEST_TIMEOUT_SECONDS
+  max_concurrent: 64               # per-worker in-flight cap; > 0. 65th concurrent request 503s. env: DK_WEBAPP__MAX_CONCURRENT
+
+  # Configured tenants. At least one entry is required; default is one
+  # anonymous client with rpm=4 so the webapp works out of the box.
+  clients:
+    - name: anonymous              # tenant name; non-empty string
+      token: ''                    # bearer token; '' = anonymous slot (at most one client)
+      rpm: 4                       # per-client requests/minute cap; > 0
+    - name: tenant-a
+      token: 'secret-tenant-a-token'
+      rpm: 60
+```
+
+---
+
 ## Environment-variable override cheatsheet
 
 The pattern: **`DK_<SECTION>__<FIELD>`** -- prefix `DK_`, double underscore between nesting levels, single underscore within a field name.

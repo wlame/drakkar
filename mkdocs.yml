@@ -53,6 +53,7 @@ nav:
   - Fan-out (one message → many tasks): fan-out.md
   - Configuration: configuration.md
   - Sinks: sinks.md
+  - Webapp: webapp.md
   - Executor: executor.md
   - Observability: observability.md
   - Performance: performance.md

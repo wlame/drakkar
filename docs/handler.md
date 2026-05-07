@@ -20,8 +20,12 @@ right time during the message-processing pipeline. See [Configuration](configura
 | `on_revoke(partitions)` | Kafka revokes partitions during rebalance | Once per rebalance event | `None` |
 | `message_label(msg)` | Before logging each message in arrange | Once per message | `str` |
 | `task_priority(task)` | Before each task waits on the executor pool | Once per task (incl. retries) | sortable key (any `<`-comparable value) |
+| `arrange_http_request(req, pending)` | One HTTP request passed auth + rate-limit + body parsing | Once per HTTP request (webapp only) | `list[`[`ExecutorTask`](executor.md#executortask)`]` |
+| `on_http_request_complete(group)` | All tasks from one HTTP request reached a terminal state | Once per HTTP request (webapp only) | `HttpResponseT` (a Pydantic model) |
+| `http_request_id(req, headers)` | After body parsing, before task fan-out | Once per HTTP request (webapp only) | `str` (validated; ≤64 chars, ASCII, no whitespace) |
+| `http_request_label(req, request_id)` | Before logging each HTTP request | Once per HTTP request (webapp only) | `str` |
 
-Only `arrange()` is required. All other hooks have safe defaults.
+Only `arrange()` is required. All other hooks have safe defaults. The four `*http*` hooks at the bottom are invoked only when [`webapp.enabled=true`](webapp.md) and the handler subclass declares concrete types in the `HttpRequestT` / `HttpResponseT` slots; see [Generic type parameters](#generic-type-parameters) below for the four-parameter form.
 
 ---
 
@@ -33,22 +37,39 @@ from drakkar import BaseDrakkarHandler
 
 ### Generic type parameters
 
-`BaseDrakkarHandler` accepts two optional type parameters that control
-automatic (de)serialization of messages:
+`BaseDrakkarHandler` accepts up to four optional type parameters. The
+first two control Kafka-path message (de)serialization; the third and
+fourth opt the handler into the [webapp pipeline](webapp.md):
 
 ```python
+# Two-param form (Kafka only). HttpRequestT / HttpResponseT default to None.
 class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
+    ...
+
+# Four-param form (Kafka + webapp). Required when webapp.enabled=true.
+class MyHandler(BaseDrakkarHandler[KafkaIn, KafkaOut, HttpReq, HttpResp]):
     ...
 ```
 
-Both type arguments must be Pydantic `BaseModel` subclasses. At class
-creation time (`__init_subclass__`), the framework inspects the generic
-arguments and sets two class attributes:
+The HTTP slots use [PEP 696 default `TypeVars`](https://peps.python.org/pep-0696/),
+so existing two-param subclasses keep working unchanged -- the third
+and fourth slots materialise to `None` and the framework never invokes
+the HTTP hooks. Four-param subclasses opt into the webapp pipeline by
+declaring concrete Pydantic models in the new slots; the framework
+reads those at startup and raises `ConfigurationError` when
+`webapp.enabled=true` but a slot is left at the default. See
+[Webapp → Enabling](webapp.md#enabling) for the full setup.
 
-| Attribute      | Value                               |
-|----------------|-------------------------------------|
-| `input_model`  | The `InputT` class, or `None`       |
-| `output_model` | The `OutputT` class, or `None`      |
+All declared type arguments must be Pydantic `BaseModel` subclasses. At
+class creation time (`__init_subclass__`), the framework inspects the
+generic arguments and sets four class attributes:
+
+| Attribute             | Value                              |
+|-----------------------|------------------------------------|
+| `input_model`         | The `InputT` class, or `None`      |
+| `output_model`        | The `OutputT` class, or `None`     |
+| `http_request_model`  | The `HttpRequestT` class, or `None`  |
+| `http_response_model` | The `HttpResponseT` class, or `None` |
 
 When `input_model` is set, every consumed message is automatically
 deserialized before `arrange()` is called:
@@ -60,6 +81,10 @@ msg.payload = MyInput.model_validate_json(msg.value)
 
 If deserialization fails, `msg.payload` is set to `None` and the raw
 bytes remain available in `msg.value`.
+
+When `http_request_model` is set, every HTTP request body is parsed into
+the model before `arrange_http_request()` is called; parse failures
+return a flat 422 response without invoking the runner.
 
 ### Non-generic usage
 
@@ -73,7 +98,8 @@ class RawHandler(BaseDrakkarHandler):
             ...
 ```
 
-Both `input_model` and `output_model` will be `None`.
+`input_model`, `output_model`, `http_request_model`, and
+`http_response_model` will all be `None`.
 
 ---
 

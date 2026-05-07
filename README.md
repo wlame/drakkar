@@ -33,6 +33,7 @@ Configured sinks (any combination)
 - **Subprocess executor pool** with semaphore-based concurrency limiting
 - **Typed message models** -- define Pydantic schemas for input/output, get auto-deserialization
 - **Cache (optional)** -- `self.cache` key/value store with memory + write-behind SQLite + eventually-consistent peer sync across workers; pluggable backends conform to the public `CacheLike` protocol ([docs](docs/cache.md))
+- **Webapp pipeline (optional)** -- opt-in synchronous HTTP endpoint exposing the same handler pipeline used for Kafka, with multi-tenant bearer-token auth, per-client rpm caps, opt-in sinks delivery, and graceful-shutdown semantics. Webapp users declare four type parameters on `BaseDrakkarHandler` (Kafka in/out + HTTP request/response). See [`docs/webapp.md`](docs/webapp.md).
 - **Built-in debug UI** (FastAPI) with executor timeline, partition lag, message tracing
 - **Flight recorder** -- SQLite event log with retention and rotation
 - **Prometheus metrics** -- pipeline, executor, per-sink, and shutdown / drain metrics
@@ -296,6 +297,8 @@ class MyHandler(BaseDrakkarHandler[InputModel, OutputModel]):
 ```
 
 Non-generic `BaseDrakkarHandler` (no type params) works too -- you get raw bytes in `msg.value`.
+
+Webapp users declare **four** type parameters (`InputT`, `OutputT`, `HttpRequestT`, `HttpResponseT`) and override `arrange_http_request` / `on_http_request_complete` to expose the pipeline as a synchronous HTTP endpoint. See [`docs/webapp.md`](docs/webapp.md).
 
 ## Scaling
 

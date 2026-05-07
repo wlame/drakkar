@@ -567,6 +567,55 @@ cache:
 
 ---
 
+## Webapp (`webapp:`)
+
+Optional synchronous-HTTP entry point. **Disabled by default** -- when `enabled: false`, no FastAPI server runs and the handler's HTTP hooks are never invoked. Webapp users declare `HttpRequestT` / `HttpResponseT` as the third and fourth generic parameters of `BaseDrakkarHandler`; missing types raise `ConfigurationError` at startup.
+
+See [Webapp](webapp.md) for the full feature guide (enabling, hooks, request/response shape, status codes, shutdown semantics).
+
+### Webapp Settings
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `enabled` | `bool` | `false` | | Master switch. When `false`, the FastAPI server is not started and the HTTP hooks are not invoked. |
+| `host` | `str` | `'0.0.0.0'` | | Interface uvicorn binds. Use `'127.0.0.1'` for host-private deployments. |
+| `port` | `int` | `8090` | | Port uvicorn binds. Distinct from the metrics and debug-UI ports. |
+| `path` | `str` | `'/process'` | starts with `'/'`, length > 1 | Single POST route the framework registers. |
+| `sinks_enabled` | `bool` | `false` | | When `true`, calls `on_message_complete` after the executor fan-out and routes returned `CollectResult` payloads through the [SinkManager](sinks.md). When `false`, sinks are skipped and the response carries `sinks: null`. |
+| `request_timeout_seconds` | `float` | `30.0` | > 0 | Per-request budget enforced via `asyncio.wait_for` on the webapp loop. On timeout the client receives a 504 and the runner's post-execute hooks are cooperatively cancelled. |
+| `max_concurrent` | `int` | `64` | > 0 | Per-worker semaphore capacity for in-flight HTTP requests. The 65th concurrent request returns 503 `status='capacity'` immediately rather than queuing. |
+| `clients` | `list[WebClientConfig]` | one anonymous client (`name='anonymous'`, `token=''`, `rpm=4`) | length >= 1 | Configured tenants. Empty `clients: []` fails at config load. |
+
+### Webapp Clients (`webapp.clients[]`)
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `name` | `str` | required | non-empty | Tenant name. Used in metric labels (`drakkar_webapp_requests_total{client=...}`), recorder rows, and the response body. |
+| `token` | `str` | `''` | at most one client may have empty token; non-empty tokens unique | Bearer token presented in `Authorization: Bearer <token>`. Empty token = anonymous slot for requests without an `Authorization` header. |
+| `rpm` | `int` | `4` | > 0 | Per-client requests-per-minute cap, enforced on a 60-second sliding window. |
+
+```yaml
+webapp:
+  enabled: true
+  host: 0.0.0.0
+  port: 8090
+  path: /process
+  sinks_enabled: false
+  request_timeout_seconds: 30.0
+  max_concurrent: 64
+  clients:
+    - name: anonymous
+      token: ""
+      rpm: 4
+    - name: tenant-a
+      token: "secret-tenant-a-token"
+      rpm: 60
+```
+
+When every configured client has an empty token, the worker logs a `webapp_unauthenticated_warning` at startup so private-network deployments that should have had a token configured surface in log aggregation.
+
+---
+
 ## Annotated `drakkar.yaml` example
 
 A copy-paste-ready YAML showing **every** field with one-line comments and the matching `DK_*` env-var override sits on its own page: **[Config Reference](config-reference.md)**. Use this page (Configuration) for the deep tables and prose; use the Reference for a quick scan of "what can I change here?"
