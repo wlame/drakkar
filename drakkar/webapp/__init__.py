@@ -6,6 +6,11 @@ is reachable here for advanced integration but intentionally absent from
 ``drakkar.__all__`` — it's a framework-internal lifecycle owner.
 """
 
+from drakkar.webapp.dependencies import (
+    WebappAuthError,
+    WebappError,
+    WebappRateLimitError,
+)
 from drakkar.webapp.models import (
     CacheStats,
     SinkDeliverySummary,
@@ -29,4 +34,7 @@ __all__ = [
     'WebApp',
     'WebReport',
     'WebRequestContext',
+    'WebappAuthError',
+    'WebappError',
+    'WebappRateLimitError',
 ]

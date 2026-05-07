@@ -51,11 +51,16 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from drakkar.config import WebAppConfig
 from drakkar.utils import make_request_id
+from drakkar.webapp.dependencies import (
+    WebappError,
+    make_authenticate,
+    make_rate_limit,
+)
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
@@ -117,11 +122,14 @@ class WebApp:
         # any dispatch.
         self.shutdown_event: threading.Event = threading.Event()
 
-        # Auth + rate-limit dependencies are wired in Task 5. Kept as
-        # placeholders here so the route handler can reference them
-        # without a fragile attribute-presence check.
-        self._authenticate: Any = None
-        self._rate_limit: Any = None
+        # Auth + rate-limit dependencies (Task 5). Built once at
+        # construction time so the route handler can refer to them via
+        # ``Depends(self._authenticate)`` / ``Depends(self._rate_limit)``.
+        # The factories close over ``config`` and over per-client deque
+        # state respectively — a fresh ``WebApp`` instance gets its own
+        # rate-limit counters, which keeps tests independent.
+        self._authenticate = make_authenticate(config)
+        self._rate_limit = make_rate_limit(config)
 
         # Validate at construction time that the handler exposes concrete
         # HTTP request/response models. We do this BEFORE building the
@@ -315,26 +323,105 @@ class WebApp:
             lifespan=lifespan,
         )
 
+        # Single exception handler for the webapp's typed errors. By
+        # registering against the ``WebappError`` base class, FastAPI's
+        # exception-dispatch machinery routes both subclasses
+        # (``WebappAuthError``, ``WebappRateLimitError``) through this
+        # handler. The handler emits ``JSONResponse`` directly with the
+        # carried ``body_dict`` — bypassing the default ``HTTPException``
+        # envelope (``{'detail': ...}``) so the response shape stays flat
+        # as documented in the plan.
+        @app.exception_handler(WebappError)
+        async def _webapp_error_handler(_request: Request, exc: WebappError) -> JSONResponse:
+            # ``content=exc.body_dict`` writes the dict verbatim; pydantic
+            # is not involved because the body has already been built by
+            # the dependency raising the exception.
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=exc.body_dict,
+                headers=exc.headers or {},
+            )
+
         # Single POST route. The handler is a method on ``self`` so it
         # can reach ``self._app.is_ready`` and ``self.shutdown_event``
         # without closing over the whole ``WebApp`` from a free function.
         # Task 6 replaces the 501 stub with a real runner dispatch.
         path = self._config.path
 
+        # Capture the dependency callables in local names so the
+        # ``Depends(...)`` defaults below close over plain functions
+        # instead of bound-method-on-self (which FastAPI cannot
+        # introspect cleanly when the surrounding ``self`` isn't a
+        # frozen dataclass). Same intent as Pydantic's
+        # ``model_construct`` callsites elsewhere in the codebase.
+        authenticate_dep = self._authenticate
+        rate_limit_dep = self._rate_limit
+
+        # The rate-limit dep receives the matched client from the auth
+        # dep. Because ``_rate_limit`` is itself a closure with
+        # ``async def _rate_limit(client: WebClientConfig)`` in a
+        # ``from __future__ import annotations`` module, FastAPI cannot
+        # auto-resolve the ``client`` parameter as a sub-dependency on
+        # ``authenticate_dep`` from the function signature alone. We
+        # bridge them with a tiny outer dep that pulls the matched
+        # client from ``request.state`` (where the auth dep stashes it)
+        # and passes it explicitly into the rate-limit closure. Same
+        # observable behaviour, simpler dependency graph for FastAPI.
+        async def _enforce_rate_limit(request: Request) -> None:
+            client = getattr(request.state, 'client_name', None)
+            # ``client_name`` is the matched client's name; we look it
+            # up in the config to get the rpm-bearing object. The
+            # config's ``clients`` list is short (operator-configured),
+            # so a linear scan is fine.
+            matched = next(
+                (c for c in self._config.clients if c.name == client),
+                None,
+            )
+            if matched is None:
+                # Defensive — auth must have run first; if request.state
+                # has no client_name something is wired wrong upstream.
+                # Treat as auth failure rather than silently admitting.
+                raise WebappError(status_code=401, body_dict={'error': 'unauthorized'})
+            await rate_limit_dep(matched)
+
+        # The route signature uses the legacy ``Depends`` default-value
+        # form because the closure-bound dep callables are local
+        # variables at this scope — ``from __future__ import annotations``
+        # defers annotation evaluation, and FastAPI's ``Annotated[...]``
+        # resolver cannot find local names when it later evaluates the
+        # strings. The default-value form sidesteps that.
+        #
+        # We type ``client`` as ``Any`` (not ``WebClientConfig``) for
+        # the same reason — newer FastAPI versions classify a Pydantic-
+        # typed parameter with a default value as a body field, which
+        # auto-generates a 422 if the body is missing. The runner can
+        # narrow back to ``WebClientConfig`` from the matched config.
         @app.post(path)
-        async def process(request: Request) -> Any:
+        async def process(
+            request: Request,
+
+            # idiom is ``Depends(...)`` in argument defaults; B008 only
+            # applies to plain function calls in defaults, not to FastAPI
+            # marker objects.
+            client: Any = Depends(authenticate_dep),  # noqa: B008
+            _: Any = Depends(_enforce_rate_limit),  # noqa: B008
+        ) -> Any:
             # The ``Request`` type-hint tells FastAPI "give me the raw
             # ASGI request, do not parse the body". Body parsing into
             # ``HttpRequestT`` happens inside the runner introduced in
             # Task 6 — we deliberately skip it here so the readiness
-            # gates fire on a body-shape-agnostic path. The parameter
-            # is unused in this stub but kept so the route signature
-            # already matches the Task 5 / Task 6 wiring.
+            # gates fire on a body-shape-agnostic path.
             #
-            # Ahead of any dispatch we evaluate the readiness gates.
-            # Both branches return the same shape (status / error /
-            # request_id / hint) so client code can switch on the
-            # status field without per-branch parsing.
+            # The auth and rate-limit dependencies have already run by
+            # the time we get here: a 401 or 429 short-circuits via
+            # ``WebappError`` and the registered exception handler.
+            # ``client`` is the matched ``WebClientConfig``; ``_`` is
+            # the rate-limit dependency's None return (kept in the
+            # signature so FastAPI knows to invoke it).
+            #
+            # Readiness gates fire AFTER auth+rate-limit so an
+            # unauthenticated burst still returns 401 (not 503) — that
+            # keeps audit trails accurate during deploys.
             request_id = make_request_id('req')
             if self.shutdown_event.is_set():
                 return JSONResponse(
@@ -358,13 +445,16 @@ class WebApp:
                 )
             # Stub — Task 6 wires the real runner here. We return 501
             # (Not Implemented) so a misrouted production request fails
-            # loudly rather than silently 200-ing with no result.
+            # loudly rather than silently 200-ing with no result. The
+            # ``client`` parameter is unused at this stub but the route
+            # signature already matches the Task 6 wiring.
             return JSONResponse(
                 status_code=501,
                 content={
                     'status': 'not_implemented',
                     'error': 'webapp runner not yet wired',
                     'request_id': request_id,
+                    'client': client.name,
                 },
             )
 
