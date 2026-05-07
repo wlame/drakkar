@@ -24,6 +24,19 @@
     </div>
 </div>
 
+<!-- Origin filter: radio buttons -->
+<div class="mb-4">
+    <label class="block text-xs text-gray-400 mb-2">Origin</label>
+    <div class="flex flex-wrap gap-3">
+        {% for opt in ['all', 'kafka', 'http'] %}
+        <label class="flex items-center gap-1 text-sm cursor-pointer">
+            <input type="radio" name="origin-filter" class="origin-rb" value="{{ opt }}" {% if (filter_origin or 'all') == opt %}checked{% endif %} onchange="applyFilters()">
+            <span class="{% if opt == 'http' %}text-purple-600{% elif opt == 'kafka' %}text-teal-600{% else %}text-gray-500{% endif %}">{{ opt }}</span>
+        </label>
+        {% endfor %}
+    </div>
+</div>
+
 <div class="flex gap-3 mb-4">
     <button onclick="applyFilters()" class="bg-teal-600 hover:bg-teal-500 text-white px-4 py-1.5 rounded text-sm">Apply</button>
     <button onclick="resetAll()" class="bg-cream-200 hover:bg-cream-300 px-4 py-1.5 rounded text-sm text-ink-700">Reset</button>

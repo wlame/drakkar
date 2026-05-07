@@ -1,6 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Live — Drakkar Debug{% endblock %}
-{% block head %}<style>#tl-viewport::-webkit-scrollbar { display: none; }</style>{% endblock %}
+{% block head %}<style>
+#tl-viewport::-webkit-scrollbar { display: none; }
+/* HTTP-origin task styling — applied by ensureBar()/createRow() to give
+   webapp-pipeline tasks a distinct purple background so they stand out
+   from the partition-id-derived palette used for Kafka tasks. */
+.task--http { background: #9C27B0 !important; border-color: #6a1b9a !important; }
+</style>{% endblock %}
 
 {% block content %}
 <div class="flex items-center gap-3 mb-1">
@@ -380,6 +386,19 @@ function scrollToEnd() { tlFollowing = true; }
 function fmtTime(ts) { return new Date(ts * 1000).toISOString().substring(11, 19); }
 function fmtTimeMs(ts) { return ts ? new Date(ts * 1000).toISOString().substring(11, 23) : ''; }
 function barColor(s) { return s === 'completed' ? '#34d399' : s === 'failed' ? '#f87171' : '#fbbf24'; }
+// Render the per-task identifier shown next to bars and in popups. Kafka
+// tasks use ``p<partition>:o<offset>`` (familiar shape from the history
+// page); HTTP tasks substitute ``<client>:<request_id[:8]>`` so the
+// visual prefix mirrors the recorder filter operators search by.
+function taskIdent(t) {
+    if (!t) return '';
+    if (t.origin === 'http') {
+        var rid = t.request_id ? String(t.request_id).slice(0, 8) : '-';
+        return (t.client_name || '-') + ':' + rid;
+    }
+    var off = (t.source_offsets && t.source_offsets.length) ? t.source_offsets[0] : '-';
+    return 'p' + (t.partition != null ? t.partition : '-') + ':o' + off;
+}
 function statusCss(s) { return s === 'completed' ? 'color:#059669' : s === 'failed' ? 'color:#dc2626' : 'color:#d97706'; }
 function durColor(d) { return d > 1 ? '#dc2626' : d > 0.1 ? '#d97706' : '#059669'; }
 function baseTaskId(tid) { return tid ? tid.split(':r')[0] : tid; }
@@ -393,11 +412,21 @@ function showTaskDetail(t) {
     var el = document.getElementById('tl-hover');
     el.textContent = '';
     var dur = t.duration ? t.duration.toFixed(3) + 's' : 'running';
+    // ``Ident`` is partition:offset for Kafka tasks, client:request_id for
+    // HTTP tasks — gives operators one column to scan regardless of origin.
     var line1 = [
-        {l:'Task', v:t.task_id}, {l:'Slot', v:t.slot != null ? '#'+t.slot : '-'}, {l:'PID', v:t.pid||'-'}, {l:'P', v:t.partition},
-        {l:'Status', v:t.status, s:statusCss(t.status)}, {l:'Duration', v:dur},
-        {l:'Start', v:fmtTimeMs(t.start_ts)}, {l:'End', v:t.end_ts ? fmtTimeMs(t.end_ts) : 'running'},
+        {l:'Task', v:t.task_id}, {l:'Slot', v:t.slot != null ? '#'+t.slot : '-'}, {l:'PID', v:t.pid||'-'},
+        {l:'Ident', v: taskIdent(t)},
     ];
+    if (t.origin === 'http') {
+        line1.push({l:'Origin', v:'http', s:'color:#9C27B0;'});
+    } else {
+        line1.push({l:'P', v:t.partition});
+    }
+    line1.push({l:'Status', v:t.status, s:statusCss(t.status)});
+    line1.push({l:'Duration', v:dur});
+    line1.push({l:'Start', v:fmtTimeMs(t.start_ts)});
+    line1.push({l:'End', v:t.end_ts ? fmtTimeMs(t.end_ts) : 'running'});
     for (var i = 0; i < line1.length; i++) {
         var p = line1[i];
         var lbl = document.createElement('span');
@@ -556,8 +585,16 @@ function ensureBar(task) {
         taskBars[id] = entry;
     }
 
-    // update color (may change on completion/failure/retry)
+    // update color (may change on completion/failure/retry). HTTP-origin
+    // tasks get a distinct purple via the ``.task--http`` class — added
+    // here so the class survives the inline backgroundColor write below
+    // (CSS ``!important`` wins over the inline style).
     entry.el.style.backgroundColor = barColor(task.status);
+    if (task.origin === 'http') {
+        entry.el.classList.add('task--http');
+    } else {
+        entry.el.classList.remove('task--http');
+    }
     entry.task = task;
 }
 

@@ -1236,6 +1236,7 @@ class EventRecorder:
         partition: int | None = None,
         event_type: str | None = None,
         since: float | None = None,
+        origin: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
@@ -1257,6 +1258,12 @@ class EventRecorder:
         if since:
             conditions.append('ts >= ?')
             params.append(since)
+        # ``origin`` filter (Task 9, webapp pipeline plan) — debug UI uses
+        # it to split the history page between Kafka-origin tasks and
+        # HTTP-origin webapp requests. Indexed via ``idx_events_origin``.
+        if origin:
+            conditions.append('origin = ?')
+            params.append(origin)
         where = f'WHERE {" AND ".join(conditions)}' if conditions else ''
         query = f'SELECT * FROM events {where} ORDER BY id DESC LIMIT ? OFFSET ?'
         params.extend([limit, offset])

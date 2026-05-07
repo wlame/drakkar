@@ -6,13 +6,20 @@
 <div class="flex items-center gap-4 mb-6">
     <h1 class="text-2xl font-bold">Task Detail</h1>
     <span class="bg-cream-200 px-3 py-1 rounded font-mono text-sm">{{ task_id }}</span>
+    {% if origin == 'http' %}
+    <span class="bg-purple-100 border border-purple-300 text-purple-800 px-3 py-1 rounded font-mono text-xs">HTTP</span>
+    {% if client_name %}
+    <span class="text-sm text-gray-500">&larr; client {{ client_name }}</span>
+    {% endif %}
+    {% else %}
     {% if partition is not none %}
     <a href="/partitions/{{ partition }}" class="text-sm text-gray-500 hover:text-ink-900">&larr; partition {{ partition }}</a>
+    {% endif %}
     {% endif %}
 </div>
 
 <!-- Summary card -->
-<div class="bg-white rounded-lg border border-cream-200 p-5 mb-6">
+<div class="bg-white rounded-lg border {% if origin == 'http' %}border-purple-200{% else %}border-cream-200{% endif %} p-5 mb-6">
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div>
             <div class="text-xs text-gray-500 mb-1">Status</div>
@@ -21,12 +28,23 @@
                 {% if completed %}completed{% elif failed %}failed{% elif started %}running{% else %}unknown{% endif %}
             </div>
         </div>
+        {% if origin == 'http' %}
+        <div>
+            <div class="text-xs text-gray-500 mb-1">Client</div>
+            <div class="text-lg font-mono text-purple-700">{{ client_name or '-' }}</div>
+        </div>
+        <div>
+            <div class="text-xs text-gray-500 mb-1">Request ID</div>
+            <div class="text-sm font-mono text-purple-700 break-all">{{ request_id or '-' }}</div>
+        </div>
+        {% else %}
         <div>
             <div class="text-xs text-gray-500 mb-1">Partition</div>
             <div class="text-lg font-mono">
                 {% if partition is not none %}<a href="/partitions/{{ partition }}" class="text-teal-600 hover:underline">{{ partition }}</a>{% else %}-{% endif %}
             </div>
         </div>
+        {% endif %}
         <div>
             <div class="text-xs text-gray-500 mb-1">Duration</div>
             <div class="text-lg font-mono">{% if duration is not none %}{{ "%.3f"|format(duration) }}s{% else %}-{% endif %}</div>
@@ -121,6 +139,29 @@
         <pre class="text-sm font-mono text-gray-500 whitespace-pre-wrap break-all select-all">{{ cli_line }}</pre>
     </div>
 </div>
+{% endif %}
+
+<!-- HTTP request body / response body (origin=http) -->
+{% if origin == 'http' %}
+<div class="mb-6">
+    <h2 class="text-lg font-semibold mb-2">HTTP Request Body</h2>
+    {% if webapp_request_body is mapping and webapp_request_body.recorded == False %}
+    <div class="bg-cream-50 border border-cream-200 rounded p-3 text-xs text-gray-500">
+        request body not recorded ({{ webapp_request_body.body_bytes }} bytes seen on the wire)
+    </div>
+    {% elif webapp_request_body %}
+    <pre class="bg-cream-50 border border-cream-200 rounded p-3 text-xs font-mono overflow-x-auto max-h-64 text-gray-600">{{ webapp_request_body }}</pre>
+    {% else %}
+    <div class="bg-cream-50 border border-cream-200 rounded p-3 text-xs text-gray-500">request body not recorded</div>
+    {% endif %}
+</div>
+
+{% if webapp_response_body %}
+<div class="mb-6">
+    <h2 class="text-lg font-semibold mb-2">HTTP Response Body</h2>
+    <pre class="bg-cream-50 border border-cream-200 rounded p-3 text-xs font-mono overflow-x-auto max-h-64 text-gray-600">{{ webapp_response_body }}</pre>
+</div>
+{% endif %}
 {% endif %}
 
 <!-- Stdout/stderr -->

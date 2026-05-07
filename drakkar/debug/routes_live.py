@@ -255,6 +255,14 @@ def create_live_router(deps: DebugDeps) -> APIRouter:
                     'slot': slot,
                     'labels': labels,
                     'env': task_env,
+                    # Webapp-pipeline columns: ``origin`` defaults to
+                    # ``'kafka'`` at the schema level, so the absence of
+                    # the column on older recorder rows still yields a
+                    # sensible value here. ``client_name`` /
+                    # ``request_id`` are NULL for Kafka tasks.
+                    'origin': e.get('origin') or 'kafka',
+                    'client_name': e.get('client_name'),
+                    'request_id': e.get('request_id'),
                 }
 
             elif e['event'] in ('task_completed', 'task_failed'):
@@ -306,7 +314,8 @@ def create_live_router(deps: DebugDeps) -> APIRouter:
         placeholders = ','.join(['?'] * len(task_ids))
         query = f"""
             SELECT task_id, event, ts, duration, partition, metadata,
-                   exit_code, pid, args, labels
+                   exit_code, pid, args, labels,
+                   origin, client_name, request_id
             FROM events
             WHERE task_id IN ({placeholders})
               AND event IN ('task_started', 'task_completed', 'task_failed')
@@ -343,6 +352,13 @@ def create_live_router(deps: DebugDeps) -> APIRouter:
                     'args': None,
                     'labels': None,
                     'exit_code': None,
+                    # Webapp-pipeline columns. The first event row to
+                    # populate them wins (origin is NOT NULL with default
+                    # 'kafka', so it's always set; client_name /
+                    # request_id are NULL for Kafka tasks).
+                    'origin': 'kafka',
+                    'client_name': None,
+                    'request_id': None,
                 },
             )
             if e['event'] == 'task_started':
@@ -354,6 +370,16 @@ def create_live_router(deps: DebugDeps) -> APIRouter:
                 t['partition'] = e.get('partition')
                 t['pid'] = e.get('pid')
                 t['args'] = e.get('args')
+                # Origin / client_name / request_id propagate from the
+                # task_started row (every recorder write site populates
+                # them). Last write wins on retries within the batch,
+                # matching the existing convention for ``pid`` etc.
+                if e.get('origin'):
+                    t['origin'] = e['origin']
+                if e.get('client_name'):
+                    t['client_name'] = e['client_name']
+                if e.get('request_id'):
+                    t['request_id'] = e['request_id']
                 if e.get('metadata'):
                     try:
                         meta = json.loads(e['metadata'])

@@ -47,6 +47,71 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
     drakkar_app = deps.drakkar_app
     templates = deps.templates
 
+    async def _build_webapp_tile() -> dict | None:
+        """Compose the dashboard "WebApp" tile, or ``None`` when webapp is off.
+
+        Reads:
+        * ``drakkar_webapp_inflight`` — current in-flight request count from
+          the prometheus Gauge (via the private ``_value.get()`` accessor that
+          the recorder tests already use).
+        * ``webapp.clients`` config — name + per-client rpm cap. The webapp's
+          rate-limit dependency persists no live counter, so the tile only
+          surfaces the configured cap (operators alert on the rpm metric for
+          actual rates).
+        * Recorder events table — counts ``webapp_request_completed`` (success)
+          and ``webapp_request_timeout`` / ``webapp_request_dropped_after_timeout``
+          (error) rows in the last 60 seconds. The DB query goes through the
+          shared ``flush_and_select`` helper so the reader connection stays
+          on the main loop.
+        """
+        webapp_cfg = drakkar_app._config.webapp
+        if not webapp_cfg.enabled:
+            return None
+        # Read the gauge directly. ``Gauge._value.get()`` is the single-process
+        # accessor used by drakkar's existing recorder tests; we keep the same
+        # convention here so debug-UI access stays consistent with metric tests.
+        from drakkar.metrics import webapp_inflight
+
+        try:
+            inflight_count = int(webapp_inflight._value.get())
+        except Exception:
+            inflight_count = 0
+
+        success_60s = 0
+        error_60s = 0
+        since = time.time() - 60.0
+        success_query = "SELECT COUNT(*) FROM events WHERE event = 'webapp_request_completed' AND ts >= ?"
+        error_query = (
+            'SELECT COUNT(*) FROM events '
+            "WHERE event IN ('webapp_request_timeout', 'webapp_request_dropped_after_timeout') "
+            'AND ts >= ?'
+        )
+        try:
+            success_result = await deps.flush_and_select(success_query, [since])
+            if success_result is not None:
+                _cols, rows = success_result
+                if rows:
+                    success_60s = int(rows[0][0] or 0)
+            error_result = await deps.flush_and_select(error_query, [since])
+            if error_result is not None:
+                _cols, rows = error_result
+                if rows:
+                    error_60s = int(rows[0][0] or 0)
+        except Exception:
+            # Recorder may not be ready in startup-edge windows; surface
+            # the tile with zeros rather than 500ing the dashboard.
+            pass
+
+        return {
+            'inflight_count': inflight_count,
+            'clients': [{'name': c.name, 'rpm_limit': c.rpm} for c in webapp_cfg.clients],
+            'success_60s': success_60s,
+            'error_60s': error_60s,
+            'host': webapp_cfg.host,
+            'port': webapp_cfg.port,
+            'path': webapp_cfg.path,
+        }
+
     # --- Kubernetes probes (unauthenticated by design) ---
     #
     # ``/healthz`` and ``/readyz`` intentionally skip the auth dependency:
@@ -119,6 +184,7 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
                     url = url.replace('{' + key + '}', val)
                 custom_links.append({'name': link.get('name', url), 'url': url})
 
+        webapp_tile = await _build_webapp_tile()
         return templates.TemplateResponse(
             request,
             'dashboard.html',
@@ -133,6 +199,7 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
                 'total_lag': total_lag,
                 'prom': deps.build_prometheus_links(),
                 'custom_links': custom_links,
+                'webapp_tile': webapp_tile,
             },
         )
 
@@ -153,12 +220,14 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
             s['committed_offset'] = lag.get('committed', s.get('last_committed_offset'))
             s['high_watermark'] = lag.get('high_watermark')
             s['lag'] = lag.get('lag', 0)
+        webapp_tile = await _build_webapp_tile()
         return templates.TemplateResponse(
             request,
             'partitions.html',
             {
                 'worker_id': drakkar_app._worker_id,
                 'summary': summary,
+                'webapp_tile': webapp_tile,
             },
         )
 
@@ -224,6 +293,52 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
             except (json.JSONDecodeError, TypeError):
                 pass
         pid = (completed or failed or {}).get('pid') or (started or {}).get('pid')
+
+        # ``origin`` is part of every event row (column added in Task 8 of
+        # the webapp pipeline plan); HTTP-origin tasks carry the
+        # ``client_name`` / ``request_id`` columns too. The template uses
+        # these to swap the Partition/Offset header for Client/Request ID.
+        origin_value = 'kafka'
+        client_name = None
+        request_id = None
+        for ev in events:
+            ev_origin = ev.get('origin')
+            if ev_origin:
+                origin_value = ev_origin
+            if ev.get('client_name'):
+                client_name = ev['client_name']
+            if ev.get('request_id'):
+                request_id = ev['request_id']
+        # Pull the truncated webapp-request body (≤ 4KB) and the final
+        # response, when the recorder captured them. Both come from the
+        # ``webapp_request_received`` / ``webapp_request_completed`` rows'
+        # metadata. ``body_bytes`` is the original size; when the recorder
+        # only captured the size (current behavior — see
+        # ``EventRecorder._compute_body_bytes``) we surface the size and a
+        # "request body not recorded" notice via a ``None`` payload.
+        webapp_request_body = None
+        webapp_response_body = None
+        if origin_value == 'http':
+            for ev in events:
+                if ev['event'] == 'webapp_request_received' and ev.get('metadata'):
+                    try:
+                        body_meta = json.loads(ev['metadata'])
+                        webapp_request_body = body_meta.get('body')
+                        if webapp_request_body is None and body_meta.get('body_bytes') is not None:
+                            # Recorder logged the size but not the payload.
+                            webapp_request_body = {
+                                'body_bytes': body_meta['body_bytes'],
+                                'recorded': False,
+                            }
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                elif ev['event'] == 'webapp_request_completed' and ev.get('metadata'):
+                    try:
+                        resp_meta = json.loads(ev['metadata'])
+                        webapp_response_body = resp_meta.get('response')
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
         return templates.TemplateResponse(
             request,
             'task_detail.html',
@@ -242,6 +357,11 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
                 'partition': started['partition'] if started else None,
                 'pid': pid,
                 'binary_path': drakkar_app._config.executor.binary_path,
+                'origin': origin_value,
+                'client_name': client_name,
+                'request_id': request_id,
+                'webapp_request_body': webapp_request_body,
+                'webapp_response_body': webapp_response_body,
             },
         )
 
@@ -250,15 +370,21 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
         request: Request,
         partition: str | None = Query(default=None),
         event_type: str | None = Query(default=None),
+        origin: str = Query(default='all'),
         page: int = Query(default=0, ge=0),
     ):
         part_int = int(partition) if partition and partition.strip() else None
         evt_type = event_type if event_type and event_type.strip() else None
+        # ``origin`` is a small enum (kafka/http/all). Default ``all`` keeps
+        # historical behavior; any other value collapses to ``all`` so a
+        # malformed query string can't 500 the page.
+        origin_filter = origin if origin in ('kafka', 'http') else 'all'
         limit = 100
         events = await dispatch_to_loop(
             recorder.get_events(
                 partition=part_int,
                 event_type=evt_type,
+                origin=origin_filter if origin_filter != 'all' else None,
                 limit=limit,
                 offset=page * limit,
             ),
@@ -274,6 +400,7 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
                 'has_next': len(events) == limit,
                 'filter_partition': part_int,
                 'filter_event_type': evt_type,
+                'filter_origin': origin_filter,
                 'partitions': sorted(drakkar_app.processors.keys()),
                 'max_ui_rows': config.max_ui_rows,
             },
@@ -326,17 +453,22 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
                 total_lag = await consumer.get_total_lag(partition_ids)
             except Exception:
                 pass
-        return JSONResponse(
-            {
-                'uptime': time.monotonic() - drakkar_app._start_time,
-                'stats': stats,
-                'partition_count': len(processors),
-                'partitions': partition_ids,
-                'pool_active': pool.active_count if pool else 0,
-                'pool_max': pool.max_executors if pool else 0,
-                'total_lag': total_lag,
-            }
-        )
+        webapp_tile = await _build_webapp_tile()
+        payload = {
+            'uptime': time.monotonic() - drakkar_app._start_time,
+            'stats': stats,
+            'partition_count': len(processors),
+            'partitions': partition_ids,
+            'pool_active': pool.active_count if pool else 0,
+            'pool_max': pool.max_executors if pool else 0,
+            'total_lag': total_lag,
+        }
+        # Webapp tile is only included when ``webapp.enabled``. Keeping the
+        # key absent (rather than ``None``) lets the JS dashboard treat its
+        # presence as the feature flag without a separate boolean.
+        if webapp_tile is not None:
+            payload['webapp_tile'] = webapp_tile
+        return JSONResponse(payload)
 
     @router.get('/api/sinks')
     async def api_sinks():
