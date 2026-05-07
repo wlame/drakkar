@@ -609,6 +609,125 @@ class CacheConfig(BaseModel):
         return self
 
 
+# --- Webapp config ---
+
+
+class WebClientConfig(BaseModel):
+    """Configuration for a single webapp client (tenant).
+
+    Each client has a name (used in metrics labels and recorder rows), an
+    optional bearer token (empty string = anonymous matching for requests
+    without an Authorization header), and a per-client rpm cap enforced by
+    a sliding-window rate limiter on the webapp side.
+
+    Validation rules at the WebAppConfig level:
+    - At most one client may have an empty token (anonymous slot).
+    - All non-empty tokens must be unique across clients.
+    - rpm must be > 0 for every client.
+    """
+
+    name: str
+    token: str = ''
+    rpm: int = 4
+
+    @field_validator('name')
+    @classmethod
+    def _validate_name_non_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError('webapp client name must be a non-empty string')
+        return v
+
+
+class WebAppConfig(BaseModel):
+    """Configuration for the optional synchronous-HTTP webapp pipeline.
+
+    When ``enabled=true``, Drakkar starts a FastAPI server on its own thread
+    accepting POST requests and routing them through the same handler
+    pipeline as Kafka messages. Defaults are tuned for a small dev
+    deployment with one anonymous client; multi-tenant production
+    deployments should configure named clients with non-empty tokens.
+
+    Per-request flow:
+    - Auth (token match) → rate-limit (per-client rpm) → dispatch to main
+      loop → user's ``arrange_http_request`` → executor pool → user's
+      ``on_http_request_complete`` → JSON response.
+
+    See ``docs/webapp.md`` (added in Task 10) for the full feature guide.
+    """
+
+    enabled: bool = False
+    host: str = '0.0.0.0'
+    port: int = 8090
+    path: str = '/process'
+    sinks_enabled: bool = False
+    request_timeout_seconds: float = 30.0
+    max_concurrent: int = 64
+    clients: list[WebClientConfig] = Field(
+        default_factory=lambda: [WebClientConfig(name='anonymous', token='', rpm=4)],
+        description=(
+            'List of webapp clients (tenants). Defaults to a single '
+            'anonymous client with empty token and rpm=4 so the webapp '
+            'works out of the box for development. Production deployments '
+            'should configure named clients with non-empty tokens.'
+        ),
+    )
+
+    @model_validator(mode='after')
+    def _validate_webapp(self) -> 'WebAppConfig':
+        """Enforce webapp config invariants.
+
+        These rules are checked at config load time so misconfigurations
+        surface before any request lands. Each error message names the
+        offending field/client so operators can find and fix the problem.
+        """
+        # path must start with '/' and not be just '/' (need a real route).
+        if not self.path.startswith('/') or len(self.path) <= 1:
+            raise ValueError(f"webapp.path must start with '/' and have a non-empty route, got {self.path!r}")
+        # request_timeout_seconds > 0 — a zero/negative timeout would
+        # cancel every request before it had a chance to start.
+        if self.request_timeout_seconds <= 0:
+            raise ValueError(f'webapp.request_timeout_seconds must be > 0, got {self.request_timeout_seconds}')
+        # max_concurrent > 0 — semaphore with zero capacity would block all
+        # requests indefinitely.
+        if self.max_concurrent <= 0:
+            raise ValueError(f'webapp.max_concurrent must be > 0, got {self.max_concurrent}')
+        # At least one client. The default factory ensures this for an
+        # omitted ``clients`` block, but explicit ``clients: []`` in YAML
+        # would otherwise silently give us a webapp that rejects every
+        # request — fail loud instead.
+        if len(self.clients) == 0:
+            raise ValueError('webapp.clients must contain at least one client')
+        # Per-client rpm > 0. Zero rpm means "always rate-limit", which
+        # is almost certainly a typo.
+        for client in self.clients:
+            if client.rpm <= 0:
+                raise ValueError(f'webapp client {client.name!r} has rpm={client.rpm}; rpm must be > 0')
+        # At most one client with empty token (the anonymous slot).
+        # Multiple empty-token clients can never be distinguished at the
+        # auth layer, so we reject the ambiguity at config time.
+        empty_token_clients = [c for c in self.clients if c.token == '']
+        if len(empty_token_clients) > 1:
+            names = ', '.join(repr(c.name) for c in empty_token_clients)
+            raise ValueError(
+                f'at most one webapp client may have an empty token (anonymous); '
+                f'got {len(empty_token_clients)} empty-token clients: {names}'
+            )
+        # All non-empty tokens unique. Two clients sharing a token would
+        # collide at the auth layer; the matched client_name would be
+        # nondeterministic.
+        seen_tokens: dict[str, str] = {}
+        for client in self.clients:
+            if client.token == '':
+                continue
+            if client.token in seen_tokens:
+                raise ValueError(
+                    f'webapp clients {seen_tokens[client.token]!r} and {client.name!r} '
+                    f'share the same token; tokens must be unique across clients'
+                )
+            seen_tokens[client.token] = client.name
+        return self
+
+
 # --- Root config ---
 
 
@@ -644,6 +763,7 @@ class DrakkarConfig(BaseSettings):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
+    webapp: WebAppConfig = Field(default_factory=WebAppConfig)
 
     def config_summary(self, worker_id: str = '', cluster_name: str = '') -> str:
         """One-line human-readable config summary for startup logging and debug UI.
@@ -736,15 +856,64 @@ def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
         # into nested structure, and deep-merge on top of YAML.
         env_overrides = _parse_env_overrides('DK_', '__')
         merged = _deep_merge(yaml_data, env_overrides)
+        # Top-level result is always a dict (the env-var prefix is fixed
+        # and never numeric); the assert satisfies static typing without a
+        # runtime branch.
+        assert isinstance(merged, dict)
+        merged = _apply_list_field_defaults(merged)
         return DrakkarConfig(**merged)
 
     env_overrides = _parse_env_overrides('DK_', '__')
+    env_overrides = _apply_list_field_defaults(env_overrides)
     return DrakkarConfig(**env_overrides)
 
 
+def _apply_list_field_defaults(merged: dict) -> dict:
+    """Ensure list-of-objects env-var overrides do not erase default entries.
+
+    When env-vars target individual list elements (e.g.
+    ``DK_WEBAPP__CLIENTS__0__RPM=10``), the parser produces a partial list
+    like ``[{'rpm': '10'}]`` with no other fields. If the YAML did not
+    supply ``webapp.clients`` at all, Pydantic would now see this partial
+    list as the entire value and reject it for missing required fields
+    (``name``). To preserve the documented behaviour — env-vars override
+    individual fields without forcing operators to repeat the defaults —
+    we deep-merge the default ``WebAppConfig`` clients list under the
+    partial override before construction.
+
+    This is intentionally narrow (only ``webapp.clients`` for now). If
+    another list-of-objects field needs the same treatment later, add it
+    here with a small helper rather than introducing a generic mechanism.
+    """
+    webapp = merged.get('webapp')
+    if not isinstance(webapp, dict):
+        return merged
+    clients_override = webapp.get('clients')
+    if not isinstance(clients_override, list):
+        return merged
+    # Build the default clients list from the WebAppConfig default factory
+    # and overlay the env-var override on top. We do this by dumping a
+    # fresh WebAppConfig() to dict form so we are guaranteed to track any
+    # future changes to the default list.
+    default_clients = [c.model_dump() for c in WebAppConfig().clients]
+    merged_clients = _deep_merge(default_clients, clients_override)
+    new_webapp = dict(webapp)
+    new_webapp['clients'] = merged_clients
+    new_merged = dict(merged)
+    new_merged['webapp'] = new_webapp
+    return new_merged
+
+
 def _parse_env_overrides(prefix: str, delimiter: str) -> dict:
-    """Extract env vars with prefix, split by delimiter into nested dict."""
-    result: dict = {}
+    """Extract env vars with prefix, split by delimiter into nested dict.
+
+    Numeric path segments are detected and the surrounding dict is
+    converted to a list (e.g. ``DK_WEBAPP__CLIENTS__0__RPM=10`` becomes
+    ``{'webapp': {'clients': [{'rpm': '10'}]}}``). This lets list-of-objects
+    config fields (like ``webapp.clients``) be overridden by env vars in
+    the same nested-delimiter style as scalar fields.
+    """
+    result: dict[str, Any] = {}
     for key, value in os.environ.items():
         if not key.startswith(prefix):
             continue
@@ -756,15 +925,64 @@ def _parse_env_overrides(prefix: str, delimiter: str) -> dict:
         for part in parts[:-1]:
             d = d.setdefault(part, {})
         d[parts[-1]] = value
-    return result
+    # Convert numeric-keyed nested dicts to lists. The top-level result
+    # is always a dict (top-level prefix segments are never numeric), so
+    # the cast is safe.
+    converted_result = _numeric_dicts_to_lists(result)
+    assert isinstance(converted_result, dict)
+    return converted_result
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
-    """Deep-merge override on top of base. Override wins for leaf values."""
-    result = dict(base)
-    for key, val in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
-            result[key] = _deep_merge(result[key], val)
-        else:
-            result[key] = val
-    return result
+def _numeric_dicts_to_lists(node: Any) -> Any:
+    """Recursively convert dicts with all-numeric string keys to lists.
+
+    A dict like ``{'0': {...}, '2': {...}}`` represents a sparse list with
+    indices 0 and 2. We materialise it as ``[{...}, {}, {...}]`` (filling
+    gaps with empty dicts) so Pydantic can validate the surrounding model
+    and so ``_deep_merge`` can later overlay it onto a YAML-supplied list
+    by index.
+    """
+    if isinstance(node, dict):
+        # Recurse into values first so nested numeric-keyed dicts are
+        # converted before we decide whether to convert the parent.
+        converted: dict[str, Any] = {k: _numeric_dicts_to_lists(v) for k, v in node.items()}
+        if converted and all(isinstance(k, str) and k.isdigit() for k in converted):
+            max_index = max(int(k) for k in converted)
+            result_list: list[Any] = [{} for _ in range(max_index + 1)]
+            for k, v in converted.items():
+                result_list[int(k)] = v
+            return result_list
+        return converted
+    return node
+
+
+def _deep_merge(base: Any, override: Any) -> Any:
+    """Deep-merge override on top of base. Override wins for leaf values.
+
+    When both sides are lists, merge element-by-element by index: the
+    override's i-th element overrides base's i-th element (recursively
+    if both are dicts), and any extra base elements past the override's
+    length are preserved. This supports the env-var override pattern
+    where ``DK_WEBAPP__CLIENTS__0__RPM=10`` should change only the first
+    client's rpm without dropping the rest of the clients defined in YAML.
+    """
+    if isinstance(base, dict) and isinstance(override, dict):
+        result_dict: dict[Any, Any] = dict(base)
+        for key, val in override.items():
+            if key in result_dict:
+                result_dict[key] = _deep_merge(result_dict[key], val)
+            else:
+                result_dict[key] = val
+        return result_dict
+    if isinstance(base, list) and isinstance(override, list):
+        merged_list: list[Any] = []
+        for i in range(max(len(base), len(override))):
+            if i < len(base) and i < len(override):
+                merged_list.append(_deep_merge(base[i], override[i]))
+            elif i < len(override):
+                merged_list.append(override[i])
+            else:
+                merged_list.append(base[i])
+        return merged_list
+    # Leaf or type mismatch: override wins.
+    return override

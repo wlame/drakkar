@@ -20,6 +20,8 @@ from drakkar.config import (
     PostgresSinkConfig,
     RedisSinkConfig,
     SinksConfig,
+    WebAppConfig,
+    WebClientConfig,
     load_config,
 )
 
@@ -441,3 +443,248 @@ def test_deep_merge_recursive():
     override = {'a': {'c': 99, 'e': 5}}
     result = _deep_merge(base, override)
     assert result == {'a': {'b': 1, 'c': 99, 'e': 5}, 'd': 3}
+
+
+# --- WebClientConfig ---
+
+
+def test_web_client_config_defaults():
+    cfg = WebClientConfig(name='alice')
+    assert cfg.name == 'alice'
+    assert cfg.token == ''
+    assert cfg.rpm == 4
+
+
+def test_web_client_config_custom_values():
+    cfg = WebClientConfig(name='tenant-a', token='secret-token', rpm=60)
+    assert cfg.name == 'tenant-a'
+    assert cfg.token == 'secret-token'
+    assert cfg.rpm == 60
+
+
+def test_web_client_config_rejects_empty_name():
+    with pytest.raises(ValidationError) as exc_info:
+        WebClientConfig(name='')
+    assert 'non-empty' in str(exc_info.value)
+
+
+def test_web_client_config_rejects_whitespace_only_name():
+    with pytest.raises(ValidationError):
+        WebClientConfig(name='   ')
+
+
+# --- WebAppConfig defaults ---
+
+
+def test_webapp_config_defaults():
+    cfg = WebAppConfig()
+    assert cfg.enabled is False
+    assert cfg.host == '0.0.0.0'
+    assert cfg.port == 8090
+    assert cfg.path == '/process'
+    assert cfg.sinks_enabled is False
+    assert cfg.request_timeout_seconds == 30.0
+    assert cfg.max_concurrent == 64
+    assert len(cfg.clients) == 1
+    assert cfg.clients[0].name == 'anonymous'
+    assert cfg.clients[0].token == ''
+    assert cfg.clients[0].rpm == 4
+
+
+def test_webapp_config_custom_values():
+    cfg = WebAppConfig(
+        enabled=True,
+        host='127.0.0.1',
+        port=9999,
+        path='/api/process',
+        sinks_enabled=True,
+        request_timeout_seconds=10.5,
+        max_concurrent=32,
+        clients=[
+            WebClientConfig(name='anonymous', token='', rpm=4),
+            WebClientConfig(name='tenant-a', token='token-a', rpm=60),
+        ],
+    )
+    assert cfg.enabled is True
+    assert cfg.port == 9999
+    assert cfg.path == '/api/process'
+    assert cfg.sinks_enabled is True
+    assert len(cfg.clients) == 2
+
+
+# --- WebAppConfig validation rules ---
+
+
+def test_webapp_config_rejects_two_empty_token_clients():
+    with pytest.raises(ValidationError) as exc_info:
+        WebAppConfig(
+            clients=[
+                WebClientConfig(name='one', token='', rpm=4),
+                WebClientConfig(name='two', token='', rpm=4),
+            ],
+        )
+    msg = str(exc_info.value)
+    assert 'empty token' in msg
+    assert "'one'" in msg
+    assert "'two'" in msg
+
+
+def test_webapp_config_rejects_duplicate_non_empty_tokens():
+    with pytest.raises(ValidationError) as exc_info:
+        WebAppConfig(
+            clients=[
+                WebClientConfig(name='a', token='shared', rpm=4),
+                WebClientConfig(name='b', token='shared', rpm=4),
+            ],
+        )
+    msg = str(exc_info.value)
+    assert 'unique' in msg
+    assert "'a'" in msg
+    assert "'b'" in msg
+
+
+def test_webapp_config_rejects_zero_rpm_client():
+    with pytest.raises(ValidationError) as exc_info:
+        WebAppConfig(
+            clients=[WebClientConfig(name='zero-rpm', token='t', rpm=0)],
+        )
+    msg = str(exc_info.value)
+    assert "'zero-rpm'" in msg
+    assert 'rpm' in msg
+
+
+def test_webapp_config_rejects_negative_rpm_client():
+    with pytest.raises(ValidationError):
+        WebAppConfig(
+            clients=[WebClientConfig(name='neg-rpm', token='t', rpm=-5)],
+        )
+
+
+def test_webapp_config_rejects_zero_request_timeout():
+    with pytest.raises(ValidationError) as exc_info:
+        WebAppConfig(request_timeout_seconds=0)
+    assert 'request_timeout_seconds' in str(exc_info.value)
+
+
+def test_webapp_config_rejects_negative_request_timeout():
+    with pytest.raises(ValidationError):
+        WebAppConfig(request_timeout_seconds=-1.0)
+
+
+def test_webapp_config_rejects_zero_max_concurrent():
+    with pytest.raises(ValidationError) as exc_info:
+        WebAppConfig(max_concurrent=0)
+    assert 'max_concurrent' in str(exc_info.value)
+
+
+def test_webapp_config_rejects_negative_max_concurrent():
+    with pytest.raises(ValidationError):
+        WebAppConfig(max_concurrent=-1)
+
+
+@pytest.mark.parametrize(
+    'bad_path',
+    ['', '/', 'process', 'api/process'],
+)
+def test_webapp_config_rejects_invalid_path(bad_path: str):
+    with pytest.raises(ValidationError) as exc_info:
+        WebAppConfig(path=bad_path)
+    assert 'webapp.path' in str(exc_info.value)
+
+
+def test_webapp_config_rejects_empty_clients_list():
+    with pytest.raises(ValidationError) as exc_info:
+        WebAppConfig(clients=[])
+    assert 'at least one client' in str(exc_info.value)
+
+
+def test_webapp_config_accepts_one_anonymous_plus_named_clients():
+    """Mixing one empty-token (anonymous) client with several named ones is valid."""
+    cfg = WebAppConfig(
+        clients=[
+            WebClientConfig(name='anonymous', token='', rpm=4),
+            WebClientConfig(name='tenant-a', token='tok-a', rpm=60),
+            WebClientConfig(name='tenant-b', token='tok-b', rpm=120),
+        ],
+    )
+    assert len(cfg.clients) == 3
+
+
+# --- DrakkarConfig integration ---
+
+
+def test_drakkar_config_webapp_default():
+    cfg = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/true'))
+    assert cfg.webapp.enabled is False
+    assert cfg.webapp.port == 8090
+    assert len(cfg.webapp.clients) == 1
+    assert cfg.webapp.clients[0].name == 'anonymous'
+
+
+def test_drakkar_config_webapp_from_yaml(tmp_path: Path):
+    """YAML round-trip: a webapp block parses correctly."""
+    config_data = {
+        'executor': {'binary_path': '/bin/echo'},
+        'webapp': {
+            'enabled': True,
+            'host': '0.0.0.0',
+            'port': 8090,
+            'path': '/process',
+            'sinks_enabled': True,
+            'request_timeout_seconds': 15.0,
+            'max_concurrent': 32,
+            'clients': [
+                {'name': 'anonymous', 'token': '', 'rpm': 4},
+                {'name': 'tenant-a', 'token': 'tok-a', 'rpm': 60},
+            ],
+        },
+    }
+    import yaml
+
+    config_path = tmp_path / 'webapp.yaml'
+    with open(config_path, 'w') as f:
+        yaml.dump(config_data, f)
+
+    cfg = load_config(config_path)
+    assert cfg.webapp.enabled is True
+    assert cfg.webapp.port == 8090
+    assert cfg.webapp.sinks_enabled is True
+    assert cfg.webapp.request_timeout_seconds == 15.0
+    assert cfg.webapp.max_concurrent == 32
+    assert len(cfg.webapp.clients) == 2
+    assert cfg.webapp.clients[1].name == 'tenant-a'
+    assert cfg.webapp.clients[1].rpm == 60
+
+
+def test_drakkar_config_webapp_env_override_enabled(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/echo')
+    monkeypatch.setenv('DK_WEBAPP__ENABLED', 'true')
+    cfg = DrakkarConfig()
+    assert cfg.webapp.enabled is True
+
+
+def test_drakkar_config_webapp_env_override_port(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv('DK_EXECUTOR__BINARY_PATH', '/bin/echo')
+    monkeypatch.setenv('DK_WEBAPP__PORT', '9000')
+    cfg = DrakkarConfig()
+    assert cfg.webapp.port == 9000
+
+
+def test_drakkar_config_webapp_env_override_client_rpm(minimal_config_yaml_file: Path, monkeypatch: pytest.MonkeyPatch):
+    """``DK_WEBAPP__CLIENTS__0__RPM`` overrides the first client's rpm.
+
+    Verifies that pydantic-settings env-var nested delimiter handling
+    (already exercised for other sub-configs) works for list-of-objects
+    fields too.
+    """
+    monkeypatch.setenv('DK_WEBAPP__CLIENTS__0__RPM', '10')
+    cfg = load_config(minimal_config_yaml_file)
+    assert cfg.webapp.clients[0].rpm == 10
+
+
+def test_drakkar_config_webapp_env_override_client_token(
+    minimal_config_yaml_file: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv('DK_WEBAPP__CLIENTS__0__TOKEN', 'tok-from-env')
+    cfg = load_config(minimal_config_yaml_file)
+    assert cfg.webapp.clients[0].token == 'tok-from-env'

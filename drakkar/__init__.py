@@ -4,7 +4,7 @@ __version__ = '0.12.0'
 
 from drakkar.app import DrakkarApp
 from drakkar.cache import CacheLike, CacheScope
-from drakkar.config import DrakkarConfig, load_config
+from drakkar.config import DrakkarConfig, WebAppConfig, WebClientConfig, load_config
 from drakkar.handler import BaseDrakkarHandler, DrakkarHandler
 from drakkar.models import (
     CollectResult,
@@ -57,6 +57,8 @@ __all__ = [
     'RedisPayload',
     'SourceMessage',
     'TaskOrigin',
+    'WebAppConfig',
+    'WebClientConfig',
     'load_config',
     'make_request_id',
     'make_task_id',
