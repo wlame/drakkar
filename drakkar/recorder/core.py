@@ -30,7 +30,7 @@ import socket  # noqa: F401
 import time
 from collections import deque
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 import structlog
@@ -79,11 +79,14 @@ from drakkar.recorder.schema import (
     SCHEMA_EVENTS,
     SCHEMA_WORKER_CONFIG,
     SCHEMA_WORKER_STATE,
+    WEBAPP_REQUIRED_EVENT_COLUMNS,
+    RecorderSchemaError,
 )
 from drakkar.utils import redact_url
 
 if TYPE_CHECKING:
     from drakkar.config import DrakkarConfig
+    from drakkar.webapp.models import WebRequestContext
 
 logger = structlog.get_logger()
 
@@ -225,6 +228,49 @@ class EventRecorder:
             await db.executescript(SCHEMA_WORKER_STATE)
         await db.commit()
 
+    @staticmethod
+    async def _verify_events_schema(db: aiosqlite.Connection, db_path: str) -> None:
+        """Ensure any pre-existing ``events`` table carries the webapp columns.
+
+        Reads ``PRAGMA table_info(events)`` from the freshly-opened
+        connection and verifies every column listed in
+        :data:`WEBAPP_REQUIRED_EVENT_COLUMNS` is present. Two cases:
+
+        * No ``events`` table yet → fresh DB; ``PRAGMA`` returns no
+          rows; we return without raising and let ``_create_schema``
+          build the up-to-date table below.
+        * Existing ``events`` table missing one or more required
+          columns → pre-webapp-release DB; raise
+          :class:`RecorderSchemaError` with operator guidance (delete
+          the file under ``db_dir`` and restart). The exception is
+          intentionally not caught anywhere in the recorder layer so
+          it propagates through ``AppLifecycle._async_run`` and aborts
+          worker startup with the message visible in stderr/logs.
+
+        Running BEFORE ``_create_schema`` is intentional — the
+        ``CREATE INDEX`` statements in :data:`SCHEMA_EVENTS` reference
+        the new columns (``idx_events_origin``, ``idx_events_request_id``)
+        and would themselves fail with ``no such column`` if we let them
+        run against a legacy table.
+        """
+        async with db.execute('PRAGMA table_info(events)') as cur:
+            # ``table_info`` rows: (cid, name, type, notnull, dflt_value, pk).
+            # Returns an empty result set when the ``events`` table does
+            # not exist at all — we treat that as "fresh DB, nothing to
+            # verify" and let the caller's ``_create_schema`` build it.
+            existing = {row[1] async for row in cur}
+        if not existing:
+            return
+        missing = [c for c in WEBAPP_REQUIRED_EVENT_COLUMNS if c not in existing]
+        if missing:
+            raise RecorderSchemaError(
+                f'Recorder DB at {db_path} predates the webapp release '
+                f"(missing columns on 'events' table: {', '.join(missing)}); "
+                f'delete it (db_dir is documented as disposable) and '
+                f'restart the worker. New rotation-cycle DBs include the '
+                f'required columns automatically.'
+            )
+
     async def start(self) -> None:
         self._running = True
         if self._config.db_dir:
@@ -241,6 +287,20 @@ class EventRecorder:
                 # Applied per-connection (SQLite stores the mode in the DB
                 # header; the reader picks it up automatically on open).
                 await self._db.execute('PRAGMA journal_mode=WAL')
+                # Webapp-release schema check (Task 8 of the webapp pipeline
+                # plan). Run BEFORE ``_create_schema`` so a pre-existing
+                # legacy DB is rejected before ``CREATE INDEX`` references
+                # a missing column. Detection rule: an existing
+                # ``events`` table must already carry every column listed
+                # in :data:`WEBAPP_REQUIRED_EVENT_COLUMNS`; missing any
+                # raises :class:`RecorderSchemaError` with operator
+                # guidance. A fresh DB with no ``events`` table yet skips
+                # this check — ``_create_schema`` will create the up-to-
+                # date schema below. The exception is intentionally left
+                # uncaught so it propagates through ``AppLifecycle._async_run``
+                # and aborts worker startup.
+                if self._config.store_events:
+                    await self._verify_events_schema(self._db, self._db_path)
                 await self._create_schema(self._db)
                 # Open the dedicated reader connection AFTER schema creation
                 # so the reader always sees a ready DB. URI with ``mode=ro``
@@ -547,6 +607,9 @@ class EventRecorder:
         pool_waiting: int = 0,
         slot: int = 0,
         precomputed: bool = False,
+        origin: str | None = None,
+        client_name: str | None = None,
+        request_id: str | None = None,
     ) -> None:
         stdin_lines = 0
         stdin_size = 0
@@ -568,6 +631,16 @@ class EventRecorder:
             # subprocess ran. The framework does not classify the reason
             # (cache, lookup, deterministic shortcut, ...).
             metadata['precomputed'] = True
+        # Origin / client_name / request_id default to whatever the
+        # ``ExecutorTask`` carries — auto-tagged at ``arrange_*`` time on
+        # both the Kafka path (``origin='kafka'`` default) and the
+        # webapp path (``WebappRunner`` stamps each task before
+        # submission). Explicit kwargs override only when callers need to
+        # record an event for a task that doesn't carry those fields
+        # (e.g., a synthetic test row). See plan Task 8 for the contract.
+        resolved_origin = origin if origin is not None else getattr(task, 'origin', 'kafka')
+        resolved_client_name = client_name if client_name is not None else getattr(task, 'client_name', None)
+        resolved_request_id = request_id if request_id is not None else getattr(task, 'request_id', None)
         entry = {
             'ts': time.time(),
             'event': 'task_started',
@@ -581,6 +654,9 @@ class EventRecorder:
             'stdin_size': stdin_size,
             'metadata': encode_json_str(metadata),
             'labels': encode_json_str(task.labels) if task.labels else None,
+            'origin': resolved_origin,
+            'client_name': resolved_client_name,
+            'request_id': resolved_request_id,
         }
         ws_threshold_ms = self._config.ws_min_duration_ms
         if ws_threshold_ms > 0:
@@ -604,6 +680,9 @@ class EventRecorder:
         pool_active: int = 0,
         pool_waiting: int = 0,
         precomputed: bool = False,
+        origin: str | None = None,
+        client_name: str | None = None,
+        request_id: str | None = None,
     ) -> None:
         self._counters['completed'] += 1
         duration_ms = result.duration_seconds * 1000
@@ -622,6 +701,13 @@ class EventRecorder:
         skip_db = self._config.event_min_duration_ms > 0 and duration_ms < self._config.event_min_duration_ms
         include_output = duration_ms >= self._config.output_min_duration_ms
 
+        # See ``record_task_started`` for the resolution rules: explicit
+        # kwargs take precedence, otherwise we read from the task that
+        # produced the result (auto-tagged by the upstream pipeline).
+        task_obj = result.task
+        resolved_origin = origin if origin is not None else getattr(task_obj, 'origin', 'kafka')
+        resolved_client_name = client_name if client_name is not None else getattr(task_obj, 'client_name', None)
+        resolved_request_id = request_id if request_id is not None else getattr(task_obj, 'request_id', None)
         entry: dict = {
             'ts': time.time(),
             'event': 'task_completed',
@@ -634,6 +720,9 @@ class EventRecorder:
             'pool_active': pool_active,
             'pool_waiting': pool_waiting,
             'labels': encode_json_str(result.task.labels) if result.task.labels else None,
+            'origin': resolved_origin,
+            'client_name': resolved_client_name,
+            'request_id': resolved_request_id,
         }
         if precomputed:
             # Mirrored on the completion event so downstream queries /
@@ -664,6 +753,9 @@ class EventRecorder:
         pool_active: int = 0,
         pool_waiting: int = 0,
         duration_seconds: float | None = None,
+        origin: str | None = None,
+        client_name: str | None = None,
+        request_id: str | None = None,
     ) -> None:
         self._counters['failed'] += 1
 
@@ -686,6 +778,10 @@ class EventRecorder:
             include_output = True
             should_log = True
 
+        # See ``record_task_started`` for the resolution rules.
+        resolved_origin = origin if origin is not None else getattr(task, 'origin', 'kafka')
+        resolved_client_name = client_name if client_name is not None else getattr(task, 'client_name', None)
+        resolved_request_id = request_id if request_id is not None else getattr(task, 'request_id', None)
         entry: dict = {
             'ts': time.time(),
             'event': 'task_failed',
@@ -701,6 +797,9 @@ class EventRecorder:
                 }
             ),
             'labels': encode_json_str(task.labels) if task.labels else None,
+            'origin': resolved_origin,
+            'client_name': resolved_client_name,
+            'request_id': resolved_request_id,
         }
         if duration_seconds is not None:
             entry['duration'] = duration_seconds
@@ -933,6 +1032,202 @@ class EventRecorder:
                 'metadata': encode_json_str(metadata),
             }
         )
+
+    # --- Webapp request lifecycle events (Task 8) ---
+    #
+    # These helpers record HTTP-origin request lifecycle events to the
+    # ``events`` table alongside the per-task rows already produced by
+    # ``record_task_*``. They populate the new ``origin`` / ``client_name``
+    # / ``request_id`` columns so the debug UI can filter, group, and
+    # trace HTTP-originated work without re-deriving the relationship
+    # from labels. Every helper is sync and safe to call from either T1
+    # (the runner) or T2 (the dependency layer) — appending to the
+    # in-memory buffer doesn't touch the DB connection (the flush loop
+    # owns that), so the recorder is loop-agnostic at the recording site.
+
+    def record_webapp_request_received(self, ctx: WebRequestContext) -> None:
+        """Record entry into the runner for one HTTP request.
+
+        Fires once per request that passed the auth + rate-limit + body
+        validation gates and is about to dispatch to T1. Captures the
+        client identity, request id, and start timestamp so operators
+        can pinpoint the request in the recorder/debug UI before any
+        task fan-out.
+        """
+        body_bytes = self._compute_body_bytes(ctx)
+        metadata: dict[str, Any] = {
+            'started_at': ctx.started_at.isoformat() if ctx.started_at is not None else None,
+        }
+        if body_bytes is not None:
+            metadata['body_bytes'] = body_bytes
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'webapp_request_received',
+                'partition': -1,  # synthetic partition for HTTP origin
+                'origin': 'http',
+                'client_name': ctx.client_name,
+                'request_id': ctx.request_id,
+                'metadata': encode_json_str(metadata),
+            }
+        )
+
+    def record_webapp_request_completed(
+        self,
+        ctx: WebRequestContext,
+        status: str,
+        duration_ms: float,
+    ) -> None:
+        """Record successful completion of one HTTP request (status='ok').
+
+        ``status`` is the same label used on ``drakkar_webapp_requests_total``
+        — typically ``'ok'`` here, but kept as a parameter so the same
+        helper can be reused if the route handler ever needs to record
+        a non-ok terminal state without a dedicated helper.
+        """
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'webapp_request_completed',
+                'partition': -1,
+                'origin': 'http',
+                'client_name': ctx.client_name,
+                'request_id': ctx.request_id,
+                'duration': duration_ms / 1000.0,
+                'metadata': encode_json_str(
+                    {
+                        'status': status,
+                        'duration_ms': duration_ms,
+                    }
+                ),
+            }
+        )
+
+    def record_webapp_request_timeout(
+        self,
+        ctx: WebRequestContext,
+        duration_ms: float,
+    ) -> None:
+        """Record a 504 timeout outcome for one HTTP request.
+
+        Fires from T2 (the route handler) when ``asyncio.wait_for`` trips
+        its budget. The matching ``record_webapp_request_dropped_after_timeout``
+        is fired from T1 if the runner reaches its post-execute gate
+        AFTER the timeout — together they let operators distinguish
+        "timed out before any work" from "timed out after the executor
+        already ran".
+        """
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'webapp_request_timeout',
+                'partition': -1,
+                'origin': 'http',
+                'client_name': ctx.client_name,
+                'request_id': ctx.request_id,
+                'duration': duration_ms / 1000.0,
+                'metadata': encode_json_str({'duration_ms': duration_ms}),
+            }
+        )
+
+    def record_webapp_request_rate_limited(
+        self,
+        client: str,
+        rpm_limit: int,
+        requests_in_window: int,
+    ) -> None:
+        """Record a 429 rate-limit outcome for one HTTP request.
+
+        ``client`` is the matched client name (the rate-limit dep only
+        runs after auth has resolved a real client, so a configured
+        client name is always available). No ``request_id`` because the
+        request is rejected before the runner allocates one.
+        """
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'webapp_request_rate_limited',
+                'partition': -1,
+                'origin': 'http',
+                'client_name': client,
+                'metadata': encode_json_str(
+                    {
+                        'rpm_limit': rpm_limit,
+                        'requests_in_window': requests_in_window,
+                    }
+                ),
+            }
+        )
+
+    def record_webapp_request_auth_failed(self, token_prefix: str) -> None:
+        """Record a 401 auth-failure for one HTTP request.
+
+        ``token_prefix`` is the redacted (first-4-chars + ``...``) token
+        produced by :func:`drakkar.webapp.utils.redact_token` — never
+        the full token. ``client_name`` is left ``NULL`` because no
+        client was matched; the debug UI can filter by ``event =
+        'webapp_request_auth_failed'`` instead.
+        """
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'webapp_request_auth_failed',
+                'partition': -1,
+                'origin': 'http',
+                # No matched client; leave client_name NULL.
+                'metadata': encode_json_str({'token_prefix': token_prefix}),
+            }
+        )
+
+    def record_webapp_request_dropped_after_timeout(
+        self,
+        ctx: WebRequestContext,
+    ) -> None:
+        """Record a request dropped on T1 after T2 had already 504'd.
+
+        Fires from the runner's post-execute / pre-on_http_request_complete
+        cancellation gates. The user already received a 504 client-side;
+        this row marks the wasted work that the framework managed to
+        skip thanks to the cooperative cancellation flag.
+        """
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'webapp_request_dropped_after_timeout',
+                'partition': -1,
+                'origin': 'http',
+                'client_name': ctx.client_name,
+                'request_id': ctx.request_id,
+            }
+        )
+
+    @staticmethod
+    def _compute_body_bytes(ctx: WebRequestContext) -> int | None:
+        """Return the body size in bytes for the recorder metadata, or ``None``.
+
+        Pydantic-modelled requests have a ``model_dump_json`` method we
+        use to recover the on-the-wire body size; raw bytes are
+        ``len()``ed directly. For the rare test fixture that hands in a
+        plain object (no model, no bytes) we fall back to ``None`` rather
+        than coerce — better to omit the field than misreport.
+        """
+        request = ctx.request
+        if isinstance(request, bytes | bytearray):
+            return len(request)
+        # Avoid importing Pydantic at module load — the recorder runs in
+        # processes that don't always carry the webapp dependencies.
+        # Local import keeps the cost paid only when we actually inspect
+        # a webapp request (a small fraction of recorder writes).
+        try:
+            from pydantic import BaseModel
+        except ImportError:  # pragma: no cover — pydantic is a hard dep
+            return None
+        if isinstance(request, BaseModel):
+            try:
+                return len(request.model_dump_json().encode('utf-8'))
+            except Exception:
+                return None
+        return None
 
     # --- Query methods (for debug UI, reads current DB) ---
 
@@ -1300,11 +1595,31 @@ class EventRecorder:
                 'metadata',
                 'pid',
                 'labels',
+                # Webapp-release columns (Task 8 of the webapp pipeline
+                # plan). Default to ``origin='kafka'`` / NULL for the
+                # other two when the recording site doesn't populate
+                # them — matches the SQL DEFAULT and keeps the SQL
+                # statement future-proof if the same column list is
+                # used elsewhere (e.g., a future bulk-import path).
+                'origin',
+                'client_name',
+                'request_id',
             ]
             placeholders = ', '.join(['?'] * len(columns))
             col_names = ', '.join(columns)
             query = f'INSERT INTO events ({col_names}) VALUES ({placeholders})'
-            rows = [tuple(entry.get(col) for col in columns) for entry in batch]
+            # ``origin`` is NOT NULL in the schema with a DEFAULT of
+            # ``'kafka'`` — but ``entry.get(col)`` would yield ``None``
+            # when the recording site didn't populate it (Kafka-path
+            # helpers below ``record_task_*`` such as ``record_consumed``,
+            # ``record_arranged``, ``record_committed``, etc., legitimately
+            # leave the new columns out). Coerce ``None`` -> ``'kafka'``
+            # at INSERT time so SQLite's column DEFAULT does not need to
+            # fight an explicit NULL.
+            rows = [
+                tuple('kafka' if (col == 'origin' and entry.get(col) is None) else entry.get(col) for col in columns)
+                for entry in batch
+            ]
             # Observe the full flush body (executemany + commit) — the histogram
             # surfaces disk-I/O latency tail so operators can alert on p99
             # regressions before the buffer backs up enough to drop events.

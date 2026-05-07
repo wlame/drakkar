@@ -32,6 +32,8 @@ from drakkar.recorder.schema import (
     SCHEMA_EVENTS,  # noqa: F401  (re-exported for tests)
     SCHEMA_WORKER_CONFIG,  # noqa: F401  (re-exported for tests)
     SCHEMA_WORKER_STATE,  # noqa: F401  (re-exported for tests)
+    WEBAPP_REQUIRED_EVENT_COLUMNS,  # noqa: F401  (re-exported for tests)
+    RecorderSchemaError,
 )
 
-__all__ = ['EventRecorder']
+__all__ = ['EventRecorder', 'RecorderSchemaError']

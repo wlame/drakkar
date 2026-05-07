@@ -198,6 +198,14 @@ class WebappRunner:
         self._request_seq += 1
         offset = self._request_seq
 
+        # Recorder: mark this request entering the runner. Opt-in —
+        # recorder is only present when ``debug.enabled=true``. Helper
+        # is sync so we don't need to await; the recorder buffers the
+        # event and the periodic flush loop persists it.
+        recorder = self._app._recorder
+        if recorder is not None:
+            recorder.record_webapp_request_received(ctx)
+
         # Wall-clock start of the pipeline-side work — used for the
         # WebReport ``finished_at`` and ``duration_ms``. ``ctx.started_at``
         # remains as set by T2 (when the request landed on the webapp).
@@ -308,6 +316,8 @@ class WebappRunner:
                 stage='post_execute',
             )
             webapp_dropped_after_timeout.labels(client=ctx.client_name).inc()
+            if recorder is not None:
+                recorder.record_webapp_request_dropped_after_timeout(ctx)
             raise asyncio.CancelledError('webapp request cancelled after task execution; T2 already 504d')
 
         # ----- Stage: synthetic MessageGroup + on_http_request_complete -----
@@ -356,6 +366,8 @@ class WebappRunner:
                 stage='pre_on_http_request_complete',
             )
             webapp_dropped_after_timeout.labels(client=ctx.client_name).inc()
+            if recorder is not None:
+                recorder.record_webapp_request_dropped_after_timeout(ctx)
             raise asyncio.CancelledError('webapp request cancelled before on_http_request_complete; T2 already 504d')
 
         complete_started = time.monotonic()
@@ -418,6 +430,19 @@ class WebappRunner:
             sinks=sinks_summary,
             timeline=timeline,
         )
+        # Recorder: persist the successful completion as a single row
+        # alongside the per-task rows already produced by the executor
+        # path. Operators querying ``event = 'webapp_request_completed'``
+        # see one row per successful HTTP request without joining to
+        # webapp_request_received. Status mirrors the route's outcome
+        # label so the same value flows into both the recorder and
+        # ``drakkar_webapp_requests_total``.
+        if recorder is not None:
+            recorder.record_webapp_request_completed(
+                ctx,
+                status='ok',
+                duration_ms=duration_ms,
+            )
         return report
 
     # ------------------------------------------------------------------
@@ -612,6 +637,8 @@ class WebappRunner:
                     next_sink_type=sink_type,
                 )
                 webapp_dropped_after_timeout.labels(client=ctx.client_name).inc()
+                if self._app._recorder is not None:
+                    self._app._recorder.record_webapp_request_dropped_after_timeout(ctx)
                 raise asyncio.CancelledError(
                     f'webapp request cancelled before {sink_type!r} sink delivery; T2 already 504d'
                 )

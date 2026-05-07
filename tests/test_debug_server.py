@@ -3253,17 +3253,23 @@ class TestOriginAllowedHelper:
 class TestApiPeriodicTasks:
     """Tests for /api/debug/periodic endpoint."""
 
-    async def test_periodic_empty_when_no_events(self, mock_recorder, mock_app):
+    async def test_periodic_empty_when_no_events(self, tmp_path, mock_recorder, mock_app):
         import aiosqlite
 
         from drakkar.recorder import SCHEMA_EVENTS
 
-        db_path = '/tmp/test-periodic-empty.db'
+        # Use ``tmp_path`` rather than a hardcoded ``/tmp`` filename so
+        # the test starts from an empty DB on every run. The webapp-release
+        # schema change made ``CREATE INDEX idx_events_origin`` reference
+        # the new ``origin`` column — leaving a stale legacy DB behind
+        # would fail with ``no such column`` because ``CREATE TABLE IF
+        # NOT EXISTS`` is a no-op against an existing legacy schema.
+        db_path = str(tmp_path / 'test-periodic-empty.db')
         db = await aiosqlite.connect(db_path)
         await db.executescript(SCHEMA_EVENTS)
         await db.commit()
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp')
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
         mock_recorder._db = db
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db

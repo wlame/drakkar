@@ -176,8 +176,11 @@ class WebApp:
         # The factories close over ``config`` and over per-client deque
         # state respectively — a fresh ``WebApp`` instance gets its own
         # rate-limit counters, which keeps tests independent.
-        self._authenticate = make_authenticate(config)
-        self._rate_limit = make_rate_limit(config)
+        # ``drakkar_app`` is forwarded so the auth-failed / rate-limited
+        # branches can reach the optional recorder (Task 8) without
+        # adding a separate per-request lookup site.
+        self._authenticate = make_authenticate(config, drakkar_app)
+        self._rate_limit = make_rate_limit(config, drakkar_app)
 
         # Validate at construction time that the handler exposes concrete
         # HTTP request/response models. We do this BEFORE building the
@@ -767,6 +770,11 @@ class WebApp:
                         timeout_seconds=self._config.request_timeout_seconds,
                         duration_ms=duration_ms,
                     )
+                    # Recorder: timeout event lives on T2 because that's
+                    # where ``wait_for`` trips. Opt-in via debug.enabled.
+                    recorder = self._app._recorder
+                    if recorder is not None:
+                        recorder.record_webapp_request_timeout(ctx, duration_ms)
                     self._observe_outcome(request=request, client=ctx.client_name, status='timeout')
                     return JSONResponse(
                         status_code=504,

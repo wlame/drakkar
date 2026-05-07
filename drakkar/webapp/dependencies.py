@@ -44,13 +44,21 @@ import hmac
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from fastapi import Request
 
 from drakkar.config import WebAppConfig, WebClientConfig
 from drakkar.webapp.utils import compute_retry_after, redact_token
+
+if TYPE_CHECKING:
+    # ``DrakkarApp`` is forwarded into the dependency factories solely
+    # so the auth-failed and rate-limited branches can reach the
+    # opt-in recorder via ``drakkar_app._recorder``. Using a TYPE_CHECKING
+    # import avoids a runtime circular dependency between
+    # ``drakkar.app`` and the webapp dependency layer.
+    from drakkar.app import DrakkarApp
 
 logger = structlog.get_logger()
 
@@ -147,6 +155,7 @@ def _extract_bearer_token(request: Request) -> tuple[str, bool]:
 
 def make_authenticate(
     config: WebAppConfig,
+    drakkar_app: DrakkarApp | None = None,
 ) -> Callable[[Request], Awaitable[WebClientConfig]]:
     """Build the auth dependency callable closed over ``config``.
 
@@ -163,6 +172,11 @@ def make_authenticate(
     object only — we cannot pass ``config`` as a positional arg. The
     factory closes over it once at startup, which also matches how we
     build the rate-limiter (see ``make_rate_limit`` for symmetry).
+
+    ``drakkar_app`` is an optional back-reference used solely so the
+    auth-failed branch can reach ``self._app._recorder`` without
+    re-plumbing per-call arguments. ``None`` keeps the dependency
+    usable in unit tests that don't need recorder integration.
     """
 
     async def _authenticate(request: Request) -> WebClientConfig:
@@ -196,12 +210,20 @@ def make_authenticate(
         # No match. Log the redacted token so operators can correlate
         # auth failures with specific clients in audit trails without
         # ever persisting the raw secret.
+        token_prefix = redact_token(token)
         await logger.ainfo(
             'webapp_request_auth_failed',
             category='webapp',
-            token_prefix=redact_token(token),
+            token_prefix=token_prefix,
             header_present=header_present,
         )
+        # Recorder: opt-in via debug.enabled. The redacted prefix lands
+        # in the metadata column so audit queries don't have to walk
+        # the structured-log stream.
+        if drakkar_app is not None:
+            recorder = getattr(drakkar_app, '_recorder', None)
+            if recorder is not None:
+                recorder.record_webapp_request_auth_failed(token_prefix)
         raise WebappAuthError(
             status_code=401,
             body_dict={'error': 'unauthorized'},
@@ -212,6 +234,7 @@ def make_authenticate(
 
 def make_rate_limit(
     config: WebAppConfig,
+    drakkar_app: DrakkarApp | None = None,
 ) -> Callable[[WebClientConfig], Awaitable[None]]:
     """Build the rate-limit dependency callable closed over ``config``.
 
@@ -254,6 +277,19 @@ def make_rate_limit(
                 rpm_limit=client.rpm,
                 retry_after_seconds=retry_after,
             )
+            # Recorder: opt-in via debug.enabled. ``len(window)`` is the
+            # admission count BEFORE the rejection — equal to ``rpm`` when
+            # we hit the cap, but kept as a separate field so future
+            # tweaks (e.g., burst-allowance > rpm) stay legible in the
+            # row.
+            if drakkar_app is not None:
+                recorder = getattr(drakkar_app, '_recorder', None)
+                if recorder is not None:
+                    recorder.record_webapp_request_rate_limited(
+                        client=client.name,
+                        rpm_limit=client.rpm,
+                        requests_in_window=len(window),
+                    )
             # ``Retry-After`` is integer seconds per RFC 7231; we round
             # up to be safe (a client backing off for the exact float
             # would race the window edge). ``int(x) + 1`` rounds up

@@ -1259,7 +1259,8 @@ async def test_rotation_new_db_has_schema(tmp_path):
         # verify indexes exist
         async with db.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_events_%'") as cur:
             indexes = await cur.fetchall()
-            assert len(indexes) == 6  # partition_offset, ts, dt, task_id, type, labels
+            # partition_offset, ts, dt, task_id, type, labels, origin, request_id
+            assert len(indexes) == 8
 
     await rec.stop()
 

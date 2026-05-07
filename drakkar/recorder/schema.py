@@ -11,9 +11,61 @@ Three tables back the recorder DB:
   snapshot (used by peer discovery to learn cluster_name, debug URL, etc.).
 - ``worker_state``  — periodic snapshot of counters / pool state for the
   debug UI's "what is this worker doing right now?" panels.
+
+Webapp-release schema extension (Task 8 of the webapp pipeline plan):
+The ``events`` table grew three columns — ``origin``, ``client_name``,
+``request_id`` — to track HTTP-origin tasks alongside Kafka-origin tasks
+without a separate code path. These columns are added directly to the
+``CREATE TABLE IF NOT EXISTS`` statement; there is intentionally NO
+migration framework. Rationale:
+
+* recorder DBs are observability-only, already rotated and disposable;
+* ``debug.db_dir`` is documented as operator-disposable;
+* a forward-only migration runner just to add three optional columns
+  would be over-engineering for a feature that affects only debug data.
+
+Pre-existing recorder DBs from older worker versions do NOT have these
+columns. Operators delete those DBs on upgrade (recorder rotation
+already produces fresh DBs per worker run). The startup-time
+``PRAGMA table_info(events)`` check in ``EventRecorder.start()``
+converts the otherwise-confusing ``OperationalError: no such column``
+mid-request error into a clear startup failure with an actionable
+upgrade path — see :class:`RecorderSchemaError` and ``docs/observability.md``
+(Task 10) for the full upgrade story.
 """
 
 from __future__ import annotations
+
+# Column names that the webapp-release recorder schema requires on the
+# ``events`` table. Used by ``EventRecorder.start()`` /
+# ``EventRecorder._rotate()`` to validate at-open that the DB is
+# compatible with the current code. Missing any of these raises
+# :class:`RecorderSchemaError` so worker startup aborts with a clear
+# upgrade-path message rather than failing at first webapp request.
+WEBAPP_REQUIRED_EVENT_COLUMNS: tuple[str, ...] = (
+    'origin',
+    'client_name',
+    'request_id',
+)
+
+
+class RecorderSchemaError(RuntimeError):
+    """Raised at recorder open when the existing DB predates required columns.
+
+    The webapp release added ``origin`` / ``client_name`` / ``request_id``
+    columns to the ``events`` table (see module docstring). Pre-existing
+    DBs from older worker versions lack those columns. The recorder
+    runs ``PRAGMA table_info(events)`` immediately after opening the DB
+    and raises this exception when the new columns are missing.
+
+    The exception is intentionally left **uncaught** in the recorder
+    layer so it propagates through ``AppLifecycle._async_run`` and
+    aborts worker startup. Operators see the message in stderr/logs
+    with the actionable next step: delete the per-worker DB(s) under
+    ``db_dir`` and restart — fresh rotation-cycle DBs include the
+    required columns automatically.
+    """
+
 
 SCHEMA_EVENTS = """
 CREATE TABLE IF NOT EXISTS events (
@@ -33,7 +85,10 @@ CREATE TABLE IF NOT EXISTS events (
     output_topic TEXT,
     metadata    TEXT,
     pid         INTEGER,
-    labels      TEXT
+    labels      TEXT,
+    origin      TEXT    NOT NULL DEFAULT 'kafka',
+    client_name TEXT,
+    request_id  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_partition_offset ON events(partition, offset);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
@@ -41,6 +96,8 @@ CREATE INDEX IF NOT EXISTS idx_events_dt ON events(dt);
 CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event);
 CREATE INDEX IF NOT EXISTS idx_events_labels ON events(labels) WHERE labels IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_events_origin ON events(origin);
+CREATE INDEX IF NOT EXISTS idx_events_request_id ON events(request_id) WHERE request_id IS NOT NULL;
 """
 
 SCHEMA_WORKER_CONFIG = """
