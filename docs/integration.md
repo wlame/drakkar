@@ -54,9 +54,14 @@ docker-compose down -v
 
 | Worker | Debug UI | Metrics | Webapp | Config |
 |--------|----------|---------|--------|--------|
-| worker-1 | [localhost:8081](http://localhost:8081) | [localhost:9090](http://localhost:9090/metrics) | [localhost:8090](http://localhost:8090/process) | 4 executors, all 6 sinks, **webapp enabled** |
+| worker-1 | [localhost:8081](http://localhost:8081) | [localhost:9090](http://localhost:9090/metrics) | [localhost:8091](http://localhost:8091/process) | 4 executors, all 6 sinks, **webapp enabled** |
 | worker-2 | [localhost:8082](http://localhost:8082) | [localhost:9091](http://localhost:9091/metrics) | -- | 4 executors, all 6 sinks |
 | worker-3 | [localhost:8083](http://localhost:8083) | [localhost:9093](http://localhost:9093/metrics) | -- | 4 executors, all 6 sinks |
+
+Webapp port follows the integration convention **debug-UI port + 10**
+(worker-1 debug `8081` → webapp `8091`). The framework default outside
+the integration cluster is `8090`; the integration `drakkar.yaml`
+overrides it to keep the port plan consistent across services.
 
 Only worker-1 has `DK_WEBAPP__ENABLED=true`; worker-2 and worker-3 are
 Kafka-only. This is intentional -- it demonstrates the
@@ -151,25 +156,26 @@ the `tenant` Compose profile and uses the higher-rpm tenant token.
 
 ### Hands-on with `curl`
 
-While the stack is running, send a request directly:
+While the stack is running, send a request as **tenant-A** (the
+60-rpm cap leaves plenty of headroom for manual testing; the
+anonymous client is typically saturated by the load_generator):
 
 ```bash
-# Anonymous (no token) -- subject to the 4-rpm cap
-curl -sS -X POST http://localhost:8090/process \
-  -H 'Content-Type: application/json' \
-  -d '{"score": 42, "client_hint": "manual-test"}' | jq .
-
-# Tenant-A (60-rpm cap)
-curl -sS -X POST http://localhost:8090/process \
+curl -sS -X POST http://localhost:8091/process \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer integration-tenant-a-token-do-not-use-in-prod' \
-  -d '{"score": 42, "client_hint": "tenant-a-test"}' | jq .
+  -d '{"request_id": "manual-1", "score": 42}' | jq .
 ```
 
-Hit the anonymous endpoint 5 times in a row and the 5th returns 429
-with a `Retry-After` header and a `hint` field pointing at the Kafka
-source path -- exactly the rate-limit body documented in
-[webapp.md](webapp.md#status-codes).
+You should see a 200 response with the framework-built `WebReport`
+envelope (`request_id`, `client`, `started_at`, `duration_ms`,
+`status`, `result`, `tasks`, `task_summary`, `cache`, `sinks`,
+`timeline`).
+
+To **provoke** a 429 deliberately on tenant-A: hit the endpoint at
+>1 req/sec for ~60 seconds. The 60-rpm window fills and the 61st
+request gets 429 with a `Retry-After` header and the `hint` field
+documented in [webapp.md](webapp.md#status-codes).
 
 ### Watching the load_generator
 

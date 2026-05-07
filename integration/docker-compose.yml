@@ -175,8 +175,9 @@ services:
       - "9090:9090"
       - "8081:8081"
       # Webapp port — only exposed on worker-1 because that's the only
-      # worker with the webapp pipeline running.
-      - "8090:8090"
+      # worker with the webapp pipeline running. Integration convention:
+      # webapp port = debug-UI port + 10 (debug 8081 → webapp 8091).
+      - "8091:8091"
     volumes:
       - ..:/project:ro
       - ./shared:/shared
@@ -186,7 +187,7 @@ services:
       # up well before the webapp accepts requests, so a green debug check
       # is a reliable "worker process is alive" signal. The load_generator
       # service depends on this healthcheck (service_healthy) so its first
-      # request lands after worker-1 has bound port 8090.
+      # request lands after worker-1 has bound port 8091.
       test: ["CMD-SHELL", "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8081/healthz\", timeout=2).status==200 else 1)'"]
       interval: 5s
       timeout: 5s
@@ -323,7 +324,7 @@ services:
         condition: service_healthy
     environment:
       WORKER_HOST: worker-1
-      WORKER_PORT: "8090"
+      WORKER_PORT: "8091"
       WORKER_PATH: "/process"
       INTERVAL_SECONDS: "10"
       RANK_SCORE_MIN: "1"
@@ -348,7 +349,7 @@ services:
         condition: service_healthy
     environment:
       WORKER_HOST: worker-1
-      WORKER_PORT: "8090"
+      WORKER_PORT: "8091"
       WORKER_PATH: "/process"
       CLIENT_TOKEN: "integration-tenant-a-token-do-not-use-in-prod"
       INTERVAL_SECONDS: "2"

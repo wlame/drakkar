@@ -64,7 +64,7 @@
     <div class="bg-white rounded-lg border border-purple-300 p-3 text-left" style="min-width:200px;">
         <div class="text-lg font-mono font-bold text-purple-700">WebApp</div>
         <div class="text-xs text-gray-500 mt-1">In-flight: <span class="font-mono text-ink-700">{{ webapp_tile.inflight_count }}</span></div>
-        <div class="text-xs text-gray-500">Last 60s: <span class="text-emerald-600 font-mono">{{ webapp_tile.success_60s }}</span> ok / <span class="text-red-600 font-mono">{{ webapp_tile.error_60s }}</span> err</div>
+        <div class="text-xs text-gray-500">Last 60s: <span class="text-emerald-600 font-mono">{{ webapp_tile.success_60s }}</span> ok / <span class="text-red-600 font-mono">{{ webapp_tile.error_60s }}</span> err / <span class="text-amber-600 font-mono">{{ webapp_tile.rejected_60s }}</span> rejected</div>
         <div class="text-xs text-gray-500 mt-1">Clients:</div>
         <ul class="text-xs font-mono text-ink-700">
             {% for c in webapp_tile.clients %}

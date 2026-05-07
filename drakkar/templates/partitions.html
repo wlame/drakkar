@@ -10,7 +10,7 @@
         <h2 class="text-lg font-semibold text-purple-700">WebApp</h2>
         <span class="text-xs text-gray-400 font-mono">{{ webapp_tile.host }}:{{ webapp_tile.port }}{{ webapp_tile.path }}</span>
     </div>
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-2">
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mt-2">
         <div>
             <div class="text-xs text-gray-500">In-flight</div>
             <div class="text-lg font-mono text-ink-700">{{ webapp_tile.inflight_count }}</div>
@@ -22,6 +22,10 @@
         <div>
             <div class="text-xs text-gray-500">Errors (60s)</div>
             <div class="text-lg font-mono text-red-600">{{ webapp_tile.error_60s }}</div>
+        </div>
+        <div>
+            <div class="text-xs text-gray-500">Rejected (60s)</div>
+            <div class="text-lg font-mono text-amber-600">{{ webapp_tile.rejected_60s }}</div>
         </div>
         <div>
             <div class="text-xs text-gray-500">Clients</div>

@@ -123,6 +123,7 @@ async def test_api_dashboard_includes_webapp_tile_when_enabled(debug_config):
     assert isinstance(tile['inflight_count'], int)
     assert tile['success_60s'] == 0
     assert tile['error_60s'] == 0
+    assert tile['rejected_60s'] == 0
     client_names = {c['name'] for c in tile['clients']}
     assert client_names == {'tenant-A', 'tenant-B'}
     rpm_for_a = next(c['rpm_limit'] for c in tile['clients'] if c['name'] == 'tenant-A')

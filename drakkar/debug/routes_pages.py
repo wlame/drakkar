@@ -58,11 +58,18 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
           rate-limit dependency persists no live counter, so the tile only
           surfaces the configured cap (operators alert on the rpm metric for
           actual rates).
-        * Recorder events table — counts ``webapp_request_completed`` (success)
-          and ``webapp_request_timeout`` / ``webapp_request_dropped_after_timeout``
-          (error) rows in the last 60 seconds. The DB query goes through the
-          shared ``flush_and_select`` helper so the reader connection stays
-          on the main loop.
+        * Recorder events table — three buckets in the last 60 seconds:
+          ``ok`` (``webapp_request_completed``),
+          ``err`` (``webapp_request_timeout`` /
+          ``webapp_request_dropped_after_timeout``), and
+          ``rejected`` (``webapp_request_rate_limited`` /
+          ``webapp_request_auth_failed``). The third bucket exists because
+          a worker that's saturating a client's rpm cap (or refusing
+          unknown tokens) is still doing useful work — surfacing those
+          counts as zero in ``ok`` AND zero in ``err`` made the tile look
+          dead during normal high-rate-limit traffic. The DB query goes
+          through the shared ``flush_and_select`` helper so the reader
+          connection stays on the main loop.
         """
         webapp_cfg = drakkar_app._config.webapp
         if not webapp_cfg.enabled:
@@ -79,11 +86,17 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
 
         success_60s = 0
         error_60s = 0
+        rejected_60s = 0
         since = time.time() - 60.0
         success_query = "SELECT COUNT(*) FROM events WHERE event = 'webapp_request_completed' AND ts >= ?"
         error_query = (
             'SELECT COUNT(*) FROM events '
             "WHERE event IN ('webapp_request_timeout', 'webapp_request_dropped_after_timeout') "
+            'AND ts >= ?'
+        )
+        rejected_query = (
+            'SELECT COUNT(*) FROM events '
+            "WHERE event IN ('webapp_request_rate_limited', 'webapp_request_auth_failed') "
             'AND ts >= ?'
         )
         try:
@@ -97,6 +110,11 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
                 _cols, rows = error_result
                 if rows:
                     error_60s = int(rows[0][0] or 0)
+            rejected_result = await deps.flush_and_select(rejected_query, [since])
+            if rejected_result is not None:
+                _cols, rows = rejected_result
+                if rows:
+                    rejected_60s = int(rows[0][0] or 0)
         except Exception:
             # Recorder may not be ready in startup-edge windows; surface
             # the tile with zeros rather than 500ing the dashboard.
@@ -107,6 +125,7 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
             'clients': [{'name': c.name, 'rpm_limit': c.rpm} for c in webapp_cfg.clients],
             'success_60s': success_60s,
             'error_60s': error_60s,
+            'rejected_60s': rejected_60s,
             'host': webapp_cfg.host,
             'port': webapp_cfg.port,
             'path': webapp_cfg.path,

@@ -7,7 +7,7 @@ processing through the Drakkar pipeline.
 Configurable via environment variables:
 
 - ``WORKER_HOST``       — target host (default ``worker-1``)
-- ``WORKER_PORT``       — target port (default ``8090``)
+- ``WORKER_PORT``       — target port (default ``8091`` to match the integration convention of debug-UI port + 10; the framework default outside the integration cluster is ``8090``)
 - ``WORKER_PATH``       — webapp path (default ``/process``)
 - ``CLIENT_TOKEN``      — bearer token; empty matches the anonymous client
 - ``INTERVAL_SECONDS``  — sleep between requests (default ``10``)
@@ -96,7 +96,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, _on_signal)
 
     host = _env_str('WORKER_HOST', 'worker-1')
-    port = _env_int('WORKER_PORT', 8090)
+    port = _env_int('WORKER_PORT', 8091)
     path = _env_str('WORKER_PATH', '/process')
     if not path.startswith('/'):
         path = '/' + path

@@ -196,7 +196,11 @@ debug:
 webapp:
   enabled: false
   host: '0.0.0.0'
-  port: 8090
+  # Integration convention: webapp port = debug-UI port + 10. worker-1
+  # serves debug on 8081 and webapp on 8091. The framework default is
+  # 8090; this override keeps the integration cluster's port plan
+  # consistent across services.
+  port: 8091
   path: '/process'
   sinks_enabled: false
   request_timeout_seconds: 30.0
