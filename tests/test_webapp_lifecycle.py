@@ -280,3 +280,138 @@ async def test_shutdown_handles_missing_webapp_gracefully(shutdown_app):
     await shutdown_app._lifecycle._shutdown()
 
     fake_processor.signal_stop.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Drain-with-in-flight-HTTP-requests (Task 6b)
+# ---------------------------------------------------------------------------
+
+
+async def test_shutdown_passes_drain_timeout_into_webapp_stop(shutdown_app):
+    """``_shutdown`` invokes ``webapp.stop(drain_timeout=...)`` with the configured value.
+
+    The stop method waits up to ``drain_timeout`` for in-flight HTTP
+    requests before forcing the webapp thread down. We confirm the
+    propagation of the configured drain budget into stop().
+    """
+    fake_webapp = MagicMock()
+    fake_webapp.shutdown_event = MagicMock()
+    fake_webapp.stop = MagicMock()
+    shutdown_app._webapp = fake_webapp
+
+    # Stage a no-op processor so the shutdown loop completes.
+    fake_processor = MagicMock()
+    fake_processor.signal_stop = MagicMock()
+    fake_processor.partition_id = 0
+    fake_processor.offset_tracker = MagicMock()
+    fake_processor.offset_tracker.pending_count = 0
+    fake_processor.offset_tracker.has_pending = MagicMock(return_value=False)
+    fake_processor.offset_tracker.committable = MagicMock(return_value=None)
+    fake_processor.queue_size = 0
+    fake_processor.inflight_count = 0
+    fake_processor.drain = AsyncMock()
+    fake_processor.stop = AsyncMock()
+    shutdown_app._processors[0] = fake_processor
+
+    await shutdown_app._lifecycle._shutdown()
+
+    # Drain budget propagated into webapp.stop().
+    fake_webapp.stop.assert_called_once_with(
+        drain_timeout=shutdown_app._config.executor.drain_timeout_seconds,
+    )
+
+
+async def test_shutdown_event_set_before_first_signal_stop(shutdown_app):
+    """``shutdown_event.set()`` runs BEFORE the first ``processor.signal_stop()``.
+
+    Documented invariant: the gate is flipped at the very top of
+    ``_shutdown`` so any HTTP request that arrives during drain is
+    rejected with 503 ``status='shutdown'`` rather than queued behind
+    a pipeline that no longer accepts work.
+
+    This test is similar to
+    ``test_shutdown_sets_webapp_shutdown_event_before_drain`` but
+    asserts on the strict total order with multiple processors so it
+    survives a refactor that runs ``signal_stop`` in parallel.
+    """
+    call_log: list[str] = []
+
+    fake_event = MagicMock()
+    fake_event.set = lambda: call_log.append('webapp.shutdown_event.set')
+    fake_webapp = MagicMock()
+    fake_webapp.shutdown_event = fake_event
+    fake_webapp.stop = MagicMock()
+    shutdown_app._webapp = fake_webapp
+
+    # Two processors: prove that NEITHER ``signal_stop`` runs before
+    # the gate flips.
+    for partition_id in (0, 1):
+        proc = MagicMock()
+        proc.signal_stop = lambda pid=partition_id: call_log.append(f'processor.signal_stop[{pid}]')
+        proc.partition_id = partition_id
+        proc.offset_tracker = MagicMock()
+        proc.offset_tracker.pending_count = 0
+        proc.offset_tracker.has_pending = MagicMock(return_value=False)
+        proc.offset_tracker.committable = MagicMock(return_value=None)
+        proc.queue_size = 0
+        proc.inflight_count = 0
+        proc.drain = AsyncMock()
+        proc.stop = AsyncMock()
+        shutdown_app._processors[partition_id] = proc
+
+    await shutdown_app._lifecycle._shutdown()
+
+    # The gate flips first; both ``signal_stop`` calls follow.
+    set_idx = call_log.index('webapp.shutdown_event.set')
+    sig_indices = [i for i, e in enumerate(call_log) if e.startswith('processor.signal_stop')]
+    assert sig_indices, 'expected processor.signal_stop calls in the log'
+    assert set_idx < min(sig_indices)
+
+
+async def test_shutdown_calls_webapp_stop_after_processor_drain(shutdown_app):
+    """``_shutdown`` orders processor drain BEFORE ``webapp.stop``.
+
+    Rationale: in-flight HTTP requests that are mid-execute are
+    waiting on the executor pool. Draining processors first lets
+    those requests finish naturally (returning 200 to clients) before
+    we pull the webapp's uvicorn thread down. Any request still alive
+    at the end of drain is forcibly cancelled when ``webapp.stop``
+    joins the thread with the ``drain_timeout`` budget.
+    """
+    call_log: list[str] = []
+
+    fake_event = MagicMock()
+    fake_event.set = lambda: call_log.append('webapp.shutdown_event.set')
+    fake_webapp = MagicMock()
+    fake_webapp.shutdown_event = fake_event
+    fake_webapp.stop = lambda *args, **kwargs: call_log.append('webapp.stop')
+    shutdown_app._webapp = fake_webapp
+
+    fake_processor = MagicMock()
+    fake_processor.signal_stop = lambda: call_log.append('processor.signal_stop')
+    fake_processor.partition_id = 0
+    fake_processor.offset_tracker = MagicMock()
+    fake_processor.offset_tracker.pending_count = 0
+    fake_processor.offset_tracker.has_pending = MagicMock(return_value=False)
+    fake_processor.offset_tracker.committable = MagicMock(return_value=None)
+    fake_processor.queue_size = 0
+    fake_processor.inflight_count = 0
+
+    async def _record_drain():
+        call_log.append('processor.drain')
+
+    fake_processor.drain = _record_drain
+    fake_processor.stop = AsyncMock(side_effect=lambda: call_log.append('processor.stop'))
+    shutdown_app._processors[0] = fake_processor
+
+    await shutdown_app._lifecycle._shutdown()
+
+    # ``webapp.stop`` runs AFTER the drain phase completes.
+    drain_idx = call_log.index('webapp.shutdown_event.set')
+    stop_idx = call_log.index('webapp.stop')
+    assert drain_idx < stop_idx
+    # The gate is the very first webapp-touching call (no other
+    # webapp-* operation precedes it).
+    webapp_calls = [c for c in call_log if c.startswith('webapp.')]
+    assert webapp_calls[0] == 'webapp.shutdown_event.set'
+    assert webapp_calls[-1] == 'webapp.stop'

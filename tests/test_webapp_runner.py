@@ -433,6 +433,91 @@ async def test_runner_wraps_on_http_request_complete_exceptions():
 
 
 @pytest.mark.asyncio
+async def test_runner_skips_on_http_request_complete_when_cancelled_pre_hook():
+    """ctx.cancelled set before on_http_request_complete → hook NOT called.
+
+    Drives the runner with a successful execute, then flips
+    ctx.cancelled while the runner is between gather() and the
+    response hook. The runner's pre-hook gate trips and raises
+    CancelledError; the user hook never runs.
+    """
+    handler = _RecordingHandler()
+    task_a = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
+
+    async def arrange_impl(req, pending):
+        return [task_a]
+
+    complete_called: list[Any] = []
+
+    async def complete_impl(group):
+        complete_called.append(group)
+        return _HttpResp()
+
+    handler.arrange_http_request_impl = arrange_impl
+    handler.on_http_request_complete_impl = complete_impl
+
+    canned = _make_canned_result(task_a)
+    pool = _make_pool_returning([canned])
+    app = _make_stub_app(handler, pool=pool)
+    runner = WebappRunner(app, _make_config())
+
+    ctx = _make_ctx()
+    # Pre-allocate ctx.cancelled on this loop AND set it. The runner's
+    # "if ctx.cancelled is None" branch leaves our pre-set Event alone.
+    ctx.cancelled = asyncio.Event()
+    ctx.cancelled.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner.run(ctx)
+
+    # The user response hook never ran — runner short-circuited at the
+    # post-execute / pre-hook gate.
+    assert complete_called == []
+
+
+@pytest.mark.asyncio
+async def test_runner_logs_dropped_after_timeout_event(monkeypatch):
+    """Cancellation after tasks complete logs ``webapp_request_dropped_after_timeout``.
+
+    Uses ``structlog.testing.capture_logs`` to assert the structured
+    log event fires with the expected category + request_id when the
+    runner trips its post-execute gate.
+    """
+    import structlog
+    from structlog.testing import capture_logs
+
+    handler = _RecordingHandler()
+    task_a = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
+
+    async def arrange_impl(req, pending):
+        return [task_a]
+
+    handler.arrange_http_request_impl = arrange_impl
+
+    pool = _make_pool_returning([_make_canned_result(task_a)])
+    app = _make_stub_app(handler, pool=pool)
+    runner = WebappRunner(app, _make_config())
+
+    ctx = _make_ctx(client_name='tenant-A', request_id='req_test_drop_1')
+    ctx.cancelled = asyncio.Event()
+    ctx.cancelled.set()
+
+    # ``capture_logs`` requires structlog's contextvars binding; ensure
+    # the logger we use (drakkar.webapp.runner) routes through it.
+    structlog.configure()  # idempotent — restores defaults if previously cleared
+
+    with capture_logs() as cap, pytest.raises(asyncio.CancelledError):
+        await runner.run(ctx)
+
+    events = [e for e in cap if e.get('event') == 'webapp_request_dropped_after_timeout']
+    assert events, f'expected webapp_request_dropped_after_timeout in {cap}'
+    event = events[0]
+    assert event['category'] == 'webapp'
+    assert event['request_id'] == 'req_test_drop_1'
+    assert event['client'] == 'tenant-A'
+
+
+@pytest.mark.asyncio
 async def test_runner_allocates_cancelled_event_lazily():
     """ctx.cancelled is allocated by the runner on the awaiting loop."""
     handler = _RecordingHandler()

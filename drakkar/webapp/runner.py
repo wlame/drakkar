@@ -25,11 +25,25 @@ flat 500 body. The original traceback is captured on the exception so
 the route handler / logger can record it without leaking it into the
 response body.
 
-Task 6a does NOT implement timeout, cancellation, the concurrency
-semaphore, or the sinks-enabled path. Those land in Tasks 6b and 6c.
-The signatures here are shaped to accept those features without
-restructuring (e.g., ``ctx.cancelled`` is allocated up front so 6b can
-add ``is_set()`` checks at the documented points).
+Task 6b adds cooperative cancellation around the user-facing side
+effects (sink delivery is Task 6c, ``on_http_request_complete`` is
+already here). When the route handler on T2 hits its
+``request_timeout_seconds`` budget, it (a) sets ``ctx.cancelled`` via
+``call_soon_threadsafe`` so the flag is set on T1's loop, and (b)
+cancels the cross-thread ``concurrent.futures.Future`` so any awaits
+on T1 that are still running raise ``CancelledError``. The runner
+checks ``ctx.cancelled.is_set()`` at the two safe boundaries — after
+``asyncio.gather`` returns and immediately before invoking
+``on_http_request_complete`` — and raises ``CancelledError`` from
+either point so the user-side response work is skipped.
+
+v1 caveat: subprocesses already running on T1 cannot be SIGTERM'd —
+they finish naturally and their results are simply discarded after
+the cancellation gate trips. Documented as a known limitation; v2
+may add SIGTERM-on-cancel for in-flight subprocesses.
+
+Task 6c will add the sinks-enabled path between the two cancellation
+checks.
 """
 
 from __future__ import annotations
@@ -242,6 +256,26 @@ class WebappRunner:
             else:
                 failed_count += 1
 
+        # ----- Cancellation gate (post-execute) -----
+        # T2's ``wait_for`` may have timed out while we were inside the
+        # executor pool. ``ctx.cancelled`` is set via
+        # ``loop.call_soon_threadsafe`` so it lands on this loop (T1).
+        # Bail out before building the synthetic ``MessageGroup`` and
+        # invoking the user's response hook — those side effects are
+        # wasted work once T2 has already returned a 504 to the caller.
+        # The metric increment + recorder row land in Task 7 / Task 8;
+        # for now we structured-log only.
+        if ctx.cancelled is not None and ctx.cancelled.is_set():
+            await logger.ainfo(
+                'webapp_request_dropped_after_timeout',
+                category='webapp',
+                request_id=ctx.request_id,
+                client=ctx.client_name,
+                stage='post_execute',
+            )
+            # TODO(Task 7): drakkar_webapp_dropped_after_timeout_total{client}.inc()
+            raise asyncio.CancelledError('webapp request cancelled after task execution; T2 already 504d')
+
         # ----- Stage: synthetic MessageGroup + on_http_request_complete -----
         # Per the task brief: pass origin/client_name/request_id
         # EXPLICITLY — the SourceMessage doesn't carry those fields.
@@ -256,6 +290,21 @@ class WebappRunner:
             client_name=ctx.client_name,
             request_id=ctx.request_id,
         )
+
+        # Second cancellation gate: late timeouts may land between the
+        # post-execute gate above and the user's response hook. Skipping
+        # ``on_http_request_complete`` keeps user-side response work off
+        # the critical path once the caller has already received a 504.
+        if ctx.cancelled is not None and ctx.cancelled.is_set():
+            await logger.ainfo(
+                'webapp_request_dropped_after_timeout',
+                category='webapp',
+                request_id=ctx.request_id,
+                client=ctx.client_name,
+                stage='pre_on_http_request_complete',
+            )
+            # TODO(Task 7): drakkar_webapp_dropped_after_timeout_total{client}.inc()
+            raise asyncio.CancelledError('webapp request cancelled before on_http_request_complete; T2 already 504d')
 
         complete_started = time.monotonic()
         try:

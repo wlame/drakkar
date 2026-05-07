@@ -27,8 +27,8 @@ Lifecycle
 Per-request 503 gates
 ---------------------
 
-Two readiness checks are evaluated at the top of the request handler,
-ahead of the runner stub introduced in Task 6:
+Three readiness checks are evaluated at the top of the request handler,
+ahead of the runner dispatch:
 
 * ``not self._app.is_ready`` → 503 with ``status='not_ready'`` and the
   Kafka-routing hint. Covers the window between the webapp thread
@@ -36,10 +36,39 @@ ahead of the runner stub introduced in Task 6:
 * ``self.shutdown_event.is_set()`` → 503 with ``status='shutdown'``.
   ``AppLifecycle._shutdown`` sets this BEFORE the drain phase begins so
   new requests are rejected immediately while in-flight ones complete.
+* T2-side concurrency cap (``WebAppConfig.max_concurrent``): if the
+  semaphore cannot be acquired immediately, return 503 ``status='capacity'``
+  with the Kafka-routing hint. The acquire uses a tiny non-blocking
+  poll (``wait_for(..., timeout)``) so a fully-loaded webapp sheds load
+  rather than queuing, and clients learn quickly to switch over to the
+  Kafka source path.
 
-Both responses include a ``hint`` field telling the client to route the
-workload through the Kafka source topic for higher throughput and
-worker-restart resilience (the documented Kafka-fallback pattern).
+All 503/504 responses include a ``hint`` field telling the client to
+route the workload through the Kafka source topic for higher throughput
+and worker-restart resilience (the documented Kafka-fallback pattern).
+
+Timeout + cancellation
+----------------------
+
+Each dispatch is wrapped in ``asyncio.wait_for(...,
+timeout=request_timeout_seconds)``. On ``TimeoutError``:
+
+1. signal cancellation to T1 via
+   ``main_loop.call_soon_threadsafe(ctx.cancelled.set)`` so the runner
+   short-circuits its post-execute side effects (sinks +
+   ``on_http_request_complete``);
+2. ``asyncio.wait_for`` already cancels the wrapped task when its
+   budget expires, which propagates through ``asyncio.wrap_future`` to
+   cancel the underlying ``concurrent.futures.Future`` (so the runner's
+   currently-awaiting line raises ``CancelledError``);
+3. return a flat 504 body with ``status='timeout'``, ``error``,
+   ``request_id`` and ``duration_ms``.
+
+The runner creates ``ctx.cancelled`` on its first line (T1's loop) so
+the Event binds to the right loop. If T2 hits the ``wait_for`` budget
+before the runner has a chance to allocate the Event, the
+``call_soon_threadsafe`` callback handles the ``None`` case
+gracefully.
 """
 
 from __future__ import annotations
@@ -80,6 +109,14 @@ logger = structlog.get_logger()
 KAFKA_FALLBACK_HINT = (
     'route this workload through the Kafka source topic for higher throughput and worker-restart resilience'
 )
+
+# Tiny acquire-probe timeout for the T2-side concurrency semaphore. The
+# value is small enough that a fully-loaded webapp sheds load almost
+# immediately (returning 503 ``capacity``) but large enough to absorb a
+# scheduling jitter on a barely-loaded pool. It is deliberately NOT a
+# user-tunable knob — operators tune ``max_concurrent`` instead, and
+# horizontal-scale-out / Kafka-fallback covers everything else.
+_SEMAPHORE_ACQUIRE_PROBE_SECONDS = 0.001
 
 
 class ConfigurationError(RuntimeError):
@@ -153,6 +190,16 @@ class WebApp:
         # handler's class attributes per request. ``_validate_handler_types``
         # already proved this is non-None before the runner was built.
         self._http_request_type: Any = drakkar_app._handler.http_request_model
+
+        # T2-side concurrency cap. The semaphore must be allocated on
+        # the loop that awaits it (the webapp loop, T2). Constructing
+        # the semaphore here works because Python 3.10+ removed the
+        # implicit-loop binding from ``asyncio.Semaphore``: a Semaphore
+        # constructed without a running loop binds lazily to whichever
+        # loop first awaits ``acquire``. The bound is set once at
+        # construction; FastAPI's webapp loop is the only loop that
+        # ever touches it (the route handler is the sole consumer).
+        self._semaphore: asyncio.Semaphore = asyncio.Semaphore(config.max_concurrent)
 
         # Build the FastAPI app eagerly — uvicorn binds it inside the
         # daemon thread but the route registration must already be in
@@ -284,6 +331,50 @@ class WebApp:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _signal_cancel(self, ctx: WebRequestContext) -> None:
+        """Schedule ``ctx.cancelled.set()`` on the main pipeline loop (T1).
+
+        Called from T2 (the webapp loop) when ``asyncio.wait_for``
+        trips its budget. ``ctx.cancelled`` is an :class:`asyncio.Event`
+        bound to T1's loop (the runner allocates it on its first line);
+        touching it from T2 directly would risk inconsistent behaviour
+        on contended event-loop policies. ``call_soon_threadsafe`` is
+        the documented cross-thread way to interact with loop-bound
+        objects.
+
+        The race we tolerate gracefully: if T2's ``wait_for`` budget
+        fires before the runner has a chance to allocate the Event,
+        ``ctx.cancelled`` is still ``None``. The scheduled callback
+        re-checks the field and returns silently in that case — the
+        ``concurrent.futures.Future`` cancellation propagated by
+        ``asyncio.wrap_future`` is sufficient to short-circuit the
+        runner before it gets to its post-execute gate.
+        """
+
+        def _set_cancelled() -> None:
+            if ctx.cancelled is not None:
+                ctx.cancelled.set()
+
+        # ``main_loop`` is the loop captured by ``DrakkarApp`` at
+        # startup. In production this is always a real event loop;
+        # tests that exercise the route handler in-process may pass a
+        # ``MagicMock`` (no ``call_soon_threadsafe``), in which case we
+        # fall back to a direct set — same observable behaviour for the
+        # runner's ``is_set()`` check, and the test stays loop-agnostic.
+        main_loop = getattr(self._app, 'main_loop', None)
+        if main_loop is not None and hasattr(main_loop, 'call_soon_threadsafe'):
+            try:
+                main_loop.call_soon_threadsafe(_set_cancelled)
+                return
+            except RuntimeError:
+                # Loop already closed (worker is in late-shutdown). The
+                # runner is no longer running; nothing to cancel. Fall
+                # through to the direct-set path so tests still observe
+                # the flag.
+                pass
+        if ctx.cancelled is not None:
+            ctx.cancelled.set()
 
     def _validate_handler_types(self) -> None:
         """Fail fast if the handler is missing webapp HTTP types.
@@ -533,6 +624,37 @@ class WebApp:
                 headers=dict(request.headers),
             )
 
+            # T2-side concurrency cap. ``acquire`` with a tiny non-zero
+            # timeout (``_SEMAPHORE_ACQUIRE_PROBE_SECONDS``) probes the
+            # semaphore: if a slot is free we get it instantly, otherwise
+            # ``TimeoutError`` falls through and we shed the request as
+            # 503 ``capacity`` rather than queue. This matches the
+            # documented "fail fast → tell the client to use Kafka"
+            # contract for over-cap requests.
+            try:
+                await asyncio.wait_for(
+                    self._semaphore.acquire(),
+                    timeout=_SEMAPHORE_ACQUIRE_PROBE_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    'webapp_request_over_capacity',
+                    category='webapp',
+                    request_id=ctx.request_id,
+                    client=ctx.client_name,
+                    max_concurrent=self._config.max_concurrent,
+                )
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        'status': 'capacity',
+                        'error': 'webapp is over capacity; request rejected',
+                        'request_id': ctx.request_id,
+                        'max_concurrent': self._config.max_concurrent,
+                        'hint': KAFKA_FALLBACK_HINT,
+                    },
+                )
+
             # Dispatch the runner coroutine to the main pipeline loop.
             # The loop captured by ``DrakkarApp`` is where the executor
             # pool's gate, the recorder writer, and any aiosqlite
@@ -541,37 +663,95 @@ class WebApp:
             # ``concurrency.py``. ``dispatch_to_loop`` handles the
             # cross-thread hop and exception forwarding.
             #
-            # Task 6a does NOT wrap this in ``asyncio.wait_for`` /
-            # cancellation / a semaphore — those land in Task 6b.
+            # Wrapped in ``asyncio.wait_for`` so a slow handler cannot
+            # block the webapp loop indefinitely. On timeout we signal
+            # the runner via ``ctx.cancelled.set`` (scheduled on T1's
+            # loop so the Event binds correctly) and return a flat 504.
             try:
-                report = await dispatch_to_loop(
-                    self._runner.run(ctx),
-                    target_loop=self._app.main_loop,
-                )
-            except WebappHandlerError as exc:
-                # User-hook failure on the pipeline side. Already logged
-                # with the full traceback inside the runner; here we just
-                # surface a flat 500 body. NEVER include the traceback
-                # in the response.
-                logger.warning(
-                    'webapp_request_handler_error',
-                    category='webapp',
-                    request_id=ctx.request_id,
-                    client=ctx.client_name,
-                    where=exc.where,
-                    error_type=type(exc.original_exc).__name__,
-                )
+                try:
+                    report = await asyncio.wait_for(
+                        dispatch_to_loop(
+                            self._runner.run(ctx),
+                            target_loop=self._app.main_loop,
+                        ),
+                        timeout=self._config.request_timeout_seconds,
+                    )
+                except TimeoutError:
+                    # Schedule the cancellation flag flip on T1's loop.
+                    # ``call_soon_threadsafe`` is the documented way to
+                    # touch loop-bound objects (here, the ``asyncio.Event``
+                    # the runner created on T1). The callback handles the
+                    # "runner hasn't started yet" race by checking
+                    # ``ctx.cancelled is not None``.
+                    self._signal_cancel(ctx)
+                    duration_ms = (datetime.now(UTC) - ctx.started_at).total_seconds() * 1000.0
+                    logger.warning(
+                        'webapp_request_timeout',
+                        category='webapp',
+                        request_id=ctx.request_id,
+                        client=ctx.client_name,
+                        timeout_seconds=self._config.request_timeout_seconds,
+                        duration_ms=duration_ms,
+                    )
+                    return JSONResponse(
+                        status_code=504,
+                        content={
+                            'status': 'timeout',
+                            'error': (f'request exceeded {self._config.request_timeout_seconds} seconds'),
+                            'request_id': ctx.request_id,
+                            'duration_ms': duration_ms,
+                            'hint': KAFKA_FALLBACK_HINT,
+                        },
+                    )
+                except asyncio.CancelledError:
+                    # The runner raised CancelledError after the post-
+                    # execute / pre-on_http_request_complete gate — this
+                    # path is taken when ``ctx.cancelled`` was already
+                    # set (e.g., the route handler is being torn down by
+                    # the webapp's own shutdown). Surface it as a 504
+                    # for consistency with the timeout path: from the
+                    # client's perspective a cancelled request looks the
+                    # same as one that timed out.
+                    duration_ms = (datetime.now(UTC) - ctx.started_at).total_seconds() * 1000.0
+                    return JSONResponse(
+                        status_code=504,
+                        content={
+                            'status': 'timeout',
+                            'error': 'request was cancelled before completion',
+                            'request_id': ctx.request_id,
+                            'duration_ms': duration_ms,
+                            'hint': KAFKA_FALLBACK_HINT,
+                        },
+                    )
+                except WebappHandlerError as exc:
+                    # User-hook failure on the pipeline side. Already logged
+                    # with the full traceback inside the runner; here we just
+                    # surface a flat 500 body. NEVER include the traceback
+                    # in the response.
+                    logger.warning(
+                        'webapp_request_handler_error',
+                        category='webapp',
+                        request_id=ctx.request_id,
+                        client=ctx.client_name,
+                        where=exc.where,
+                        error_type=type(exc.original_exc).__name__,
+                    )
+                    return JSONResponse(
+                        status_code=500,
+                        content={
+                            'status': 'error',
+                            'request_id': ctx.request_id,
+                            'error': 'internal error',
+                        },
+                    )
                 return JSONResponse(
-                    status_code=500,
-                    content={
-                        'status': 'error',
-                        'request_id': ctx.request_id,
-                        'error': 'internal error',
-                    },
+                    status_code=200,
+                    content=report.model_dump(mode='json'),
                 )
-            return JSONResponse(
-                status_code=200,
-                content=report.model_dump(mode='json'),
-            )
+            finally:
+                # Always release the semaphore — even on timeout / error.
+                # Without this an unhandled exception path would leak a
+                # permit and slowly starve the pool.
+                self._semaphore.release()
 
         return app
