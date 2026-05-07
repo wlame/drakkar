@@ -52,11 +52,17 @@ docker-compose down -v
 
 3 workers, consumer group `drakkar-integration`, 50-partition topic.
 
-| Worker | Debug UI | Metrics | Config |
-|--------|----------|---------|--------|
-| worker-1 | [localhost:8081](http://localhost:8081) | [localhost:9090](http://localhost:9090/metrics) | 4 executors, all 6 sinks |
-| worker-2 | [localhost:8082](http://localhost:8082) | [localhost:9091](http://localhost:9091/metrics) | 4 executors, all 6 sinks |
-| worker-3 | [localhost:8083](http://localhost:8083) | [localhost:9093](http://localhost:9093/metrics) | 4 executors, all 6 sinks |
+| Worker | Debug UI | Metrics | Webapp | Config |
+|--------|----------|---------|--------|--------|
+| worker-1 | [localhost:8081](http://localhost:8081) | [localhost:9090](http://localhost:9090/metrics) | [localhost:8090](http://localhost:8090/process) | 4 executors, all 6 sinks, **webapp enabled** |
+| worker-2 | [localhost:8082](http://localhost:8082) | [localhost:9091](http://localhost:9091/metrics) | -- | 4 executors, all 6 sinks |
+| worker-3 | [localhost:8083](http://localhost:8083) | [localhost:9093](http://localhost:9093/metrics) | -- | 4 executors, all 6 sinks |
+
+Only worker-1 has `DK_WEBAPP__ENABLED=true`; worker-2 and worker-3 are
+Kafka-only. This is intentional -- it demonstrates the
+[load-balancer caveat](webapp.md#load-balancer-caveat) for the
+synchronous HTTP endpoint: requests land where they're sent, no
+framework-level redistribution.
 
 ### Fast Cluster (symbol counting)
 
@@ -116,6 +122,144 @@ Same source topic, different consumer group. Each message:
 
 Fast tasks finish in milliseconds, demonstrating [duration threshold](observability.md#duration-thresholds)
 filtering and high-throughput behavior.
+
+### Webapp Pipeline (worker-1 only)
+
+Worker-1 also runs the [synchronous HTTP webapp](webapp.md). The
+endpoint accepts a `RankRequest` body and returns a framework-built
+`WebReport` JSON containing the user's `RankResponse` plus per-task and
+sink stats. See `integration/worker/handler.py` for the
+`arrange_http_request` / `on_http_request_complete` implementation and
+the `task_priority` override that pushes HTTP-origin tasks ahead of
+Kafka tasks at the executor gate.
+
+Two clients are configured (in `integration/worker/drakkar.yaml`):
+
+| Client | Token | RPM cap |
+|--------|-------|---------|
+| `anonymous` | (empty) | 4 |
+| `tenant-A` | `integration-tenant-a-token-do-not-use-in-prod` | 60 |
+
+A `load_generator` container drives a request every 10 seconds using
+the anonymous client (so you can watch the rate-limit kick in at the
+4-rpm cap). A second `load_generator_tenant_a` service is gated behind
+the `tenant` Compose profile and uses the higher-rpm tenant token.
+
+---
+
+## Testing the Webapp
+
+### Hands-on with `curl`
+
+While the stack is running, send a request directly:
+
+```bash
+# Anonymous (no token) -- subject to the 4-rpm cap
+curl -sS -X POST http://localhost:8090/process \
+  -H 'Content-Type: application/json' \
+  -d '{"score": 42, "client_hint": "manual-test"}' | jq .
+
+# Tenant-A (60-rpm cap)
+curl -sS -X POST http://localhost:8090/process \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer integration-tenant-a-token-do-not-use-in-prod' \
+  -d '{"score": 42, "client_hint": "tenant-a-test"}' | jq .
+```
+
+Hit the anonymous endpoint 5 times in a row and the 5th returns 429
+with a `Retry-After` header and a `hint` field pointing at the Kafka
+source path -- exactly the rate-limit body documented in
+[webapp.md](webapp.md#status-codes).
+
+### Watching the load_generator
+
+```bash
+# Default profile -- anonymous traffic only
+docker-compose logs -f load_generator
+
+# With the tenant-A profile
+docker-compose --profile tenant up -d load_generator_tenant_a
+docker-compose logs -f load_generator_tenant_a
+```
+
+Each iteration logs the request body and the response status. You'll
+see 200 responses up to the rpm cap, then 429s once the sliding window
+fills.
+
+### What to check in the debug UI
+
+Open [worker-1's debug UI](http://localhost:8081):
+
+- **Dashboard `/`** -- a "WebApp" tile appears alongside the partition
+  tiles, showing in-flight requests, per-client rpm caps, and 60s
+  success/error counts.
+- **Live `/live`** -- HTTP-origin tasks render with a distinct purple
+  highlight and the identifier `<client>:<request_id[:8]>` instead of
+  the Kafka `p<partition>:o<offset>` form.
+- **History `/history`** -- the **Origin** filter (top right) lets you
+  view kafka-only / http-only / all events. Webapp-specific event
+  types (`webapp_request_received`, `webapp_request_completed`,
+  `webapp_request_timeout`, `webapp_request_rate_limited`,
+  `webapp_request_auth_failed`, `webapp_request_dropped_after_timeout`)
+  are visible here.
+- **Task detail `/task/{id}`** -- clicking an HTTP-origin task shows
+  Client / Request ID (instead of Partition / Offset), the truncated
+  request body, and the final response.
+
+### What to check in metrics
+
+The webapp metrics live at
+[localhost:9090/metrics](http://localhost:9090/metrics) alongside the
+existing executor and sink counters. Filter for `drakkar_webapp_`:
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `drakkar_webapp_requests_total` | Counter | `{client, status}` |
+| `drakkar_webapp_request_duration_seconds` | Histogram | `{client, status}` |
+| `drakkar_webapp_inflight` | Gauge | -- |
+| `drakkar_webapp_dropped_after_timeout_total` | Counter | `{client}` |
+| `drakkar_webapp_rpm_limit` | Gauge | `{client}` (informational) |
+
+A useful Prometheus query while the load_generator runs:
+
+```promql
+sum by (client, status) (rate(drakkar_webapp_requests_total[1m]))
+```
+
+### Demonstrating priority scheduling
+
+The integration handler's `task_priority` override returns a
+priority key of `(0, ...)` for `task.origin == 'http'` tasks and
+`(1, source_offset)` for Kafka tasks. Under sustained Kafka load, a
+manual `curl` request lands in the executor gate ahead of the queued
+Kafka tasks. The effect is visible in `/live` -- HTTP tasks dequeue
+near-instantly even when the Kafka partition queues are full.
+
+To exercise this end-to-end:
+
+1. Start the stack and the producer (default).
+2. Wait until pool utilization on worker-1 is near 100% from
+   Kafka traffic.
+3. Hit `/process` with `curl` (or just leave the `load_generator`
+   running).
+4. Watch `/live` on worker-1: HTTP-origin tasks (purple) are scheduled
+   immediately; Kafka tasks remain queued behind them.
+
+### Toggling sinks_enabled
+
+The webapp's sinks-enabled mode is OFF by default in the integration
+config. To exercise it:
+
+```bash
+# In integration/docker-compose.yml -> worker-1 -> environment
+DK_WEBAPP__SINKS_ENABLED: "true"
+```
+
+Restart worker-1. Now each HTTP request also flows through the
+handler's `on_message_complete` and writes to Kafka / Postgres /
+MongoDB / Redis like a Kafka-source message. The framework adds a
+`sinks: { ... }` summary to the response body documenting per-sink
+attempted/delivered/dlq counts.
 
 ---
 
