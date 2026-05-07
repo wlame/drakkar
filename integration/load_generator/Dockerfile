@@ -8,7 +8,7 @@ WORKDIR /app
 # We rely on the pinned httpx version + base image determinism for supply-chain
 # protection — no other packages are added here.
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir --require-hashes=false -r /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY loop.py /app/loop.py
 
