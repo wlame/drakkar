@@ -14,6 +14,36 @@ MessageGroup — and emits the aggregated summary (single row per request).
 from pydantic import BaseModel, Field
 
 
+class RankRequest(BaseModel):
+    """Webapp input model — synchronous HTTP rank request.
+
+    Sent by the ``load_generator`` service via POST /process. Carries a
+    framework-validated ``request_id`` (string id the generator stamps onto
+    each request) and a single ``score`` integer the handler turns into
+    one or two ripgrep tasks. Kept intentionally tiny so the integration
+    scenario focuses on the HTTP plumbing rather than payload shape.
+    """
+
+    request_id: str
+    score: int = Field(ge=0)
+
+
+class RankResponse(BaseModel):
+    """Webapp output model — what the handler returns to the HTTP client.
+
+    The framework wraps this model under ``"result"`` in the JSON envelope
+    (see ``docs/webapp.md``). ``client_hint`` mirrors any non-default
+    behaviour selected by ``arrange_http_request`` so the HTTP caller can
+    correlate the priority class assigned to its request.
+    """
+
+    request_id: str
+    result: int
+    client_hint: str = ''
+    succeeded_tasks: int = 0
+    failed_tasks: int = 0
+
+
 class SearchRequest(BaseModel):
     """Input message schema — a single request to search.
 

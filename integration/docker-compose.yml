@@ -165,12 +165,33 @@ services:
       DK_METRICS__PORT: "9090"
       DK_DEBUG__PORT: "8081"
       DK_DEBUG__DEBUG_URL: "http://localhost:8081/"
+      # Webapp pipeline is enabled ONLY on worker-1. Worker-2 and worker-3
+      # leave webapp.enabled=false (the shared yaml default) — proving the
+      # load-balancer caveat documented in docs/webapp.md: the synchronous
+      # HTTP path is sticky to a single worker, and round-robin
+      # load-balancing across all three would 503 two-thirds of requests.
+      DK_WEBAPP__ENABLED: "true"
     ports:
       - "9090:9090"
       - "8081:8081"
+      # Webapp port — only exposed on worker-1 because that's the only
+      # worker with the webapp pipeline running.
+      - "8090:8090"
     volumes:
       - ..:/project:ro
       - ./shared:/shared
+    healthcheck:
+      # Reuse the debug server's /healthz endpoint as the readiness gate.
+      # The webapp itself does not own a /healthz route — debug is always
+      # up well before the webapp accepts requests, so a green debug check
+      # is a reliable "worker process is alive" signal. The load_generator
+      # service depends on this healthcheck (service_healthy) so its first
+      # request lands after worker-1 has bound port 8090.
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8081/healthz\", timeout=2).status==200 else 1)'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
 
   worker-2:
     build:
@@ -283,3 +304,54 @@ services:
       KAFKA_BROKERS: kafka:9092
       SOURCE_TOPIC: search-requests
       TOTAL_MESSAGES: "5000"
+
+  # --- HTTP Load Generator ---
+  #
+  # Drives the worker-1 webapp pipeline on a 10-second cycle. Anonymous by
+  # default (CLIENT_TOKEN unset → matches the ``anonymous`` client at
+  # rpm=4). At one request every 10 seconds the anonymous limit is comfortably
+  # under the rpm=4 cap, so 200 OK is the steady state. Set INTERVAL_SECONDS
+  # to a small value (e.g. "2") to demonstrate the 429 path, or run the
+  # ``load_generator_tenant_a`` profile (commented below) to exercise the
+  # higher-rpm tenant.
+  load_generator:
+    build:
+      context: ./load_generator
+      dockerfile: Dockerfile
+    depends_on:
+      worker-1:
+        condition: service_healthy
+    environment:
+      WORKER_HOST: worker-1
+      WORKER_PORT: "8090"
+      WORKER_PATH: "/process"
+      INTERVAL_SECONDS: "10"
+      RANK_SCORE_MIN: "1"
+      RANK_SCORE_MAX: "20"
+    # Restart on failure so a brief worker restart during chaos tests
+    # doesn't kill the demo. ``no`` would be wrong — the loop catches its
+    # own connection errors, so a hard exit means something unexpected.
+    restart: on-failure
+
+  # Tenant-A load generator. Disabled by default (assigned to the ``tenant``
+  # profile so ``docker compose up`` won't start it). Enable explicitly with:
+  #   docker compose --profile tenant up load_generator_tenant_a
+  # Drives the same endpoint with the ``tenant-A`` token at a tighter
+  # interval to demonstrate the higher rpm=60 cap.
+  load_generator_tenant_a:
+    profiles: ["tenant"]
+    build:
+      context: ./load_generator
+      dockerfile: Dockerfile
+    depends_on:
+      worker-1:
+        condition: service_healthy
+    environment:
+      WORKER_HOST: worker-1
+      WORKER_PORT: "8090"
+      WORKER_PATH: "/process"
+      CLIENT_TOKEN: "integration-tenant-a-token-do-not-use-in-prod"
+      INTERVAL_SECONDS: "2"
+      RANK_SCORE_MIN: "5"
+      RANK_SCORE_MAX: "30"
+    restart: on-failure

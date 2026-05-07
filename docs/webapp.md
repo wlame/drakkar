@@ -626,6 +626,67 @@ client label and surface the load-balancing problem at the deployer.
 
 ---
 
+## Integration scenario
+
+The repo ships with a runnable end-to-end scenario under `integration/`
+that wires the webapp pipeline into the same docker-compose stack used
+for Kafka demos. It demonstrates:
+
+- **Per-worker enablement** -- only `worker-1` flips
+  `webapp.enabled=true` (via the `DK_WEBAPP__ENABLED=true` env var); the
+  other two workers leave the shared yaml default of `false` so they
+  never bind port 8090. This matches the third row of the
+  [Load balancer caveat](#load-balancer-caveat) table.
+- **Anonymous client at rpm=4** -- the default `load_generator`
+  service polls `POST /process` every 10 seconds with no
+  `Authorization` header. Steady state is 200 OK; lower
+  `INTERVAL_SECONDS` to ~2 seconds and watch 429s appear in the
+  generator's stdout.
+- **Tenant-A client at rpm=60** -- the optional
+  `load_generator_tenant_a` service (gated behind a compose profile)
+  presents a bearer token and runs at a tighter interval to exercise
+  the higher rpm tier.
+- **Priority scheduling** -- the integration handler's
+  `task_priority(task)` override returns `(0, 0)` for `origin='http'`
+  tasks and `(1, min_offset)` for Kafka tasks, so HTTP-origin tasks
+  jump the executor gate while a slow Kafka task is in flight.
+
+### Running it
+
+```bash
+cd integration
+docker compose up --build         # default: anonymous load_generator only
+# or, to also drive the tenant-A path:
+docker compose --profile tenant up --build
+```
+
+What to expect within ~30 seconds of the stack being healthy:
+
+- `worker-1` logs `webapp_request_received` and `webapp_request_completed`
+  events.
+- The `load_generator` container prints one line per iteration with the
+  status code and a body preview (`"result"`, `"sinks"`, `"errors"`,
+  `"hint"`).
+- `http://localhost:8081/live` highlights HTTP-origin tasks with the
+  origin column populated; the same tasks dequeue ahead of pending
+  Kafka tasks at the gate.
+- `drakkar_webapp_requests_total{worker="worker-1",status="ok"}` climbs
+  in Prometheus (`http://localhost:9099`).
+
+### File map
+
+| Path | Purpose |
+|------|---------|
+| `integration/load_generator/loop.py` | Standalone Python loop that POSTs `RankRequest` payloads on a configurable interval. |
+| `integration/load_generator/Dockerfile` | Thin `python:3.13-slim` image; the only dependency is a pinned `httpx`. |
+| `integration/load_generator/requirements.txt` | `httpx==0.27.2` (pinned). |
+| `integration/worker/handler.py` | 4-param `BaseDrakkarHandler`; defines `arrange_http_request`, `on_http_request_complete`, and the `task_priority` override. |
+| `integration/worker/models.py` | Adds `RankRequest` / `RankResponse`. |
+| `integration/worker/drakkar.yaml` | `webapp:` block with two clients; `enabled=false` by default and flipped per-worker via env. |
+| `integration/docker-compose.yml` | Defines `load_generator` and `load_generator_tenant_a`; exposes port 8090 and a `/healthz` healthcheck on `worker-1`. |
+
+---
+
 ## Related pages
 
 - [Handler](handler.md) -- the full hook surface, including the four

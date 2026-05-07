@@ -26,6 +26,8 @@ from metrics import (
     search_match_count,
 )
 from models import (
+    RankRequest,
+    RankResponse,
     SearchAggregate,
     SearchNotification,
     SearchRequest,
@@ -40,8 +42,18 @@ logger = structlog.get_logger()
 # Fail rate for simulated executor failures (passed as --fail=X to CLI)
 FAIL_RATE = '0.05'
 
+# Webapp tasks always pick from this small pattern list — keeps the demo
+# deterministic and decoupled from the Kafka producer's pattern set. Two
+# patterns mean every ``RankRequest`` produces two HTTP-origin executor
+# tasks, which is enough to demonstrate fan-out and the 4-param generic
+# wiring without flooding the executor pool.
+HTTP_PATTERNS = ['main', 'config']
+HTTP_FILE_PATH = '/tmp/search-corpus'
 
-class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
+
+class RipgrepHandler(
+    dk.BaseDrakkarHandler[SearchRequest, SearchResult, RankRequest, RankResponse],
+):
     """Searches source files using ripgrep with FAN-OUT, FAN-IN, and a
     precomputed-result fast-track driven by the framework cache.
 
@@ -516,6 +528,129 @@ class RipgrepHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
         if error.sink_type in ('http', 'redis'):
             return dk.DeliveryAction.RETRY
         return dk.DeliveryAction.DLQ
+
+    # ------------------------------------------------------------------
+    # Webapp pipeline (only invoked when ``webapp.enabled=True`` — by default
+    # only worker-1 has the webapp turned on; worker-2 / worker-3 never call
+    # these hooks and their existence is ignored at runtime).
+    # ------------------------------------------------------------------
+
+    async def arrange_http_request(
+        self,
+        req: RankRequest,
+        pending: dk.PendingContext,
+    ) -> list[dk.ExecutorTask]:
+        """Translate a single HTTP RankRequest into 1-2 executor tasks.
+
+        Every HTTP request fans out into ``len(HTTP_PATTERNS)`` ripgrep tasks
+        against ``HTTP_FILE_PATH``. Tasks carry priority/client metadata so
+        ``task_priority`` (below) can prioritise them ahead of Kafka tasks
+        AND respect a ``priority_class`` override coming from the request
+        path — both axes of the priority demo are exercised.
+        """
+
+        await logger.ainfo(
+            'http_arrange',
+            category='handler',
+            request_id=req.request_id,
+            score=req.score,
+            patterns=HTTP_PATTERNS,
+        )
+
+        # Use ``score`` to deterministically vary the repeat count: small
+        # scores produce fast tasks, large scores produce slow ones. This
+        # makes the priority-scheduling demo visible in /live: a slow Kafka
+        # task in flight + an HTTP task arriving should cause the HTTP task
+        # to be dequeued ahead of any pending Kafka task at the gate.
+        repeat = max(1, min(5, req.score % 5 + 1))
+
+        tasks: list[dk.ExecutorTask] = []
+        for pattern in HTTP_PATTERNS:
+            task_id = dk.make_task_id('http-rg')
+            if task_id in pending.pending_task_ids:
+                continue
+            tasks.append(
+                dk.ExecutorTask(
+                    task_id=task_id,
+                    args=[str(repeat), pattern, HTTP_FILE_PATH, f'--fail={FAIL_RATE}'],
+                    metadata={
+                        'request_id': req.request_id,
+                        'pattern': pattern,
+                        'file_path': HTTP_FILE_PATH,
+                        'repeat': repeat,
+                        # Read by ``task_priority``: HTTP tasks tagged
+                        # ``priority_class='web'`` jump the queue. Tasks
+                        # without the tag fall back to the default key.
+                        'priority_class': 'web',
+                        'client': 'http-client',
+                    },
+                    labels={
+                        'source': 'http',
+                        'pattern': pattern,
+                        'file': HTTP_FILE_PATH,
+                    },
+                ),
+            )
+        return tasks
+
+    async def on_http_request_complete(self, group: dk.MessageGroup) -> RankResponse:
+        """Build the HTTP response from the gathered task outputs.
+
+        Counts match lines across all completed tasks and folds them into a
+        single ``RankResponse``. ``client_hint`` echoes the priority class
+        assigned by ``arrange_http_request`` so the caller can confirm its
+        request was processed on the fast lane.
+        """
+
+        if group.is_empty:
+            return RankResponse(
+                request_id=group.request_id or '',
+                result=0,
+                client_hint='empty',
+            )
+
+        total_matches = 0
+        for r in group.results:
+            total_matches += sum(1 for line in r.stdout.strip().split('\n') if line)
+
+        await logger.ainfo(
+            'http_completed',
+            category='handler',
+            request_id=group.request_id,
+            client_name=group.client_name,
+            succeeded=group.succeeded,
+            failed=group.failed,
+            total_matches=total_matches,
+        )
+
+        return RankResponse(
+            request_id=group.request_id or '',
+            result=total_matches,
+            client_hint='web-priority',
+            succeeded_tasks=group.succeeded,
+            failed_tasks=group.failed,
+        )
+
+    def task_priority(self, task: dk.ExecutorTask) -> tuple[int, int]:
+        """Order tasks at the executor gate.
+
+        Returns a ``(priority_class, tiebreak)`` tuple where smaller
+        priority_class dequeues first. The framework auto-stamps
+        ``task.origin='http'`` for tasks returned by
+        ``arrange_http_request``, so we can route on it directly.
+
+        Two axes are demonstrated:
+
+        - ``origin='http'`` tasks always lead Kafka tasks, even when a Kafka
+          task has been waiting longer (the synchronous client is blocked
+          on the response, so it gets the fast lane).
+        - Within Kafka tasks, smaller offsets dequeue first — matching the
+          framework default and keeping ``OffsetTracker`` memory bounded.
+        """
+
+        if task.origin == 'http':
+            return (0, 0)
+        return (1, min(task.source_offsets) if task.source_offsets else 0)
 
     async def on_assign(self, partitions: list[int]) -> None:
         await logger.ainfo('partitions_assigned', category='handler', partitions=partitions)

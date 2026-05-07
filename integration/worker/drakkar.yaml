@@ -179,6 +179,36 @@ debug:
 # downstream consumers; this section configures the framework's
 # *in-process* cache which the handler consults inside arrange() and
 # populates inside on_task_complete().
+# --- Webapp pipeline ---
+#
+# Synchronous HTTP front door for the same handler pipeline that consumes
+# Kafka. Disabled by default in the shared file; only worker-1 flips it on
+# via the ``DK_WEBAPP__ENABLED=true`` env var in docker-compose.yml. That
+# arrangement deliberately leaves worker-2 / worker-3 webapp-less to
+# demonstrate the "load-balancer caveat" from docs/webapp.md — the
+# load_generator service hits worker-1 directly because round-robin would
+# 503 two-thirds of requests.
+#
+# ``sinks_enabled=false`` keeps the demo simple: HTTP responses are built
+# entirely from gathered task outputs, no per-request fan-out into the
+# Kafka/Postgres/Mongo sinks. Flip via ``DK_WEBAPP__SINKS_ENABLED=true``
+# on worker-1 to exercise the sinks-enabled variant.
+webapp:
+  enabled: false
+  host: '0.0.0.0'
+  port: 8090
+  path: '/process'
+  sinks_enabled: false
+  request_timeout_seconds: 30.0
+  max_concurrent: 64
+  clients:
+    - name: anonymous
+      token: ''
+      rpm: 4
+    - name: tenant-A
+      token: 'integration-tenant-a-token-do-not-use-in-prod'
+      rpm: 60
+
 cache:
   # Master switch. When false, every handler.cache call becomes a no-op
   # stub (peek/get return None, set/delete silently discard) — handler
