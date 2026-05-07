@@ -21,6 +21,7 @@ from drakkar.webapp.models import (
     WebReport,
     WebRequestContext,
 )
+from drakkar.webapp.runner import WebappHandlerError, WebappRunner
 from drakkar.webapp.server import ConfigurationError, WebApp
 
 __all__ = [
@@ -36,5 +37,7 @@ __all__ = [
     'WebRequestContext',
     'WebappAuthError',
     'WebappError',
+    'WebappHandlerError',
     'WebappRateLimitError',
+    'WebappRunner',
 ]

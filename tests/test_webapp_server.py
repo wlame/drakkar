@@ -6,12 +6,14 @@ Focus areas:
   ``wait_until_ready`` resolves once serving, ``stop`` exits cleanly.
 * Construction-time validation: webapp.enabled but no HTTP types →
   :class:`ConfigurationError`.
-* Per-request 503 gates ahead of the runner stub:
+* Per-request 503 gates ahead of the runner:
   - request before main loop ready → 503 ``not_ready`` with the
     Kafka-routing hint.
   - request during shutdown → 503 ``status='shutdown'``.
-* Request once both gates pass → 501 ``not_implemented`` (the Task 4
-  stub; replaced in Task 6).
+* Request once both gates pass exercises the runner (Task 6a). The
+  default ``arrange_http_request`` raises ``NotImplementedError`` so
+  the route handler returns a flat 500 — happy-path runner tests live
+  in ``tests/test_webapp_runner.py``.
 """
 
 from __future__ import annotations
@@ -175,13 +177,18 @@ def test_start_in_thread_and_wait_until_ready_returns_once_serving():
         # If wait_until_ready returned without binding we'd see a
         # ConnectionRefusedError here.
         with httpx.Client() as client:
-            # Hit the configured route — request body shape doesn't
-            # matter, the gate fires before any parsing.
+            # Hit the configured route — body shape matters now
+            # because Task 6a parses the body before dispatching to
+            # the runner. Empty JSON validates against the test's
+            # ``_HttpReq`` model (all defaults). The default
+            # ``arrange_http_request`` raises ``NotImplementedError``
+            # which the route handler maps to a flat 500.
             response = client.post(f'http://127.0.0.1:{port}/process', json={})
-            # 501 — both gates pass (is_ready=True, shutdown not set),
-            # so the stub returns the 501 documented for Task 4.
-            assert response.status_code == 501
-            assert response.json()['status'] == 'not_implemented'
+            assert response.status_code == 500
+            body = response.json()
+            assert body['status'] == 'error'
+            assert body['error'] == 'internal error'
+            assert 'request_id' in body
     finally:
         webapp.stop(drain_timeout=2.0)
 
@@ -284,8 +291,15 @@ def test_request_during_shutdown_returns_503_with_status_shutdown():
         webapp.stop(drain_timeout=2.0)
 
 
-def test_request_when_ready_and_not_shutting_down_returns_501_stub():
-    """Both gates pass → 501 from the Task 4 stub (replaced in Task 6)."""
+def test_request_when_ready_and_not_shutting_down_dispatches_to_runner():
+    """Both gates pass → request flows into the runner (Task 6a).
+
+    The bare ``_WebHandler`` test fixture inherits the default
+    ``arrange_http_request`` that raises ``NotImplementedError``. That
+    failure surfaces as a flat 500 from the route handler — confirming
+    body parse + runner dispatch happened. The happy-path runner tests
+    live in ``tests/test_webapp_runner.py``.
+    """
     handler = _WebHandler()
     app = _make_app_stub(handler, is_ready=True)
     port = _free_port()
@@ -298,9 +312,10 @@ def test_request_when_ready_and_not_shutting_down_returns_501_stub():
 
         with httpx.Client() as client:
             response = client.post(f'http://127.0.0.1:{port}/process', json={})
-            assert response.status_code == 501
+            assert response.status_code == 500
             body = response.json()
-            assert body['status'] == 'not_implemented'
+            assert body['status'] == 'error'
+            assert body['error'] == 'internal error'
             assert 'request_id' in body
     finally:
         webapp.stop(drain_timeout=2.0)

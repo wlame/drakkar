@@ -47,20 +47,25 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
 import uvicorn
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
+from drakkar.concurrency import dispatch_to_loop
 from drakkar.config import WebAppConfig
-from drakkar.utils import make_request_id
+from drakkar.utils import make_request_id, validate_request_id
 from drakkar.webapp.dependencies import (
     WebappError,
     make_authenticate,
     make_rate_limit,
 )
+from drakkar.webapp.models import WebRequestContext
+from drakkar.webapp.runner import WebappHandlerError, WebappRunner
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
@@ -137,6 +142,17 @@ class WebApp:
         # a clear message, not at first-request time with a confusing
         # 500 about a missing override.
         self._validate_handler_types()
+
+        # Webapp runner — Task 6a. One instance per ``WebApp`` so the
+        # synthetic ``SourceMessage.offset`` counter is monotone for the
+        # process lifetime. The runner runs on the main loop (T1); the
+        # FastAPI route handler dispatches to it via ``dispatch_to_loop``.
+        self._runner = WebappRunner(drakkar_app, config)
+        # Cache the resolved HttpRequestT model on ``self`` so the route
+        # handler can validate the POST body without re-walking the
+        # handler's class attributes per request. ``_validate_handler_types``
+        # already proved this is non-None before the runner was built.
+        self._http_request_type: Any = drakkar_app._handler.http_request_model
 
         # Build the FastAPI app eagerly — uvicorn binds it inside the
         # daemon thread but the route registration must already be in
@@ -399,7 +415,6 @@ class WebApp:
         @app.post(path)
         async def process(
             request: Request,
-
             # idiom is ``Depends(...)`` in argument defaults; B008 only
             # applies to plain function calls in defaults, not to FastAPI
             # marker objects.
@@ -422,14 +437,18 @@ class WebApp:
             # Readiness gates fire AFTER auth+rate-limit so an
             # unauthenticated burst still returns 401 (not 503) — that
             # keeps audit trails accurate during deploys.
-            request_id = make_request_id('req')
+            # Pre-allocate a request_id used for the gate responses
+            # below. If the request makes it past the gates the runner
+            # asks the handler for the real request_id (which may be
+            # derived from headers — typical for tracing scenarios).
+            gate_request_id = make_request_id('req')
             if self.shutdown_event.is_set():
                 return JSONResponse(
                     status_code=503,
                     content={
                         'status': 'shutdown',
                         'error': 'webapp is shutting down; request rejected',
-                        'request_id': request_id,
+                        'request_id': gate_request_id,
                         'hint': KAFKA_FALLBACK_HINT,
                     },
                 )
@@ -439,23 +458,120 @@ class WebApp:
                     content={
                         'status': 'not_ready',
                         'error': 'webapp is starting; main pipeline is not yet ready',
-                        'request_id': request_id,
+                        'request_id': gate_request_id,
                         'hint': KAFKA_FALLBACK_HINT,
                     },
                 )
-            # Stub — Task 6 wires the real runner here. We return 501
-            # (Not Implemented) so a misrouted production request fails
-            # loudly rather than silently 200-ing with no result. The
-            # ``client`` parameter is unused at this stub but the route
-            # signature already matches the Task 6 wiring.
+
+            # Parse the body manually so we control the 422 envelope
+            # shape. Declaring the parameter as the typed model would
+            # let FastAPI auto-422 with its own envelope; we want a flat
+            # body matching the documented webapp shape.
+            body_bytes = await request.body()
+            try:
+                parsed = self._http_request_type.model_validate_json(body_bytes)
+            except ValidationError as exc:
+                # ``include_input=False`` keeps the offending raw bytes
+                # OUT of the response body (the default ``input`` field
+                # carries the raw value, which can be ``bytes`` and isn't
+                # JSON-encodable; even when encodable, echoing it back
+                # leaks request payload to anyone who could already see
+                # the response). ``include_url=False`` strips the
+                # documentation URLs Pydantic adds — operators read
+                # docs, the API caller does not need them.
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        'error': 'invalid_request',
+                        'request_id': gate_request_id,
+                        'details': exc.errors(include_input=False, include_url=False),
+                    },
+                )
+            except ValueError as exc:
+                # ``model_validate_json`` surfaces malformed JSON as a
+                # plain ``ValueError`` — same flat envelope, different
+                # ``details`` shape (Pydantic gives us a single string).
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        'error': 'invalid_request',
+                        'request_id': gate_request_id,
+                        'details': str(exc),
+                    },
+                )
+
+            # Resolve the framework request_id via the handler hook so
+            # users can promote an upstream tracing header (e.g.,
+            # ``X-Request-ID``) into the framework id. The hook's return
+            # value goes through ``validate_request_id`` so a buggy
+            # override fails loudly rather than producing log labels
+            # with whitespace / non-ASCII.
+            try:
+                request_id = self._app._handler.http_request_id(parsed, dict(request.headers))
+                validate_request_id(request_id)
+            except Exception as exc:
+                logger.warning(
+                    'webapp_request_id_resolution_failed',
+                    category='webapp',
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        'status': 'error',
+                        'request_id': gate_request_id,
+                        'error': 'internal error',
+                    },
+                )
+
+            ctx = WebRequestContext(
+                request_id=request_id,
+                client_name=client.name,
+                request=parsed,
+                started_at=datetime.now(UTC),
+                headers=dict(request.headers),
+            )
+
+            # Dispatch the runner coroutine to the main pipeline loop.
+            # The loop captured by ``DrakkarApp`` is where the executor
+            # pool's gate, the recorder writer, and any aiosqlite
+            # connections were constructed — running the runner on T2
+            # would trip the "loop binding" RuntimeError documented in
+            # ``concurrency.py``. ``dispatch_to_loop`` handles the
+            # cross-thread hop and exception forwarding.
+            #
+            # Task 6a does NOT wrap this in ``asyncio.wait_for`` /
+            # cancellation / a semaphore — those land in Task 6b.
+            try:
+                report = await dispatch_to_loop(
+                    self._runner.run(ctx),
+                    target_loop=self._app.main_loop,
+                )
+            except WebappHandlerError as exc:
+                # User-hook failure on the pipeline side. Already logged
+                # with the full traceback inside the runner; here we just
+                # surface a flat 500 body. NEVER include the traceback
+                # in the response.
+                logger.warning(
+                    'webapp_request_handler_error',
+                    category='webapp',
+                    request_id=ctx.request_id,
+                    client=ctx.client_name,
+                    where=exc.where,
+                    error_type=type(exc.original_exc).__name__,
+                )
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        'status': 'error',
+                        'request_id': ctx.request_id,
+                        'error': 'internal error',
+                    },
+                )
             return JSONResponse(
-                status_code=501,
-                content={
-                    'status': 'not_implemented',
-                    'error': 'webapp runner not yet wired',
-                    'request_id': request_id,
-                    'client': client.name,
-                },
+                status_code=200,
+                content=report.model_dump(mode='json'),
             )
 
         return app

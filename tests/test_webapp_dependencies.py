@@ -67,10 +67,23 @@ class _HttpResp(BaseModel):
 
 
 class _WebHandler(BaseDrakkarHandler[_Input, _Output, _HttpReq, _HttpResp]):
-    """Handler with all four Generic slots populated."""
+    """Handler with all four Generic slots populated.
+
+    Implements ``arrange_http_request``/``on_http_request_complete`` as
+    no-op success hooks so the dependency-layer tests that POST through
+    the wired route end up at the runner's happy path (200) — proving
+    auth+rate-limit admitted the request without depending on the
+    runner's 501 stub (now removed).
+    """
 
     async def arrange(self, messages, pending):
         return []
+
+    async def arrange_http_request(self, req, pending):
+        return []
+
+    async def on_http_request_complete(self, group):
+        return _HttpResp(matches=0)
 
 
 def _make_app_stub(*, is_ready: bool = True) -> Any:
@@ -417,12 +430,13 @@ def test_post_with_no_auth_returns_401_flat_body():
     assert 'detail' not in body
 
 
-def test_post_with_valid_token_reaches_route_stub():
-    """E2E: valid Bearer token passes auth+rate-limit → reaches 501 stub.
+def test_post_with_valid_token_reaches_runner_happy_path():
+    """E2E: valid Bearer token passes auth+rate-limit → 200 from the runner.
 
-    501 is the Task 4 stub — Task 6 replaces it with the real runner.
-    Reaching 501 (rather than 401/429) proves the dependencies admitted
-    the request.
+    With Task 6a wired, the test handler's no-op
+    ``arrange_http_request``/``on_http_request_complete`` produce a
+    successful WebReport. Reaching 200 (rather than 401/429) proves the
+    dependencies admitted the request.
     """
     webapp = _make_webapp(rpm=4)
     client = TestClient(webapp._fastapi_app)
@@ -433,9 +447,9 @@ def test_post_with_valid_token_reaches_route_stub():
         headers={'Authorization': 'Bearer token-a-secret'},
     )
 
-    assert response.status_code == 501
+    assert response.status_code == 200
     body = response.json()
-    assert body['status'] == 'not_implemented'
+    assert body['status'] == 'ok'
     assert body['client'] == 'tenant-A'
 
 
@@ -444,11 +458,12 @@ def test_post_over_rpm_cap_returns_429_with_documented_shape():
     webapp = _make_webapp(rpm=2)
     client = TestClient(webapp._fastapi_app)
 
-    # Burn the cap as anonymous — first two requests admit (501 stub),
-    # third must rate-limit.
+    # Burn the cap as anonymous — first two requests admit (runner returns
+    # 200 because the test handler's hooks are no-ops), third must
+    # rate-limit at the dependency layer.
     for _ in range(2):
         response = client.post('/process', json={})
-        assert response.status_code == 501
+        assert response.status_code == 200
 
     response = client.post('/process', json={})
     assert response.status_code == 429
@@ -471,6 +486,6 @@ def test_post_anonymous_without_auth_admitted_under_cap():
 
     response = client.post('/process', json={})
 
-    assert response.status_code == 501
+    assert response.status_code == 200
     body = response.json()
     assert body['client'] == 'anonymous'
