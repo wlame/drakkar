@@ -65,6 +65,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from drakkar.config import WebAppConfig
+from drakkar.metrics import webapp_dropped_after_timeout, webapp_inflight
 from drakkar.models import (
     CollectResult,
     DeliveryAction,
@@ -182,6 +183,18 @@ class WebappRunner:
         if ctx.cancelled is None:
             ctx.cancelled = asyncio.Event()
 
+        # Inflight gauge — incremented on entry, decremented in the
+        # ``finally`` below so error / cancellation paths still release
+        # the count. Operators alert on a runaway gauge to spot bugs that
+        # leak the increment (e.g., an early ``raise`` before this point).
+        webapp_inflight.inc()
+        try:
+            return await self._run_body(ctx)
+        finally:
+            webapp_inflight.dec()
+
+    async def _run_body(self, ctx: WebRequestContext) -> WebReport:
+        """The actual pipeline-side work; wrapped by ``run`` for inflight."""
         self._request_seq += 1
         offset = self._request_seq
 
@@ -294,7 +307,7 @@ class WebappRunner:
                 client=ctx.client_name,
                 stage='post_execute',
             )
-            # TODO(Task 7): drakkar_webapp_dropped_after_timeout_total{client}.inc()
+            webapp_dropped_after_timeout.labels(client=ctx.client_name).inc()
             raise asyncio.CancelledError('webapp request cancelled after task execution; T2 already 504d')
 
         # ----- Stage: synthetic MessageGroup + on_http_request_complete -----
@@ -342,7 +355,7 @@ class WebappRunner:
                 client=ctx.client_name,
                 stage='pre_on_http_request_complete',
             )
-            # TODO(Task 7): drakkar_webapp_dropped_after_timeout_total{client}.inc()
+            webapp_dropped_after_timeout.labels(client=ctx.client_name).inc()
             raise asyncio.CancelledError('webapp request cancelled before on_http_request_complete; T2 already 504d')
 
         complete_started = time.monotonic()
@@ -598,7 +611,7 @@ class WebappRunner:
                     stage='during_sinks',
                     next_sink_type=sink_type,
                 )
-                # TODO(Task 7): drakkar_webapp_dropped_after_timeout_total{client}.inc()
+                webapp_dropped_after_timeout.labels(client=ctx.client_name).inc()
                 raise asyncio.CancelledError(
                     f'webapp request cancelled before {sink_type!r} sink delivery; T2 already 504d'
                 )

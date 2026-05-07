@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -87,6 +88,11 @@ from pydantic import ValidationError
 
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.config import WebAppConfig
+from drakkar.metrics import (
+    webapp_request_duration,
+    webapp_requests,
+    webapp_rpm_limit,
+)
 from drakkar.utils import make_request_id, validate_request_id
 from drakkar.webapp.dependencies import (
     WebappError,
@@ -206,6 +212,14 @@ class WebApp:
         # place when the thread starts (otherwise ``wait_until_ready``
         # could observe a server with no routes).
         self._fastapi_app: FastAPI = self._build_app()
+
+        # Informational rpm-cap gauge per configured client. Set once at
+        # construction time (the cap doesn't change at runtime — operators
+        # edit YAML and restart). Operators read this alongside
+        # ``drakkar_webapp_requests_total{status='rate_limited'}`` to
+        # confirm the deployed limits match the workload's expectations.
+        for client_cfg in self._config.clients:
+            webapp_rpm_limit.labels(client=client_cfg.name).set(client_cfg.rpm)
 
     # ------------------------------------------------------------------
     # Public lifecycle API. Called from ``AppLifecycle._async_run``.
@@ -332,6 +346,38 @@ class WebApp:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _observe_outcome(self, *, request: Request, client: str, status: str) -> None:
+        """Record one ``webapp_requests_total`` + ``webapp_request_duration`` pair.
+
+        Looks up the per-request start time stashed on ``request.state``
+        by the route handler. When the start time is missing (e.g., the
+        exception fired before the route ran), the duration observation
+        is skipped but the counter still ticks so operators see the
+        outcome in dashboards.
+
+        Parameters
+        ----------
+        request:
+            The Starlette/FastAPI request (used only to read state).
+        client:
+            Either a configured client name or the fixed sentinel
+            ``'unauthenticated'`` for auth-failed / pre-auth gate hits.
+            Cardinality stays bounded by the configured client list + 1.
+        status:
+            One of: ``ok | timeout | error | rate_limited | auth_failed |
+            shutdown | not_ready | capacity``. Documented in the plan.
+        """
+        webapp_requests.labels(client=client, status=status).inc()
+        # ``request.state`` may be missing the start-time on early-error
+        # paths (the exception fired in the auth dep, before the route
+        # body had a chance to stash it). In that case skip the histogram
+        # observation — the counter alone is enough to spot the outcome.
+        start = getattr(request.state, 'webapp_start_monotonic', None)
+        if start is None:
+            return
+        duration = max(0.0, time.monotonic() - start)
+        webapp_request_duration.labels(client=client, status=status).observe(duration)
+
     def _signal_cancel(self, ctx: WebRequestContext) -> None:
         """Schedule ``ctx.cancelled.set()`` on the main pipeline loop (T1).
 
@@ -438,8 +484,25 @@ class WebApp:
         # carried ``body_dict`` — bypassing the default ``HTTPException``
         # envelope (``{'detail': ...}``) so the response shape stays flat
         # as documented in the plan.
+        #
+        # The handler also records the matching ``webapp_requests_total``
+        # / ``webapp_request_duration_seconds`` metric pair. It reads the
+        # request-start monotonic time and the matched client name from
+        # ``request.state`` (set in the route by the auth dep / handler);
+        # missing values fall back to the fixed sentinel
+        # ``client='unauthenticated'`` so cardinality stays bounded by
+        # configured clients + 1.
         @app.exception_handler(WebappError)
-        async def _webapp_error_handler(_request: Request, exc: WebappError) -> JSONResponse:
+        async def _webapp_error_handler(request: Request, exc: WebappError) -> JSONResponse:
+            # Map status code → metric status label. The plan documents
+            # these names and prevents ad-hoc additions.
+            status_label = 'auth_failed' if exc.status_code == 401 else 'rate_limited'
+            client_label = getattr(request.state, 'client_name', None)
+            if client_label is None or status_label == 'auth_failed':
+                # 401 always uses the fixed sentinel — auth failed before
+                # we matched a real client. Cardinality stays bounded.
+                client_label = 'unauthenticated'
+            self._observe_outcome(request=request, client=client_label, status=status_label)
             # ``content=exc.body_dict`` writes the dict verbatim; pydantic
             # is not involved because the body has already been built by
             # the dependency raising the exception.
@@ -533,7 +596,13 @@ class WebApp:
             # asks the handler for the real request_id (which may be
             # derived from headers — typical for tracing scenarios).
             gate_request_id = make_request_id('req')
+            # ``client.name`` is set by the auth dep before the route body
+            # runs; capture it for the metric labels below. Falls back to
+            # the fixed ``unauthenticated`` sentinel if (somehow) the auth
+            # dep didn't populate it — keeps cardinality bounded.
+            metric_client = client.name if client is not None else 'unauthenticated'
             if self.shutdown_event.is_set():
+                self._observe_outcome(request=request, client=metric_client, status='shutdown')
                 return JSONResponse(
                     status_code=503,
                     content={
@@ -544,6 +613,7 @@ class WebApp:
                     },
                 )
             if not self._app.is_ready:
+                self._observe_outcome(request=request, client=metric_client, status='not_ready')
                 return JSONResponse(
                     status_code=503,
                     content={
@@ -570,6 +640,7 @@ class WebApp:
                 # the response). ``include_url=False`` strips the
                 # documentation URLs Pydantic adds — operators read
                 # docs, the API caller does not need them.
+                self._observe_outcome(request=request, client=metric_client, status='error')
                 return JSONResponse(
                     status_code=422,
                     content={
@@ -582,6 +653,7 @@ class WebApp:
                 # ``model_validate_json`` surfaces malformed JSON as a
                 # plain ``ValueError`` — same flat envelope, different
                 # ``details`` shape (Pydantic gives us a single string).
+                self._observe_outcome(request=request, client=metric_client, status='error')
                 return JSONResponse(
                     status_code=422,
                     content={
@@ -607,6 +679,7 @@ class WebApp:
                     error_type=type(exc).__name__,
                     error=str(exc),
                 )
+                self._observe_outcome(request=request, client=metric_client, status='error')
                 return JSONResponse(
                     status_code=500,
                     content={
@@ -644,6 +717,7 @@ class WebApp:
                     client=ctx.client_name,
                     max_concurrent=self._config.max_concurrent,
                 )
+                self._observe_outcome(request=request, client=ctx.client_name, status='capacity')
                 return JSONResponse(
                     status_code=503,
                     content={
@@ -693,6 +767,7 @@ class WebApp:
                         timeout_seconds=self._config.request_timeout_seconds,
                         duration_ms=duration_ms,
                     )
+                    self._observe_outcome(request=request, client=ctx.client_name, status='timeout')
                     return JSONResponse(
                         status_code=504,
                         content={
@@ -713,6 +788,7 @@ class WebApp:
                     # client's perspective a cancelled request looks the
                     # same as one that timed out.
                     duration_ms = (datetime.now(UTC) - ctx.started_at).total_seconds() * 1000.0
+                    self._observe_outcome(request=request, client=ctx.client_name, status='timeout')
                     return JSONResponse(
                         status_code=504,
                         content={
@@ -736,6 +812,7 @@ class WebApp:
                         where=exc.where,
                         error_type=type(exc.original_exc).__name__,
                     )
+                    self._observe_outcome(request=request, client=ctx.client_name, status='error')
                     return JSONResponse(
                         status_code=500,
                         content={
@@ -744,6 +821,7 @@ class WebApp:
                             'error': 'internal error',
                         },
                     )
+                self._observe_outcome(request=request, client=ctx.client_name, status='ok')
                 return JSONResponse(
                     status_code=200,
                     content=report.model_dump(mode='json'),

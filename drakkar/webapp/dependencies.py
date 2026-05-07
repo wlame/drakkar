@@ -166,6 +166,12 @@ def make_authenticate(
     """
 
     async def _authenticate(request: Request) -> WebClientConfig:
+        # Stash a request-start monotonic timestamp on ``request.state``
+        # so the route's outcome-observation helper can record a duration
+        # alongside the outcome counter. The auth dep is the earliest
+        # per-request entry point we own — putting it here means even
+        # auth-failed responses get a duration observation.
+        request.state.webapp_start_monotonic = time.monotonic()
         token, header_present = _extract_bearer_token(request)
 
         # Walk every configured client and pick the one whose token

@@ -606,6 +606,70 @@ suspected_oom_kills = Counter(
 )
 
 
+# --- Webapp ---
+#
+# Observability for the synchronous-HTTP pipeline (the optional
+# ``webapp.enabled`` feature). Cardinality is bounded by:
+#   * the configured client list (operator-controlled, typically <10 entries)
+#   * a single fixed sentinel ``client='unauthenticated'`` for requests that
+#     never matched a configured client (auth_failed / pre-auth gate hits).
+# Status labels are drawn from a closed set documented in the plan:
+#   ``ok | timeout | error | rate_limited | auth_failed | shutdown |
+#   not_ready | capacity``.
+#
+# Why no separate ``webapp_rate_limited_total`` counter? Because
+# ``webapp_requests_total{status='rate_limited',client=...}`` already
+# answers "how many rate-limit hits per client" with no extra cardinality.
+# Adding a parallel counter would just duplicate the data.
+
+webapp_requests = Counter(
+    'drakkar_webapp_requests_total',
+    'Total webapp requests by client and outcome status',
+    ['client', 'status'],
+)
+
+# Histogram buckets cover the documented webapp request budget
+# (``request_timeout_seconds=30s`` default) plus a long-tail bucket so
+# timeouts are visible without losing precision in the sub-second range.
+# Mirrors the shape of ``sink_deliver_duration`` for sub-second work
+# while extending out to 30s for full-pipeline executions.
+webapp_request_duration = Histogram(
+    'drakkar_webapp_request_duration_seconds',
+    'Webapp request duration in seconds, labelled by client and outcome status',
+    ['client', 'status'],
+    buckets=(0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30),
+)
+
+# In-flight gauge — incremented on runner entry, decremented in finally.
+# Operators alert on ``drakkar_webapp_inflight > max_concurrent`` to spot
+# semaphore-leak bugs (a permit accidentally held past response).
+webapp_inflight = Gauge(
+    'drakkar_webapp_inflight',
+    'Number of webapp requests currently being processed by the runner on T1',
+)
+
+# Counter for requests whose result was discarded after T2's
+# ``request_timeout_seconds`` budget elapsed. The runner increments this
+# at each cancellation gate (post-execute and pre-on_http_request_complete)
+# so a high rate indicates either a too-tight timeout or a slow
+# subprocess pipeline.
+webapp_dropped_after_timeout = Counter(
+    'drakkar_webapp_dropped_after_timeout_total',
+    'Webapp requests whose pipeline result was dropped after T2 already 504d to the client',
+    ['client'],
+)
+
+# Configured rpm cap per client — informational gauge set once at
+# WebApp startup. Lets operators see the deployed limits via the same
+# Prometheus scrape they use for everything else, without having to
+# read the YAML config file.
+webapp_rpm_limit = Gauge(
+    'drakkar_webapp_rpm_limit',
+    'Configured rpm limit per webapp client (informational; set once at startup)',
+    ['client'],
+)
+
+
 # --- Periodic tasks ---
 
 periodic_task_runs = Counter(
