@@ -8,7 +8,8 @@ handles sink failures.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Generic, Protocol, get_args
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, get_args
 
 from pydantic import BaseModel
 
@@ -35,10 +36,32 @@ from drakkar.models import (
     PendingContext,
     SourceMessage,
 )
+from drakkar.utils import make_request_id
+
+# PEP 696 default TypeVars (Python 3.13+). These let the handler stay 2-param
+# for non-webapp users (``BaseDrakkarHandler[InputT, OutputT]``) while extending
+# to 4 params for webapp users (``BaseDrakkarHandler[InputT, OutputT, HttpReqT,
+# HttpRespT]``). When a subclass omits the HTTP slots, ``get_args`` materialises
+# them to ``None`` (verified empirically with CPython 3.13's PEP 696 impl), so
+# ``_extract_type_args`` can simply read off the four positions and return
+# ``None`` for unspecified slots.
+#
+# No ``bound=`` constraint: webapp users opt in by declaring concrete Pydantic
+# models in those slots; the framework only requires non-None at startup when
+# ``webapp.enabled=True`` (Task 4). Users who never enable the webapp keep the
+# defaults and never see the HTTP hooks.
+HttpRequestT = TypeVar('HttpRequestT', default=None)
+HttpResponseT = TypeVar('HttpResponseT', default=None)
 
 
-class DrakkarHandler(Protocol):
-    """Protocol defining the hooks a user must implement."""
+class DrakkarHandler(Protocol[InputT, OutputT, HttpRequestT, HttpResponseT]):
+    """Protocol defining the hooks a user must implement.
+
+    Parameterised over four type variables — ``InputT`` / ``OutputT`` for the
+    Kafka path and ``HttpRequestT`` / ``HttpResponseT`` for the optional webapp
+    path. The HTTP slots default to ``None`` via PEP 696 so 2-param users don't
+    need to know the HTTP slots exist (see :class:`BaseDrakkarHandler`).
+    """
 
     input_model: type[BaseModel] | None
     output_model: type[BaseModel] | None
@@ -64,19 +87,49 @@ class DrakkarHandler(Protocol):
     async def on_assign(self, partitions: list[int]) -> None: ...
     async def on_revoke(self, partitions: list[int]) -> None: ...
 
+    # Webapp hooks. Only invoked when ``webapp.enabled=True`` AND the handler
+    # subclass declares concrete types in the HttpRequestT/HttpResponseT slots.
+    async def arrange_http_request(self, req: HttpRequestT, pending: PendingContext) -> list[ExecutorTask]: ...
+    async def on_http_request_complete(self, group: MessageGroup) -> HttpResponseT: ...
+    def http_request_id(self, req: HttpRequestT, headers: Mapping[str, str]) -> str: ...
+    def http_request_label(self, req: HttpRequestT, request_id: str) -> str: ...
 
-def _extract_type_args(cls: type) -> tuple[type | None, type | None]:
-    """Extract InputT and OutputT from BaseDrakkarHandler[InputT, OutputT]."""
+
+def _extract_type_args(
+    cls: type,
+) -> tuple[type | None, type | None, type | None, type | None]:
+    """Extract the four generic slots from ``BaseDrakkarHandler[...]`` bases.
+
+    Returns ``(InputT, OutputT, HttpRequestT, HttpResponseT)`` — ``None`` for
+    any slot that the subclass left at the default. PEP 696 materialises
+    omitted defaults to ``None`` in ``get_args(orig_base)``, so we just read
+    off the positions and substitute ``None`` whenever the runtime value is
+    not a concrete ``type``. (The 2-param historical form is preserved by
+    accepting ``len(args) == 2`` and returning ``None`` for the two HTTP
+    slots — covers older subclasses that predate the webapp release.)
+    """
     for base in getattr(cls, '__orig_bases__', ()):
         args = get_args(base)
+        if len(args) == 4:
+            input_t, output_t, http_req_t, http_resp_t = args
+            return (
+                input_t if isinstance(input_t, type) else None,
+                output_t if isinstance(output_t, type) else None,
+                http_req_t if isinstance(http_req_t, type) else None,
+                http_resp_t if isinstance(http_resp_t, type) else None,
+            )
         if len(args) == 2:
             input_t, output_t = args
-            if isinstance(input_t, type) and isinstance(output_t, type):
-                return input_t, output_t
-    return None, None
+            return (
+                input_t if isinstance(input_t, type) else None,
+                output_t if isinstance(output_t, type) else None,
+                None,
+                None,
+            )
+    return None, None, None, None
 
 
-class BaseDrakkarHandler(Generic[InputT, OutputT]):
+class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     """Base handler with no-op defaults for optional hooks.
 
     Users extend this class and must override ``arrange()``.
@@ -158,13 +211,26 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
     # (Redis-backed, distributed, etc.) satisfy the contract structurally.
     cache: CacheLike
 
+    # The four resolved generic slots, populated by ``__init_subclass__``.
+    # Webapp users read ``http_request_model`` / ``http_response_model`` from
+    # the *class*, mirroring how ``input_model`` / ``output_model`` work for
+    # the Kafka path. ``None`` means "this slot was not specified" (PEP 696
+    # default); the webapp bootstrap (Task 4) fail-fasts when these are None
+    # and ``webapp.enabled=True``.
+    http_request_model: type[BaseModel] | None = None
+    http_response_model: type[BaseModel] | None = None
+
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
-        input_t, output_t = _extract_type_args(cls)
+        input_t, output_t, http_req_t, http_resp_t = _extract_type_args(cls)
         if input_t and issubclass(input_t, BaseModel):
             cls.input_model = input_t
         if output_t and issubclass(output_t, BaseModel):
             cls.output_model = output_t
+        if http_req_t and issubclass(http_req_t, BaseModel):
+            cls.http_request_model = http_req_t
+        if http_resp_t and issubclass(http_resp_t, BaseModel):
+            cls.http_response_model = http_resp_t
 
     def message_label(self, msg: SourceMessage) -> str:
         """Return a short label for a message, used in logs and UI.
@@ -345,6 +411,105 @@ class BaseDrakkarHandler(Generic[InputT, OutputT]):
     async def on_revoke(self, partitions: list[int]) -> None:
         """Called when partitions are revoked from this worker."""
         pass
+
+    # ------------------------------------------------------------------
+    # Webapp hooks (optional — only invoked when webapp.enabled=True).
+    #
+    # Users opt in by declaring concrete types in the HttpRequestT /
+    # HttpResponseT slots:
+    #
+    #     class MyHandler(BaseDrakkarHandler[KIn, KOut, HReq, HResp]):
+    #         async def arrange_http_request(self, req, pending): ...
+    #         async def on_http_request_complete(self, group): ...
+    #
+    # When ``webapp.enabled=True`` but a user hasn't overridden
+    # ``arrange_http_request`` / ``on_http_request_complete``, the framework
+    # raises ``NotImplementedError`` from the default below at request time.
+    # The error message names the missing override so operators can quickly
+    # find the problem in their handler subclass.
+    # ------------------------------------------------------------------
+
+    async def arrange_http_request(
+        self,
+        req: HttpRequestT,
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        """Translate an HTTP request into executor tasks.
+
+        Mirrors :meth:`arrange` for the webapp path. The framework parses the
+        incoming POST body as ``HttpRequestT`` (the third generic slot), then
+        calls this hook on the main event loop. Each returned task is
+        auto-tagged with ``origin='http'``, ``client_name``, and
+        ``request_id`` by the framework before submission.
+
+        Required when ``webapp.enabled=True``. The default raises
+        ``NotImplementedError`` to fail fast at the first request — webapp
+        users will see the missing-override message immediately.
+        """
+        raise NotImplementedError('override arrange_http_request when webapp.enabled=True')
+
+    async def on_http_request_complete(
+        self,
+        group: MessageGroup,
+    ) -> HttpResponseT:
+        """Build the user-facing response from completed task results.
+
+        Called once per HTTP request after ``arrange_http_request`` tasks all
+        reach a terminal state. Mirrors :meth:`on_message_complete` but is
+        REQUIRED for the webapp path and returns the user's
+        ``HttpResponseT`` model instead of an optional ``CollectResult``.
+        The framework wraps the returned model into the JSON response body
+        under the ``"result"`` key (full response shape documented in
+        ``docs/webapp.md``).
+
+        Required when ``webapp.enabled=True``. The default raises
+        ``NotImplementedError``.
+        """
+        raise NotImplementedError('override on_http_request_complete when webapp.enabled=True')
+
+    def http_request_id(
+        self,
+        req: HttpRequestT,
+        headers: Mapping[str, str],
+    ) -> str:
+        """Return the request_id used in logs, recorder rows, and the response.
+
+        Override to use an upstream-provided correlation header (common
+        examples: ``X-Request-ID``, ``X-Correlation-ID``) so a single
+        request_id flows from caller → worker → downstream services.
+        Whatever you return must satisfy
+        :func:`drakkar.utils.validate_request_id` (≤64 chars, ASCII, no
+        whitespace) — the framework calls ``validate_request_id`` on the
+        return value before using it.
+
+        Default: a fresh framework-generated id from
+        :func:`drakkar.utils.make_request_id` with prefix ``'req'``. The
+        default always passes ``validate_request_id`` (no need for callers
+        to validate the framework-generated id).
+        """
+        return make_request_id('req')
+
+    def http_request_label(
+        self,
+        req: HttpRequestT,
+        request_id: str,
+    ) -> str:
+        """Return a short human-readable label for an HTTP request in logs/UI.
+
+        Mirrors :meth:`message_label` for the webapp path. The framework
+        passes the resolved ``request_id`` so the default override can be a
+        no-op pass-through (``return request_id``) without needing to
+        rediscover the id from ``req``. Override to embed business fields
+        (e.g. ``f"{req.tenant}/{request_id}"``).
+
+        Note: this signature includes ``request_id`` as a parameter — a
+        deliberate divergence from the original plan (which took only
+        ``req``). The plan's signature couldn't satisfy its own documented
+        default ("return the framework request_id") without the framework
+        passing the id through. See plan checkbox text and Task 3 commit
+        notes for the rationale.
+        """
+        return request_id
 
 
 # Attach the class-level default cache stub after class definition. We do this

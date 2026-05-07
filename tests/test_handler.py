@@ -18,6 +18,7 @@ from drakkar.models import (
     PendingContext,
     SourceMessage,
 )
+from drakkar.utils import validate_request_id
 
 
 @pytest.fixture
@@ -303,3 +304,73 @@ async def test_custom_on_delivery_error_retry():
 
     permanent = DeliveryError(sink_name='x', sink_type='http', error='auth failed')
     assert await handler.on_delivery_error(permanent) == DeliveryAction.DLQ
+
+
+# --- Webapp HTTP hooks (default behaviour) ---
+
+
+async def test_arrange_http_request_default_raises_with_helpful_message(
+    handler: BaseDrakkarHandler,
+):
+    """Default arrange_http_request raises NotImplementedError with override hint."""
+    with pytest.raises(NotImplementedError, match='arrange_http_request'):
+        await handler.arrange_http_request(req=None, pending=PendingContext())
+
+
+async def test_on_http_request_complete_default_raises_with_helpful_message(
+    handler: BaseDrakkarHandler,
+):
+    """Default on_http_request_complete raises NotImplementedError with override hint."""
+    with pytest.raises(NotImplementedError, match='on_http_request_complete'):
+        await handler.on_http_request_complete(group=None)
+
+
+def test_http_request_id_default_produces_valid_id(handler: BaseDrakkarHandler):
+    """Default http_request_id returns an id that round-trips through validate_request_id."""
+    rid = handler.http_request_id(req=None, headers={})
+    # Round-trip: the framework calls validate_request_id on whatever the
+    # user's http_request_id returned. The default must always pass.
+    validate_request_id(rid)
+    # Format invariant: starts with the 'req' prefix (mirrors the doc).
+    assert rid.startswith('req_')
+
+
+def test_http_request_id_default_is_unique_across_calls(handler: BaseDrakkarHandler):
+    """The monotone counter inside make_request_id ensures uniqueness."""
+    ids = {handler.http_request_id(req=None, headers={}) for _ in range(50)}
+    assert len(ids) == 50
+
+
+def test_http_request_label_default_returns_supplied_request_id(
+    handler: BaseDrakkarHandler,
+):
+    """Default http_request_label echoes the framework-supplied request_id.
+
+    This signature takes ``request_id`` as an explicit parameter — a
+    deliberate divergence from the original plan, which had only ``req``.
+    The plan's default ("return the framework request_id") was impossible to
+    satisfy without the framework passing the id through, so we extended the
+    signature. See drakkar/handler.py docstring on ``http_request_label`` for
+    the rationale.
+    """
+    label = handler.http_request_label(req=None, request_id='req_20260506T000000_0001')
+    assert label == 'req_20260506T000000_0001'
+
+
+def test_http_request_label_custom_override_can_embed_business_field():
+    """User override can build a richer label using both req and request_id."""
+
+    class TenantBM(BaseModel):
+        tenant: str = ''
+
+    class TenantHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return []
+
+        def http_request_label(self, req, request_id):
+            return f'{req.tenant}/{request_id}'
+
+    handler = TenantHandler()
+    req = TenantBM(tenant='acme')
+    label = handler.http_request_label(req=req, request_id='req_20260506T000000_0007')
+    assert label == 'acme/req_20260506T000000_0007'
