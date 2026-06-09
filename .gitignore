@@ -52,6 +52,7 @@ docs/plans/
 # Environment and secrets
 .env
 .env.*
+.vb.env
 *.pem
 credentials.json
 
@@ -63,3 +64,6 @@ _tmp*
 # Integration test runtime artifacts (recorder DBs, WAL/SHM side files, cache snapshots)
 integration/shared/*
 !integration/shared/README.md
+
+# vibrator workspace pin — may contain plaintext prereq tokens
+.vb

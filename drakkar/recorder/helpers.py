@@ -41,11 +41,10 @@ from drakkar.utils import redact_url
 #   on insert; those sites use ``encode_json_str``.
 # - Keys are SORTED so repeated encodes of the same dict produce
 #   identical output (deterministic hashes / cache dedup downstream).
-# - Non-JSON-native types fall back to ``default=str`` / orjson's
-#   built-in ``datetime`` + ``UUID`` handlers.
-# - Datetimes tagged with ``tzinfo=UTC`` end with "Z" in both paths
-#   (matches the existing ``isoformat().replace("+00:00", "Z")``
-#   convention used elsewhere in the code base).
+# - Datetimes use ``isoformat()`` in both paths (T separator, +00:00
+#   suffix for UTC). orjson's OPT_UTC_Z further rewrites +00:00 → Z;
+#   the stdlib path keeps +00:00.
+# - Other non-JSON-native types fall back to ``str()``.
 try:
     import orjson  # ty: ignore[unresolved-import]
 
@@ -69,6 +68,12 @@ try:
 except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
     _HAS_ORJSON = False
 
+    def _json_default(obj: Any) -> Any:
+        # datetime.isoformat() gives the T separator; str() would give a space.
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return str(obj)
+
     def encode_json(obj: Any) -> bytes:
         """Stdlib fallback encoder (used when orjson is not installed).
 
@@ -78,14 +83,16 @@ except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
           escaping non-ASCII (e.g. ``"naïve"`` stays as-is, not
           ``"na\\u00efve"``). orjson always writes raw UTF-8.
         - ``sort_keys=True`` → deterministic key order.
-        - ``default=str`` → fallback coercion for non-native types;
-          catches anything orjson's ``default=str`` would also catch.
+        - ``default=_json_default`` → datetimes via ``isoformat()``,
+          other types via ``str()``.
 
         These choices keep the on-disk recorder DB stable regardless of
         which path (orjson vs. stdlib) produced the bytes, so swapping
         the ``perf`` extra on/off does not change stored content.
         """
-        return json.dumps(obj, sort_keys=True, default=str, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+        return json.dumps(obj, sort_keys=True, default=_json_default, separators=(',', ':'), ensure_ascii=False).encode(
+            'utf-8'
+        )
 
 
 def encode_json_str(obj: Any) -> str:
