@@ -22,7 +22,7 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -52,7 +52,9 @@ class _SinkBreakdownRequest(BaseModel):
 
 def create_live_router(deps: DebugDeps) -> APIRouter:
     """Build the router that owns the live view + completion-hook feeds."""
-    router = APIRouter()
+    # All live-data routes expose task args/output and partition state —
+    # gate the whole router behind require_auth (no-op without a token).
+    router = APIRouter(dependencies=[Depends(deps.require_auth)])
     config = deps.config
     recorder = deps.recorder
     drakkar_app = deps.drakkar_app

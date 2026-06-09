@@ -101,6 +101,7 @@ Settings for the Kafka consumer that reads input messages.
 | `max_poll_interval_ms` | `int` | `300000` | Maximum time (ms) between poll calls before Kafka considers the consumer dead and triggers a rebalance. Increase this if your tasks take a long time. |
 | `session_timeout_ms` | `int` | `45000` | Session timeout (ms) for group membership. If the broker does not receive a heartbeat within this window, the consumer is removed from the group. |
 | `heartbeat_interval_ms` | `int` | `3000` | Interval (ms) between heartbeats sent to the broker. Should be less than `session_timeout_ms / 3`. |
+| `on_parse_error` | `'skip'` \| `'dlq'` \| `'raise'` | `'skip'` | What to do when a message value fails `input_model` parsing. `skip`: the message reaches `arrange()` with `payload=None` and `msg.parse_error` set. `dlq`: the message is excluded from `arrange()` and written to the DLQ topic as a `ParseFailurePayload`; the offset commits once the DLQ write is confirmed (a failed write follows `dlq.on_send_failure`). `raise`: fail fast — a `MessageParseError` stops the partition processor. |
 | `startup_align_enabled` | `bool` | `true` | When `true`, delay the first Kafka subscribe until a shared wall-clock boundary so a fleet of workers converges on a single rebalance. Disable for single-process dev runs. |
 | `startup_min_wait_seconds` | `float` | `4.0` | Minimum seconds to sleep before aligning. Acts as a buffer for slow init (DB connects, schema migrations, cache warm-up). Must be `>= 0`. |
 | `startup_align_interval_seconds` | `int` | `10` | Alignment interval in seconds. Workers wake at the next `time.time() % interval == 0` boundary — default `10` aligns on `:00/:10/:20/:30/:40/:50` of every minute. Must be `>= 1`. |
@@ -345,11 +346,13 @@ Failed sink deliveries can be routed to a [DLQ](sinks.md#dead-letter-queue) Kafk
 |-------|------|---------|-------------|
 | `topic` | `str` | `''` | DLQ Kafka topic name. If empty, auto-derived as `{source_topic}_dlq` (e.g., `input-events_dlq`). |
 | `brokers` | `str` | `''` | Kafka brokers for the DLQ. If empty, inherits from `kafka.brokers`. |
+| `on_send_failure` | `'drop'` \| `'stall'` | `'drop'` | Strategy when the DLQ write itself fails. `drop`: log + count the loss, commit the offset, keep the pipeline moving. `stall`: leave the offset uncommitted and pause the partition until restart — no loss, at the cost of consumer lag. See [When the DLQ itself fails](sinks.md#when-the-dlq-itself-fails). |
 
 ```yaml
 dlq:
   topic: failed-events
   brokers: kafka-prod:9092
+  on_send_failure: drop
 ```
 
 ---

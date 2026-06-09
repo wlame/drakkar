@@ -380,13 +380,22 @@ Auth is opt-in (see [Is the debug UI safe](#is-the-debug-ui-safe-to-expose-to-a-
 
 1. **Default loopback bind** (`debug.host='127.0.0.1'`) — the UI is only reachable from the host out of the box, regardless of auth.
 2. **Startup warning when unauthenticated.** With `debug.enabled=true` and an empty `auth_token`, the worker emits a `debug_ui_unauthenticated` structured warning at startup naming the unauthenticated bind and the two opt-in paths (YAML key + env var). The worker continues starting — Drakkar treats this as a private-contour-friendly default, not a misconfiguration.
-3. **Bearer token + Origin check when `auth_token` is set.** Protected endpoints (database download, merge, probe) require `Authorization: Bearer <token>`; the WebSocket stream additionally validates the `Origin` header against `allowed_ws_origins` (or the `Host` header). See `drakkar/debug_server_helpers.py::origin_allowed` and `drakkar/debug_server.py::_token_matches`.
+3. **Bearer token + Origin check when `auth_token` is set.** Every UI page and API endpoint requires `Authorization: Bearer <token>` (or `?token=` for browser navigation); only `/healthz` and `/readyz` stay public for Kubernetes probes. The WebSocket stream authenticates inside its handshake and additionally validates the `Origin` header against `allowed_ws_origins` (or the `Host` header). See `drakkar/debug/server_helpers.py::origin_allowed` and `drakkar/debug/server.py::token_matches`.
 
-Read-only HTTP pages are not token-gated regardless — auth applies to mutating / data-exposing endpoints and to the WebSocket event stream. If you put the UI on a non-loopback host outside a private network, set a strong `auth_token` and consider a reverse proxy with TLS.
+If you put the UI on a non-loopback host outside a private network, set a strong `auth_token` and consider a reverse proxy with TLS.
 
 ### Why doesn't Drakkar validate Kafka message payloads?
 
-Parse errors in `handler.deserialize_message` silently set `msg.payload=None` rather than raising or DLQ-ing the message (see `drakkar/app.py::_deserialize`). A malicious producer can cause handlers to see unexpected `None` payloads, but cannot execute code in the worker. Your handler is responsible for validating the payload before using it — use Pydantic `model_validate` or raise explicitly from `arrange()` to route bad messages.
+Parse failures are policy-driven via `kafka.on_parse_error`. The default (`skip`) sets `msg.payload=None` and stamps `msg.parse_error`, logging a `message_parse_failed` warning and ticking `drakkar_message_parse_failures_total`; the handler decides what to do with the message in `arrange()`. Set `dlq` to exclude unparseable messages from `arrange()` and route them to the DLQ topic as `ParseFailurePayload` records (a failed DLQ write then follows the `dlq.on_send_failure` strategy — see the next question), or `raise` to fail fast on schema-broken deployments. A malicious producer can trigger parse failures but cannot execute code in the worker.
+
+### What happens when the DLQ itself fails?
+
+The error-handling philosophy is: never wedge the pipeline silently — let the handler decide via hooks, default to log + DLQ. When the DLQ write *also* fails, the payloads have nowhere safe to go and the `dlq.on_send_failure` strategy applies:
+
+- **`drop` (default)** — the loss is logged at CRITICAL and counted in `drakkar_dlq_dropped_payloads_total`; the message counts as processed, its offset commits, and the pipeline keeps moving.
+- **`stall`** — the offset is left uncommitted (`drakkar_delivery_stalled_offsets_total`) and the partition is paused so no new messages are fetched. Note that *not committing alone would not stop consumption* — Kafka consumers fetch from their in-memory position, so the explicit pause is what bounds duplicate processing and tracker memory. The partition resumes after a worker restart or reassignment, replaying from the last committed offset.
+
+Both strategies tick `drakkar_dlq_send_failures_total` and emit a CRITICAL `dlq_send_failed` log. See [When the DLQ itself fails](sinks.md#when-the-dlq-itself-fails).
 
 ### What redactions apply to per-task env?
 

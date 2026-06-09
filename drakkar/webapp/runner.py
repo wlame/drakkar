@@ -816,10 +816,11 @@ class WebappRunner:
                 # the Kafka path exhibits in pre-DLQ deployments.
                 if app._dlq_sink is not None:
                     try:
-                        await app._dlq_sink.send(error, partition_id=-1)
+                        sent = await app._dlq_sink.send(error, partition_id=-1)
                     except Exception as exc:
                         # DLQ send raising is rare but should not crash
                         # the request — record and continue.
+                        sent = False
                         sink_result.errors.append(f'dlq_send_failed: {exc!r}')
                         await logger.aerror(
                             'webapp_sink_dlq_send_failed',
@@ -827,6 +828,13 @@ class WebappRunner:
                             sink_type=error.sink_type,
                             error=str(exc),
                         )
+                    if not sent and not any(e.startswith('dlq_send_failed') for e in sink_result.errors):
+                        # send() reported failure without raising — surface
+                        # it in the response so the HTTP caller knows the
+                        # payloads were not persisted anywhere. The webapp
+                        # path has no offsets to stall; the request-level
+                        # error report IS the recovery signal.
+                        sink_result.errors.append('dlq_send_failed: DLQ write not confirmed')
                 sink_result.dlq += failed_count
                 sink_result.delivered = max(0, sink_result.delivered - failed_count)
             elif action == DeliveryAction.SKIP:

@@ -60,7 +60,11 @@ class _ProbeRequest(BaseModel):
 
 def create_debug_router(deps: DebugDeps) -> APIRouter:
     """Build the router that owns the debug page + ``/api/debug/*`` endpoints (excluding cache)."""
-    router = APIRouter()
+    # Every debug route (config summary, traces, metrics, merge, probe,
+    # downloads) is sensitive — gate the whole router behind require_auth
+    # (no-op without a token). The per-route Depends below predate the
+    # router-level gate and are kept as explicit markers.
+    router = APIRouter(dependencies=[Depends(deps.require_auth)])
     config = deps.config
     recorder = deps.recorder
     drakkar_app = deps.drakkar_app
@@ -288,6 +292,10 @@ def create_debug_router(deps: DebugDeps) -> APIRouter:
             path=full,
             filename=filename,
             media_type='application/x-sqlite3',
+            # The download URL may carry ?token= (browsers can't set headers
+            # on <a> navigations); no-store keeps token-bearing responses
+            # out of shared proxy/CDN caches.
+            headers={'Cache-Control': 'no-store, private'},
         )
 
     # Shared DebugRunner instance. The runner holds an ``asyncio.Lock``

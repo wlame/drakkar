@@ -767,6 +767,7 @@ async def test_runner_sinks_failure_routes_to_dlq_and_records_error():
 
     async def _dlq_send(error, partition_id):
         sent_to_dlq.append((error, partition_id))
+        return True  # DLQSink.send contract: True = write confirmed
 
     dlq_sink.send = _dlq_send
 

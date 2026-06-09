@@ -18,8 +18,8 @@ import structlog
 from pydantic import BaseModel
 
 from drakkar.config import CircuitBreakerConfig
-from drakkar.metrics import sink_deliveries_skipped, sink_delivery_retries
-from drakkar.models import CollectResult, DeliveryAction, DeliveryError
+from drakkar.metrics import dlq_dropped_payloads, sink_deliveries_skipped, sink_delivery_retries
+from drakkar.models import CollectResult, DeliveryAction, DeliveryError, SinkDeliveryFailedError
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.registry import SinkRegistry
 from drakkar.utils import redact_url
@@ -163,6 +163,9 @@ class SinkManager:
         # guards inside ``_deliver_to_sink``.
         self._recorder: EventRecorder | None = recorder
         self._dlq_sink: DLQSink | None = dlq_sink
+        # Strategy for circuit-open deliveries whose DLQ write fails.
+        # Overridden via attach_runtime from DLQConfig.on_send_failure.
+        self._dlq_on_send_failure: str = 'drop'
 
         # Run plugin discovery once at construction so any third-party
         # sinks installed via ``[project.entry-points."drakkar.sinks"]``
@@ -186,6 +189,7 @@ class SinkManager:
         self,
         recorder: EventRecorder | None,
         dlq_sink: DLQSink | None,
+        dlq_on_send_failure: str = 'drop',
     ) -> None:
         """Inject recorder + DLQ sink after construction.
 
@@ -200,9 +204,15 @@ class SinkManager:
         Both arguments are assigned directly — pass ``None`` to clear a
         reference (e.g., when debug is disabled and no recorder was ever
         constructed).
+
+        ``dlq_on_send_failure`` mirrors ``DLQConfig.on_send_failure`` and
+        governs the circuit-open DLQ path: 'drop' logs + counts and lets
+        the offset commit; 'stall' raises ``SinkDeliveryFailedError`` so
+        the partition pipeline stalls the affected offsets.
         """
         self._recorder = recorder
         self._dlq_sink = dlq_sink
+        self._dlq_on_send_failure = dlq_on_send_failure
 
     @property
     def sinks(self) -> dict[tuple[str, str], BaseSink[Any]]:
@@ -699,7 +709,28 @@ class SinkManager:
             # results back to the same DLQ sink), so we keep the path
             # direct.
             if self._dlq_sink is not None:
-                await self._dlq_sink.send(error, partition_id=partition_id)
+                if not await self._dlq_sink.send(error, partition_id=partition_id):
+                    # The breaker is open AND the DLQ write failed — the
+                    # payloads have nowhere safe to go. Apply the
+                    # dlq.on_send_failure strategy.
+                    if self._dlq_on_send_failure == 'stall':
+                        raise SinkDeliveryFailedError(
+                            sink_name=sink_name,
+                            sink_type=sink_type,
+                            reason='circuit open and DLQ send failed',
+                        )
+                    dlq_dropped_payloads.labels(partition=str(partition_id)).inc()
+                    await logger.acritical(
+                        'dlq_failure_payloads_dropped',
+                        category='sink',
+                        sink_name=sink_name,
+                        sink_type=sink_type,
+                        partition=partition_id,
+                        payload_count=len(payloads),
+                        reason='circuit open and DLQ send failed',
+                        action='ALERT: payloads lost (dlq.on_send_failure=drop) — '
+                        'set dlq.on_send_failure=stall to prefer replay over loss',
+                    )
             else:
                 # Legacy path: no DLQ sink wired. Fall back to handler-driven
                 # routing and hope the handler's DLQ plumbing lives upstream.

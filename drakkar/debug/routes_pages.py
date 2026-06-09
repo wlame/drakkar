@@ -27,7 +27,7 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from drakkar.concurrency import dispatch_to_loop
@@ -40,8 +40,17 @@ WS_DRAIN_SLEEP = 0.02  # seconds to sleep when WebSocket event queue is empty
 
 
 def create_pages_router(deps: DebugDeps) -> APIRouter:
-    """Build the router that owns HTML pages, top-level APIs, and the WS endpoint."""
-    router = APIRouter()
+    """Build the router that owns HTML pages, top-level APIs, and the WS endpoint.
+
+    Every route except the Kubernetes probes and the WebSocket goes through
+    ``require_auth`` (a no-op when ``auth_token`` is empty). The probes must
+    stay public for the kubelet; the WebSocket runs its own auth handshake
+    inside the endpoint so it can reply with a proper 4401 close code.
+    """
+    # Public router: probes + WS (WS authenticates internally).
+    public = APIRouter()
+    # Everything else requires auth when a token is configured.
+    router = APIRouter(dependencies=[Depends(deps.require_auth)])
     config = deps.config
     recorder = deps.recorder
     drakkar_app = deps.drakkar_app
@@ -150,12 +159,12 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
     #     Kubernetes removes the pod from service endpoints on failure
     #     (without restarting it).
 
-    @router.get('/healthz')
+    @public.get('/healthz')
     async def healthz() -> JSONResponse:
         """Liveness probe — returns 200 as long as the event loop is alive."""
         return JSONResponse({'status': 'ok'})
 
-    @router.get('/readyz')
+    @public.get('/readyz')
     async def readyz() -> JSONResponse:
         """Readiness probe — 200 iff the worker is ready AND all sinks are connected."""
         reasons: list[str] = []
@@ -632,7 +641,7 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
 
     # --- WebSocket endpoint for live event streaming ---
 
-    @router.websocket('/ws')
+    @public.websocket('/ws')
     async def ws_events(ws: WebSocket):
         """Stream recorder events to connected clients in real-time.
 
@@ -707,4 +716,9 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
         finally:
             recorder.unsubscribe(q)
 
-    return router
+    # Compose: the auth-gated routes plus the public probes/WS, returned as
+    # one router so server.py's include_router call stays unchanged.
+    combined = APIRouter()
+    combined.include_router(public)
+    combined.include_router(router)
+    return combined

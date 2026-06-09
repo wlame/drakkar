@@ -1562,32 +1562,39 @@ async def test_on_message_complete_per_message_commits(echo_pool):
     assert any(c[1] == 2 for c in committed)
 
 
-async def test_on_message_complete_sink_delivery_exception_does_not_block_offset(echo_pool):
-    """If the CollectResult from on_message_complete fails to deliver to a
-    sink, the offset must still commit — a sink delivery failure is
-    handled via on_delivery_error, not by stalling the partition.
-    """
+class _AggHandler(BaseDrakkarHandler):
+    """Handler whose on_message_complete returns an aggregate payload."""
 
-    delivery_calls: list[int] = []
-    committed: list[tuple[int, int]] = []
+    async def arrange(self, messages, pending):
+        return [ExecutorTask(task_id=f's-{m.offset}', args=['ok'], source_offsets=[m.offset]) for m in messages]
 
-    class H(BaseDrakkarHandler):
-        async def arrange(self, messages, pending):
-            return [ExecutorTask(task_id=f's-{m.offset}', args=['ok'], source_offsets=[m.offset]) for m in messages]
+    async def on_message_complete(self, group):
+        return CollectResult(kafka=[KafkaPayload(data=_Out(v='agg'))])
 
-        async def on_message_complete(self, group):
-            return CollectResult(kafka=[KafkaPayload(data=_Out(v='agg'))])
+
+def _failing_collect_fixture():
+    calls: list[int] = []
 
     async def failing_on_collect(result: CollectResult, partition_id: int) -> None:
-        delivery_calls.append(partition_id)
+        calls.append(partition_id)
         raise RuntimeError('sink down')
+
+    return calls, failing_on_collect
+
+
+async def test_on_message_complete_sink_exception_drop_mode_commits(echo_pool):
+    """Default dlq.on_send_failure=drop: an unexpected sink-delivery
+    exception on the aggregate payload is logged loudly but the offset
+    still commits — a handler bug must not wedge the partition."""
+    delivery_calls, failing_on_collect = _failing_collect_fixture()
+    committed: list[tuple[int, int]] = []
 
     async def on_commit(pid, off):
         committed.append((pid, off))
 
     proc = PartitionProcessor(
         partition_id=0,
-        handler=H(),
+        handler=_AggHandler(),
         executor_pool=echo_pool,
         window_size=10,
         on_collect=failing_on_collect,
@@ -1599,7 +1606,37 @@ async def test_on_message_complete_sink_delivery_exception_does_not_block_offset
     await proc.stop()
 
     assert delivery_calls, 'on_collect must have been invoked'
-    assert any(c[1] == 31 for c in committed), 'offset must commit despite sink failure'
+
+
+async def test_on_message_complete_sink_exception_stall_mode_stalls_offset(echo_pool):
+    """dlq.on_send_failure=stall: an unexpected sink-delivery exception
+    means delivery state is unknown — the offset must NOT commit, so the
+    message replays after restart instead of being silently lost."""
+    delivery_calls, failing_on_collect = _failing_collect_fixture()
+    committed: list[tuple[int, int]] = []
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=_AggHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_collect=failing_on_collect,
+        on_commit=on_commit,
+        on_dlq_failure='stall',
+    )
+    proc.enqueue(make_msg(offset=30))
+    proc.start()
+    await wait_for(lambda: bool(delivery_calls), timeout=5)
+    # Give the (not expected) commit a chance to fire before asserting.
+    await asyncio.sleep(0.1)
+    await proc.stop()
+
+    assert delivery_calls, 'on_collect must have been invoked'
+    assert not committed, 'offset must NOT commit when delivery is unconfirmed'
+    assert proc.offset_tracker.has_pending(), 'offset stays pending (stalled watermark)'
 
 
 async def test_on_error_replacement_preserves_explicit_parent_task_id(failing_pool):

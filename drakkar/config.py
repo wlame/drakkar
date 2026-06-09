@@ -6,7 +6,7 @@ Use DK_ prefix with __ for nesting (e.g., DK_KAFKA__BROKERS).
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import structlog
@@ -46,6 +46,21 @@ class KafkaConfig(BaseModel):
     max_poll_interval_ms: int = 300_000
     session_timeout_ms: int = 45_000
     heartbeat_interval_ms: int = 3_000
+
+    # Policy for source messages whose value fails input_model parsing:
+    #   - 'skip'  — message flows to arrange() with payload=None (and
+    #               msg.parse_error set); the handler decides what to do.
+    #               Matches pre-policy behavior, now logged + counted.
+    #   - 'dlq'   — message is excluded from arrange(), a ParseFailurePayload
+    #               is written to the DLQ topic, and the offset commits once
+    #               the DLQ write is confirmed. A failed DLQ write stalls the
+    #               offset (redelivery on restart) instead of losing data.
+    #   - 'raise' — fail fast: a MessageParseError propagates and stops the
+    #               partition processor. Use when a parse failure means the
+    #               deployment is broken (schema mismatch) and processing
+    #               must not continue past it.
+    on_parse_error: Literal['skip', 'dlq', 'raise'] = 'skip'
+
     # Kafka-UI (https://github.com/provectus/kafka-ui) deep-link config.
     # When both fields are set, the debug UI renders a small Kafka icon
     # next to every <partition:offset> display; the icon opens Kafka-UI
@@ -295,6 +310,20 @@ class DLQConfig(BaseModel):
 
     topic: str = ''
     brokers: str = ''
+
+    # Strategy when the DLQ write itself fails (or no DLQ sink exists) after
+    # a sink delivery already failed — the payloads have nowhere safe to go:
+    #   - 'drop'  — log CRITICAL, tick drakkar_dlq_dropped_payloads_total,
+    #               count the message as processed and commit its offset.
+    #               The pipeline keeps moving; the payloads are lost (default).
+    #   - 'stall' — do NOT commit the affected offset and pause the partition
+    #               (stop fetching new messages from it). The watermark stalls
+    #               and the messages are redelivered after restart/rebalance.
+    #               Bounds data loss at the cost of consumer lag.
+    # Either way the failure is loud: alert on
+    # drakkar_dlq_send_failures_total and (for 'stall')
+    # drakkar_delivery_stalled_offsets_total.
+    on_send_failure: Literal['drop', 'stall'] = 'drop'
 
 
 # --- Non-sink config models ---

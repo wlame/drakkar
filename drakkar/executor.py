@@ -130,7 +130,9 @@ class PriorityGate:
             return
 
         # Slow path: queue up in the priority heap and wait.
-        loop = asyncio.get_event_loop()
+        # get_running_loop(): we are always inside a coroutine here, and
+        # get_event_loop() is deprecated in that context since 3.10.
+        loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         seq = next(self._seq)
         heapq.heappush(self._heap, (priority, seq, fut))

@@ -27,6 +27,8 @@ metrics:
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `drakkar_messages_consumed_total` | Counter | `partition` | Total messages consumed from the source Kafka topic |
+| `drakkar_message_parse_failures_total` | Counter | `partition` | Source messages whose value failed `input_model` deserialization (handled per `kafka.on_parse_error`) |
+| `drakkar_delivery_stalled_offsets_total` | Counter | `partition` | Offsets left uncommitted because sink delivery (including the DLQ fallback) could not be confirmed. The watermark is stalled; messages are redelivered after restart. **Alert on this.** |
 
 #### Executor
 
@@ -85,7 +87,8 @@ metrics:
 | `drakkar_sink_deliveries_skipped_total` | Counter | `sink_type`, `sink_name` | Deliveries skipped via `on_delivery_error` returning SKIP |
 | `drakkar_tasks_precomputed_total` | Counter | -- | Tasks whose result was supplied by the handler via `ExecutorTask.precomputed`, bypassing the subprocess. Framework is agnostic to the reason (cache hit, lookup, deterministic shortcut). Compare to `drakkar_executor_tasks_total{status="completed"}` for the short-circuit rate. |
 | `drakkar_sink_dlq_messages_total` | Counter | -- | Total messages sent to the [dead letter queue](sinks.md#dead-letter-queue) |
-| `drakkar_dlq_send_failures_total` | Counter | -- | Total failed attempts to send messages to the DLQ. When both the primary sink and DLQ fail, the payload is lost — alert on this counter. |
+| `drakkar_dlq_send_failures_total` | Counter | -- | Total failed attempts to send messages to the DLQ. What happens next depends on `dlq.on_send_failure`: `drop` (default) commits past the lost payloads, `stall` leaves the offsets uncommitted and pauses the partition — alert on this counter either way. |
+| `drakkar_dlq_dropped_payloads_total` | Counter | `partition` | Payloads dropped because both the sink delivery and the DLQ write failed under `dlq.on_send_failure=drop`. The offset committed and the payloads are lost. **Alert on this.** |
 | `drakkar_sink_circuit_open` | Gauge | `sink_type`, `sink_name` | Per-sink [circuit breaker](sinks.md#circuit-breaker) state: `0.0` closed, `0.5` half-open, `1.0` open. Gauges are zero-initialized at sink registration so a never-tripped sink still appears in scrape output. Sustained `1.0` on a sink means its downstream has been down longer than the cooldown can recover from. |
 | `drakkar_sink_circuit_trips_total` | Counter | `sink_type`, `sink_name` | Transitions *into* the open state per sink — both the initial failure-threshold trip and every half-open probe failure. A flapping circuit surfaces as a rising rate on this counter, not a single trip plus silent reopens. Alert on `rate(...[5m]) > 0` paired with non-zero `drakkar_sink_circuit_open`. |
 

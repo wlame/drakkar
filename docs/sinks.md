@@ -435,6 +435,28 @@ When `dlq.brokers` is empty, the DLQ producer connects to the same brokers as th
 main Kafka consumer (`kafka.brokers`). Set `dlq.brokers` explicitly to write DLQ
 messages to a different Kafka cluster.
 
+### When the DLQ itself fails
+
+The DLQ is the last resort — if the DLQ write also fails (broker down, topic
+missing, auth error), the payloads have nowhere safe to go. The
+`dlq.on_send_failure` setting decides what happens next:
+
+| Strategy | Behavior | Trade-off |
+|----------|----------|-----------|
+| `drop` (default) | The failure is logged at CRITICAL (`dlq_failure_payloads_dropped`) and counted in `drakkar_dlq_dropped_payloads_total`; the message counts as processed and its offset commits. The pipeline keeps moving. | The payloads are **lost**. Alert on the counter. |
+| `stall` | The affected offset is left uncommitted (counted in `drakkar_delivery_stalled_offsets_total`) and the partition is **paused** — no new messages are fetched from it until the worker restarts or the partition is reassigned. On restart, processing resumes from the last committed offset, so the messages are redelivered. | No data loss, but the partition accrues consumer lag until the downstream is fixed and the worker restarted. |
+
+Both strategies are loud: `drakkar_dlq_send_failures_total` ticks on every failed
+DLQ write regardless of the strategy, and a CRITICAL `dlq_send_failed` log entry
+carries the full context. Under `stall`, the pause is also recorded as a
+`partition_stalled` event in the flight recorder and a `partition_paused_on_stall`
+ERROR log.
+
+A stall-paused partition is deliberately excluded from the backpressure
+pause/resume cycle — backpressure recovery never silently un-pauses it. Choose
+`stall` when downstream data must never be dropped (audit, billing); keep `drop`
+when pipeline liveness matters more than occasional loss during a double outage.
+
 ### DLQ replay
 
 `scripts/replay_dlq.py` is a reference operator tool that reads DLQ entries

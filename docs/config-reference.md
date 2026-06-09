@@ -49,6 +49,13 @@ kafka:
   session_timeout_ms: 45000        # group-membership heartbeat window. env: DK_KAFKA__SESSION_TIMEOUT_MS
   heartbeat_interval_ms: 3000      # heartbeat frequency; should be ≤ session_timeout_ms / 3. env: DK_KAFKA__HEARTBEAT_INTERVAL_MS
 
+  # Policy for messages whose value fails input_model parsing. env: DK_KAFKA__ON_PARSE_ERROR
+  #   skip  — message reaches arrange() with payload=None and msg.parse_error set (default)
+  #   dlq   — message is excluded from arrange() and written to the DLQ topic as a
+  #           ParseFailurePayload; the offset commits only after the DLQ write is confirmed
+  #   raise — fail fast: MessageParseError stops the partition processor (schema-broken deploys)
+  on_parse_error: skip
+
   # Kafka-UI deep-link integration: when both are set, the debug UI shows a clickable
   # icon next to every <partition:offset>. Both empty = feature disabled silently.
   ui_url: ''                       # env: DK_KAFKA__UI_URL  · example: http://kafka-ui:8080
@@ -211,6 +218,13 @@ Failed sink deliveries (after retries are exhausted, or when a circuit breaker i
 dlq:
   topic: ''                        # empty = auto-derive "{source_topic}_dlq". env: DK_DLQ__TOPIC
   brokers: ''                      # empty = inherit kafka.brokers. env: DK_DLQ__BROKERS
+
+  # Strategy when the DLQ write itself fails (payloads have nowhere safe to go):
+  #   drop  — log CRITICAL + tick drakkar_dlq_dropped_payloads_total, commit the offset,
+  #           keep the pipeline moving; the payloads are lost (default)
+  #   stall — leave the offset uncommitted and pause the partition; messages are
+  #           redelivered after restart/rebalance (no loss, at the cost of lag)
+  on_send_failure: drop            # env: DK_DLQ__ON_SEND_FAILURE
 ```
 
 ---

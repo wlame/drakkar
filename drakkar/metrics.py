@@ -26,6 +26,33 @@ messages_consumed = Counter(
     ['partition'],
 )
 
+message_parse_failures = Counter(
+    'drakkar_message_parse_failures_total',
+    'Total source messages whose value failed input_model deserialization',
+    ['partition'],
+)
+
+dlq_dropped_payloads = Counter(
+    'drakkar_dlq_dropped_payloads_total',
+    (
+        'Total payloads dropped because the sink delivery failed AND the DLQ '
+        'fallback failed, under dlq.on_send_failure=drop. The offset was '
+        'committed and the payloads are lost. ALERT on this.'
+    ),
+    ['partition'],
+)
+
+delivery_stalled_offsets = Counter(
+    'drakkar_delivery_stalled_offsets_total',
+    (
+        'Total offsets left uncommitted because sink delivery (including the '
+        'DLQ fallback) could not be confirmed. A non-zero value means the '
+        'partition watermark is stalled and messages will be redelivered '
+        'after a restart or rebalance. ALERT on this.'
+    ),
+    ['partition'],
+)
+
 # --- Executor ---
 
 executor_tasks = Counter(

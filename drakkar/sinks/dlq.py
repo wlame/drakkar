@@ -113,23 +113,24 @@ class DLQSink(BaseSink[BaseModel]):
         delivery_error: DeliveryError,
         partition_id: int,
         attempt_count: int = 1,
-    ) -> None:
+    ) -> bool:
         """Write a failed delivery to the DLQ topic.
 
-        Wraps the error in a DLQMessage with metadata and produces it to the
-        configured DLQ Kafka topic. Does NOT raise on failure — the DLQ is
-        the last resort and propagating the exception would cause the
-        partition pipeline to stall with no safe recovery. Failures are
-        instead reported via:
+        Returns ``True`` when the DLQ broker confirmed the write, ``False``
+        otherwise. Does NOT raise — the caller decides what a failed DLQ
+        write means for its pipeline. The partition pipeline reacts to
+        ``False`` by stalling the affected offsets (no commit → redelivery
+        on restart) instead of silently losing the payloads. Failures are
+        additionally reported via:
           - the ``dlq_send_failures`` Prometheus counter (alert on this!)
           - a CRITICAL-severity structured log entry with full context
 
         Operators MUST configure alerting on ``drakkar_dlq_send_failures_total``
-        — a non-zero value means messages are being silently lost.
+        — a non-zero value means deliveries are stalling behind a broken DLQ.
         """
         if self._producer is None:
             await logger.awarning('dlq_send_skipped_not_connected', category='sink')
-            return
+            return False
 
         msg = DLQMessage(
             delivery_error=delivery_error,
@@ -157,12 +158,14 @@ class DLQSink(BaseSink[BaseModel]):
                 partition=partition_id,
                 payload_count=len(delivery_error.payloads),
             )
+            return True
         except Exception as e:
             dlq_send_failures.inc()
             # CRITICAL: the DLQ itself has failed after the original sink
-            # already failed. These payloads are effectively lost until the
-            # operator intervenes. Include full context so alerting tools
-            # surface enough to act on without a dashboard dive.
+            # already failed. The caller stalls the affected offsets so
+            # the payloads are redelivered after restart instead of lost.
+            # Include full context so alerting tools surface enough to
+            # act on without a dashboard dive.
             await logger.acritical(
                 'dlq_send_failed',
                 category='sink',
@@ -175,8 +178,9 @@ class DLQSink(BaseSink[BaseModel]):
                 payload_count=len(delivery_error.payloads),
                 payload_bytes=len(serialized),
                 attempt_count=attempt_count,
-                action='ALERT: message lost — investigate DLQ producer/broker',
+                action='ALERT: offsets stalled — investigate DLQ producer/broker',
             )
+            return False
 
     async def close(self) -> None:
         """Flush and close the DLQ producer."""

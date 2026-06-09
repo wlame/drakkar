@@ -28,7 +28,8 @@ from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.logging import setup_logging
-from drakkar.models import CollectResult, DeliveryAction, DeliveryError
+from drakkar.metrics import dlq_dropped_payloads
+from drakkar.models import CollectResult, DeliveryAction, DeliveryError, SinkDeliveryFailedError
 from drakkar.partition import PartitionProcessor
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.base import BaseSink
@@ -107,6 +108,10 @@ class DrakkarApp:
         self._processors: dict[int, PartitionProcessor] = {}
         self._running = False
         self._paused = False
+        # Partitions paused because an offset stalled under
+        # dlq.on_send_failure=stall. Excluded from backpressure resume;
+        # cleared on revoke so a reassignment starts fresh.
+        self._stalled_partitions: set[int] = set()
         # Readiness signal for the ``/readyz`` Kubernetes probe (exposed
         # via the debug server). Flipped to ``True`` after the worker has
         # cleared its full startup sequence — consumer subscribed, sinks
@@ -294,6 +299,34 @@ class DrakkarApp:
             'paused': self._paused,
         }
 
+    async def _handle_dlq_failure(self, error: 'DeliveryError', partition_id: int, reason: str) -> None:
+        """Apply the ``dlq.on_send_failure`` strategy when the DLQ fallback failed.
+
+        'drop' (default): log CRITICAL, tick ``dlq_dropped_payloads``, and
+        return — the delivery counts as handled, the offset commits, and the
+        payloads are lost. 'stall': raise :class:`SinkDeliveryFailedError`
+        so the partition pipeline leaves the affected offsets uncommitted
+        and pauses the partition (redelivery after restart/rebalance).
+        """
+        if self._config.dlq.on_send_failure == 'stall':
+            raise SinkDeliveryFailedError(
+                sink_name=error.sink_name,
+                sink_type=error.sink_type,
+                reason=reason,
+            )
+        dlq_dropped_payloads.labels(partition=str(partition_id)).inc()
+        await logger.acritical(
+            'dlq_failure_payloads_dropped',
+            category='sink',
+            sink_name=error.sink_name,
+            sink_type=error.sink_type,
+            partition=partition_id,
+            payload_count=len(error.payloads),
+            reason=reason,
+            action='ALERT: payloads lost (dlq.on_send_failure=drop) — '
+            'set dlq.on_send_failure=stall to prefer replay over loss',
+        )
+
     async def _handle_collect(self, result: CollectResult, partition_id: int) -> None:
         """Deliver CollectResult payloads to configured sinks.
 
@@ -312,8 +345,22 @@ class DrakkarApp:
                 action = await self._handler.on_delivery_error(error)
             finally:
                 unbind_contextvars('hook', 'sink_type', 'sink_name')
-            if action == DeliveryAction.DLQ and self._dlq_sink:
-                await self._dlq_sink.send(error, partition_id=partition_id)
+            if action == DeliveryAction.DLQ:
+                # DLQ is the last resort. If it is missing or the write
+                # fails, the payloads have nowhere safe to go — apply the
+                # dlq.on_send_failure strategy.
+                if self._dlq_sink is None:
+                    await self._handle_dlq_failure(
+                        error,
+                        partition_id=partition_id,
+                        reason='handler returned DLQ but no DLQ sink is configured',
+                    )
+                elif not await self._dlq_sink.send(error, partition_id=partition_id):
+                    await self._handle_dlq_failure(
+                        error,
+                        partition_id=partition_id,
+                        reason='DLQ send failed',
+                    )
             return action
 
         await self._sink_manager.deliver_all(

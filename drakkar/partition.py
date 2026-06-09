@@ -12,6 +12,8 @@ from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.metrics import (
     batch_duration,
+    delivery_stalled_offsets,
+    dlq_dropped_payloads,
     executor_duration,
     executor_pool_active,
     executor_tasks,
@@ -24,12 +26,16 @@ from drakkar.metrics import (
 )
 from drakkar.models import (
     CollectResult,
+    DeliveryError,
     ErrorAction,
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
     MessageGroup,
+    MessageParseError,
+    ParseFailurePayload,
     PendingContext,
+    SinkDeliveryFailedError,
     SourceMessage,
 )
 from drakkar.offsets import OffsetTracker
@@ -39,6 +45,11 @@ logger = structlog.get_logger()
 
 CollectCallback = Callable[[CollectResult, int], Awaitable[None]]
 CommitCallback = Callable[[int, int], Awaitable[None]]
+# Matches DLQSink.send(error, partition_id) -> bool (True = confirmed write).
+DLQSendCallback = Callable[[DeliveryError, int], Awaitable[bool]]
+# Invoked once (per processor lifetime) when the first offset stalls under
+# dlq.on_send_failure=stall — the lifecycle pauses the partition in Kafka.
+StallCallback = Callable[[int], Awaitable[None]]
 
 MAX_RETRIES = 3  # default, overridden by config.executor.max_retries
 DRAIN_POLL_INTERVAL = 0.05  # seconds between checks when draining in-flight work
@@ -136,6 +147,11 @@ class MessageTracker:
     # Guard against double-firing on_message_complete if bookkeeping hits
     # zero more than once due to e.g. a cancellation race.
     completion_fired: bool = False
+    # Set when a sink delivery for this message's payloads could not be
+    # confirmed (including the DLQ fallback). A True value makes
+    # _finalize_message_tracker skip offset completion — the watermark
+    # stalls and the message is redelivered after restart/rebalance.
+    delivery_failed: bool = False
 
 
 class PartitionProcessor:
@@ -157,6 +173,10 @@ class PartitionProcessor:
         on_collect: CollectCallback | None = None,
         on_commit: CommitCallback | None = None,
         recorder: EventRecorder | None = None,
+        on_parse_error: str = 'skip',
+        dlq_send: DLQSendCallback | None = None,
+        on_dlq_failure: str = 'drop',
+        on_stall: StallCallback | None = None,
     ) -> None:
         self._partition_id = partition_id
         self._handler = handler
@@ -166,6 +186,13 @@ class PartitionProcessor:
         self._on_collect = on_collect
         self._on_commit = on_commit
         self._recorder = recorder
+        self._on_parse_error = on_parse_error
+        self._dlq_send = dlq_send
+        # dlq.on_send_failure strategy: 'drop' commits past lost payloads,
+        # 'stall' leaves their offsets uncommitted and pauses the partition.
+        self._on_dlq_failure = on_dlq_failure
+        self._on_stall = on_stall
+        self._stall_signaled = False
 
         self._queue: asyncio.Queue[SourceMessage] = asyncio.Queue()
         self._offset_tracker = OffsetTracker()
@@ -182,6 +209,11 @@ class PartitionProcessor:
         # Entries are added in _process_window before arrange() runs and
         # removed in _finalize_message_tracker when on_message_complete fires.
         self._message_trackers: dict[int, MessageTracker] = {}
+        # Offsets deliberately left pending because their sink delivery
+        # (including the DLQ fallback) could not be confirmed. They block
+        # the watermark by design but must NOT block drain/stop — they will
+        # never complete in this process; redelivery happens after restart.
+        self._stalled_offsets: set[int] = set()
 
     @property
     def partition_id(self) -> int:
@@ -251,9 +283,18 @@ class PartitionProcessor:
                 pass
             self._task = None
 
+    def _has_drainable_pending(self) -> bool:
+        """Pending offsets that can still complete in this process.
+
+        Stalled offsets (delivery unconfirmed) are excluded: they never
+        complete here by design, and waiting on them would wedge drain
+        until the timeout on every shutdown/rebalance.
+        """
+        return self._offset_tracker.pending_count > len(self._stalled_offsets)
+
     async def drain(self) -> None:
         """Wait for all in-flight work and queued messages to complete."""
-        while self._queue.qsize() > 0 or self._offset_tracker.has_pending() or self._inflight_count > 0:
+        while self._queue.qsize() > 0 or self._has_drainable_pending() or self._inflight_count > 0:
             await asyncio.sleep(DRAIN_POLL_INTERVAL)
 
     async def _run(self) -> None:
@@ -281,14 +322,18 @@ class PartitionProcessor:
                 if messages:
                     await self._process_window(messages)
 
-            # wait for any in-flight tasks to complete
-            while self._inflight_count > 0 or self._offset_tracker.has_pending():
+            # wait for any in-flight tasks to complete (stalled offsets are
+            # excluded — they never complete in this process by design)
+            while self._inflight_count > 0 or self._has_drainable_pending():
                 await asyncio.sleep(DRAIN_POLL_INTERVAL)
 
             # final commit
             await self._try_commit()
         except asyncio.CancelledError:
+            # Re-raise so the awaiting caller (stop()) sees the true
+            # termination cause instead of a clean return.
             await log.ainfo('partition_processor_cancelled')
+            raise
         except Exception as e:
             await log.aerror('partition_processor_error', error=str(e), exc_info=True)
 
@@ -314,6 +359,25 @@ class PartitionProcessor:
 
     async def _process_window(self, messages: list[SourceMessage]) -> None:
         self._window_counter += 1
+
+        # Register offsets and deserialize BEFORE building the window so
+        # the parse-error policy can drop unparseable messages from the
+        # window while their offsets are already watermark-tracked.
+        # Policy ('skip' keeps the message in the window with payload=None):
+        arrange_started_at = time.monotonic()
+        accepted: list[SourceMessage] = []
+        for msg in messages:
+            self._offset_tracker.register(msg.offset)
+            self._handler.deserialize_message(msg)
+            if msg.parse_error is not None and self._on_parse_error != 'skip':
+                await self._handle_parse_failure(msg)
+                continue
+            accepted.append(msg)
+        messages = accepted
+        if not messages:
+            await self._try_commit()
+            return
+
         window = Window(
             window_id=self._window_counter,
             source_messages=messages,
@@ -322,11 +386,8 @@ class PartitionProcessor:
 
         # Create a per-message tracker BEFORE arrange() so any outcome
         # we observe afterwards (even an immediate failure) has a place
-        # to land. Also register the offset with the watermark tracker.
-        arrange_started_at = time.monotonic()
+        # to land.
         for msg in messages:
-            self._offset_tracker.register(msg.offset)
-            self._handler.deserialize_message(msg)
             self._message_trackers[msg.offset] = MessageTracker(
                 source_message=msg,
                 started_at=arrange_started_at,
@@ -407,6 +468,100 @@ class PartitionProcessor:
             self._active_tasks.add(t)
             t.add_done_callback(self._active_tasks.discard)
 
+    async def _signal_stall(self) -> None:
+        """Notify the lifecycle (once) that this partition has stalled.
+
+        The lifecycle reacts by pausing the partition in Kafka so no new
+        messages are fetched — without the pause, processing would continue
+        past the stall and everything after it would be re-processed (and
+        re-delivered to sinks) on restart, while the offset tracker
+        accumulated unacknowledged state without bound.
+        """
+        if self._stall_signaled or self._on_stall is None:
+            return
+        self._stall_signaled = True
+        try:
+            await self._on_stall(self._partition_id)
+        except Exception as e:
+            await logger.aerror(
+                'partition_stall_signal_failed',
+                category='partition',
+                partition=self._partition_id,
+                error=str(e),
+                exc_info=True,
+            )
+
+    async def _stall_offset(self, offset: int) -> None:
+        """Leave ``offset`` permanently pending: the watermark stalls at it
+        and the message is redelivered after a restart or rebalance."""
+        self._stalled_offsets.add(offset)
+        delivery_stalled_offsets.labels(partition=str(self._partition_id)).inc()
+        await logger.aerror(
+            'offset_stalled_on_delivery_failure',
+            category='partition',
+            partition=self._partition_id,
+            offset=offset,
+            hint='offset will not commit; message redelivered after restart/rebalance',
+        )
+        await self._signal_stall()
+
+    async def _handle_parse_failure(self, msg: SourceMessage) -> None:
+        """Apply the 'dlq' / 'raise' parse-error policy to one message.
+
+        ('skip' never reaches this method — the message stays in the
+        window with payload=None and the handler decides what to do.)
+
+        'raise' propagates a MessageParseError, stopping the partition
+        processor with the offset uncommitted (fail-fast, redelivery on
+        restart). 'dlq' writes a ParseFailurePayload to the DLQ topic and
+        completes the offset when the write is confirmed; on a failed
+        write the ``dlq.on_send_failure`` strategy applies — 'drop'
+        commits anyway (payload lost, loud log + metric), 'stall' leaves
+        the offset uncommitted and pauses the partition.
+        """
+        if self._on_parse_error == 'raise':
+            raise MessageParseError(
+                partition=msg.partition,
+                offset=msg.offset,
+                error=msg.parse_error or 'unknown parse error',
+            )
+
+        payload = ParseFailurePayload(
+            topic=msg.topic,
+            partition=msg.partition,
+            offset=msg.offset,
+            raw_value=msg.value.decode('utf-8', errors='replace') if msg.value else '',
+            parse_error=msg.parse_error or 'unknown parse error',
+        )
+        error = DeliveryError(
+            sink_name='parse',
+            sink_type='parse_error',
+            error=msg.parse_error or 'unknown parse error',
+            payloads=[payload],
+        )
+        sent = False
+        if self._dlq_send is not None:
+            sent = await self._dlq_send(error, self._partition_id)
+        if sent:
+            self._offset_tracker.complete(msg.offset)
+            await self._try_commit()
+        elif self._on_dlq_failure == 'stall':
+            await self._stall_offset(msg.offset)
+        else:
+            # 'drop': the unparseable message is lost (it had no parsed
+            # payload to begin with); commit past it and keep moving.
+            dlq_dropped_payloads.labels(partition=str(self._partition_id)).inc()
+            await logger.acritical(
+                'dlq_failure_payloads_dropped',
+                category='partition',
+                partition=self._partition_id,
+                offset=msg.offset,
+                reason='on_parse_error=dlq but the DLQ write was not confirmed',
+                action='ALERT: unparseable message dropped (dlq.on_send_failure=drop)',
+            )
+            self._offset_tracker.complete(msg.offset)
+            await self._try_commit()
+
     async def _execute_and_track(self, task: ExecutorTask, window: Window, retry_count: int = 0) -> None:
         # Bind partition context for this async task — inherited by all user hooks called within
         bind_contextvars(partition=self._partition_id, window_id=window.window_id)
@@ -459,7 +614,24 @@ class PartitionProcessor:
                     output_message_count=len(collect_result.kafka) if collect_result else 0,
                 )
             if collect_result and self._on_collect:
-                await self._on_collect(collect_result, self._partition_id)
+                try:
+                    await self._on_collect(collect_result, self._partition_id)
+                except SinkDeliveryFailedError as e:
+                    # Delivery (including the DLQ fallback) could not be
+                    # confirmed. Mark every affected message tracker so
+                    # _finalize_message_tracker stalls the offset instead
+                    # of committing past undelivered data. The task itself
+                    # succeeded — group/window accounting proceeds normally.
+                    for src_offset in task.source_offsets:
+                        affected = self._message_trackers.get(src_offset)
+                        if affected is not None:
+                            affected.delivery_failed = True
+                    await log.aerror(
+                        'task_sink_delivery_failed',
+                        error=str(e),
+                        source_offsets=task.source_offsets,
+                        hint='affected offsets will not commit (redelivery on restart)',
+                    )
 
             window.results.append(result)
             task_result = result
@@ -611,7 +783,33 @@ class PartitionProcessor:
                     output_message_count=len(on_complete_result.kafka) if on_complete_result else 0,
                 )
             if on_complete_result and self._on_collect:
-                await self._on_collect(on_complete_result, self._partition_id)
+                try:
+                    await self._on_collect(on_complete_result, self._partition_id)
+                except SinkDeliveryFailedError as e:
+                    # The window's per-message offsets were already completed
+                    # individually as each message finished, so there is
+                    # nothing left to stall — the aggregate payload is the
+                    # only loss. Loudest possible signal for the operator.
+                    await logger.acritical(
+                        'on_window_complete_delivery_failed',
+                        category='sink',
+                        partition=self._partition_id,
+                        window_id=window.window_id,
+                        error=str(e),
+                        action='ALERT: window aggregate payload lost — offsets already committed',
+                    )
+                except Exception as e:
+                    # Previously this propagated out of the fire-and-forget
+                    # task and surfaced only as an unobserved-exception
+                    # warning at GC time. Log it properly instead.
+                    await logger.aerror(
+                        'on_window_complete_sink_delivery_error',
+                        category='sink',
+                        partition=self._partition_id,
+                        window_id=window.window_id,
+                        error=str(e),
+                        exc_info=True,
+                    )
 
             # Per-message offsets were already marked complete individually
             # by _finalize_message_tracker as each message's tasks finished.
@@ -679,20 +877,48 @@ class PartitionProcessor:
                 output_message_count=len(on_complete_result.kafka) if on_complete_result else 0,
             )
 
+        delivery_failed = tracker.delivery_failed
         if on_complete_result and self._on_collect:
             try:
                 await self._on_collect(on_complete_result, self._partition_id)
+            except SinkDeliveryFailedError as e:
+                # Delivery (including the DLQ fallback) could not be
+                # confirmed for the per-message aggregate payload. Only
+                # raised under dlq.on_send_failure=stall — under 'drop'
+                # the DLQ-failure handler already logged + counted the
+                # loss and returned normally.
+                delivery_failed = True
+                await logger.aerror(
+                    'on_message_complete_delivery_failed',
+                    category='sink',
+                    partition=self._partition_id,
+                    offset=tracker.source_message.offset,
+                    error=str(e),
+                )
             except Exception as e:
-                # Same reasoning as above — a sink failure on the aggregate
-                # payload should not stall the message's offset. The sink
-                # manager already runs its own on_delivery_error hook.
-                logger.warning(
+                # Unexpected error — delivery state is unknown. The
+                # dlq.on_send_failure strategy decides: 'stall' treats
+                # unknown as undelivered (replay on restart), 'drop'
+                # logs loudly and commits so a deterministic handler bug
+                # cannot wedge the partition.
+                if self._on_dlq_failure == 'stall':
+                    delivery_failed = True
+                await logger.aerror(
                     'on_message_complete_sink_delivery_failed',
                     category='handler',
                     partition=self._partition_id,
                     offset=tracker.source_message.offset,
                     error=str(e),
+                    offset_action='stall' if self._on_dlq_failure == 'stall' else 'commit',
+                    exc_info=True,
                 )
+
+        if delivery_failed:
+            # Do NOT complete the offset: the watermark stalls at this
+            # message and it is redelivered after a restart or rebalance.
+            # The tracker stays registered so the stall is inspectable.
+            await self._stall_offset(tracker.source_message.offset)
+            return
 
         # Mark the offset complete on the watermark tracker and try to
         # advance the commit. Per-message commit granularity — a slow task

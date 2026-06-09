@@ -274,6 +274,7 @@ class EventRecorder:
     async def start(self) -> None:
         self._running = True
         if self._config.db_dir:
+            await self._warn_if_db_dir_world_writable()
             self._db_path = make_db_path(self._config.db_dir, self._worker_name)
             # Open writer + apply PRAGMA + create schema + open reader in a
             # single try/except. A failure at any of these steps must close
@@ -306,6 +307,15 @@ class EventRecorder:
                 # so the reader always sees a ready DB. URI with ``mode=ro``
                 # rejects any accidental write attempt through this handle.
                 self._reader_db = await open_reader(self._db_path)
+                # The DB stores task args + subprocess stdout/stderr, which
+                # may carry message-derived data. SQLite creates files with
+                # 0644 & ~umask; tighten to owner-only so other local users
+                # on shared hosts (e.g. world-readable /tmp) cannot read
+                # them. Same-user peer workers (cache sync, debug merge)
+                # are unaffected. Best-effort: chmod failure must not
+                # abort recorder startup.
+                with contextlib.suppress(OSError):
+                    os.chmod(self._db_path, 0o600)
             except Exception:
                 # Best-effort cleanup of whichever connections opened before
                 # the exception. Reset attrs so a retry of start() starts
@@ -331,6 +341,29 @@ class EventRecorder:
             category='recorder',
             db_path=self._db_path or '(memory only)',
         )
+
+    async def _warn_if_db_dir_world_writable(self) -> None:
+        """Warn when the recorder DB directory is world-writable (e.g. /tmp).
+
+        Recorder DBs persist task args and subprocess output. In a
+        world-writable directory other local users can pre-create or
+        symlink-swap files, and (before the post-create chmod) read DB
+        contents. Best-effort: a stat failure is ignored — the directory
+        may not exist yet and ``make_db_path`` / connect handle that.
+        """
+        try:
+            mode = os.stat(self._config.db_dir).st_mode
+        except OSError:
+            return
+        if mode & 0o002:
+            await logger.awarning(
+                'recorder_db_dir_world_writable',
+                category='recorder',
+                db_dir=self._config.db_dir,
+                hint='recorder DBs store task args and subprocess output; '
+                'point debug.db_dir at a directory owned by the worker user '
+                '(e.g. /var/lib/drakkar) on shared hosts',
+            )
 
     def subscribe(self) -> queue.Queue:
         """Subscribe to live event stream. Returns a thread-safe queue."""
@@ -1000,6 +1033,17 @@ class EventRecorder:
                     'partition': p,
                 }
             )
+
+    def record_partition_stalled(self, partition: int) -> None:
+        """Record that a partition was paused because an offset stalled
+        (delivery + DLQ unconfirmed under ``dlq.on_send_failure=stall``)."""
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'partition_stalled',
+                'partition': partition,
+            }
+        )
 
     def record_periodic_run(
         self,

@@ -19,7 +19,7 @@ import time
 from typing import TYPE_CHECKING
 
 import structlog
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from drakkar.concurrency import dispatch_to_loop
@@ -33,7 +33,9 @@ logger = structlog.get_logger()
 
 def create_cache_router(deps: DebugDeps) -> APIRouter:
     """Build the router that owns ``/api/debug/cache/*`` endpoints."""
-    router = APIRouter()
+    # Cache routes expose key/value contents — gate the whole router
+    # behind require_auth (no-op without a token).
+    router = APIRouter(dependencies=[Depends(deps.require_auth)])
     drakkar_app = deps.drakkar_app
 
     def _cache_reader_or_404():

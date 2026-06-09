@@ -2789,7 +2789,9 @@ class TestAuthToken:
             resp = await c.get('/api/debug/databases')
             assert resp.status_code == 200
 
-    async def test_unprotected_routes_always_accessible(self, mock_recorder, mock_app):
+    async def test_all_ui_routes_require_token_when_configured(self, mock_recorder, mock_app):
+        """With auth_token set, every UI/API route is gated — only the
+        Kubernetes probes stay public."""
         cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
@@ -2797,7 +2799,32 @@ class TestAuthToken:
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             for path in ['/', '/partitions', '/sinks', '/live', '/history', '/debug']:
                 resp = await c.get(path)
-                assert resp.status_code == 200, f'{path} should be accessible without auth'
+                assert resp.status_code == 401, f'{path} should require auth when token is set'
+                resp = await c.get(path, headers={'Authorization': 'Bearer secret-123'})
+                assert resp.status_code == 200, f'{path} should be accessible with the token'
+
+    async def test_probes_stay_public_with_token_configured(self, mock_recorder, mock_app):
+        """/healthz and /readyz must remain unauthenticated — Kubernetes
+        probes cannot send bearer tokens."""
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        mock_recorder.config = cfg
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/healthz')
+            assert resp.status_code == 200
+            resp = await c.get('/readyz')
+            assert resp.status_code in (200, 503)  # readiness depends on mock state
+
+    async def test_ui_routes_open_when_no_token_configured(self, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='')
+        mock_recorder.config = cfg
+        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            for path in ['/', '/partitions', '/sinks', '/live', '/history', '/debug']:
+                resp = await c.get(path)
+                assert resp.status_code == 200, f'{path} should be open when no token is configured'
 
     async def test_merge_requires_token(self, tmp_path, mock_recorder, mock_app):
         cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')

@@ -50,6 +50,64 @@ class SourceMessage(BaseModel):
         default=None,
         description='Parsed payload object. Set by the handler arrange() method.',
     )
+    parse_error: str | None = Field(
+        default=None,
+        description=(
+            'Set by deserialize_message() when the raw value could not be '
+            'parsed into the input model. None means parsing succeeded (or '
+            'no input_model is configured). The framework applies the '
+            'kafka.on_parse_error policy to messages with a non-None value.'
+        ),
+    )
+
+
+class SinkDeliveryFailedError(Exception):
+    """Raised when a sink delivery could not be confirmed AND the DLQ fallback
+    also failed (or no DLQ sink is available).
+
+    This is the framework's signal that a payload has nowhere safe to go.
+    The partition pipeline reacts by NOT completing the affected offsets —
+    the watermark stalls and the messages are redelivered after a restart
+    or rebalance (at-least-once: prefer replay over silent loss).
+    """
+
+    def __init__(self, sink_name: str, sink_type: str, reason: str) -> None:
+        self.sink_name = sink_name
+        self.sink_type = sink_type
+        self.reason = reason
+        super().__init__(f'delivery to {sink_type}/{sink_name} failed and DLQ fallback failed: {reason}')
+
+
+class MessageParseError(Exception):
+    """Raised under ``kafka.on_parse_error: raise`` when a source message
+    fails input_model deserialization.
+
+    Propagates out of the partition processor's window loop, stopping the
+    partition with an error log and leaving the offset uncommitted — the
+    message is redelivered after restart. Fail-fast for deployments where
+    a parse failure means the schema contract is broken.
+    """
+
+    def __init__(self, partition: int, offset: int, error: str) -> None:
+        self.partition = partition
+        self.offset = offset
+        self.error = error
+        super().__init__(f'message {partition}:{offset} failed deserialization: {error}')
+
+
+class ParseFailurePayload(BaseModel):
+    """DLQ payload wrapper for a source message that failed deserialization.
+
+    Produced by the framework when ``kafka.on_parse_error: dlq`` is set.
+    Carries the raw value (decoded with replacement characters) plus
+    enough metadata to locate the original message in Kafka.
+    """
+
+    topic: str = Field(description='Source topic of the unparseable message.')
+    partition: int = Field(description='Source partition of the unparseable message.')
+    offset: int = Field(description='Source offset of the unparseable message.')
+    raw_value: str = Field(description='Raw message value, UTF-8 decoded with errors replaced.')
+    parse_error: str = Field(description='The deserialization error message.')
 
 
 class PrecomputedResult(BaseModel):

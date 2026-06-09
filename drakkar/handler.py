@@ -11,7 +11,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, get_args
 
-from pydantic import BaseModel
+import structlog
+from pydantic import BaseModel, ValidationError
 
 # Imported at runtime (not under ``TYPE_CHECKING``) so the ``cache: CacheLike``
 # annotations on the classes below are resolvable by tools that evaluate
@@ -23,6 +24,7 @@ from drakkar.cache.protocol import CacheLike
 if TYPE_CHECKING:
     from drakkar.config import DrakkarConfig
 
+from drakkar.metrics import message_parse_failures
 from drakkar.models import (
     CollectResult,
     DeliveryAction,
@@ -37,6 +39,8 @@ from drakkar.models import (
     SourceMessage,
 )
 from drakkar.utils import make_request_id
+
+logger = structlog.get_logger()
 
 # PEP 696 default TypeVars (Python 3.13+). These let the handler stay 2-param
 # for non-webapp users (``BaseDrakkarHandler[InputT, OutputT]``) while extending
@@ -283,12 +287,32 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
 
         Called by the framework before arrange(). If no input_model
         is set, returns the message unchanged.
+
+        On parse failure ``msg.payload`` stays ``None`` and
+        ``msg.parse_error`` is set; the framework then applies the
+        ``kafka.on_parse_error`` policy (``skip`` / ``dlq`` / ``raise``).
+        Failures are logged with partition/offset context and counted in
+        ``drakkar_message_parse_failures_total``.
         """
         if self.input_model is not None:
             try:
                 msg.payload = self.input_model.model_validate_json(msg.value)
-            except Exception:
+                msg.parse_error = None
+            except (ValidationError, TypeError, ValueError) as e:
+                # ValidationError subclasses ValueError, but is listed
+                # explicitly for clarity; TypeError covers a None value.
                 msg.payload = None
+                msg.parse_error = str(e)
+                message_parse_failures.labels(partition=str(msg.partition)).inc()
+                logger.warning(
+                    'message_parse_failed',
+                    category='handler',
+                    partition=msg.partition,
+                    offset=msg.offset,
+                    model=self.input_model.__name__,
+                    error=str(e)[:500],
+                    value_snippet=msg.value[:200].decode('utf-8', errors='replace') if msg.value else '',
+                )
         return msg
 
     async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:

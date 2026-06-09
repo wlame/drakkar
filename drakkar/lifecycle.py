@@ -277,6 +277,7 @@ class AppLifecycle:
         app._sink_manager.attach_runtime(
             recorder=app._recorder,
             dlq_sink=app._dlq_sink,
+            dlq_on_send_failure=app._config.dlq.on_send_failure,
         )
 
         # log sink topology
@@ -415,7 +416,9 @@ class AppLifecycle:
                     executor_idle_waste.inc(idle_slots * dt)
 
             if app._paused and total <= low_watermark:
-                partition_ids = list(app._processors.keys())
+                # Never resume partitions paused by a delivery stall — they
+                # stay paused until restart/revoke regardless of backpressure.
+                partition_ids = [p for p in app._processors if p not in app._stalled_partitions]
                 if partition_ids:
                     await app._consumer.resume(partition_ids)
                     app._paused = False
@@ -467,6 +470,10 @@ class AppLifecycle:
                     on_collect=app._handle_collect,
                     on_commit=app._handle_commit,
                     recorder=app._recorder,
+                    on_parse_error=app._config.kafka.on_parse_error,
+                    dlq_send=app._dlq_sink.send if app._dlq_sink else None,
+                    on_dlq_failure=app._config.dlq.on_send_failure,
+                    on_stall=self._pause_stalled_partition,
                 )
                 app._processors[pid] = processor
                 processor.start()
@@ -507,6 +514,9 @@ class AppLifecycle:
         if app._recorder:
             app._recorder.record_revoked(partition_ids)
         for pid in partition_ids:
+            # A revoked partition is no longer ours — clear any stall-pause
+            # bookkeeping so a future reassignment starts fresh.
+            app._stalled_partitions.discard(pid)
             processor = app._processors.pop(pid, None)
             if processor:
                 t = asyncio.ensure_future(self._stop_processor(processor))
@@ -527,11 +537,58 @@ class AppLifecycle:
         t.add_done_callback(app._background_tasks.discard)
 
     async def _safe_call(self, coro: Coroutine) -> None:
-        """Run a coroutine and log any exception instead of leaving it unretrieved."""
+        """Run a coroutine and log any exception instead of leaving it unretrieved.
+
+        For best-effort user hooks (on_assign/on_revoke) and auxiliary
+        framework work only. Critical cleanup paths like _stop_processor
+        must NOT go through this wrapper — they carry their own
+        error handling with forced teardown.
+        """
         try:
             await coro
         except Exception as e:
-            logger.warning('async_callback_failed', category='lifecycle', error=str(e))
+            logger.warning(
+                'async_callback_failed',
+                category='lifecycle',
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True,
+            )
+
+    async def _pause_stalled_partition(self, partition_id: int) -> None:
+        """Pause a partition whose watermark stalled (dlq.on_send_failure=stall).
+
+        Called (once per processor lifetime) by ``PartitionProcessor`` when
+        the first offset stalls. Pausing stops Kafka from delivering new
+        messages so the stall doesn't snowball: without it, every message
+        processed past the stall point would be re-processed (and
+        re-delivered to sinks) after restart, and the offset tracker would
+        grow without bound. The partition stays paused until the worker
+        restarts or the partition is revoked — ``_stalled_partitions``
+        keeps the backpressure resume cycle from silently un-pausing it.
+        """
+        app = self._app
+        app._stalled_partitions.add(partition_id)
+        if app._recorder:
+            app._recorder.record_partition_stalled(partition_id)
+        if app._consumer is not None:
+            try:
+                await app._consumer.pause([partition_id])
+                logger.error(
+                    'partition_paused_on_stall',
+                    category='lifecycle',
+                    partition=partition_id,
+                    hint='delivery (incl. DLQ) unconfirmed and dlq.on_send_failure=stall; '
+                    'partition paused — fix the downstream and restart the worker to resume',
+                )
+            except Exception as e:
+                logger.error(
+                    'partition_stall_pause_failed',
+                    category='lifecycle',
+                    partition=partition_id,
+                    error=str(e),
+                    exc_info=True,
+                )
 
     async def _claim_watchdog_slot(self) -> None:
         """Write the per-worker watchdog file, tolerating ``OSError``.
@@ -600,12 +657,28 @@ class AppLifecycle:
                         )
             await processor.stop()
         except Exception as e:
-            logger.warning(
+            # Critical cleanup path: a failure here must not leave the
+            # processor running (it would keep consuming executor slots
+            # with no owner). Log loudly with the full traceback, then
+            # force-stop as a last resort.
+            logger.error(
                 'stop_processor_failed',
                 category='lifecycle',
                 partition=processor.partition_id,
                 error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True,
             )
+            try:
+                await processor.stop()
+            except Exception as stop_exc:
+                logger.error(
+                    'stop_processor_force_stop_failed',
+                    category='lifecycle',
+                    partition=processor.partition_id,
+                    error=str(stop_exc),
+                    exc_info=True,
+                )
 
     def _handle_signal(self) -> None:
         """Handle shutdown signals."""
@@ -717,6 +790,7 @@ class AppLifecycle:
                     category='lifecycle',
                     error=str(exc),
                     exc_type=type(exc).__name__,
+                    exc_info=True,
                 )
         finally:
             # Mark the watchdog clean as soon as the drain phase has been
@@ -738,6 +812,7 @@ class AppLifecycle:
                         'watchdog_mark_clean_failed',
                         category='watchdog',
                         error=str(exc),
+                        exc_info=True,
                     )
 
             # Only commit final offsets if drain succeeded cleanly. After
@@ -758,6 +833,7 @@ class AppLifecycle:
                                 category='kafka',
                                 partition=processor.partition_id,
                                 error=str(e),
+                                exc_info=True,
                             )
 
             # Stop every partition processor regardless of drain outcome.
@@ -773,6 +849,7 @@ class AppLifecycle:
                         category='lifecycle',
                         partition=processor.partition_id,
                         error=str(exc),
+                        exc_info=True,
                     )
             app._processors.clear()
 
@@ -813,6 +890,7 @@ class AppLifecycle:
                         'cache_engine_stop_failed',
                         category='lifecycle',
                         error=str(exc),
+                        exc_info=True,
                     )
                 app._cache_engine = None
 
@@ -824,6 +902,7 @@ class AppLifecycle:
                         'recorder_stop_failed',
                         category='lifecycle',
                         error=str(exc),
+                        exc_info=True,
                     )
 
             if app._debug_server:
@@ -834,6 +913,7 @@ class AppLifecycle:
                         'debug_server_stop_failed',
                         category='lifecycle',
                         error=str(exc),
+                        exc_info=True,
                     )
 
             # Stop the webapp uvicorn thread. ``stop`` is a sync method
@@ -850,6 +930,7 @@ class AppLifecycle:
                         'webapp_stop_failed',
                         category='webapp',
                         error=str(exc),
+                        exc_info=True,
                     )
                 app._webapp = None
 
@@ -864,6 +945,7 @@ class AppLifecycle:
                     'sink_manager_close_failed',
                     category='lifecycle',
                     error=str(exc),
+                    exc_info=True,
                 )
             if app._dlq_sink:
                 try:
@@ -873,6 +955,7 @@ class AppLifecycle:
                         'dlq_sink_close_failed',
                         category='lifecycle',
                         error=str(exc),
+                        exc_info=True,
                     )
 
             if app._consumer:
@@ -883,6 +966,7 @@ class AppLifecycle:
                         'consumer_close_failed',
                         category='lifecycle',
                         error=str(exc),
+                        exc_info=True,
                     )
 
             await log.ainfo('drakkar_stopped', category='lifecycle')
