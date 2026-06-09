@@ -29,6 +29,8 @@ metrics:
 | `drakkar_messages_consumed_total` | Counter | `partition` | Total messages consumed from the source Kafka topic |
 | `drakkar_message_parse_failures_total` | Counter | `partition` | Source messages whose value failed `input_model` deserialization (handled per `kafka.on_parse_error`) |
 | `drakkar_delivery_stalled_offsets_total` | Counter | `partition` | Offsets left uncommitted because sink delivery (including the DLQ fallback) could not be confirmed. The watermark is stalled; messages are redelivered after restart. **Alert on this.** |
+| `drakkar_suppressed_zombie_deliveries_total` | Counter | `partition` | Sink deliveries suppressed because the task finished after a revoke/shutdown drain timeout — the new partition owner re-processes those messages. A rising rate means `executor.drain_timeout_seconds` is too small for the workload. |
+| `drakkar_messages_unassigned_dropped_total` | Counter | `partition` | Messages received from Kafka for a partition with no registered processor (a revoke raced the poll). The new owner redelivers them; this only signals the race happened. |
 
 #### Executor
 
@@ -122,6 +124,7 @@ Emitted only when [`cache.enabled=true`](cache.md). Memory gauges are maintained
 | `drakkar_cache_deletes_total` | Counter | -- | Total `Cache.delete()` calls regardless of whether the key was present. Note: delete is local-only — see [sharp edge](cache.md#delete-is-local-only-the-main-sharp-edge). |
 | `drakkar_cache_evictions_total` | Counter | -- | Entries popped from the in-memory dict due to the LRU cap (`max_memory_entries`). Sustained high rate signals cap undersizing. |
 | `drakkar_cache_flush_entries_total` | Counter | `op` (`set`, `delete`) | Entries drained from the dirty map to SQLite per flush cycle, by op type. Measures flush throughput, not rows actually modified (LWW may reject a SET). |
+| `drakkar_cache_flush_failures_total` | Counter | -- | Flush cycles that raised. Consecutive failures mean cache writes accumulate in memory (lost on shutdown if the final drain also fails); after 5 in a row the worker logs `cache_flush_failing_repeatedly` at ERROR. **Alert on a rising rate.** |
 | `drakkar_cache_cleanup_removed_total` | Counter | -- | Rows removed from the SQLite DB by the cleanup loop (entries whose TTL elapsed). A sudden spike means many entries expiring together. |
 | `drakkar_cache_sync_entries_fetched_total` | Counter | `peer` | Rows pulled from a peer worker's cache DB by the sync loop, per peer. |
 | `drakkar_cache_sync_entries_upserted_total` | Counter | `peer` | Rows the sync loop attempted to UPSERT into the local DB. Equals or less than `sync_entries_fetched_total` when LWW rejects some. |

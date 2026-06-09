@@ -50,6 +50,12 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+# Consecutive failed flush cycles before the engine escalates from the
+# periodic-runner's per-failure log to a dedicated ERROR with operator
+# guidance. Low enough to fire within ~half a minute at the default
+# flush interval, high enough that a single transient blip stays quiet.
+FLUSH_FAILURE_ESCALATION_THRESHOLD = 5
+
 
 class CacheEngine:
     """Owns the SQLite backing store and periodic loops for a single worker's cache.
@@ -123,6 +129,16 @@ class CacheEngine:
         # cache-DB file, and splitting caches across engines would make
         # the ``_dirty`` swap (see ``_flush_once``) ambiguous.
         self._cache: Cache | None = None
+        # Serializes flush cycles. The periodic flush task and the
+        # shutdown final drain can otherwise run ``_flush_once``
+        # concurrently — both swapping the dirty map and writing through
+        # the same writer connection with interleaved transactions.
+        self._flush_lock = asyncio.Lock()
+        # Consecutive failed flush cycles. Reset on success. Used to
+        # escalate logging when the writer connection is persistently
+        # broken (dirty entries accumulate in memory and would be lost
+        # if the shutdown drain also fails).
+        self._consecutive_flush_failures = 0
         # Task reference for the periodic flush loop. Set in ``start()``
         # after ``run_periodic_task`` is scheduled; cleared in ``stop()``
         # once the task has been cancelled and awaited. None when the
@@ -565,6 +581,38 @@ class CacheEngine:
     # ---- flush loop ---------------------------------------------------------
 
     async def _flush_once(self) -> None:
+        """Run one serialized flush cycle with failure-streak tracking.
+
+        Wraps :meth:`_flush_locked` in ``_flush_lock`` so the periodic
+        flush task and the shutdown final drain can never interleave a
+        dirty-map swap or share the writer transaction. Tracks
+        consecutive failures and escalates to ERROR once the streak
+        reaches ``FLUSH_FAILURE_ESCALATION_THRESHOLD`` — a persistently
+        broken writer means dirty entries accumulate in memory and are
+        lost if the shutdown drain also fails.
+        """
+        async with self._flush_lock:
+            try:
+                await self._flush_locked()
+            except Exception as e:
+                self._consecutive_flush_failures += 1
+                metrics.cache_flush_failures.inc()
+                if self._consecutive_flush_failures >= FLUSH_FAILURE_ESCALATION_THRESHOLD:
+                    await logger.aerror(
+                        'cache_flush_failing_repeatedly',
+                        category='cache',
+                        consecutive_failures=self._consecutive_flush_failures,
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        hint='cache writes are accumulating in memory and will be '
+                        'lost on shutdown if the final drain also fails — '
+                        'investigate the cache DB / disk',
+                    )
+                raise
+            else:
+                self._consecutive_flush_failures = 0
+
+    async def _flush_locked(self) -> None:
         """Drain one batch of pending mutations from the Cache's dirty map
         to the local SQLite DB.
 

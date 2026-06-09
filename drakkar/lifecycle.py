@@ -56,6 +56,7 @@ from drakkar.metrics import (
     drain_timeout_hit,
     executor_idle_waste,
     inflight_at_stop,
+    messages_unassigned_dropped,
     start_metrics_server,
     total_queued,
     uncommitted_offsets_at_stop,
@@ -436,6 +437,19 @@ class AppLifecycle:
                 processor = app._processors.get(msg.partition)
                 if processor:
                     processor.enqueue(msg)
+                else:
+                    # Revoke raced the poll: the processor was popped but
+                    # the broker delivered a few more messages before
+                    # acknowledging the revoke. The new partition owner
+                    # redelivers from the last committed offset, so
+                    # dropping here is safe — but it must be visible.
+                    messages_unassigned_dropped.labels(partition=str(msg.partition)).inc()
+                    logger.warning(
+                        'message_for_unassigned_partition_dropped',
+                        category='kafka',
+                        partition=msg.partition,
+                        offset=msg.offset,
+                    )
 
             # After the first poll completes successfully we consider the
             # worker ready to serve traffic — the consumer is subscribed,
@@ -635,6 +649,11 @@ class AppLifecycle:
                 await asyncio.wait_for(processor.drain(), timeout=app._config.executor.drain_timeout_seconds)
                 drained_cleanly = True
             except TimeoutError:
+                # Tasks still running are zombies now — the new partition
+                # owner replays their messages, so their late results must
+                # not reach sinks (double-write) or commit offsets
+                # (clobbering the new owner's progress).
+                processor.suppress_deliveries()
                 logger.warning(
                     'stop_processor_drain_timeout',
                     category='lifecycle',
@@ -744,7 +763,13 @@ class AppLifecycle:
             await asyncio.gather(*app._periodic_tasks, return_exceptions=True)
             app._periodic_tasks.clear()
 
-        for processor in list(app._processors.values()):
+        # Snapshot the processors BEFORE draining: a rebalance firing
+        # concurrently with shutdown pops processors from ``_processors``
+        # (handing them to ``_stop_processor`` background tasks). Draining
+        # from the live dict would skip those, and ``drained_cleanly=True``
+        # could fire with their work still in flight.
+        processors_snapshot = list(app._processors.values())
+        for processor in processors_snapshot:
             processor.signal_stop()
 
         drain_timeout = app._config.executor.drain_timeout_seconds
@@ -761,7 +786,7 @@ class AppLifecycle:
         # file that the next startup would mis-classify as a SIGKILL.
         try:
             try:
-                await asyncio.wait_for(self._drain_all_processors(), timeout=drain_timeout)
+                await asyncio.wait_for(self._drain_all_processors(processors_snapshot), timeout=drain_timeout)
                 drained_cleanly = True
                 await log.ainfo('executors_drained', category='lifecycle')
             except TimeoutError:
@@ -769,6 +794,13 @@ class AppLifecycle:
                 # operators can alert on ``rate(...[5m]) > 0`` instead of
                 # parsing logs for the ``drain_timeout`` warning.
                 drain_timeout_hit.inc()
+                # In-flight tasks are zombies now: after this worker exits,
+                # another consumer-group member replays their messages from
+                # the last committed offset. Suppress their late sink
+                # deliveries and commits to avoid double-writes during the
+                # remaining teardown window.
+                for processor in list(app._processors.values()):
+                    processor.suppress_deliveries()
                 await log.awarning(
                     'drain_timeout',
                     category='lifecycle',
@@ -972,11 +1004,18 @@ class AppLifecycle:
             await log.ainfo('drakkar_stopped', category='lifecycle')
             close_logging()
 
-    async def _drain_all_processors(self) -> None:
-        """Wait for all partition processors to finish queued + in-flight work."""
+    async def _drain_all_processors(self, processors: list[PartitionProcessor]) -> None:
+        """Wait for the given partition processors to finish queued + in-flight work.
+
+        Takes an explicit snapshot instead of reading ``app._processors``
+        so a rebalance that pops processors mid-shutdown cannot shrink the
+        drain set under us. Processors whose only pending offsets are
+        stalled (delivery unconfirmed) drain promptly — ``drain()`` itself
+        excludes stalled offsets from its wait condition.
+        """
         drain_tasks = [
             processor.drain()
-            for processor in self._app._processors.values()
+            for processor in processors
             if processor.queue_size > 0 or processor.offset_tracker.has_pending() or processor.inflight_count > 0
         ]
         if drain_tasks:

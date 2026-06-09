@@ -819,7 +819,17 @@ class SinkManager:
                         error=safe_error,
                         payloads=payloads,
                     )
-                    action = await on_delivery_error(error)
+                    try:
+                        action = await on_delivery_error(error)
+                    except Exception:
+                        # The hook raising (handler bug, or a stall-mode
+                        # SinkDeliveryFailedError from the DLQ fallback) is
+                        # a terminal failure for this delivery — tell the
+                        # breaker before propagating so consecutive
+                        # failures still accumulate toward the trip
+                        # threshold instead of leaving it blind.
+                        sink.record_failure()
+                        raise
 
                     if action == DeliveryAction.RETRY and attempt < max_retries:
                         stats.retry_count += 1

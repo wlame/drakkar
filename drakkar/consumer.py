@@ -142,7 +142,18 @@ class KafkaConsumer:
         tps = [TopicPartition(self._config.source_topic, pid) for pid in partition_ids]
         try:
             committed_list = await self._consumer.committed(tps)
-        except Exception:
+        except Exception as e:
+            # A lag of 0 here is a lie told to keep the caller simple —
+            # make the failure visible so a broker outage doesn't read
+            # as "no backlog" on dashboards.
+            consumer_errors.inc()
+            logger.warning(
+                'lag_query_failed',
+                category='kafka',
+                op='committed',
+                error=str(e),
+                error_type=type(e).__name__,
+            )
             return 0
 
         committed_map = {}
@@ -155,7 +166,16 @@ class KafkaConsumer:
                 tp = TopicPartition(self._config.source_topic, pid)
                 _low, high = await self._consumer.get_watermark_offsets(tp)
                 return max(0, high - committed_map.get(pid, 0))
-            except Exception:
+            except Exception as e:
+                consumer_errors.inc()
+                logger.warning(
+                    'lag_query_failed',
+                    category='kafka',
+                    op='watermark',
+                    partition=pid,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
                 return 0
 
         lags = await asyncio.gather(*[_watermark(pid) for pid in partition_ids])
@@ -180,8 +200,15 @@ class KafkaConsumer:
             for tp_result in committed_list or []:
                 if tp_result and tp_result.offset >= 0:
                     committed_map[tp_result.partition] = tp_result.offset
-        except Exception:
-            pass
+        except Exception as e:
+            consumer_errors.inc()
+            logger.warning(
+                'lag_query_failed',
+                category='kafka',
+                op='committed',
+                error=str(e),
+                error_type=type(e).__name__,
+            )
 
         # parallel watermark lookups
         async def _watermark(pid: int) -> tuple[int, int]:
@@ -189,7 +216,16 @@ class KafkaConsumer:
                 tp = TopicPartition(self._config.source_topic, pid)
                 _low, high = await self._consumer.get_watermark_offsets(tp)
                 return pid, high
-            except Exception:
+            except Exception as e:
+                consumer_errors.inc()
+                logger.warning(
+                    'lag_query_failed',
+                    category='kafka',
+                    op='watermark',
+                    partition=pid,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
                 return pid, 0
 
         watermarks = await asyncio.gather(*[_watermark(pid) for pid in partition_ids])

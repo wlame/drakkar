@@ -174,7 +174,8 @@ When partitions are revoked (rebalance, scaling event):
      1. Sets `processor._running = False`.
      2. Waits up to `executor.drain_timeout_seconds` (default: `30`, min: `1`) for in-flight work to complete.
      3. **Only if drain completed cleanly**, commits the offset watermark. If drain timed out, in-flight tasks may still be running and committing their offsets would silently skip them on reassign — safer to let at-least-once replay recover them.
-     4. Calls `processor.stop()`.
+     4. **On drain timeout**, the still-running tasks are marked as *zombies*: their late results are suppressed (no sink deliveries, no offset commits) because the new partition owner replays their messages from the last committed offset — delivering here would be a guaranteed double-write, and a late commit could clobber the new owner's progress. Suppressions are counted in `drakkar_suppressed_zombie_deliveries_total` and logged as `zombie_delivery_suppressed`. The same suppression applies to tasks that outlive the shutdown drain timeout.
+     5. Calls `processor.stop()`.
 3. Updates the `assigned_partitions` gauge.
 4. Calls the handler's `on_revoke(partition_ids)` hook asynchronously.
 

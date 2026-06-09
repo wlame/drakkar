@@ -22,6 +22,7 @@ from drakkar.metrics import (
     messages_consumed,
     offset_lag,
     partition_queue_size,
+    suppressed_zombie_deliveries,
     task_retries,
 )
 from drakkar.models import (
@@ -214,6 +215,12 @@ class PartitionProcessor:
         # the watermark by design but must NOT block drain/stop — they will
         # never complete in this process; redelivery happens after restart.
         self._stalled_offsets: set[int] = set()
+        # Set when the partition was revoked (or shutdown began) and the
+        # drain timed out: tasks still running are zombies — the new
+        # partition owner re-processes their messages, so delivering their
+        # results or committing their offsets here would double-write /
+        # clobber the new owner's progress.
+        self._deliveries_suppressed = False
 
     @property
     def partition_id(self) -> int:
@@ -282,6 +289,30 @@ class PartitionProcessor:
             except asyncio.CancelledError:
                 pass
             self._task = None
+
+    def suppress_deliveries(self) -> None:
+        """Mark in-flight tasks as zombies: no further sink deliveries or
+        offset commits from this processor.
+
+        Called by the lifecycle when a revoke/shutdown drain times out.
+        Tasks that complete afterwards belong to a partition this worker
+        no longer owns — the new owner replays from the last committed
+        offset, so any delivery here would be a guaranteed double-write
+        and any commit could clobber the new owner's progress.
+        """
+        self._deliveries_suppressed = True
+
+    def _note_suppressed_delivery(self, hook: str) -> None:
+        suppressed_zombie_deliveries.labels(partition=str(self._partition_id)).inc()
+        logger.warning(
+            'zombie_delivery_suppressed',
+            category='partition',
+            partition=self._partition_id,
+            hook=hook,
+            hint='task finished after the revoke/shutdown drain timed out; '
+            'the new partition owner re-processes the message — raise '
+            'executor.drain_timeout_seconds if this happens routinely',
+        )
 
     def _has_drainable_pending(self) -> bool:
         """Pending offsets that can still complete in this process.
@@ -613,7 +644,9 @@ class PartitionProcessor:
                     duration=collect_duration,
                     output_message_count=len(collect_result.kafka) if collect_result else 0,
                 )
-            if collect_result and self._on_collect:
+            if collect_result and self._on_collect and self._deliveries_suppressed:
+                self._note_suppressed_delivery('on_task_complete')
+            elif collect_result and self._on_collect:
                 try:
                     await self._on_collect(collect_result, self._partition_id)
                 except SinkDeliveryFailedError as e:
@@ -782,7 +815,9 @@ class PartitionProcessor:
                     task_count=window.total_tasks,
                     output_message_count=len(on_complete_result.kafka) if on_complete_result else 0,
                 )
-            if on_complete_result and self._on_collect:
+            if on_complete_result and self._on_collect and self._deliveries_suppressed:
+                self._note_suppressed_delivery('on_window_complete')
+            elif on_complete_result and self._on_collect:
                 try:
                     await self._on_collect(on_complete_result, self._partition_id)
                 except SinkDeliveryFailedError as e:
@@ -878,7 +913,9 @@ class PartitionProcessor:
             )
 
         delivery_failed = tracker.delivery_failed
-        if on_complete_result and self._on_collect:
+        if on_complete_result and self._on_collect and self._deliveries_suppressed:
+            self._note_suppressed_delivery('on_message_complete')
+        elif on_complete_result and self._on_collect:
             try:
                 await self._on_collect(on_complete_result, self._partition_id)
             except SinkDeliveryFailedError as e:
@@ -932,6 +969,10 @@ class PartitionProcessor:
 
     async def _try_commit(self) -> None:
         """Commit offsets if the watermark has advanced."""
+        if self._deliveries_suppressed:
+            # Zombie path: the partition belongs to another worker now.
+            # Committing here could clobber the new owner's progress.
+            return
         committable = self._offset_tracker.committable()
         if committable is not None:
             if self._on_commit:

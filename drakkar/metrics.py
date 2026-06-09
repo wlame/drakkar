@@ -32,6 +32,37 @@ message_parse_failures = Counter(
     ['partition'],
 )
 
+suppressed_zombie_deliveries = Counter(
+    'drakkar_suppressed_zombie_deliveries_total',
+    (
+        'Sink deliveries suppressed because the task completed after its '
+        'partition was revoked and the drain timed out. The new partition '
+        'owner re-processes these messages, so delivering here would '
+        'double-write. A rising rate means drain_timeout_seconds is too '
+        'small for the workload.'
+    ),
+    ['partition'],
+)
+
+messages_unassigned_dropped = Counter(
+    'drakkar_messages_unassigned_dropped_total',
+    (
+        'Messages received from Kafka for a partition with no registered '
+        'processor (revoke raced the poll). The new partition owner '
+        'redelivers them; this counter only signals the race happened.'
+    ),
+    ['partition'],
+)
+
+cache_flush_failures = Counter(
+    'drakkar_cache_flush_failures_total',
+    (
+        'Cache write-behind flush cycles that raised. Consecutive failures '
+        'mean dirty entries accumulate in memory and are lost on shutdown '
+        'if the final drain also fails. ALERT on a rising rate.'
+    ),
+)
+
 dlq_dropped_payloads = Counter(
     'drakkar_dlq_dropped_payloads_total',
     (

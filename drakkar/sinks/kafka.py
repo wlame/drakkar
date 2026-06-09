@@ -78,6 +78,7 @@ class KafkaSink(BaseSink[KafkaPayload]):
         start = time.monotonic()
         labels = {'sink_type': self.sink_type, 'sink_name': self._name}
         futures = []
+        futures_collected = False
         try:
             for payload in payloads:
                 value = payload.data.model_dump_json().encode()
@@ -95,6 +96,7 @@ class KafkaSink(BaseSink[KafkaPayload]):
                     f'(topic={self._config.topic!r}, sink={self._name!r})'
                 )
             results = await asyncio.gather(*futures)
+            futures_collected = True
             for i, result in enumerate(results):
                 if result is None:
                     raise RuntimeError(
@@ -112,6 +114,43 @@ class KafkaSink(BaseSink[KafkaPayload]):
         except Exception:
             sink_deliver_errors.labels(**labels).inc()
             raise
+        finally:
+            if not futures_collected and futures:
+                # An exception escaped before the gather (e.g. flush raised
+                # with messages still in flight). Collect the outstanding
+                # delivery futures so broker-level errors surface here
+                # instead of being silently abandoned — their disposition
+                # would otherwise depend on producer-close internals.
+                # Bounded wait: futures of permanently-undeliverable
+                # messages may never resolve.
+                try:
+                    leftover = await asyncio.wait_for(
+                        asyncio.gather(*futures, return_exceptions=True),
+                        timeout=5.0,
+                    )
+                except TimeoutError:
+                    await logger.awarning(
+                        'kafka_sink_abandoned_futures_timeout',
+                        category='sink',
+                        sink_name=self._name,
+                        topic=self._config.topic,
+                        future_count=len(futures),
+                    )
+                else:
+                    failed = [
+                        r
+                        for r in leftover
+                        if isinstance(r, BaseException) or (hasattr(r, 'error') and r.error() is not None)
+                    ]
+                    if failed:
+                        await logger.awarning(
+                            'kafka_sink_inflight_delivery_errors',
+                            category='sink',
+                            sink_name=self._name,
+                            topic=self._config.topic,
+                            failed_count=len(failed),
+                            first_error=str(failed[0]),
+                        )
 
     async def close(self) -> None:
         """Flush pending messages and close the producer."""
