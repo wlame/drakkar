@@ -791,7 +791,10 @@ def test_debug_report_serialize_deserialize_round_trip():
 
     as_json = report.model_dump_json()
     restored = DebugReport.model_validate_json(as_json)
-    assert restored == report
+    # ``ProbeError.traceback`` is serialization-excluded (contract decision
+    # D14), so compare the serialized shapes rather than the raw models.
+    assert restored.model_dump() == report.model_dump()
+    assert 'traceback' not in restored.model_dump()['errors'][0]
 
 
 def test_debug_report_defaults_produce_valid_empty_shape():
@@ -1861,10 +1864,12 @@ async def test_runner_captures_deserialize_error_and_skips_downstream():
     assert handler.on_message_complete_calls == 0
     assert handler.on_window_complete_calls == 0
 
-    # Report round-trips through JSON without raising.
+    # Report round-trips through JSON without raising. ``traceback`` is
+    # serialization-excluded (contract decision D14), so compare the
+    # serialized shapes rather than the raw models.
     as_json = report.model_dump_json()
     restored = DebugReport.model_validate_json(as_json)
-    assert restored == report
+    assert restored.model_dump() == report.model_dump()
 
 
 class _ArrangeRaisingHandler(_HappyPathHandler):

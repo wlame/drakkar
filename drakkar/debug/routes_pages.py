@@ -231,8 +231,15 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
             },
         )
 
-    @router.get('/partitions', response_class=HTMLResponse)
-    async def partitions(request: Request):
+    async def _partitions_data() -> list[dict]:
+        """Per-partition summary rows enriched with live processor state and lag.
+
+        Shared by the ``/partitions`` HTML page and ``GET /api/v1/partitions``
+        so the page and the API never drift. Rows are recorder aggregates
+        (``get_partition_summary`` columns) plus ``is_live`` / ``queue_size`` /
+        ``pending_offsets`` / ``committed_offset`` / ``high_watermark`` /
+        ``lag``, sorted by partition.
+        """
         # ``get_partition_summary`` internally does ``self._db.execute(...)``;
         # dispatch to the main loop so the aiosqlite cursor stays there.
         summary = await dispatch_to_loop(recorder.get_partition_summary(), deps.drakkar_app.main_loop)
@@ -248,6 +255,12 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
             s['committed_offset'] = lag.get('committed', s.get('last_committed_offset'))
             s['high_watermark'] = lag.get('high_watermark')
             s['lag'] = lag.get('lag', 0)
+        summary.sort(key=lambda s: s['partition'])
+        return summary
+
+    @router.get('/partitions', response_class=HTMLResponse)
+    async def partitions(request: Request):
+        summary = await _partitions_data()
         webapp_tile = await _build_webapp_tile()
         return templates.TemplateResponse(
             request,
@@ -258,6 +271,13 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
                 'webapp_tile': webapp_tile,
             },
         )
+
+    # v1-only contract endpoint (no legacy alias): the partitions table as
+    # JSON for the static SPA. ``[]`` when nothing has been recorded.
+    @router.get('/api/v1/partitions')
+    async def api_partitions():
+        """Per-partition summary rows as JSON, sorted by partition."""
+        return JSONResponse(await _partitions_data())
 
     @router.get('/partitions/{partition_id}', response_class=HTMLResponse)
     async def partition_detail(
@@ -286,8 +306,14 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
             },
         )
 
-    @router.get('/task/{task_id}', response_class=HTMLResponse)
-    async def task_detail(request: Request, task_id: str):
+    async def _task_detail_data(task_id: str) -> dict:
+        """One task's reconstructed lifecycle from its recorded events.
+
+        Shared by the ``/task/{task_id}`` HTML page and
+        ``GET /api/v1/task/{task_id}`` so the page and the API never drift.
+        ``task_id`` is echoed back as requested; the recorder lookup strips
+        the ``:r…`` retry composite-key suffix to the base id.
+        """
         # Strip retry composite key suffix (e.g. "task-abc:r1234567.89" → "task-abc")
         base_id = task_id.split(':r')[0] if ':r' in task_id else task_id
         events = await dispatch_to_loop(recorder.get_task_events(base_id), deps.drakkar_app.main_loop)
@@ -367,31 +393,43 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
                     except (json.JSONDecodeError, TypeError):
                         pass
 
+        return {
+            'task_id': task_id,
+            'events': events,
+            'started': started,
+            'completed': completed,
+            'failed': failed,
+            'duration': duration,
+            'source_offsets': source_offsets,
+            'args': args,
+            'labels': labels,
+            'task_env': task_env,
+            'partition': started['partition'] if started else None,
+            'pid': pid,
+            'exit_code': finished.get('exit_code') if finished else None,
+            'binary_path': drakkar_app._config.executor.binary_path,
+            'origin': origin_value,
+            'client_name': client_name,
+            'request_id': request_id,
+            'webapp_request_body': webapp_request_body,
+            'webapp_response_body': webapp_response_body,
+        }
+
+    @router.get('/task/{task_id}', response_class=HTMLResponse)
+    async def task_detail(request: Request, task_id: str):
+        detail = await _task_detail_data(task_id)
         return templates.TemplateResponse(
             request,
             'task_detail.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'task_id': task_id,
-                'events': events,
-                'started': started,
-                'completed': completed,
-                'failed': failed,
-                'duration': duration,
-                'source_offsets': source_offsets,
-                'args': args,
-                'labels': labels,
-                'task_env': task_env,
-                'partition': started['partition'] if started else None,
-                'pid': pid,
-                'binary_path': drakkar_app._config.executor.binary_path,
-                'origin': origin_value,
-                'client_name': client_name,
-                'request_id': request_id,
-                'webapp_request_body': webapp_request_body,
-                'webapp_response_body': webapp_response_body,
-            },
+            {'worker_id': drakkar_app._worker_id, **detail},
         )
+
+    # v1-only contract endpoint (no legacy alias): one task's full lifecycle
+    # as JSON for the static SPA. stdout/stderr live inside the event rows.
+    @router.get('/api/v1/task/{task_id}')
+    async def api_task_detail(task_id: str):
+        """Single-task detail as JSON; ``:r…`` retry suffixes resolve to the base task."""
+        return JSONResponse(await _task_detail_data(task_id))
 
     @router.get('/history', response_class=HTMLResponse)
     async def history(

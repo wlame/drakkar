@@ -209,7 +209,14 @@ class ProbeError(BaseModel):
     )
     exception_class: str = Field(description='Fully qualified exception class name.')
     message: str = Field(description='str(exception).')
-    traceback: str = Field(description='traceback.format_exc() output captured at the point of failure.')
+    traceback: str = Field(
+        default='',
+        exclude=True,
+        description=(
+            'traceback.format_exc() output captured at the point of failure. '
+            'Internal-only: excluded from the serialized report (contract decision D14).'
+        ),
+    )
     occurred_at_ms: float = Field(description='Milliseconds since the probe started.')
 
 
@@ -222,7 +229,7 @@ class PlannedSinkRecord(BaseModel):
     Postgres sink instance name, etc.) without bloating the core schema.
     """
 
-    sink_type: Literal['kafka', 'postgres', 'mongo', 'http', 'redis', 'files'] = Field(
+    sink_type: Literal['kafka', 'postgres', 'mongo', 'http', 'redis', 'files', 'custom'] = Field(
         description='Which CollectResult field the payload came from.'
     )
     destination: str = Field(

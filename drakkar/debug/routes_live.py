@@ -22,7 +22,7 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -60,32 +60,21 @@ def create_live_router(deps: DebugDeps) -> APIRouter:
     drakkar_app = deps.drakkar_app
     templates = deps.templates
 
-    @router.get('/live', response_class=HTMLResponse)
-    async def live(request: Request):
-        # All three reads (active tasks + two event queries) touch the
-        # main-loop aiosqlite connection. Batch them into one dispatch
-        # so the whole page builds from a single cross-thread hop.
-        async def _read_from_main():
-            active_rows = await recorder.get_active_tasks()
-            finished_rows = await recorder.get_events(
-                event_type='task_completed',
-                limit=config.max_ui_rows,
-            )
-            failed_rows = await recorder.get_events(
-                event_type='task_failed',
-                limit=1000,
-            )
-            return active_rows, finished_rows, failed_rows
+    async def _live_overview_data() -> dict:
+        """The live view's server-side snapshot.
 
-        active, finished, failed = await dispatch_to_loop(_read_from_main(), deps.drakkar_app.main_loop)
+        Shared by the ``/live`` HTML page and ``GET /api/v1/live/overview``
+        so the page and the API never drift: running/pending task maps,
+        in-flight Arrange calls, pool occupancy, UI tuning knobs, handler
+        hook flags, and the Kafka-UI deep-link config.
+        """
+        active = await dispatch_to_loop(recorder.get_active_tasks(), deps.drakkar_app.main_loop)
         now = time.time()
-        for task in active:
-            task['elapsed'] = now - task['ts'] if task.get('ts') else 0
         # split tasks: running (have task_started in DB) vs pending (no task_started yet)
         processors = drakkar_app.processors
         active_task_ids = {t['task_id'] for t in active}
-        running_tasks = {}
-        pending_tasks = {}
+        running_tasks: dict = {}
+        pending_tasks: dict = {}
 
         # ``proc._pending_tasks``, ``_arranging``, ``_arrange_start``, and
         # ``_arrange_labels`` are mutated exclusively on the main loop.
@@ -126,37 +115,70 @@ def create_live_router(deps: DebugDeps) -> APIRouter:
                 else:
                     pending_tasks[tid] = entry
 
-        recent_finished = sorted(finished + failed, key=lambda e: e.get('ts', 0), reverse=True)[: config.max_ui_rows]
-
         # ``partition_count`` powers the Arrange tab's "last N batches" cap
         # (3 x partition_count) so the live list stays stable-sized regardless
         # of how many partitions the broker has assigned to this worker.
         # ``hook_flags`` hides completion-hook tabs (Task/Message/Window
         # Results) for hooks the handler doesn't implement.
+        kafka_cfg = drakkar_app._config.kafka
+        return {
+            'worker_id': drakkar_app._worker_id,
+            'running_tasks': running_tasks,
+            'pending_tasks': pending_tasks,
+            'arranging': arranging,
+            'pool_active': drakkar_app._executor_pool.active_count if drakkar_app._executor_pool else 0,
+            'pool_waiting': drakkar_app._executor_pool.waiting_count if drakkar_app._executor_pool else 0,
+            'pool_max': drakkar_app._executor_pool.max_executors if drakkar_app._executor_pool else 0,
+            'partition_count': len(drakkar_app.processors),
+            'max_ui_rows': config.max_ui_rows,
+            'ws_min_duration_ms': config.ws_min_duration_ms,
+            'hook_flags': hook_flags(drakkar_app.handler)
+            if drakkar_app.handler
+            else {
+                'task_complete': False,
+                'message_complete': False,
+                'window_complete': False,
+            },
+            # Kafka-UI deep-link config for the SPA (Jinja globals on the
+            # HTML pages). Always strings; empty when unconfigured.
+            'kafka_ui_base': kafka_cfg.ui_url.rstrip('/'),
+            'kafka_ui_cluster': kafka_cfg.ui_cluster_name,
+            'kafka_source_topic': kafka_cfg.source_topic,
+        }
+
+    @router.get('/live', response_class=HTMLResponse)
+    async def live(request: Request):
+        overview = await _live_overview_data()
+
+        # Recent-finished rows are page-only (the SPA reads live feeds over
+        # /api/events and the WS instead); both queries batch into a single
+        # cross-thread dispatch.
+        async def _read_finished():
+            finished_rows = await recorder.get_events(
+                event_type='task_completed',
+                limit=config.max_ui_rows,
+            )
+            failed_rows = await recorder.get_events(
+                event_type='task_failed',
+                limit=1000,
+            )
+            return finished_rows, failed_rows
+
+        finished, failed = await dispatch_to_loop(_read_finished(), deps.drakkar_app.main_loop)
+        recent_finished = sorted(finished + failed, key=lambda e: e.get('ts', 0), reverse=True)[: config.max_ui_rows]
+
         return templates.TemplateResponse(
             request,
             'live.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'running_tasks': running_tasks,
-                'pending_tasks': pending_tasks,
-                'recent_finished': recent_finished,
-                'arranging': arranging,
-                'pool_active': drakkar_app._executor_pool.active_count if drakkar_app._executor_pool else 0,
-                'pool_waiting': drakkar_app._executor_pool.waiting_count if drakkar_app._executor_pool else 0,
-                'pool_max': drakkar_app._executor_pool.max_executors if drakkar_app._executor_pool else 0,
-                'partition_count': len(drakkar_app.processors),
-                'max_ui_rows': config.max_ui_rows,
-                'ws_min_duration_ms': config.ws_min_duration_ms,
-                'hook_flags': hook_flags(drakkar_app.handler)
-                if drakkar_app.handler
-                else {
-                    'task_complete': False,
-                    'message_complete': False,
-                    'window_complete': False,
-                },
-            },
+            {**overview, 'recent_finished': recent_finished},
         )
+
+    # v1-only contract endpoint (no legacy alias): the live page's
+    # server-side snapshot as JSON for the static SPA.
+    @router.get('/api/v1/live/overview')
+    async def api_live_overview():
+        """Live overview snapshot: tasks, arranging, pool, UI knobs, hook flags."""
+        return JSONResponse(await _live_overview_data())
 
     @router.get('/api/events')
     async def api_events(
@@ -166,7 +188,15 @@ def create_live_router(deps: DebugDeps) -> APIRouter:
         limit: int = Query(default=200, le=10000),
     ):
         """Get events as JSON. Supports multiple partitions/types as comma-separated."""
-        part_list = [int(p) for p in partitions.split(',') if p.strip()] if partitions else None
+        # A malformed partitions CSV is a caller error, not a server bug —
+        # reply 422 with the minimal FastAPI-style envelope (contract v1).
+        try:
+            part_list = [int(p) for p in partitions.split(',') if p.strip()] if partitions else None
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=[{'loc': ['query', 'partitions'], 'msg': 'Input should be a valid integer'}],
+            ) from None
         type_list = [t.strip() for t in event_types.split(',') if t.strip()] if event_types else None
 
         conditions = []

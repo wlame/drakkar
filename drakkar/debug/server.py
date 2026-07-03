@@ -33,6 +33,7 @@ from urllib.parse import quote
 import structlog
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.routing import APIRoute
 from fastapi.templating import Jinja2Templates
 
 from drakkar.concurrency import dispatch_to_loop
@@ -371,6 +372,55 @@ class DebugDeps:
         return {'card_links': card_links, 'worker_links': worker_links, 'cluster_links': cluster_links}
 
 
+# Legacy JSON API paths that live outside the ``/api/`` namespace but still
+# get a versioned alias (contract v1). Everything under ``/api/`` maps by the
+# strip-``/api``-prefix rule in ``_v1_alias_path``; this table carries the
+# irregular ones.
+_V1_EXTRA_ALIASES: dict[str, str] = {
+    '/debug/download/{filename}': '/api/v1/debug/download/{filename}',
+}
+
+
+def _v1_alias_path(path: str) -> str | None:
+    """Map a legacy route path to its ``/api/v1`` alias, or ``None`` for no alias.
+
+    HTML pages, the probes (``/healthz``/``/readyz``), the WebSocket, and
+    routes already under ``/api/v1`` (the v1-only contract endpoints) get no
+    alias.
+    """
+    if path.startswith('/api/v1/'):
+        return None
+    if path.startswith('/api/'):
+        return '/api/v1/' + path.removeprefix('/api/')
+    return _V1_EXTRA_ALIASES.get(path)
+
+
+def register_v1_aliases(app: FastAPI) -> None:
+    """Register every legacy JSON API route under ``/api/v1/...`` as well.
+
+    The UI contract (v1) versions the JSON surface behind an ``/api/v1``
+    prefix while the legacy unprefixed paths keep working during the
+    transition. Rather than duplicating handler registrations per module,
+    this walks the already-mounted route table and re-registers each
+    qualifying route under its computed alias — same endpoint function,
+    same dependency list (so auth gating is identical on both prefixes).
+    """
+    for route in list(app.routes):
+        if not isinstance(route, APIRoute):
+            continue
+        alias = _v1_alias_path(route.path)
+        if alias is None:
+            continue
+        app.add_api_route(
+            alias,
+            route.endpoint,
+            methods=sorted(route.methods or []),
+            dependencies=route.dependencies,
+            name=f'{route.name}_v1',
+            response_class=route.response_class,
+        )
+
+
 def create_debug_app(
     config: DebugConfig,
     recorder: EventRecorder,
@@ -427,6 +477,9 @@ def create_debug_app(
     app.include_router(create_live_router(deps))
     app.include_router(create_debug_router(deps))
     app.include_router(create_cache_router(deps))
+
+    # Contract v1: every legacy JSON route is also served under /api/v1.
+    register_v1_aliases(app)
 
     return app
 

@@ -1,0 +1,724 @@
+"""Tests for the /api/v1 contract surface (UI contract v1).
+
+Covers:
+  * ``/api/v1`` aliases of every legacy JSON route (same payload, same auth).
+  * The three v1-only endpoints: ``/api/v1/partitions``,
+    ``/api/v1/task/{id}``, ``/api/v1/live/overview``.
+  * The contract reconciliations: events 422 on malformed partitions CSV,
+    probe report omitting ``traceback``, ``custom`` planned-sink payloads,
+    and merge/download/trace/trace-by-label input hardening.
+"""
+
+import time
+import typing
+from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import quote
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+from pydantic import BaseModel
+
+from drakkar.config import DebugConfig, DrakkarConfig
+from drakkar.debug.server import create_debug_app
+from drakkar.recorder import EventRecorder
+
+_INT32_MAX = 2**31 - 1
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mock_recorder():
+    rec = AsyncMock(spec=EventRecorder)
+    rec._db = None
+    rec._reader_db = None
+    rec.reader_db = None
+    rec.get_stats.return_value = {'total_events': 3, 'consumed': 2, 'completed': 1}
+    rec.get_partition_summary.return_value = []
+    rec.get_task_events.return_value = []
+    rec.get_active_tasks.return_value = []
+    # fresh list per call: the /api/workers handler appends the current
+    # worker to whatever discover_workers returns
+    rec.discover_workers.side_effect = lambda: []
+    rec.cross_trace.return_value = []
+    rec.cross_trace_by_label.return_value = []
+    return rec
+
+
+@pytest.fixture
+def mock_app():
+    app = MagicMock()
+    app._worker_id = 'test-worker'
+    app._cluster_name = ''
+    app._start_time = time.monotonic() - 120
+    app.processors = {}
+    app._config = DrakkarConfig()
+    # ``cache_engine=None`` makes the cache routes 404 (disabled); a plain
+    # MagicMock would be truthy and send them down the real-reader path.
+    app.cache_engine = None
+    # ``handler=None`` pins hook_flags to the deterministic all-False branch.
+    app.handler = None
+    app._consumer = None
+
+    pool = MagicMock()
+    pool.active_count = 2
+    pool.waiting_count = 1
+    pool.max_executors = 8
+    app._executor_pool = pool
+
+    sink_mgr = MagicMock()
+    sink_mgr.get_sink_info.return_value = [{'sink_type': 'kafka', 'name': 'results'}]
+    sink_mgr.get_all_stats.return_value = {}
+    app.sink_manager = sink_mgr
+    return app
+
+
+@pytest.fixture
+def debug_config(tmp_path):
+    return DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+
+
+def make_client(cfg, recorder, app) -> AsyncClient:
+    fastapi_app = create_debug_app(cfg, recorder, app)
+    return AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test')
+
+
+@pytest.fixture
+async def client(debug_config, mock_recorder, mock_app):
+    mock_recorder.config = debug_config
+    async with make_client(debug_config, mock_recorder, mock_app) as c:
+        yield c
+
+
+# ---------------------------------------------------------------------------
+# Work package A: /api/v1 aliases
+# ---------------------------------------------------------------------------
+
+
+LEGACY_TO_V1 = [
+    ('/api/dashboard', '/api/v1/dashboard'),
+    ('/api/sinks', '/api/v1/sinks'),
+    ('/api/workers', '/api/v1/workers'),
+    ('/api/debug/processors', '/api/v1/debug/processors'),
+    ('/api/events', '/api/v1/events'),
+    ('/api/recent-tasks', '/api/v1/recent-tasks'),
+    ('/api/live/task-results', '/api/v1/live/task-results'),
+    ('/api/live/message-results', '/api/v1/live/message-results'),
+    ('/api/live/window-results', '/api/v1/live/window-results'),
+    ('/api/debug/databases', '/api/v1/debug/databases'),
+    ('/api/debug/label-keys', '/api/v1/debug/label-keys'),
+    ('/api/debug/periodic', '/api/v1/debug/periodic'),
+]
+
+
+class TestV1Aliases:
+    @pytest.mark.parametrize(('legacy', 'v1'), LEGACY_TO_V1)
+    async def test_v1_alias_matches_legacy_payload(self, client, legacy, v1):
+        legacy_resp = await client.get(legacy)
+        v1_resp = await client.get(v1)
+        assert legacy_resp.status_code == 200
+        assert v1_resp.status_code == 200
+        legacy_json = legacy_resp.json()
+        v1_json = v1_resp.json()
+        if isinstance(legacy_json, dict):
+            # uptime is wall-clock and differs between the two calls
+            legacy_json.pop('uptime', None)
+            v1_json.pop('uptime', None)
+        assert v1_json == legacy_json
+
+    async def test_download_alias_serves_file(self, tmp_path, mock_recorder, mock_app):
+        (tmp_path / 'w1.db').write_bytes(b'sqlite-bytes')
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        mock_recorder.config = cfg
+        async with make_client(cfg, mock_recorder, mock_app) as c:
+            legacy = await c.get('/debug/download/w1.db')
+            v1 = await c.get('/api/v1/debug/download/w1.db')
+        assert legacy.status_code == 200
+        assert v1.status_code == 200
+        assert legacy.content == v1.content == b'sqlite-bytes'
+        assert v1.headers['content-type'] == 'application/x-sqlite3'
+        assert v1.headers['cache-control'] == 'no-store, private'
+
+    async def test_merge_alias_validates_body(self, client):
+        resp = await client.post('/api/v1/debug/merge', json={'filenames': ['only-one.db']})
+        assert resp.status_code == 400
+        assert resp.json() == {'error': 'Select at least 2 databases'}
+
+    @pytest.mark.parametrize('path', ['/api/debug/cache/stats', '/api/v1/debug/cache/stats'])
+    async def test_cache_alias_404_when_disabled(self, client, path):
+        resp = await client.get(path)
+        assert resp.status_code == 404
+        assert resp.json() == {'detail': 'Cache is disabled'}
+
+    @pytest.mark.parametrize('path', ['/api/partitions', '/api/task/some-id', '/api/live/overview'])
+    async def test_new_endpoints_have_no_legacy_alias(self, client, path):
+        resp = await client.get(path)
+        assert resp.status_code == 404
+
+    async def test_probes_and_pages_stay_unprefixed(self, client):
+        assert (await client.get('/healthz')).status_code == 200
+        assert (await client.get('/api/v1/healthz')).status_code == 404
+        assert (await client.get('/api/v1/readyz')).status_code == 404
+
+
+class TestV1Auth:
+    V1_PROTECTED: typing.ClassVar[list[str]] = [
+        '/api/v1/dashboard',
+        '/api/v1/partitions',
+        '/api/v1/task/t-1',
+        '/api/v1/live/overview',
+        '/api/v1/events',
+        '/api/v1/debug/databases',
+        '/api/v1/debug/download/test.db',
+        '/api/v1/debug/cache/stats',
+    ]
+
+    def _make_authed_client(self, tmp_path, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
+        mock_recorder.config = cfg
+        return make_client(cfg, mock_recorder, mock_app)
+
+    async def test_v1_routes_require_token(self, tmp_path, mock_recorder, mock_app):
+        async with self._make_authed_client(tmp_path, mock_recorder, mock_app) as c:
+            for path in self.V1_PROTECTED:
+                resp = await c.get(path)
+                assert resp.status_code == 401, f'{path} should require auth'
+                assert resp.json() == {'detail': 'Invalid or missing auth token'}
+
+    async def test_v1_routes_accept_bearer_header(self, tmp_path, mock_recorder, mock_app):
+        headers = {'Authorization': 'Bearer secret-123'}
+        async with self._make_authed_client(tmp_path, mock_recorder, mock_app) as c:
+            for path in ('/api/v1/dashboard', '/api/v1/partitions', '/api/v1/live/overview'):
+                resp = await c.get(path, headers=headers)
+                assert resp.status_code == 200, f'{path} should accept the bearer token'
+
+    async def test_v1_routes_accept_query_param(self, tmp_path, mock_recorder, mock_app):
+        async with self._make_authed_client(tmp_path, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/live/overview?token=secret-123')
+            assert resp.status_code == 200
+
+    async def test_v1_wrong_token_returns_401(self, tmp_path, mock_recorder, mock_app):
+        async with self._make_authed_client(tmp_path, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/dashboard', headers={'Authorization': 'Bearer wrong'})
+            assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Work package B1: GET /api/v1/partitions
+# ---------------------------------------------------------------------------
+
+
+class TestApiV1Partitions:
+    async def test_empty_db_returns_empty_list(self, client):
+        resp = await client.get('/api/v1/partitions')
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    async def test_rows_enriched_and_sorted(self, debug_config, mock_recorder, mock_app):
+        # deliberately unsorted input: the endpoint must sort by partition
+        mock_recorder.get_partition_summary.return_value = [
+            {
+                'partition': 1,
+                'last_consumed': 100.0,
+                'last_committed': 99.0,
+                'last_committed_offset': 7,
+                'consumed_count': 3,
+                'completed_count': 2,
+                'failed_count': 1,
+            },
+            {
+                'partition': 0,
+                'last_consumed': 50.0,
+                'last_committed': 49.0,
+                'last_committed_offset': 5,
+                'consumed_count': 1,
+                'completed_count': 1,
+                'failed_count': 0,
+            },
+        ]
+        proc = MagicMock()
+        proc.queue_size = 4
+        proc.offset_tracker.pending_count = 2
+        mock_app.processors = {0: proc}
+        mock_recorder.config = debug_config
+
+        async with make_client(debug_config, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/partitions')
+        assert resp.status_code == 200
+        rows = resp.json()
+        assert [r['partition'] for r in rows] == [0, 1]
+
+        live = rows[0]
+        assert live['is_live'] is True
+        assert live['queue_size'] == 4
+        assert live['pending_offsets'] == 2
+        # no consumer → lag falls back to the recorded committed offset
+        assert live['committed_offset'] == 5
+        assert live['high_watermark'] is None
+        assert live['lag'] == 0
+
+        dead = rows[1]
+        assert dead['is_live'] is False
+        assert dead['queue_size'] == 0
+        assert dead['pending_offsets'] == 0
+        # summary columns pass through unchanged
+        assert dead['consumed_count'] == 3
+        assert dead['failed_count'] == 1
+        assert dead['last_committed_offset'] == 7
+
+    async def test_lag_columns_from_consumer(self, debug_config, mock_recorder, mock_app):
+        mock_recorder.get_partition_summary.return_value = [
+            {
+                'partition': 0,
+                'last_consumed': 50.0,
+                'last_committed': 49.0,
+                'last_committed_offset': 5,
+                'consumed_count': 1,
+                'completed_count': 1,
+                'failed_count': 0,
+            },
+        ]
+        proc = MagicMock()
+        proc.queue_size = 0
+        proc.offset_tracker.pending_count = 0
+        mock_app.processors = {0: proc}
+        consumer = MagicMock()
+        consumer.get_partition_lag = AsyncMock(return_value={0: {'committed': 10, 'high_watermark': 15, 'lag': 5}})
+        mock_app._consumer = consumer
+        mock_recorder.config = debug_config
+
+        async with make_client(debug_config, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/partitions')
+        row = resp.json()[0]
+        assert row['committed_offset'] == 10
+        assert row['high_watermark'] == 15
+        assert row['lag'] == 5
+
+
+# ---------------------------------------------------------------------------
+# Work package B2: GET /api/v1/task/{id}
+# ---------------------------------------------------------------------------
+
+
+TASK_DETAIL_KEYS = {
+    'task_id',
+    'events',
+    'started',
+    'completed',
+    'failed',
+    'duration',
+    'source_offsets',
+    'args',
+    'labels',
+    'task_env',
+    'partition',
+    'pid',
+    'exit_code',
+    'binary_path',
+    'origin',
+    'client_name',
+    'request_id',
+    'webapp_request_body',
+    'webapp_response_body',
+}
+
+
+class TestApiV1TaskDetail:
+    def _task_events(self, now: float) -> list[dict]:
+        import json as json_mod
+
+        return [
+            {
+                'id': 1,
+                'ts': now - 10,
+                'event': 'task_started',
+                'partition': 3,
+                'offset': None,
+                'task_id': 'task-abc',
+                'args': '["--input", "f.txt"]',
+                'stdout_size': 0,
+                'stdout': None,
+                'stderr': None,
+                'exit_code': None,
+                'duration': None,
+                'output_topic': None,
+                'pid': 1234,
+                'labels': '{"team": "core"}',
+                'metadata': json_mod.dumps({'source_offsets': [10, 11], 'env': {'MODE': 'x'}}),
+            },
+            {
+                'id': 2,
+                'ts': now - 5,
+                'event': 'task_completed',
+                'partition': 3,
+                'offset': None,
+                'task_id': 'task-abc',
+                'args': None,
+                'stdout_size': 512,
+                'stdout': 'output data',
+                'stderr': None,
+                'exit_code': 0,
+                'duration': 5.0,
+                'output_topic': None,
+                'pid': 1234,
+                'labels': None,
+                'metadata': None,
+            },
+        ]
+
+    async def test_shape_and_values(self, client, mock_recorder):
+        mock_recorder.get_task_events.return_value = self._task_events(time.time())
+        resp = await client.get('/api/v1/task/task-abc')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert set(data) == TASK_DETAIL_KEYS
+        assert data['task_id'] == 'task-abc'
+        assert data['duration'] == 5.0
+        assert data['exit_code'] == 0
+        assert data['partition'] == 3
+        assert data['pid'] == 1234
+        assert data['source_offsets'] == [10, 11]
+        assert data['task_env'] == {'MODE': 'x'}
+        assert data['args'] == ['--input', 'f.txt']
+        assert data['labels'] == {'team': 'core'}
+        assert data['origin'] == 'kafka'
+        assert data['client_name'] is None
+        assert data['request_id'] is None
+        assert data['webapp_request_body'] is None
+        assert data['webapp_response_body'] is None
+        # stdout/stderr stay inside the event rows, not top-level
+        assert len(data['events']) == 2
+        assert data['events'][1]['stdout'] == 'output data'
+        assert data['started']['event'] == 'task_started'
+        assert data['completed']['event'] == 'task_completed'
+        assert data['failed'] is None
+
+    async def test_retry_suffix_stripped_for_lookup(self, client, mock_recorder):
+        mock_recorder.get_task_events.return_value = []
+        resp = await client.get('/api/v1/task/task-abc:r1234567.89')
+        assert resp.status_code == 200
+        mock_recorder.get_task_events.assert_awaited_with('task-abc')
+        # the requested id (with suffix) is echoed back
+        assert resp.json()['task_id'] == 'task-abc:r1234567.89'
+
+    async def test_unknown_task_returns_null_fields(self, client, mock_recorder):
+        mock_recorder.get_task_events.return_value = []
+        resp = await client.get('/api/v1/task/no-such-task')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert set(data) == TASK_DETAIL_KEYS
+        assert data['events'] == []
+        for key in ('started', 'completed', 'failed', 'duration', 'partition', 'pid', 'exit_code'):
+            assert data[key] is None, key
+        assert data['origin'] == 'kafka'
+
+    async def test_duration_computed_from_timestamps(self, client, mock_recorder):
+        now = time.time()
+        events = self._task_events(now)
+        events[1]['duration'] = None  # force the ts-difference fallback
+        mock_recorder.get_task_events.return_value = events
+        resp = await client.get('/api/v1/task/task-abc')
+        assert resp.json()['duration'] == pytest.approx(5.0)
+
+
+# ---------------------------------------------------------------------------
+# Work package B3: GET /api/v1/live/overview
+# ---------------------------------------------------------------------------
+
+
+LIVE_OVERVIEW_KEYS = {
+    'worker_id',
+    'running_tasks',
+    'pending_tasks',
+    'arranging',
+    'pool_active',
+    'pool_waiting',
+    'pool_max',
+    'partition_count',
+    'max_ui_rows',
+    'ws_min_duration_ms',
+    'hook_flags',
+    'kafka_ui_base',
+    'kafka_ui_cluster',
+    'kafka_source_topic',
+}
+
+
+class TestApiV1LiveOverview:
+    async def test_shape_with_defaults(self, client):
+        resp = await client.get('/api/v1/live/overview')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert set(data) == LIVE_OVERVIEW_KEYS
+        assert data['worker_id'] == 'test-worker'
+        assert data['running_tasks'] == {}
+        assert data['pending_tasks'] == {}
+        assert data['arranging'] == []
+        assert data['pool_active'] == 2
+        assert data['pool_waiting'] == 1
+        assert data['pool_max'] == 8
+        assert data['partition_count'] == 0
+        assert data['max_ui_rows'] == 5000
+        assert data['ws_min_duration_ms'] == 500
+        # handler=None → all hook flags off
+        assert data['hook_flags'] == {
+            'task_complete': False,
+            'message_complete': False,
+            'window_complete': False,
+        }
+        # Kafka-UI knobs unconfigured → empty strings; source topic has a default
+        assert data['kafka_ui_base'] == ''
+        assert data['kafka_ui_cluster'] == ''
+        assert data['kafka_source_topic'] == 'input-events'
+
+    async def test_running_pending_split_and_arranging(self, debug_config, mock_recorder, mock_app):
+        now = time.time()
+        mock_recorder.get_active_tasks.return_value = [
+            {'task_id': 'task-run', 'ts': now - 5, 'event': 'task_started'},
+        ]
+        pending_task = MagicMock()
+        pending_task.args = '["--fast"]'
+        pending_task.source_offsets = [10, 11]
+
+        proc = MagicMock()
+        proc.partition_id = 0
+        proc._pending_tasks = {'task-run': pending_task, 'task-wait': pending_task}
+        proc._arranging = True
+        proc._arrange_start = now - 2.5
+        proc._arrange_labels = [f'label-{i}' for i in range(12)]
+        mock_app.processors = {0: proc}
+        mock_recorder.config = debug_config
+
+        async with make_client(debug_config, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/live/overview')
+        data = resp.json()
+        assert set(data['running_tasks']) == {'task-run'}
+        assert set(data['pending_tasks']) == {'task-wait'}
+        assert data['running_tasks']['task-run'] == {
+            'task_id': 'task-run',
+            'args': '["--fast"]',
+            'partition': 0,
+            'source_offsets': [10, 11],
+        }
+        assert len(data['arranging']) == 1
+        arrange = data['arranging'][0]
+        assert arrange['partition'] == 0
+        assert arrange['message_count'] == 12
+        assert len(arrange['labels']) == 10  # capped at 10 labels per entry
+        assert arrange['duration'] >= 2.0
+        assert data['partition_count'] == 1
+
+    async def test_hook_flags_reflect_handler_overrides(self, debug_config, mock_recorder, mock_app):
+        from drakkar.handler import BaseDrakkarHandler
+        from drakkar.models import CollectResult, ExecutorResult
+
+        class H(BaseDrakkarHandler):
+            async def on_task_complete(self, result: ExecutorResult) -> CollectResult | None:
+                return None
+
+        mock_app.handler = H()
+        mock_recorder.config = debug_config
+        async with make_client(debug_config, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/live/overview')
+        assert resp.json()['hook_flags'] == {
+            'task_complete': True,
+            'message_complete': False,
+            'window_complete': False,
+        }
+
+    async def test_kafka_ui_config_surfaces(self, debug_config, mock_recorder, mock_app):
+        mock_app._config.kafka.ui_url = 'http://kafka-ui:8080/'
+        mock_app._config.kafka.ui_cluster_name = 'local'
+        mock_app._config.kafka.source_topic = 'events-in'
+        mock_recorder.config = debug_config
+        async with make_client(debug_config, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/live/overview')
+        data = resp.json()
+        assert data['kafka_ui_base'] == 'http://kafka-ui:8080'  # trailing slash stripped
+        assert data['kafka_ui_cluster'] == 'local'
+        assert data['kafka_source_topic'] == 'events-in'
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation 6: malformed partitions CSV → 422
+# ---------------------------------------------------------------------------
+
+
+class TestEventsMalformedPartitions:
+    @pytest.mark.parametrize('path', ['/api/events', '/api/v1/events'])
+    async def test_malformed_partitions_csv_returns_422(self, client, path):
+        resp = await client.get(path, params={'partitions': '0,abc'})
+        assert resp.status_code == 422
+        detail = resp.json()['detail']
+        assert detail[0]['loc'] == ['query', 'partitions']
+        assert detail[0]['msg'] == 'Input should be a valid integer'
+
+    async def test_valid_partitions_csv_still_ok(self, client):
+        resp = await client.get('/api/events', params={'partitions': '0, 1'})
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation 7: probe report omits traceback (decision D14)
+# ---------------------------------------------------------------------------
+
+
+class TestProbeErrorTracebackOmitted:
+    def test_probe_error_dump_has_no_traceback_key(self):
+        from drakkar.debug.runner_models import ProbeError
+
+        err = ProbeError(
+            stage='arrange',
+            exception_class='ValueError',
+            message='boom',
+            traceback='Traceback (most recent call last): ...',
+            occurred_at_ms=1.0,
+        )
+        # still captured internally (runner tests read it)
+        assert err.traceback.startswith('Traceback')
+        dump = err.model_dump(mode='json')
+        assert 'traceback' not in dump
+        assert dump['exception_class'] == 'ValueError'
+
+    def test_debug_report_omits_traceback_everywhere(self):
+        from drakkar.debug.runner_models import (
+            DebugReport,
+            ProbeError,
+            ProbeInput,
+            ProbeStageResult,
+        )
+
+        err = ProbeError(
+            stage='deserialize',
+            exception_class='ValueError',
+            message='bad payload',
+            traceback='tb-text',
+            occurred_at_ms=0.5,
+        )
+        report = DebugReport(
+            input=ProbeInput(value='x'),
+            deserialize_error=err,
+            arrange=ProbeStageResult(),
+            errors=[err],
+        )
+        dump = report.model_dump(mode='json')
+        assert 'traceback' not in dump['deserialize_error']
+        assert 'traceback' not in dump['errors'][0]
+        assert dump['errors'][0]['message'] == 'bad payload'
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation 9: planned_sink_payloads includes custom sinks
+# ---------------------------------------------------------------------------
+
+
+class TestPlannedSinkCustomPayloads:
+    def test_flatten_includes_custom_payloads(self):
+        from drakkar.debug.runner import DebugSinkCollector
+        from drakkar.models import CollectResult, CustomPayload
+
+        class _Doc(BaseModel):
+            answer: int = 42
+
+        collector = DebugSinkCollector()
+        collector.entries.append(
+            ('task_complete:t-1', CollectResult(custom=[CustomPayload(sink='my-plugin', data=_Doc())])),
+        )
+        records = collector.flatten()
+        assert len(records) == 1
+        record = records[0]
+        assert record.sink_type == 'custom'
+        assert record.destination == 'my-plugin'
+        assert record.origin_stage == 'task_complete:t-1'
+        assert record.payload == {'answer': 42}
+        assert record.extras == {'sink_instance': 'my-plugin'}
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation 10: merge/download/trace/trace-by-label input hardening
+# ---------------------------------------------------------------------------
+
+
+class TestMergeInputHardening:
+    @pytest.mark.parametrize('path', ['/api/debug/merge', '/api/v1/debug/merge'])
+    async def test_malformed_json_body_returns_400(self, client, path):
+        resp = await client.post(path, content=b'{not json', headers={'Content-Type': 'application/json'})
+        assert resp.status_code == 400
+        assert resp.json() == {'error': 'Invalid JSON body'}
+
+    @pytest.mark.parametrize(
+        'body',
+        [
+            ['a.db', 'b.db'],  # not an object
+            {'filenames': 'a.db'},  # filenames not a list
+            {'filenames': ['a.db', 5]},  # non-string entry
+        ],
+    )
+    async def test_wrong_body_shape_returns_400(self, client, body):
+        resp = await client.post('/api/debug/merge', json=body)
+        assert resp.status_code == 400
+        assert resp.json() == {'error': 'Invalid JSON body'}
+
+    @pytest.mark.parametrize(
+        'bad_name',
+        ['evil";x.db', 'evil;.db', 'evil\n.db', 'evil\x00.db', 'evil\x7f.db'],
+    )
+    async def test_unsafe_filename_chars_rejected(self, client, bad_name):
+        resp = await client.post('/api/debug/merge', json={'filenames': [bad_name, 'other.db']})
+        assert resp.status_code == 400
+        assert 'Invalid filename' in resp.json()['error']
+
+
+class TestDownloadFilenameHardening:
+    @pytest.mark.parametrize(
+        'bad_name',
+        ['evil".db', 'evil;.db', 'evil\n.db', 'evil\x1f.db', 'evil\x7f.db'],
+    )
+    async def test_unsafe_filename_chars_rejected(self, client, bad_name):
+        resp = await client.get('/debug/download/' + quote(bad_name, safe=''))
+        assert resp.status_code == 400
+        assert resp.json() == {'error': 'Invalid filename'}
+
+    async def test_v1_download_rejects_unsafe_chars_too(self, client):
+        resp = await client.get('/api/v1/debug/download/' + quote('evil;.db', safe=''))
+        assert resp.status_code == 400
+        assert resp.json() == {'error': 'Invalid filename'}
+
+
+class TestTraceInt32Range:
+    @pytest.mark.parametrize('path', ['/api/debug/trace', '/api/v1/debug/trace'])
+    @pytest.mark.parametrize('partition', [-1, _INT32_MAX + 1])
+    async def test_out_of_range_partition_returns_422(self, client, path, partition):
+        resp = await client.get(path, params={'partition': partition, 'offset': 0})
+        assert resp.status_code == 422
+        detail = resp.json()['detail']
+        assert detail[0]['loc'] == ['query', 'partition']
+
+    async def test_max_int32_partition_accepted(self, client):
+        resp = await client.get('/api/debug/trace', params={'partition': _INT32_MAX, 'offset': 0})
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+
+class TestTraceByLabelEmptyParams:
+    @pytest.mark.parametrize(
+        'params',
+        [
+            {'key': '', 'value': 'v'},
+            {'key': 'k', 'value': ''},
+            {'value': 'v'},  # key missing entirely
+            {'key': 'k'},  # value missing entirely
+        ],
+    )
+    @pytest.mark.parametrize('path', ['/api/debug/trace-by-label', '/api/v1/debug/trace-by-label'])
+    async def test_empty_or_missing_key_value_returns_422(self, client, path, params):
+        resp = await client.get(path, params=params)
+        assert resp.status_code == 422
+
+    async def test_valid_key_value_ok(self, client):
+        resp = await client.get('/api/debug/trace-by-label', params={'key': 'k', 'value': 'v'})
+        assert resp.status_code == 200
+        assert resp.json() == []

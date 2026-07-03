@@ -350,7 +350,7 @@ class DebugSinkCollector:
     ``PlannedSinkRecord`` items — one per payload inside every
     ``CollectResult``. Sorted by stage first, then by sink field in the
     canonical CollectResult order (kafka → postgres → mongo → http →
-    redis → files) for stable UI ordering.
+    redis → files → custom) for stable UI ordering.
 
     ``kafka_sink_topics`` maps Kafka sink instance names to their
     configured topic (from ``app.config.sinks.kafka[name].topic``).
@@ -470,6 +470,19 @@ class DebugSinkCollector:
                         origin_stage=stage,
                         payload=fp.data.model_dump(mode='json'),
                         extras={'sink_instance': fp.sink},
+                    )
+                )
+            # Plugin-registered sinks: the payload is opaque to the
+            # framework, so the sink instance name doubles as the
+            # destination (matching the Go collector).
+            for cp in cr.custom:
+                records.append(
+                    PlannedSinkRecord(
+                        sink_type='custom',
+                        destination=cp.sink,
+                        origin_stage=stage,
+                        payload=cp.data.model_dump(mode='json'),
+                        extras={'sink_instance': cp.sink},
                     )
                 )
         return records

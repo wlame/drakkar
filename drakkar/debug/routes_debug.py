@@ -44,6 +44,23 @@ if TYPE_CHECKING:
 PROBE_TIMEOUT_HEADROOM_SECONDS: float = 30.0
 
 
+# Kafka partitions are non-negative int32; ``/api/debug/trace`` rejects
+# values that would silently truncate when narrowed to the recorder's
+# int32 partition column (contract v1).
+_INT32_MAX = 2**31 - 1
+
+
+def _has_unsafe_filename_char(filename: str) -> bool:
+    """True when ``filename`` carries a char that must not reach the download headers.
+
+    The double-quote ends the ``Content-Disposition: filename="..."`` token,
+    the semicolon starts a new header parameter, and control characters
+    (incl. CR/LF, plus DEL) enable header injection. Path-separator and
+    dot-prefix traversal are checked separately by the callers.
+    """
+    return any(c in '";' or ord(c) < 0x20 or ord(c) == 0x7F for c in filename)
+
+
 # ``/api/debug/probe`` request body — module-scope per the FastAPI
 # "single Pydantic param = body" heuristic: an imported model is
 # treated as a query parameter and surfaces as 422 errors. Mirrors
@@ -116,16 +133,23 @@ def create_debug_router(deps: DebugDeps) -> APIRouter:
 
         from drakkar.merge import merge_databases
 
-        body = await request.json()
-        filenames = body.get('filenames', [])
+        # A malformed body is a caller error, not a server bug — 400 with
+        # the legacy {"error": ...} envelope (contract v1), never a 500.
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({'error': 'Invalid JSON body'}, status_code=400)
+        filenames = body.get('filenames', []) if isinstance(body, dict) else None
+        if not isinstance(filenames, list) or not all(isinstance(fn, str) for fn in filenames):
+            return JSONResponse({'error': 'Invalid JSON body'}, status_code=400)
         if len(filenames) < 2:
             return JSONResponse({'error': 'Select at least 2 databases'}, status_code=400)
 
         # resolve to full paths, validate they exist in db_dir
         db_paths = []
         for fn in filenames:
-            # prevent directory traversal
-            if '/' in fn or '\\' in fn or fn.startswith('.'):
+            # prevent directory traversal and header-injection characters
+            if '/' in fn or '\\' in fn or fn.startswith('.') or _has_unsafe_filename_char(fn):
                 return JSONResponse({'error': f'Invalid filename: {fn}'}, status_code=400)
             full = os.path.join(config.db_dir, fn)
             if not os.path.realpath(full).startswith(os.path.realpath(config.db_dir) + os.sep):
@@ -153,7 +177,7 @@ def create_debug_router(deps: DebugDeps) -> APIRouter:
 
     @router.get('/api/debug/trace')
     async def api_debug_trace(
-        partition: int = Query(),
+        partition: int = Query(ge=0, le=_INT32_MAX),
         offset: int = Query(),
     ):
         """Trace a message across all workers in the same cluster."""
@@ -188,8 +212,8 @@ def create_debug_router(deps: DebugDeps) -> APIRouter:
 
     @router.get('/api/debug/trace-by-label')
     async def api_debug_trace_by_label(
-        key: str = Query(),
-        value: str = Query(),
+        key: str = Query(min_length=1),
+        value: str = Query(min_length=1),
     ):
         """Trace tasks by label value across all workers in the cluster."""
         events = await dispatch_to_loop(recorder.cross_trace_by_label(key, value), deps.drakkar_app.main_loop)
@@ -280,8 +304,8 @@ def create_debug_router(deps: DebugDeps) -> APIRouter:
     @router.get('/debug/download/{filename}', dependencies=[Depends(deps.require_auth)])
     async def debug_download(filename: str):
         """Download a database file from db_dir."""
-        # prevent directory traversal
-        if '/' in filename or '\\' in filename or filename.startswith('.'):
+        # prevent directory traversal and header-injection characters
+        if '/' in filename or '\\' in filename or filename.startswith('.') or _has_unsafe_filename_char(filename):
             return JSONResponse({'error': 'Invalid filename'}, status_code=400)
         full = os.path.join(config.db_dir, filename)
         if not os.path.realpath(full).startswith(os.path.realpath(config.db_dir) + os.sep):
