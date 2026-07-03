@@ -1,11 +1,15 @@
 name: Deploy docs
 
+# Builds via `just docs-build` (see justfile) so the strict mkdocs build
+# CI runs is the same one developers run locally.
+
 on:
   push:
     branches: [main]
     paths:
       - 'docs/**'
       - 'mkdocs.yml'
+      - 'justfile'
   workflow_dispatch:
 
 permissions:
@@ -21,19 +25,20 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v7
         with:
-          python-version: '3.13'
+          version: "latest"
 
-      - run: pip install mkdocs-material
+      - uses: extractions/setup-just@v4
 
-      - run: mkdocs build --strict --site-dir _site
+      - name: Build docs (strict)
+        run: just docs-build
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: _site
+          path: site
 
   deploy:
     needs: build

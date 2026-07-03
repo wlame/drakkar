@@ -62,6 +62,7 @@ nav:
   - Integration Tests: integration.md
   - Data Flow: data-flow.md
   - Config Reference: config-reference.md
+  - Development: development.md
   - FAQ: faq.md
 
 markdown_extensions:

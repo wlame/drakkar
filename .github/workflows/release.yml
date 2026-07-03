@@ -1,5 +1,8 @@
 name: Release
 
+# Quality gates call `just` recipes (see justfile) so the release pipeline
+# enforces exactly what `just ci` enforces locally.
+
 on:
   release:
     types: [published]
@@ -14,11 +17,13 @@ jobs:
         with:
           version: "latest"
 
-      - name: Lint with ruff
-        run: uvx ruff check drakkar/ tests/
+      - uses: extractions/setup-just@v4
 
       - name: Check formatting
-        run: uvx ruff format --check drakkar/ tests/
+        run: just fmt-check
+
+      - name: Lint with ruff
+        run: just lint
 
   test:
     runs-on: ubuntu-latest
@@ -27,24 +32,26 @@ jobs:
       matrix:
         python-version: ["3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
 
+      - uses: extractions/setup-just@v4
+
       - name: Set up Python
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --extra=dev --extra=perf
+        run: just install
 
       - name: Type check with ty
         if: matrix.python-version == '3.14'
-        run: uv run ty check drakkar/
+        run: just typecheck
 
       - name: Run tests with coverage
-        run: uv run pytest --cov=drakkar --cov-report=term-missing
+        run: just cover
 
   verify-tag:
     runs-on: ubuntu-latest
@@ -56,12 +63,14 @@ jobs:
         with:
           version: "latest"
 
+      - uses: extractions/setup-just@v4
+
       - name: Verify tag matches package version
         env:
           GIT_TAG: ${{ github.ref_name }}
         run: |
           TAG="${GIT_TAG#v}"
-          PKG_VERSION=$(uv run python -c "from drakkar import __version__; print(__version__)")
+          PKG_VERSION=$(just version)
           if [ "$TAG" != "$PKG_VERSION" ]; then
             echo "Error: tag v$TAG does not match __version__ = '$PKG_VERSION'"
             exit 1
@@ -81,8 +90,10 @@ jobs:
         with:
           version: "latest"
 
+      - uses: extractions/setup-just@v4
+
       - name: Build package
-        run: uv build
+        run: just build
 
       - name: Verify build artifacts
         run: ls -la dist/

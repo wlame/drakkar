@@ -1,5 +1,8 @@
 name: CI
 
+# All steps call `just` recipes (see justfile) so local `just ci`
+# and GitHub CI run exactly the same commands.
+
 on:
   push:
     branches: [main]
@@ -16,11 +19,13 @@ jobs:
         with:
           version: "latest"
 
-      - name: Lint with ruff
-        run: uvx ruff check drakkar/ tests/
+      - uses: extractions/setup-just@v4
 
       - name: Check formatting
-        run: uvx ruff format --check drakkar/ tests/
+        run: just fmt-check
+
+      - name: Lint with ruff
+        run: just lint
 
   test:
     runs-on: ubuntu-latest
@@ -35,18 +40,20 @@ jobs:
         with:
           version: "latest"
 
+      - uses: extractions/setup-just@v4
+
       - name: Set up Python
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --extra=dev --extra=perf
+        run: just install
 
       - name: Type check with ty
         if: matrix.python-version == '3.14'
-        run: uv run ty check drakkar/
+        run: just typecheck
 
       - name: Run tests with coverage
-        run: uv run pytest --cov=drakkar --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
+        run: just cover
 
       - name: Upload coverage artifact
         if: matrix.python-version == '3.14'

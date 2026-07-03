@@ -412,12 +412,29 @@ Debug recorder databases and per-worker cache databases both live in `integratio
 
 ## Development
 
+Development tasks run through [`just`](https://github.com/casey/just) — the `justfile` is the single entrypoint, and CI calls the same recipes, so `just ci` locally and GitHub CI cannot disagree.
+
 ```bash
-uv sync --extra=dev
-uv run pytest --cov=drakkar
-uvx ruff check drakkar/ tests/
-uv run ty check drakkar/
+# one-time setup
+just install          # uv sync with dev + perf extras
+
+# day-to-day
+just test             # run the unit test suite
+just test -k cache    # pass any pytest args through
+just fmt              # format with ruff
+just lint             # lint with ruff
+just typecheck        # type-check with ty
+just ci               # everything CI enforces: format check → lint → types → tests + coverage gate
+
+# more
+just cover            # tests with the coverage gate (75% floor) + xml/junit artifacts
+just docs-serve       # live-reload docs at http://127.0.0.1:8000
+just check            # full pre-push battery: ci + strict docs build
+just release minor    # run ci, bump the version, commit + tag (prints push commands, never pushes)
+just --list           # see every recipe (integration env, chaos test, DLQ replay, ...)
 ```
+
+Without `just`, the underlying tools work directly: `uv sync --extra=dev`, `uv run pytest`, `uv run --extra=dev ruff check drakkar/ tests/`, `uv run ty check drakkar/`. See [`docs/development.md`](docs/development.md) for the full workflow.
 
 ## License
 
