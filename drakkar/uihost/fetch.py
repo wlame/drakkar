@@ -16,12 +16,21 @@ import tempfile
 import time
 from pathlib import Path
 from typing import IO, Any
+from urllib.parse import unquote
 
 import httpx
 
 # Default GitHub API base. Overridable per call so tests (and GitHub
 # Enterprise deployments) can point the engine at another server.
 GITHUB_API_BASE = 'https://api.github.com'
+
+# Plain-web GitHub host serving release assets and the /releases/latest
+# redirect. Unlike api.github.com it is not subject to the anonymous REST
+# rate limit (60 req/h per IP), so it is the PRIMARY fetch path for public
+# repos; the API remains the fallback (needed for private repos via
+# GITHUB_TOKEN and for releases whose asset name deviates from the
+# convention). Same trick as rx-go's frontend manager.
+GITHUB_DOWNLOAD_BASE = 'https://github.com'
 
 # Caps total extracted size to defuse a decompression bomb in a
 # malicious/corrupt release asset (a UI bundle is well under this).
@@ -39,36 +48,82 @@ class FetchError(Exception):
     """A UI bundle could not be fetched, validated, or extracted."""
 
 
-def fetch_latest_version(api_base: str, repo: str, *, deadline: float | None = None) -> str:
+def fetch_latest_version(
+    api_base: str, repo: str, *, download_base: str = GITHUB_DOWNLOAD_BASE, deadline: float | None = None
+) -> str:
     """Return the latest release tag for the ``owner/name`` repo.
 
-    ``deadline`` is an absolute ``time.monotonic()`` instant bounding the
-    request; ``None`` uses a per-request default timeout.
+    The github.com ``/releases/latest`` redirect is tried first (no API rate
+    limit); the REST API is the fallback. ``deadline`` is an absolute
+    ``time.monotonic()`` instant bounding each request; ``None`` uses a
+    per-request default timeout.
     """
-    release = _get_release(f'{api_base}/repos/{repo}/releases/latest', deadline=deadline)
-    tag = release.get('tag_name') or ''
-    if not isinstance(tag, str) or not tag:
-        raise FetchError('latest release has no tag_name')
+    try:
+        return _latest_tag_via_redirect(download_base, repo, deadline=deadline)
+    except FetchError as redirect_exc:
+        try:
+            release = _get_release(f'{api_base}/repos/{repo}/releases/latest', deadline=deadline)
+        except FetchError as api_exc:
+            raise FetchError(f'{redirect_exc}; {api_exc}') from api_exc
+        tag = release.get('tag_name') or ''
+        if not isinstance(tag, str) or not tag:
+            raise FetchError('latest release has no tag_name') from redirect_exc
+        return tag
+
+
+def _latest_tag_via_redirect(download_base: str, repo: str, *, deadline: float | None) -> str:
+    """Resolve the latest release tag WITHOUT the REST API.
+
+    ``GET {download_base}/{repo}/releases/latest`` answers with a redirect
+    whose Location ends in ``/releases/tag/<tag>``. A repo with no releases
+    serves its releases index without a redirect — reported as an error so
+    the caller can fall back to the API.
+    """
+    url = f'{download_base}/{repo}/releases/latest'
+    try:
+        with httpx.Client(timeout=_remaining(deadline), follow_redirects=False) as client:
+            resp = client.get(url)
+    except httpx.HTTPError as exc:
+        raise FetchError(f'latest-release redirect {url}: {exc}') from exc
+    location = resp.headers.get('location', '')
+    marker = '/releases/tag/'
+    idx = location.rfind(marker)
+    if not (300 <= resp.status_code < 400) or idx < 0:
+        raise FetchError(f'no latest-release redirect from {url} (status {resp.status_code})')
+    tag = unquote(location[idx + len(marker) :].rstrip('/'))
+    if not tag:
+        raise FetchError('empty tag in latest-release redirect')
     return tag
 
 
-def fetch_release(api_base: str, repo: str, version: str, dest_dir: Path, *, deadline: float | None = None) -> None:
+def bundle_asset_name(version: str) -> str:
+    """Conventional release-asset filename the drakkar-ui workflow produces.
+
+    Deterministic from the tag — which is what lets the direct (API-free)
+    download URL be constructed without asset discovery.
+    """
+    return f'drakkar-ui-{version}.tar.gz'
+
+
+def fetch_release(
+    api_base: str,
+    repo: str,
+    version: str,
+    dest_dir: Path,
+    *,
+    download_base: str = GITHUB_DOWNLOAD_BASE,
+    deadline: float | None = None,
+) -> None:
     """Download repo's release tagged ``version`` and extract it into ``dest_dir``.
 
-    Extraction is atomic: the tarball unpacks into a sibling per-process
-    ``<dest_dir>.<pid>.incoming`` directory which is swapped into place only
-    after it passes structural validation (``index.html`` at the bundle
-    root), so a partially written cache is never served.
+    The direct ``{download_base}/{repo}/releases/download/{tag}/{asset}`` URL
+    is tried first (plain github.com — no API rate limit); asset discovery
+    through the REST API is the fallback. Extraction is atomic: the tarball
+    unpacks into a sibling per-process ``<dest_dir>.<pid>.incoming`` directory
+    which is swapped into place only after it passes structural validation
+    (``index.html`` at the bundle root), so a partially written cache is
+    never served.
     """
-    release = _get_release(f'{api_base}/repos/{repo}/releases/tags/{version}', deadline=deadline)
-    assets = release.get('assets')
-    asset = pick_bundle_asset(assets if isinstance(assets, list) else [])
-    if asset is None:
-        raise FetchError(f'release {version} has no .tar.gz bundle asset')
-    download_url = asset.get('browser_download_url')
-    if not isinstance(download_url, str) or not download_url:
-        raise FetchError(f'release {version} bundle asset has no download URL')
-
     dest_dir.parent.mkdir(parents=True, exist_ok=True)
     # Per-process staging name: concurrent workers fetching the same missing
     # version into the shared cache must never delete or interleave each
@@ -76,11 +131,15 @@ def fetch_release(api_base: str, repo: str, version: str, dest_dir: Path, *, dea
     # newest_cached_version (both backends) filters on.
     incoming = dest_dir.with_name(f'{dest_dir.name}.{os.getpid()}.incoming')
     shutil.rmtree(incoming, ignore_errors=True)
+    direct_url = f'{download_base}/{repo}/releases/download/{version}/{bundle_asset_name(version)}'
     try:
         # Buffer the tarball to a temp file so the download cap applies
         # before any extraction work starts.
         with tempfile.TemporaryFile() as tarball:
-            _download(download_url, tarball, deadline=deadline)
+            try:
+                _download(direct_url, tarball, deadline=deadline)
+            except FetchError as direct_exc:
+                _download_via_api(api_base, repo, version, tarball, direct_exc, deadline=deadline)
             tarball.seek(0)
             _extract_tar_gz(tarball, incoming)
         if not (incoming / 'index.html').is_file():
@@ -92,6 +151,24 @@ def fetch_release(api_base: str, repo: str, version: str, dest_dir: Path, *, dea
     # window is tiny and a concurrent reader sees either the old or new tree.
     shutil.rmtree(dest_dir, ignore_errors=True)
     incoming.replace(dest_dir)
+
+
+def _download_via_api(
+    api_base: str, repo: str, version: str, tarball: IO[bytes], direct_exc: FetchError, *, deadline: float | None
+) -> None:
+    """Fallback bundle download: discover the asset through the REST API."""
+    release = _get_release(f'{api_base}/repos/{repo}/releases/tags/{version}', deadline=deadline)
+    assets = release.get('assets')
+    asset = pick_bundle_asset(assets if isinstance(assets, list) else [])
+    if asset is None:
+        raise FetchError(f'release {version} has no .tar.gz bundle asset') from direct_exc
+    download_url = asset.get('browser_download_url')
+    if not isinstance(download_url, str) or not download_url:
+        raise FetchError(f'release {version} bundle asset has no download URL') from direct_exc
+    # Drop any bytes the failed direct attempt already buffered.
+    tarball.seek(0)
+    tarball.truncate()
+    _download(download_url, tarball, deadline=deadline)
 
 
 def pick_bundle_asset(assets: list[Any]) -> dict[str, Any] | None:

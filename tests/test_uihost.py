@@ -62,7 +62,11 @@ class StubGitHub:
                     return
                 status, content_type, body = entry
                 self.send_response(status)
-                self.send_header('Content-Type', content_type)
+                if 300 <= status < 400:
+                    # Redirect entries carry the Location in the second slot.
+                    self.send_header('Location', content_type)
+                else:
+                    self.send_header('Content-Type', content_type)
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -80,7 +84,11 @@ class StubGitHub:
         return f'http://{host}:{port}'
 
     def add_release(self, repo: str, tag: str, asset_bytes: bytes | None, *, latest: bool = False) -> None:
-        """Register a release (tags + optionally latest) with one tar.gz asset."""
+        """Register a release on the REST-API routes with one tar.gz asset.
+
+        Only API routes are registered, so the engine's direct-URL attempt
+        404s and these releases exercise the API fallback path.
+        """
         asset_path = f'/assets/{tag}.tar.gz'
         release = {
             'tag_name': tag,
@@ -92,6 +100,20 @@ class StubGitHub:
             self.routes[f'/repos/{repo}/releases/latest'] = (200, 'application/json', body)
         if asset_bytes is not None:
             self.routes[asset_path] = (200, 'application/octet-stream', asset_bytes)
+
+    def add_direct_release(self, repo: str, tag: str, asset_bytes: bytes, *, latest: bool = False) -> None:
+        """Register a release on the plain-web (github.com-style) routes ONLY.
+
+        No REST-API routes at all — releases registered this way prove the
+        primary, API-free path (the one immune to the anonymous rate limit).
+        """
+        self.routes[f'/{repo}/releases/download/{tag}/drakkar-ui-{tag}.tar.gz'] = (
+            200,
+            'application/octet-stream',
+            asset_bytes,
+        )
+        if latest:
+            self.routes[f'/{repo}/releases/latest'] = (302, f'{self.base_url}/{repo}/releases/tag/{tag}', b'')
 
     def close(self) -> None:
         self.server.shutdown()
@@ -163,6 +185,35 @@ def test_fetch_happy_path_extracts_bundle(stub_github, tmp_path):
     assert not (tmp_path / 'cache' / 'v1.0.0.incoming').exists()
 
 
+def test_fetch_via_direct_url_without_api(stub_github, tmp_path):
+    # The primary path: the conventional github.com asset URL serves the
+    # bundle with ZERO REST-API routes on the stub — the path that keeps
+    # working under the anonymous API rate limit.
+    stub_github.add_direct_release('wlame/drakkar-ui', 'v1.0.0', make_tar_gz(BUNDLE_FILES))
+    cfg = ui_config(tmp_path, pinned_version='v1.0.0')
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'fetched'
+    assert (bundle.root / 'index.html').read_bytes() == BUNDLE_FILES['index.html']
+    assert stub_github.requests == ['/wlame/drakkar-ui/releases/download/v1.0.0/drakkar-ui-v1.0.0.tar.gz']
+
+
+def test_latest_resolves_via_redirect_without_api(stub_github, tmp_path):
+    # Latest-tag resolution through the github.com redirect alone — no REST
+    # API routes served; the whole check_update+fetch flow stays API-free.
+    stub_github.add_direct_release('wlame/drakkar-ui', 'v2.0.0', make_tar_gz(BUNDLE_FILES), latest=True)
+    cfg = ui_config(tmp_path, pinned_version='', check_update=True)
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'fetched'
+    assert bundle.root == tmp_path / 'cache' / 'v2.0.0'
+    assert '/repos/' not in ''.join(stub_github.requests)
+
+
 def test_cache_hit_short_circuits_without_network(stub_github, tmp_path):
     seed_cache(tmp_path, 'v1.0.0')
     cfg = ui_config(tmp_path, pinned_version='v1.0.0')
@@ -187,7 +238,13 @@ def test_check_update_with_cached_latest_does_not_redownload(stub_github, tmp_pa
     assert bundle is not None
     assert bundle.source == 'cache'
     assert bundle.root == tmp_path / 'cache' / 'v1.2.0'
-    assert stub_github.requests == ['/repos/wlame/drakkar-ui/releases/latest']
+    # Only the update check hits the network: the direct redirect attempt
+    # (404 on this API-only stub) followed by the API fallback — and no
+    # asset download at all.
+    assert stub_github.requests == [
+        '/wlame/drakkar-ui/releases/latest',
+        '/repos/wlame/drakkar-ui/releases/latest',
+    ]
 
 
 def test_update_check_failure_keeps_pinned_version(stub_github, tmp_path):
