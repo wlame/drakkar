@@ -527,18 +527,19 @@ class UIConfig(BaseModel):
     The UI ships as its own versioned bundle (the separate drakkar-ui repo,
     published to GitHub Releases) so every backend on a host serves the same
     UI and looks identical. When ``enabled``, the worker resolves that bundle
-    through :mod:`drakkar.uihost` (cache → fetch → embedded fallback) and
-    serves it in place of the built-in server-rendered HTML pages.
+    through :mod:`drakkar.uihost` (cache → fetch) and serves it in place of
+    the built-in server-rendered HTML pages.
 
-    Default-OFF: the working Jinja debug UI stays the default. A fetch
-    failure is never fatal — the worker still starts and serves whatever
-    bundle is available (cache or embedded).
+    Default-ON with an update check: on startup the worker resolves the
+    latest release (or serves the shared cache) and falls back to the
+    built-in Jinja pages when nothing is fetchable and the cache is empty —
+    a fetch failure is never fatal, so the default is safe offline too.
 
     The YAML keys and semantics match the Go backend's ``ui`` config block,
     so ``DK_UI__*`` env overrides behave identically on both backends.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     release_repo: str = Field(
         default='wlame/drakkar-ui',
         description=(
@@ -565,7 +566,7 @@ class UIConfig(BaseModel):
         ),
     )
     check_update: bool = Field(
-        default=False,
+        default=True,
         description=(
             'Resolve the latest release tag on startup instead of only the '
             'pinned version (the "check for a new version" toggle). Already-'

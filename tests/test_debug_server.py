@@ -118,6 +118,9 @@ def mock_app():
     app._start_time = time.monotonic() - 120
     app.processors = {}
     app._config = DrakkarConfig()
+    # UI hosting defaults ON and resolves against the real user cache /
+    # GitHub at DebugServer.start(); tests must stay hermetic.
+    app._config.ui.enabled = False
 
     pool = MagicMock()
     pool.active_count = 2

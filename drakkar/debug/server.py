@@ -587,6 +587,13 @@ class DebugServer:
             return None
         if bundle is None:
             return None
+        # The embedded placeholder page is strictly worse than the built-in
+        # Jinja pages this worker already has — never serve it; None keeps
+        # the built-in UI. (The placeholder only exists for hosts with no
+        # other UI at all.)
+        if bundle.source == 'embedded':
+            await logger.ainfo('ui_using_builtin_pages', category='ui', reason='no bundle fetchable and cache empty')
+            return None
         await logger.ainfo('ui_bundle_resolved', category='ui', source=bundle.source, dir=str(bundle.root))
         return bundle.root
 

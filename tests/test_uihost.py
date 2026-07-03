@@ -150,7 +150,15 @@ BUNDLE_FILES = {
 
 
 def ui_config(tmp_path: Path, **overrides) -> UIConfig:
-    defaults = {'enabled': True, 'cache_dir': str(tmp_path / 'cache'), 'release_repo': 'wlame/drakkar-ui'}
+    # check_update defaults OFF here (unlike the production default) so each
+    # test opts into the latest-lookup request explicitly — request-sequence
+    # assertions stay deterministic.
+    defaults = {
+        'enabled': True,
+        'check_update': False,
+        'cache_dir': str(tmp_path / 'cache'),
+        'release_repo': 'wlame/drakkar-ui',
+    }
     defaults.update(overrides)
     return UIConfig(**defaults)
 
@@ -390,12 +398,15 @@ def test_default_cache_root_honors_xdg(monkeypatch, tmp_path):
 
 
 def test_ui_config_defaults():
+    # Default-ON with an update check: workers serve the latest
+    # fetched/cached release and keep the Jinja pages when nothing is
+    # fetchable (matches the Go backend's DefaultUIConfig).
     cfg = DrakkarConfig()
-    assert cfg.ui.enabled is False
+    assert cfg.ui.enabled is True
     assert cfg.ui.release_repo == 'wlame/drakkar-ui'
     assert cfg.ui.pinned_version == ''
     assert cfg.ui.cache_dir == ''
-    assert cfg.ui.check_update is False
+    assert cfg.ui.check_update is True
 
 
 def test_ui_config_rejects_repo_without_slash():
@@ -568,6 +579,7 @@ async def test_ui_disabled_app_unchanged(tmp_path, mock_recorder, mock_app):
 async def test_debug_server_resolve_ui_root_disabled_returns_none(tmp_path, mock_recorder, mock_app):
     from drakkar.debug.server import DebugServer
 
+    mock_app._config.ui = ui_config(tmp_path, enabled=False)
     cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
     server = DebugServer(cfg, mock_recorder, mock_app)
     assert await server._resolve_ui_root() is None
