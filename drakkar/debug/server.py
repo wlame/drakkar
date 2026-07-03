@@ -32,7 +32,7 @@ from urllib.parse import quote
 
 import structlog
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.routing import APIRoute
 from fastapi.templating import Jinja2Templates
 
@@ -395,30 +395,43 @@ def _v1_alias_path(path: str) -> str | None:
     return _V1_EXTRA_ALIASES.get(path)
 
 
-def register_v1_aliases(app: FastAPI) -> None:
+def register_v1_aliases(app: FastAPI, routers: Sequence[APIRouter]) -> None:
     """Register every legacy JSON API route under ``/api/v1/...`` as well.
 
     The UI contract (v1) versions the JSON surface behind an ``/api/v1``
     prefix while the legacy unprefixed paths keep working during the
     transition. Rather than duplicating handler registrations per module,
-    this walks the already-mounted route table and re-registers each
-    qualifying route under its computed alias — same endpoint function,
-    same dependency list (so auth gating is identical on both prefixes).
+    this walks the given routers and re-registers each qualifying route on
+    the app under its computed alias — same endpoint function, same
+    dependency list (router-level ``Depends`` are merged into each route at
+    registration time, so auth gating is identical on both prefixes).
+
+    The walk deliberately reads ``router.routes`` (where ``@router.get``
+    registrations live as ``APIRoute`` objects on every FastAPI version)
+    rather than ``app.routes``: newer FastAPI includes routers lazily, so
+    the app-level table no longer exposes ``APIRoute`` entries.
     """
-    for route in list(app.routes):
-        if not isinstance(route, APIRoute):
-            continue
-        alias = _v1_alias_path(route.path)
-        if alias is None:
-            continue
-        app.add_api_route(
-            alias,
-            route.endpoint,
-            methods=sorted(route.methods or []),
-            dependencies=route.dependencies,
-            name=f'{route.name}_v1',
-            response_class=route.response_class,
-        )
+    registered = 0
+    for router in routers:
+        for route in router.routes:
+            if not isinstance(route, APIRoute):
+                continue
+            alias = _v1_alias_path(route.path)
+            if alias is None:
+                continue
+            app.add_api_route(
+                alias,
+                route.endpoint,
+                methods=sorted(route.methods or []),
+                dependencies=route.dependencies,
+                name=f'{route.name}_v1',
+                response_class=route.response_class,
+            )
+            registered += 1
+    if registered == 0:
+        # Serving without the /api/v1 surface would silently break the UI
+        # contract — fail at startup instead.
+        raise RuntimeError('v1 alias registration found no legacy API routes; FastAPI routing internals changed')
 
 
 def create_debug_app(
@@ -472,14 +485,22 @@ def create_debug_app(
 
     # Mount the four route modules. Order doesn't matter for correctness
     # (FastAPI matches by path), but grouping reads naturally as
-    # pages → live → debug → cache.
-    app.include_router(create_pages_router(deps))
-    app.include_router(create_live_router(deps))
-    app.include_router(create_debug_router(deps))
-    app.include_router(create_cache_router(deps))
+    # pages → live → debug → cache. Only leaf routers land here — the
+    # /api/v1 alias walk below cannot see through nested include_router
+    # calls on newer FastAPI.
+    pages_public, pages_gated = create_pages_router(deps)
+    routers = (
+        pages_public,
+        pages_gated,
+        create_live_router(deps),
+        create_debug_router(deps),
+        create_cache_router(deps),
+    )
+    for router in routers:
+        app.include_router(router)
 
     # Contract v1: every legacy JSON route is also served under /api/v1.
-    register_v1_aliases(app)
+    register_v1_aliases(app, routers)
 
     return app
 

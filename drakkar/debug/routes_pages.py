@@ -15,9 +15,10 @@ Routes:
   * ``/api/debug/processors``    — partition-processor diagnostics JSON.
   * ``/ws``                      — recorder-event WebSocket stream.
 
-The factory ``create_pages_router(deps)`` returns a single ``APIRouter``
-that the server module mounts onto the FastAPI app via
-``app.include_router(...)``. Routes reach shared state through ``deps``.
+The factory ``create_pages_router(deps)`` returns two leaf ``APIRouter``s
+(public probes/WS + auth-gated everything else) that the server module
+mounts onto the FastAPI app via ``app.include_router(...)``. Routes reach
+shared state through ``deps``.
 """
 
 from __future__ import annotations
@@ -39,13 +40,19 @@ if TYPE_CHECKING:
 WS_DRAIN_SLEEP = 0.02  # seconds to sleep when WebSocket event queue is empty
 
 
-def create_pages_router(deps: DebugDeps) -> APIRouter:
-    """Build the router that owns HTML pages, top-level APIs, and the WS endpoint.
+def create_pages_router(deps: DebugDeps) -> tuple[APIRouter, APIRouter]:
+    """Build the routers that own HTML pages, top-level APIs, and the WS endpoint.
 
-    Every route except the Kubernetes probes and the WebSocket goes through
-    ``require_auth`` (a no-op when ``auth_token`` is empty). The probes must
-    stay public for the kubelet; the WebSocket runs its own auth handshake
-    inside the endpoint so it can reply with a proper 4401 close code.
+    Returns two leaf routers — ``(public, gated)`` — for the app to include
+    directly. Every gated route goes through ``require_auth`` (a no-op when
+    ``auth_token`` is empty). The probes must stay public for the kubelet;
+    the WebSocket runs its own auth handshake inside the endpoint so it can
+    reply with a proper 4401 close code.
+
+    The two routers are deliberately NOT combined behind a wrapper
+    ``include_router``: newer FastAPI includes routers lazily, so a nesting
+    router exposes no ``APIRoute`` entries for the ``/api/v1`` alias walk
+    in ``server.py``.
     """
     # Public router: probes + WS (WS authenticates internally).
     public = APIRouter()
@@ -754,9 +761,4 @@ def create_pages_router(deps: DebugDeps) -> APIRouter:
         finally:
             recorder.unsubscribe(q)
 
-    # Compose: the auth-gated routes plus the public probes/WS, returned as
-    # one router so server.py's include_router call stays unchanged.
-    combined = APIRouter()
-    combined.include_router(public)
-    combined.include_router(router)
-    return combined
+    return public, router
