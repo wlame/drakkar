@@ -518,6 +518,71 @@ class DebugConfig(BaseModel):
     custom_links: list[dict[str, str]] = Field(default_factory=list)
 
 
+# --- UI hosting config ---
+
+
+class UIConfig(BaseModel):
+    """Decoupled drakkar-ui single-page-app hosting settings.
+
+    The UI ships as its own versioned bundle (the separate drakkar-ui repo,
+    published to GitHub Releases) so every backend on a host serves the same
+    UI and looks identical. When ``enabled``, the worker resolves that bundle
+    through :mod:`drakkar.uihost` (cache → fetch → embedded fallback) and
+    serves it in place of the built-in server-rendered HTML pages.
+
+    Default-OFF: the working Jinja debug UI stays the default. A fetch
+    failure is never fatal — the worker still starts and serves whatever
+    bundle is available (cache or embedded).
+
+    The YAML keys and semantics match the Go backend's ``ui`` config block,
+    so ``DK_UI__*`` env overrides behave identically on both backends.
+    """
+
+    enabled: bool = False
+    release_repo: str = Field(
+        default='wlame/drakkar-ui',
+        description=(
+            'The "owner/name" GitHub repo that publishes UI bundles. '
+            'Empty disables fetching — only a cached bundle or the embedded '
+            'fallback is served.'
+        ),
+    )
+    pinned_version: str = Field(
+        default='',
+        description=(
+            'Known-good UI release tag this backend is built against '
+            '(e.g. "v1.2.0"); the contract is API-major compatible. Empty '
+            'means "no pinned version".'
+        ),
+    )
+    cache_dir: str = Field(
+        default='',
+        description=(
+            'Bundle cache root override. Empty uses the per-user cache dir '
+            '($XDG_CACHE_HOME/drakkar/ui, falling back to ~/.cache/drakkar/ui '
+            "— the same directory the Go backend's os.UserCacheDir produces "
+            'on Linux, so both backends share one cache).'
+        ),
+    )
+    check_update: bool = Field(
+        default=False,
+        description=(
+            'Resolve the latest release tag on startup instead of only the '
+            'pinned version (the "check for a new version" toggle). Already-'
+            'cached versions are never re-downloaded — release tags are '
+            'immutable.'
+        ),
+    )
+
+    @field_validator('release_repo')
+    @classmethod
+    def _validate_release_repo(cls, v: str) -> str:
+        """A non-empty repo must look like a GitHub ``owner/name`` slug."""
+        if v and '/' not in v:
+            raise ValueError(f'ui.release_repo must be "owner/name", got {v!r}')
+        return v
+
+
 # --- Cache config ---
 
 
@@ -791,6 +856,7 @@ class DrakkarConfig(BaseSettings):
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
+    ui: UIConfig = Field(default_factory=UIConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     webapp: WebAppConfig = Field(default_factory=WebAppConfig)
 

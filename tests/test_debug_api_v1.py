@@ -152,7 +152,7 @@ class TestV1Aliases:
         assert resp.status_code == 404
         assert resp.json() == {'detail': 'Cache is disabled'}
 
-    @pytest.mark.parametrize('path', ['/api/partitions', '/api/task/some-id', '/api/live/overview'])
+    @pytest.mark.parametrize('path', ['/api/partitions', '/api/task/some-id', '/api/live/overview', '/api/identity'])
     async def test_new_endpoints_have_no_legacy_alias(self, client, path):
         resp = await client.get(path)
         assert resp.status_code == 404
@@ -169,6 +169,7 @@ class TestV1Auth:
         '/api/v1/partitions',
         '/api/v1/task/t-1',
         '/api/v1/live/overview',
+        '/api/v1/identity',
         '/api/v1/events',
         '/api/v1/debug/databases',
         '/api/v1/debug/download/test.db',
@@ -722,3 +723,113 @@ class TestTraceByLabelEmptyParams:
         resp = await client.get('/api/debug/trace-by-label', params={'key': 'k', 'value': 'v'})
         assert resp.status_code == 200
         assert resp.json() == []
+
+
+# ---------------------------------------------------------------------------
+# Work package F2: GET /api/v1/identity (v1-only)
+# ---------------------------------------------------------------------------
+
+
+class TestApiV1Identity:
+    async def test_shape_without_cluster(self, debug_config, mock_recorder, mock_app):
+        mock_app.config_summary = '[test-worker] topic=input-events group=drakkar-workers'
+        mock_recorder.config = debug_config
+        async with make_client(debug_config, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/identity')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert set(data) == {'worker_id', 'cluster', 'config_summary'}
+        assert data['worker_id'] == 'test-worker'
+        assert data['cluster'] is None  # empty cluster name serializes as null
+        assert data['config_summary'] == '[test-worker] topic=input-events group=drakkar-workers'
+
+    async def test_cluster_name_surfaces(self, debug_config, mock_recorder, mock_app):
+        mock_app._cluster_name = 'main'
+        mock_app.config_summary = '[test-worker/main] topic=input-events'
+        mock_recorder.config = debug_config
+        async with make_client(debug_config, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/identity')
+        assert resp.json()['cluster'] == 'main'
+
+    async def test_requires_auth_when_token_set(self, tmp_path, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
+        mock_app.config_summary = '[test-worker]'
+        mock_recorder.config = cfg
+        async with make_client(cfg, mock_recorder, mock_app) as c:
+            assert (await c.get('/api/v1/identity')).status_code == 401
+            ok = await c.get('/api/v1/identity', headers={'Authorization': 'Bearer secret-123'})
+            assert ok.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Work package F1: optional `links` key on GET /api/v1/dashboard
+# ---------------------------------------------------------------------------
+
+
+class TestDashboardLinks:
+    @pytest.mark.parametrize('path', ['/api/dashboard', '/api/v1/dashboard'])
+    async def test_links_absent_when_unconfigured(self, client, path):
+        resp = await client.get(path)
+        assert resp.status_code == 200
+        assert 'links' not in resp.json()
+
+    async def test_links_present_with_prometheus_url(self, tmp_path, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), prometheus_url='http://prom:9090')
+        mock_recorder.config = cfg
+        async with make_client(cfg, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/dashboard')
+        links = resp.json()['links']
+        assert set(links) == {'card_links', 'worker_links', 'cluster_links', 'custom_links'}
+        assert set(links['card_links']) == {'lag', 'consumed', 'completed', 'failed', 'produced'}
+        for url in links['card_links'].values():
+            assert url.startswith('http://prom:9090/graph?')
+        # worker links: grouped {category, links:[[name, url], ...]} cards
+        categories = [group['category'] for group in links['worker_links']]
+        assert categories == ['Throughput', 'Latency', 'Health', 'Errors']
+        for group in links['worker_links']:
+            for entry in group['links']:
+                name, url = entry  # tuples serialize as 2-element arrays
+                assert isinstance(name, str)
+                assert url.startswith('http://prom:9090/graph?')
+        # no cluster label configured → no cluster links; no custom links
+        assert links['cluster_links'] == []
+        assert links['custom_links'] == []
+
+    async def test_cluster_links_with_cluster_label(self, tmp_path, mock_recorder, mock_app):
+        cfg = DebugConfig(
+            enabled=True,
+            port=8080,
+            db_dir=str(tmp_path),
+            prometheus_url='http://prom:9090',
+            prometheus_cluster_label='cluster="main"',
+        )
+        mock_recorder.config = cfg
+        async with make_client(cfg, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/dashboard')
+        cluster_links = resp.json()['links']['cluster_links']
+        assert cluster_links, 'cluster label configured — cluster links expected'
+        for entry in cluster_links:
+            name, url = entry
+            assert isinstance(name, str)
+            assert url.startswith('http://prom:9090/graph?')
+
+    async def test_custom_links_alone_enable_key_and_pass_verbatim(self, tmp_path, mock_recorder, mock_app):
+        custom = [{'name': 'Grafana', 'url': 'http://grafana/{worker_id}'}]
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), custom_links=custom)
+        mock_recorder.config = cfg
+        async with make_client(cfg, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/dashboard')
+        links = resp.json()['links']
+        # prometheus unconfigured → empty prometheus containers, custom verbatim
+        assert links['card_links'] == {}
+        assert links['worker_links'] == []
+        assert links['cluster_links'] == []
+        assert links['custom_links'] == custom  # URL templates NOT expanded
+
+    async def test_legacy_alias_carries_links_too(self, tmp_path, mock_recorder, mock_app):
+        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), prometheus_url='http://prom:9090')
+        mock_recorder.config = cfg
+        async with make_client(cfg, mock_recorder, mock_app) as c:
+            legacy = await c.get('/api/dashboard')
+            v1 = await c.get('/api/v1/dashboard')
+        assert legacy.json()['links'] == v1.json()['links']

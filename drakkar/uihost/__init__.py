@@ -1,0 +1,199 @@
+"""Serve the drakkar web UI as static files, decoupled from the backend.
+
+The UI ships as its own versioned bundle (the separate drakkar-ui repo,
+published to GitHub Releases) so every backend on a host serves the same UI
+and looks identical. This package is the Python port of the Go backend's
+``internal/uihost`` — both resolve bundles into the same per-user cache
+directory so a host running mixed backends downloads each release once.
+
+Resolution order (graceful degradation, never fatal):
+
+1. an update check (when ``check_update``) resolves the latest release tag;
+   on any failure the pinned version is kept;
+2. a previously cached bundle for the resolved version
+   (``~/.cache/drakkar/ui/<ver>``) — release tags are immutable, so a cached
+   version is never re-downloaded;
+3. otherwise fetch that version from GitHub Releases into the cache; on a
+   fetch failure a stale cached copy of that version still serves;
+4. with no resolvable version at all, the newest previously cached version
+   (semver order, lexicographic fallback) serves;
+5. finally the embedded placeholder page shipped as package data.
+
+A fetch failure is never fatal — the worker still starts and serves whatever
+bundle is available (cache or embedded).
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+import structlog
+
+from drakkar.config import UIConfig
+from drakkar.uihost.fetch import GITHUB_API_BASE, FetchError, fetch_latest_version, fetch_release
+
+__all__ = [
+    'GITHUB_API_BASE',
+    'UI_RESOLVE_TIMEOUT_SECONDS',
+    'FetchError',
+    'ResolvedBundle',
+    'Source',
+    'cache_root',
+    'default_cache_root',
+    'dir_has_index',
+    'fetch_latest_version',
+    'fetch_release',
+    'newest_cached_version',
+    'resolve',
+]
+
+logger = structlog.get_logger()
+
+# Identifies which bundle ``resolve`` selected — surfaced in logs.
+Source = Literal['embedded', 'cache', 'fetched']
+
+# Bounds the whole startup-time resolution (update check + fetch), matching
+# the Go backend's uiResolveTimeout. Resolution failures degrade to a cached
+# or embedded bundle; they never delay worker startup past this budget.
+UI_RESOLVE_TIMEOUT_SECONDS = 30.0
+
+# The placeholder page baked into the package so SPA mode works fully
+# offline out of the box (mirrors Go's go:embed fallback bundle).
+EMBEDDED_BUNDLE_DIR = Path(__file__).parent / 'bundle'
+
+# Cached bundle directories are named after release tags (``v1.2.0``).
+_SEMVER_TAG_RE = re.compile(r'^v(\d+)\.(\d+)\.(\d+)$')
+
+
+@dataclass(frozen=True)
+class ResolvedBundle:
+    """The UI bundle ``resolve`` selected: its directory and provenance."""
+
+    root: Path
+    source: Source
+
+
+def default_cache_root() -> Path:
+    """Per-user bundle cache root: ``$XDG_CACHE_HOME/drakkar/ui`` or ``~/.cache/drakkar/ui``.
+
+    This is exactly the directory Go's ``os.UserCacheDir()/drakkar/ui``
+    produces on Linux, so the Python and Go backends share one cache.
+    """
+    xdg = os.environ.get('XDG_CACHE_HOME', '')
+    base = Path(xdg) if xdg else Path.home() / '.cache'
+    return base / 'drakkar' / 'ui'
+
+
+def cache_root(config: UIConfig) -> Path:
+    """The configured cache root, defaulting to the per-user cache dir."""
+    if config.cache_dir:
+        return Path(config.cache_dir)
+    return default_cache_root()
+
+
+def dir_has_index(directory: Path) -> bool:
+    """Whether ``directory`` looks like a usable UI bundle (has ``index.html``)."""
+    return (directory / 'index.html').is_file()
+
+
+def newest_cached_version(root: Path) -> str | None:
+    """The newest usable cached version under ``root``, or ``None``.
+
+    "Newest" orders ``v<maj>.<min>.<patch>`` tags by semver; any other
+    directory names sort below semver tags, lexicographically among
+    themselves. In-flight ``.incoming`` extraction dirs are skipped.
+    """
+    try:
+        candidates = [
+            entry.name
+            for entry in root.iterdir()
+            if entry.is_dir() and not entry.name.endswith('.incoming') and dir_has_index(entry)
+        ]
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    return max(candidates, key=_version_sort_key)
+
+
+def _version_sort_key(name: str) -> tuple[int, int, int, int, str]:
+    """Sort key ranking semver tags above (and among) non-semver names."""
+    match = _SEMVER_TAG_RE.match(name)
+    if match:
+        return (1, int(match.group(1)), int(match.group(2)), int(match.group(3)), name)
+    return (0, 0, 0, 0, name)
+
+
+def resolve(
+    config: UIConfig,
+    *,
+    api_base: str = GITHUB_API_BASE,
+    timeout: float = UI_RESOLVE_TIMEOUT_SECONDS,
+) -> ResolvedBundle | None:
+    """Select the UI bundle directory to serve.
+
+    Never raises for fetch/cache problems — it degrades along the resolution
+    order in the module docstring and logs a structured event for each step.
+    Returns ``None`` only when even the embedded fallback is missing (a
+    packaging problem), in which case the caller keeps the built-in Jinja
+    pages.
+
+    ``api_base`` overrides the GitHub API base (GitHub Enterprise, or a stub
+    server in tests). ``timeout`` bounds the whole resolution — update check
+    plus download — as an absolute wall-clock budget.
+    """
+    deadline = time.monotonic() + timeout
+    version = config.pinned_version
+
+    # An update check resolves the latest tag first; on any failure we keep
+    # the pinned version (the fetch below still tries, then we degrade).
+    if config.check_update and config.release_repo:
+        try:
+            version = fetch_latest_version(api_base, config.release_repo, deadline=deadline)
+            logger.info('ui_update_check', category='ui', latest=version)
+        except Exception as exc:
+            logger.warning('ui_update_check_failed', category='ui', error=str(exc))
+
+    root = cache_root(config)
+
+    if version:
+        bundle_dir = root / version
+        # 1. Cache hit for the resolved version. Release tags are immutable,
+        # so a cached copy never needs re-downloading — even on an update
+        # check that resolved "latest" to an already-cached tag.
+        if dir_has_index(bundle_dir):
+            logger.info('ui_served_from_cache', category='ui', version=version, dir=str(bundle_dir))
+            return ResolvedBundle(root=bundle_dir, source='cache')
+        # 2. Fetch the version into the cache.
+        if config.release_repo:
+            try:
+                fetch_release(api_base, config.release_repo, version, bundle_dir, deadline=deadline)
+                logger.info('ui_fetched', category='ui', version=version, dir=str(bundle_dir))
+                return ResolvedBundle(root=bundle_dir, source='fetched')
+            except Exception as exc:
+                logger.warning('ui_fetch_failed', category='ui', version=version, error=str(exc))
+            # Fetch failed but a cached copy may have appeared meanwhile
+            # (another worker sharing the cache can fill it concurrently).
+            if dir_has_index(bundle_dir):
+                logger.info('ui_served_from_stale_cache', category='ui', version=version)
+                return ResolvedBundle(root=bundle_dir, source='cache')
+    else:
+        # 3. No version resolvable at all (nothing pinned and the latest
+        # lookup failed or fetching is disabled): serve the newest
+        # previously cached version before giving up.
+        newest = newest_cached_version(root)
+        if newest is not None:
+            logger.info('ui_served_from_cache', category='ui', version=newest, dir=str(root / newest))
+            return ResolvedBundle(root=root / newest, source='cache')
+
+    # 4. Embedded placeholder fallback.
+    if dir_has_index(EMBEDDED_BUNDLE_DIR):
+        logger.info('ui_served_from_embedded_fallback', category='ui')
+        return ResolvedBundle(root=EMBEDDED_BUNDLE_DIR, source='embedded')
+    logger.warning('ui_embedded_fallback_missing', category='ui', dir=str(EMBEDDED_BUNDLE_DIR))
+    return None

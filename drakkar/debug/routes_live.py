@@ -50,11 +50,18 @@ class _SinkBreakdownRequest(BaseModel):
     offsets: list[int] = Field(default_factory=list, max_length=5000)
 
 
-def create_live_router(deps: DebugDeps) -> APIRouter:
-    """Build the router that owns the live view + completion-hook feeds."""
+def create_live_router(deps: DebugDeps, include_html: bool = True) -> APIRouter:
+    """Build the router that owns the live view + completion-hook feeds.
+
+    ``include_html=False`` (SPA mode) drops the ``/live`` Jinja page so the
+    SPA catch-all owns it; the JSON feeds are unaffected.
+    """
     # All live-data routes expose task args/output and partition state —
     # gate the whole router behind require_auth (no-op without a token).
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
+    # HTML page routes register on ``html``: the real router normally, or a
+    # throwaway router (never mounted) when the SPA owns the page surface.
+    html = router if include_html else APIRouter()
     config = deps.config
     recorder = deps.recorder
     drakkar_app = deps.drakkar_app
@@ -146,7 +153,7 @@ def create_live_router(deps: DebugDeps) -> APIRouter:
             'kafka_source_topic': kafka_cfg.source_topic,
         }
 
-    @router.get('/live', response_class=HTMLResponse)
+    @html.get('/live', response_class=HTMLResponse)
     async def live(request: Request):
         overview = await _live_overview_data()
 

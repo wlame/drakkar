@@ -75,13 +75,21 @@ class _ProbeRequest(BaseModel):
     use_cache: bool = False
 
 
-def create_debug_router(deps: DebugDeps) -> APIRouter:
-    """Build the router that owns the debug page + ``/api/debug/*`` endpoints (excluding cache)."""
+def create_debug_router(deps: DebugDeps, include_html: bool = True) -> APIRouter:
+    """Build the router that owns the debug page + ``/api/debug/*`` endpoints (excluding cache).
+
+    ``include_html=False`` (SPA mode) drops the ``/debug`` Jinja page so the
+    SPA catch-all owns it; the JSON endpoints and the file download at
+    ``/debug/download/{filename}`` are unaffected.
+    """
     # Every debug route (config summary, traces, metrics, merge, probe,
     # downloads) is sensitive — gate the whole router behind require_auth
     # (no-op without a token). The per-route Depends below predate the
     # router-level gate and are kept as explicit markers.
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
+    # HTML page routes register on ``html``: the real router normally, or a
+    # throwaway router (never mounted) when the SPA owns the page surface.
+    html = router if include_html else APIRouter()
     config = deps.config
     recorder = deps.recorder
     drakkar_app = deps.drakkar_app
@@ -89,7 +97,7 @@ def create_debug_router(deps: DebugDeps) -> APIRouter:
 
     # --- Debug databases page ---
 
-    @router.get('/debug', response_class=HTMLResponse)
+    @html.get('/debug', response_class=HTMLResponse)
     async def debug_databases(request: Request):
         return templates.TemplateResponse(
             request,

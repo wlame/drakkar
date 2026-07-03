@@ -1,0 +1,533 @@
+"""Tests for the drakkar-ui bundle host (:mod:`drakkar.uihost`) and SPA serving.
+
+Covers:
+  * the fetch engine against a local stub GitHub-API server (no real
+    network): happy path, cache-hit short-circuit, check_update with a
+    cached latest, newest-cached fallback, traversal/oversize/missing-index
+    rejection, atomic ``.incoming`` cleanup;
+  * the ``ui.enabled`` serving mode: SPA files + History-API fallback,
+    JSON/probe/download precedence, auth gating, Jinja pages absent;
+  * the ``ui`` config block defaults and validation.
+"""
+
+import io
+import json
+import tarfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
+
+from drakkar.config import DebugConfig, DrakkarConfig, UIConfig
+from drakkar.debug.server import create_debug_app
+from drakkar.recorder import EventRecorder
+from drakkar.uihost import (
+    EMBEDDED_BUNDLE_DIR,
+    ResolvedBundle,
+    default_cache_root,
+    newest_cached_version,
+    resolve,
+)
+
+# ---------------------------------------------------------------------------
+# Stub GitHub server
+# ---------------------------------------------------------------------------
+
+
+class StubGitHub:
+    """A local HTTP server standing in for the GitHub API + asset CDN.
+
+    ``routes`` maps request paths to ``(status, content_type, body)``;
+    every request path is recorded in ``requests`` so tests can assert on
+    (the absence of) network traffic.
+    """
+
+    def __init__(self) -> None:
+        self.routes: dict[str, tuple[int, str, bytes]] = {}
+        self.requests: list[str] = []
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                stub.requests.append(self.path)
+                entry = stub.routes.get(self.path)
+                if entry is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                status, content_type, body = entry
+                self.send_response(status)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args) -> None:  # silence stderr noise
+                pass
+
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def base_url(self) -> str:
+        host, port = self.server.server_address[:2]
+        return f'http://{host}:{port}'
+
+    def add_release(self, repo: str, tag: str, asset_bytes: bytes | None, *, latest: bool = False) -> None:
+        """Register a release (tags + optionally latest) with one tar.gz asset."""
+        asset_path = f'/assets/{tag}.tar.gz'
+        release = {
+            'tag_name': tag,
+            'assets': [{'name': f'drakkar-ui-{tag}.tar.gz', 'browser_download_url': f'{self.base_url}{asset_path}'}],
+        }
+        body = json.dumps(release).encode()
+        self.routes[f'/repos/{repo}/releases/tags/{tag}'] = (200, 'application/json', body)
+        if latest:
+            self.routes[f'/repos/{repo}/releases/latest'] = (200, 'application/json', body)
+        if asset_bytes is not None:
+            self.routes[asset_path] = (200, 'application/octet-stream', asset_bytes)
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture
+def stub_github():
+    stub = StubGitHub()
+    yield stub
+    stub.close()
+
+
+def make_tar_gz(files: dict[str, bytes], symlinks: dict[str, str] | None = None) -> bytes:
+    """Build an in-memory gzipped tarball from ``{name: content}`` (+ optional symlinks)."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode='w:gz') as tar:
+        for name, content in files.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+        for name, target in (symlinks or {}).items():
+            info = tarfile.TarInfo(name=name)
+            info.type = tarfile.SYMTYPE
+            info.linkname = target
+            tar.addfile(info)
+    return buf.getvalue()
+
+
+BUNDLE_FILES = {
+    'index.html': b'<!doctype html><title>real ui</title>',
+    'assets/app.js': b'console.log("ui");',
+}
+
+
+def ui_config(tmp_path: Path, **overrides) -> UIConfig:
+    defaults = {'enabled': True, 'cache_dir': str(tmp_path / 'cache'), 'release_repo': 'wlame/drakkar-ui'}
+    defaults.update(overrides)
+    return UIConfig(**defaults)
+
+
+def seed_cache(tmp_path: Path, version: str, files: dict[str, bytes] | None = None) -> Path:
+    """Pre-populate the cache dir with a usable bundle for ``version``."""
+    bundle_dir = tmp_path / 'cache' / version
+    for name, content in (files or BUNDLE_FILES).items():
+        target = bundle_dir / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    return bundle_dir
+
+
+# ---------------------------------------------------------------------------
+# Fetch engine + resolution order
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_happy_path_extracts_bundle(stub_github, tmp_path):
+    stub_github.add_release('wlame/drakkar-ui', 'v1.0.0', make_tar_gz(BUNDLE_FILES))
+    cfg = ui_config(tmp_path, pinned_version='v1.0.0')
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'fetched'
+    assert bundle.root == tmp_path / 'cache' / 'v1.0.0'
+    assert (bundle.root / 'index.html').read_bytes() == BUNDLE_FILES['index.html']
+    assert (bundle.root / 'assets' / 'app.js').read_bytes() == BUNDLE_FILES['assets/app.js']
+    # extraction staging dir swapped away cleanly
+    assert not (tmp_path / 'cache' / 'v1.0.0.incoming').exists()
+
+
+def test_cache_hit_short_circuits_without_network(stub_github, tmp_path):
+    seed_cache(tmp_path, 'v1.0.0')
+    cfg = ui_config(tmp_path, pinned_version='v1.0.0')
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'cache'
+    assert bundle.root == tmp_path / 'cache' / 'v1.0.0'
+    assert stub_github.requests == []
+
+
+def test_check_update_with_cached_latest_does_not_redownload(stub_github, tmp_path):
+    # latest resolves to v1.2.0 which is already cached: only the update
+    # check hits the network — release tags are immutable, no re-download.
+    stub_github.add_release('wlame/drakkar-ui', 'v1.2.0', None, latest=True)
+    seed_cache(tmp_path, 'v1.2.0')
+    cfg = ui_config(tmp_path, pinned_version='v1.0.0', check_update=True)
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'cache'
+    assert bundle.root == tmp_path / 'cache' / 'v1.2.0'
+    assert stub_github.requests == ['/repos/wlame/drakkar-ui/releases/latest']
+
+
+def test_update_check_failure_keeps_pinned_version(stub_github, tmp_path):
+    # /releases/latest 404s; the pinned version still fetches.
+    stub_github.add_release('wlame/drakkar-ui', 'v1.0.0', make_tar_gz(BUNDLE_FILES))
+    cfg = ui_config(tmp_path, pinned_version='v1.0.0', check_update=True)
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'fetched'
+    assert bundle.root.name == 'v1.0.0'
+
+
+def test_newest_cached_fallback_when_latest_lookup_fails(stub_github, tmp_path):
+    # No pinned version and the latest lookup fails: the newest cached
+    # version serves, ordered by semver (v1.10.0 > v1.2.0) above
+    # non-semver names ('zzz' loses despite sorting last lexicographically).
+    for version in ('v1.2.0', 'v1.10.0', 'zzz'):
+        seed_cache(tmp_path, version)
+    cfg = ui_config(tmp_path, pinned_version='', check_update=True)
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'cache'
+    assert bundle.root == tmp_path / 'cache' / 'v1.10.0'
+
+
+def test_newest_cached_skips_incomplete_and_incoming_dirs(tmp_path):
+    seed_cache(tmp_path, 'v1.0.0')
+    # a newer version without index.html (unusable) and an in-flight
+    # extraction dir must both lose to the older complete bundle
+    (tmp_path / 'cache' / 'v2.0.0').mkdir(parents=True)
+    seed_cache(tmp_path, 'v3.0.0.incoming')
+
+    assert newest_cached_version(tmp_path / 'cache') == 'v1.0.0'
+
+
+def test_newest_cached_returns_none_for_missing_root(tmp_path):
+    assert newest_cached_version(tmp_path / 'nope') is None
+
+
+def test_traversal_member_rejected_and_incoming_cleaned(stub_github, tmp_path):
+    evil = make_tar_gz({'index.html': b'x', '../evil.txt': b'pwned'})
+    stub_github.add_release('wlame/drakkar-ui', 'v1.0.0', evil)
+    cfg = ui_config(tmp_path, pinned_version='v1.0.0')
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'embedded'
+    assert not (tmp_path / 'cache' / 'evil.txt').exists()
+    assert not (tmp_path / 'cache' / 'v1.0.0').exists()
+    assert not (tmp_path / 'cache' / 'v1.0.0.incoming').exists()
+
+
+def test_symlink_members_skipped(stub_github, tmp_path):
+    tarball = make_tar_gz(BUNDLE_FILES, symlinks={'passwd': '/etc/passwd'})
+    stub_github.add_release('wlame/drakkar-ui', 'v1.0.0', tarball)
+    cfg = ui_config(tmp_path, pinned_version='v1.0.0')
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'fetched'
+    assert not (bundle.root / 'passwd').exists()
+
+
+def test_oversize_extraction_rejected(stub_github, tmp_path, monkeypatch):
+    monkeypatch.setattr('drakkar.uihost.fetch.MAX_BUNDLE_BYTES', 16)
+    stub_github.add_release('wlame/drakkar-ui', 'v1.0.0', make_tar_gz({'index.html': b'x' * 64}))
+    cfg = ui_config(tmp_path, pinned_version='v1.0.0')
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'embedded'
+    assert not (tmp_path / 'cache' / 'v1.0.0.incoming').exists()
+
+
+def test_oversize_download_rejected(stub_github, tmp_path, monkeypatch):
+    monkeypatch.setattr('drakkar.uihost.fetch.MAX_ASSET_BYTES', 16)
+    stub_github.add_release('wlame/drakkar-ui', 'v1.0.0', make_tar_gz(BUNDLE_FILES))
+    cfg = ui_config(tmp_path, pinned_version='v1.0.0')
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'embedded'
+
+
+def test_bundle_without_index_rejected(stub_github, tmp_path):
+    stub_github.add_release('wlame/drakkar-ui', 'v1.0.0', make_tar_gz({'assets/app.js': b'js'}))
+    cfg = ui_config(tmp_path, pinned_version='v1.0.0')
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'embedded'
+    assert not (tmp_path / 'cache' / 'v1.0.0').exists()
+    assert not (tmp_path / 'cache' / 'v1.0.0.incoming').exists()
+
+
+def test_release_without_tarball_asset_rejected(stub_github, tmp_path):
+    body = json.dumps(
+        {'tag_name': 'v1.0.0', 'assets': [{'name': 'notes.zip', 'browser_download_url': 'http://x/notes.zip'}]}
+    ).encode()
+    stub_github.routes['/repos/wlame/drakkar-ui/releases/tags/v1.0.0'] = (200, 'application/json', body)
+    cfg = ui_config(tmp_path, pinned_version='v1.0.0')
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'embedded'
+
+
+def test_empty_release_repo_disables_fetching(stub_github, tmp_path):
+    cfg = ui_config(tmp_path, release_repo='', pinned_version='v1.0.0', check_update=True)
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'embedded'
+    assert stub_github.requests == []
+
+
+def test_embedded_fallback_is_packaged():
+    assert (EMBEDDED_BUNDLE_DIR / 'index.html').is_file()
+
+
+def test_default_cache_root_honors_xdg(monkeypatch, tmp_path):
+    monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path / 'xdg'))
+    assert default_cache_root() == tmp_path / 'xdg' / 'drakkar' / 'ui'
+
+    monkeypatch.delenv('XDG_CACHE_HOME')
+    assert default_cache_root() == Path.home() / '.cache' / 'drakkar' / 'ui'
+
+
+# ---------------------------------------------------------------------------
+# ui config block
+# ---------------------------------------------------------------------------
+
+
+def test_ui_config_defaults():
+    cfg = DrakkarConfig()
+    assert cfg.ui.enabled is False
+    assert cfg.ui.release_repo == 'wlame/drakkar-ui'
+    assert cfg.ui.pinned_version == ''
+    assert cfg.ui.cache_dir == ''
+    assert cfg.ui.check_update is False
+
+
+def test_ui_config_rejects_repo_without_slash():
+    with pytest.raises(ValidationError, match='owner/name'):
+        UIConfig(release_repo='drakkar-ui')
+
+
+def test_ui_config_env_overrides(monkeypatch):
+    from drakkar.config import load_config
+
+    monkeypatch.setenv('DK_UI__ENABLED', 'true')
+    monkeypatch.setenv('DK_UI__PINNED_VERSION', 'v9.9.9')
+    monkeypatch.setenv('DK_UI__CHECK_UPDATE', 'true')
+    cfg = load_config()
+    assert cfg.ui.enabled is True
+    assert cfg.ui.pinned_version == 'v9.9.9'
+    assert cfg.ui.check_update is True
+
+
+# ---------------------------------------------------------------------------
+# SPA serving (create_debug_app with ui_root)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mock_recorder():
+    rec = AsyncMock(spec=EventRecorder)
+    rec._db = None
+    rec._reader_db = None
+    rec.reader_db = None
+    rec.get_stats.return_value = {'total_events': 0}
+    rec.get_partition_summary.return_value = []
+    rec.get_task_events.return_value = []
+    rec.get_active_tasks.return_value = []
+    rec.discover_workers.side_effect = lambda: []
+    return rec
+
+
+@pytest.fixture
+def mock_app():
+    app = MagicMock()
+    app._worker_id = 'test-worker'
+    app._cluster_name = ''
+    app._start_time = time.monotonic() - 60
+    app.processors = {}
+    app._config = DrakkarConfig()
+    app.cache_engine = None
+    app.handler = None
+    app._consumer = None
+
+    pool = MagicMock()
+    pool.active_count = 0
+    pool.waiting_count = 0
+    pool.max_executors = 4
+    app._executor_pool = pool
+
+    sink_mgr = MagicMock()
+    sink_mgr.get_sink_info.return_value = []
+    sink_mgr.get_all_stats.return_value = {}
+    sink_mgr.all_connected.return_value = True
+    app.sink_manager = sink_mgr
+    app.is_ready = True
+    return app
+
+
+@pytest.fixture
+def ui_bundle_dir(tmp_path) -> Path:
+    return seed_cache(tmp_path, 'v1.0.0')
+
+
+def make_client(cfg, recorder, app, ui_root=None) -> AsyncClient:
+    fastapi_app = create_debug_app(cfg, recorder, app, ui_root=ui_root)
+    return AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test')
+
+
+@pytest.fixture
+async def spa_client(tmp_path, mock_recorder, mock_app, ui_bundle_dir):
+    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    mock_recorder.config = cfg
+    async with make_client(cfg, mock_recorder, mock_app, ui_root=ui_bundle_dir) as c:
+        yield c
+
+
+async def test_spa_serves_index_at_root(spa_client):
+    resp = await spa_client.get('/')
+    assert resp.status_code == 200
+    assert resp.content == BUNDLE_FILES['index.html']
+    assert resp.headers['content-type'].startswith('text/html')
+
+
+async def test_spa_serves_bundle_asset(spa_client):
+    resp = await spa_client.get('/assets/app.js')
+    assert resp.status_code == 200
+    assert resp.content == BUNDLE_FILES['assets/app.js']
+    assert 'javascript' in resp.headers['content-type']
+
+
+async def test_spa_unknown_path_returns_index_200(spa_client):
+    for path in ('/partitions', '/task/task-abc', '/history', '/live', '/debug', '/no/such/route'):
+        resp = await spa_client.get(path)
+        assert resp.status_code == 200, path
+        assert resp.content == BUNDLE_FILES['index.html'], path
+
+
+async def test_spa_traversal_falls_back_to_index(spa_client):
+    resp = await spa_client.get('/%2e%2e/%2e%2e/etc/passwd')
+    assert resp.status_code == 200
+    assert resp.content == BUNDLE_FILES['index.html']
+
+
+async def test_spa_mode_keeps_json_api(spa_client):
+    resp = await spa_client.get('/api/v1/dashboard')
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert 'stats' in payload
+    # the legacy alias keeps working too
+    legacy = await spa_client.get('/api/dashboard')
+    assert legacy.status_code == 200
+
+
+async def test_spa_mode_keeps_probes_public(spa_client):
+    resp = await spa_client.get('/healthz')
+    assert resp.status_code == 200
+    assert resp.json() == {'status': 'ok'}
+
+
+async def test_spa_mode_keeps_download_precedence(tmp_path, mock_recorder, mock_app, ui_bundle_dir):
+    (tmp_path / 'w1.db').write_bytes(b'sqlite-bytes')
+    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    mock_recorder.config = cfg
+    async with make_client(cfg, mock_recorder, mock_app, ui_root=ui_bundle_dir) as c:
+        resp = await c.get('/debug/download/w1.db')
+    assert resp.status_code == 200
+    assert resp.content == b'sqlite-bytes'
+
+
+async def test_spa_mode_auth_gates_pages_like_html(tmp_path, mock_recorder, mock_app, ui_bundle_dir):
+    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
+    mock_recorder.config = cfg
+    async with make_client(cfg, mock_recorder, mock_app, ui_root=ui_bundle_dir) as c:
+        # SPA paths require the token...
+        assert (await c.get('/')).status_code == 401
+        assert (await c.get('/partitions')).status_code == 401
+        ok = await c.get('/', headers={'Authorization': 'Bearer secret-123'})
+        assert ok.status_code == 200
+        assert ok.content == BUNDLE_FILES['index.html']
+        # ...while the probes stay public.
+        assert (await c.get('/healthz')).status_code == 200
+
+
+async def test_spa_mode_drops_jinja_pages(spa_client):
+    # Jinja pages would render server-side HTML with the worker id; in SPA
+    # mode every page path serves the bundle's index.html instead.
+    for path in ('/', '/partitions', '/history', '/sinks', '/live', '/debug'):
+        resp = await spa_client.get(path)
+        assert resp.content == BUNDLE_FILES['index.html'], path
+
+
+async def test_ui_disabled_app_unchanged(tmp_path, mock_recorder, mock_app):
+    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    mock_recorder.config = cfg
+    async with make_client(cfg, mock_recorder, mock_app) as c:
+        page = await c.get('/')
+        assert page.status_code == 200
+        assert 'test-worker' in page.text  # Jinja dashboard, not the SPA shell
+        # unknown paths 404 (no History-API fallback without the SPA)
+        assert (await c.get('/no/such/route')).status_code == 404
+
+
+async def test_debug_server_resolve_ui_root_disabled_returns_none(tmp_path, mock_recorder, mock_app):
+    from drakkar.debug.server import DebugServer
+
+    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    server = DebugServer(cfg, mock_recorder, mock_app)
+    assert await server._resolve_ui_root() is None
+
+
+async def test_debug_server_resolve_ui_root_enabled_resolves(tmp_path, mock_recorder, mock_app):
+    from drakkar.debug.server import DebugServer
+
+    mock_app._config.ui = ui_config(tmp_path, release_repo='')
+    seed_cache(tmp_path, 'v1.0.0')
+    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    server = DebugServer(cfg, mock_recorder, mock_app)
+    root = await server._resolve_ui_root()
+    assert root == tmp_path / 'cache' / 'v1.0.0'
+
+
+def test_resolved_bundle_is_frozen(tmp_path):
+    bundle = ResolvedBundle(root=tmp_path, source='cache')
+    with pytest.raises(AttributeError):
+        bundle.root = tmp_path / 'other'  # ty: ignore[invalid-assignment]

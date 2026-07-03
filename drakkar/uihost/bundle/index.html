@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Drakkar UI</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+        background: #f5f3ee;
+        color: #3d3d3d;
+      }
+      .card {
+        max-width: 32rem;
+        padding: 2rem;
+        text-align: center;
+        line-height: 1.5;
+        background: #ffffff;
+        border: 1px solid #e5e1d8;
+        border-radius: 0.5rem;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+      }
+      h1 {
+        font-size: 1.5rem;
+        color: #1a1a1a;
+      }
+      code {
+        font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+        color: #0d9488;
+      }
+      a {
+        color: #2563eb;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Drakkar UI — embedded fallback</h1>
+      <p>
+        The real <code>drakkar-ui</code> bundle could not be resolved — no
+        cached copy exists yet and the release fetch did not succeed.
+      </p>
+      <p>
+        The backend still exposes its JSON API under <code>/api/v1/</code>.
+        The full UI is published separately to GitHub Releases and is fetched
+        into the local cache on startup; check the worker logs
+        (<code>category=ui</code>) for the resolution outcome.
+      </p>
+    </div>
+  </body>
+</html>

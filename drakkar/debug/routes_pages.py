@@ -13,6 +13,7 @@ Routes:
   * ``/api/sinks``               — sink config + delivery stats JSON.
   * ``/api/workers``             — peer-worker discovery JSON.
   * ``/api/debug/processors``    — partition-processor diagnostics JSON.
+  * ``/api/v1/identity``         — worker identity + config summary (v1-only).
   * ``/ws``                      — recorder-event WebSocket stream.
 
 The factory ``create_pages_router(deps)`` returns two leaf ``APIRouter``s
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
 WS_DRAIN_SLEEP = 0.02  # seconds to sleep when WebSocket event queue is empty
 
 
-def create_pages_router(deps: DebugDeps) -> tuple[APIRouter, APIRouter]:
+def create_pages_router(deps: DebugDeps, include_html: bool = True) -> tuple[APIRouter, APIRouter]:
     """Build the routers that own HTML pages, top-level APIs, and the WS endpoint.
 
     Returns two leaf routers — ``(public, gated)`` — for the app to include
@@ -48,6 +49,10 @@ def create_pages_router(deps: DebugDeps) -> tuple[APIRouter, APIRouter]:
     ``auth_token`` is empty). The probes must stay public for the kubelet;
     the WebSocket runs its own auth handshake inside the endpoint so it can
     reply with a proper 4401 close code.
+
+    ``include_html=False`` (SPA mode — ``ui.enabled`` with a resolved
+    drakkar-ui bundle) drops the Jinja page routes so the SPA catch-all owns
+    every non-API path; the JSON APIs, probes, and WS are unaffected.
 
     The two routers are deliberately NOT combined behind a wrapper
     ``include_router``: newer FastAPI includes routers lazily, so a nesting
@@ -58,6 +63,9 @@ def create_pages_router(deps: DebugDeps) -> tuple[APIRouter, APIRouter]:
     public = APIRouter()
     # Everything else requires auth when a token is configured.
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
+    # HTML page routes register on ``html``: the gated router normally, or a
+    # throwaway router (never mounted) when the SPA owns the page surface.
+    html = router if include_html else APIRouter()
     config = deps.config
     recorder = deps.recorder
     drakkar_app = deps.drakkar_app
@@ -191,7 +199,7 @@ def create_pages_router(deps: DebugDeps) -> tuple[APIRouter, APIRouter]:
 
     # --- HTML pages ---
 
-    @router.get('/', response_class=HTMLResponse)
+    @html.get('/', response_class=HTMLResponse)
     async def dashboard(request: Request):
         stats = await recorder.get_stats()
         processors = drakkar_app.processors
@@ -265,7 +273,7 @@ def create_pages_router(deps: DebugDeps) -> tuple[APIRouter, APIRouter]:
         summary.sort(key=lambda s: s['partition'])
         return summary
 
-    @router.get('/partitions', response_class=HTMLResponse)
+    @html.get('/partitions', response_class=HTMLResponse)
     async def partitions(request: Request):
         summary = await _partitions_data()
         webapp_tile = await _build_webapp_tile()
@@ -286,7 +294,7 @@ def create_pages_router(deps: DebugDeps) -> tuple[APIRouter, APIRouter]:
         """Per-partition summary rows as JSON, sorted by partition."""
         return JSONResponse(await _partitions_data())
 
-    @router.get('/partitions/{partition_id}', response_class=HTMLResponse)
+    @html.get('/partitions/{partition_id}', response_class=HTMLResponse)
     async def partition_detail(
         request: Request,
         partition_id: int,
@@ -422,7 +430,7 @@ def create_pages_router(deps: DebugDeps) -> tuple[APIRouter, APIRouter]:
             'webapp_response_body': webapp_response_body,
         }
 
-    @router.get('/task/{task_id}', response_class=HTMLResponse)
+    @html.get('/task/{task_id}', response_class=HTMLResponse)
     async def task_detail(request: Request, task_id: str):
         detail = await _task_detail_data(task_id)
         return templates.TemplateResponse(
@@ -438,7 +446,7 @@ def create_pages_router(deps: DebugDeps) -> tuple[APIRouter, APIRouter]:
         """Single-task detail as JSON; ``:r…`` retry suffixes resolve to the base task."""
         return JSONResponse(await _task_detail_data(task_id))
 
-    @router.get('/history', response_class=HTMLResponse)
+    @html.get('/history', response_class=HTMLResponse)
     async def history(
         request: Request,
         partition: str | None = Query(default=None),
@@ -479,7 +487,7 @@ def create_pages_router(deps: DebugDeps) -> tuple[APIRouter, APIRouter]:
             },
         )
 
-    @router.get('/sinks', response_class=HTMLResponse)
+    @html.get('/sinks', response_class=HTMLResponse)
     async def sinks_page(request: Request):
         mgr = drakkar_app.sink_manager
         info = mgr.get_sink_info()
@@ -512,6 +520,20 @@ def create_pages_router(deps: DebugDeps) -> tuple[APIRouter, APIRouter]:
 
     # --- Top-level JSON APIs ---
 
+    def _build_dashboard_links() -> dict | None:
+        """The dashboard ``links`` payload, or ``None`` when nothing is configured.
+
+        Key presence is the feature flag (like ``webapp_tile``): the key
+        appears only when ``prometheus_url`` is configured or ``custom_links``
+        is non-empty. ``card_links`` / ``worker_links`` / ``cluster_links``
+        come from ``build_prometheus_links`` verbatim (empty containers when
+        only custom links are configured); ``custom_links`` passes the
+        configured dicts through unchanged.
+        """
+        if not config.prometheus_url and not config.custom_links:
+            return None
+        return {**deps.build_prometheus_links(), 'custom_links': config.custom_links}
+
     @router.get('/api/dashboard')
     async def api_dashboard():
         """Dashboard data as JSON for JS refresh."""
@@ -541,7 +563,24 @@ def create_pages_router(deps: DebugDeps) -> tuple[APIRouter, APIRouter]:
         # presence as the feature flag without a separate boolean.
         if webapp_tile is not None:
             payload['webapp_tile'] = webapp_tile
+        # Same presence-as-flag convention for the Prometheus/custom links.
+        links = _build_dashboard_links()
+        if links is not None:
+            payload['links'] = links
         return JSONResponse(payload)
+
+    # v1-only contract endpoint (no legacy alias): worker identity + the
+    # one-line config summary for the SPA's debug-page banner.
+    @router.get('/api/v1/identity')
+    async def api_identity():
+        """Worker identity: ``{worker_id, cluster, config_summary}``."""
+        return JSONResponse(
+            {
+                'worker_id': drakkar_app._worker_id,
+                'cluster': drakkar_app._cluster_name or None,
+                'config_summary': drakkar_app.config_summary,
+            }
+        )
 
     @router.get('/api/sinks')
     async def api_sinks():

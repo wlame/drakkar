@@ -23,6 +23,7 @@ Helpers that are pure functions (no closure over ``drakkar_app`` or
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import threading
 from collections.abc import Sequence
@@ -438,6 +439,7 @@ def create_debug_app(
     config: DebugConfig,
     recorder: EventRecorder,
     drakkar_app: DrakkarApp,
+    ui_root: Path | None = None,
 ) -> FastAPI:
     """Create the FastAPI debug application.
 
@@ -445,6 +447,14 @@ def create_debug_app(
     helpers, then mounts the four route modules onto the app. Each route
     module receives a single ``DebugDeps`` parameter that exposes shared
     state and helpers.
+
+    ``ui_root`` is the resolved drakkar-ui bundle directory (SPA mode, from
+    ``ui.enabled``): the Jinja page routes are dropped and a catch-all
+    registered LAST serves the SPA — bundle files as-is, ``index.html`` with
+    a 200 for every unknown path — auth-gated exactly like the HTML pages.
+    The probes, ``/ws``, all ``/api*`` JSON routes (legacy and ``/api/v1``),
+    and ``/debug/download/{filename}`` keep precedence over the catch-all.
+    ``None`` (default) keeps the built-in server-rendered HTML pages.
     """
     # Local imports break a routes_* → server module cycle: each routes
     # module imports ``DebugDeps`` from this module, and this module
@@ -454,6 +464,7 @@ def create_debug_app(
     from drakkar.debug.routes_debug import create_debug_router
     from drakkar.debug.routes_live import create_live_router
     from drakkar.debug.routes_pages import create_pages_router
+    from drakkar.debug.routes_spa import create_spa_router
 
     app = FastAPI(title='Drakkar Debug', docs_url=None, redoc_url=None)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -484,16 +495,18 @@ def create_debug_app(
     templates.env.globals['kafka_ui_cluster'] = drakkar_app._config.kafka.ui_cluster_name  # ty: ignore[invalid-assignment]
 
     # Mount the four route modules. Order doesn't matter for correctness
-    # (FastAPI matches by path), but grouping reads naturally as
+    # among them (FastAPI matches by path), but grouping reads naturally as
     # pages → live → debug → cache. Only leaf routers land here — the
     # /api/v1 alias walk below cannot see through nested include_router
-    # calls on newer FastAPI.
-    pages_public, pages_gated = create_pages_router(deps)
+    # calls on newer FastAPI. In SPA mode (``ui_root``) the Jinja page
+    # routes are dropped so the catch-all below owns the page surface.
+    include_html = ui_root is None
+    pages_public, pages_gated = create_pages_router(deps, include_html=include_html)
     routers = (
         pages_public,
         pages_gated,
-        create_live_router(deps),
-        create_debug_router(deps),
+        create_live_router(deps, include_html=include_html),
+        create_debug_router(deps, include_html=include_html),
         create_cache_router(deps),
     )
     for router in routers:
@@ -501,6 +514,11 @@ def create_debug_app(
 
     # Contract v1: every legacy JSON route is also served under /api/v1.
     register_v1_aliases(app, routers)
+
+    # SPA catch-all LAST: Starlette matches in registration order, so every
+    # route above (probes, /ws, /api*, downloads) keeps precedence.
+    if ui_root is not None:
+        app.include_router(create_spa_router(deps, ui_root))
 
     return app
 
@@ -529,6 +547,7 @@ class DebugServer:
             self._config,
             self._recorder,
             self._drakkar_app,
+            ui_root=await self._resolve_ui_root(),
         )
         uvi_config = uvicorn.Config(
             app=fastapi_app,
@@ -544,6 +563,32 @@ class DebugServer:
         )
         self._thread.start()
         await logger.ainfo('debug_server_started', category='debug', port=self._config.port)
+
+    async def _resolve_ui_root(self) -> Path | None:
+        """Resolve the drakkar-ui bundle directory when ``ui.enabled``, else ``None``.
+
+        The resolution (cache → GitHub fetch → embedded fallback) runs in a
+        worker thread so a slow network fetch never blocks the main loop; it
+        is bounded internally by ``UI_RESOLVE_TIMEOUT_SECONDS`` and is never
+        fatal — any failure leaves the server on its built-in HTML pages.
+        """
+        from drakkar.config import UIConfig
+        from drakkar.uihost import resolve
+
+        ui_cfg = getattr(self._drakkar_app._config, 'ui', None)
+        # The isinstance check keeps MagicMock-configured test apps (whose
+        # attribute chain is truthy) from triggering a real resolution.
+        if not isinstance(ui_cfg, UIConfig) or not ui_cfg.enabled:
+            return None
+        try:
+            bundle = await asyncio.to_thread(resolve, ui_cfg)
+        except Exception as exc:
+            await logger.awarning('ui_resolve_failed', category='ui', error=str(exc))
+            return None
+        if bundle is None:
+            return None
+        await logger.ainfo('ui_bundle_resolved', category='ui', source=bundle.source, dir=str(bundle.root))
+        return bundle.root
 
     async def stop(self) -> None:
         if self._server:
