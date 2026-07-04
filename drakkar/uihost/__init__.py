@@ -39,6 +39,7 @@ from drakkar.uihost.fetch import (
     GITHUB_API_BASE,
     GITHUB_DOWNLOAD_BASE,
     FetchError,
+    dir_has_index,
     fetch_latest_version,
     fetch_release,
 )
@@ -102,9 +103,8 @@ def cache_root(config: UIConfig) -> Path:
     return default_cache_root()
 
 
-def dir_has_index(directory: Path) -> bool:
-    """Whether ``directory`` looks like a usable UI bundle (has ``index.html``)."""
-    return (directory / 'index.html').is_file()
+# dir_has_index lives in fetch.py (the installer needs it too); re-exported
+# here as part of the module's public surface.
 
 
 def newest_cached_version(root: Path) -> str | None:
@@ -198,16 +198,28 @@ def resolve(
             if dir_has_index(bundle_dir):
                 logger.info('ui_served_from_stale_cache', category='ui', version=version)
                 return ResolvedBundle(root=bundle_dir, source='cache')
-    else:
-        # 3. No version resolvable at all (nothing pinned and the latest
-        # lookup failed or fetching is disabled): serve the newest
-        # previously cached version before giving up.
+        # 3. The pinned version, when the update check resolved a newer tag
+        # that could not be fetched: a cached pin is contract-guaranteed and
+        # beats every further fallback.
+        if config.pinned_version and config.pinned_version != version:
+            pinned_dir = root / config.pinned_version
+            if dir_has_index(pinned_dir):
+                logger.info('ui_served_from_cache', category='ui', version=config.pinned_version, dir=str(pinned_dir))
+                return ResolvedBundle(root=pinned_dir, source='cache')
+
+    # 4. Newest cached bundle — for UNPINNED workers only: with no pin there
+    # is no contract guarantee to protect, so the last-fetched release beats
+    # the embedded placeholder both when no version was resolvable (offline
+    # restart) and when the resolved latest failed to download. A worker
+    # whose PIN cannot be fetched deliberately does NOT fall back to a
+    # different cached version.
+    if not config.pinned_version:
         newest = newest_cached_version(root)
         if newest is not None:
             logger.info('ui_served_from_cache', category='ui', version=newest, dir=str(root / newest))
             return ResolvedBundle(root=root / newest, source='cache')
 
-    # 4. Embedded placeholder fallback.
+    # 5. Embedded placeholder fallback.
     if dir_has_index(EMBEDDED_BUNDLE_DIR):
         logger.info('ui_served_from_embedded_fallback', category='ui')
         return ResolvedBundle(root=EMBEDDED_BUNDLE_DIR, source='embedded')

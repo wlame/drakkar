@@ -600,3 +600,108 @@ def test_resolved_bundle_is_frozen(tmp_path):
     bundle = ResolvedBundle(root=tmp_path, source='cache')
     with pytest.raises(AttributeError):
         bundle.root = tmp_path / 'other'  # ty: ignore[invalid-assignment]
+
+
+def test_install_bundle_keeps_winners_copy(tmp_path):
+    # Shared-cache convergence: a worker finishing extraction after another
+    # already installed the same (immutable) tag discards its staging copy —
+    # a valid dest_dir is never replaced.
+    from drakkar.uihost.fetch import _install_bundle
+
+    dest = tmp_path / 'v1.0.0'
+    dest.mkdir()
+    (dest / 'index.html').write_text('winner')
+    incoming = tmp_path / 'v1.0.0.abcd.incoming'
+    incoming.mkdir()
+    (incoming / 'index.html').write_text('loser')
+
+    _install_bundle(incoming, dest)
+
+    assert (dest / 'index.html').read_text() == 'winner'
+    assert not incoming.exists()
+
+
+def test_install_bundle_replaces_invalid_leftover(tmp_path):
+    from drakkar.uihost.fetch import _install_bundle
+
+    dest = tmp_path / 'v1.0.0'
+    dest.mkdir()
+    (dest / 'half-extracted.js').write_text('junk')  # no index.html
+    incoming = tmp_path / 'v1.0.0.abcd.incoming'
+    incoming.mkdir()
+    (incoming / 'index.html').write_text('fresh')
+
+    _install_bundle(incoming, dest)
+
+    assert (dest / 'index.html').read_text() == 'fresh'
+    assert not incoming.exists()
+
+
+def test_resolve_serves_cache_when_fetch_loses_race(stub_github, tmp_path, monkeypatch):
+    # Thundering-herd simulation: our download fails, but by the time resolve
+    # rechecks, "another worker" has installed the wanted version into the
+    # shared cache. The loser must serve that copy instead of degrading.
+    import drakkar.uihost as uihost_mod
+
+    cfg = ui_config(tmp_path, pinned_version='v1.0.0')
+    dest = tmp_path / 'cache' / 'v1.0.0'
+
+    def racing_download(url, out, *, deadline=None):
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / 'index.html').write_text('RACE-WINNER')
+        raise uihost_mod.FetchError('download interrupted')
+
+    monkeypatch.setattr('drakkar.uihost.fetch._download', racing_download)
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'cache'
+    assert (bundle.root / 'index.html').read_text() == 'RACE-WINNER'
+
+
+def test_resolve_unpinned_fetch_failure_falls_back_to_newest_cached(stub_github, tmp_path):
+    # An unpinned worker whose resolved-latest download fails serves the
+    # newest cached release, not the placeholder.
+    stub_github.routes['/wlame/drakkar-ui/releases/latest'] = (
+        302,
+        f'{stub_github.base_url}/wlame/drakkar-ui/releases/tag/v9.0.0',
+        b'',
+    )  # latest resolves, but v9.0.0 has no asset routes at all
+    seed_cache(tmp_path, 'v1.0.0')
+    cfg = ui_config(tmp_path, pinned_version='', check_update=True)
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'cache'
+    assert bundle.root == tmp_path / 'cache' / 'v1.0.0'
+
+
+def test_resolve_pinned_fetch_failure_stays_strict(stub_github, tmp_path):
+    # A pin that cannot be fetched must NOT serve a different cached version.
+    seed_cache(tmp_path, 'v1.0.0')
+    cfg = ui_config(tmp_path, pinned_version='v9.0.0')
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'embedded'
+
+
+def test_resolve_pinned_cached_beats_unfetchable_latest(stub_github, tmp_path):
+    # Pinned v1 cached; update check resolves v2 which cannot be fetched →
+    # the cached pin serves.
+    stub_github.routes['/wlame/drakkar-ui/releases/latest'] = (
+        302,
+        f'{stub_github.base_url}/wlame/drakkar-ui/releases/tag/v2.0.0',
+        b'',
+    )
+    seed_cache(tmp_path, 'v1.0.0')
+    cfg = ui_config(tmp_path, pinned_version='v1.0.0', check_update=True)
+
+    bundle = resolve(cfg, api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'cache'
+    assert bundle.root == tmp_path / 'cache' / 'v1.0.0'

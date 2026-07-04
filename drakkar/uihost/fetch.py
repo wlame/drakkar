@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import tarfile
 import tempfile
@@ -46,6 +47,11 @@ _DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 
 class FetchError(Exception):
     """A UI bundle could not be fetched, validated, or extracted."""
+
+
+def dir_has_index(directory: Path) -> bool:
+    """Whether ``directory`` looks like a usable UI bundle (has ``index.html``)."""
+    return (directory / 'index.html').is_file()
 
 
 def fetch_latest_version(
@@ -125,12 +131,13 @@ def fetch_release(
     never served.
     """
     dest_dir.parent.mkdir(parents=True, exist_ok=True)
-    # Per-process staging name: concurrent workers fetching the same missing
-    # version into the shared cache must never delete or interleave each
-    # other's in-flight extraction. The '.incoming' suffix is what
+    # The staging dir carries a random token so concurrent workers fetching
+    # the same missing version into a shared cache never delete or interleave
+    # each other's in-flight extraction. A pid would NOT be unique here:
+    # containerized workers are all pid 1, and the cache is shared across
+    # containers by design. The '.incoming' suffix is what
     # newest_cached_version (both backends) filters on.
-    incoming = dest_dir.with_name(f'{dest_dir.name}.{os.getpid()}.incoming')
-    shutil.rmtree(incoming, ignore_errors=True)
+    incoming = dest_dir.with_name(f'{dest_dir.name}.{secrets.token_hex(4)}.incoming')
     direct_url = f'{download_base}/{repo}/releases/download/{version}/{bundle_asset_name(version)}'
     try:
         # Buffer the tarball to a temp file so the download cap applies
@@ -147,10 +154,48 @@ def fetch_release(
     except BaseException:
         shutil.rmtree(incoming, ignore_errors=True)
         raise
-    # Swap into place. rmtree + rename is not perfectly atomic, but the
-    # window is tiny and a concurrent reader sees either the old or new tree.
-    shutil.rmtree(dest_dir, ignore_errors=True)
-    incoming.replace(dest_dir)
+    _install_bundle(incoming, dest_dir)
+
+
+def _install_bundle(incoming: Path, dest_dir: Path) -> None:
+    """Move a validated staging dir into place.
+
+    Release tags are immutable, so when several workers race to install the
+    same version the content is identical — the invariant here is that a
+    VALID ``dest_dir`` is never deleted or replaced, only an invalid/partial
+    one: whoever installs first wins, and everyone else discards their
+    staging copy and reports success.
+    """
+    if dir_has_index(dest_dir):
+        shutil.rmtree(incoming, ignore_errors=True)  # another worker already installed it
+        return
+    try:
+        incoming.rename(dest_dir)
+        return
+    except OSError:
+        pass
+    # Rename failed — either dest_dir appeared concurrently (valid → we lost
+    # the race, fine) or an invalid leftover occupies the name: move it aside
+    # (never delete in place — it could become valid mid-check) and retry once.
+    if dir_has_index(dest_dir):
+        shutil.rmtree(incoming, ignore_errors=True)
+        return
+    trash = dest_dir.with_name(f'{dest_dir.name}.{secrets.token_hex(4)}.incoming')
+    try:
+        dest_dir.rename(trash)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        shutil.rmtree(incoming, ignore_errors=True)
+        raise
+    shutil.rmtree(trash, ignore_errors=True)
+    try:
+        incoming.rename(dest_dir)
+    except OSError:
+        shutil.rmtree(incoming, ignore_errors=True)
+        if dir_has_index(dest_dir):
+            return  # lost the final race to a valid install
+        raise
 
 
 def _download_via_api(
