@@ -4591,3 +4591,30 @@ async def test_readyz_with_auth_token_configured_still_accessible(debug_config, 
 
     assert resp.status_code == 200
     assert resp.json() == {'status': 'ready'}
+
+
+class TestBuiltinUIBadge:
+    """The built-in fallback pages label themselves so operators can tell
+    them apart from a served drakkar-ui release (which shows its version in
+    its own header instead)."""
+
+    async def test_builtin_pages_show_the_badge(self, mock_recorder, mock_app):
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp')
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/')
+        assert resp.status_code == 200
+        assert 'built-in UI' in resp.text
+
+    async def test_spa_mode_does_not_show_the_badge(self, tmp_path, mock_recorder, mock_app):
+        bundle = tmp_path / 'v1.0.0'
+        bundle.mkdir()
+        (bundle / 'index.html').write_text('<html><body>spa</body></html>')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp')
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app, ui_root=bundle)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/')
+        assert resp.status_code == 200
+        assert 'built-in UI' not in resp.text
