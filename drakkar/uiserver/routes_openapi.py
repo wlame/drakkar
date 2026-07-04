@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 import yaml
 from fastapi import APIRouter, Depends, Request
@@ -80,7 +81,11 @@ def create_openapi_router(deps: UIDeps) -> APIRouter:
     async def docs_page(request: Request) -> HTMLResponse:
         """Self-hosted Swagger UI over the vendored spec."""
         token = request.query_params.get('token', '')
-        token_qs = f'?token={token}' if token else ''
+        # Strict percent-encoding (safe='') neutralizes every character
+        # that could break out of the URL attribute or the inline JS
+        # string — without it the reflected token would be an XSS vector
+        # on deployments that run with auth disabled.
+        token_qs = f'?token={quote(token, safe="")}' if token else ''
         return HTMLResponse(_DOCS_HTML.format(token_qs=token_qs))
 
     @router.get('/docs/swagger-ui-bundle.js')

@@ -111,3 +111,12 @@ async def test_docs_gated_when_token_configured():
         assert (await client.get('/api/v1/openapi.json')).status_code == 401
         ok = await client.get('/docs', params={'token': 'secret-123'})
         assert ok.status_code == 200
+
+
+async def test_docs_page_escapes_reflected_token():
+    """A hostile ?token= value must not break out of the HTML/JS context."""
+    transport = ASGITransport(app=_stub_app())
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        page = await client.get('/docs', params={'token': '"><script>alert(1)</script>'})
+    assert '<script>alert(1)</script>' not in page.text
+    assert 'token=%22%3E%3Cscript%3Ealert%281%29%3C%2Fscript%3E' in page.text
