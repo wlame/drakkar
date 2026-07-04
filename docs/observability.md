@@ -1,6 +1,6 @@
 # Observability
 
-Drakkar provides four integrated observability layers: Prometheus metrics for alerting and dashboards, structured logging for event streams, a browser-based debug UI for real-time inspection, and a SQLite flight recorder for post-mortem analysis. All four are enabled by default and work together -- the debug UI reads from the flight recorder and links out to Prometheus graphs. See [Configuration](configuration.md) for the full YAML reference.
+Drakkar provides four integrated observability layers: Prometheus metrics for alerting and dashboards, structured logging for event streams, a browser-based operator UI for real-time inspection, and a SQLite flight recorder for post-mortem analysis. All four are enabled by default and work together -- the UI reads from the flight recorder and links out to Prometheus graphs. See [Configuration](configuration.md) for the full YAML reference.
 
 ---
 
@@ -102,7 +102,7 @@ metrics:
 
 #### Recorder
 
-Emitted only when [`debug.enabled=true`](configuration.md#debug-flight-recorder-debug). Track flight-recorder health -- buffer depth, drops under load, and flush latency. Alert on sustained non-zero `dropped_events_total` or p99 `flush_duration_seconds` exceeding `flush_interval_seconds`.
+Emitted only when [`ui.enabled=true`](configuration.md#ui-flight-recorder-ui). Track flight-recorder health -- buffer depth, drops under load, and flush latency. Alert on sustained non-zero `dropped_events_total` or p99 `flush_duration_seconds` exceeding `flush_interval_seconds`.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
@@ -158,11 +158,11 @@ Emitted only when [`webapp.enabled=true`](webapp.md). Track per-client request v
 | `drakkar_uncommitted_offsets_at_stop` | Gauge | -- | Snapshot at `_shutdown` start: count of Kafka offsets that were registered in-flight but not yet committed when shutdown began. Summed across all assigned partitions via each `OffsetTracker.pending_count`. Always set (even to `0`) so the gauge reflects the most recent shutdown rather than a stale prior value. |
 | `drakkar_inflight_at_stop` | Gauge | -- | Snapshot at `_shutdown` start: number of in-flight executor subprocesses (`ExecutorPool.active_count`) running user code when shutdown began. Always set, including to `0`. |
 | `drakkar_drain_timeout_hit_total` | Counter | -- | Incremented each time `_drain_all_processors` exceeded `executor.drain_timeout_seconds` before all partition processors finished draining. A nonzero rate signals workers being killed mid-flight — either the timeout is too tight or handlers are stuck. |
-| `drakkar_suspected_oom_kills_total` | Counter | -- | Incremented at startup when the previous run left a watchdog file at `{debug.db_dir}/{worker_id}.watchdog` whose body lacked the `CLEAN_EXIT` marker. That signature means the prior process was killed before reaching the normal shutdown path — typically OOM-killer SIGKILL, kubelet pod-pressure eviction, or kernel panic. See *OOM / SIGKILL detection* below. |
+| `drakkar_suspected_oom_kills_total` | Counter | -- | Incremented at startup when the previous run left a watchdog file at `{ui.recorder.db_dir}/{worker_id}.watchdog` whose body lacked the `CLEAN_EXIT` marker. That signature means the prior process was killed before reaching the normal shutdown path — typically OOM-killer SIGKILL, kubelet pod-pressure eviction, or kernel panic. See *OOM / SIGKILL detection* below. |
 
 #### OOM / SIGKILL detection
 
-Drakkar writes a small **watchdog file** at `{debug.db_dir}/{worker_id}.watchdog`
+Drakkar writes a small **watchdog file** at `{ui.recorder.db_dir}/{worker_id}.watchdog`
 during startup and removes it as the last step of a clean shutdown. The
 file's presence and contents at the next startup let the framework
 distinguish three termination modes:
@@ -185,8 +185,8 @@ so the OOM counter `drakkar_suspected_oom_kills_total` is reserved for
 the genuinely-empty-body signature: process killed before reaching
 `mark_clean`.
 
-The file lives in `debug.db_dir` (default `/tmp`), the same directory
-used by the recorder and cache engine. If `debug.db_dir` is empty —
+The file lives in `ui.recorder.db_dir` (default `/tmp`), the same directory
+used by the recorder and cache engine. If `ui.recorder.db_dir` is empty —
 fully disk-less deployment — the watchdog is **disabled** for that run
 (no file written, no metric increment), since the alternative of
 falling back to the worker's CWD risks both breaking the "no on-disk
@@ -220,7 +220,7 @@ from prometheus_client import Counter, Histogram
 from drakkar.handler import BaseDrakkarHandler
 
 class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
-    # These are automatically discovered and shown in the debug UI
+    # These are automatically discovered and shown in the operator UI
     items_parsed = Counter(
         'myapp_items_parsed_total',
         'Total items parsed from executor output',
@@ -237,7 +237,7 @@ class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
         ...
 ```
 
-User metrics are displayed alongside framework metrics on the debug UI's metrics page (`/debug`), tagged with source `user` to distinguish them from the built-in `drakkar_*` metrics.
+User metrics are displayed alongside framework metrics on the UI's metrics page (`/debug`), tagged with source `user` to distinguish them from the built-in `drakkar_*` metrics.
 
 ### Scrape Configuration
 
@@ -380,12 +380,12 @@ Output (JSON format):
 
 ---
 
-## Debug UI
+## Operator UI
 
-The debug web UI is a FastAPI application served in a separate thread so that CPU-intensive executor tasks on the main event loop do not block the interface. Enabled by default on port 8080.
+The operator web UI is a FastAPI application served in a separate thread so that CPU-intensive executor tasks on the main event loop do not block the interface. Enabled by default on port 8080.
 
 ```yaml
-debug:
+ui:
   enabled: true
   port: 8080
 ```
@@ -400,8 +400,8 @@ The landing page with a high-level overview of worker health:
 - **Pool utilization** -- active tasks vs. max workers.
 - **Event counters** -- consumed, completed, failed, produced, committed totals.
 - **Consumer lag** -- total lag across all assigned partitions.
-- **Custom links** -- configurable via `debug.custom_links` with template variables (`{worker_id}`, `{cluster_name}`, `{metrics_port}`, `{debug_port}`).
-- **Prometheus graph links** -- when `debug.prometheus_url` is configured, each stat card links directly to a Prometheus graph filtered to this worker. Worker-scoped links are grouped by category (Throughput, Latency, Health, Errors). Cluster-wide links appear when `debug.prometheus_cluster_label` is set.
+- **Custom links** -- configurable via `ui.custom_links` with template variables (`{worker_id}`, `{cluster_name}`, `{metrics_port}`, `{debug_port}`).
+- **Prometheus graph links** -- when `ui.prometheus_url` is configured, each stat card links directly to a Prometheus graph filtered to this worker. Worker-scoped links are grouped by category (Throughput, Latency, Health, Errors). Cluster-wide links appear when `ui.prometheus_cluster_label` is set.
 
 #### `/partitions` -- Partition Overview
 
@@ -456,7 +456,7 @@ Multi-purpose debug page with:
     - **By partition:offset** -- enter `partition:offset` (e.g., `5:42`) to trace a message through the full pipeline.
     - **By label** -- search inputs are auto-generated for each [label](handler.md#task-labels) key found in the database (e.g., `request_id`, `pattern`). Enter a value to find all tasks and events matching that label. Useful for tracing a specific request across partitions and workers.
     Both modes search the current worker first, then other live workers in the cluster, then rotated historical DB files.
-- **Database management** -- list all debug database files with event counts and sizes, download individual files, merge multiple files into one, and view per-file breakdown by event type.
+- **Database management** -- list all recorder database files with event counts and sizes, download individual files, merge multiple files into one, and view per-file breakdown by event type.
 - **Message Probe** -- replay a single pasted message through the handler pipeline (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with **zero footprint**: no sink writes, no offset commits, no event-recorder rows, no cache writes, no peer sync. The report shows every task's stdout/stderr/exit code, each hook's returned `CollectResult`, the payloads that *would have been* written to each sink, every cache call, a timeline waterfall, and any exceptions raised at any stage. Posts to `/api/debug/probe` with a JSON body containing the message's `value` (and optional `key`, `partition`, `offset`, `topic`, `timestamp`, `use_cache`).
 
 #### `/task/{id}` -- Task Detail
@@ -472,26 +472,37 @@ Detailed view of a single task's lifecycle:
 - **Source offsets** -- which Kafka offsets this task covers
 - **Event timeline** -- chronological list of all events for this task_id (started, completed/failed, task_complete)
 
+### API
+
+The pages above are backed by a JSON/WebSocket API under `/api/v1` -- the same contract the Go backend implements. Endpoints useful beyond the pages themselves:
+
+- `GET /api/v1/identity` -- worker identity for the SPA and external tooling. Since contract v1.2 the response also carries `backend` (`"python"` or `"go"`), `backend_version`, `ui_version`, and `ui_source`.
+- `GET /api/v1/openapi.json` -- the vendored OpenAPI 3.1 spec describing the `/api/v1` surface. Served from `drakkar/uiserver/openapi.yaml`; the canonical source is `docs/openapi-v1.yaml` in the drakkar-ui repo, and `tests/test_openapi_parity.py` pins the served route table to the spec.
+- `GET /docs` -- a self-hosted Swagger UI over that spec (no CDN assets).
+
+Both the spec and Swagger UI endpoints are auth-gated exactly like the rest of their route class when `ui.auth_token` is set.
+
 ---
 
 ## Flight Recorder
 
-The flight recorder is a SQLite-based event log that captures the full processing lifecycle. It provides the data backing for the debug UI and survives worker restarts (within retention limits).
+The flight recorder is a SQLite-based event log that captures the full processing lifecycle. It provides the data backing for the operator UI and survives worker restarts (within retention limits).
 
 ### Configuration
 
 ```yaml
-debug:
-  db_dir: /tmp                      # Directory for SQLite files; '' disables disk persistence
-  store_events: true                # Write processing events to the events table
-  store_config: true                # Write worker config (enables autodiscovery)
-  store_state: true                 # Periodic state snapshots
-  flush_interval_seconds: 5         # Buffer flush interval
-  max_buffer: 50000                 # In-memory event buffer size
-  rotation_interval_minutes: 60     # Rotate to a new DB file every N minutes
-  retention_hours: 24               # Delete DB files older than this
-  retention_max_events: 100000      # Cap total events across DB files
-  store_output: true                # Include stdout/stderr in event records
+ui:
+  recorder:
+    db_dir: /tmp                      # Directory for SQLite files; '' disables disk persistence
+    store_events: true                # Write processing events to the events table
+    store_config: true                # Write worker config (enables autodiscovery)
+    store_state: true                 # Periodic state snapshots
+    flush_interval_seconds: 5         # Buffer flush interval
+    max_buffer: 50000                 # In-memory event buffer size
+    rotation_interval_minutes: 60     # Rotate to a new DB file every N minutes
+    retention_hours: 24               # Delete DB files older than this
+    retention_max_events: 100000      # Cap total events across DB files
+    store_output: true                # Include stdout/stderr in event records
 ```
 
 ### Database Schema
@@ -544,7 +555,7 @@ Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`,
     migration runner that exists only to add three optional columns.
 
     **On upgrade**, operators delete pre-existing per-worker recorder
-    DBs in `debug.db_dir` before restarting workers. New rotation-cycle
+    DBs in `ui.recorder.db_dir` before restarting workers. New rotation-cycle
     DBs include the new columns automatically.
 
     The framework detects the schema mismatch at startup: the recorder
@@ -564,7 +575,7 @@ Single-row table written at startup (and after each rotation). Contains the full
 This table is what enables the worker autodiscovery feature -- other workers scan for it in shared `db_dir`.
 
 !!! warning "Secrets are redacted before they reach disk"
-    The recorder SQLite file is downloadable via the debug UI. To avoid
+    The recorder SQLite file is downloadable via the operator UI. To avoid
     publishing credentials through that path, three redactions are applied
     before any env data is written:
 
@@ -581,7 +592,7 @@ This table is what enables the worker autodiscovery feature -- other workers sca
       the `task_started` event is recorded. The original task object is
       not mutated; only the recorded copy is redacted (the subprocess
       still receives the real values). This closes the last env-related
-      leak into the debug UI.
+      leak into the UI.
 
     The contract is "aggressive redact, accept false positives":
     `PASSWORD_RESET_URL` is redacted because it matches `*PASSWORD*` even
@@ -645,7 +656,7 @@ database.
 
 ### Merging Databases
 
-The debug UI's database section (`/debug`) allows selecting multiple
+The UI's database section (`/debug`) allows selecting multiple
 database files and merging them into a single file. This is useful for:
 
 - **Post-mortem analysis** -- combine files from multiple workers and
@@ -669,11 +680,12 @@ appears in the database list and can be downloaded.
 Drakkar provides four independent duration thresholds that control what gets logged, broadcast, and stored. These are essential for high-throughput workers where fast tasks would otherwise flood every observability channel.
 
 ```yaml
-debug:
+ui:
   log_min_duration_ms: 500
   ws_min_duration_ms: 500
-  event_min_duration_ms: 0
-  output_min_duration_ms: 500
+  recorder:
+    event_min_duration_ms: 0
+    output_min_duration_ms: 500
 ```
 
 ### `log_min_duration_ms` (default: 500)
@@ -708,7 +720,7 @@ executor pool, sinks, and flight recorder work fine with a local
 directory.
 
 You can also disable the flight recorder database entirely by setting
-`db_dir: ""` (empty string). The debug web UI and WebSocket live
+`db_dir: ""` (empty string). The web UI and WebSocket live
 streaming still work (events are held in memory only), but these
 features are disabled: event history (`/history`), message trace,
 label search, database download/merge, periodic task history, and
@@ -716,7 +728,7 @@ worker autodiscovery. The live pipeline view (`/live`) and dashboard
 counters continue working since they read from in-memory state.
 
 When workers share the same `db_dir` (e.g., a shared NFS mount,
-Kubernetes PVC, or Docker volume), several additional debug features
+Kubernetes PVC, or Docker volume), several additional UI features
 become available:
 
 - **Worker switcher** -- jump between worker UIs from a dropdown in the
@@ -728,7 +740,7 @@ become available:
 - **Cluster-wide database browser** -- see all workers' DB files in
   one view, sorted and filtered
 
-Without a shared `db_dir`, each worker's debug UI only sees its own
+Without a shared `db_dir`, each worker's UI only sees its own
 data. All other functionality (processing, sinks, metrics, logging)
 works identically.
 
@@ -738,10 +750,10 @@ works identically.
    (e.g., `worker-1-2026-04-08__14_30_00.db`) and maintains a
    `{worker_name}-live.db` symlink pointing to the current file.
 2. Workers with `store_config: true` (default) write their
-   configuration -- worker name, IP address, debug port, cluster
+   configuration -- worker name, IP address, UI port, cluster
    name, Kafka settings -- to the `worker_config` table at startup
    and after each DB rotation.
-3. The debug UI scans `db_dir` for `*-live.db` symlinks belonging
+3. The UI server scans `db_dir` for `*-live.db` symlinks belonging
    to other workers.
 4. For each live symlink, the UI reads `worker_config` to get the
    worker's name, address, and cluster membership.
@@ -753,9 +765,9 @@ works identically.
 
 ### Worker Switcher
 
-The debug UI navigation bar includes a worker dropdown that lists all
+The UI navigation bar includes a worker dropdown that lists all
 discovered workers, grouped by cluster. Clicking a worker navigates
-to its debug UI (using `debug_url` if configured, otherwise
+to its UI (using `ui.public_url` if configured, otherwise
 `http://{ip_address}:{debug_port}/`). The dropdown refreshes every
 10 seconds.
 
@@ -765,10 +777,11 @@ The minimal config for autodiscovery:
 
 ```yaml
 # all workers must share the same db_dir path
-debug:
-  db_dir: "/shared"        # mount the same volume on all workers
-  store_config: true       # default, writes worker_config table
-  # optional: set cluster_name to group workers
+ui:
+  recorder:
+    db_dir: "/shared"      # mount the same volume on all workers
+    store_config: true     # default, writes worker_config table
+# optional: set cluster_name to group workers
 cluster_name: "my-cluster"
 ```
 
@@ -776,13 +789,13 @@ In Kubernetes, use a shared PVC:
 
 ```yaml
 volumes:
-  - name: debug-shared
+  - name: recorder-shared
     persistentVolumeClaim:
-      claimName: drakkar-debug
+      claimName: drakkar-recorder
 
 # mount on all worker pods at the same path
 volumeMounts:
-  - name: debug-shared
+  - name: recorder-shared
     mountPath: /shared
 ```
 

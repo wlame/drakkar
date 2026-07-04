@@ -44,13 +44,13 @@ sync (`drakkar/cache/`).
 
 | surface | module | default | purpose |
 |---|---|---|---|
-| Debug UI | `drakkar/debug/` | `:8080` | operator UI + `/api/v1` JSON contract + `/ws` + probes |
+| UI server | `drakkar/uiserver/` | `:8080` | operator UI + `/api/v1` JSON contract + `/ws` + probes |
 | Webapp | `drakkar/webapp/` | `:8090` | opt-in synchronous ingress: one `POST /process` route through the same handler pipeline |
 | Metrics | `drakkar/metrics.py` | `:9090` | raw Prometheus exporter (not FastAPI) |
 
-Debug-UI facts that save reading time:
+UI-server facts that save reading time:
 
-- Route modules (`routes_pages/live/debug/cache/spa.py`) are factories
+- Route modules (`routes_pages/live/debug/cache/openapi/spa.py`) are factories
   returning **leaf APIRouters**; `server.py` includes them and then walks the
   routers to register every legacy `/api/...` route under `/api/v1/...` too
   (`register_v1_aliases`). **Do not nest routers behind a combining
@@ -58,28 +58,35 @@ Debug-UI facts that save reading time:
   walk (and startup guard) would see no routes. New v1-only endpoints (e.g.
   `GET /api/v1/identity`) are registered directly with the `/api/v1` prefix
   and get no legacy alias.
-- Auth is one optional bearer token for everything (`debug.auth_token`;
+- `GET /api/v1/identity` reports `backend` ("python"|"go"), `backend_version`,
+  `ui_version`, `ui_source` (contract v1.2). `GET /api/v1/openapi.json` serves
+  the vendored OpenAPI 3.1 spec (`drakkar/uiserver/openapi.yaml`; canonical
+  source `drakkar-ui/docs/openapi-v1.yaml`) and `GET /docs` a self-hosted
+  Swagger UI (no CDN) — both auth-gated like their route class.
+  `tests/test_openapi_parity.py` pins the served route table to the spec.
+- Auth is one optional bearer token for everything (`ui.auth_token`;
   header or `?token=` for downloads/WS); probes and `/ws` self-manage
   (WS close codes 4401/4403).
-- The debug server runs on its own thread/event loop; **every read of live
+- The UI server runs on its own thread/event loop; **every read of live
   worker state goes through `dispatch_to_loop(...)`** to the main loop plus a
   dedicated SQLite reader connection. Follow that pattern for any new
   endpoint.
 - The Jinja templates (`drakkar/templates/`) are the legacy built-in UI and
-  the **UX reference** the SPA was ported from. When `ui.enabled` resolves a
-  bundle, `create_debug_app(..., ui_root=...)` skips the Jinja page routes
-  and mounts the SPA catch-all (`routes_spa.py`: files + History-API fallback
-  to `index.html`); `/api*`, `/ws`, probes, and `/debug/download/...` keep
-  precedence.
+  the **UX reference** the SPA was ported from. When `ui.release.enabled`
+  resolves a bundle, `create_ui_app(..., ui_root=...)` skips the Jinja page
+  routes and mounts the SPA catch-all (`routes_spa.py`: files + History-API
+  fallback to `index.html`); `/api*`, `/ws`, probes, and `/debug/download/...`
+  keep precedence.
 
 ## Decoupled UI hosting (`drakkar/uihost/`) — default ON
 
-At startup (when `debug.enabled`) the worker resolves the latest `drakkar-ui`
+At startup (when `ui.enabled`) the worker resolves the latest `drakkar-ui`
 GitHub release, caches it under `$XDG_CACHE_HOME/drakkar/ui/<tag>/`
 (≈ `~/.cache/drakkar/ui` — byte-identical to Go's `os.UserCacheDir` path on
 Linux, so co-located workers of BOTH backends share one download), and serves
-it. Config: `ui.*` in YAML / `DK_UI__*` env — identical keys, defaults, and
-semantics as the Go backend; change them in lockstep.
+it. Config: `ui.release.*` within the merged `ui` section in YAML /
+`DK_UI__RELEASE__*` env — identical keys, defaults, and semantics as the Go
+backend; change them in lockstep.
 
 Design points every agent should know:
 
@@ -93,7 +100,7 @@ Design points every agent should know:
   may have installed it) → cached pin → newest cached release (unpinned
   workers only — a pin guarantees contract compatibility) → keep the
   **built-in Jinja pages** (the embedded placeholder is never served while
-  Jinja pages exist; `DebugServer._resolve_ui_root` returns None for
+  Jinja pages exist; `UIServer._resolve_ui_root` returns None for
   `source == 'embedded'`).
 - **Shared-cache concurrency invariant**: a valid cached bundle is NEVER
   deleted or replaced (`fetch.py _install_bundle`). Staging dirs use random
@@ -108,14 +115,15 @@ Design points every agent should know:
 
 1. **Contract parity with drakkar-go** — config format (YAML + `DK_` env),
    DLQ JSON byte-stability, metric names, the config-summary one-liner
-   (`ui` section deliberately excluded from it), and the `/api/v1` shapes.
+   (renders `ui=on:8080`; the `ui.release.*` bundle-fetch settings are
+   deliberately excluded from it), and the `/api/v1` shapes.
 2. **Tooling**: `uv` only (never pip), `ruff` (format + lint, single quotes
    for code / double for user-facing text), `ty` for types, pytest
    (function-based, fixtures, parametrize). Coverage gate **75%**
    (`just cover`).
 3. **Tests are hermetic** — no real network. UI hosting defaults ON, so test
-   fixtures with a real `DrakkarConfig` must set `ui.enabled = False` (the
-   `mock_app` fixtures do) or use `tests/test_uihost.py`'s `StubGitHub` +
+   fixtures with a real `DrakkarConfig` must set `ui.release.enabled = False`
+   (the `mock_app` fixtures do) or use `tests/test_uihost.py`'s `StubGitHub` +
    `ui_config()` helpers.
 4. Errors are explicit; never silently swallowed. Structured logging via
    structlog (ECS-compatible).
@@ -131,7 +139,7 @@ just integration-up     # full docker harness (Kafka, sinks, 3 workers + load ge
 just integration-logs worker-1
 ```
 
-Integration workers expose the debug UI on `:8081..:8083`; the compose file
+Integration workers expose the UI on `:8081..:8083`; the compose file
 mounts the host UI cache so all workers share one bundle download.
 
 ## Gotchas
@@ -144,7 +152,7 @@ mounts the host UI cache so all workers share one bundle download.
   serves API routes only (`add_release`) or direct-web routes only
   (`add_direct_release`) to prove each path in isolation.
 - The webapp has NO health routes; readiness gates are enforced per-request
-  (503 envelopes). Kubernetes probes live on the debug server.
+  (503 envelopes). Kubernetes probes live on the UI server.
 - Retry visualization convention: archived task attempts get composite keys
   `task_id:r<start_ts>` — server and SPA both rely on it.
 - `pyproject.toml` ships `drakkar/uihost/bundle/**` as package data (the
@@ -161,7 +169,7 @@ drakkar/
   sinks/                   sink implementations + DLQ + circuit breaker
   cache/                   LWW SQLite cache + peer sync
   recorder/                flight recorder (SQLite event log)
-  debug/                   debug UI: server.py + routes_* + runner (message probe)
+  uiserver/                UI server: server.py + routes_* + runner (message probe)
   webapp/                  synchronous HTTP ingress pipeline
   uihost/                  drakkar-ui bundle fetch/cache/serve engine
   templates/               legacy Jinja UI (also the SPA's UX reference)

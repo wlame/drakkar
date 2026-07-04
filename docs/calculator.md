@@ -126,7 +126,7 @@ function drakkarCalc() {
   var worstWindowSec = windowSize * taskTimeout;
   var maxPollInterval = Math.max(300000, Math.min(900000, worstWindowSec * 1000 * 2));
 
-  // debug thresholds
+  // UI duration thresholds
   // ws_min_duration_ms: floor at 30ms — below that, fast task WS events
   // cause buggy timeline rendering and browser performance issues.
   var wsMin, eventMin, outputMin, logMin, storeOutput;
@@ -167,12 +167,13 @@ function drakkarCalc() {
   y += '  drain_timeout_seconds: ' + drainTimeout + '\n';
   y += '  backpressure_high_multiplier: ' + highMult + '\n';
   y += '  backpressure_low_multiplier: ' + lowMult + '\n';
-  y += '\ndebug:\n';
+  y += '\nui:\n';
   y += '  ws_min_duration_ms: ' + wsMin + '\n';
-  y += '  event_min_duration_ms: ' + eventMin + '\n';
-  y += '  output_min_duration_ms: ' + outputMin + '\n';
   y += '  log_min_duration_ms: ' + logMin + '\n';
-  y += '  store_output: ' + storeOutput + '\n';
+  y += '  recorder:\n';
+  y += '    event_min_duration_ms: ' + eventMin + '\n';
+  y += '    output_min_duration_ms: ' + outputMin + '\n';
+  y += '    store_output: ' + storeOutput + '\n';
 
   document.getElementById('calc-yaml').textContent = y;
   document.getElementById('calc-result').style.display = '';
@@ -294,7 +295,7 @@ understand how well the worker is performing and where to tune further.
 3. Check the tables above
 4. Adjust one parameter at a time, observe for another 10 minutes
 5. Typical iteration cycle: `max_executors` first, then `window_size`,
-   then debug thresholds last (they affect observability, not throughput)
+   then duration thresholds last (they affect observability, not throughput)
 
 ---
 
@@ -341,7 +342,7 @@ Fast tasks drain quickly and need less buffer. Slow tasks need more
 buffer but should not over-fetch (each message is minutes of work).
 The gap between high and low prevents rapid pause/resume cycling.
 
-### Debug thresholds
+### Duration thresholds
 
 All four `*_min_duration_ms` thresholds follow the same principle:
 **hide noise, preserve signal**. For fast workloads (p80 < 50ms), the

@@ -558,7 +558,7 @@ one.
 ## Events emitted by the recorder
 
 Each hook completion produces a distinct event in the flight recorder,
-so the debug UI, Prometheus queries, and downstream tooling can tell
+so the operator UI, Prometheus queries, and downstream tooling can tell
 the three stages apart:
 
 | Event | Fires after | Grain |
@@ -605,6 +605,6 @@ cd integration
 docker compose up --build
 ```
 
-Then watch the debug UIs at `:8081`–`:8083` — each request fans out to
+Then watch the worker UIs at `:8081`–`:8083` — each request fans out to
 several subprocess tasks, and exactly one aggregate row per request
 lands in the `hot_recent_matches` Postgres table.

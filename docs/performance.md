@@ -80,8 +80,8 @@ thread. The event loop handles:
 - [Prometheus metric](observability.md#prometheus-metrics) updates
 - [Offset tracking](handler.md#offset-commit-logic) and commits
 
-Note: the **[debug web server](observability.md#debug-ui) runs in a separate thread** with its own
-Uvicorn event loop (`DebugServer` uses `threading.Thread`). It does not
+Note: the **[UI server](observability.md#operator-ui) runs in a separate thread** with its own
+Uvicorn event loop (`UIServer` uses `threading.Thread`). It does not
 compete for time on the main event loop. Communication between them uses
 a thread-safe `queue.Queue` for WebSocket event broadcasting.
 
@@ -112,7 +112,7 @@ event loop IS the bottleneck**, not a comfortable cushion.
 worker tops out around 4k-8k tasks/sec regardless of how many cores are
 available. To push further, scale horizontally (more workers, each with
 its own event loop) or reduce per-task overhead (see the mitigations
-below and the [Recorder](#bottleneck-recorder-and-debug-ui) tuning
+below and the [Recorder](#bottleneck-recorder-and-ui) tuning
 knobs).
 
 The ceiling moves even lower when:
@@ -249,7 +249,7 @@ blocks the partition pipeline for the duration of that call.
 
 ---
 
-## Bottleneck: Recorder and Debug UI
+## Bottleneck: Recorder and UI
 
 With `event_min_duration_ms: 0` (default), every task writes events to
 the SQLite buffer. See [Duration Thresholds](observability.md#duration-thresholds) for the full reference on these settings. At 2,700 tasks/sec (80 workers, 30ms tasks), that's
@@ -257,7 +257,7 @@ the SQLite buffer. See [Duration Thresholds](observability.md#duration-threshold
 every `flush_interval_seconds`. The flush itself is a batch INSERT that
 takes ~10-50ms for 10,000 rows.
 
-The WebSocket broadcast is handled in the debug server's **separate
+The WebSocket broadcast is handled in the UI server's **separate
 thread**, so it doesn't block the main event loop. However, the
 `_record()` method on the main loop still JSON-encodes each event and
 pushes it to the thread-safe queue (~20us per event).
@@ -267,15 +267,16 @@ pushes it to the thread-safe queue (~20us per event).
 For high-throughput fast-task workloads:
 
 ```yaml
-debug:
-  event_min_duration_ms: 50    # skip DB writes for tasks < 50ms
+ui:
   ws_min_duration_ms: 100      # skip live UI updates for tasks < 100ms
-  output_min_duration_ms: 100  # skip stdout/stderr for fast tasks
   log_min_duration_ms: 100     # skip structlog for fast tasks
-  store_output: false          # no stdout/stderr storage at all
+  recorder:
+    event_min_duration_ms: 50    # skip DB writes for tasks < 50ms
+    output_min_duration_ms: 100  # skip stdout/stderr for fast tasks
+    store_output: false          # no stdout/stderr storage at all
 ```
 
-This keeps the debug system useful (slow tasks, failures, and sink
+This keeps the recorder and UI useful (slow tasks, failures, and sink
 deliveries are still recorded) while eliminating per-task overhead for
 the fast majority.
 
@@ -358,12 +359,13 @@ executor:
 kafka:
   max_poll_records: 500        # pull more messages per poll cycle
 
-debug:
+ui:
   ws_min_duration_ms: 100      # hide fast tasks from live UI
-  event_min_duration_ms: 50    # don't store fast tasks in DB
-  output_min_duration_ms: 100  # don't store stdout for fast tasks
   log_min_duration_ms: 100     # don't log fast tasks
-  store_output: false          # skip stdout/stderr storage entirely
+  recorder:
+    event_min_duration_ms: 50    # don't store fast tasks in DB
+    output_min_duration_ms: 100  # don't store stdout for fast tasks
+    store_output: false          # skip stdout/stderr storage entirely
 ```
 
 | Setting | Rationale |
@@ -386,15 +388,16 @@ executor:
 kafka:
   max_poll_records: 100
 
-debug:
+ui:
   ws_min_duration_ms: 0        # show all tasks in live UI
-  event_min_duration_ms: 0     # store everything
-  store_output: true           # stdout/stderr is valuable for debugging
+  recorder:
+    event_min_duration_ms: 0     # store everything
+    store_output: true           # stdout/stderr is valuable for debugging
 ```
 
 For slow tasks, the overhead analysis inverts: process launch is
 negligible (3ms vs 5000ms task), the event loop is idle most of the
-time, and debug recording has no throughput impact. Optimize for
+time, and event recording has no throughput impact. Optimize for
 observability.
 
 ### Long-running tasks (~10s), low core count
@@ -414,11 +417,12 @@ kafka:
   session_timeout_ms: 60000    # longer session timeout to avoid rebalance during slow processing
   max_poll_interval_ms: 600000 # 10 min between polls -- tasks may run long
 
-debug:
+ui:
   ws_min_duration_ms: 0        # show everything in live UI
-  event_min_duration_ms: 0     # store all events
-  store_output: true           # stdout/stderr is critical for 10s tasks
   log_min_duration_ms: 0       # log every task
+  recorder:
+    event_min_duration_ms: 0     # store all events
+    store_output: true           # stdout/stderr is critical for 10s tasks
 ```
 
 | Setting | Rationale |

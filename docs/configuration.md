@@ -56,8 +56,8 @@ export DK_KAFKA__BROKERS=kafka-prod:9092
 # Override executor.max_executors
 export DK_EXECUTOR__MAX_EXECUTORS=16
 
-# Override debug.port
-export DK_DEBUG__PORT=9000
+# Override ui.port
+export DK_UI__PORT=9000
 ```
 
 Env vars are parsed into a nested dict structure and deep-merged on top of the YAML values. Leaf values from env vars always win over YAML values; nested dicts are merged recursively.
@@ -76,8 +76,8 @@ Top-level settings that control worker identity and cluster grouping.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `worker_name_env` | `str` | `'WORKER_ID'` | Name of the environment variable that holds the worker name. Used in logs, metrics, and the debug UI. If the env var is empty or unset, falls back to `drakkar-{hex_id}`. |
-| `cluster_name` | `str` | `''` | Logical cluster name for grouping workers in the debug UI. Workers with the same cluster name are displayed together and can cross-trace messages. |
+| `worker_name_env` | `str` | `'WORKER_ID'` | Name of the environment variable that holds the worker name. Used in logs, metrics, and the operator UI. If the env var is empty or unset, falls back to `drakkar-{hex_id}`. |
+| `cluster_name` | `str` | `''` | Logical cluster name for grouping workers in the operator UI. Workers with the same cluster name are displayed together and can cross-trace messages. |
 | `cluster_name_env` | `str` | `''` | Name of an environment variable that holds the cluster name. If set and non-empty, overrides the static `cluster_name` value. |
 
 ```yaml
@@ -202,7 +202,7 @@ Produces messages to a Kafka topic.
 |-------|------|---------|-------------|
 | `topic` | `str` | *(required)* | Target Kafka topic for output messages. |
 | `brokers` | `str` | `''` | Kafka brokers for this sink. If empty, inherits from `kafka.brokers` (same cluster as the source). |
-| `ui_url` | `str` | `''` | URL to a web UI for this sink (e.g., Kafka UI, Kowl). Displayed as a link in the debug dashboard. |
+| `ui_url` | `str` | `''` | URL to a web UI for this sink (e.g., Kafka UI, Kowl). Displayed as a link in the operator UI dashboard. |
 
 ### PostgreSQL Sink (`sinks.postgres.<name>`)
 
@@ -393,89 +393,57 @@ logging:
 
 ---
 
-## Debug / Flight Recorder (`debug:`)
+## UI / Flight Recorder (`ui:`)
 
-The debug subsystem provides a [flight recorder](observability.md#flight-recorder) (SQLite-backed event log), a [web UI dashboard](observability.md#debug-ui), WebSocket live streaming, and [worker autodiscovery](observability.md#worker-autodiscovery). This is the largest configuration section.
+The `ui` section covers the whole operator-UI feature: the [web UI dashboard](observability.md#operator-ui) (FastAPI server) and its presentation settings at the top level, the [flight recorder](observability.md#flight-recorder) (SQLite-backed event log) under `ui.recorder.*`, drakkar-ui bundle fetching under `ui.release.*`, plus WebSocket live streaming and [worker autodiscovery](observability.md#worker-autodiscovery). This is the largest configuration section.
 
 ### Authentication
 
-The debug UI's auth is **opt-in by default**. With `debug.enabled=true` and `debug.auth_token` empty (the default), the worker emits a structured `debug_ui_unauthenticated` warning at startup naming the bound host:port and the two opt-in paths (YAML key + env var), then continues starting normally. The UI is **read-only by design** — no endpoint stops a worker, replays Kafka messages, mutates sinks, or fakes pipeline data — and Drakkar is intended to run inside a private contour (VPC / internal cluster / operator-only ingress), so the framework treats "unauthenticated + warned" as a reasonable starting point rather than a misconfiguration.
+The UI's auth is **opt-in by default**. With `ui.enabled=true` and `ui.auth_token` empty (the default), the worker emits a structured `ui_unauthenticated` warning at startup naming the bound host:port and the two opt-in paths (YAML key + env var), then continues starting normally. The UI is **read-only by design** — no endpoint stops a worker, replays Kafka messages, mutates sinks, or fakes pipeline data — and Drakkar is intended to run inside a private contour (VPC / internal cluster / operator-only ingress), so the framework treats "unauthenticated + warned" as a reasonable starting point rather than a misconfiguration.
 
 To require auth on the protected endpoints (database download, merge, message probe) and the WebSocket live-event stream, set a strong token:
 
 - **Generate a strong value:** `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
-- **Configure via YAML:** set `debug.auth_token: <value>` in your config.
-- **Or via environment:** export `DK_DEBUG__AUTH_TOKEN=<value>` (overrides YAML when both are set).
+- **Configure via YAML:** set `ui.auth_token: <value>` in your config.
+- **Or via environment:** export `DK_UI__AUTH_TOKEN=<value>` (overrides YAML when both are set).
 
 When the token is set, protected endpoints reject requests without a matching `Authorization: Bearer <token>` header (or `?token=<token>` query parameter); the WebSocket additionally validates the `Origin` header against `allowed_ws_origins` (or the request's `Host` header). Comparison uses `secrets.compare_digest` for timing-side-channel safety; leading/trailing whitespace in the configured token is stripped on load (a `auth_token: " "` of only spaces is treated as empty and the warning still fires).
 
-The unauthenticated-startup warning runs at `DrakkarApp._async_run()` startup, before the recorder and debug server are constructed. See `drakkar/app_security.py::warn_if_debug_unauthenticated` for the implementation.
+The unauthenticated-startup warning runs at `DrakkarApp._async_run()` startup, before the recorder and UI server are constructed. See `drakkar/app_security.py::warn_if_ui_unauthenticated` for the implementation.
 
-### Core Settings
+### Server Settings
+
+Top-level `ui.*` fields configure the UI server itself and the presentation settings its pages consume.
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `enabled` | `bool` | `true` | | Enable or disable the entire debug feature. Set to `false` to skip the flight recorder, web UI, and all associated overhead. |
-| `host` | `str` | `'127.0.0.1'` | | Bind address for the debug server. Default `127.0.0.1` (localhost only). Use `0.0.0.0` to expose on all interfaces. Auth is opt-in regardless of host — when binding to a non-loopback address inside anything other than a fully-trusted private network, set `auth_token` (see below). |
-| `port` | `int` | `8080` | 1--65535 | Port for the debug web UI (FastAPI server). |
-| `auth_token` | `str` | `''` | | Bearer token for sensitive debug endpoints (database download, merge, message probe) **and** for the WebSocket live-event stream at `/ws`. **Empty (the default) disables auth entirely** — every endpoint is reachable without credentials and the WebSocket skips both token and Origin checks. This is intentional: the UI is read-only and intended for private-network deployments, and a startup warning (`debug_ui_unauthenticated`) names the unauthenticated posture in logs. When set to a non-empty value, protected HTTP endpoints require `Authorization: Bearer <token>` header or `?token=<token>` query parameter; WebSocket connections without a valid token are closed with code 4401. Comparison uses `secrets.compare_digest` to avoid timing side-channels. Leading/trailing whitespace is stripped on config load so `auth_token: " secret "` in YAML still works (and a token of only spaces is treated as empty). Read-only pages (dashboard, live, partitions, sinks, history) are always accessible. |
+| `enabled` | `bool` | `true` | | Enable or disable the entire UI feature. Set to `false` to skip the flight recorder, web UI, and all associated overhead. |
+| `host` | `str` | `'127.0.0.1'` | | Bind address for the UI server. Default `127.0.0.1` (localhost only). Use `0.0.0.0` to expose on all interfaces. Auth is opt-in regardless of host — when binding to a non-loopback address inside anything other than a fully-trusted private network, set `auth_token` (see below). |
+| `port` | `int` | `8080` | 1--65535 | Port for the web UI (FastAPI server). |
+| `auth_token` | `str` | `''` | | Bearer token for sensitive endpoints (database download, merge, message probe) **and** for the WebSocket live-event stream at `/ws`. **Empty (the default) disables auth entirely** — every endpoint is reachable without credentials and the WebSocket skips both token and Origin checks. This is intentional: the UI is read-only and intended for private-network deployments, and a startup warning (`ui_unauthenticated`) names the unauthenticated posture in logs. When set to a non-empty value, protected HTTP endpoints require `Authorization: Bearer <token>` header or `?token=<token>` query parameter; WebSocket connections without a valid token are closed with code 4401. Comparison uses `secrets.compare_digest` to avoid timing side-channels. Leading/trailing whitespace is stripped on config load so `auth_token: " secret "` in YAML still works (and a token of only spaces is treated as empty). Read-only pages (dashboard, live, partitions, sinks, history) are always accessible. |
 | `allowed_ws_origins` | `list[str]` | `[]` | | Explicit allowlist of WebSocket `Origin` header values. Only consulted when `auth_token` is set (empty token = no origin check, dev workflow preserved). Empty list + non-empty `auth_token` = same-origin fallback: Origin host must match the `Host` header. Non-empty list = strict allowlist; any Origin not in the list is rejected with close code 4403. Comparison is case-insensitive and normalizes default ports (`:80` for http, `:443` for https) so `https://ops.internal` and `https://ops.internal:443` are equivalent. Missing Origin header (non-browser clients) is always accepted -- the token check already authenticated them. |
-| `debug_url` | `str` | `''` | | External URL for the debug UI. Used when workers discover each other -- if set, this URL is advertised instead of the auto-detected `http://{ip}:{port}`. Useful behind load balancers or Kubernetes ingresses. |
-| `db_dir` | `str` | `'/tmp'` | | Directory for SQLite database files. Set to `''` to run without any disk persistence (in-memory only, WebSocket streaming still works). Use a shared filesystem (e.g., NFS, EFS) for cross-worker autodiscovery and merge. |
-
-### Persistence Flags
-
-These flags control which tables are created in the SQLite database. All require `db_dir` to be non-empty. Any combination is valid.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `store_events` | `bool` | `true` | Write processing events (consumed, task_started, task_completed, task_failed, etc.) to the `events` table. Disable to reduce disk I/O on high-throughput workers. |
-| `store_config` | `bool` | `true` | Write worker configuration to the `worker_config` table. This enables autodiscovery -- other workers sharing the same `db_dir` can find and link to this worker. |
-| `store_state` | `bool` | `true` | Periodically snapshot worker state (uptime, partitions, pool utilization, queue depth, counters) to the `worker_state` table. |
-| `state_sync_interval_seconds` | `int` | `10` | >= 1 | Interval (seconds) between worker state snapshots. |
-
-### Exposed Environment Variables
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `expose_env_vars` | `list[str]` | `[]` | List of environment variable names to capture and store in `worker_config.env_vars_json`. Useful for recording deployment metadata (e.g., `['GIT_SHA', 'DEPLOY_ENV', 'K8S_POD_NAME']`). |
-
-### Database Rotation and Retention
-
-| Field | Type | Default | Constraints | Description |
-|-------|------|---------|-------------|-------------|
-| `rotation_interval_minutes` | `int` | `60` | >= 1 | How often (minutes) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is finalized. A `-live.db` symlink always points to the current file. |
-| `retention_hours` | `int` | `24` | >= 1 | Delete rotated database files older than this many hours. |
-| `retention_max_events` | `int` | `100000` | >= 100 | Upper bound on total events across all DB files. Also controls the maximum number of retained DB files (`max_files = retention_max_events / 10000`). |
-
-### Output Storage
-
-| Field | Type | Default | Constraints | Description |
-|-------|------|---------|-------------|-------------|
-| `store_output` | `bool` | `true` | | Include subprocess stdout/stderr in event records. Disable to save disk space when output is large or not needed for debugging. |
-| `flush_interval_seconds` | `int` | `5` | >= 1 | How often (seconds) the in-memory event buffer is flushed to SQLite. |
-| `max_buffer` | `int` | `50000` | >= 1000 | Maximum number of events held in the in-memory buffer. When full, oldest events are dropped (ring buffer). |
-| `max_flush_retries` | `int` | `3` | >= 1 | How many times a flush batch is re-queued on transient `OperationalError` (database is locked, disk I/O error, etc.) before the batch is dropped. On drop, `drakkar_recorder_flush_batches_dropped_total` ticks; on each retry `drakkar_recorder_flush_retries_total` ticks. |
-| `max_ui_rows` | `int` | `5000` | >= 100 | Maximum number of rows returned to the debug web UI in list views. |
+| `public_url` | `str` | `''` | | External URL for this worker's UI. Used when workers discover each other -- if set, this URL is advertised instead of the auto-detected `http://{ip}:{port}`. Useful behind load balancers or Kubernetes ingresses. |
+| `expose_env_vars` | `list[str]` | `[]` | | List of environment variable names to capture and store in `worker_config.env_vars_json`. Useful for recording deployment metadata (e.g., `['GIT_SHA', 'DEPLOY_ENV', 'K8S_POD_NAME']`). |
+| `max_rows` | `int` | `5000` | >= 100 | Maximum number of rows returned to the web UI in list views. |
 
 ### Duration Thresholds
 
-These thresholds control which events are recorded, logged, and streamed. See [Duration Thresholds](observability.md#duration-thresholds) for detailed behavior and [Performance Tuning](performance.md) for recommendations. They help reduce noise in high-throughput systems where most tasks complete quickly.
+These thresholds control which events are recorded, logged, and streamed. See [Duration Thresholds](observability.md#duration-thresholds) for detailed behavior and [Performance Tuning](performance.md) for recommendations. They help reduce noise in high-throughput systems where most tasks complete quickly. The log and WebSocket thresholds are top-level `ui.*` fields; the persistence thresholds live under `ui.recorder.*`.
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `log_min_duration_ms` | `int` | `500` | >= 0 | Minimum task duration (ms) to emit a `slow_task_completed` or `slow_task_failed` log message. Set to `0` to log all tasks. |
 | `ws_min_duration_ms` | `int` | `500` | >= 0 | Minimum task duration (ms) to broadcast via WebSocket to the live UI. Fast tasks that complete under this threshold are invisible in the live view (reduces UI noise). Failed tasks always appear regardless. Set to `0` to show all tasks. |
-| `event_min_duration_ms` | `int` | `0` | >= 0 | Minimum task duration (ms) to persist to the SQLite database. Set above `0` to skip storing fast tasks entirely. |
-| `output_min_duration_ms` | `int` | `500` | >= 0 | Minimum task duration (ms) to include stdout/stderr in the persisted event record. Tasks under this threshold are recorded but without output data. |
+| `recorder.event_min_duration_ms` | `int` | `0` | >= 0 | Minimum task duration (ms) to persist to the SQLite database. Set above `0` to skip storing fast tasks entirely. |
+| `recorder.output_min_duration_ms` | `int` | `500` | >= 0 | Minimum task duration (ms) to include stdout/stderr in the persisted event record. Tasks under this threshold are recorded but without output data. |
 
 ### Prometheus Integration
 
-These settings add clickable Prometheus graph links to the debug dashboard.
+These settings add clickable Prometheus graph links to the dashboard.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `prometheus_url` | `str` | `''` | Base URL of your Prometheus server (e.g., `http://prometheus:9090`). If empty, no Prometheus links are shown in the debug UI. |
+| `prometheus_url` | `str` | `''` | Base URL of your Prometheus server (e.g., `http://prometheus:9090`). If empty, no Prometheus links are shown in the UI. |
 | `prometheus_rate_interval` | `str` | `'5m'` | Rate interval used in PromQL `rate()` expressions for dashboard links (e.g., `1m`, `5m`, `15m`). |
 | `prometheus_worker_label` | `str` | `''` | PromQL label filter for worker-scoped queries. Supports template variables: `{worker_id}`, `{cluster_name}`, `{metrics_port}`, `{debug_port}`. If empty, defaults to `instance="{hostname}:{metrics_port}"`. Example: `worker_id="{worker_id}"`. |
 | `prometheus_cluster_label` | `str` | `''` | PromQL label filter for cluster-wide queries. Supports the same template variables. Example: `cluster="{cluster_name}"`. If empty, cluster-wide links are not shown. |
@@ -484,34 +452,53 @@ These settings add clickable Prometheus graph links to the debug dashboard.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `custom_links` | `list[dict[str, str]]` | `[]` | List of custom links displayed in the debug dashboard navigation. Each entry is a dict with `name` and `url` keys. URL values support template variables: `{worker_id}`, `{cluster_name}`, `{metrics_port}`, `{debug_port}`. |
+| `custom_links` | `list[dict[str, str]]` | `[]` | List of custom links displayed in the dashboard navigation. Each entry is a dict with `name` and `url` keys. URL values support template variables: `{worker_id}`, `{cluster_name}`, `{metrics_port}`, `{debug_port}`. |
+
+### Flight Recorder (`ui.recorder:`)
+
+Flight-recorder persistence — the UI's data store. All flags below require `db_dir` to be non-empty; any combination of the `store_*` flags is valid.
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `db_dir` | `str` | `'/tmp'` | | Directory for SQLite database files. Set to `''` to run without any disk persistence (in-memory only, WebSocket streaming still works). Use a shared filesystem (e.g., NFS, EFS) for cross-worker autodiscovery and merge. |
+| `store_events` | `bool` | `true` | | Write processing events (consumed, task_started, task_completed, task_failed, etc.) to the `events` table. Disable to reduce disk I/O on high-throughput workers. |
+| `store_config` | `bool` | `true` | | Write worker configuration to the `worker_config` table. This enables autodiscovery -- other workers sharing the same `db_dir` can find and link to this worker. |
+| `store_state` | `bool` | `true` | | Periodically snapshot worker state (uptime, partitions, pool utilization, queue depth, counters) to the `worker_state` table. |
+| `state_sync_interval_seconds` | `int` | `10` | >= 1 | Interval (seconds) between worker state snapshots. |
+| `rotation_interval_minutes` | `int` | `60` | >= 1 | How often (minutes) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is finalized. A `-live.db` symlink always points to the current file. |
+| `retention_hours` | `int` | `24` | >= 1 | Delete rotated database files older than this many hours. |
+| `retention_max_events` | `int` | `100000` | >= 100 | Upper bound on total events across all DB files. Also controls the maximum number of retained DB files (`max_files = retention_max_events / 10000`). |
+| `store_output` | `bool` | `true` | | Include subprocess stdout/stderr in event records. Disable to save disk space when output is large or not needed for debugging. |
+| `flush_interval_seconds` | `int` | `5` | >= 1 | How often (seconds) the in-memory event buffer is flushed to SQLite. |
+| `max_buffer` | `int` | `50000` | >= 1000 | Maximum number of events held in the in-memory buffer. When full, oldest events are dropped (ring buffer). |
+| `max_flush_retries` | `int` | `3` | >= 1 | How many times a flush batch is re-queued on transient `OperationalError` (database is locked, disk I/O error, etc.) before the batch is dropped. On drop, `drakkar_recorder_flush_batches_dropped_total` ticks; on each retry `drakkar_recorder_flush_retries_total` ticks. |
+| `event_min_duration_ms` | `int` | `0` | >= 0 | See [Duration Thresholds](#duration-thresholds) above. |
+| `output_min_duration_ms` | `int` | `500` | >= 0 | See [Duration Thresholds](#duration-thresholds) above. |
+
+### UI Release (`ui.release:`)
+
+Decoupled drakkar-ui bundle fetching. The UI ships as its own versioned bundle (the separate drakkar-ui repo, published to GitHub Releases); when enabled, the worker resolves that bundle (cache → fetch) and serves it in place of the built-in server-rendered pages. A fetch failure is never fatal — the worker falls back to the built-in pages, so the default is safe offline too.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `true` | Resolve and serve the drakkar-ui bundle. Off pins the built-in server-rendered pages unconditionally (no fetch, no cache read). |
+| `repo` | `str` | `'wlame/drakkar-ui'` | The `owner/name` GitHub repo that publishes UI bundles. Empty disables fetching — only a cached bundle or the embedded fallback is served. |
+| `pinned_version` | `str` | `''` | Known-good UI release tag this backend is built against (e.g. `v1.2.0`); the contract is API-major compatible. Empty means "no pinned version". |
+| `cache_dir` | `str` | `''` | Bundle cache root override. Empty uses the per-user cache dir (`$XDG_CACHE_HOME/drakkar/ui`, falling back to `~/.cache/drakkar/ui` — the same directory the Go backend uses on Linux, so both backends share one cache). |
+| `check_update` | `bool` | `true` | Resolve the latest release tag on startup instead of only the pinned version. Already-cached versions are never re-downloaded — release tags are immutable. |
 
 ```yaml
-debug:
+ui:
   enabled: true
   port: 8080
-  debug_url: https://debug.example.com/worker-1
-  db_dir: /shared/drakkar-debug
-  store_events: true
-  store_config: true
-  store_state: true
-  state_sync_interval_seconds: 10
+  public_url: https://drakkar-ui.example.com/worker-1
   expose_env_vars:
     - GIT_SHA
     - DEPLOY_ENV
     - K8S_POD_NAME
-  rotation_interval_minutes: 60
-  retention_hours: 48
-  retention_max_events: 200000
-  store_output: true
-  flush_interval_seconds: 5
-  max_buffer: 50000
-  max_flush_retries: 3
-  max_ui_rows: 5000
+  max_rows: 5000
   log_min_duration_ms: 1000
   ws_min_duration_ms: 500
-  event_min_duration_ms: 100
-  output_min_duration_ms: 1000
   prometheus_url: http://prometheus:9090
   prometheus_rate_interval: 5m
   prometheus_worker_label: 'worker_id="{worker_id}"'
@@ -521,6 +508,26 @@ debug:
       url: http://grafana:3000/d/drakkar?var-worker={worker_id}
     - name: Kibana Logs
       url: http://kibana:5601/app/discover#/?_a=(query:(match_phrase:(worker_id:'{worker_id}')))
+  recorder:
+    db_dir: /shared/drakkar-recorder
+    store_events: true
+    store_config: true
+    store_state: true
+    state_sync_interval_seconds: 10
+    rotation_interval_minutes: 60
+    retention_hours: 48
+    retention_max_events: 200000
+    store_output: true
+    flush_interval_seconds: 5
+    max_buffer: 50000
+    max_flush_retries: 3
+    event_min_duration_ms: 100
+    output_min_duration_ms: 1000
+  release:
+    enabled: true
+    repo: wlame/drakkar-ui
+    pinned_version: ""
+    check_update: true
 ```
 
 ---
@@ -536,14 +543,14 @@ See [Cache](cache.md) for the full API (`set` / `peek` / `get` / `delete`) and t
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `enabled` | `bool` | `false` | | Master switch. When `false`, the cache is a no-op stub. When `true` without a `db_dir` (anywhere), the engine warns and continues without persistence -- in-memory only. |
-| `db_dir` | `str` | `''` | | Directory for the per-worker `<worker_id>-cache.db` SQLite file. Empty falls back to [`debug.db_dir`](#debug-flight-recorder-debug). Use a **shared** filesystem (NFS, EFS) for peer-sync to discover other workers' cache files. |
+| `db_dir` | `str` | `''` | | Directory for the per-worker `<worker_id>-cache.db` SQLite file. Empty falls back to [`ui.recorder.db_dir`](#flight-recorder-uirecorder). Use a **shared** filesystem (NFS, EFS) for peer-sync to discover other workers' cache files. |
 | `flush_interval_seconds` | `float` | `3.0` | > 0 | Interval (seconds) for the write-behind loop that drains dirty in-memory entries to SQLite. Lower = less data loss on crash; higher = less write amplification. |
 | `cleanup_interval_seconds` | `float` | `60.0` | > 0 | Interval (seconds) for the loop that deletes rows whose `expires_at_ms` has passed and refreshes Prometheus DB-size gauges. |
 | `max_memory_entries` | `int \| null` | `10000` | >= 1 or `null` | Cap for the in-memory LRU. `null` = unbounded (a startup warning fires so the choice is visible in logs). The DB is the source of truth, so eviction never loses data -- evicted entries re-warm on the next `get()`. |
 
 ### Peer Sync (`cache.peer_sync:`) {#cache-peer-sync}
 
-The peer-sync loop pulls recent entries from sibling workers' `-cache.db` files (LWW merge by `updated_at_ms`). Requires `debug.store_config: true` for autodiscovery -- if disabled, peer sync silently no-ops.
+The peer-sync loop pulls recent entries from sibling workers' `-cache.db` files (LWW merge by `updated_at_ms`). Requires `ui.recorder.store_config: true` for autodiscovery -- if disabled, peer sync silently no-ops.
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
@@ -556,7 +563,7 @@ The peer-sync loop pulls recent entries from sibling workers' `-cache.db` files 
 ```yaml
 cache:
   enabled: true
-  db_dir: /shared/drakkar-cache       # empty falls back to debug.db_dir
+  db_dir: /shared/drakkar-cache       # empty falls back to ui.recorder.db_dir
   flush_interval_seconds: 3.0
   cleanup_interval_seconds: 60.0
   max_memory_entries: 10000           # null = unbounded (warns)
@@ -582,7 +589,7 @@ See [Webapp](webapp.md) for the full feature guide (enabling, hooks, request/res
 |-------|------|---------|-------------|-------------|
 | `enabled` | `bool` | `false` | | Master switch. When `false`, the FastAPI server is not started and the HTTP hooks are not invoked. |
 | `host` | `str` | `'0.0.0.0'` | | Interface uvicorn binds. Use `'127.0.0.1'` for host-private deployments. |
-| `port` | `int` | `8090` | | Port uvicorn binds. Distinct from the metrics and debug-UI ports. |
+| `port` | `int` | `8090` | | Port uvicorn binds. Distinct from the metrics and operator-UI ports. |
 | `path` | `str` | `'/process'` | starts with `'/'`, length > 1 | Single POST route the framework registers. |
 | `sinks_enabled` | `bool` | `false` | | When `true`, calls `on_message_complete` after the executor fan-out and routes returned `CollectResult` payloads through the [SinkManager](sinks.md). When `false`, sinks are skipped and the response carries `sinks: null`. |
 | `request_timeout_seconds` | `float` | `30.0` | > 0 | Per-request budget enforced via `asyncio.wait_for` on the webapp loop. On timeout the client receives a 504 and the runner's post-execute hooks are cooperatively cancelled. |

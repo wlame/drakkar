@@ -258,7 +258,7 @@ async def arrange(self, messages, pending):
   and the subprocess never runs).
 - **Framework-agnostic about the source.** `precomputed` says "a result
   was supplied in `arrange()`"; the framework does NOT interpret it as
-  "cache hit" specifically. The debug-UI event metadata is marked
+  "cache hit" specifically. The UI event metadata is marked
   `precomputed=true`, not `cached=true`.
 
 **Observability:**
@@ -763,7 +763,7 @@ def message_label(self, msg: SourceMessage) -> str
 ```
 
 Override to provide a human-readable label used in structured log lines
-and the debug web UI. The default returns `partition:offset`.
+and the operator web UI. The default returns `partition:offset`.
 
 ```python
 def message_label(self, msg):
@@ -777,7 +777,7 @@ def message_label(self, msg):
 ## Task Labels
 
 [ExecutorTask](executor.md#executortask)`.labels` is a `dict[str, str]` of user-defined key-value
-pairs displayed alongside task details in the [debug UI](observability.md#debug-ui). Set them in
+pairs displayed alongside task details in the [operator UI](observability.md#operator-ui). Set them in
 `arrange()`:
 
 ```python
@@ -798,7 +798,7 @@ Labels appear on:
 - The live timeline view
 - The task detail page
 - Running and finished task tables
-- The debug trace view
+- The trace view on the Debug page
 
 Labels are purely for display. Use `metadata` for data you need in
 `on_task_complete()`, `on_message_complete()`, or `on_error()`.
@@ -845,7 +845,7 @@ class MyHandler(dk.BaseDrakkarHandler[MyInput, MyOutput]):
 ## Custom Prometheus Metrics
 
 Declare `prometheus_client` metrics as class attributes on your handler.
-The framework auto-discovers them and exposes them on the [debug UI](observability.md#debug-ui)
+The framework auto-discovers them and exposes them on the [operator UI](observability.md#operator-ui)
 metrics page alongside built-in [Drakkar metrics](observability.md#prometheus-metrics).
 
 ```python

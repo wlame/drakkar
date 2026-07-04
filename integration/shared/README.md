@@ -8,10 +8,10 @@ Stores per-worker SQLite files of two kinds:
 
 1. **Flight-recorder databases** — rotating event logs (consumed / arranged /
    task lifecycle / produced / committed events). Managed by the recorder
-   subsystem (`debug.db_dir`).
+   subsystem (`ui.recorder.db_dir`).
 2. **Cache databases** — write-behind stores for the framework cache
    (`self.cache`). Managed by the cache subsystem (`cache.db_dir`, which
-   defaults to `debug.db_dir` so both live side-by-side here).
+   defaults to `ui.recorder.db_dir` so both live side-by-side here).
 
 Both subsystems publish a stable symlink that other workers scan for peer
 discovery — the recorder's `-live.db` symlinks feed the Message Trace

@@ -71,29 +71,17 @@ logging:
   level: "INFO"
   format: "json"
 
-debug:
+ui:
   enabled: true
   host: "0.0.0.0"
   port: 8080
-  db_dir: "/shared"
-  store_events: true
-  store_config: true
-  store_state: true
-  state_sync_interval_seconds: 10
   expose_env_vars:
     - "WORKER_ID"
     - "DK_CONFIG"
-  retention_hours: 24
-  retention_max_events: 100000
-  store_output: true
-  flush_interval_seconds: 3
-  max_buffer: 50000
-  max_ui_rows: 5000
+  max_rows: 5000
   # Duration thresholds — tuned down for fast tasks (most finish in <100ms)
   log_min_duration_ms: 100       # log slow tasks above 100ms
   ws_min_duration_ms: 100        # stream all but the fastest to live UI
-  event_min_duration_ms: 0       # write all task events to DB
-  output_min_duration_ms: 100    # only store stdout/stderr/args for tasks above 100ms
   prometheus_url: "http://localhost:9099"
   prometheus_rate_interval: "30s"
   prometheus_worker_label: 'instance="{worker_id}:{metrics_port}"'
@@ -101,3 +89,16 @@ debug:
   custom_links:
     - name: "Drakkar GitHub"
       url: "https://github.com/wlame/drakkar?from={worker_id}"
+  recorder:
+    db_dir: "/shared"
+    store_events: true
+    store_config: true
+    store_state: true
+    state_sync_interval_seconds: 10
+    retention_hours: 24
+    retention_max_events: 100000
+    store_output: true
+    flush_interval_seconds: 3
+    max_buffer: 50000
+    event_min_duration_ms: 0       # write all task events to DB
+    output_min_duration_ms: 100    # only store stdout/stderr/args for tasks above 100ms

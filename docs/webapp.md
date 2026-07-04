@@ -127,7 +127,7 @@ below documents every knob for production deployments.
 |-------|------|---------|-------------|
 | `enabled` | `bool` | `false` | Master switch. When `false`, no FastAPI server runs and the handler's HTTP hooks are never invoked. |
 | `host` | `str` | `'0.0.0.0'` | Interface uvicorn binds. Use `'127.0.0.1'` to keep the endpoint inside the host (private deployments). |
-| `port` | `int` | `8090` | Port uvicorn binds. The webapp does not share a port with the debug UI or the metrics server. |
+| `port` | `int` | `8090` | Port uvicorn binds. The webapp does not share a port with the operator UI or the metrics server. |
 | `path` | `str` | `'/process'` | Single POST route the framework registers. Must start with `'/'` and contain at least one character after it. |
 | `sinks_enabled` | `bool` | `false` | When `true`, calls `on_message_complete(group)` after the executor fan-out and routes returned `CollectResult` payloads through the [SinkManager](sinks.md). When `false`, sinks are skipped entirely and the response carries `sinks: null`. |
 | `request_timeout_seconds` | `float` | `30.0` | Per-request budget enforced via `asyncio.wait_for` on the webapp loop. On timeout the client receives a 504 with `status='timeout'` and the runner's post-execute hook is cooperatively cancelled. Must be > 0. |
@@ -189,7 +189,7 @@ messages never trigger them.
 | `arrange_http_request(req, pending)` | One HTTP request passed auth, rate-limit, and body parsing; about to enter the executor pool | Once per HTTP request | `list[ExecutorTask]` |
 | `on_http_request_complete(group)` | All tasks from one HTTP request reached a terminal state | Once per HTTP request | `HttpResponseT` (a Pydantic model) |
 | `http_request_id(req, headers)` | After body parsing, before task fan-out | Once per HTTP request | `str` (validated to ASCII, no whitespace, ≤64 chars) |
-| `http_request_label(req, request_id)` | Before structured-log lines and debug-UI rendering | Once per HTTP request | `str` |
+| `http_request_label(req, request_id)` | Before structured-log lines and UI rendering | Once per HTTP request | `str` |
 
 Required overrides: `arrange_http_request` and `on_http_request_complete`.
 The defaults raise `NotImplementedError` so a misconfigured deployment
@@ -208,7 +208,7 @@ sibling-message dedup work to do.
 The framework auto-stamps every returned task with `origin='http'`,
 `client_name=<matched client>`, and `request_id` (whatever
 `http_request_id` returned). Operators see those columns in the recorder
-and the debug UI -- no need to set them by hand.
+and the operator UI -- no need to set them by hand.
 
 ```python
 async def arrange_http_request(self, req: RankRequest, pending) -> list[dk.ExecutorTask]:
@@ -277,7 +277,7 @@ id surfaces immediately as a 500 -- it never reaches downstream logs.
 ### `http_request_label(req, request_id) -> str`
 
 Override to embed a business-readable identifier into structured log
-lines and the debug UI. The default returns the framework `request_id`
+lines and the operator UI. The default returns the framework `request_id`
 unchanged.
 
 ```python
@@ -352,7 +352,7 @@ Successful response body (HTTP 200):
 | `duration_ms` | Server-side wall clock between `started_at` and `finished_at`. Prefer this over external timers when comparing requests across clients. |
 | `status` | One of `ok | error | timeout | rate_limited | auth_failed | shutdown | not_ready`. Mirrors the `drakkar_webapp_requests_total` label. |
 | `result` | The Pydantic model returned by `on_http_request_complete(group)`, dumped to JSON. `null` on error paths. |
-| `tasks` | One compact entry per successful executor task (`task_id`, `exit_code`, `duration_ms`, `retries`). **Subprocess `stdout` / `stderr` are deliberately excluded from the response body** -- read those via the recorder or the debug UI. |
+| `tasks` | One compact entry per successful executor task (`task_id`, `exit_code`, `duration_ms`, `retries`). **Subprocess `stdout` / `stderr` are deliberately excluded from the response body** -- read those via the recorder or the operator UI. |
 | `task_summary` | Aggregate `total / success / failed` counts for the per-request fan-out. |
 | `cache` | Per-request cache hit/miss counts. Reserved for future use; the runner currently emits zeros. |
 | `sinks` | `null` when `sinks_enabled=false`. With sinks enabled, an aggregated per-sink-type delivery summary -- see below. |

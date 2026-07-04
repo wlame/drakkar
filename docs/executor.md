@@ -14,7 +14,7 @@ Every subprocess execution starts with an `ExecutorTask` created in your [arrang
 | `args` | `list[str]` | `[]` | CLI arguments appended to the binary path when launching the process. May be empty, especially when `precomputed` is set and no subprocess will run. |
 | `source_offsets` | `list[int]` | (required) | Kafka offsets of the source messages that produced this task. Used for [offset watermark tracking](handler.md#offset-commit-logic) -- offsets are committed only after all sinks confirm delivery. |
 | `metadata` | `dict` | `{}` | Arbitrary key-value data carried through the pipeline. Accessible in [on_task_complete()](handler.md#on_task_complete) via `result.task.metadata`. |
-| `labels` | `dict[str, str]` | `{}` | User-defined key-value [labels](handler.md#task-labels) shown in the [debug UI](observability.md#debug-ui) (live timeline, task detail page, trace view). Useful for `request_id`, `user_id`, or other domain identifiers. |
+| `labels` | `dict[str, str]` | `{}` | User-defined key-value [labels](handler.md#task-labels) shown in the [operator UI](observability.md#operator-ui) (live timeline, task detail page, trace view). Useful for `request_id`, `user_id`, or other domain identifiers. |
 | `env` | `dict[str, str]` | `{}` | Per-task environment variables. Merged on top of `executor.env` from config (task overrides config on key conflict). See [Environment Variables](#environment-variables). |
 | `binary_path` | `str \| None` | `None` | Per-task binary override. Takes precedence over `executor.binary_path` from config. |
 | `stdin` | `str \| None` | `None` | Optional string piped to the process stdin after launch. When `None`, stdin is not connected. |
@@ -405,9 +405,9 @@ async def arrange(self, messages, pending):
 Per-task env is useful when the binary reads configuration from
 environment variables and different messages need different settings.
 
-!!! note "Per-task env is visible in the debug UI (after redaction)"
+!!! note "Per-task env is visible in the UI (after redaction)"
     Values in `task.env` are surfaced on the Message Trace and Task
-    Results tabs of the debug UI — the full env dict is stored in the
+    Results tabs of the operator UI — the full env dict is stored in the
     recorder's `task_started` event metadata. Before storage, values
     whose names match secret patterns (`*PASSWORD*`, `*SECRET*`,
     `*TOKEN*`, `*_KEY`, `*API_KEY*`, `*CREDENTIAL*`, `*_DSN`) are

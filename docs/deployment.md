@@ -2,12 +2,12 @@
 
 This page covers operational topics that apply when running Drakkar in a
 production environment: Kubernetes probes, rolling restarts, and the
-interaction between the debug server and cluster health checks.
+interaction between the UI server and cluster health checks.
 
 ## Kubernetes probes
 
 Drakkar exposes two dedicated HTTP endpoints for Kubernetes probes on the
-debug-server port (``debug.port``, default ``8080``):
+UI-server port (``ui.port``, default ``8080``):
 
 | Endpoint   | Purpose    | Success  | Failure                         |
 |------------|------------|----------|---------------------------------|
@@ -15,7 +15,7 @@ debug-server port (``debug.port``, default ``8080``):
 | ``/readyz``  | Readiness  | ``200``  | Remove the pod from endpoints   |
 
 Both endpoints are **unauthenticated** — they are the only routes on the
-debug server that ignore ``debug.auth_token``. This is intentional: the
+UI server that ignore ``ui.auth_token``. This is intentional: the
 kubelet has no facility to supply bearer tokens on probe requests, and
 both endpoints expose only liveness / readiness signals with no message
 content, partition state, or operator credentials. They must be mounted

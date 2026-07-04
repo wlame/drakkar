@@ -30,7 +30,7 @@ Drakkar's cache gives you all of these for free, plus:
   built from a cache hit — skipping the subprocess entirely.
 - Workers in the same cluster can share cached values via peer sync
   (eventually consistent, LWW).
-- Operators inspect cache contents in the debug UI and scrape size/hit
+- Operators inspect cache contents in the operator UI and scrape size/hit
   metrics via Prometheus.
 
 ---
@@ -79,7 +79,7 @@ flowchart LR
 
 Three periodic loops run alongside the main processing pipeline, registered
 as **system** periodic tasks (they appear with a `[system]` badge on the
-debug UI's periodic tasks page alongside user-defined `@periodic` methods):
+UI's periodic tasks page alongside user-defined `@periodic` methods):
 
 | Loop | Default interval | What it does |
 |------|------------------|--------------|
@@ -154,7 +154,7 @@ And the matching config:
 ```yaml
 cache:
   enabled: true
-  # db_dir: ""           # empty → falls back to debug.db_dir
+  # db_dir: ""           # empty → falls back to ui.recorder.db_dir
   flush_interval_seconds: 3.0
   cleanup_interval_seconds: 60.0
   max_memory_entries: 10000     # LRU cap; omit for unbounded
@@ -324,7 +324,7 @@ writes without touching consumers.
 | "Is recomputation expensive, and would it be OK to recompute on a cold cache?" | **Cache.** Cold start is bounded by whatever time it takes for reasonable cache population via normal traffic. |
 | "Do I need strict consistency across workers?" | **Not cache.** Cache is eventually consistent (peer sync lags + LWW + no tombstones). Use Redis / Postgres / a distributed consensus system. |
 | "Is the value small, JSON-serializable, and idempotent?" | **Cache fits well.** |
-| "Does the value contain secrets?" | **Not cache.** Cache DBs are downloadable from the debug UI (same as recorder DBs). No redaction layer applies to cache values. |
+| "Does the value contain secrets?" | **Not cache.** Cache DBs are downloadable from the UI (same as recorder DBs). No redaction layer applies to cache values. |
 
 ---
 
@@ -412,7 +412,7 @@ The recorder redacts secrets before writing `worker_config`
 ([see the warning in Observability](observability.md#worker_config-autodiscovery)).
 The cache does **not** apply such redaction: cache values are written
 verbatim. Do not put secrets in the cache if the DB file is
-downloadable through the debug UI in your deployment.
+downloadable through the UI in your deployment.
 
 ### Delete is local-only (the main sharp edge)
 
@@ -459,9 +459,9 @@ See [`delete()` above](#deletekey) for the full story.
 
 ---
 
-## Debug UI walkthrough
+## UI walkthrough
 
-When `cache.enabled=true`, the debug UI gains a **Cache** nav link that
+When `cache.enabled=true`, the operator UI gains a **Cache** nav link that
 opens `/debug/cache`.
 
 ### `/debug/cache` — entries browser
@@ -509,7 +509,7 @@ handler asked of the cache without disturbing its state.
 - [Handler](handler.md) — the handler class surface that exposes `self.cache`
 - [PrecomputedResult](handler.md#precomputed-task-results-skip-the-subprocess)
   — how cache hits short-circuit tasks
-- [Observability](observability.md) — Prometheus metrics, debug UI details
+- [Observability](observability.md) — Prometheus metrics, operator UI details
 - [Performance](performance.md) — when caching helps, the `PrecomputedResult`
   fast path
 - [Worker Autodiscovery](observability.md#worker-autodiscovery) — the

@@ -14,14 +14,14 @@ A copy-paste-ready annotated `drakkar.yaml` showing **every** configurable field
 
 📚 [Deep details](configuration.md#root-config-drakkarconfig)
 
-Top-level fields that identify this worker in logs, metrics, and the debug UI.
+Top-level fields that identify this worker in logs, metrics, and the operator UI.
 
 ```yaml
 # Name of the env var that holds this worker's display name.
 # Empty / unset env var → falls back to "drakkar-<hex>".
 worker_name_env: WORKER_ID         # env: DK_WORKER_NAME_ENV  · reasonable: WORKER_ID, HOSTNAME, K8S_POD_NAME
 
-# Logical cluster name. Workers sharing this name are grouped in the debug UI
+# Logical cluster name. Workers sharing this name are grouped in the operator UI
 # and can cross-trace messages.
 cluster_name: ''                   # env: DK_CLUSTER_NAME  · reasonable: search-cluster, prod-east, ''
 
@@ -56,7 +56,7 @@ kafka:
   #   raise — fail fast: MessageParseError stops the partition processor (schema-broken deploys)
   on_parse_error: skip
 
-  # Kafka-UI deep-link integration: when both are set, the debug UI shows a clickable
+  # Kafka-UI deep-link integration: when both are set, the operator UI shows a clickable
   # icon next to every <partition:offset>. Both empty = feature disabled silently.
   ui_url: ''                       # env: DK_KAFKA__UI_URL  · example: http://kafka-ui:8080
   ui_cluster_name: ''              # cluster name registered in Kafka-UI. env: DK_KAFKA__UI_CLUSTER_NAME
@@ -120,7 +120,7 @@ sinks:
     results:                       # instance name (free-form, referenced from handler code)
       topic: search-results        # required. env: DK_SINKS__KAFKA__RESULTS__TOPIC
       brokers: ''                  # empty = inherit kafka.brokers. env: DK_SINKS__KAFKA__RESULTS__BROKERS
-      ui_url: ''                   # link to Kafka-UI/Kowl in debug dashboard. env: DK_SINKS__KAFKA__RESULTS__UI_URL
+      ui_url: ''                   # link to Kafka-UI/Kowl in the UI dashboard. env: DK_SINKS__KAFKA__RESULTS__UI_URL
 ```
 
 ### PostgreSQL sink
@@ -260,67 +260,78 @@ logging:
 
 ---
 
-## Debug / Flight Recorder (`debug:`)
+## UI / Flight Recorder (`ui:`)
 
-📚 [Deep details](configuration.md#debug-flight-recorder-debug) · [Authentication](configuration.md#authentication) · [Debug UI](observability.md#debug-ui)
+📚 [Deep details](configuration.md#ui-flight-recorder-ui) · [Authentication](configuration.md#authentication) · [Operator UI](observability.md#operator-ui)
 
-The largest section. Provides a SQLite-backed event log, a web UI, WebSocket live streaming, worker autodiscovery, and Prometheus deep-links.
+The largest section. Provides the operator web UI, a SQLite-backed event log (`ui.recorder.*`), drakkar-ui bundle fetching (`ui.release.*`), WebSocket live streaming, worker autodiscovery, and Prometheus deep-links.
 
 ```yaml
-debug:
+ui:
   # --- Server ---
-  enabled: true                    # master switch for the whole subsystem. env: DK_DEBUG__ENABLED
-  host: 127.0.0.1                  # bind address. Use 0.0.0.0 for non-loopback. env: DK_DEBUG__HOST
-  port: 8080                       # 1–65535. env: DK_DEBUG__PORT
-  debug_url: ''                    # external URL advertised to peers (LB / ingress). env: DK_DEBUG__DEBUG_URL
+  enabled: true                    # master switch for the whole UI feature. env: DK_UI__ENABLED
+  host: 127.0.0.1                  # bind address. Use 0.0.0.0 for non-loopback. env: DK_UI__HOST
+  port: 8080                       # 1–65535. env: DK_UI__PORT
+  public_url: ''                   # external URL advertised to peers (LB / ingress). env: DK_UI__PUBLIC_URL
 
   # --- Auth (opt-in by default; UI is read-only) ---
-  auth_token: ''                   # bearer token; empty = unauthenticated + startup warning. env: DK_DEBUG__AUTH_TOKEN
+  auth_token: ''                   # bearer token; empty = unauthenticated + startup warning. env: DK_UI__AUTH_TOKEN
                                    # Generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
-  allowed_ws_origins: []           # WebSocket Origin allowlist. env: DK_DEBUG__ALLOWED_WS_ORIGINS (JSON list)
-
-  # --- Persistence (all require non-empty db_dir) ---
-  db_dir: /tmp                     # SQLite directory. Empty = no disk persistence. env: DK_DEBUG__DB_DIR
-                                   # Use shared FS (NFS, EFS) for cross-worker autodiscovery
-  store_events: true               # write per-message events. env: DK_DEBUG__STORE_EVENTS
-  store_config: true               # write worker config (enables autodiscovery). env: DK_DEBUG__STORE_CONFIG
-  store_state: true                # periodic worker-state snapshots. env: DK_DEBUG__STORE_STATE
-  state_sync_interval_seconds: 10  # snapshot frequency. env: DK_DEBUG__STATE_SYNC_INTERVAL_SECONDS
+  allowed_ws_origins: []           # WebSocket Origin allowlist. env: DK_UI__ALLOWED_WS_ORIGINS (JSON list)
 
   # --- Deployment metadata ---
-  expose_env_vars: []              # env vars captured into worker_config table. env: DK_DEBUG__EXPOSE_ENV_VARS (JSON list)
+  expose_env_vars: []              # env vars captured into worker_config table. env: DK_UI__EXPOSE_ENV_VARS (JSON list)
                                    # e.g. ['GIT_SHA', 'DEPLOY_ENV', 'K8S_POD_NAME']
 
-  # --- Database rotation & retention ---
-  rotation_interval_minutes: 60    # how often to rotate the SQLite file. env: DK_DEBUG__ROTATION_INTERVAL_MINUTES
-  retention_hours: 24              # delete rotated files older than this. env: DK_DEBUG__RETENTION_HOURS
-  retention_max_events: 100000     # cap on total events across all files. env: DK_DEBUG__RETENTION_MAX_EVENTS
-
-  # --- Output (stdout/stderr) capture ---
-  store_output: true               # include subprocess output in events. env: DK_DEBUG__STORE_OUTPUT
-  flush_interval_seconds: 5        # in-memory buffer → SQLite cadence. env: DK_DEBUG__FLUSH_INTERVAL_SECONDS
-  max_buffer: 50000                # ring-buffer capacity. env: DK_DEBUG__MAX_BUFFER
-  max_flush_retries: 3             # retries on transient SQLite errors. env: DK_DEBUG__MAX_FLUSH_RETRIES
-  max_ui_rows: 5000                # max rows returned by UI list endpoints. env: DK_DEBUG__MAX_UI_ROWS
+  # --- Presentation ---
+  max_rows: 5000                   # max rows returned by UI list endpoints. env: DK_UI__MAX_ROWS
 
   # --- Duration thresholds (noise filters) ---
-  log_min_duration_ms: 500         # min ms to log slow_task_completed/failed. env: DK_DEBUG__LOG_MIN_DURATION_MS
-  ws_min_duration_ms: 500          # min ms to broadcast over WebSocket. env: DK_DEBUG__WS_MIN_DURATION_MS
-  event_min_duration_ms: 0         # min ms to persist to SQLite (0 = persist all). env: DK_DEBUG__EVENT_MIN_DURATION_MS
-  output_min_duration_ms: 500      # min ms to include stdout/stderr in event. env: DK_DEBUG__OUTPUT_MIN_DURATION_MS
+  log_min_duration_ms: 500         # min ms to log slow_task_completed/failed. env: DK_UI__LOG_MIN_DURATION_MS
+  ws_min_duration_ms: 500          # min ms to broadcast over WebSocket. env: DK_UI__WS_MIN_DURATION_MS
 
   # --- Prometheus deep-links in the UI ---
-  prometheus_url: ''               # e.g. http://prometheus:9090. env: DK_DEBUG__PROMETHEUS_URL
-  prometheus_rate_interval: 5m     # rate() interval used in dashboard PromQL. env: DK_DEBUG__PROMETHEUS_RATE_INTERVAL
-  prometheus_worker_label: ''      # PromQL label for worker-scoped queries. env: DK_DEBUG__PROMETHEUS_WORKER_LABEL
+  prometheus_url: ''               # e.g. http://prometheus:9090. env: DK_UI__PROMETHEUS_URL
+  prometheus_rate_interval: 5m     # rate() interval used in dashboard PromQL. env: DK_UI__PROMETHEUS_RATE_INTERVAL
+  prometheus_worker_label: ''      # PromQL label for worker-scoped queries. env: DK_UI__PROMETHEUS_WORKER_LABEL
                                    # Supports {worker_id}, {cluster_name}, {metrics_port}, {debug_port}
                                    # e.g. 'worker_id="{worker_id}"'
-  prometheus_cluster_label: ''     # PromQL label for cluster-wide queries. env: DK_DEBUG__PROMETHEUS_CLUSTER_LABEL
+  prometheus_cluster_label: ''     # PromQL label for cluster-wide queries. env: DK_UI__PROMETHEUS_CLUSTER_LABEL
                                    # e.g. 'cluster="{cluster_name}"'
 
   # --- Custom links shown in the dashboard nav ---
-  custom_links: []                 # env: DK_DEBUG__CUSTOM_LINKS (JSON list)
+  custom_links: []                 # env: DK_UI__CUSTOM_LINKS (JSON list)
                                    # Each entry: {name: "...", url: "..."}; url supports {worker_id} etc.
+
+  # --- Flight recorder (persistence; all flags require non-empty db_dir) ---
+  recorder:
+    db_dir: /tmp                     # SQLite directory. Empty = no disk persistence. env: DK_UI__RECORDER__DB_DIR
+                                     # Use shared FS (NFS, EFS) for cross-worker autodiscovery
+    store_events: true               # write per-message events. env: DK_UI__RECORDER__STORE_EVENTS
+    store_config: true               # write worker config (enables autodiscovery). env: DK_UI__RECORDER__STORE_CONFIG
+    store_state: true                # periodic worker-state snapshots. env: DK_UI__RECORDER__STORE_STATE
+    state_sync_interval_seconds: 10  # snapshot frequency. env: DK_UI__RECORDER__STATE_SYNC_INTERVAL_SECONDS
+
+    # --- Database rotation & retention ---
+    rotation_interval_minutes: 60    # how often to rotate the SQLite file. env: DK_UI__RECORDER__ROTATION_INTERVAL_MINUTES
+    retention_hours: 24              # delete rotated files older than this. env: DK_UI__RECORDER__RETENTION_HOURS
+    retention_max_events: 100000     # cap on total events across all files. env: DK_UI__RECORDER__RETENTION_MAX_EVENTS
+
+    # --- Output (stdout/stderr) capture ---
+    store_output: true               # include subprocess output in events. env: DK_UI__RECORDER__STORE_OUTPUT
+    flush_interval_seconds: 5        # in-memory buffer → SQLite cadence. env: DK_UI__RECORDER__FLUSH_INTERVAL_SECONDS
+    max_buffer: 50000                # ring-buffer capacity. env: DK_UI__RECORDER__MAX_BUFFER
+    max_flush_retries: 3             # retries on transient SQLite errors. env: DK_UI__RECORDER__MAX_FLUSH_RETRIES
+    event_min_duration_ms: 0         # min ms to persist to SQLite (0 = persist all). env: DK_UI__RECORDER__EVENT_MIN_DURATION_MS
+    output_min_duration_ms: 500      # min ms to include stdout/stderr in event. env: DK_UI__RECORDER__OUTPUT_MIN_DURATION_MS
+
+  # --- drakkar-ui bundle fetching (never fatal; offline falls back to built-in pages) ---
+  release:
+    enabled: true                    # resolve + serve the drakkar-ui bundle. env: DK_UI__RELEASE__ENABLED
+    repo: wlame/drakkar-ui           # "owner/name" GitHub repo publishing UI bundles. env: DK_UI__RELEASE__REPO
+    pinned_version: ''               # known-good UI release tag (e.g. v1.2.0); '' = unpinned. env: DK_UI__RELEASE__PINNED_VERSION
+    cache_dir: ''                    # bundle cache root; '' = $XDG_CACHE_HOME/drakkar/ui. env: DK_UI__RELEASE__CACHE_DIR
+    check_update: true               # resolve the latest release tag on startup. env: DK_UI__RELEASE__CHECK_UPDATE
 ```
 
 ---
@@ -334,7 +345,7 @@ Optional handler-accessible key/value cache. **Disabled by default**.
 ```yaml
 cache:
   enabled: false                   # master switch; false = no-op stub. env: DK_CACHE__ENABLED
-  db_dir: ''                       # SQLite dir; empty = falls back to debug.db_dir. env: DK_CACHE__DB_DIR
+  db_dir: ''                       # SQLite dir; empty = falls back to ui.recorder.db_dir. env: DK_CACHE__DB_DIR
   flush_interval_seconds: 3.0      # write-behind flush cadence. env: DK_CACHE__FLUSH_INTERVAL_SECONDS
   cleanup_interval_seconds: 60.0   # expired-row cleanup cadence. env: DK_CACHE__CLEANUP_INTERVAL_SECONDS
   max_memory_entries: 10000        # in-memory LRU cap; null = unbounded (warns). env: DK_CACHE__MAX_MEMORY_ENTRIES
@@ -390,7 +401,7 @@ The pattern: **`DK_<SECTION>__<FIELD>`** -- prefix `DK_`, double underscore betw
 | One level deep | `kafka.brokers` → `DK_KAFKA__BROKERS` |
 | Two levels deep | `cache.peer_sync.interval_seconds` → `DK_CACHE__PEER_SYNC__INTERVAL_SECONDS` |
 | Map key (sink instance) | `sinks.postgres.main-db.dsn` → `DK_SINKS__POSTGRES__MAIN_DB__DSN` |
-| List value | `debug.expose_env_vars` → `DK_DEBUG__EXPOSE_ENV_VARS='["GIT_SHA","DEPLOY_ENV"]'` (JSON) |
+| List value | `ui.expose_env_vars` → `DK_UI__EXPOSE_ENV_VARS='["GIT_SHA","DEPLOY_ENV"]'` (JSON) |
 | Dict value | `executor.env` → `DK_EXECUTOR__ENV='{"FOO":"bar"}'` (JSON) |
 
 Special cases:

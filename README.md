@@ -34,7 +34,7 @@ Configured sinks (any combination)
 - **Typed message models** -- define Pydantic schemas for input/output, get auto-deserialization
 - **Cache (optional)** -- `self.cache` key/value store with memory + write-behind SQLite + eventually-consistent peer sync across workers; pluggable backends conform to the public `CacheLike` protocol ([docs](docs/cache.md))
 - **Webapp pipeline (optional)** -- opt-in synchronous HTTP endpoint exposing the same handler pipeline used for Kafka, with multi-tenant bearer-token auth, per-client rpm caps, opt-in sinks delivery, and graceful-shutdown semantics. Webapp users declare four type parameters on `BaseDrakkarHandler` (Kafka in/out + HTTP request/response). See [`docs/webapp.md`](docs/webapp.md).
-- **Built-in debug UI** (FastAPI) with executor timeline, partition lag, message tracing
+- **Built-in operator UI** (FastAPI) with executor timeline, partition lag, message tracing
 - **Flight recorder** -- SQLite event log with retention and rotation
 - **Prometheus metrics** -- pipeline, executor, per-sink, and shutdown / drain metrics
 - **Structured JSON logging** -- ECS-compatible, ready for Elastic
@@ -190,7 +190,7 @@ dlq:
 metrics:
   port: 9090
 
-debug:
+ui:
   port: 8080
 ```
 
@@ -216,9 +216,9 @@ Drakkar has an explicit trust model that operators should understand before prod
 
 1. **Handler binary is fully trusted.** `executor.binary_path` is operator-configured; message bytes flow to the binary's stdin without sanitization. The binary runs with the worker's privileges (plus any env overrides from `ExecutorConfig.env` or per-task `env`).
 2. **Peer workers sharing `db_dir` are fully trusted.** The cache and recorder peer-sync mechanisms have no cryptographic authentication of peer writes. Anyone who can write to the shared directory can inject cache entries or event rows that your workers will read. Treat `db_dir` as a shared-trust boundary.
-3. **The debug UI is an operator tool, not a public surface.** Authentication is **opt-in by default** — `debug.auth_token` is empty out of the box, the UI runs unauthenticated, and a structured warning (`debug_ui_unauthenticated`) fires at startup naming the host:port and the two opt-in paths (`debug.auth_token` in YAML or `DK_DEBUG__AUTH_TOKEN` env var). To require auth, set the token to a 32+ character random value (e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"`); protected endpoints (database download, merge, message probe) and the WebSocket live-event stream then require `Authorization: Bearer <token>` (or `?token=<token>`). When a token is set, the WebSocket also validates the `Origin` header (against `debug.allowed_ws_origins` when configured, otherwise against the request's `Host` header). Even with auth, the debug UI exposes subprocess stdout/stderr, per-task env (after redaction), cache contents, and live event streams; restrict access to operators only.
+3. **The operator UI is an operator tool, not a public surface.** Authentication is **opt-in by default** — `ui.auth_token` is empty out of the box, the UI runs unauthenticated, and a structured warning (`ui_unauthenticated`) fires at startup naming the host:port and the two opt-in paths (`ui.auth_token` in YAML or `DK_UI__AUTH_TOKEN` env var). To require auth, set the token to a 32+ character random value (e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"`); protected endpoints (database download, merge, message probe) and the WebSocket live-event stream then require `Authorization: Bearer <token>` (or `?token=<token>`). When a token is set, the WebSocket also validates the `Origin` header (against `ui.allowed_ws_origins` when configured, otherwise against the request's `Host` header). Even with auth, the UI exposes subprocess stdout/stderr, per-task env (after redaction), cache contents, and live event streams; restrict access to operators only.
 
-**Why is auth opt-out by default?** The debug UI is **read-only by design** — no endpoint stops a running worker, replays Kafka messages, mutates configured sinks, or fakes pipeline data. The Message Probe runs the handler against pasted input but is enforced (with tests) to produce zero side effects: no sink writes, no offset commits, no recorder rows, no cache writes, no peer sync. Combined with Drakkar's expected deployment posture — inside a private contour (VPC, internal cluster network, operator-only ingress) — the framework treats "unauthenticated by default + structured startup warning" as the right balance between out-of-the-box ergonomics and operator visibility. Operators who deploy in any non-private context (public internet, multi-tenant host, hostile network segment) should treat the warning as a prompt to set `auth_token` before the worker accepts traffic.
+**Why is auth opt-out by default?** The UI is **read-only by design** — no endpoint stops a running worker, replays Kafka messages, mutates configured sinks, or fakes pipeline data. The Message Probe runs the handler against pasted input but is enforced (with tests) to produce zero side effects: no sink writes, no offset commits, no recorder rows, no cache writes, no peer sync. Combined with Drakkar's expected deployment posture — inside a private contour (VPC, internal cluster network, operator-only ingress) — the framework treats "unauthenticated by default + structured startup warning" as the right balance between out-of-the-box ergonomics and operator visibility. Operators who deploy in any non-private context (public internet, multi-tenant host, hostile network segment) should treat the warning as a prompt to set `auth_token` before the worker accepts traffic.
 4. **Kafka producers are trusted for availability, not correctness.** Drakkar deserializes message payloads via `handler.deserialize_message`; parse errors silently set `msg.payload=None` rather than DLQ-ing the message or raising. A malicious producer cannot execute code in the worker, but can cause handlers to see unexpected `None` payloads unless your handler validates.
 5. **Per-task `env` is redacted before it reaches the recorder.** Handler-written values in `task.env` are sanitized on the way to the recorder DB: names matching `*PASSWORD*`/`*SECRET*`/`*TOKEN*`/`*_KEY`/`*API_KEY*`/`*CREDENTIAL*`/`*_DSN` become `***`; other URL-shaped values have embedded credentials stripped. Non-matching names pass through, so rename or avoid per-task env for secrets whose names don't trigger a pattern. `ExecutorConfig.env` (framework-level) is **never written** to the recorder at all -- it only reaches the subprocess environment, making it the safer slot for stable credentials.
 
@@ -316,12 +316,12 @@ All config fields support environment variable override with `DK_` prefix and `_
 ```bash
 DK_KAFKA__BROKERS=kafka:9092
 DK_EXECUTOR__MAX_EXECUTORS=16
-DK_DEBUG__PORT=8081
+DK_UI__PORT=8081
 ```
 
 ## Observability
 
-### Debug UI
+### Operator UI
 
 Enabled by default at `:8080`. Pages:
 
@@ -387,11 +387,11 @@ Services and web UIs:
 
 | URL | Service |
 |-----|---------|
-| `http://localhost:8081` | Worker 1 debug UI (primary workers, shared consumer group) |
-| `http://localhost:8082` | Worker 2 debug UI |
-| `http://localhost:8083` | Worker 3 debug UI |
-| `http://localhost:8084` | Fast-worker 1 debug UI (separate consumer group, `on_window_complete` aggregation) |
-| `http://localhost:8085` | Fast-worker 2 debug UI |
+| `http://localhost:8081` | Worker 1 UI (primary workers, shared consumer group) |
+| `http://localhost:8082` | Worker 2 UI |
+| `http://localhost:8083` | Worker 3 UI |
+| `http://localhost:8084` | Fast-worker 1 UI (separate consumer group, `on_window_complete` aggregation) |
+| `http://localhost:8085` | Fast-worker 2 UI |
 | `http://localhost:8087` | Redis Commander |
 | `http://localhost:8088` | Kafka UI |
 | `http://localhost:8089` | MongoDB Express |
@@ -408,7 +408,7 @@ The integration scenario:
 - 5% simulated executor failures with retry via `on_error()`
 - Failed deliveries route to DLQ or retry based on sink type
 
-Debug recorder databases and per-worker cache databases both live in `integration/shared/`, which is mounted into every worker container as `/shared`. Recorder files are per-worker timestamped (`worker-1-2026-03-23__14_55_00.db` with a `{worker}-live.db` symlink). Cache files are single per-worker (`worker-1-cache.db.actual` with a `{worker}-cache.db` symlink used for peer discovery). See `integration/shared/README.md` for details.
+Flight-recorder databases and per-worker cache databases both live in `integration/shared/`, which is mounted into every worker container as `/shared`. Recorder files are per-worker timestamped (`worker-1-2026-03-23__14_55_00.db` with a `{worker}-live.db` symlink). Cache files are single per-worker (`worker-1-cache.db.actual` with a `{worker}-cache.db` symlink used for peer discovery). See `integration/shared/README.md` for details.
 
 ## Development
 

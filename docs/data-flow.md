@@ -2,7 +2,7 @@
 
 ## Architecture Overview
 
-Drakkar is a Python 3.13+ framework that consumes messages from a Kafka topic, fans them out to per-partition async processors, runs user-defined logic as subprocesses, and delivers results to one or more output sinks (Kafka, PostgreSQL, MongoDB, HTTP, Redis, filesystem). The architecture follows a pipeline model: **poll -> partition -> window -> arrange -> execute -> on_task_complete -> on_message_complete -> on_window_complete -> deliver -> commit**. A single Drakkar worker runs one async event loop (`asyncio.run`) that hosts all partition processors, a shared subprocess executor pool with semaphore-based concurrency control, a sink manager, a dead-letter queue (DLQ), optional Prometheus metrics, and an optional debug flight recorder with a web UI. The user implements a handler class with hooks (`arrange`, `on_task_complete`, `on_message_complete`, `on_window_complete`, `on_error`, `on_delivery_error`, plus lifecycle hooks like `on_startup`/`on_ready`/`on_assign`/`on_revoke`) that define the application-specific logic; everything else -- Kafka consumption, offset tracking, backpressure, retries, subprocess lifecycle, sink connections, and graceful shutdown -- is managed by the framework. See [Fan-out](fan-out.md) for a dedicated walkthrough of the per-task / per-message / per-window hook trio.
+Drakkar is a Python 3.13+ framework that consumes messages from a Kafka topic, fans them out to per-partition async processors, runs user-defined logic as subprocesses, and delivers results to one or more output sinks (Kafka, PostgreSQL, MongoDB, HTTP, Redis, filesystem). The architecture follows a pipeline model: **poll -> partition -> window -> arrange -> execute -> on_task_complete -> on_message_complete -> on_window_complete -> deliver -> commit**. A single Drakkar worker runs one async event loop (`asyncio.run`) that hosts all partition processors, a shared subprocess executor pool with semaphore-based concurrency control, a sink manager, a dead-letter queue (DLQ), optional Prometheus metrics, and an optional flight recorder with an operator web UI. The user implements a handler class with hooks (`arrange`, `on_task_complete`, `on_message_complete`, `on_window_complete`, `on_error`, `on_delivery_error`, plus lifecycle hooks like `on_startup`/`on_ready`/`on_assign`/`on_revoke`) that define the application-specific logic; everything else -- Kafka consumption, offset tracking, backpressure, retries, subprocess lifecycle, sink connections, and graceful shutdown -- is managed by the framework. See [Fan-out](fan-out.md) for a dedicated walkthrough of the per-task / per-message / per-window hook trio.
 
 Configuration is loaded from a YAML file (path via `config_path` argument or `DK_CONFIG` env var) with environment variable overrides using the `DK_` prefix and `__` as a nesting delimiter (e.g., `DK_KAFKA__BROKERS`). Environment variables are deep-merged on top of YAML values. The root configuration object is `DrakkarConfig`, a Pydantic `BaseSettings` model. All config fields referenced below are part of this hierarchy.
 
@@ -36,12 +36,12 @@ After `on_startup`, the framework builds all components in this order:
 
 3. **Starts the Prometheus metrics server** on `metrics.port` (default: `9090`) if `metrics.enabled` (default: `True`). Publishes `worker_info` with worker_id, version, and consumer_group labels.
 
-4. **If `debug.enabled`** (default: `True`):
-   - Creates an `EventRecorder` with the debug config, worker name, and cluster name.
-   - Sets up a state provider callback so the recorder can periodically snapshot worker state (uptime, partitions, pool utilization, queue depth) every `debug.state_sync_interval_seconds` (default: `10`) seconds.
+4. **If `ui.enabled`** (default: `True`):
+   - Creates an `EventRecorder` with the UI config, worker name, and cluster name.
+   - Sets up a state provider callback so the recorder can periodically snapshot worker state (uptime, partitions, pool utilization, queue depth) every `ui.recorder.state_sync_interval_seconds` (default: `10`) seconds.
    - Starts the recorder (creates/opens the SQLite database, starts flush/retention/state-sync background tasks).
-   - Writes the full worker configuration to the `worker_config` table (if `debug.store_config` is True, default: `True`), enabling autodiscovery by other workers in the same cluster.
-   - Creates and starts a `DebugServer` (FastAPI) on `debug.port` (default: `8080`), providing a web UI, JSON API, WebSocket event streaming, and database download/merge endpoints.
+   - Writes the full worker configuration to the `worker_config` table (if `ui.recorder.store_config` is True, default: `True`), enabling autodiscovery by other workers in the same cluster.
+   - Creates and starts a `UIServer` (FastAPI) on `ui.port` (default: `8080`), providing a web UI, JSON API, WebSocket event streaming, and database download/merge endpoints.
 
 5. **Builds all sinks** from config by iterating each type's dict:
    - `sinks.kafka` -- creates `KafkaSink(name, config, brokers_fallback=kafka.brokers)` for each named entry
@@ -131,7 +131,7 @@ if processor:
 ```
 
 The `enqueue()` call is non-blocking (`queue.put_nowait()`). It also:
-- Records a `consumed` event in the flight recorder (if debug enabled).
+- Records a `consumed` event in the flight recorder (if the UI is enabled).
 - Increments the `messages_consumed` Prometheus counter (labeled by partition).
 - Updates the `partition_queue_size` gauge.
 
@@ -158,7 +158,7 @@ When Kafka's cooperative-sticky rebalancer assigns new partitions to this worker
      - `executor.window_size` (default: `100`, min: `1`) -- max messages per window
      - `executor.max_retries` (default: `3`, min: `0`) -- retry limit per failed task
      - Callbacks for sink delivery (`_handle_collect`) and offset commit (`_handle_commit`)
-     - The flight recorder (if debug enabled)
+     - The flight recorder (if the UI is enabled)
    - Starts the processor's background `asyncio.Task` immediately.
 3. Updates the `assigned_partitions` Prometheus gauge.
 4. Calls the handler's `on_assign(partition_ids)` hook asynchronously (fire-and-forget with exception logging).
@@ -652,10 +652,10 @@ When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
 - This runs **before** the consumer is closed so those tasks can still use `self._consumer` safely. Skipping this step caused use-after-close errors and missed final commits under revoke-then-shutdown sequences.
 
 ### Step 7: Stop the Flight Recorder
-- If debug is enabled: flushes any buffered events to SQLite, cancels background tasks (flush, retention, state sync), removes the `-live.db` symlink.
+- If the UI is enabled: flushes any buffered events to SQLite, cancels background tasks (flush, retention, state sync), removes the `-live.db` symlink.
 
-### Step 8: Stop the Debug Server
-- If debug is enabled: stops the FastAPI server.
+### Step 8: Stop the UI Server
+- If the UI is enabled: stops the FastAPI server.
 
 ### Step 9: Close All Sinks and DLQ
 - `sink_manager.close_all()`: calls `close()` on each sink. Exceptions are caught and logged as warnings (never raised during shutdown).
@@ -797,34 +797,39 @@ Each sink type is a dict mapping instance names to their config:
 | `level` | str | `'INFO'` |
 | `format` | str | `'json'` (also: `'console'`) |
 
-### `debug` -- Flight Recorder and Web UI
+### `ui` -- Operator UI and Flight Recorder
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `True` | Enable/disable entire debug feature |
-| `port` | int | `8080` | Debug web UI port |
-| `debug_url` | str | `''` | External URL for the debug UI |
-| `db_dir` | str | `'/tmp'` | SQLite database directory; `''` = no disk persistence |
-| `store_events` | bool | `True` | Write processing events to events table |
-| `store_config` | bool | `True` | Write worker config (enables autodiscovery) |
-| `store_state` | bool | `True` | Periodic state snapshots |
-| `state_sync_interval_seconds` | int | `10` | Seconds between state snapshots |
-| `rotation_interval_minutes` | int | `60` | When to roll over DB files |
-| `retention_hours` | int | `24` | Delete DBs older than this |
-| `retention_max_events` | int | `100000` | Max total events across DB files |
-| `store_output` | bool | `True` | Include stdout/stderr in event records |
-| `flush_interval_seconds` | int | `5` | Buffer flush interval |
-| `max_buffer` | int | `50000` | In-memory event buffer size |
-| `max_ui_rows` | int | `5000` | Max rows returned to UI queries |
+| `enabled` | bool | `True` | Enable/disable the entire UI feature |
+| `port` | int | `8080` | Web UI port |
+| `public_url` | str | `''` | External URL for this worker's UI |
+| `max_rows` | int | `5000` | Max rows returned to UI queries |
 | `log_min_duration_ms` | int | `500` | Min duration to log slow tasks |
 | `ws_min_duration_ms` | int | `500` | Min duration to broadcast via WebSocket |
-| `event_min_duration_ms` | int | `0` | Min duration to persist to DB |
-| `output_min_duration_ms` | int | `500` | Min duration to include stdout/stderr |
 | `prometheus_url` | str | `''` | Prometheus server URL for dashboard links |
 | `prometheus_rate_interval` | str | `'5m'` | Rate interval for Prometheus queries |
 | `prometheus_worker_label` | str | `''` | Worker label name in Prometheus |
 | `prometheus_cluster_label` | str | `''` | Cluster label name in Prometheus |
-| `custom_links` | list[dict] | `[]` | Custom links for debug UI |
+| `custom_links` | list[dict] | `[]` | Custom links for the UI dashboard |
+| `recorder.db_dir` | str | `'/tmp'` | SQLite database directory; `''` = no disk persistence |
+| `recorder.store_events` | bool | `True` | Write processing events to events table |
+| `recorder.store_config` | bool | `True` | Write worker config (enables autodiscovery) |
+| `recorder.store_state` | bool | `True` | Periodic state snapshots |
+| `recorder.state_sync_interval_seconds` | int | `10` | Seconds between state snapshots |
+| `recorder.rotation_interval_minutes` | int | `60` | When to roll over DB files |
+| `recorder.retention_hours` | int | `24` | Delete DBs older than this |
+| `recorder.retention_max_events` | int | `100000` | Max total events across DB files |
+| `recorder.store_output` | bool | `True` | Include stdout/stderr in event records |
+| `recorder.flush_interval_seconds` | int | `5` | Buffer flush interval |
+| `recorder.max_buffer` | int | `50000` | In-memory event buffer size |
+| `recorder.event_min_duration_ms` | int | `0` | Min duration to persist to DB |
+| `recorder.output_min_duration_ms` | int | `500` | Min duration to include stdout/stderr |
+| `release.enabled` | bool | `True` | Resolve and serve the drakkar-ui bundle |
+| `release.repo` | str | `'wlame/drakkar-ui'` | GitHub repo publishing UI bundles |
+| `release.pinned_version` | str | `''` | Known-good UI release tag; `''` = unpinned |
+| `release.cache_dir` | str | `''` | Bundle cache root; `''` = per-user cache dir |
+| `release.check_update` | bool | `True` | Resolve the latest release tag on startup |
 
 ### Root-Level Settings
 

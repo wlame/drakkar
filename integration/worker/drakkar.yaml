@@ -140,24 +140,14 @@ logging:
   level: "INFO"
   format: "json"
 
-debug:
+ui:
   enabled: true
   host: "0.0.0.0"
   port: 8080
-  db_dir: "/shared"
-  store_events: true
-  store_config: true
-  store_state: true
-  state_sync_interval_seconds: 10
   expose_env_vars:
     - "WORKER_ID"
     - "DK_CONFIG"
-  retention_hours: 24
-  retention_max_events: 100000
-  store_output: true
-  flush_interval_seconds: 3
-  max_buffer: 50000
-  max_ui_rows: 5000
+  max_rows: 5000
   prometheus_url: "http://localhost:9099"
   prometheus_rate_interval: "30s"
   prometheus_worker_label: 'instance="{worker_id}:{metrics_port}"'
@@ -165,6 +155,17 @@ debug:
   custom_links:
     - name: "Drakkar GitHub"
       url: "https://github.com/wlame/drakkar?from={worker_id}"
+  recorder:
+    db_dir: "/shared"
+    store_events: true
+    store_config: true
+    store_state: true
+    state_sync_interval_seconds: 10
+    retention_hours: 24
+    retention_max_events: 100000
+    store_output: true
+    flush_interval_seconds: 3
+    max_buffer: 50000
 
 # --- Framework cache ---
 #
@@ -218,7 +219,7 @@ cache:
   # stub (peek/get return None, set/delete silently discard) — handler
   # code runs unchanged.
   enabled: true
-  # Empty db_dir falls back to debug.db_dir above. Keeping them on the
+  # Empty db_dir falls back to ui.recorder.db_dir above. Keeping them on the
   # same shared volume lets the peer-sync loop discover other workers'
   # cache DBs alongside their -live.db recorder files.
   db_dir: ""
@@ -238,7 +239,7 @@ cache:
   # Peer-sync loop: pulls recent rows from other workers' `-cache.db`
   # files via read-only SQLite connections, LWW-merges into our local
   # DB, and invalidates overlapping memory entries so the next read
-  # sees the newer value. Requires debug.store_config=true above so
+  # sees the newer value. Requires ui.recorder.store_config=true above so
   # peers can discover our cluster_name.
   peer_sync:
     enabled: true

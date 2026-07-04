@@ -52,14 +52,14 @@ docker-compose down -v
 
 3 workers, consumer group `drakkar-integration`, 50-partition topic.
 
-| Worker | Debug UI | Metrics | Webapp | Config |
+| Worker | Operator UI | Metrics | Webapp | Config |
 |--------|----------|---------|--------|--------|
 | worker-1 | [localhost:8081](http://localhost:8081) | [localhost:9090](http://localhost:9090/metrics) | [localhost:8091](http://localhost:8091/process) | 4 executors, all 6 sinks, **webapp enabled** |
 | worker-2 | [localhost:8082](http://localhost:8082) | [localhost:9091](http://localhost:9091/metrics) | -- | 4 executors, all 6 sinks |
 | worker-3 | [localhost:8083](http://localhost:8083) | [localhost:9093](http://localhost:9093/metrics) | -- | 4 executors, all 6 sinks |
 
-Webapp port follows the integration convention **debug-UI port + 10**
-(worker-1 debug `8081` → webapp `8091`). The framework default outside
+Webapp port follows the integration convention **UI port + 10**
+(worker-1 UI `8081` → webapp `8091`). The framework default outside
 the integration cluster is `8090`; the integration `drakkar.yaml`
 overrides it to keep the port plan consistent across services.
 
@@ -73,7 +73,7 @@ framework-level redistribution.
 
 2 workers, consumer group `drakkar-fast`, same source topic.
 
-| Worker | Debug UI | Metrics | Config |
+| Worker | Operator UI | Metrics | Config |
 |--------|----------|---------|--------|
 | fast-worker-1 | [localhost:8084](http://localhost:8084) | [localhost:9094](http://localhost:9094/metrics) | 2 executors, Kafka-only sink |
 | fast-worker-2 | [localhost:8085](http://localhost:8085) | [localhost:9095](http://localhost:9095/metrics) | 2 executors, Kafka-only sink |
@@ -192,9 +192,9 @@ Each iteration logs the request body and the response status. You'll
 see 200 responses up to the rpm cap, then 429s once the sliding window
 fills.
 
-### What to check in the debug UI
+### What to check in the UI
 
-Open [worker-1's debug UI](http://localhost:8081):
+Open [worker-1's UI](http://localhost:8081):
 
 - **Dashboard `/`** -- a "WebApp" tile appears alongside the partition
   tiles, showing in-flight requests, per-client rpm caps, and 60s
@@ -269,9 +269,9 @@ attempted/delivered/dlq counts.
 
 ---
 
-## Debug UI Pages
+## Operator UI Pages
 
-Open any worker's debug UI to explore:
+Open any worker's UI to explore:
 
 ### Dashboard (`/`)
 
@@ -338,7 +338,7 @@ Browse topics in the [Kafka UI](http://localhost:8088).
 
 ## Worker Autodiscovery
 
-All workers write to `/shared` (mounted as a volume). The [debug UI](observability.md#debug-ui)
+All workers write to `/shared` (mounted as a volume). The [operator UI](observability.md#operator-ui)
 scans this directory for `*-live.db` symlinks and discovers peer
 workers via [worker autodiscovery](observability.md#worker-autodiscovery). Use the worker dropdown in the top-right nav to switch between
 workers without remembering ports.
@@ -427,25 +427,26 @@ rebalance detection. Increase for production-like behavior:
 session_timeout_ms: 45000
 ```
 
-### Disable debug thresholds
+### Disable duration thresholds
 
-To see ALL tasks in the debug UI (including fast ones):
+To see ALL tasks in the UI (including fast ones):
 
 ```yaml
 # integration/worker/drakkar.yaml or fast-worker/drakkar.yaml
-debug:
+ui:
   ws_min_duration_ms: 0
-  event_min_duration_ms: 0
-  output_min_duration_ms: 0
   log_min_duration_ms: 0
+  recorder:
+    event_min_duration_ms: 0
+    output_min_duration_ms: 0
 ```
 
-### Add auth to debug UI
+### Add auth to the UI
 
 Protect database downloads with a token:
 
 ```yaml
-debug:
+ui:
   auth_token: "my-secret-token"
 ```
 

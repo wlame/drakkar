@@ -298,7 +298,7 @@ exhausted, operator returned `DLQ`), so transient blips don't trip it.
   trip AND half-open probe failures). A flapping circuit shows up as
   a rising rate on this counter, not a single trip plus silent
   reopens.
-- `SinkStats.last_error == 'circuit open'` — the debug UI renders
+- `SinkStats.last_error == 'circuit open'` — the operator UI renders
   this sentinel so operators can distinguish breaker-routed DLQ
   entries from actual delivery failures.
 

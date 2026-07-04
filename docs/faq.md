@@ -35,7 +35,7 @@ Drakkar is narrower and more opinionated than any of them — the sweet spot is 
 
 | Tool | Input sources | Work stage | Python-native? | Notes |
 |------|--------------|-----------|----------------|-------|
-| **Drakkar** | Kafka only | **Subprocess pool** (external binary via stdin/stdout) | Yes (3.13+) | Built-in DLQ, circuit breakers, flight recorder, peer-sync cache, live debug UI. Offsets commit per-partition after *all* sinks ack. |
+| **Drakkar** | Kafka only | **Subprocess pool** (external binary via stdin/stdout) | Yes (3.13+) | Built-in DLQ, circuit breakers, flight recorder, peer-sync cache, live operator UI. Offsets commit per-partition after *all* sinks ack. |
 | **Celery** | Broker-agnostic (Redis, RabbitMQ, SQS, Kafka via plugin) | In-process Python function | Yes | General task queue; no native Kafka partition ordering; one broker at a time per worker. |
 | **Faust** | Kafka only | In-process async Python (streams & tables) | Yes | Stream-processing DSL (agents, tables, windows). No first-class subprocess executor; you bring your own. |
 | **Kafka Streams** | Kafka only | In-process JVM code | No (Java/Scala) | Stateful stream processor with changelog-backed stores. No Python. |
@@ -65,7 +65,7 @@ There's no single number — memory is dominated by three tunables plus your sub
 
 - **Buffered Kafka messages**: `max_poll_records` × average message size × (number of partitions × `window_size`) in worst case. Defaults (`max_poll_records=100`, `window_size` small) keep this in the tens of MB.
 - **In-memory cache**: capped by `cache.max_memory_entries` (default `10_000`). Each entry is a Python dict + serialized Pydantic JSON; budget roughly 1-10 KB/entry for typical payloads. Set `max_memory_entries: null` for unbounded (the config layer emits a startup warning if you do — monitor RSS).
-- **Flight recorder buffer**: small, bounded by `recorder.flush_interval_seconds` × event rate. Events are buffered in memory and flushed to SQLite; a full buffer is tens of MB.
+- **Flight recorder buffer**: small, bounded by `ui.recorder.flush_interval_seconds` × event rate. Events are buffered in memory and flushed to SQLite; a full buffer is tens of MB.
 - **Subprocess children**: `max_executors` live processes, each using whatever your binary consumes. This usually dwarfs the Python RSS.
 
 For a typical worker (max_executors=80, cache enabled with defaults, recorder on), the **Python process** sits in the 150-400 MB range. The subprocess pool adds whatever your binary needs, times `max_executors`. Measure under load; there's no substitute. Raw capacity knobs are documented in [Configuration](configuration.md) and the [Cache memory cap](cache.md) page.
@@ -136,7 +136,7 @@ Framework-provided `self.cache` on every handler: in-memory LRU + write-behind p
 
 ### How do workers discover each other's caches?
 
-Via a **shared filesystem** — no peer list in config, no Kafka topic, no discovery protocol. Each worker writes its cache DB under a shared directory (`cache.db_dir`, falling back to `debug.db_dir`) and publishes a stable live symlink named `<worker>-cache.db` pointing at the current file. Peers `glob` the directory for `*-cache.db` symlinks, skip their own entry, resolve through `os.path.realpath` (so a peer rotating its DB doesn't break mid-read), and read rows from the peer's `cache_entries` table. See `drakkar/peer_discovery.py::discover_peer_dbs` for the implementation.
+Via a **shared filesystem** — no peer list in config, no Kafka topic, no discovery protocol. Each worker writes its cache DB under a shared directory (`cache.db_dir`, falling back to `ui.recorder.db_dir`) and publishes a stable live symlink named `<worker>-cache.db` pointing at the current file. Peers `glob` the directory for `*-cache.db` symlinks, skip their own entry, resolve through `os.path.realpath` (so a peer rotating its DB doesn't break mid-read), and read rows from the peer's `cache_entries` table. See `drakkar/peer_discovery.py::discover_peer_dbs` for the implementation.
 
 What happens if the filesystem isn't shared: peer sync finds zero peers and the cache operates single-worker. No error, no warning — it just behaves like a local cache. If you *want* cluster-wide cache, mount a shared volume (NFS, EFS, hostPath in k8s) and point every worker's `db_dir` at it.
 
@@ -231,15 +231,15 @@ Drakkar does not ship blessed Helm charts or Kustomize overlays yet — a refere
 - **Graceful shutdown** on `SIGTERM` (drains in-flight windows, commits settled offsets, disconnects sinks).
 - **Structured logs** on stdout (JSON via structlog) — ready for any k8s log collector.
 - **Prometheus metrics** on a configurable port for `prometheus-operator` `ServiceMonitor`.
-- **Stateful considerations**: each worker needs a unique `worker_id` (set via the env var named in `worker_name_env`, default `WORKER_ID`) and a per-worker DB path (recorder + cache SQLite files). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `debug.db_dir` / `cache.db_dir`, or use a shared `ReadWriteMany` volume (NFS, EFS) if you want cluster-wide peer sync.
+- **Stateful considerations**: each worker needs a unique `worker_id` (set via the env var named in `worker_name_env`, default `WORKER_ID`) and a per-worker DB path (recorder + cache SQLite files). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `ui.recorder.db_dir` / `cache.db_dir`, or use a shared `ReadWriteMany` volume (NFS, EFS) if you want cluster-wide peer sync.
 
 Typical shape: one `StatefulSet` (or `Deployment` with a PVC per replica) × N replicas = N Kafka consumer-group members. Replica count ≤ partition count. Env-var overrides follow the `DK_` prefix + `__` nesting convention (see [Configuration Loading](configuration.md#configuration-loading)).
 
 ---
 
-## Debug UI and observability
+## Operator UI and observability
 
-### How does the debug web UI affect the running pipeline?
+### How does the operator web UI affect the running pipeline?
 
 The UI runs on a separate thread with its own asyncio event loop, so most read-only endpoints don't interfere. Real effects to be aware of:
 
@@ -248,13 +248,13 @@ The UI runs on a separate thread with its own asyncio event loop, so most read-o
 - **GIL contention** between the UI thread and the main loop under heavy UI use.
 - **aiosqlite connections** are per-thread workers; UI reads don't block pipeline writes thanks to SQLite WAL mode.
 
-See [Observability — Debug UI](observability.md#debug-ui) for the endpoint inventory.
+See [Observability — Operator UI](observability.md#operator-ui) for the endpoint inventory.
 
-### Is the debug UI safe to expose to a team of operators?
+### Is the UI safe to expose to a team of operators?
 
-Auth is **opt-in by default**. The UI is read-only by design (no endpoint stops a worker, replays Kafka messages, mutates sinks, or fakes pipeline data) and Drakkar is intended to run inside a private contour, so the framework starts unauthenticated when `debug.auth_token` is empty (the default) and emits a structured `debug_ui_unauthenticated` warning at startup naming the host:port and the two opt-in paths (`debug.auth_token` in YAML or `DK_DEBUG__AUTH_TOKEN` env var).
+Auth is **opt-in by default**. The UI is read-only by design (no endpoint stops a worker, replays Kafka messages, mutates sinks, or fakes pipeline data) and Drakkar is intended to run inside a private contour, so the framework starts unauthenticated when `ui.auth_token` is empty (the default) and emits a structured `ui_unauthenticated` warning at startup naming the host:port and the two opt-in paths (`ui.auth_token` in YAML or `DK_UI__AUTH_TOKEN` env var).
 
-For multi-operator setups, set a strong `debug.auth_token`:
+For multi-operator setups, set a strong `ui.auth_token`:
 
 1. **Bearer token on protected endpoints.** Once the token is set, `/api/debug/databases`, `/api/debug/merge`, `/debug/download/{filename}`, and `/api/debug/probe` all require an `Authorization: Bearer <token>` header (or `?token=<token>` query parameter). Comparison uses `secrets.compare_digest` to avoid timing side-channels.
 2. **WebSocket auth + origin check.** With a token configured, the live-event WebSocket at `/ws` also requires the same `auth_token`; invalid tokens close with code 4401. The handshake validates the `Origin` header against `allowed_ws_origins` (explicit allowlist) or the `Host` header (same-origin fallback).
@@ -262,28 +262,28 @@ For multi-operator setups, set a strong `debug.auth_token`:
 
 Even with auth, the read-only pages expose task stdout/stderr, task env (after [redaction](observability.md#flight-recorder)), cache contents, and live event streams. Restrict access to operators. Concurrent Message Probes serialize on an internal lock, and the probe temporarily replaces `handler.cache` — keep this in mind if you have many operators debugging the same worker simultaneously.
 
-### Why does my worker emit a `debug_ui_unauthenticated` warning at startup?
+### Why does my worker emit a `ui_unauthenticated` warning at startup?
 
-You have `debug.enabled=true` and `debug.auth_token` is empty (the default). That's an intentional, supported configuration — Drakkar treats the debug UI as opt-in-auth because it is read-only and meant for private-network deployments. The warning is informational; the worker continues starting normally.
+You have `ui.enabled=true` and `ui.auth_token` is empty (the default). That's an intentional, supported configuration — Drakkar treats the UI as opt-in-auth because it is read-only and meant for private-network deployments. The warning is informational; the worker continues starting normally.
 
 To silence it (i.e. require auth), pick one of:
 
-- **Set `debug.auth_token`** to a strong random value (`python -c "import secrets; print(secrets.token_urlsafe(32))"`) — recommended whenever the UI is reachable from anywhere outside a fully-trusted operator network.
-- **Set `debug.enabled=false`** — if the worker doesn't need the flight recorder at all (no observability cost reduction without removing the UI).
+- **Set `ui.auth_token`** to a strong random value (`python -c "import secrets; print(secrets.token_urlsafe(32))"`) — recommended whenever the UI is reachable from anywhere outside a fully-trusted operator network.
+- **Set `ui.enabled=false`** — if the worker doesn't need the flight recorder at all (no observability cost reduction without removing the UI).
 
-See [Authentication](configuration.md#authentication) for the field semantics and the implementation at `drakkar/app_security.py::warn_if_debug_unauthenticated`.
+See [Authentication](configuration.md#authentication) for the field semantics and the implementation at `drakkar/app_security.py::warn_if_ui_unauthenticated`.
 
 ### What is the Message Probe tab?
 
-Paste a raw Kafka message value; the framework runs it end-to-end through your handler (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with zero intentional footprint: no sink writes, no offset commits, no recorder rows, no cache writes. Shows every task's stdin/stdout/stderr/exit code/duration plus the sink payloads that *would* have been produced. The full contract (headers, cache proxy behavior, concurrent-probe serialization) is documented on the [Debug UI page](observability.md#debug-ui).
+Paste a raw Kafka message value; the framework runs it end-to-end through your handler (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with zero intentional footprint: no sink writes, no offset commits, no recorder rows, no cache writes. Shows every task's stdin/stdout/stderr/exit code/duration plus the sink payloads that *would* have been produced. The full contract (headers, cache proxy behavior, concurrent-probe serialization) is documented on the [Operator UI page](observability.md#operator-ui).
 
 ### How do I trace a specific message through the pipeline?
 
-Use `/debug` → **Message Trace** tab, search by `partition:offset` or by label value. The flight recorder stores every lifecycle event per message. See [Observability — Debug UI](observability.md#debug-ui).
+Use `/debug` → **Message Trace** tab, search by `partition:offset` or by label value. The flight recorder stores every lifecycle event per message. See [Observability — Operator UI](observability.md#operator-ui).
 
 ### Do UI readers slow down the pipeline?
 
-Mildly. Heavy read traffic increases SQLite WAL checkpoint frequency and burns a little Python GIL time. Under normal operator use (a few tabs refreshing) the effect is negligible. See [Bottleneck: Recorder and Debug UI](performance.md#bottleneck-recorder-and-debug-ui).
+Mildly. Heavy read traffic increases SQLite WAL checkpoint frequency and burns a little Python GIL time. Under normal operator use (a few tabs refreshing) the effect is negligible. See [Bottleneck: Recorder and UI](performance.md#bottleneck-recorder-and-ui).
 
 ---
 
@@ -299,7 +299,7 @@ The exception is caught, logged, the task is marked failed, `on_error` fires on 
 
 ### What if the Kafka broker goes down?
 
-librdkafka (the underlying client) handles reconnects transparently — the consumer automatically rejoins when brokers recover. Drakkar does not expose a distinct "broker-down" state in the debug UI or Prometheus: there is no `drakkar_kafka_connected` gauge today. What you *will* see: `drakkar_messages_consumed_total` rate drops to zero while processing continues on already-polled messages. Pair a "no new messages" alert (`rate(drakkar_messages_consumed_total[5m]) == 0` while expecting traffic) with broker-level monitoring (Kafka's own JMX / kafka_exporter metrics) to catch broker issues. There is no hard fail-fast option — the design assumption is that brokers recover and transient disconnects should not restart the worker.
+librdkafka (the underlying client) handles reconnects transparently — the consumer automatically rejoins when brokers recover. Drakkar does not expose a distinct "broker-down" state in the UI or Prometheus: there is no `drakkar_kafka_connected` gauge today. What you *will* see: `drakkar_messages_consumed_total` rate drops to zero while processing continues on already-polled messages. Pair a "no new messages" alert (`rate(drakkar_messages_consumed_total[5m]) == 0` while expecting traffic) with broker-level monitoring (Kafka's own JMX / kafka_exporter metrics) to catch broker issues. There is no hard fail-fast option — the design assumption is that brokers recover and transient disconnects should not restart the worker.
 
 ### What if a sink is unreachable for a long time?
 
@@ -311,7 +311,7 @@ Drakkar does not run a built-in replay worker — replays are operator-driven. U
 
 ### A message is stuck in "in-flight" forever — what do I do?
 
-Check the **Executors** tab on `/live` for stuck tasks; their `task_timeout_seconds` should eventually fire. When a task overruns the timeout, `asyncio.wait_for` raises `TimeoutError`, the executor's `finally` block calls `proc.kill()` + `proc.wait()`, and the task takes the normal `on_error` path. If the subprocess *itself* doesn't die after `proc.kill()`, the task coroutine stays pending — the debug server exposes `/api/debug/processors`, which includes a `stuck_tasks` list with a live coroutine stack (top 5 frames) per in-flight task; that's the rescue-visibility tool.
+Check the **Executors** tab on `/live` for stuck tasks; their `task_timeout_seconds` should eventually fire. When a task overruns the timeout, `asyncio.wait_for` raises `TimeoutError`, the executor's `finally` block calls `proc.kill()` + `proc.wait()`, and the task takes the normal `on_error` path. If the subprocess *itself* doesn't die after `proc.kill()`, the task coroutine stays pending — the UI server exposes `/api/debug/processors`, which includes a `stuck_tasks` list with a live coroutine stack (top 5 frames) per in-flight task; that's the rescue-visibility tool.
 
 Rescue procedure when a task is truly wedged past the timeout:
 
@@ -342,7 +342,7 @@ Zero-operational-cost embedded store with WAL-mode concurrency, good enough for 
 
 ### How many event loops does a worker run?
 
-Two: the **main loop** (Kafka consumer + partition processors + executor pool + periodic tasks + sink manager) and the **debug UI loop** (uvicorn on a separate thread). asyncio primitives created on one are not safe to use on the other — in particular, the recorder's `aiosqlite` connection and the cache reader connection are bound to the main loop. The debug server uses a `_dispatch_to_main_loop` helper to marshal roughly 20 read-side endpoints (message trace, probe, task listings, cache inspection, etc.) back onto the main loop via `asyncio.run_coroutine_threadsafe`; pure-Python work (template rendering, counters, constants) stays on the UI loop.
+Two: the **main loop** (Kafka consumer + partition processors + executor pool + periodic tasks + sink manager) and the **UI server loop** (uvicorn on a separate thread). asyncio primitives created on one are not safe to use on the other — in particular, the recorder's `aiosqlite` connection and the cache reader connection are bound to the main loop. The UI server uses a dispatch-to-loop helper to marshal roughly 20 read-side endpoints (message trace, probe, task listings, cache inspection, etc.) back onto the main loop via `asyncio.run_coroutine_threadsafe`; pure-Python work (template rendering, counters, constants) stays on the UI loop.
 
 ### What happens during a Kafka rebalance?
 
@@ -354,7 +354,7 @@ The poll loop compares in-flight message count to high/low watermarks (multiples
 
 ### What's the difference between the recorder DB and the cache DB?
 
-They're separate SQLite files with separate schemas and separate reader/writer connections. The recorder stores per-message lifecycle events (flight recorder for the debug UI); the cache stores operator-written key/value pairs for memoization. See [Observability — Flight Recorder](configuration.md#debug-flight-recorder-debug) and [Cache](cache.md).
+They're separate SQLite files with separate schemas and separate reader/writer connections. The recorder stores per-message lifecycle events (flight recorder for the UI); the cache stores operator-written key/value pairs for memoization. See [UI / Flight Recorder](configuration.md#ui-flight-recorder-ui) and [Cache](cache.md).
 
 ---
 
@@ -374,13 +374,13 @@ The cache and recorder peer-sync mechanisms read other workers' SQLite files dir
 
 Treat `db_dir` as a shared-trust boundary: any principal with write access to that directory has the same trust level as the workers themselves. On a shared filesystem (NFS, EFS), restrict directory permissions to the worker user.
 
-### How is the debug UI protected?
+### How is the UI protected?
 
-Auth is opt-in (see [Is the debug UI safe](#is-the-debug-ui-safe-to-expose-to-a-team-of-operators) above):
+Auth is opt-in (see [Is the UI safe](#is-the-ui-safe-to-expose-to-a-team-of-operators) above):
 
-1. **Default loopback bind** (`debug.host='127.0.0.1'`) — the UI is only reachable from the host out of the box, regardless of auth.
-2. **Startup warning when unauthenticated.** With `debug.enabled=true` and an empty `auth_token`, the worker emits a `debug_ui_unauthenticated` structured warning at startup naming the unauthenticated bind and the two opt-in paths (YAML key + env var). The worker continues starting — Drakkar treats this as a private-contour-friendly default, not a misconfiguration.
-3. **Bearer token + Origin check when `auth_token` is set.** Every UI page and API endpoint requires `Authorization: Bearer <token>` (or `?token=` for browser navigation); only `/healthz` and `/readyz` stay public for Kubernetes probes. The WebSocket stream authenticates inside its handshake and additionally validates the `Origin` header against `allowed_ws_origins` (or the `Host` header). See `drakkar/debug/server_helpers.py::origin_allowed` and `drakkar/debug/server.py::token_matches`.
+1. **Default loopback bind** (`ui.host='127.0.0.1'`) — the UI is only reachable from the host out of the box, regardless of auth.
+2. **Startup warning when unauthenticated.** With `ui.enabled=true` and an empty `auth_token`, the worker emits a `ui_unauthenticated` structured warning at startup naming the unauthenticated bind and the two opt-in paths (YAML key + env var). The worker continues starting — Drakkar treats this as a private-contour-friendly default, not a misconfiguration.
+3. **Bearer token + Origin check when `auth_token` is set.** Every UI page and API endpoint requires `Authorization: Bearer <token>` (or `?token=` for browser navigation); only `/healthz` and `/readyz` stay public for Kubernetes probes. The WebSocket stream authenticates inside its handshake and additionally validates the `Origin` header against `allowed_ws_origins` (or the `Host` header). See `drakkar/uiserver/server_helpers.py::origin_allowed` and `drakkar/uiserver/server.py::token_matches`.
 
 If you put the UI on a non-loopback host outside a private network, set a strong `auth_token` and consider a reverse proxy with TLS.
 
