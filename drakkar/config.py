@@ -649,7 +649,7 @@ class UIConfig(BaseModel):
         default repo.
         """
         if isinstance(values, dict):
-            moved = [f'ui.{key} -> {new}' for key, new in _UI_FLAT_KEY_MAP.items() if key in values]
+            moved = sorted(f'ui.{key} -> {new}' for key, new in _UI_FLAT_KEY_MAP.items() if key in values)
             if moved:
                 raise ValueError('old flat ui.* bundle keys were moved under ui.release.*; update: ' + ', '.join(moved))
         return values
@@ -943,9 +943,11 @@ class DrakkarConfig(BaseSettings):
         if isinstance(values, dict) and 'debug' in values:
             section = cast('dict[str, object]', values)['debug']
             if isinstance(section, dict):
-                keys = [str(key) for key in section]
+                keys = sorted(str(key) for key in section)
                 moved = [f'debug.{key} -> {_DEBUG_KEY_MAP[key]}' for key in keys if key in _DEBUG_KEY_MAP]
                 unknown = [f'debug.{key}' for key in keys if key not in _DEBUG_KEY_MAP]
+                # Sorted key order keeps this message byte-comparable with the
+                # Go backend's twin guard.
                 detail = ', '.join(moved + unknown) or 'debug -> ui'
             else:
                 detail = 'debug -> ui'
