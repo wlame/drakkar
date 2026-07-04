@@ -33,7 +33,7 @@ from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisc
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from drakkar.concurrency import dispatch_to_loop
-from drakkar.uiserver.server_helpers import origin_allowed
+from drakkar.uiserver.server_helpers import backend_version, origin_allowed
 
 if TYPE_CHECKING:
     from drakkar.uiserver.server import UIDeps
@@ -570,15 +570,21 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
         return JSONResponse(payload)
 
     # v1-only contract endpoint (no legacy alias): worker identity + the
-    # one-line config summary for the SPA's debug-page banner.
+    # one-line config summary for the SPA's debug-page banner. v1.2 adds
+    # the backend flavor/version and the served drakkar-ui bundle so the
+    # SPA header popover can show the full version picture.
     @router.get('/api/v1/identity')
     async def api_identity():
-        """Worker identity: ``{worker_id, cluster, config_summary}``."""
+        """Worker identity: id, cluster, config summary, and versions."""
         return JSONResponse(
             {
                 'worker_id': drakkar_app._worker_id,
                 'cluster': drakkar_app._cluster_name or None,
                 'config_summary': drakkar_app.config_summary,
+                'backend': 'python',
+                'backend_version': backend_version(),
+                'ui_version': deps.ui_version,
+                'ui_source': deps.ui_source,
             }
         )
 

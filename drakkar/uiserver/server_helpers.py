@@ -259,3 +259,20 @@ def worker_group(name: str) -> str:
     ``worker15`` → ``worker``
     """
     return re.sub(r'[-_]?\d+$', '', name) or name
+
+
+def backend_version() -> str:
+    """The running backend's version string for the identity endpoint.
+
+    Prefers the installed ``py-drakkar`` distribution version; a source
+    checkout that was never installed (editable dev without metadata)
+    falls back to the in-tree ``__version__`` constant.
+    """
+    from importlib import metadata
+
+    try:
+        return metadata.version('py-drakkar')
+    except metadata.PackageNotFoundError:
+        from drakkar import __version__
+
+        return __version__

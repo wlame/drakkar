@@ -40,6 +40,7 @@ from fastapi.templating import Jinja2Templates
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.config import UIConfig
 from drakkar.recorder import EventRecorder
+from drakkar.uihost import ResolvedBundle
 
 # Re-import the helpers that used to live here so test patches like
 # ``drakkar.uiserver.server.hook_flags`` keep working without changes.
@@ -85,11 +86,18 @@ class UIDeps:
         recorder: EventRecorder,
         drakkar_app: DrakkarApp,
         templates: Jinja2Templates,
+        ui_version: str | None = None,
+        ui_source: str = 'builtin',
     ) -> None:
         self.config = config
         self.recorder = recorder
         self.drakkar_app = drakkar_app
         self.templates = templates
+        # Identity v1.2: which drakkar-ui bundle this server actually
+        # serves — 'release' + tag in SPA mode, 'builtin' + None when the
+        # server-rendered fallback pages are active.
+        self.ui_version = ui_version
+        self.ui_source = ui_source
 
     # --- Sink-UI / Kafka-UI helpers (also wired into Jinja globals) ---
 
@@ -440,6 +448,7 @@ def create_ui_app(
     recorder: EventRecorder,
     drakkar_app: DrakkarApp,
     ui_root: Path | None = None,
+    ui_version: str | None = None,
 ) -> FastAPI:
     """Create the FastAPI UI application.
 
@@ -449,12 +458,15 @@ def create_ui_app(
     state and helpers.
 
     ``ui_root`` is the resolved drakkar-ui bundle directory (SPA mode, from
-    ``ui.enabled``): the Jinja page routes are dropped and a catch-all
+    ``ui.release.enabled``): the Jinja page routes are dropped and a catch-all
     registered LAST serves the SPA — bundle files as-is, ``index.html`` with
     a 200 for every unknown path — auth-gated exactly like the HTML pages.
     The probes, ``/ws``, all ``/api*`` JSON routes (legacy and ``/api/v1``),
     and ``/debug/download/{filename}`` keep precedence over the catch-all.
     ``None`` (default) keeps the built-in server-rendered HTML pages.
+
+    ``ui_version`` is the release tag ``ui_root`` holds (identity v1.2's
+    ``ui_version`` field); it is meaningful only in SPA mode.
     """
     # Local imports break a routes_* → server module cycle: each routes
     # module imports ``UIDeps`` from this module, and this module
@@ -479,6 +491,8 @@ def create_ui_app(
         recorder=recorder,
         drakkar_app=drakkar_app,
         templates=templates,
+        ui_version=ui_version if ui_root is not None else None,
+        ui_source='release' if ui_root is not None else 'builtin',
     )
 
     # Jinja globals that need access to the live app/config — bound
@@ -543,11 +557,13 @@ class UIServer:
         self._thread: threading.Thread | None = None
 
     async def start(self) -> None:
+        bundle = await self._resolve_ui_bundle()
         fastapi_app = create_ui_app(
             self._config,
             self._recorder,
             self._drakkar_app,
-            ui_root=await self._resolve_ui_root(),
+            ui_root=bundle.root if bundle else None,
+            ui_version=bundle.version if bundle else None,
         )
         uvi_config = uvicorn.Config(
             app=fastapi_app,
@@ -564,8 +580,12 @@ class UIServer:
         self._thread.start()
         await logger.ainfo('ui_server_started', category='ui', port=self._config.port)
 
-    async def _resolve_ui_root(self) -> Path | None:
-        """Resolve the drakkar-ui bundle directory when ``ui.release.enabled``, else ``None``.
+    async def _resolve_ui_bundle(self) -> ResolvedBundle | None:
+        """Resolve the drakkar-ui bundle when ``ui.release.enabled``, else ``None``.
+
+        Returns the full :class:`drakkar.uihost.ResolvedBundle` (directory +
+        provenance + version) so the identity endpoint can report which UI
+        release this worker serves.
 
         The resolution (cache → GitHub fetch → embedded fallback) runs in a
         worker thread so a slow network fetch never blocks the main loop; it
@@ -594,8 +614,10 @@ class UIServer:
         if bundle.source == 'embedded':
             await logger.ainfo('ui_using_builtin_pages', category='ui', reason='no bundle fetchable and cache empty')
             return None
-        await logger.ainfo('ui_bundle_resolved', category='ui', source=bundle.source, dir=str(bundle.root))
-        return bundle.root
+        await logger.ainfo(
+            'ui_bundle_resolved', category='ui', source=bundle.source, version=bundle.version, dir=str(bundle.root)
+        )
+        return bundle
 
     async def stop(self) -> None:
         if self._server:

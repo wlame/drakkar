@@ -79,10 +79,16 @@ _SEMVER_TAG_RE = re.compile(r'^v(\d+)\.(\d+)\.(\d+)$')
 
 @dataclass(frozen=True)
 class ResolvedBundle:
-    """The UI bundle ``resolve`` selected: its directory and provenance."""
+    """The UI bundle ``resolve`` selected: directory, provenance, version.
+
+    ``version`` is the release tag the directory holds (``v1.2.0``), or
+    ``None`` for the embedded placeholder — surfaced by the identity
+    endpoint so operators can see which UI a backend actually serves.
+    """
 
     root: Path
     source: Source
+    version: str | None = None
 
 
 def default_cache_root() -> Path:
@@ -180,7 +186,7 @@ def resolve(
         # check that resolved "latest" to an already-cached tag.
         if dir_has_index(bundle_dir):
             logger.info('ui_served_from_cache', category='ui', version=version, dir=str(bundle_dir))
-            return ResolvedBundle(root=bundle_dir, source='cache')
+            return ResolvedBundle(root=bundle_dir, source='cache', version=version)
         # 2. Fetch the version into the cache.
         if config.repo:
             try:
@@ -188,14 +194,14 @@ def resolve(
                     api_base, config.repo, version, bundle_dir, download_base=download_base, deadline=deadline
                 )
                 logger.info('ui_fetched', category='ui', version=version, dir=str(bundle_dir))
-                return ResolvedBundle(root=bundle_dir, source='fetched')
+                return ResolvedBundle(root=bundle_dir, source='fetched', version=version)
             except Exception as exc:
                 logger.warning('ui_fetch_failed', category='ui', version=version, error=str(exc))
             # Fetch failed but a cached copy may have appeared meanwhile
             # (another worker sharing the cache can fill it concurrently).
             if dir_has_index(bundle_dir):
                 logger.info('ui_served_from_stale_cache', category='ui', version=version)
-                return ResolvedBundle(root=bundle_dir, source='cache')
+                return ResolvedBundle(root=bundle_dir, source='cache', version=version)
         # 3. The pinned version, when the update check resolved a newer tag
         # that could not be fetched: a cached pin is contract-guaranteed and
         # beats every further fallback.
@@ -203,7 +209,7 @@ def resolve(
             pinned_dir = root / config.pinned_version
             if dir_has_index(pinned_dir):
                 logger.info('ui_served_from_cache', category='ui', version=config.pinned_version, dir=str(pinned_dir))
-                return ResolvedBundle(root=pinned_dir, source='cache')
+                return ResolvedBundle(root=pinned_dir, source='cache', version=config.pinned_version)
 
     # 4. Newest cached bundle — for UNPINNED workers only: with no pin there
     # is no contract guarantee to protect, so the last-fetched release beats
@@ -215,11 +221,11 @@ def resolve(
         newest = newest_cached_version(root)
         if newest is not None:
             logger.info('ui_served_from_cache', category='ui', version=newest, dir=str(root / newest))
-            return ResolvedBundle(root=root / newest, source='cache')
+            return ResolvedBundle(root=root / newest, source='cache', version=newest)
 
     # 5. Embedded placeholder fallback.
     if dir_has_index(EMBEDDED_BUNDLE_DIR):
         logger.info('ui_served_from_embedded_fallback', category='ui')
-        return ResolvedBundle(root=EMBEDDED_BUNDLE_DIR, source='embedded')
+        return ResolvedBundle(root=EMBEDDED_BUNDLE_DIR, source='embedded', version=None)
     logger.warning('ui_embedded_fallback_missing', category='ui', dir=str(EMBEDDED_BUNDLE_DIR))
     return None

@@ -742,10 +742,43 @@ class TestApiV1Identity:
             resp = await c.get('/api/v1/identity')
         assert resp.status_code == 200
         data = resp.json()
-        assert set(data) == {'worker_id', 'cluster', 'config_summary'}
+        assert set(data) == {
+            'worker_id',
+            'cluster',
+            'config_summary',
+            'backend',
+            'backend_version',
+            'ui_version',
+            'ui_source',
+        }
         assert data['worker_id'] == 'test-worker'
         assert data['cluster'] is None  # empty cluster name serializes as null
         assert data['config_summary'] == '[test-worker] topic=input-events group=drakkar-workers'
+        # v1.2: backend flavor + versions. Built-in pages serve in this
+        # fixture, so the UI fields report the builtin fallback.
+        assert data['backend'] == 'python'
+        assert isinstance(data['backend_version'], str) and data['backend_version']
+        assert data['ui_version'] is None
+        assert data['ui_source'] == 'builtin'
+
+    async def test_ui_fields_report_served_bundle(self, tmp_path, debug_config, mock_recorder, mock_app):
+        """SPA mode: identity reports the release tag the backend serves."""
+        bundle_dir = tmp_path / 'v1.0.0'
+        bundle_dir.mkdir()
+        (bundle_dir / 'index.html').write_text('<html></html>')
+        mock_app.config_summary = '[test-worker]'
+        mock_recorder.config = debug_config
+        fastapi_app = create_ui_app(
+            debug_config,
+            mock_recorder,
+            mock_app,
+            ui_root=bundle_dir,
+            ui_version='v1.0.0',
+        )
+        async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test') as c:
+            data = (await c.get('/api/v1/identity')).json()
+        assert data['ui_version'] == 'v1.0.0'
+        assert data['ui_source'] == 'release'
 
     async def test_cluster_name_surfaces(self, debug_config, mock_recorder, mock_app):
         mock_app._cluster_name = 'main'
