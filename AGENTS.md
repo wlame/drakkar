@@ -1,0 +1,172 @@
+# AGENTS.md — Drakkar (Python)
+
+Orientation for LLM coding agents. Read this before deriving structure from
+source. Human-facing docs live in `docs/` (mkdocs site); this file is the
+condensed agent map.
+
+## What this is
+
+A **Kafka → subprocess-pool → sinks** orchestration framework: poll messages,
+`arrange()` them into tasks run by a managed subprocess pool, deliver results
+to pluggable sinks (Kafka, Postgres, Mongo, Redis, HTTP, files), and commit
+offsets at-least-once on a per-partition watermark. This is the **reference
+implementation** — the most polished one — of a three-repo product:
+
+| repo | role |
+|---|---|
+| `drakkar` (this) | Python reference implementation, published as `py-drakkar` |
+| `drakkar-go` | Go implementation; byte-parity with this repo where contractual (config, DLQ JSON, metric names, config-summary line) |
+| `drakkar-ui` | the ONE web UI both backends serve — a versioned static SPA published to GitHub Releases |
+
+Both backends implement one identical JSON/WS contract under **`/api/v1`**;
+the normative spec is **`drakkar-ui/docs/api-contract-v1.md`** (the UI repo
+owns it as a requirement on backends). Any change to the API surface must
+update that document and land on BOTH backends.
+
+Key mental model: the framework owns the control loop and calls *into* user
+code (inversion of control). The actual work runs in an **external
+subprocess** (`executor.binary_path` + argv); the user's handler only turns
+messages into subprocess invocations and subprocess output into sink writes.
+
+## Programming model
+
+Users subclass `BaseDrakkarHandler[In, Out]` (`drakkar/handler.py`) with
+Pydantic models as the type parameters (auto de/serialization). `arrange()`
+is the one required hook (window of messages → executor tasks); everything
+else is optional overrides: `on_task_complete`, `on_message_complete`,
+`on_window_complete`, `on_error`, `on_delivery_error`, lifecycle hooks
+(`on_startup`, `on_ready`, `pre_shutdown`), periodic tasks, and the webapp
+hooks (`arrange_http_request` / `on_http_request_complete` — see
+`docs/webapp.md`). `self.cache` is an optional LWW key/value store with peer
+sync (`drakkar/cache/`).
+
+## HTTP surfaces (three separate servers, three ports)
+
+| surface | module | default | purpose |
+|---|---|---|---|
+| Debug UI | `drakkar/debug/` | `:8080` | operator UI + `/api/v1` JSON contract + `/ws` + probes |
+| Webapp | `drakkar/webapp/` | `:8090` | opt-in synchronous ingress: one `POST /process` route through the same handler pipeline |
+| Metrics | `drakkar/metrics.py` | `:9090` | raw Prometheus exporter (not FastAPI) |
+
+Debug-UI facts that save reading time:
+
+- Route modules (`routes_pages/live/debug/cache/spa.py`) are factories
+  returning **leaf APIRouters**; `server.py` includes them and then walks the
+  routers to register every legacy `/api/...` route under `/api/v1/...` too
+  (`register_v1_aliases`). **Do not nest routers behind a combining
+  `include_router`** — newer FastAPI includes routers lazily and the alias
+  walk (and startup guard) would see no routes. New v1-only endpoints (e.g.
+  `GET /api/v1/identity`) are registered directly with the `/api/v1` prefix
+  and get no legacy alias.
+- Auth is one optional bearer token for everything (`debug.auth_token`;
+  header or `?token=` for downloads/WS); probes and `/ws` self-manage
+  (WS close codes 4401/4403).
+- The debug server runs on its own thread/event loop; **every read of live
+  worker state goes through `dispatch_to_loop(...)`** to the main loop plus a
+  dedicated SQLite reader connection. Follow that pattern for any new
+  endpoint.
+- The Jinja templates (`drakkar/templates/`) are the legacy built-in UI and
+  the **UX reference** the SPA was ported from. When `ui.enabled` resolves a
+  bundle, `create_debug_app(..., ui_root=...)` skips the Jinja page routes
+  and mounts the SPA catch-all (`routes_spa.py`: files + History-API fallback
+  to `index.html`); `/api*`, `/ws`, probes, and `/debug/download/...` keep
+  precedence.
+
+## Decoupled UI hosting (`drakkar/uihost/`) — default ON
+
+At startup (when `debug.enabled`) the worker resolves the latest `drakkar-ui`
+GitHub release, caches it under `$XDG_CACHE_HOME/drakkar/ui/<tag>/`
+(≈ `~/.cache/drakkar/ui` — byte-identical to Go's `os.UserCacheDir` path on
+Linux, so co-located workers of BOTH backends share one download), and serves
+it. Config: `ui.*` in YAML / `DK_UI__*` env — identical keys, defaults, and
+semantics as the Go backend; change them in lockstep.
+
+Design points every agent should know:
+
+- **Fetch avoids the GitHub REST API**: latest tag via the
+  `github.com/<repo>/releases/latest` redirect Location, asset via the
+  conventional direct URL (`releases/download/<tag>/drakkar-ui-<tag>.tar.gz`)
+  — immune to the anonymous 60 req/h API rate limit. The API is only a
+  fallback (private repos via `GITHUB_TOKEN`, renamed assets).
+- **Resolution ladder** (never fatal, bounded ~30s, runs in a worker
+  thread): cached resolved tag → fetch → recheck cache (a concurrent worker
+  may have installed it) → cached pin → newest cached release (unpinned
+  workers only — a pin guarantees contract compatibility) → keep the
+  **built-in Jinja pages** (the embedded placeholder is never served while
+  Jinja pages exist; `DebugServer._resolve_ui_root` returns None for
+  `source == 'embedded'`).
+- **Shared-cache concurrency invariant**: a valid cached bundle is NEVER
+  deleted or replaced (`fetch.py _install_bundle`). Staging dirs use random
+  tokens (NOT pid — containerized workers are all pid 1) with a `.incoming`
+  suffix that every fallback scan filters out; racing workers converge — one
+  installs, the rest discard their copy and serve the winner's.
+- Extraction is hardened: zip-slip rejection, symlinks/devices skipped,
+  50 MiB download / 100 MiB extracted caps, `index.html`-at-root structural
+  validation before the atomic swap.
+
+## Invariants
+
+1. **Contract parity with drakkar-go** — config format (YAML + `DK_` env),
+   DLQ JSON byte-stability, metric names, the config-summary one-liner
+   (`ui` section deliberately excluded from it), and the `/api/v1` shapes.
+2. **Tooling**: `uv` only (never pip), `ruff` (format + lint, single quotes
+   for code / double for user-facing text), `ty` for types, pytest
+   (function-based, fixtures, parametrize). Coverage gate **75%**
+   (`just cover`).
+3. **Tests are hermetic** — no real network. UI hosting defaults ON, so test
+   fixtures with a real `DrakkarConfig` must set `ui.enabled = False` (the
+   `mock_app` fixtures do) or use `tests/test_uihost.py`'s `StubGitHub` +
+   `ui_config()` helpers.
+4. Errors are explicit; never silently swallowed. Structured logging via
+   structlog (ECS-compatible).
+
+## Build / test / run (always via just)
+
+```bash
+just test               # full suite (uv run pytest)
+just cover              # THE gate: 75% floor
+just ci                 # exactly what CI runs: fmt-check lint typecheck cover
+just check              # ci + strict docs build
+just integration-up     # full docker harness (Kafka, sinks, 3 workers + load gen)
+just integration-logs worker-1
+```
+
+Integration workers expose the debug UI on `:8081..:8083`; the compose file
+mounts the host UI cache so all workers share one bundle download.
+
+## Gotchas
+
+- FastAPI version sensitivity: the v1-alias registration walks
+  **router.routes** (leaf routers), not `app.routes` — on FastAPI ≥0.139 the
+  app-level table hides included routes. A startup guard raises if the walk
+  finds nothing; don't remove it.
+- `tests/` pin request-sequence behavior of the fetch engine — the stub
+  serves API routes only (`add_release`) or direct-web routes only
+  (`add_direct_release`) to prove each path in isolation.
+- The webapp has NO health routes; readiness gates are enforced per-request
+  (503 envelopes). Kubernetes probes live on the debug server.
+- Retry visualization convention: archived task attempts get composite keys
+  `task_id:r<start_ts>` — server and SPA both rely on it.
+- `pyproject.toml` ships `drakkar/uihost/bundle/**` as package data (the
+  embedded placeholder); keep it in the wheel.
+
+## Directory map
+
+```
+drakkar/
+  app.py, lifecycle.py     DrakkarApp wiring + startup/shutdown ordering
+  handler.py, models.py    user extension points + typed messages
+  consumer.py, partition.py, offsets.py   poll loop, per-partition pipeline, watermarks
+  executor.py              subprocess pool (argv exec, process-group kill)
+  sinks/                   sink implementations + DLQ + circuit breaker
+  cache/                   LWW SQLite cache + peer sync
+  recorder/                flight recorder (SQLite event log)
+  debug/                   debug UI: server.py + routes_* + runner (message probe)
+  webapp/                  synchronous HTTP ingress pipeline
+  uihost/                  drakkar-ui bundle fetch/cache/serve engine
+  templates/               legacy Jinja UI (also the SPA's UX reference)
+  config.py                pydantic-settings config (YAML + DK_ env overrides)
+integration/               docker-compose harness (Kafka, sinks, workers, load gen)
+docs/                      mkdocs documentation site
+scripts/                   replay_dlq.py etc.
+```
