@@ -22,7 +22,6 @@ from drakkar.cache.engine import FLUSH_FAILURE_ESCALATION_THRESHOLD, CacheEngine
 from drakkar.cache.memory import Cache
 from drakkar.config import (
     CacheConfig,
-    DebugConfig,
     DrakkarConfig,
     ExecutorConfig,
     KafkaConfig,
@@ -47,7 +46,7 @@ from drakkar.models import (
 )
 from drakkar.partition import PartitionProcessor
 from drakkar.sinks.kafka import KafkaSink
-from tests.conftest import wait_for
+from tests.conftest import make_ui_config, wait_for
 from tests.test_app import SimpleHandler, _setup_app_sinks
 
 
@@ -183,7 +182,7 @@ async def test_drain_all_processors_uses_snapshot_not_live_dict(app_config):
 def _make_engine() -> CacheEngine:
     engine = CacheEngine(
         config=CacheConfig(enabled=True),
-        debug_config=DebugConfig(enabled=False, db_dir=''),
+        ui_config=make_ui_config(enabled=False, db_dir=''),
         worker_id='w-test',
         cluster_name='',
         recorder=None,

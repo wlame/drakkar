@@ -12,6 +12,7 @@ from drakkar.periodic import (
     periodic,
     run_periodic_task,
 )
+from tests.conftest import make_ui_config
 
 # --- Decorator tests ---
 
@@ -527,10 +528,9 @@ async def test_periodic_run_error_increments_error_metric():
 
 async def test_periodic_run_records_to_recorder(tmp_path):
     """Periodic run records events to the flight recorder."""
-    from drakkar.config import DebugConfig
     from drakkar.recorder import EventRecorder
 
-    config = DebugConfig(enabled=True, db_dir=str(tmp_path))
+    config = make_ui_config(enabled=True, db_dir=str(tmp_path))
     rec = EventRecorder(config, worker_name='test')
     await rec.start()
 
@@ -564,10 +564,9 @@ async def test_periodic_run_records_error_to_recorder(tmp_path):
     """Periodic run records error events with error message."""
     import json
 
-    from drakkar.config import DebugConfig
     from drakkar.recorder import EventRecorder
 
-    config = DebugConfig(enabled=True, db_dir=str(tmp_path))
+    config = make_ui_config(enabled=True, db_dir=str(tmp_path))
     rec = EventRecorder(config, worker_name='test')
     await rec.start()
 
@@ -603,10 +602,9 @@ async def test_run_periodic_task_system_flag_propagates_to_recorder(tmp_path):
     """run_periodic_task(system=True) stores `system: true` in event metadata."""
     import json
 
-    from drakkar.config import DebugConfig
     from drakkar.recorder import EventRecorder
 
-    config = DebugConfig(enabled=True, db_dir=str(tmp_path))
+    config = make_ui_config(enabled=True, db_dir=str(tmp_path))
     rec = EventRecorder(config, worker_name='test')
     await rec.start()
 
@@ -646,10 +644,9 @@ async def test_run_periodic_task_system_flag_default_omitted(tmp_path):
     """
     import json
 
-    from drakkar.config import DebugConfig
     from drakkar.recorder import EventRecorder
 
-    config = DebugConfig(enabled=True, db_dir=str(tmp_path))
+    config = make_ui_config(enabled=True, db_dir=str(tmp_path))
     rec = EventRecorder(config, worker_name='test')
     await rec.start()
 
@@ -684,10 +681,9 @@ def test_recorder_record_periodic_run_system_true_stores_in_metadata(tmp_path):
     """EventRecorder.record_periodic_run(system=True) embeds `system: true` in metadata JSON."""
     import json
 
-    from drakkar.config import DebugConfig
     from drakkar.recorder import EventRecorder
 
-    config = DebugConfig(enabled=True, db_dir=str(tmp_path))
+    config = make_ui_config(enabled=True, db_dir=str(tmp_path))
     rec = EventRecorder(config, worker_name='test')
     rec.record_periodic_run(name='cache.flush', duration=0.01, status='ok', system=True)
 
@@ -705,10 +701,9 @@ def test_recorder_record_periodic_run_system_false_omits_key(tmp_path):
     """
     import json
 
-    from drakkar.config import DebugConfig
     from drakkar.recorder import EventRecorder
 
-    config = DebugConfig(enabled=True, db_dir=str(tmp_path))
+    config = make_ui_config(enabled=True, db_dir=str(tmp_path))
     rec = EventRecorder(config, worker_name='test')
     rec.record_periodic_run(name='user.task', duration=0.01, status='ok')
 
@@ -723,10 +718,9 @@ def test_recorder_record_periodic_run_system_true_with_error(tmp_path):
     """system=True combines cleanly with the error case."""
     import json
 
-    from drakkar.config import DebugConfig
     from drakkar.recorder import EventRecorder
 
-    config = DebugConfig(enabled=True, db_dir=str(tmp_path))
+    config = make_ui_config(enabled=True, db_dir=str(tmp_path))
     rec = EventRecorder(config, worker_name='test')
     rec.record_periodic_run(
         name='cache.sync',

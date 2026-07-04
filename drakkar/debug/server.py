@@ -38,7 +38,7 @@ from fastapi.routing import APIRoute
 from fastapi.templating import Jinja2Templates
 
 from drakkar.concurrency import dispatch_to_loop
-from drakkar.config import DebugConfig
+from drakkar.config import UIConfig
 
 # Re-import the helpers that used to live here so test patches like
 # ``drakkar.debug.server.hook_flags`` keep working without changes.
@@ -81,7 +81,7 @@ class DebugDeps:
 
     def __init__(
         self,
-        config: DebugConfig,
+        config: UIConfig,
         recorder: EventRecorder,
         drakkar_app: DrakkarApp,
         templates: Jinja2Templates,
@@ -436,7 +436,7 @@ def register_v1_aliases(app: FastAPI, routers: Sequence[APIRouter]) -> None:
 
 
 def create_debug_app(
-    config: DebugConfig,
+    config: UIConfig,
     recorder: EventRecorder,
     drakkar_app: DrakkarApp,
     ui_root: Path | None = None,
@@ -532,7 +532,7 @@ class DebugServer:
 
     def __init__(
         self,
-        config: DebugConfig,
+        config: UIConfig,
         recorder: EventRecorder,
         app: DrakkarApp,
     ) -> None:
@@ -565,7 +565,7 @@ class DebugServer:
         await logger.ainfo('debug_server_started', category='debug', port=self._config.port)
 
     async def _resolve_ui_root(self) -> Path | None:
-        """Resolve the drakkar-ui bundle directory when ``ui.enabled``, else ``None``.
+        """Resolve the drakkar-ui bundle directory when ``ui.release.enabled``, else ``None``.
 
         The resolution (cache → GitHub fetch → embedded fallback) runs in a
         worker thread so a slow network fetch never blocks the main loop; it
@@ -578,10 +578,10 @@ class DebugServer:
         ui_cfg = getattr(self._drakkar_app._config, 'ui', None)
         # The isinstance check keeps MagicMock-configured test apps (whose
         # attribute chain is truthy) from triggering a real resolution.
-        if not isinstance(ui_cfg, UIConfig) or not ui_cfg.enabled:
+        if not isinstance(ui_cfg, UIConfig) or not ui_cfg.release.enabled:
             return None
         try:
-            bundle = await asyncio.to_thread(resolve, ui_cfg)
+            bundle = await asyncio.to_thread(resolve, ui_cfg.release)
         except Exception as exc:
             await logger.awarning('ui_resolve_failed', category='ui', error=str(exc))
             return None

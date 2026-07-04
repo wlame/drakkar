@@ -137,7 +137,7 @@ def create_live_router(deps: DebugDeps, include_html: bool = True) -> APIRouter:
             'pool_waiting': drakkar_app._executor_pool.waiting_count if drakkar_app._executor_pool else 0,
             'pool_max': drakkar_app._executor_pool.max_executors if drakkar_app._executor_pool else 0,
             'partition_count': len(drakkar_app.processors),
-            'max_ui_rows': config.max_ui_rows,
+            'max_ui_rows': config.max_rows,
             'ws_min_duration_ms': config.ws_min_duration_ms,
             'hook_flags': hook_flags(drakkar_app.handler)
             if drakkar_app.handler
@@ -163,7 +163,7 @@ def create_live_router(deps: DebugDeps, include_html: bool = True) -> APIRouter:
         async def _read_finished():
             finished_rows = await recorder.get_events(
                 event_type='task_completed',
-                limit=config.max_ui_rows,
+                limit=config.max_rows,
             )
             failed_rows = await recorder.get_events(
                 event_type='task_failed',
@@ -172,7 +172,7 @@ def create_live_router(deps: DebugDeps, include_html: bool = True) -> APIRouter:
             return finished_rows, failed_rows
 
         finished, failed = await dispatch_to_loop(_read_finished(), deps.drakkar_app.main_loop)
-        recent_finished = sorted(finished + failed, key=lambda e: e.get('ts', 0), reverse=True)[: config.max_ui_rows]
+        recent_finished = sorted(finished + failed, key=lambda e: e.get('ts', 0), reverse=True)[: config.max_rows]
 
         return templates.TemplateResponse(
             request,
@@ -365,7 +365,7 @@ def create_live_router(deps: DebugDeps, include_html: bool = True) -> APIRouter:
         # flushing + SELECTing against an empty table. ``flush_and_select``
         # would still dispatch to the main loop and return rows, but they'd
         # always be empty.
-        if not recorder.config.store_events:
+        if not recorder.config.recorder.store_events:
             return JSONResponse({})
         query_result = await deps.flush_and_select(query, task_ids)
         if query_result is None:
@@ -458,7 +458,7 @@ def create_live_router(deps: DebugDeps, include_html: bool = True) -> APIRouter:
         list when recorder storage is disabled. Callers parse metadata
         themselves because each event type has different metadata shape.
         """
-        if not recorder.config.store_events:
+        if not recorder.config.recorder.store_events:
             return []
         query = (
             'SELECT ts, task_id, partition, offset, duration, metadata '
@@ -653,7 +653,7 @@ def create_live_router(deps: DebugDeps, include_html: bool = True) -> APIRouter:
         """
         if not req.offsets:
             return JSONResponse({})
-        if not recorder.config.store_events:
+        if not recorder.config.recorder.store_events:
             return JSONResponse({})
         placeholders = ','.join(['?'] * len(req.offsets))
         q = (

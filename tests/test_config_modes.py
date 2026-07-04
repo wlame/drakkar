@@ -15,7 +15,6 @@ from pydantic import BaseModel
 
 from drakkar.app import DrakkarApp
 from drakkar.config import (
-    DebugConfig,
     DLQConfig,
     DrakkarConfig,
     ExecutorConfig,
@@ -37,7 +36,7 @@ from drakkar.models import (
 from drakkar.partition import PartitionProcessor
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.manager import SinkNotConfiguredError
-from tests.conftest import wait_for
+from tests.conftest import make_ui_config, wait_for
 
 # --- Helpers ---
 
@@ -104,7 +103,7 @@ def make_config(**overrides) -> DrakkarConfig:
         'sinks': SinksConfig(kafka={'out': KafkaSinkConfig(topic='test-out')}),
         'metrics': MetricsConfig(enabled=False),
         'logging': LoggingConfig(level='WARNING', format='console'),
-        'debug': DebugConfig(enabled=False),
+        'ui': make_ui_config(enabled=False),
     }
     defaults.update(overrides)
     return DrakkarConfig(**defaults)
@@ -154,13 +153,13 @@ class TestDebugModes:
     """Verify app works identically with debug on and off."""
 
     def test_app_creation_debug_disabled(self):
-        config = make_config(debug=DebugConfig(enabled=False))
+        config = make_config(ui=make_ui_config(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         assert app._recorder is None
         assert app._debug_server is None
 
     def test_app_creation_debug_enabled_no_server_yet(self):
-        config = make_config(debug=DebugConfig(enabled=True))
+        config = make_config(ui=make_ui_config(enabled=True))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         # recorder and debug_server are set during _async_run, not __init__
         assert app._recorder is None
@@ -168,7 +167,7 @@ class TestDebugModes:
 
     async def test_on_assign_without_recorder(self):
         """Partition assignment works when debug is disabled (recorder=None)."""
-        config = make_config(debug=DebugConfig(enabled=False))
+        config = make_config(ui=make_ui_config(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
         app._consumer = MagicMock()
@@ -183,7 +182,7 @@ class TestDebugModes:
 
     async def test_on_revoke_without_recorder(self):
         """Partition revocation works when debug is disabled."""
-        config = make_config(debug=DebugConfig(enabled=False))
+        config = make_config(ui=make_ui_config(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
         app._consumer = AsyncMock()
@@ -198,7 +197,7 @@ class TestDebugModes:
 
     async def test_handle_commit_without_recorder(self):
         """Offset commits work when debug is disabled."""
-        config = make_config(debug=DebugConfig(enabled=False))
+        config = make_config(ui=make_ui_config(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         app._consumer = AsyncMock()
 
@@ -207,7 +206,7 @@ class TestDebugModes:
 
     async def test_handle_collect_without_recorder(self):
         """Sink delivery works when debug is disabled."""
-        config = make_config(debug=DebugConfig(enabled=False))
+        config = make_config(ui=make_ui_config(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         _setup_app_sinks(app)
 
@@ -219,7 +218,7 @@ class TestDebugModes:
 
     async def test_shutdown_without_debug(self):
         """Shutdown completes cleanly when debug is disabled."""
-        config = make_config(debug=DebugConfig(enabled=False))
+        config = make_config(ui=make_ui_config(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         app._consumer = AsyncMock()
         _setup_app_sinks(app)
@@ -234,7 +233,7 @@ class TestDebugModes:
 
     async def test_shutdown_with_debug_mocked(self):
         """Shutdown stops recorder and debug_server if they exist."""
-        config = make_config(debug=DebugConfig(enabled=True))
+        config = make_config(ui=make_ui_config(enabled=True))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         app._consumer = AsyncMock()
         _setup_app_sinks(app)
@@ -287,7 +286,7 @@ class TestPartitionProcessorRecorderModes:
         async def on_commit(pid, offset):
             committed.append((pid, offset))
 
-        debug_cfg = DebugConfig(enabled=True, db_dir=str(tmp_path), flush_interval_seconds=60)
+        debug_cfg = make_ui_config(enabled=True, db_dir=str(tmp_path), flush_interval_seconds=60)
         recorder = EventRecorder(debug_cfg, worker_name='test-w', cluster_name='')
         await recorder.start()
 
@@ -331,7 +330,7 @@ class TestRecorderStoreFlags:
     )
     async def test_recorder_start_stop_with_flag_combos(self, tmp_path, store_events, store_config, store_state):
         """Recorder starts and stops cleanly with any combination of store flags."""
-        cfg = DebugConfig(
+        cfg = make_ui_config(
             enabled=True,
             db_dir=str(tmp_path),
             store_events=store_events,
@@ -361,7 +360,7 @@ class TestRecorderStoreFlags:
 
     async def test_recorder_db_dir_empty_is_memory_only(self, tmp_path):
         """With db_dir='', recorder runs in memory-only mode — no crash."""
-        cfg = DebugConfig(
+        cfg = make_ui_config(
             enabled=True,
             db_dir='',
             store_events=True,
@@ -388,7 +387,7 @@ class TestRecorderStoreFlags:
 
     async def test_recorder_discover_workers_requires_config_and_db(self, tmp_path):
         """discover_workers returns empty when store_config=False or db_dir=''."""
-        cfg_no_config = DebugConfig(
+        cfg_no_config = make_ui_config(
             enabled=True,
             db_dir=str(tmp_path),
             store_config=False,
@@ -400,7 +399,7 @@ class TestRecorderStoreFlags:
         assert workers == []
         await rec.stop()
 
-        cfg_no_db = DebugConfig(
+        cfg_no_db = make_ui_config(
             enabled=True,
             db_dir='',
             store_config=True,
@@ -415,7 +414,7 @@ class TestRecorderStoreFlags:
     @pytest.mark.parametrize('store_state', [True, False])
     async def test_recorder_state_sync_respects_flag(self, tmp_path, store_state):
         """State sync only writes when store_state=True and db exists."""
-        cfg = DebugConfig(
+        cfg = make_ui_config(
             enabled=True,
             db_dir=str(tmp_path),
             store_events=False,
@@ -704,7 +703,7 @@ class TestDLQModes:
 
 
 # ============================================================================
-# 8. Combined mode stress: debug=off + processing full pipeline
+# 8. Combined mode stress: ui=off + processing full pipeline
 # ============================================================================
 
 
@@ -713,7 +712,7 @@ class TestCombinedModes:
         """Full message -> arrange -> execute -> collect -> commit with
         debug disabled and metrics disabled."""
         config = make_config(
-            debug=DebugConfig(enabled=False),
+            ui=make_ui_config(enabled=False),
             metrics=MetricsConfig(enabled=False),
         )
         handler = CollectHandler()
@@ -748,7 +747,7 @@ class TestCombinedModes:
                 window_size=1,
                 max_retries=0,
             ),
-            debug=DebugConfig(enabled=False),
+            ui=make_ui_config(enabled=False),
             metrics=MetricsConfig(enabled=False),
         )
         handler = CollectHandler()
@@ -783,7 +782,7 @@ class TestCombinedModes:
                 task_timeout_seconds=10,
                 max_retries=0,
             ),
-            debug=DebugConfig(enabled=False),
+            ui=make_ui_config(enabled=False),
         )
         handler = RetryHandler()  # asks for RETRY but max_retries=0 blocks it
         app = DrakkarApp(handler=handler, config=config)
@@ -963,7 +962,7 @@ class TestConfigSummary:
         assert 'group=drakkar-workers' in summary
         assert 'exec=2w/' in summary
         assert 'retries=' in summary
-        assert 'debug=off' in summary
+        assert 'ui=off' in summary
         assert 'sinks=[kf:out]' in summary
         assert 'log=WARNING' in summary
 
@@ -979,9 +978,9 @@ class TestConfigSummary:
         assert summary.startswith('[?]')
 
     def test_summary_debug_on(self):
-        cfg = make_config(debug=DebugConfig(enabled=True, port=8080))
+        cfg = make_config(ui=make_ui_config(enabled=True, port=8080))
         summary = cfg.config_summary(worker_id='w')
-        assert 'debug=on:8080' in summary
+        assert 'ui=on:8080' in summary
 
     def test_summary_metrics_enabled(self):
         cfg = make_config(metrics=MetricsConfig(enabled=True, port=9090))

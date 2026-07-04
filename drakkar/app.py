@@ -48,9 +48,9 @@ logger = structlog.get_logger()
 # Re-exported for backward compatibility — moved into
 # :mod:`drakkar.app_security` so the warning helper can be exercised in
 # isolation without importing the full ``DrakkarApp`` machinery. Test
-# imports of the form ``from drakkar.app import warn_if_debug_unauthenticated``
+# imports of the form ``from drakkar.app import warn_if_ui_unauthenticated``
 # continue to work via this re-export.
-from drakkar.app_security import warn_if_debug_unauthenticated as warn_if_debug_unauthenticated  # noqa: E402
+from drakkar.app_security import warn_if_ui_unauthenticated as warn_if_ui_unauthenticated  # noqa: E402
 
 
 class DrakkarApp:

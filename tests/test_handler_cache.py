@@ -34,7 +34,6 @@ from pydantic import BaseModel
 from drakkar.cache import Cache, CacheEngine, NoOpCache
 from drakkar.config import (
     CacheConfig,
-    DebugConfig,
     DrakkarConfig,
     ExecutorConfig,
     KafkaConfig,
@@ -53,6 +52,7 @@ from drakkar.models import (
     PrecomputedResult,
     SourceMessage,
 )
+from tests.conftest import make_ui_config
 
 # -- NoOpCache defaults ------------------------------------------------------
 
@@ -154,7 +154,7 @@ def _make_config_with_cache(
         sinks=SinksConfig(kafka={'results': KafkaSinkConfig(topic='test-out')}),
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
-        debug=DebugConfig(
+        ui=make_ui_config(
             enabled=debug_enabled,
             db_dir=str(tmp_path),
             store_events=False,
@@ -194,7 +194,7 @@ async def test_app_wires_real_cache_when_enabled(tmp_path, monkeypatch) -> None:
     if app.config.cache.enabled:
         engine = CacheEngine(
             config=app.config.cache,
-            debug_config=app.config.debug,
+            ui_config=app.config.ui,
             worker_id=app._worker_id,
             cluster_name=app._cluster_name,
             recorder=app._recorder,
@@ -311,7 +311,7 @@ async def test_pydantic_roundtrip_via_handler_cache(tmp_path) -> None:
             db_dir=str(tmp_path),
             peer_sync={'enabled': False},
         ),
-        debug_config=DebugConfig(enabled=True, db_dir=str(tmp_path)),
+        ui_config=make_ui_config(enabled=True, db_dir=str(tmp_path)),
         worker_id='w1',
         cluster_name='',
         recorder=None,

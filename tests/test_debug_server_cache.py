@@ -38,9 +38,10 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from drakkar.cache import Cache, CacheEngine
-from drakkar.config import CacheConfig, DebugConfig, DrakkarConfig
+from drakkar.config import CacheConfig, DrakkarConfig
 from drakkar.debug.server import create_debug_app
 from drakkar.recorder import EventRecorder
+from tests.conftest import make_ui_config
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -93,7 +94,7 @@ def _make_mock_app(cache_engine: CacheEngine | None = None):
     app._config = DrakkarConfig()
     # UI hosting defaults ON and resolves against the real user cache /
     # GitHub at DebugServer.start(); tests must stay hermetic.
-    app._config.ui.enabled = False
+    app._config.ui.release.enabled = False
 
     pool = MagicMock()
     pool.active_count = 0
@@ -117,7 +118,7 @@ def _make_mock_app(cache_engine: CacheEngine | None = None):
 
 @pytest.fixture
 def debug_config(tmp_path):
-    return DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    return make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
 
 
 # ---------------------------------------------------------------------------
@@ -299,10 +300,10 @@ async def _start_live_engine(tmp_path) -> CacheEngine:
         cleanup_interval_seconds=60.0,
         peer_sync={'enabled': False},
     )
-    debug_cfg = DebugConfig(enabled=True, db_dir=str(tmp_path), store_config=False)
+    debug_cfg = make_ui_config(enabled=True, db_dir=str(tmp_path), store_config=False)
     engine = CacheEngine(
         config=cache_cfg,
-        debug_config=debug_cfg,
+        ui_config=debug_cfg,
         worker_id='test-worker',
         cluster_name='',
         recorder=None,

@@ -6,7 +6,6 @@ import pytest
 from pydantic import ValidationError
 
 from drakkar.config import (
-    DebugConfig,
     DLQConfig,
     DrakkarConfig,
     ExecutorConfig,
@@ -24,6 +23,7 @@ from drakkar.config import (
     WebClientConfig,
     load_config,
 )
+from tests.conftest import make_ui_config
 
 # --- KafkaConfig (source/consumer) ---
 
@@ -293,12 +293,12 @@ def test_metrics_config_rejects_invalid_port():
         MetricsConfig(port=99999)
 
 
-def test_debug_config_defaults():
-    cfg = DebugConfig()
-    assert cfg.max_buffer == 50_000
-    assert cfg.max_ui_rows == 5000
-    assert cfg.flush_interval_seconds == 5
-    assert cfg.retention_hours == 24
+def test_ui_config_defaults():
+    cfg = make_ui_config()
+    assert cfg.recorder.max_buffer == 50_000
+    assert cfg.max_rows == 5000
+    assert cfg.recorder.flush_interval_seconds == 5
+    assert cfg.recorder.retention_hours == 24
 
 
 def test_logging_config_defaults():

@@ -6,7 +6,7 @@ Use DK_ prefix with __ for nesting (e.g., DK_KAFKA__BROKERS).
 
 import os
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
 import structlog
@@ -416,10 +416,55 @@ class LoggingConfig(BaseModel):
     )
 
 
-class DebugConfig(BaseModel):
-    """Debug flight recorder and web UI settings.
+# --- UI config (server + recorder + release bundle) ---
 
-    Set ``enabled: false`` to disable the entire debug feature.
+# Old debug.* key → new ui.* home. Data-driven so the migration error and
+# any future tooling render from one table instead of hand-written prose.
+_DEBUG_KEY_MAP: dict[str, str] = {
+    'enabled': 'ui.enabled',
+    'host': 'ui.host',
+    'port': 'ui.port',
+    'auth_token': 'ui.auth_token',
+    'allowed_ws_origins': 'ui.allowed_ws_origins',
+    'debug_url': 'ui.public_url',
+    'expose_env_vars': 'ui.expose_env_vars',
+    'max_ui_rows': 'ui.max_rows',
+    'ws_min_duration_ms': 'ui.ws_min_duration_ms',
+    'log_min_duration_ms': 'ui.log_min_duration_ms',
+    'prometheus_url': 'ui.prometheus_url',
+    'prometheus_rate_interval': 'ui.prometheus_rate_interval',
+    'prometheus_worker_label': 'ui.prometheus_worker_label',
+    'prometheus_cluster_label': 'ui.prometheus_cluster_label',
+    'custom_links': 'ui.custom_links',
+    'db_dir': 'ui.recorder.db_dir',
+    'store_events': 'ui.recorder.store_events',
+    'store_config': 'ui.recorder.store_config',
+    'store_state': 'ui.recorder.store_state',
+    'state_sync_interval_seconds': 'ui.recorder.state_sync_interval_seconds',
+    'rotation_interval_minutes': 'ui.recorder.rotation_interval_minutes',
+    'retention_hours': 'ui.recorder.retention_hours',
+    'retention_max_events': 'ui.recorder.retention_max_events',
+    'store_output': 'ui.recorder.store_output',
+    'flush_interval_seconds': 'ui.recorder.flush_interval_seconds',
+    'max_buffer': 'ui.recorder.max_buffer',
+    'max_flush_retries': 'ui.recorder.max_flush_retries',
+    'event_min_duration_ms': 'ui.recorder.event_min_duration_ms',
+    'output_min_duration_ms': 'ui.recorder.output_min_duration_ms',
+}
+
+# Old flat ui.* fetch key → new ui.release.* home (the pre-merge UI section
+# held only bundle-fetch settings at the top level).
+_UI_FLAT_KEY_MAP: dict[str, str] = {
+    'release_repo': 'ui.release.repo',
+    'pinned_version': 'ui.release.pinned_version',
+    'cache_dir': 'ui.release.cache_dir',
+    'check_update': 'ui.release.check_update',
+}
+
+
+class UIRecorderConfig(BaseModel):
+    """Flight-recorder persistence settings — the UI's data store.
+
     Set ``db_dir: ""`` to run without any SQLite files on disk.
 
     Granular persistence flags (all require ``db_dir`` to be set):
@@ -431,16 +476,124 @@ class DebugConfig(BaseModel):
     else ``false`` gives autodiscovery without event or state logging.
     """
 
+    db_dir: str = '/tmp'
+    store_events: bool = True
+    store_config: bool = True
+    store_state: bool = True
+    state_sync_interval_seconds: int = Field(default=10, ge=1)
+    rotation_interval_minutes: int = Field(default=60, ge=1)
+    retention_hours: int = Field(default=24, ge=1)
+    retention_max_events: int = Field(default=100_000, ge=100)
+    store_output: bool = True
+    flush_interval_seconds: int = Field(default=5, ge=1)
+    max_buffer: int = Field(default=50_000, ge=1000)
+    # Maximum consecutive ``OperationalError`` failures tolerated on a single
+    # batch before the recorder gives up and drops it. On each failure the
+    # batch is re-queued at the front of the buffer so the next flush tick
+    # retries it; after this many attempts the batch is discarded and the
+    # ``drakkar_recorder_flush_batches_dropped_total`` counter ticks. Default
+    # 3 matches the cache engine's retry budget and keeps a persistent DB
+    # outage from leaking the buffer indefinitely.
+    max_flush_retries: int = Field(default=3, ge=1)
+    event_min_duration_ms: int = Field(default=0, ge=0)
+    output_min_duration_ms: int = Field(default=500, ge=0)
+
+
+class UIReleaseConfig(BaseModel):
+    """Decoupled drakkar-ui bundle fetching settings.
+
+    The UI ships as its own versioned bundle (the separate drakkar-ui repo,
+    published to GitHub Releases) so every backend on a host serves the same
+    UI and looks identical. When ``enabled``, the worker resolves that bundle
+    through :mod:`drakkar.uihost` (cache → fetch) and serves it in place of
+    the built-in server-rendered HTML pages.
+
+    Default-ON with an update check: on startup the worker resolves the
+    latest release (or serves the shared cache) and falls back to the
+    built-in Jinja pages when nothing is fetchable and the cache is empty —
+    a fetch failure is never fatal, so the default is safe offline too.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            'Resolve and serve the drakkar-ui bundle. Off pins the built-in '
+            'server-rendered pages unconditionally (no fetch, no cache read).'
+        ),
+    )
+    repo: str = Field(
+        default='wlame/drakkar-ui',
+        description=(
+            'The "owner/name" GitHub repo that publishes UI bundles. '
+            'Empty disables fetching — only a cached bundle or the embedded '
+            'fallback is served.'
+        ),
+    )
+    pinned_version: str = Field(
+        default='',
+        description=(
+            'Known-good UI release tag this backend is built against '
+            '(e.g. "v1.2.0"); the contract is API-major compatible. Empty '
+            'means "no pinned version".'
+        ),
+    )
+    cache_dir: str = Field(
+        default='',
+        description=(
+            'Bundle cache root override. Empty uses the per-user cache dir '
+            '($XDG_CACHE_HOME/drakkar/ui, falling back to ~/.cache/drakkar/ui '
+            "— the same directory the Go backend's os.UserCacheDir produces "
+            'on Linux, so both backends share one cache).'
+        ),
+    )
+    check_update: bool = Field(
+        default=True,
+        description=(
+            'Resolve the latest release tag on startup instead of only the '
+            'pinned version (the "check for a new version" toggle). Already-'
+            'cached versions are never re-downloaded — release tags are '
+            'immutable.'
+        ),
+    )
+
+    @field_validator('repo')
+    @classmethod
+    def _validate_repo(cls, v: str) -> str:
+        """A non-empty repo must look like a GitHub ``owner/name`` slug."""
+        if v and '/' not in v:
+            raise ValueError(f'ui.release.repo must be "owner/name", got {v!r}')
+        return v
+
+
+class UIConfig(BaseModel):
+    """The operator web UI: HTTP server, presentation, and sub-sections.
+
+    One first-class ``ui.*`` section covers the whole surface:
+
+    - top-level keys — the UI server itself (bind address, auth) and
+      presentation settings the pages/SPA consume;
+    - ``ui.recorder.*`` — the flight-recorder store that feeds the UI
+      (:class:`UIRecorderConfig`);
+    - ``ui.release.*`` — drakkar-ui bundle fetching
+      (:class:`UIReleaseConfig`).
+
+    Set ``enabled: false`` to disable the whole UI feature (server,
+    recorder persistence, and bundle serving).
+
+    The YAML keys and semantics match the Go backend's ``ui`` config block,
+    so ``DK_UI__*`` env overrides behave identically on both backends.
+    """
+
     enabled: bool = True
     host: str = Field(
         default='127.0.0.1',
-        description='Bind address for the debug server. Use 0.0.0.0 to expose on all interfaces.',
+        description='Bind address for the UI server. Use 0.0.0.0 to expose on all interfaces.',
     )
     port: int = Field(default=8080, ge=1, le=65535)
     auth_token: str = Field(
         default='',
         description=(
-            'Bearer token for the debug UI. **Empty (the default) disables auth** '
+            'Bearer token for the UI. **Empty (the default) disables auth** '
             'entirely — every endpoint (including database download, merge, and '
             'message-probe) is reachable without credentials and the WebSocket '
             'live-event stream skips both token and Origin checks. This is a '
@@ -448,7 +601,7 @@ class DebugConfig(BaseModel):
             'worker, replays Kafka messages, mutates sinks, or fakes pipeline '
             'data) and Drakkar is intended for deployment inside a private '
             'contour (VPC / internal cluster / operator-only ingress). A startup '
-            'warning fires whenever debug is enabled without a token so the '
+            'warning fires whenever the UI is enabled without a token so the '
             'unauthenticated posture is visible in logs. '
             'When set to a non-empty value, protected HTTP endpoints require '
             'an ``Authorization: Bearer <token>`` header or ``?token=<token>`` '
@@ -485,103 +638,41 @@ class DebugConfig(BaseModel):
             return v.strip()
         return v
 
-    debug_url: str = ''
-    db_dir: str = '/tmp'
-    store_events: bool = True
-    store_config: bool = True
-    store_state: bool = True
-    state_sync_interval_seconds: int = Field(default=10, ge=1)
+    @model_validator(mode='before')
+    @classmethod
+    def _reject_old_flat_release_keys(cls, values: object) -> object:
+        """Hard break: the pre-merge flat fetch keys moved under ``ui.release``.
+
+        Detecting them here (instead of letting them vanish as ignored
+        extras) prevents the nastiest failure mode of the section merge — a
+        config that still says ``ui.release_repo`` silently reverting to the
+        default repo.
+        """
+        if isinstance(values, dict):
+            moved = [f'ui.{key} -> {new}' for key, new in _UI_FLAT_KEY_MAP.items() if key in values]
+            if moved:
+                raise ValueError('old flat ui.* bundle keys were moved under ui.release.*; update: ' + ', '.join(moved))
+        return values
+
+    public_url: str = Field(
+        default='',
+        description=(
+            "Externally reachable URL of this worker's UI, used for "
+            'cross-worker links in the workers list. Empty derives '
+            'http://<ip>:<port> from the bind address.'
+        ),
+    )
     expose_env_vars: list[str] = Field(default_factory=list)
-    rotation_interval_minutes: int = Field(default=60, ge=1)
-    retention_hours: int = Field(default=24, ge=1)
-    retention_max_events: int = Field(default=100_000, ge=100)
-    store_output: bool = True
-    flush_interval_seconds: int = Field(default=5, ge=1)
-    max_buffer: int = Field(default=50_000, ge=1000)
-    # Maximum consecutive ``OperationalError`` failures tolerated on a single
-    # batch before the recorder gives up and drops it. On each failure the
-    # batch is re-queued at the front of the buffer so the next flush tick
-    # retries it; after this many attempts the batch is discarded and the
-    # ``drakkar_recorder_flush_batches_dropped_total`` counter ticks. Default
-    # 3 matches the cache engine's retry budget and keeps a persistent DB
-    # outage from leaking the buffer indefinitely.
-    max_flush_retries: int = Field(default=3, ge=1)
-    max_ui_rows: int = Field(default=5000, ge=100)
+    max_rows: int = Field(default=5000, ge=100)
     log_min_duration_ms: int = Field(default=500, ge=0)
     ws_min_duration_ms: int = Field(default=500, ge=0)
-    event_min_duration_ms: int = Field(default=0, ge=0)
-    output_min_duration_ms: int = Field(default=500, ge=0)
     prometheus_url: str = ''
     prometheus_rate_interval: str = '5m'
     prometheus_worker_label: str = ''
     prometheus_cluster_label: str = ''
     custom_links: list[dict[str, str]] = Field(default_factory=list)
-
-
-# --- UI hosting config ---
-
-
-class UIConfig(BaseModel):
-    """Decoupled drakkar-ui single-page-app hosting settings.
-
-    The UI ships as its own versioned bundle (the separate drakkar-ui repo,
-    published to GitHub Releases) so every backend on a host serves the same
-    UI and looks identical. When ``enabled``, the worker resolves that bundle
-    through :mod:`drakkar.uihost` (cache → fetch) and serves it in place of
-    the built-in server-rendered HTML pages.
-
-    Default-ON with an update check: on startup the worker resolves the
-    latest release (or serves the shared cache) and falls back to the
-    built-in Jinja pages when nothing is fetchable and the cache is empty —
-    a fetch failure is never fatal, so the default is safe offline too.
-
-    The YAML keys and semantics match the Go backend's ``ui`` config block,
-    so ``DK_UI__*`` env overrides behave identically on both backends.
-    """
-
-    enabled: bool = True
-    release_repo: str = Field(
-        default='wlame/drakkar-ui',
-        description=(
-            'The "owner/name" GitHub repo that publishes UI bundles. '
-            'Empty disables fetching — only a cached bundle or the embedded '
-            'fallback is served.'
-        ),
-    )
-    pinned_version: str = Field(
-        default='',
-        description=(
-            'Known-good UI release tag this backend is built against '
-            '(e.g. "v1.2.0"); the contract is API-major compatible. Empty '
-            'means "no pinned version".'
-        ),
-    )
-    cache_dir: str = Field(
-        default='',
-        description=(
-            'Bundle cache root override. Empty uses the per-user cache dir '
-            '($XDG_CACHE_HOME/drakkar/ui, falling back to ~/.cache/drakkar/ui '
-            "— the same directory the Go backend's os.UserCacheDir produces "
-            'on Linux, so both backends share one cache).'
-        ),
-    )
-    check_update: bool = Field(
-        default=True,
-        description=(
-            'Resolve the latest release tag on startup instead of only the '
-            'pinned version (the "check for a new version" toggle). Already-'
-            'cached versions are never re-downloaded — release tags are '
-            'immutable.'
-        ),
-    )
-
-    @field_validator('release_repo')
-    @classmethod
-    def _validate_release_repo(cls, v: str) -> str:
-        """A non-empty repo must look like a GitHub ``owner/name`` slug."""
-        if v and '/' not in v:
-            raise ValueError(f'ui.release_repo must be "owner/name", got {v!r}')
-        return v
+    recorder: UIRecorderConfig = Field(default_factory=UIRecorderConfig)
+    release: UIReleaseConfig = Field(default_factory=UIReleaseConfig)
 
 
 # --- Cache config ---
@@ -838,6 +929,37 @@ class DrakkarConfig(BaseSettings):
         env_nested_delimiter='__',
     )
 
+    @model_validator(mode='before')
+    @classmethod
+    def _reject_retired_debug_section(cls, values: object) -> object:
+        """Hard break: the ``debug.*`` section merged into ``ui.*``.
+
+        Fails loudly with the exact old→new key mapping instead of letting
+        an unrecognized ``debug`` key be ignored — a stale config would
+        otherwise silently run with defaults (wrong port, wrong db_dir).
+        Checks the raw input dict (YAML/kwargs path) and the environment
+        (``DK_DEBUG__*`` would silently match no field at all).
+        """
+        if isinstance(values, dict) and 'debug' in values:
+            section = cast('dict[str, object]', values)['debug']
+            if isinstance(section, dict):
+                keys = [str(key) for key in section]
+                moved = [f'debug.{key} -> {_DEBUG_KEY_MAP[key]}' for key in keys if key in _DEBUG_KEY_MAP]
+                unknown = [f'debug.{key}' for key in keys if key not in _DEBUG_KEY_MAP]
+                detail = ', '.join(moved + unknown) or 'debug -> ui'
+            else:
+                detail = 'debug -> ui'
+            raise ValueError(
+                'the debug.* config section was replaced by the first-class ui.* section; update: ' + detail
+            )
+        stale_env = sorted(name for name in os.environ if name.startswith('DK_DEBUG__'))
+        if stale_env:
+            raise ValueError(
+                'DK_DEBUG__* environment overrides target the retired debug.* section '
+                '(now merged into ui.*); rename: ' + ', '.join(stale_env)
+            )
+        return values
+
     worker_name_env: str = Field(
         default='WORKER_ID',
         description='Environment variable that holds the worker name for logs, metrics, and UI',
@@ -856,7 +978,6 @@ class DrakkarConfig(BaseSettings):
     dlq: DLQConfig = Field(default_factory=DLQConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
-    debug: DebugConfig = Field(default_factory=DebugConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     webapp: WebAppConfig = Field(default_factory=WebAppConfig)
@@ -865,7 +986,11 @@ class DrakkarConfig(BaseSettings):
         """One-line human-readable config summary for startup logging and debug UI.
 
         Format (Option C — structured-but-readable):
-        [worker/cluster] topic=... group=... exec=4w/100win/100poll retries=3/120s debug=on metrics=9090 dlq=on sinks=[kafka:a,b pg:main] log=INFO
+        [worker/cluster] topic=... group=... exec=4w/100win/100poll retries=3/120s ui=on:8080 metrics=9090 dlq=on sinks=[kafka:a,b pg:main] log=INFO
+
+        The ``ui`` token reports the UI server state; the ``ui.release``
+        bundle-fetch settings are deliberately excluded (they never affect
+        pipeline behavior). Byte-parity with the Go backend is contractual.
         """
         identity = worker_id or '?'
         if cluster_name:
@@ -875,7 +1000,7 @@ class DrakkarConfig(BaseSettings):
         exec_part = f'{ex.max_executors}w/{ex.window_size}win/{self.kafka.max_poll_records}poll'
         retries_part = f'{ex.max_retries}/{ex.task_timeout_seconds}s'
 
-        debug_part = f'on:{self.debug.port}' if self.debug.enabled else 'off'
+        ui_part = f'on:{self.ui.port}' if self.ui.enabled else 'off'
 
         # Cache summary: 'off' when disabled; otherwise 'on:f=Ns/s=Ns|off/c=Ns[/max=N]'.
         # :g format trims trailing zeros on integer-valued floats (3.0 → '3'), keeping
@@ -916,7 +1041,7 @@ class DrakkarConfig(BaseSettings):
             f' group={self.kafka.consumer_group}'
             f' exec={exec_part}'
             f' retries={retries_part}'
-            f' debug={debug_part}'
+            f' ui={ui_part}'
             f' cache={cache_part}'
             f' metrics={metrics_part}'
             f' dlq={dlq_part}'

@@ -38,13 +38,14 @@ from drakkar.cache import (
     CacheEngine,
     CacheScope,
 )
-from drakkar.config import CacheConfig, CachePeerSyncConfig, DebugConfig
+from drakkar.config import CacheConfig, CachePeerSyncConfig, UIConfig
+from tests.conftest import make_ui_config
 
 # --- helpers (mirrors test_cache_sync_pull helpers) -------------------------
 
 
-def make_debug_config(tmp_path: Path, **overrides: Any) -> DebugConfig:
-    """DebugConfig with ``db_dir`` pointed at the temp path and events off."""
+def make_debug_config(tmp_path: Path, **overrides: Any) -> UIConfig:
+    """UIConfig with ``db_dir`` pointed at the temp path and events off."""
     defaults: dict[str, Any] = {
         'enabled': True,
         'db_dir': str(tmp_path),
@@ -53,7 +54,7 @@ def make_debug_config(tmp_path: Path, **overrides: Any) -> DebugConfig:
         'store_state': False,
     }
     defaults.update(overrides)
-    return DebugConfig(**defaults)
+    return make_ui_config(**defaults)
 
 
 def make_cache_config(**overrides: Any) -> CacheConfig:
@@ -75,7 +76,7 @@ async def _make_engine(
     cache = Cache(origin_worker_id=worker_id)
     engine = CacheEngine(
         config=make_cache_config(**(cache_overrides or {})),
-        debug_config=make_debug_config(tmp_path, **(debug_overrides or {})),
+        ui_config=make_debug_config(tmp_path, **(debug_overrides or {})),
         worker_id=worker_id,
         cluster_name=cluster_name,
         recorder=None,

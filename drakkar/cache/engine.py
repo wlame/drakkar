@@ -45,7 +45,7 @@ from drakkar.peer_discovery import discover_peer_dbs
 from drakkar.periodic import run_periodic_task
 
 if TYPE_CHECKING:
-    from drakkar.config import CacheConfig, DebugConfig
+    from drakkar.config import CacheConfig, UIConfig
     from drakkar.recorder import EventRecorder
 
 logger = structlog.get_logger()
@@ -77,7 +77,7 @@ class CacheEngine:
     def __init__(
         self,
         config: CacheConfig,
-        debug_config: DebugConfig,
+        ui_config: UIConfig,
         worker_id: str,
         cluster_name: str,
         recorder: EventRecorder | None = None,
@@ -87,7 +87,7 @@ class CacheEngine:
         Args:
             config: cache-specific settings (enabled flag, intervals,
                 peer-sync, memory cap, optional dedicated db_dir).
-            debug_config: referenced only for its ``db_dir`` fallback when
+            ui_config: referenced only for its ``recorder.db_dir`` fallback when
                 ``config.db_dir`` is empty. The engine does NOT otherwise
                 reach into debug settings.
             worker_id: stable identifier for this worker — used for the
@@ -103,7 +103,7 @@ class CacheEngine:
                 can avoid requiring the recorder's presence.
         """
         self._config = config
-        self._debug_config = debug_config
+        self._ui_config = ui_config
         self._worker_id = worker_id
         self._cluster_name = cluster_name
         self._recorder = recorder
@@ -270,7 +270,7 @@ class CacheEngine:
            piggybacks on the debug directory).
         3. Empty string → engine runs in disabled mode.
         """
-        return self._config.db_dir or self._debug_config.db_dir
+        return self._config.db_dir or self._ui_config.recorder.db_dir
 
     def _update_live_link(self) -> None:
         """Create/refresh the ``<worker>-cache.db`` symlink pointing at the DB file.
@@ -413,7 +413,7 @@ class CacheEngine:
                 worker_id=self._worker_id,
                 reason='peer_sync.enabled=False in config',
             )
-        elif not self._debug_config.store_config:
+        elif not self._ui_config.recorder.store_config:
             self._peer_sync_enabled = False
             await logger.awarning(
                 'cache_peer_sync_disabled_no_store_config',

@@ -7,13 +7,14 @@ maintains a {worker}-live.db symlink, and removes it on stop().
 import os
 from pathlib import Path
 
-from drakkar.config import DebugConfig
+from drakkar.config import UIConfig
 from drakkar.recorder import EventRecorder, list_db_files, live_link_path, make_db_path
+from tests.conftest import make_ui_config
 
 WORKER = 'worker-1'
 
 
-def _make_config(tmp_path, **overrides) -> DebugConfig:
+def _make_config(tmp_path, **overrides) -> UIConfig:
     defaults = {
         'enabled': True,
         'db_dir': str(tmp_path),
@@ -22,7 +23,7 @@ def _make_config(tmp_path, **overrides) -> DebugConfig:
         'flush_interval_seconds': 60,
     }
     defaults.update(overrides)
-    return DebugConfig(**defaults)
+    return make_ui_config(**defaults)
 
 
 # --- Filename generation ---
@@ -201,7 +202,7 @@ def testlist_db_files_excludes_other_workers(tmp_path):
 
 
 async def test_no_symlink_when_db_dir_empty():
-    config = DebugConfig(enabled=True, db_dir='')
+    config = make_ui_config(enabled=True, db_dir='')
     rec = EventRecorder(config, worker_name=WORKER)
     await rec.start()
     assert rec.db_path == ''

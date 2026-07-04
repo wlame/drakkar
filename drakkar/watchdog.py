@@ -58,7 +58,7 @@ class WatchdogFile:
 
     def __init__(self, data_dir: Path, worker_id: str) -> None:
         # Coerce to ``Path`` so callers can pass plain strings from
-        # ``config.debug.db_dir`` without having to convert at the call
+        # ``config.ui.recorder.db_dir`` without having to convert at the call
         # site. ``Path(Path(...))`` is a no-op so this is also safe when
         # the caller already owns a ``Path``.
         self._data_dir = Path(data_dir)

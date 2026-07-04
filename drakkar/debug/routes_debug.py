@@ -104,7 +104,7 @@ def create_debug_router(deps: DebugDeps, include_html: bool = True) -> APIRouter
             'debug.html',
             {
                 'worker_id': drakkar_app._worker_id,
-                'db_dir': config.db_dir,
+                'db_dir': config.recorder.db_dir,
                 'config_summary': drakkar_app.config_summary,
             },
         )
@@ -114,7 +114,7 @@ def create_debug_router(deps: DebugDeps, include_html: bool = True) -> APIRouter
         """List all debug database files in db_dir with stats."""
         from drakkar.merge import scan_directory
 
-        databases = scan_directory(config.db_dir)
+        databases = scan_directory(config.recorder.db_dir)
         return JSONResponse(
             [
                 {
@@ -159,8 +159,8 @@ def create_debug_router(deps: DebugDeps, include_html: bool = True) -> APIRouter
             # prevent directory traversal and header-injection characters
             if '/' in fn or '\\' in fn or fn.startswith('.') or _has_unsafe_filename_char(fn):
                 return JSONResponse({'error': f'Invalid filename: {fn}'}, status_code=400)
-            full = os.path.join(config.db_dir, fn)
-            if not os.path.realpath(full).startswith(os.path.realpath(config.db_dir) + os.sep):
+            full = os.path.join(config.recorder.db_dir, fn)
+            if not os.path.realpath(full).startswith(os.path.realpath(config.recorder.db_dir) + os.sep):
                 return JSONResponse({'error': f'Invalid path: {fn}'}, status_code=400)
             if not os.path.isfile(full):
                 return JSONResponse({'error': f'File not found: {fn}'}, status_code=404)
@@ -168,7 +168,7 @@ def create_debug_router(deps: DebugDeps, include_html: bool = True) -> APIRouter
 
         ts = datetime.now(tz=UTC).strftime('%Y-%m-%d__%H_%M_%S')
         output_name = f'merged-{ts}.db'
-        output_path = os.path.join(config.db_dir, output_name)
+        output_path = os.path.join(config.recorder.db_dir, output_name)
 
         result = await asyncio.to_thread(merge_databases, db_paths, output_path)
 
@@ -315,8 +315,8 @@ def create_debug_router(deps: DebugDeps, include_html: bool = True) -> APIRouter
         # prevent directory traversal and header-injection characters
         if '/' in filename or '\\' in filename or filename.startswith('.') or _has_unsafe_filename_char(filename):
             return JSONResponse({'error': 'Invalid filename'}, status_code=400)
-        full = os.path.join(config.db_dir, filename)
-        if not os.path.realpath(full).startswith(os.path.realpath(config.db_dir) + os.sep):
+        full = os.path.join(config.recorder.db_dir, filename)
+        if not os.path.realpath(full).startswith(os.path.realpath(config.recorder.db_dir) + os.sep):
             return JSONResponse({'error': 'Invalid path'}, status_code=400)
         if not os.path.isfile(full):
             return JSONResponse({'error': 'File not found'}, status_code=404)

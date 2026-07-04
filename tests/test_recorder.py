@@ -10,7 +10,7 @@ import aiosqlite
 import pytest
 from pydantic import BaseModel
 
-from drakkar.config import DebugConfig
+from drakkar.config import UIConfig
 from drakkar.models import (
     ExecutorError,
     ExecutorResult,
@@ -31,6 +31,7 @@ from drakkar.recorder import (
 from drakkar.recorder import (
     logger as recorder_logger,
 )
+from tests.conftest import make_ui_config
 
 
 class _RecData(BaseModel):
@@ -40,7 +41,7 @@ class _RecData(BaseModel):
 WORKER_NAME = 'test-worker'
 
 
-def make_debug_config(tmp_path, **overrides) -> DebugConfig:
+def make_debug_config(tmp_path, **overrides) -> UIConfig:
     defaults = {
         'enabled': True,
         'db_dir': str(tmp_path),
@@ -50,7 +51,7 @@ def make_debug_config(tmp_path, **overrides) -> DebugConfig:
         'flush_interval_seconds': 60,
     }
     defaults.update(overrides)
-    return DebugConfig(**defaults)
+    return make_ui_config(**defaults)
 
 
 def make_msg(partition=0, offset=0) -> SourceMessage:
@@ -446,7 +447,7 @@ async def test_get_stats_empty_db(recorder):
 
 
 async def test_get_events_no_db():
-    config = DebugConfig(enabled=True, db_dir='')
+    config = make_ui_config(enabled=True, db_dir='')
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     events = await rec.get_events()
     assert events == []
@@ -1473,7 +1474,7 @@ async def test_write_config_populates_single_row(tmp_path):
 
 
 async def test_write_config_stores_debug_url(tmp_path):
-    config = make_debug_config(tmp_path, debug_url='http://localhost:8081/')
+    config = make_debug_config(tmp_path, public_url='http://localhost:8081/')
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -1997,7 +1998,7 @@ async def test_discover_workers_empty_when_store_config_false(tmp_path):
 
 async def test_discover_workers_empty_when_no_db_dir():
     """discover_workers returns empty when db_dir is empty."""
-    config = DebugConfig(enabled=True, db_dir='')
+    config = make_ui_config(enabled=True, db_dir='')
     rec = EventRecorder(config, worker_name=WORKER_NAME)
 
     workers = await rec.discover_workers()
@@ -3371,7 +3372,7 @@ async def test_recorder_flush_persistent_error_drops_after_max_retries(tmp_path)
         dropped_before = recorder_flush_batches_dropped._value.get()
 
         # Attempts 1..N-1: re-queue each time, counter climbs.
-        for attempt in range(1, config.max_flush_retries):
+        for attempt in range(1, config.recorder.max_flush_retries):
             await rec._flush()
             assert rec._flush_failures == attempt
             # Rows still in buffer — no data loss yet.
@@ -3387,7 +3388,7 @@ async def test_recorder_flush_persistent_error_drops_after_max_retries(tmp_path)
         assert recorder_flush_batches_dropped._value.get() == dropped_before + 1
         # Retry counter ticked on every failed attempt (including the one
         # that finally tripped the drop).
-        assert recorder_flush_retries._value.get() == retries_before + config.max_flush_retries
+        assert recorder_flush_retries._value.get() == retries_before + config.recorder.max_flush_retries
 
         # Subsequent batches with a working DB flush cleanly — retries
         # counter is fresh because we reset it on drop. Unpatch by
@@ -3853,9 +3854,9 @@ async def test_cross_trace_by_label_fallback_to_other_live_worker(tmp_path):
 
 async def test_cross_trace_by_label_returns_empty_when_no_db_dir():
     """Without ``db_dir`` the cross-worker fallback short-circuits to []."""
-    # ``DebugConfig`` requires ``db_dir`` for its other validators, so build
+    # ``UIConfig`` requires ``db_dir`` for its other validators, so build
     # a recorder, then null the directory to exercise the early-return.
-    config = DebugConfig(enabled=True, db_dir='', flush_interval_seconds=60)
+    config = make_ui_config(enabled=True, db_dir='', flush_interval_seconds=60)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -4185,7 +4186,7 @@ async def test_trace_db_file_returns_empty_when_events_table_missing(tmp_path):
 async def test_cross_trace_returns_empty_when_no_db_dir():
     """Without ``db_dir`` ``cross_trace`` short-circuits to [] before any
     glob/symlink walk."""
-    config = DebugConfig(enabled=True, db_dir='', flush_interval_seconds=60)
+    config = make_ui_config(enabled=True, db_dir='', flush_interval_seconds=60)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -4476,13 +4477,13 @@ async def test_rotate_swallows_oserror_when_enforcing_max_files(tmp_path, monkey
 
 
 async def test_config_property_returns_underlying_config(tmp_path):
-    """The ``config`` property exposes the DebugConfig the recorder was
+    """The ``config`` property exposes the UIConfig the recorder was
     constructed with — used by the debug server to inspect settings
     without reaching into ``_config``."""
     config = make_debug_config(tmp_path, retention_hours=12)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     assert rec.config is config
-    assert rec.config.retention_hours == 12
+    assert rec.config.recorder.retention_hours == 12
 
 
 async def test_flush_public_alias_drains_buffer(recorder):
@@ -4501,7 +4502,7 @@ async def test_flush_public_alias_drains_buffer(recorder):
 async def test_update_live_link_no_op_when_no_db_path(tmp_path):
     """Without ``db_dir``/``db_path`` the recorder skips the symlink dance
     entirely — there's nothing to point at."""
-    config = DebugConfig(enabled=True, db_dir='', flush_interval_seconds=60)
+    config = make_ui_config(enabled=True, db_dir='', flush_interval_seconds=60)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 

@@ -20,7 +20,6 @@ from pydantic import BaseModel as BM
 
 from drakkar.app import DrakkarApp
 from drakkar.config import (
-    DebugConfig,
     DrakkarConfig,
     ExecutorConfig,
     KafkaConfig,
@@ -44,7 +43,7 @@ from drakkar.models import (
 from drakkar.partition import PartitionProcessor
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.dlq import DLQSink
-from tests.conftest import wait_for
+from tests.conftest import make_ui_config, wait_for
 from tests.test_app import SimpleHandler, _setup_app_sinks
 
 
@@ -459,7 +458,7 @@ async def test_revoke_clears_stall_bookkeeping(app_config):
 
 
 async def test_recorder_db_file_owner_only_permissions(tmp_path):
-    recorder = EventRecorder(DebugConfig(enabled=False, db_dir=str(tmp_path)), worker_name='permtest')
+    recorder = EventRecorder(make_ui_config(enabled=False, db_dir=str(tmp_path)), worker_name='permtest')
     await recorder.start()
     try:
         db_files = [f for f in os.listdir(tmp_path) if f.endswith('.db') and not os.path.islink(tmp_path / f)]

@@ -21,11 +21,12 @@ from pathlib import Path
 import aiosqlite
 
 from drakkar.cache import LWW_UPSERT_SQL, CacheEngine
-from drakkar.config import CacheConfig, DebugConfig
+from drakkar.config import CacheConfig, UIConfig
+from tests.conftest import make_ui_config
 
 
-def make_debug_config(tmp_path: Path, **overrides) -> DebugConfig:
-    """Build a DebugConfig rooted at tmp_path — same shape as recorder tests."""
+def make_debug_config(tmp_path: Path, **overrides) -> UIConfig:
+    """Build a UIConfig rooted at tmp_path — same shape as recorder tests."""
     defaults: dict = {
         'enabled': True,
         'db_dir': str(tmp_path),
@@ -34,7 +35,7 @@ def make_debug_config(tmp_path: Path, **overrides) -> DebugConfig:
         'store_state': False,
     }
     defaults.update(overrides)
-    return DebugConfig(**defaults)
+    return make_ui_config(**defaults)
 
 
 def make_cache_config(**overrides) -> CacheConfig:
@@ -52,7 +53,7 @@ async def _make_engine(tmp_path: Path, *, worker_id: str = 'w1', **cfg_overrides
     """
     return CacheEngine(
         config=make_cache_config(**cfg_overrides),
-        debug_config=make_debug_config(tmp_path),
+        ui_config=make_debug_config(tmp_path),
         worker_id=worker_id,
         cluster_name='',
         recorder=None,
@@ -275,7 +276,7 @@ async def test_start_with_empty_db_dir_disables_engine(tmp_path, caplog):
     # cache.db_dir empty, debug.db_dir empty (override) → no resolution possible
     engine = CacheEngine(
         config=CacheConfig(enabled=True, db_dir=''),
-        debug_config=DebugConfig(enabled=True, db_dir=''),
+        ui_config=make_ui_config(enabled=True, db_dir=''),
         worker_id='w1',
         cluster_name='',
         recorder=None,
@@ -299,7 +300,7 @@ async def test_start_uses_cache_db_dir_when_set(tmp_path):
     debug_dir.mkdir()
     engine = CacheEngine(
         config=CacheConfig(enabled=True, db_dir=str(cache_dir)),
-        debug_config=DebugConfig(enabled=True, db_dir=str(debug_dir)),
+        ui_config=make_ui_config(enabled=True, db_dir=str(debug_dir)),
         worker_id='w1',
         cluster_name='',
         recorder=None,
@@ -319,7 +320,7 @@ async def test_start_falls_back_to_debug_db_dir(tmp_path):
     debug section."""
     engine = CacheEngine(
         config=CacheConfig(enabled=True, db_dir=''),
-        debug_config=DebugConfig(enabled=True, db_dir=str(tmp_path)),
+        ui_config=make_ui_config(enabled=True, db_dir=str(tmp_path)),
         worker_id='w1',
         cluster_name='',
         recorder=None,
@@ -335,7 +336,7 @@ async def test_start_disabled_cache_does_not_open_connection(tmp_path):
     """When `cache.enabled=false`, start() is a no-op even if db_dir is set."""
     engine = CacheEngine(
         config=CacheConfig(enabled=False, db_dir=str(tmp_path)),
-        debug_config=DebugConfig(enabled=True, db_dir=str(tmp_path)),
+        ui_config=make_ui_config(enabled=True, db_dir=str(tmp_path)),
         worker_id='w1',
         cluster_name='',
         recorder=None,

@@ -6,12 +6,31 @@ from pathlib import Path
 import pytest
 import yaml
 
+from drakkar.config import UIConfig, UIRecorderConfig
 from drakkar.models import (
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
     SourceMessage,
 )
+
+_RECORDER_FIELDS = frozenset(UIRecorderConfig.model_fields)
+
+
+def make_ui_config(**kwargs) -> UIConfig:
+    """Build a ``UIConfig`` from flat kwargs, routing recorder-tier fields.
+
+    Test convenience so the many call sites that mix server settings with
+    persistence settings (``make_ui_config(port=8080, db_dir='/tmp')``)
+    stay one-liners after the ``debug.*``→``ui.*`` merge. ``recorder=`` /
+    ``release=`` kwargs still pass through for tests that want the nested
+    form explicitly.
+    """
+    recorder_kwargs = {key: kwargs.pop(key) for key in list(kwargs) if key in _RECORDER_FIELDS}
+    if recorder_kwargs:
+        assert 'recorder' not in kwargs, 'mix of flat recorder kwargs and recorder= is ambiguous'
+        kwargs['recorder'] = UIRecorderConfig(**recorder_kwargs)
+    return UIConfig(**kwargs)
 
 
 async def wait_for(condition, timeout=5.0, interval=0.05):

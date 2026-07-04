@@ -36,7 +36,8 @@ import pytest
 from pydantic import BaseModel
 
 from drakkar.cache import LWW_UPSERT_SQL, Cache, CacheEngine, CacheScope, DirtyOp, Op
-from drakkar.config import CacheConfig, DebugConfig
+from drakkar.config import CacheConfig, UIConfig
+from tests.conftest import make_ui_config
 
 
 def _make_cache(*, max_memory_entries: int | None = None) -> Cache:
@@ -431,8 +432,8 @@ def test_dirty_op_is_importable_with_op_enum():
 # -- helpers for engine-backed tests -----------------------------------------
 
 
-def _make_debug_config(tmp_path: Path) -> DebugConfig:
-    return DebugConfig(
+def _make_debug_config(tmp_path: Path) -> UIConfig:
+    return make_ui_config(
         enabled=True,
         db_dir=str(tmp_path),
         store_events=False,
@@ -462,7 +463,7 @@ async def _make_started_engine(
     cache = Cache(origin_worker_id=worker_id, max_memory_entries=max_memory_entries)
     engine = CacheEngine(
         config=_make_cache_config(**cfg_overrides),
-        debug_config=_make_debug_config(tmp_path),
+        ui_config=_make_debug_config(tmp_path),
         worker_id=worker_id,
         cluster_name='',
         recorder=None,
@@ -854,7 +855,7 @@ async def test_reader_connection_not_opened_when_engine_disabled(tmp_path):
     stays None — matches the writer's effectively-disabled behavior."""
     engine = CacheEngine(
         config=CacheConfig(enabled=False),
-        debug_config=_make_debug_config(tmp_path),
+        ui_config=_make_debug_config(tmp_path),
         worker_id='w1',
         cluster_name='',
         recorder=None,
@@ -872,7 +873,7 @@ async def test_get_on_disabled_engine_returns_none(tmp_path):
     cache = Cache(origin_worker_id='w1')
     engine = CacheEngine(
         config=CacheConfig(enabled=False),
-        debug_config=_make_debug_config(tmp_path),
+        ui_config=_make_debug_config(tmp_path),
         worker_id='w1',
         cluster_name='',
         recorder=None,

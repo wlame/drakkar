@@ -23,7 +23,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
-from drakkar.config import DebugConfig, DrakkarConfig, UIConfig
+from drakkar.config import DrakkarConfig, UIConfig, UIReleaseConfig
 from drakkar.debug.server import create_debug_app
 from drakkar.recorder import EventRecorder
 from drakkar.uihost import (
@@ -33,6 +33,7 @@ from drakkar.uihost import (
     newest_cached_version,
     resolve,
 )
+from tests.conftest import make_ui_config
 
 # ---------------------------------------------------------------------------
 # Stub GitHub server
@@ -149,7 +150,7 @@ BUNDLE_FILES = {
 }
 
 
-def ui_config(tmp_path: Path, **overrides) -> UIConfig:
+def ui_config(tmp_path: Path, **overrides) -> UIReleaseConfig:
     # check_update defaults OFF here (unlike the production default) so each
     # test opts into the latest-lookup request explicitly — request-sequence
     # assertions stay deterministic.
@@ -157,10 +158,10 @@ def ui_config(tmp_path: Path, **overrides) -> UIConfig:
         'enabled': True,
         'check_update': False,
         'cache_dir': str(tmp_path / 'cache'),
-        'release_repo': 'wlame/drakkar-ui',
+        'repo': 'wlame/drakkar-ui',
     }
     defaults.update(overrides)
-    return UIConfig(**defaults)
+    return UIReleaseConfig(**defaults)
 
 
 def seed_cache(tmp_path: Path, version: str, files: dict[str, bytes] | None = None) -> Path:
@@ -371,7 +372,7 @@ def test_release_without_tarball_asset_rejected(stub_github, tmp_path):
 
 
 def test_empty_release_repo_disables_fetching(stub_github, tmp_path):
-    cfg = ui_config(tmp_path, release_repo='', pinned_version='v1.0.0', check_update=True)
+    cfg = ui_config(tmp_path, repo='', pinned_version='v1.0.0', check_update=True)
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
@@ -403,27 +404,28 @@ def test_ui_config_defaults():
     # fetchable (matches the Go backend's DefaultUIConfig).
     cfg = DrakkarConfig()
     assert cfg.ui.enabled is True
-    assert cfg.ui.release_repo == 'wlame/drakkar-ui'
-    assert cfg.ui.pinned_version == ''
-    assert cfg.ui.cache_dir == ''
-    assert cfg.ui.check_update is True
+    assert cfg.ui.release.enabled is True
+    assert cfg.ui.release.repo == 'wlame/drakkar-ui'
+    assert cfg.ui.release.pinned_version == ''
+    assert cfg.ui.release.cache_dir == ''
+    assert cfg.ui.release.check_update is True
 
 
 def test_ui_config_rejects_repo_without_slash():
     with pytest.raises(ValidationError, match='owner/name'):
-        UIConfig(release_repo='drakkar-ui')
+        UIReleaseConfig(repo='drakkar-ui')
 
 
 def test_ui_config_env_overrides(monkeypatch):
     from drakkar.config import load_config
 
     monkeypatch.setenv('DK_UI__ENABLED', 'true')
-    monkeypatch.setenv('DK_UI__PINNED_VERSION', 'v9.9.9')
-    monkeypatch.setenv('DK_UI__CHECK_UPDATE', 'true')
+    monkeypatch.setenv('DK_UI__RELEASE__PINNED_VERSION', 'v9.9.9')
+    monkeypatch.setenv('DK_UI__RELEASE__CHECK_UPDATE', 'true')
     cfg = load_config()
     assert cfg.ui.enabled is True
-    assert cfg.ui.pinned_version == 'v9.9.9'
-    assert cfg.ui.check_update is True
+    assert cfg.ui.release.pinned_version == 'v9.9.9'
+    assert cfg.ui.release.check_update is True
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +486,7 @@ def make_client(cfg, recorder, app, ui_root=None) -> AsyncClient:
 
 @pytest.fixture
 async def spa_client(tmp_path, mock_recorder, mock_app, ui_bundle_dir):
-    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
     mock_recorder.config = cfg
     async with make_client(cfg, mock_recorder, mock_app, ui_root=ui_bundle_dir) as c:
         yield c
@@ -535,7 +537,7 @@ async def test_spa_mode_keeps_probes_public(spa_client):
 
 async def test_spa_mode_keeps_download_precedence(tmp_path, mock_recorder, mock_app, ui_bundle_dir):
     (tmp_path / 'w1.db').write_bytes(b'sqlite-bytes')
-    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
     mock_recorder.config = cfg
     async with make_client(cfg, mock_recorder, mock_app, ui_root=ui_bundle_dir) as c:
         resp = await c.get('/debug/download/w1.db')
@@ -544,7 +546,7 @@ async def test_spa_mode_keeps_download_precedence(tmp_path, mock_recorder, mock_
 
 
 async def test_spa_mode_auth_gates_pages_like_html(tmp_path, mock_recorder, mock_app, ui_bundle_dir):
-    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
     mock_recorder.config = cfg
     async with make_client(cfg, mock_recorder, mock_app, ui_root=ui_bundle_dir) as c:
         # SPA paths require the token...
@@ -566,7 +568,7 @@ async def test_spa_mode_drops_jinja_pages(spa_client):
 
 
 async def test_ui_disabled_app_unchanged(tmp_path, mock_recorder, mock_app):
-    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
     mock_recorder.config = cfg
     async with make_client(cfg, mock_recorder, mock_app) as c:
         page = await c.get('/')
@@ -579,8 +581,8 @@ async def test_ui_disabled_app_unchanged(tmp_path, mock_recorder, mock_app):
 async def test_debug_server_resolve_ui_root_disabled_returns_none(tmp_path, mock_recorder, mock_app):
     from drakkar.debug.server import DebugServer
 
-    mock_app._config.ui = ui_config(tmp_path, enabled=False)
-    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    mock_app._config.ui = UIConfig(release=ui_config(tmp_path, enabled=False))
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
     server = DebugServer(cfg, mock_recorder, mock_app)
     assert await server._resolve_ui_root() is None
 
@@ -588,9 +590,9 @@ async def test_debug_server_resolve_ui_root_disabled_returns_none(tmp_path, mock
 async def test_debug_server_resolve_ui_root_enabled_resolves(tmp_path, mock_recorder, mock_app):
     from drakkar.debug.server import DebugServer
 
-    mock_app._config.ui = ui_config(tmp_path, release_repo='')
+    mock_app._config.ui = UIConfig(release=ui_config(tmp_path, repo=''))
     seed_cache(tmp_path, 'v1.0.0')
-    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
     server = DebugServer(cfg, mock_recorder, mock_app)
     root = await server._resolve_ui_root()
     assert root == tmp_path / 'cache' / 'v1.0.0'

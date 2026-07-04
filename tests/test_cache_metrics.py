@@ -38,7 +38,8 @@ from drakkar.cache import (
     DirtyOp,
     Op,
 )
-from drakkar.config import CacheConfig, DebugConfig
+from drakkar.config import CacheConfig, UIConfig
+from tests.conftest import make_ui_config
 
 # --- helpers ----------------------------------------------------------------
 
@@ -65,7 +66,7 @@ def _make_cache(*, max_memory_entries: int | None = None, worker_id: str = 'w1')
     return Cache(origin_worker_id=worker_id, max_memory_entries=max_memory_entries)
 
 
-def make_debug_config(tmp_path: Path, **overrides) -> DebugConfig:
+def make_debug_config(tmp_path: Path, **overrides) -> UIConfig:
     defaults: dict = {
         'enabled': True,
         'db_dir': str(tmp_path),
@@ -74,7 +75,7 @@ def make_debug_config(tmp_path: Path, **overrides) -> DebugConfig:
         'store_state': False,
     }
     defaults.update(overrides)
-    return DebugConfig(**defaults)
+    return make_ui_config(**defaults)
 
 
 def make_cache_config(**overrides) -> CacheConfig:
@@ -87,7 +88,7 @@ async def _make_engine(tmp_path: Path, *, worker_id: str = 'w1', **cfg_overrides
     cache = Cache(origin_worker_id=worker_id)
     engine = CacheEngine(
         config=make_cache_config(**cfg_overrides),
-        debug_config=make_debug_config(tmp_path),
+        ui_config=make_debug_config(tmp_path),
         worker_id=worker_id,
         cluster_name='',
         recorder=None,

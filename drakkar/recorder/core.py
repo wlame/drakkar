@@ -36,7 +36,7 @@ import aiosqlite
 import structlog
 from pydantic import BaseModel
 
-from drakkar.config import DebugConfig
+from drakkar.config import UIConfig
 from drakkar.metrics import (
     recorder_buffer_size,
     recorder_dropped_events,
@@ -107,13 +107,16 @@ class EventRecorder:
     - ``store_state`` -> ``worker_state`` table (periodic snapshots)
     """
 
-    MAX_BUFFER = 50_000  # default, overridden by config.debug.max_buffer
+    MAX_BUFFER = 50_000  # default, overridden by config.ui.recorder.max_buffer
 
-    def __init__(self, config: DebugConfig, worker_name: str = 'worker', cluster_name: str = '') -> None:
+    def __init__(self, config: UIConfig, worker_name: str = 'worker', cluster_name: str = '') -> None:
         self._config = config
+        # The persistence tier (ui.recorder.*) is read on hot paths — bind
+        # it once so those reads don't repeat the attribute hop.
+        self._store = config.recorder
         self._worker_name = worker_name
         self._cluster_name = cluster_name
-        self._buffer: deque[dict] = deque(maxlen=config.max_buffer)
+        self._buffer: deque[dict] = deque(maxlen=config.recorder.max_buffer)
         self._db: aiosqlite.Connection | None = None
         # Dedicated reader connection used by the debug UI for SELECTs.
         # aiosqlite serializes ops per connection, so without this the UI
@@ -170,9 +173,9 @@ class EventRecorder:
         return self._db_path
 
     @property
-    def config(self) -> DebugConfig:
-        """Read-only access to the debug config — lets the debug server
-        inspect ``store_events`` / ``ws_min_duration_ms`` without reaching
+    def config(self) -> UIConfig:
+        """Read-only access to the UI config — lets the UI server inspect
+        ``recorder.store_events`` / ``ws_min_duration_ms`` without reaching
         into the private ``_config`` attribute.
         """
         return self._config
@@ -220,11 +223,11 @@ class EventRecorder:
         schemaless would otherwise let a concurrent ``_flush`` hit
         ``no such table: events``.
         """
-        if self._config.store_events:
+        if self._store.store_events:
             await db.executescript(SCHEMA_EVENTS)
-        if self._config.store_config:
+        if self._store.store_config:
             await db.executescript(SCHEMA_WORKER_CONFIG)
-        if self._config.store_state:
+        if self._store.store_state:
             await db.executescript(SCHEMA_WORKER_STATE)
         await db.commit()
 
@@ -273,9 +276,9 @@ class EventRecorder:
 
     async def start(self) -> None:
         self._running = True
-        if self._config.db_dir:
+        if self._store.db_dir:
             await self._warn_if_db_dir_world_writable()
-            self._db_path = make_db_path(self._config.db_dir, self._worker_name)
+            self._db_path = make_db_path(self._store.db_dir, self._worker_name)
             # Open writer + apply PRAGMA + create schema + open reader in a
             # single try/except. A failure at any of these steps must close
             # whichever connections already opened — otherwise the caller
@@ -300,7 +303,7 @@ class EventRecorder:
                 # date schema below. The exception is intentionally left
                 # uncaught so it propagates through ``AppLifecycle._async_run``
                 # and aborts worker startup.
-                if self._config.store_events:
+                if self._store.store_events:
                     await self._verify_events_schema(self._db, self._db_path)
                 await self._create_schema(self._db)
                 # Open the dedicated reader connection AFTER schema creation
@@ -331,10 +334,10 @@ class EventRecorder:
                 self._running = False
                 raise
             self._update_live_link()
-            if self._config.store_events:
+            if self._store.store_events:
                 self._flush_task = asyncio.create_task(self._flush_loop())
             self._retention_task = asyncio.create_task(self._retention_loop())
-            if self._config.store_state:
+            if self._store.store_state:
                 self._state_task = asyncio.create_task(self._state_sync_loop())
         await logger.ainfo(
             'recorder_started',
@@ -352,14 +355,14 @@ class EventRecorder:
         may not exist yet and ``make_db_path`` / connect handle that.
         """
         try:
-            mode = os.stat(self._config.db_dir).st_mode
+            mode = os.stat(self._store.db_dir).st_mode
         except OSError:
             return
         if mode & 0o002:
             await logger.awarning(
                 'recorder_db_dir_world_writable',
                 category='recorder',
-                db_dir=self._config.db_dir,
+                db_dir=self._store.db_dir,
                 hint='recorder DBs store task args and subprocess output; '
                 'point debug.db_dir at a directory owned by the worker user '
                 '(e.g. /var/lib/drakkar) on shared hosts',
@@ -421,9 +424,9 @@ class EventRecorder:
 
     def _update_live_link(self) -> None:
         """Create or update the {worker}-live.db symlink to the current DB."""
-        if not self._config.db_dir or not self._db_path:
+        if not self._store.db_dir or not self._db_path:
             return
-        link = live_link_path(self._config.db_dir, self._worker_name)
+        link = live_link_path(self._store.db_dir, self._worker_name)
         target = os.path.basename(self._db_path)
         try:
             tmp = link + '.tmp'
@@ -434,9 +437,9 @@ class EventRecorder:
 
     def _remove_live_link(self) -> None:
         """Remove the live symlink on graceful shutdown."""
-        if not self._config.db_dir:
+        if not self._store.db_dir:
             return
-        link = live_link_path(self._config.db_dir, self._worker_name)
+        link = live_link_path(self._store.db_dir, self._worker_name)
         try:
             if os.path.islink(link):
                 os.remove(link)
@@ -456,7 +459,7 @@ class EventRecorder:
           values have embedded credentials stripped.
         """
         self._drakkar_config = drakkar_config
-        if not self._db or not self._config.store_config:
+        if not self._db or not self._store.store_config:
             return
         env_vars = {name: sanitize_env_value(name, os.environ.get(name, '')) for name in self._config.expose_env_vars}
         sinks: dict[str, list[str]] = {}
@@ -478,7 +481,7 @@ class EventRecorder:
                 self._cluster_name or None,
                 detect_worker_ip(),
                 self._config.port,
-                self._config.debug_url or None,
+                self._config.public_url or None,
                 redact_url(drakkar_config.kafka.brokers),
                 drakkar_config.kafka.source_topic,
                 drakkar_config.kafka.consumer_group,
@@ -499,11 +502,11 @@ class EventRecorder:
 
     async def _state_sync_loop(self) -> None:
         while self._running:
-            await asyncio.sleep(self._config.state_sync_interval_seconds)
+            await asyncio.sleep(self._store.state_sync_interval_seconds)
             await self._sync_state()
 
     async def _sync_state(self) -> None:
-        if not self._db or not self._config.store_state:
+        if not self._db or not self._store.store_state:
             return
         app_state = self._state_provider() if self._state_provider else {}
         now = time.time()
@@ -731,8 +734,8 @@ class EventRecorder:
         else:
             skip_ws = False
 
-        skip_db = self._config.event_min_duration_ms > 0 and duration_ms < self._config.event_min_duration_ms
-        include_output = duration_ms >= self._config.output_min_duration_ms
+        skip_db = self._store.event_min_duration_ms > 0 and duration_ms < self._store.event_min_duration_ms
+        include_output = duration_ms >= self._store.output_min_duration_ms
 
         # See ``record_task_started`` for the resolution rules: explicit
         # kwargs take precedence, otherwise we read from the task that
@@ -764,7 +767,7 @@ class EventRecorder:
             entry['metadata'] = encode_json_str({'precomputed': True})
         if include_output:
             entry['args'] = encode_json_str(result.task.args)
-        if include_output and self._config.store_output:
+        if include_output and self._store.store_output:
             entry['stdout'] = result.stdout
             entry['stderr'] = result.stderr
         self._record(entry, skip_ws=skip_ws, skip_db=skip_db)
@@ -803,8 +806,8 @@ class EventRecorder:
 
         if duration_seconds is not None:
             duration_ms = duration_seconds * 1000
-            skip_db = self._config.event_min_duration_ms > 0 and duration_ms < self._config.event_min_duration_ms
-            include_output = duration_ms >= self._config.output_min_duration_ms
+            skip_db = self._store.event_min_duration_ms > 0 and duration_ms < self._store.event_min_duration_ms
+            include_output = duration_ms >= self._store.output_min_duration_ms
             should_log = duration_ms >= self._config.log_min_duration_ms
         else:
             skip_db = False
@@ -838,7 +841,7 @@ class EventRecorder:
             entry['duration'] = duration_seconds
         if include_output:
             entry['args'] = encode_json_str(task.args)
-        if include_output and self._config.store_output:
+        if include_output and self._store.store_output:
             entry['stderr'] = error.stderr
         self._record(entry, skip_ws=False, skip_db=skip_db)
 
@@ -1289,7 +1292,7 @@ class EventRecorder:
         # to the writer when the reader isn't available (e.g. legacy tests
         # that set ``_db`` only).
         reader = self._reader_db or self._db
-        if not reader or not self._config.store_events:
+        if not reader or not self._store.store_events:
             return []
         conditions = []
         params: list = []
@@ -1320,7 +1323,7 @@ class EventRecorder:
         """Find all events for tasks matching a label key-value pair."""
         await self._flush()
         reader = self._reader_db or self._db
-        if not reader or not self._config.store_events:
+        if not reader or not self._store.store_events:
             return []
         json_path = f'$.{label_key}'
         async with reader.execute(_LABEL_TRACE_QUERY, [json_path, label_value]) as cursor:
@@ -1338,11 +1341,11 @@ class EventRecorder:
             return sorted(local_events, key=lambda e: e.get('ts', 0))
 
         # search other workers' live DBs
-        if not self._config.db_dir:
+        if not self._store.db_dir:
             return []
 
         json_path = f'$.{label_key}'
-        for target in sorted(glob.glob(os.path.join(self._config.db_dir, '*-live.db'))):
+        for target in sorted(glob.glob(os.path.join(self._store.db_dir, '*-live.db'))):
             real = os.path.realpath(target)
             if real == self._db_path:
                 continue
@@ -1384,7 +1387,7 @@ class EventRecorder:
         """Get the full lifecycle of a message by partition and offset."""
         await self._flush()
         reader = self._reader_db or self._db
-        if not reader or not self._config.store_events:
+        if not reader or not self._store.store_events:
             return []
         async with reader.execute(_TRACE_QUERY, [partition, msg_offset, partition, msg_offset]) as cursor:
             columns = [d[0] for d in cursor.description]
@@ -1448,7 +1451,7 @@ class EventRecorder:
         if local_events:
             return local_events
 
-        if not self._config.db_dir:
+        if not self._store.db_dir:
             return []
 
         searched_paths: set[str] = set()
@@ -1456,7 +1459,7 @@ class EventRecorder:
             searched_paths.add(os.path.realpath(self._db_path))
 
         # 2. Fallback: other workers' live DBs
-        live_pattern = os.path.join(self._config.db_dir, '*-live.db')
+        live_pattern = os.path.join(self._store.db_dir, '*-live.db')
         for link_path in glob.glob(live_pattern):
             if not os.path.islink(link_path):
                 continue
@@ -1471,10 +1474,10 @@ class EventRecorder:
 
         # 3. Fallback: rotated DB files (newest first)
         all_dbs = []
-        for entry in os.listdir(self._config.db_dir):
+        for entry in os.listdir(self._store.db_dir):
             if not entry.endswith('.db'):
                 continue
-            full = os.path.join(self._config.db_dir, entry)
+            full = os.path.join(self._store.db_dir, entry)
             if os.path.islink(full) or not os.path.isfile(full):
                 continue
             if os.path.realpath(full) in searched_paths:
@@ -1495,7 +1498,7 @@ class EventRecorder:
         """Get all events for a specific task_id, ordered chronologically."""
         await self._flush()  # ensure recent events are queryable
         reader = self._reader_db or self._db
-        if not reader or not self._config.store_events:
+        if not reader or not self._store.store_events:
             return []
         query = 'SELECT * FROM events WHERE task_id = ? ORDER BY id ASC'
         async with reader.execute(query, [task_id]) as cursor:
@@ -1506,7 +1509,7 @@ class EventRecorder:
     async def get_partition_summary(self) -> list[dict]:
         """Get summary stats per partition from recorded events."""
         reader = self._reader_db or self._db
-        if not reader or not self._config.store_events:
+        if not reader or not self._store.store_events:
             return []
         query = """
             SELECT
@@ -1531,7 +1534,7 @@ class EventRecorder:
         """Get tasks that started but haven't completed or failed."""
         await self._flush()
         reader = self._reader_db or self._db
-        if not reader or not self._config.store_events:
+        if not reader or not self._store.store_events:
             return []
         query = """
             SELECT s.* FROM events s
@@ -1564,11 +1567,11 @@ class EventRecorder:
         step — reading the `worker_config` row out of each resolved DB —
         right here; the cache will supply its own row-reader in a later task.
         """
-        if not self._config.db_dir or not self._config.store_config:
+        if not self._store.db_dir or not self._store.store_config:
             return []
         workers: list[dict] = []
         async for _worker_name, target in discover_peer_dbs(
-            self._config.db_dir,
+            self._store.db_dir,
             '-live.db',
             self._worker_name,
         ):
@@ -1592,7 +1595,7 @@ class EventRecorder:
 
     async def _flush_loop(self) -> None:
         while self._running:
-            await asyncio.sleep(self._config.flush_interval_seconds)
+            await asyncio.sleep(self._store.flush_interval_seconds)
             await self._flush()
 
     async def _flush(self) -> None:
@@ -1613,7 +1616,7 @@ class EventRecorder:
             db = self._db
             if not db or not self._buffer:
                 return
-            if not self._config.store_events:
+            if not self._store.store_events:
                 self._buffer.clear()
                 # Reflect the drain in the gauge even when events aren't persisted —
                 # buffer length is what the gauge reports, not DB row count.
@@ -1699,7 +1702,7 @@ class EventRecorder:
                 # strictly worse — silent data loss with no metric tick.
                 self._flush_failures += 1
                 recorder_flush_retries.inc()
-                if self._flush_failures >= self._config.max_flush_retries:
+                if self._flush_failures >= self._store.max_flush_retries:
                     # Give up on this batch: drop it, reset the counter so
                     # the next batch starts from a clean slate, and tick
                     # the drop metric. Without the reset, a transient
@@ -1754,7 +1757,7 @@ class EventRecorder:
                     'recorder_flush_retry',
                     category='recorder',
                     attempt=self._flush_failures,
-                    max_retries=self._config.max_flush_retries,
+                    max_retries=self._store.max_flush_retries,
                     batch_size=len(batch),
                     error=str(exc),
                 )
@@ -1770,7 +1773,7 @@ class EventRecorder:
 
     async def _retention_loop(self) -> None:
         while self._running:
-            await asyncio.sleep(self._config.rotation_interval_minutes * 60)
+            await asyncio.sleep(self._store.rotation_interval_minutes * 60)
             await self._rotate()
 
     async def _rotate(self) -> None:
@@ -1790,7 +1793,7 @@ class EventRecorder:
         # open new DB and initialize schema BEFORE swapping. If schema
         # creation fails, close the orphaned connection and leave
         # self._db untouched so the caller can retry on the next tick.
-        new_path = make_db_path(self._config.db_dir, self._worker_name)
+        new_path = make_db_path(self._store.db_dir, self._worker_name)
         new_db = await aiosqlite.connect(new_path)
         try:
             await new_db.execute('PRAGMA journal_mode=WAL')
@@ -1856,8 +1859,8 @@ class EventRecorder:
                 )
 
         # delete DB files older than retention
-        cutoff = time.time() - (self._config.retention_hours * 3600)
-        for db_file in list_db_files(self._config.db_dir, self._worker_name):
+        cutoff = time.time() - (self._store.retention_hours * 3600)
+        for db_file in list_db_files(self._store.db_dir, self._worker_name):
             if db_file == new_path:
                 continue
             try:
@@ -1869,8 +1872,8 @@ class EventRecorder:
                 pass
 
         # enforce max file count
-        remaining = list_db_files(self._config.db_dir, self._worker_name)
-        max_files = max(1, self._config.retention_max_events // 10_000)
+        remaining = list_db_files(self._store.db_dir, self._worker_name)
+        max_files = max(1, self._store.retention_max_events // 10_000)
         if len(remaining) > max_files:
             for old_file in remaining[:-max_files]:
                 if old_file != new_path:

@@ -8,9 +8,8 @@ import pytest
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
-from drakkar.app import DrakkarApp, warn_if_debug_unauthenticated
+from drakkar.app import DrakkarApp, warn_if_ui_unauthenticated
 from drakkar.config import (
-    DebugConfig,
     DrakkarConfig,
     ExecutorConfig,
     KafkaConfig,
@@ -19,6 +18,7 @@ from drakkar.config import (
     MetricsConfig,
     PostgresSinkConfig,
     SinksConfig,
+    UIConfig,
 )
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
@@ -29,7 +29,7 @@ from drakkar.models import (
     SourceMessage,
 )
 from drakkar.sinks.manager import CIRCUIT_OPEN_ERROR, SinkNotConfiguredError
-from tests.conftest import wait_for
+from tests.conftest import make_ui_config, wait_for
 
 
 class _D(BaseModel):
@@ -1034,106 +1034,106 @@ async def test_poll_loop_executor_idle_waste_metric(test_config):
 
 
 @pytest.fixture
-def config_with_debug(test_config_no_sinks):
-    """Factory fixture — returns a builder that swaps ``debug`` on the no-sinks baseline.
+def config_with_ui(test_config_no_sinks):
+    """Factory fixture — returns a builder that swaps ``ui`` on the no-sinks baseline.
 
-    The security gating tests only read ``config.debug``, so reusing the
-    existing minimal config and overriding the ``debug`` field keeps the test
+    The security gating tests only read ``config.ui``, so reusing the
+    existing minimal config and overriding the ``ui`` field keeps the test
     setup a single line without duplicating the Kafka/executor/sinks scaffold.
     """
 
-    def _build(debug_cfg: DebugConfig) -> DrakkarConfig:
-        return test_config_no_sinks.model_copy(update={'debug': debug_cfg})
+    def _build(ui_cfg: UIConfig) -> DrakkarConfig:
+        return test_config_no_sinks.model_copy(update={'ui': ui_cfg})
 
     return _build
 
 
 # --- Unauthenticated debug-UI startup warning ---
 #
-# Auth is opt-in: ``debug.auth_token`` defaults to empty, which disables auth
+# Auth is opt-in: ``ui.auth_token`` defaults to empty, which disables auth
 # on the entire debug UI. The framework emits a structured warning at startup
 # whenever debug is enabled without a token, so the unauthenticated posture
 # is visible in logs and operators have a clear path to enable auth.
 #
 # These tests pin down the helper's invariants:
-#   - warns when debug.enabled AND auth_token == ''
+#   - warns when ui.enabled AND auth_token == ''
 #   - does NOT warn when auth_token is set (any non-empty value)
-#   - does NOT warn when debug.enabled is False
+#   - does NOT warn when ui.enabled is False
 #   - whitespace-only tokens are treated as empty (the field validator strips
 #     them on load, so the helper sees ``''`` and warns)
 #   - warning carries host/port + remediation pointers (YAML key + env var)
 
 
 def _captured_unauth_events(records: list[dict]) -> list[dict]:
-    """Filter captured structlog records down to the unauthenticated-debug events."""
-    return [e for e in records if e.get('event') == 'debug_ui_unauthenticated']
+    """Filter captured structlog records down to the unauthenticated-UI events."""
+    return [e for e in records if e.get('event') == 'ui_unauthenticated']
 
 
-def test_warn_if_debug_unauthenticated_emits_warning(config_with_debug):
+def test_warn_if_ui_unauthenticated_emits_warning(config_with_ui):
     """debug.enabled + empty auth_token emits a structured warning naming host:port."""
-    config = config_with_debug(DebugConfig(enabled=True, host='0.0.0.0', auth_token=''))
+    config = config_with_ui(make_ui_config(enabled=True, host='0.0.0.0', auth_token=''))
     with capture_logs() as cap:
-        warn_if_debug_unauthenticated(config)
+        warn_if_ui_unauthenticated(config)
 
     events = _captured_unauth_events(cap)
     assert len(events) == 1
     record = events[0]
     assert record['log_level'] == 'warning'
     assert record['host'] == '0.0.0.0'
-    assert record['port'] == config.debug.port
+    assert record['port'] == config.ui.port
     # The remediation message must name BOTH opt-in paths (YAML key + env
     # var) so operators don't have to guess which knob to turn.
-    assert 'debug.auth_token' in record['message']
-    assert 'DK_DEBUG__AUTH_TOKEN' in record['message']
+    assert 'ui.auth_token' in record['message']
+    assert 'DK_UI__AUTH_TOKEN' in record['message']
     # The "read-only by design" rationale is part of the message — operators
     # reading the warning should immediately understand WHY this is opt-in.
     assert 'read-only' in record['message']
 
 
-def test_warn_if_debug_unauthenticated_silent_when_token_set(config_with_debug):
+def test_warn_if_ui_unauthenticated_silent_when_token_set(config_with_ui):
     """Setting auth_token (any non-empty value) silences the unauthenticated warning."""
-    config = config_with_debug(DebugConfig(enabled=True, host='0.0.0.0', auth_token='secret-token'))
+    config = config_with_ui(make_ui_config(enabled=True, host='0.0.0.0', auth_token='secret-token'))
     with capture_logs() as cap:
-        warn_if_debug_unauthenticated(config)
+        warn_if_ui_unauthenticated(config)
     assert _captured_unauth_events(cap) == []
 
 
-def test_warn_if_debug_unauthenticated_warns_on_loopback_too(config_with_debug):
+def test_warn_if_ui_unauthenticated_warns_on_loopback_too(config_with_ui):
     """Warning fires regardless of host — even on 127.0.0.1 with empty token,
     so the unauthenticated posture is always visible in logs (no host-based
     silent path that masks the same default in dev vs prod)."""
-    config = config_with_debug(DebugConfig(enabled=True, host='127.0.0.1', auth_token=''))
+    config = config_with_ui(make_ui_config(enabled=True, host='127.0.0.1', auth_token=''))
     with capture_logs() as cap:
-        warn_if_debug_unauthenticated(config)
+        warn_if_ui_unauthenticated(config)
     assert len(_captured_unauth_events(cap)) == 1
 
 
-def test_warn_if_debug_unauthenticated_silent_when_debug_disabled(config_with_debug):
+def test_warn_if_ui_unauthenticated_silent_when_debug_disabled(config_with_ui):
     """debug.enabled=False means no debug server starts, so the warning is skipped."""
-    config = config_with_debug(DebugConfig(enabled=False, host='0.0.0.0', auth_token=''))
+    config = config_with_ui(make_ui_config(enabled=False, host='0.0.0.0', auth_token=''))
     with capture_logs() as cap:
-        warn_if_debug_unauthenticated(config)
+        warn_if_ui_unauthenticated(config)
     assert _captured_unauth_events(cap) == []
 
 
-def test_warn_if_debug_unauthenticated_whitespace_token_treated_as_empty(config_with_debug):
+def test_warn_if_ui_unauthenticated_whitespace_token_treated_as_empty(config_with_ui):
     """A token of only spaces is stripped to empty by the field validator, so
     the helper sees ``''`` and warns. This prevents a 'spaces token' from
     silently looking secured to a careless operator."""
-    config = config_with_debug(DebugConfig(enabled=True, host='0.0.0.0', auth_token='   '))
+    config = config_with_ui(make_ui_config(enabled=True, host='0.0.0.0', auth_token='   '))
     # Pre-condition: the field validator already stripped the whitespace.
-    assert config.debug.auth_token == ''
+    assert config.ui.auth_token == ''
     with capture_logs() as cap:
-        warn_if_debug_unauthenticated(config)
+        warn_if_ui_unauthenticated(config)
     assert len(_captured_unauth_events(cap)) == 1
 
 
 @pytest.mark.parametrize('host', ['127.0.0.1', 'localhost', '::1', '0.0.0.0', 'worker.internal'])
-def test_warn_if_debug_unauthenticated_host_independent(config_with_debug, host: str):
+def test_warn_if_ui_unauthenticated_host_independent(config_with_ui, host: str):
     """Warning fires for every host — auth gating is no longer host-based."""
-    config = config_with_debug(DebugConfig(enabled=True, host=host, auth_token=''))
+    config = config_with_ui(make_ui_config(enabled=True, host=host, auth_token=''))
     with capture_logs() as cap:
-        warn_if_debug_unauthenticated(config)
+        warn_if_ui_unauthenticated(config)
     events = _captured_unauth_events(cap)
     assert len(events) == 1
     assert events[0]['host'] == host
@@ -1521,7 +1521,7 @@ async def test_lifecycle_shutdown_marks_watchdog_clean_on_clean_drain(test_confi
 
     # Force the watchdog dir to a writable temp path so the test never
     # races a real on-disk file from a developer machine.
-    test_config.debug.db_dir = str(tmp_path)
+    test_config.ui.recorder.db_dir = str(tmp_path)
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._consumer = AsyncMock()
@@ -1551,7 +1551,7 @@ async def test_lifecycle_shutdown_marks_watchdog_clean_on_drain_timeout(test_con
     from drakkar.lifecycle import AppLifecycle
     from drakkar.watchdog import WatchdogFile
 
-    test_config.debug.db_dir = str(tmp_path)
+    test_config.ui.recorder.db_dir = str(tmp_path)
     # Tighten the drain timeout so the test runs quickly.
     test_config.executor.drain_timeout_seconds = 1
 
@@ -1586,7 +1586,7 @@ async def test_lifecycle_shutdown_no_watchdog_does_not_crash(test_config):
     """
     from drakkar.lifecycle import AppLifecycle
 
-    test_config.debug.db_dir = ''  # disk-less mode
+    test_config.ui.recorder.db_dir = ''  # disk-less mode
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._consumer = AsyncMock()
@@ -1613,7 +1613,7 @@ async def test_lifecycle_shutdown_drain_exception_still_runs_teardown(test_confi
     from drakkar.lifecycle import AppLifecycle
     from drakkar.watchdog import WatchdogFile
 
-    test_config.debug.db_dir = str(tmp_path)
+    test_config.ui.recorder.db_dir = str(tmp_path)
 
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._consumer = AsyncMock()
@@ -1665,7 +1665,7 @@ async def test_lifecycle_claim_watchdog_slot_tolerates_oserror(test_config, tmp_
     from drakkar.lifecycle import AppLifecycle
     from drakkar.watchdog import WatchdogFile
 
-    test_config.debug.db_dir = str(tmp_path)
+    test_config.ui.recorder.db_dir = str(tmp_path)
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     lifecycle = AppLifecycle(app)
 
@@ -1697,7 +1697,7 @@ async def test_lifecycle_claim_watchdog_slot_no_op_when_disabled(test_config):
     """
     from drakkar.lifecycle import AppLifecycle
 
-    test_config.debug.db_dir = ''  # disk-less
+    test_config.ui.recorder.db_dir = ''  # disk-less
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     lifecycle = AppLifecycle(app)
     assert lifecycle._watchdog is None

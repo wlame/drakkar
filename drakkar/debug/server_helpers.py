@@ -21,7 +21,7 @@ import re
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
-from drakkar.config import DebugConfig
+from drakkar.config import UIConfig
 
 # Default ports are implicit in browsers' Origin header but may appear
 # explicitly in the Host header (and vice-versa). We strip both sides to
@@ -118,7 +118,7 @@ def parse_host_header(host_header: str) -> tuple[str, int | None]:
     return host_header.lower(), None
 
 
-def origin_allowed(origin: str | None, host_header: str, config: DebugConfig) -> bool:
+def origin_allowed(origin: str | None, host_header: str, config: UIConfig) -> bool:
     """Return True when a WebSocket handshake origin is allowed.
 
     Decision table (only consulted when ``auth_token`` is set — caller

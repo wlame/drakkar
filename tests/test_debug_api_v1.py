@@ -18,9 +18,10 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
-from drakkar.config import DebugConfig, DrakkarConfig
+from drakkar.config import DrakkarConfig
 from drakkar.debug.server import create_debug_app
 from drakkar.recorder import EventRecorder
+from tests.conftest import make_ui_config
 
 _INT32_MAX = 2**31 - 1
 
@@ -57,7 +58,7 @@ def mock_app():
     app._config = DrakkarConfig()
     # UI hosting defaults ON and resolves against the real user cache /
     # GitHub at DebugServer.start(); tests must stay hermetic.
-    app._config.ui.enabled = False
+    app._config.ui.release.enabled = False
     # ``cache_engine=None`` makes the cache routes 404 (disabled); a plain
     # MagicMock would be truthy and send them down the real-reader path.
     app.cache_engine = None
@@ -80,7 +81,7 @@ def mock_app():
 
 @pytest.fixture
 def debug_config(tmp_path):
-    return DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    return make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
 
 
 def make_client(cfg, recorder, app) -> AsyncClient:
@@ -133,7 +134,7 @@ class TestV1Aliases:
 
     async def test_download_alias_serves_file(self, tmp_path, mock_recorder, mock_app):
         (tmp_path / 'w1.db').write_bytes(b'sqlite-bytes')
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         mock_recorder.config = cfg
         async with make_client(cfg, mock_recorder, mock_app) as c:
             legacy = await c.get('/debug/download/w1.db')
@@ -180,7 +181,7 @@ class TestV1Auth:
     ]
 
     def _make_authed_client(self, tmp_path, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
         mock_recorder.config = cfg
         return make_client(cfg, mock_recorder, mock_app)
 
@@ -755,7 +756,7 @@ class TestApiV1Identity:
         assert resp.json()['cluster'] == 'main'
 
     async def test_requires_auth_when_token_set(self, tmp_path, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
         mock_app.config_summary = '[test-worker]'
         mock_recorder.config = cfg
         async with make_client(cfg, mock_recorder, mock_app) as c:
@@ -777,7 +778,7 @@ class TestDashboardLinks:
         assert 'links' not in resp.json()
 
     async def test_links_present_with_prometheus_url(self, tmp_path, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), prometheus_url='http://prom:9090')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), prometheus_url='http://prom:9090')
         mock_recorder.config = cfg
         async with make_client(cfg, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/dashboard')
@@ -799,7 +800,7 @@ class TestDashboardLinks:
         assert links['custom_links'] == []
 
     async def test_cluster_links_with_cluster_label(self, tmp_path, mock_recorder, mock_app):
-        cfg = DebugConfig(
+        cfg = make_ui_config(
             enabled=True,
             port=8080,
             db_dir=str(tmp_path),
@@ -818,7 +819,7 @@ class TestDashboardLinks:
 
     async def test_custom_links_alone_enable_key_and_pass_verbatim(self, tmp_path, mock_recorder, mock_app):
         custom = [{'name': 'Grafana', 'url': 'http://grafana/{worker_id}'}]
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), custom_links=custom)
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), custom_links=custom)
         mock_recorder.config = cfg
         async with make_client(cfg, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/dashboard')
@@ -830,7 +831,7 @@ class TestDashboardLinks:
         assert links['custom_links'] == custom  # URL templates NOT expanded
 
     async def test_legacy_alias_carries_links_too(self, tmp_path, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), prometheus_url='http://prom:9090')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), prometheus_url='http://prom:9090')
         mock_recorder.config = cfg
         async with make_client(cfg, mock_recorder, mock_app) as c:
             legacy = await c.get('/api/dashboard')

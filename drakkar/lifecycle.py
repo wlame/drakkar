@@ -43,7 +43,7 @@ import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import __version__
-from drakkar.app_security import warn_if_debug_unauthenticated
+from drakkar.app_security import warn_if_ui_unauthenticated
 from drakkar.cache import Cache, CacheEngine
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
@@ -119,7 +119,7 @@ class AppLifecycle:
         log = logger.bind(worker_id=app._worker_id)
 
         # Watchdog file for OOM / SIGKILL detection. Resolves the durable
-        # directory from ``config.debug.db_dir`` (the canonical location
+        # directory from ``config.ui.recorder.db_dir`` (the canonical location
         # for per-worker durable files in this codebase — already used by
         # the recorder and the cache engine). When ``db_dir`` is empty —
         # fully disk-less deployment where the operator deliberately
@@ -138,8 +138,8 @@ class AppLifecycle:
         # committed to running. Otherwise an exception during sink
         # connect / consumer.subscribe / on_startup would leave the empty
         # body and falsely flag the next startup as OOM-killed.
-        if app._config.debug.db_dir:
-            watchdog_dir = Path(app._config.debug.db_dir)
+        if app._config.ui.recorder.db_dir:
+            watchdog_dir = Path(app._config.ui.recorder.db_dir)
             self._watchdog = WatchdogFile(data_dir=watchdog_dir, worker_id=app._worker_id)
             # Detect a possible SIGKILL from the prior run BEFORE we
             # claim the slot for this run. ``check_previous`` returns
@@ -158,7 +158,7 @@ class AppLifecycle:
             await log.ainfo(
                 'watchdog_disabled_no_db_dir',
                 category='watchdog',
-                reason='debug.db_dir is empty — OOM/SIGKILL detection disabled for this run',
+                reason='ui.recorder.db_dir is empty — OOM/SIGKILL detection disabled for this run',
             )
 
         bind_contextvars(hook='on_startup')
@@ -207,16 +207,16 @@ class AppLifecycle:
                 metrics=[f'{m._name} ({m._type})' for m in user_metrics.values()],
             )
 
-        if app._config.debug.enabled:
+        if app._config.ui.enabled:
             # Auth is opt-in. Emit a startup warning naming how to set a
             # token when none is configured — the UI is read-only by design
             # and meant for private-network deployment, so this is
             # informational rather than fail-fast. See README §"Security &
             # trust model" for the rationale.
-            warn_if_debug_unauthenticated(app._config)
+            warn_if_ui_unauthenticated(app._config)
 
             app._recorder = EventRecorder(
-                app._config.debug,
+                app._config.ui,
                 worker_name=app._worker_id,
                 cluster_name=app._cluster_name,
             )
@@ -227,7 +227,7 @@ class AppLifecycle:
             from drakkar.debug.server import DebugServer
 
             app._debug_server = DebugServer(
-                config=app._config.debug,
+                config=app._config.ui,
                 recorder=app._recorder,
                 app=app,
             )
@@ -240,7 +240,7 @@ class AppLifecycle:
         if app._config.cache.enabled:
             app._cache_engine = CacheEngine(
                 config=app._config.cache,
-                debug_config=app._config.debug,
+                ui_config=app._config.ui,
                 worker_id=app._worker_id,
                 cluster_name=app._cluster_name,
                 recorder=app._recorder,

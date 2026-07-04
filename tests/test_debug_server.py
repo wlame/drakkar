@@ -13,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 from starlette.testclient import TestClient
 
-from drakkar.config import DebugConfig, DrakkarConfig
+from drakkar.config import DrakkarConfig
 from drakkar.debug.server import (
     create_debug_app,
     format_ts,
@@ -24,6 +24,7 @@ from drakkar.debug.server import (
     worker_group,
 )
 from drakkar.recorder import EventRecorder
+from tests.conftest import make_ui_config
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -120,7 +121,7 @@ def mock_app():
     app._config = DrakkarConfig()
     # UI hosting defaults ON and resolves against the real user cache /
     # GitHub at DebugServer.start(); tests must stay hermetic.
-    app._config.ui.enabled = False
+    app._config.ui.release.enabled = False
 
     pool = MagicMock()
     pool.active_count = 2
@@ -162,7 +163,7 @@ def mock_app():
 
 @pytest.fixture
 def debug_config():
-    return DebugConfig(enabled=True, port=8080, db_dir='/tmp')
+    return make_ui_config(enabled=True, port=8080, db_dir='/tmp')
 
 
 @pytest.fixture
@@ -286,7 +287,7 @@ class TestWorkerGroup:
 
 class TestBuildPrometheusLinks:
     async def test_empty_prometheus_url_returns_empty_dicts(self, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', prometheus_url='')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', prometheus_url='')
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
 
         # The dashboard endpoint invokes _build_prometheus_links via the
@@ -300,7 +301,7 @@ class TestBuildPrometheusLinks:
         assert 'prometheus' not in resp.text.lower() or 'graph?g0' not in resp.text
 
     async def test_prometheus_url_set_returns_links(self, mock_recorder, mock_app):
-        cfg = DebugConfig(
+        cfg = make_ui_config(
             enabled=True,
             port=8080,
             db_dir='/tmp',
@@ -318,7 +319,7 @@ class TestBuildPrometheusLinks:
 
     async def test_prometheus_links_card_keys(self, mock_recorder, mock_app):
         """Verify _build_prometheus_links returns expected card/worker/cluster keys."""
-        cfg = DebugConfig(
+        cfg = make_ui_config(
             enabled=True,
             port=8080,
             db_dir='/tmp',
@@ -344,7 +345,7 @@ class TestBuildPrometheusLinks:
 
     async def test_prometheus_links_no_cluster_label(self, mock_recorder, mock_app):
         """When prometheus_cluster_label is empty, cluster_links should be empty."""
-        cfg = DebugConfig(
+        cfg = make_ui_config(
             enabled=True,
             port=8080,
             db_dir='/tmp',
@@ -421,7 +422,7 @@ class TestApiSinks:
 
 class TestApiDebugDatabases:
     async def test_empty_dir_returns_empty_list(self, tmp_path, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -457,7 +458,7 @@ class TestApiDebugDatabases:
         db.commit()
         db.close()
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -554,7 +555,7 @@ class TestDebugDownload:
         db_path = tmp_path / 'test.db'
         db_path.write_bytes(b'fake-sqlite')
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -564,7 +565,7 @@ class TestDebugDownload:
         assert resp.content == b'fake-sqlite'
 
     async def test_download_directory_traversal_blocked(self, tmp_path, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -572,7 +573,7 @@ class TestDebugDownload:
         assert resp.status_code in (400, 404)
 
     async def test_download_nonexistent_file(self, tmp_path, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -782,7 +783,7 @@ async def _start_live_recorder(tmp_path):
     """
     from drakkar.recorder import EventRecorder
 
-    cfg = DebugConfig(enabled=True, db_dir=str(tmp_path), flush_interval_seconds=60)
+    cfg = make_ui_config(enabled=True, db_dir=str(tmp_path), flush_interval_seconds=60)
     rec = EventRecorder(cfg, worker_name='test-arrange-tasks')
     await rec.start()
     return rec
@@ -1454,7 +1455,7 @@ async def test_api_workers_unclustered_at_end(client, mock_recorder, mock_app):
 @pytest.fixture
 async def debug_client(tmp_path, mock_recorder, mock_app):
     """Client with a real db_dir for debug database endpoints."""
-    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
     fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -1502,7 +1503,7 @@ async def test_api_debug_databases_lists_files(tmp_path, mock_recorder, mock_app
     db.commit()
     db.close()
 
-    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
     fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -1530,7 +1531,7 @@ async def test_api_debug_databases_skips_symlinks(tmp_path, mock_recorder, mock_
     db.close()
     os.symlink('w1.db', str(tmp_path / 'w1-live.db'))
 
-    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
     fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -1568,7 +1569,7 @@ async def test_api_debug_merge(tmp_path, mock_recorder, mock_app):
         db.commit()
         db.close()
 
-    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
     fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -1606,7 +1607,7 @@ async def test_debug_download(tmp_path, mock_recorder, mock_app):
     db_path = tmp_path / 'test.db'
     db_path.write_bytes(b'fake-sqlite')
 
-    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
     fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -1738,7 +1739,7 @@ class TestDashboardCustomLinks:
     """Cover custom_links template expansion (lines 268-278)."""
 
     async def test_custom_links_rendered(self, mock_recorder, mock_app):
-        cfg = DebugConfig(
+        cfg = make_ui_config(
             enabled=True,
             port=8080,
             db_dir='/tmp',
@@ -1947,7 +1948,7 @@ class TestMergeEndpointDotPrefixed:
     """Cover merge endpoint rejecting dot-prefixed filenames (line 579)."""
 
     async def test_merge_rejects_dot_prefixed_filename(self, tmp_path, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -1965,7 +1966,7 @@ class TestMergeEndpointFileNotFound:
         # Create one valid file so only the second triggers the 404
         (tmp_path / 'exists.db').write_bytes(b'fake')
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2006,7 +2007,7 @@ class TestDownloadRealpathTraversal:
         link = db_dir / 'escape.db'
         link.symlink_to(secret)
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(db_dir))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(db_dir))
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2021,7 +2022,7 @@ class TestDownloadDotPrefixed:
         hidden = tmp_path / '.secret.db'
         hidden.write_bytes(b'secret')
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2049,7 +2050,7 @@ class TestApiEvents:
             )
         await db.commit()
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
 
         # Same connection for read and write paths in this unit-test
         # shim — the dedicated reader connection that the real recorder
@@ -2174,7 +2175,7 @@ class TestApiRecentTasks:
         )
         await db.commit()
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
 
         mock_recorder._db = db
         mock_recorder._reader_db = db
@@ -2373,7 +2374,7 @@ class TestDebugPage:
 
     async def test_debug_page_shows_config_summary(self, tmp_path, mock_recorder, mock_app):
         mock_app.config_summary = 'worker=test-worker topic=events group=drakkar'
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2388,7 +2389,7 @@ class TestDebugPage:
         Keeps the UI work honest without depending on a JS test stack — the
         endpoint behavior itself is covered by the probe endpoint tests above.
         """
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2636,7 +2637,7 @@ class TestApiRecentTasksEdgeCases:
         )
         await db.commit()
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
 
         mock_recorder._db = db
         mock_recorder._reader_db = db
@@ -2671,7 +2672,7 @@ class TestApiRecentTasksEdgeCases:
         )
         await db.commit()
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
 
         mock_recorder._db = db
         mock_recorder._reader_db = db
@@ -2694,7 +2695,7 @@ class TestPrometheusWorkerLabel:
     """Cover _build_prometheus_links with prometheus_worker_label set (line 142)."""
 
     async def test_prometheus_worker_label_used_in_links(self, mock_recorder, mock_app):
-        cfg = DebugConfig(
+        cfg = make_ui_config(
             enabled=True,
             port=8080,
             db_dir='/tmp',
@@ -2746,7 +2747,7 @@ class TestAuthToken:
     ]
 
     async def test_protected_routes_require_token(self, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2756,7 +2757,7 @@ class TestAuthToken:
                 assert resp.status_code == 401, f'{method} {path} should require auth'
 
     async def test_protected_routes_accept_bearer_header(self, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2766,7 +2767,7 @@ class TestAuthToken:
             assert resp.status_code == 200
 
     async def test_protected_routes_accept_query_param(self, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2775,7 +2776,7 @@ class TestAuthToken:
             assert resp.status_code == 200
 
     async def test_wrong_token_returns_401(self, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2784,7 +2785,7 @@ class TestAuthToken:
             assert resp.status_code == 401
 
     async def test_no_auth_when_token_empty(self, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='')
         mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2795,7 +2796,7 @@ class TestAuthToken:
     async def test_all_ui_routes_require_token_when_configured(self, mock_recorder, mock_app):
         """With auth_token set, every UI/API route is gated — only the
         Kubernetes probes stay public."""
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2809,7 +2810,7 @@ class TestAuthToken:
     async def test_probes_stay_public_with_token_configured(self, mock_recorder, mock_app):
         """/healthz and /readyz must remain unauthenticated — Kubernetes
         probes cannot send bearer tokens."""
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2820,7 +2821,7 @@ class TestAuthToken:
             assert resp.status_code in (200, 503)  # readiness depends on mock state
 
     async def test_ui_routes_open_when_no_token_configured(self, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='')
         mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2830,7 +2831,7 @@ class TestAuthToken:
                 assert resp.status_code == 200, f'{path} should be open when no token is configured'
 
     async def test_merge_requires_token(self, tmp_path, mock_recorder, mock_app):
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
         mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2855,7 +2856,7 @@ class TestAuthToken:
         ``/debug/download/{filename}``).
         """
         _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, _probe_mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2887,7 +2888,7 @@ class TestAuthToken:
         actually send and funnels through starlette's header decoder the
         same way a real request would.
         """
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2909,7 +2910,7 @@ class TestAuthToken:
         itself is non-ASCII, every auth check must fail-closed with 401,
         not explode into 500s that fill logs and trip 5xx alerting.
         """
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='non-ascïi')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='non-ascïi')
         mock_recorder.config = cfg
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2965,7 +2966,7 @@ class TestWebSocketAuth:
 
         monkeypatch.setattr(ds.secrets, 'compare_digest', capturing_compare)
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
 
         async def _call():
@@ -2997,7 +2998,7 @@ class TestWebSocketAuth:
         """WS connect without token while ``auth_token`` is set is rejected."""
         from starlette.websockets import WebSocketDisconnect
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         real_recorder = EventRecorder(cfg)
         real_recorder._running = True
         fastapi_app = create_debug_app(cfg, real_recorder, mock_app)
@@ -3013,7 +3014,7 @@ class TestWebSocketAuth:
         """WS with ``Origin`` outside ``allowed_ws_origins`` is closed 4403."""
         from starlette.websockets import WebSocketDisconnect
 
-        cfg = DebugConfig(
+        cfg = make_ui_config(
             enabled=True,
             port=8080,
             db_dir='/tmp',
@@ -3035,7 +3036,7 @@ class TestWebSocketAuth:
 
     def test_ws_correct_token_and_origin_accepted(self, mock_recorder, mock_app):
         """WS with valid token + allowlisted origin is accepted and streams events."""
-        cfg = DebugConfig(
+        cfg = make_ui_config(
             enabled=True,
             port=8080,
             db_dir='/tmp',
@@ -3060,7 +3061,7 @@ class TestWebSocketAuth:
 
     def test_ws_no_auth_configured_still_works(self, mock_recorder, mock_app):
         """Default dev workflow: ``auth_token=''`` → connection accepted without token."""
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='')
         real_recorder = EventRecorder(cfg)
         real_recorder._running = True
         fastapi_app = create_debug_app(cfg, real_recorder, mock_app)
@@ -3076,7 +3077,7 @@ class TestWebSocketAuth:
 
     def test_ws_same_origin_fallback_accepted(self, mock_recorder, mock_app):
         """With ``auth_token`` set + empty allowlist, Origin's host must equal Host."""
-        cfg = DebugConfig(
+        cfg = make_ui_config(
             enabled=True,
             port=8080,
             db_dir='/tmp',
@@ -3105,7 +3106,7 @@ class TestWebSocketAuth:
         """Empty allowlist + mismatched Origin Host → 4403."""
         from starlette.websockets import WebSocketDisconnect
 
-        cfg = DebugConfig(
+        cfg = make_ui_config(
             enabled=True,
             port=8080,
             db_dir='/tmp',
@@ -3136,7 +3137,7 @@ class TestWebSocketAuth:
         """
         from starlette.websockets import WebSocketDisconnect
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         real_recorder = EventRecorder(cfg)
         real_recorder._running = True
         fastapi_app = create_debug_app(cfg, real_recorder, mock_app)
@@ -3157,7 +3158,7 @@ class TestWebSocketAuth:
         comparing. Without the normalization, this handshake would be closed
         with 4403 even though the two headers point to the same origin.
         """
-        cfg = DebugConfig(
+        cfg = make_ui_config(
             enabled=True,
             port=8080,
             db_dir='/tmp',
@@ -3191,7 +3192,7 @@ class TestWebSocketAuth:
 # ``origin_allowed`` helper — direct unit tests
 # ---------------------------------------------------------------------------
 # The helper lives at module scope (not nested inside ``create_debug_app``),
-# so we can call it directly with synthetic ``DebugConfig`` values and
+# so we can call it directly with synthetic ``UIConfig`` values and
 # hand-crafted origin/host strings. This gives coverage of the absent-Origin
 # branch that TestClient can't exercise (it always sends Origin), and of the
 # default-port normalization that browsers apply inconsistently to Origin vs.
@@ -3203,74 +3204,74 @@ class TestOriginAllowedHelper:
 
     def test_absent_origin_accepted(self):
         """Non-browser clients omit Origin — accept (token was already checked)."""
-        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed(None, 'testserver', cfg) is True
 
     def test_absent_origin_accepted_even_with_allowlist(self):
         """Absent Origin is accepted regardless of allowlist — we err on the
         side of letting authenticated tools connect rather than rejecting a
         missing header a malicious browser couldn't omit anyway."""
-        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
         assert origin_allowed(None, 'testserver', cfg) is True
 
     def test_allowlist_match_accepted(self):
-        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
         assert origin_allowed('https://ops.internal', 'ignored', cfg) is True
 
     def test_allowlist_case_insensitive(self):
         """Uppercase Origin must match lowercase allowlist entry."""
-        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
         assert origin_allowed('https://OPS.INTERNAL', 'ignored', cfg) is True
 
     def test_allowlist_default_port_ignored(self):
         """Browsers strip :443 from https Origin but operators may write it
         explicitly in the allowlist. Normalization must treat the two forms
         as equal."""
-        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal:443'])
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=['https://ops.internal:443'])
         assert origin_allowed('https://ops.internal', 'ignored', cfg) is True
 
     def test_allowlist_miss_rejected(self):
-        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
         assert origin_allowed('https://evil.com', 'ignored', cfg) is False
 
     def test_same_origin_exact_match(self):
-        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('http://testserver', 'testserver', cfg) is True
 
     def test_same_origin_case_insensitive(self):
-        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('http://Example.com', 'example.com', cfg) is True
 
     def test_same_origin_default_port_on_origin_missing_on_host(self):
         """Browser may send ``Origin: http://example.com`` (no port) while
         the Host header is ``example.com:80``. Normalization collapses both
         to ``(example.com, None)`` so the compare succeeds."""
-        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('http://example.com', 'example.com:80', cfg) is True
 
     def test_same_origin_default_port_on_host_missing_on_origin(self):
         """Inverse of the above: ``Origin: http://example.com:80`` + Host
         ``example.com`` must also match."""
-        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('http://example.com:80', 'example.com', cfg) is True
 
     def test_same_origin_non_default_port_mismatch_rejected(self):
-        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('http://example.com:8080', 'example.com:9090', cfg) is False
 
     def test_same_origin_ipv6_host_bracketed(self):
         """RFC 7230 allows ``Host: [::1]:8080`` for IPv6 literals."""
-        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('http://[::1]:8080', '[::1]:8080', cfg) is True
 
     def test_same_origin_host_mismatch_rejected(self):
-        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
         assert origin_allowed('https://evil.com', 'testserver', cfg) is False
 
     def test_malformed_origin_rejected(self):
         """Garbage in the Origin header must not cause the helper to raise —
         return False so the endpoint closes the connection cleanly."""
-        cfg = DebugConfig(auth_token='secret', allowed_ws_origins=[])
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
         # No scheme → urlparse returns empty hostname → mismatch
         assert origin_allowed('not-a-url', 'testserver', cfg) is False
 
@@ -3299,7 +3300,7 @@ class TestApiPeriodicTasks:
         await db.executescript(SCHEMA_EVENTS)
         await db.commit()
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         mock_recorder._db = db
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
@@ -3342,7 +3343,7 @@ class TestApiPeriodicTasks:
         )
         await db.commit()
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         mock_recorder._db = db
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
@@ -3414,7 +3415,7 @@ class TestApiLabelTrace:
         )
         await db.commit()
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path))
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         mock_recorder._db = db
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
@@ -3464,7 +3465,7 @@ class TestApiLabelTrace:
         db = await aiosqlite.connect(':memory:')
         await db.executescript(SCHEMA_EVENTS)
 
-        cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp')
         mock_recorder._db = db
         mock_recorder._reader_db = db
         mock_recorder.reader_db = db
@@ -4492,7 +4493,7 @@ async def test_healthz_returns_200_without_auth(debug_config, mock_recorder, pro
     Kubernetes probes have no way to supply a bearer token, so ``/healthz``
     must accept anonymous requests regardless of ``config.auth_token``.
     """
-    cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-token')
+    cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-token')
     fastapi_app = create_debug_app(cfg, mock_recorder, probe_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -4577,7 +4578,7 @@ async def test_readyz_ignores_supplied_auth_token(probe_client, probe_app):
 
 async def test_readyz_with_auth_token_configured_still_accessible(debug_config, mock_recorder, probe_app):
     """When an auth_token is configured globally, /readyz remains unauthenticated."""
-    cfg = DebugConfig(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-token')
+    cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-token')
     probe_app.is_ready = True
     probe_app.sink_manager.all_connected.return_value = True
     probe_app.sink_manager.disconnected_sink_names.return_value = []

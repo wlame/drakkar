@@ -12,7 +12,7 @@ Covers:
 
 The tests follow the pytest-function-with-fixtures style used by the
 rest of the debug-UI suite (``test_debug_server.py``) and reuse the same
-``DebugConfig`` / ``DrakkarConfig`` shapes.
+``UIConfig`` / ``DrakkarConfig`` shapes.
 """
 
 from __future__ import annotations
@@ -23,9 +23,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from drakkar.config import DebugConfig, DrakkarConfig, WebAppConfig, WebClientConfig
+from drakkar.config import DrakkarConfig, WebAppConfig, WebClientConfig
 from drakkar.debug.server import create_debug_app
 from drakkar.recorder import EventRecorder
+from tests.conftest import make_ui_config
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -98,7 +99,7 @@ def _make_mock_app(*, webapp_enabled: bool = False) -> MagicMock:
 
 @pytest.fixture
 def debug_config():
-    return DebugConfig(enabled=True, port=8080, db_dir='/tmp')
+    return make_ui_config(enabled=True, port=8080, db_dir='/tmp')
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +271,7 @@ async def test_task_detail_renders_partition_for_kafka(debug_config):
 
 async def test_api_recent_tasks_includes_origin_fields(tmp_path, debug_config):
     """The /api/recent-tasks payload exposes origin/client_name/request_id."""
-    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), flush_interval_seconds=60)
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), flush_interval_seconds=60)
     rec = EventRecorder(cfg, worker_name='wlame-worker')
     await rec.start()
     try:
@@ -333,7 +334,7 @@ async def test_api_recent_tasks_includes_origin_fields(tmp_path, debug_config):
 
 async def test_history_filters_by_origin(tmp_path):
     """/history?origin=kafka|http|all filters recorder events accordingly."""
-    cfg = DebugConfig(enabled=True, port=8080, db_dir=str(tmp_path), flush_interval_seconds=60)
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), flush_interval_seconds=60)
     rec = EventRecorder(cfg, worker_name='wlame-worker')
     await rec.start()
     try:

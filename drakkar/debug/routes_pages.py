@@ -483,7 +483,7 @@ def create_pages_router(deps: DebugDeps, include_html: bool = True) -> tuple[API
                 'filter_event_type': evt_type,
                 'filter_origin': origin_filter,
                 'partitions': sorted(drakkar_app.processors.keys()),
-                'max_ui_rows': config.max_ui_rows,
+                'max_ui_rows': config.max_rows,
             },
         )
 
@@ -703,7 +703,7 @@ def create_pages_router(deps: DebugDeps, include_html: bool = True) -> tuple[API
             'cluster_name': drakkar_app._cluster_name or None,
             'ip_address': None,
             'debug_port': config.port,
-            'debug_url': config.debug_url or None,
+            'debug_url': config.public_url or None,
         }
         workers.append(current_entry)
 

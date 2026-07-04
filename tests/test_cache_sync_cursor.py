@@ -57,7 +57,8 @@ from drakkar.cache import (
     CacheEngine,
     CacheScope,
 )
-from drakkar.config import CacheConfig, CachePeerSyncConfig, DebugConfig
+from drakkar.config import CacheConfig, CachePeerSyncConfig, UIConfig
+from tests.conftest import make_ui_config
 
 # --- helpers ---------------------------------------------------------------
 #
@@ -66,8 +67,8 @@ from drakkar.config import CacheConfig, CachePeerSyncConfig, DebugConfig
 # duplicating keeps test failures localized to one task's file.
 
 
-def make_debug_config(tmp_path: Path, **overrides: Any) -> DebugConfig:
-    """DebugConfig pointing at tmp_path; events off, config on (needed for peer sync)."""
+def make_debug_config(tmp_path: Path, **overrides: Any) -> UIConfig:
+    """UIConfig pointing at tmp_path; events off, config on (needed for peer sync)."""
     defaults: dict[str, Any] = {
         'enabled': True,
         'db_dir': str(tmp_path),
@@ -76,7 +77,7 @@ def make_debug_config(tmp_path: Path, **overrides: Any) -> DebugConfig:
         'store_state': False,
     }
     defaults.update(overrides)
-    return DebugConfig(**defaults)
+    return make_ui_config(**defaults)
 
 
 def make_cache_config(**overrides: Any) -> CacheConfig:
@@ -97,7 +98,7 @@ async def _make_engine(
     cache = Cache(origin_worker_id=worker_id)
     engine = CacheEngine(
         config=make_cache_config(**(cache_overrides or {})),
-        debug_config=make_debug_config(tmp_path, **(debug_overrides or {})),
+        ui_config=make_debug_config(tmp_path, **(debug_overrides or {})),
         worker_id=worker_id,
         cluster_name=cluster_name,
         recorder=None,
@@ -979,7 +980,7 @@ async def test_sync_registered_as_system_periodic_task(tmp_path, monkeypatch):
     cache = Cache(origin_worker_id='me')
     engine = CacheEngine(
         config=make_cache_config(),
-        debug_config=make_debug_config(tmp_path),
+        ui_config=make_debug_config(tmp_path),
         worker_id='me',
         cluster_name='prod',
         recorder=None,
@@ -1024,7 +1025,7 @@ async def test_sync_not_registered_when_peer_sync_disabled(tmp_path, monkeypatch
     cache = Cache(origin_worker_id='me')
     engine = CacheEngine(
         config=make_cache_config(peer_sync=CachePeerSyncConfig(enabled=False)),
-        debug_config=make_debug_config(tmp_path),
+        ui_config=make_debug_config(tmp_path),
         worker_id='me',
         cluster_name='prod',
         recorder=None,

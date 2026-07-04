@@ -34,7 +34,7 @@ from typing import Literal
 
 import structlog
 
-from drakkar.config import UIConfig
+from drakkar.config import UIReleaseConfig
 from drakkar.uihost.fetch import (
     GITHUB_API_BASE,
     GITHUB_DOWNLOAD_BASE,
@@ -96,7 +96,7 @@ def default_cache_root() -> Path:
     return base / 'drakkar' / 'ui'
 
 
-def cache_root(config: UIConfig) -> Path:
+def cache_root(config: UIReleaseConfig) -> Path:
     """The configured cache root, defaulting to the per-user cache dir."""
     if config.cache_dir:
         return Path(config.cache_dir)
@@ -136,7 +136,7 @@ def _version_sort_key(name: str) -> tuple[int, int, int, int, str]:
 
 
 def resolve(
-    config: UIConfig,
+    config: UIReleaseConfig,
     *,
     api_base: str = GITHUB_API_BASE,
     download_base: str | None = None,
@@ -164,11 +164,9 @@ def resolve(
 
     # An update check resolves the latest tag first; on any failure we keep
     # the pinned version (the fetch below still tries, then we degrade).
-    if config.check_update and config.release_repo:
+    if config.check_update and config.repo:
         try:
-            version = fetch_latest_version(
-                api_base, config.release_repo, download_base=download_base, deadline=deadline
-            )
+            version = fetch_latest_version(api_base, config.repo, download_base=download_base, deadline=deadline)
             logger.info('ui_update_check', category='ui', latest=version)
         except Exception as exc:
             logger.warning('ui_update_check_failed', category='ui', error=str(exc))
@@ -184,10 +182,10 @@ def resolve(
             logger.info('ui_served_from_cache', category='ui', version=version, dir=str(bundle_dir))
             return ResolvedBundle(root=bundle_dir, source='cache')
         # 2. Fetch the version into the cache.
-        if config.release_repo:
+        if config.repo:
             try:
                 fetch_release(
-                    api_base, config.release_repo, version, bundle_dir, download_base=download_base, deadline=deadline
+                    api_base, config.repo, version, bundle_dir, download_base=download_base, deadline=deadline
                 )
                 logger.info('ui_fetched', category='ui', version=version, dir=str(bundle_dir))
                 return ResolvedBundle(root=bundle_dir, source='fetched')
