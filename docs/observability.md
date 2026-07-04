@@ -482,6 +482,20 @@ The pages above are backed by a JSON/WebSocket API under `/api/v1` -- the same c
 
 Both the spec and Swagger UI endpoints are auth-gated exactly like the rest of their route class when `ui.auth_token` is set.
 
+### Managing the UI bundle cache
+
+The `drakkar-ui` console script (installed with the package) manages the shared per-user bundle cache -- the same engine the worker runs at startup, and command-for-command identical to the Go backend's `drakkar-ui` CLI, so either backend's binary maintains the cache for both:
+
+```bash
+drakkar-ui where                    # report the cache location + what would be served
+drakkar-ui update                   # download the latest UI release into the cache
+drakkar-ui fetch --version=v0.2.0   # download a specific release
+```
+
+All subcommands accept `--repo=owner/name`, `--cache-dir=DIR`, and `--api-base=URL` (GitHub Enterprise); a `GITHUB_TOKEN` in the environment raises rate limits and unlocks private repos. Cached versions are never re-downloaded -- release tags are immutable. `just drakkar-ui <args>` wraps the same command for repo-local use.
+
+When no bundle is available at all (offline host, empty cache), the worker serves its built-in server-rendered pages instead -- those pages carry a **built-in UI** tag in the header so operators can tell at a glance they are on the fallback rather than a drakkar-ui release.
+
 ---
 
 ## Flight Recorder

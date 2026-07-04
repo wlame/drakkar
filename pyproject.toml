@@ -32,6 +32,11 @@ dependencies = [
     "redis>=5.2.0",
 ]
 
+[project.scripts]
+# Cache-management CLI for the decoupled drakkar-ui bundle; mirrors the Go
+# backend's cmd/drakkar-ui (same subcommands, flags, output, exit codes).
+drakkar-ui = "drakkar.uihost.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.0",

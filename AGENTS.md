@@ -100,8 +100,13 @@ Design points every agent should know:
   may have installed it) → cached pin → newest cached release (unpinned
   workers only — a pin guarantees contract compatibility) → keep the
   **built-in Jinja pages** (the embedded placeholder is never served while
-  Jinja pages exist; `UIServer._resolve_ui_root` returns None for
-  `source == 'embedded'`).
+  Jinja pages exist; `UIServer._resolve_ui_bundle` returns None for
+  `source == 'embedded'`). The built-in pages carry a "built-in UI" header
+  badge so operators can tell them from a served release.
+- **Cache management CLI**: the `drakkar-ui` console script
+  (`drakkar/uihost/cli.py`, `just drakkar-ui …`) mirrors the Go backend's
+  `cmd/drakkar-ui` byte-for-byte (`where` / `fetch --version=vX` /
+  `update`; exit codes 0/1/2) over the same shared cache.
 - **Shared-cache concurrency invariant**: a valid cached bundle is NEVER
   deleted or replaced (`fetch.py _install_bundle`). Staging dirs use random
   tokens (NOT pid — containerized workers are all pid 1) with a `.incoming`
@@ -137,6 +142,7 @@ just ci                 # exactly what CI runs: fmt-check lint typecheck cover
 just check              # ci + strict docs build
 just integration-up     # full docker harness (Kafka, sinks, 3 workers + load gen)
 just integration-logs worker-1
+just drakkar-ui where   # decoupled-UI cache management CLI (mirrors the Go one)
 ```
 
 Integration workers expose the UI on `:8081..:8083`; the compose file

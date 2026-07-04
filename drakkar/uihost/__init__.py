@@ -48,13 +48,18 @@ __all__ = [
     'GITHUB_API_BASE',
     'UI_RESOLVE_TIMEOUT_SECONDS',
     'FetchError',
+    'Fetched',
     'ResolvedBundle',
     'Source',
+    'Status',
     'cache_root',
     'default_cache_root',
     'dir_has_index',
+    'fetch_latest',
     'fetch_latest_version',
     'fetch_release',
+    'fetch_version',
+    'inspect_cache',
     'newest_cached_version',
     'resolve',
 ]
@@ -229,3 +234,109 @@ def resolve(
         return ResolvedBundle(root=EMBEDDED_BUNDLE_DIR, source='embedded', version=None)
     logger.warning('ui_embedded_fallback_missing', category='ui', dir=str(EMBEDDED_BUNDLE_DIR))
     return None
+
+
+# ---------------------------------------------------------------------------
+# Introspection + fetch API the drakkar-ui CLI is a thin projection of (the
+# headless-first command surface, mirroring the Go backend's uihost helpers).
+# ``resolve`` stays the single function the UI server calls at startup; these
+# expose the individual steps — inspect the cache, fetch a pinned version,
+# fetch the latest — so the CLI's where / fetch / update subcommands never
+# reimplement the engine.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Status:
+    """What bundle would be served for a config, from cache state only (no network).
+
+    Backs the ``drakkar-ui where`` output; field-for-field identical to the
+    Go backend's ``uihost.Status``.
+    """
+
+    cache_root: Path
+    pinned_version: str
+    pinned_dir: Path | None
+    pinned_cached: bool
+    fallback_version: str | None
+    fallback_dir: Path | None
+    source: Source
+
+
+@dataclass(frozen=True)
+class Fetched:
+    """The result of downloading a bundle into the cache."""
+
+    version: str
+    dir: Path
+
+
+def inspect_cache(config: UIReleaseConfig) -> Status:
+    """Report the offline cache state for ``config`` without any network access."""
+    root = cache_root(config)
+    if config.pinned_version:
+        pinned_dir = root / config.pinned_version
+        pinned_cached = dir_has_index(pinned_dir)
+        return Status(
+            cache_root=root,
+            pinned_version=config.pinned_version,
+            pinned_dir=pinned_dir,
+            pinned_cached=pinned_cached,
+            fallback_version=None,
+            fallback_dir=None,
+            source='cache' if pinned_cached else 'embedded',
+        )
+    # No pinned version: resolve (offline) would serve the newest cached
+    # bundle before degrading to the embedded fallback — report the same.
+    newest = newest_cached_version(root)
+    return Status(
+        cache_root=root,
+        pinned_version='',
+        pinned_dir=None,
+        pinned_cached=False,
+        fallback_version=newest,
+        fallback_dir=root / newest if newest else None,
+        source='cache' if newest else 'embedded',
+    )
+
+
+def fetch_version(
+    config: UIReleaseConfig,
+    version: str,
+    *,
+    api_base: str = GITHUB_API_BASE,
+    download_base: str | None = None,
+    deadline: float | None = None,
+) -> Fetched:
+    """Download ``config.repo``'s release tagged ``version`` into the cache.
+
+    An already-cached valid copy is left in place (release tags are
+    immutable, so re-downloading the same tag can never change content).
+    Error copy matches the Go CLI so the two backends' commands report
+    interchangeably.
+    """
+    if not config.repo:
+        raise FetchError('no release repo configured (set --repo)')
+    if not version:
+        raise FetchError('no version specified (set --version)')
+    if download_base is None:
+        download_base = api_base if api_base != GITHUB_API_BASE else GITHUB_DOWNLOAD_BASE
+    dest_dir = cache_root(config) / version
+    fetch_release(api_base, config.repo, version, dest_dir, download_base=download_base, deadline=deadline)
+    return Fetched(version=version, dir=dest_dir)
+
+
+def fetch_latest(
+    config: UIReleaseConfig,
+    *,
+    api_base: str = GITHUB_API_BASE,
+    download_base: str | None = None,
+    deadline: float | None = None,
+) -> Fetched:
+    """Resolve the latest release tag for ``config.repo`` and fetch it."""
+    if not config.repo:
+        raise FetchError('no release repo configured (set --repo)')
+    if download_base is None:
+        download_base = api_base if api_base != GITHUB_API_BASE else GITHUB_DOWNLOAD_BASE
+    latest = fetch_latest_version(api_base, config.repo, download_base=download_base, deadline=deadline)
+    return fetch_version(config, latest, api_base=api_base, download_base=download_base, deadline=deadline)

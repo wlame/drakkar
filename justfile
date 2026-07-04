@@ -120,6 +120,10 @@ release part='patch':
 # Product routines
 # ---------------------------------------------------------------------------
 
+# Manage the decoupled drakkar-ui bundle (e.g. just drakkar-ui where, just drakkar-ui update)
+drakkar-ui *args:
+    uv run drakkar-ui {{ args }}
+
 # Start the integration environment (Kafka, sinks, worker clusters, load generator)
 integration-up:
     docker compose -f integration/docker-compose.yml up -d --build
