@@ -125,7 +125,7 @@ def fetch_release(
     The direct ``{download_base}/{repo}/releases/download/{tag}/{asset}`` URL
     is tried first (plain github.com — no API rate limit); asset discovery
     through the REST API is the fallback. Extraction is atomic: the tarball
-    unpacks into a sibling per-process ``<dest_dir>.<pid>.incoming`` directory
+    unpacks into a sibling ``<dest_dir>.<token>.incoming`` staging directory
     which is swapped into place only after it passes structural validation
     (``index.html`` at the bundle root), so a partially written cache is
     never served.
