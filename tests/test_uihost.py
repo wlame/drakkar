@@ -24,7 +24,6 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
 from drakkar.config import DrakkarConfig, UIConfig, UIReleaseConfig
-from drakkar.debug.server import create_debug_app
 from drakkar.recorder import EventRecorder
 from drakkar.uihost import (
     EMBEDDED_BUNDLE_DIR,
@@ -33,6 +32,7 @@ from drakkar.uihost import (
     newest_cached_version,
     resolve,
 )
+from drakkar.uiserver.server import create_ui_app
 from tests.conftest import make_ui_config
 
 # ---------------------------------------------------------------------------
@@ -429,7 +429,7 @@ def test_ui_config_env_overrides(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# SPA serving (create_debug_app with ui_root)
+# SPA serving (create_ui_app with ui_root)
 # ---------------------------------------------------------------------------
 
 
@@ -480,7 +480,7 @@ def ui_bundle_dir(tmp_path) -> Path:
 
 
 def make_client(cfg, recorder, app, ui_root=None) -> AsyncClient:
-    fastapi_app = create_debug_app(cfg, recorder, app, ui_root=ui_root)
+    fastapi_app = create_ui_app(cfg, recorder, app, ui_root=ui_root)
     return AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test')
 
 
@@ -578,22 +578,22 @@ async def test_ui_disabled_app_unchanged(tmp_path, mock_recorder, mock_app):
         assert (await c.get('/no/such/route')).status_code == 404
 
 
-async def test_debug_server_resolve_ui_root_disabled_returns_none(tmp_path, mock_recorder, mock_app):
-    from drakkar.debug.server import DebugServer
+async def test_ui_server_resolve_ui_root_disabled_returns_none(tmp_path, mock_recorder, mock_app):
+    from drakkar.uiserver.server import UIServer
 
     mock_app._config.ui = UIConfig(release=ui_config(tmp_path, enabled=False))
     cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-    server = DebugServer(cfg, mock_recorder, mock_app)
+    server = UIServer(cfg, mock_recorder, mock_app)
     assert await server._resolve_ui_root() is None
 
 
-async def test_debug_server_resolve_ui_root_enabled_resolves(tmp_path, mock_recorder, mock_app):
-    from drakkar.debug.server import DebugServer
+async def test_ui_server_resolve_ui_root_enabled_resolves(tmp_path, mock_recorder, mock_app):
+    from drakkar.uiserver.server import UIServer
 
     mock_app._config.ui = UIConfig(release=ui_config(tmp_path, repo=''))
     seed_cache(tmp_path, 'v1.0.0')
     cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-    server = DebugServer(cfg, mock_recorder, mock_app)
+    server = UIServer(cfg, mock_recorder, mock_app)
     root = await server._resolve_ui_root()
     assert root == tmp_path / 'cache' / 'v1.0.0'
 

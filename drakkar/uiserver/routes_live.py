@@ -27,10 +27,10 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from drakkar.concurrency import dispatch_to_loop
-from drakkar.debug.server_helpers import hook_flags
+from drakkar.uiserver.server_helpers import hook_flags
 
 if TYPE_CHECKING:
-    from drakkar.debug.server import DebugDeps
+    from drakkar.uiserver.server import UIDeps
 
 
 # ``/api/live/arrange-tasks`` request body — kept at module scope so
@@ -50,7 +50,7 @@ class _SinkBreakdownRequest(BaseModel):
     offsets: list[int] = Field(default_factory=list, max_length=5000)
 
 
-def create_live_router(deps: DebugDeps, include_html: bool = True) -> APIRouter:
+def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
     """Build the router that owns the live view + completion-hook feeds.
 
     ``include_html=False`` (SPA mode) drops the ``/live`` Jinja page so the

@@ -369,7 +369,7 @@ class SinkManager:
     def all_connected(self) -> bool:
         """Return True when every registered sink is connected.
 
-        Consulted by the ``/readyz`` endpoint (``drakkar/debug_server.py``)
+        Consulted by the ``/readyz`` endpoint (``drakkar/uiserver_server.py``)
         to report whether the worker can serve traffic. An empty manager
         (no sinks registered) returns True — startup validation in
         ``DrakkarApp`` already rejects that config, so the invariant is

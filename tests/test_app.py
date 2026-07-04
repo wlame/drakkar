@@ -865,7 +865,7 @@ async def test_shutdown_skips_commit_on_drain_timeout(test_config):
 # --- Shutdown: recorder and debug server cleanup ---
 
 
-async def test_shutdown_stops_recorder_and_debug_server(test_config):
+async def test_shutdown_stops_recorder_and_ui_server(test_config):
     """Shutdown stops the recorder and debug server if they exist."""
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
     app._consumer = AsyncMock()
@@ -873,14 +873,14 @@ async def test_shutdown_stops_recorder_and_debug_server(test_config):
     app._dlq_sink = AsyncMock()
 
     mock_recorder = AsyncMock()
-    mock_debug_server = AsyncMock()
+    mock_ui_server = AsyncMock()
     app._recorder = mock_recorder
-    app._debug_server = mock_debug_server
+    app._ui_server = mock_ui_server
 
     await app._lifecycle._shutdown()
 
     mock_recorder.stop.assert_called_once()
-    mock_debug_server.stop.assert_called_once()
+    mock_ui_server.stop.assert_called_once()
 
 
 # --- Poll loop tests ---

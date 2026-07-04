@@ -19,8 +19,8 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
 from drakkar.config import DrakkarConfig
-from drakkar.debug.server import create_debug_app
 from drakkar.recorder import EventRecorder
+from drakkar.uiserver.server import create_ui_app
 from tests.conftest import make_ui_config
 
 _INT32_MAX = 2**31 - 1
@@ -57,7 +57,7 @@ def mock_app():
     app.processors = {}
     app._config = DrakkarConfig()
     # UI hosting defaults ON and resolves against the real user cache /
-    # GitHub at DebugServer.start(); tests must stay hermetic.
+    # GitHub at UIServer.start(); tests must stay hermetic.
     app._config.ui.release.enabled = False
     # ``cache_engine=None`` makes the cache routes 404 (disabled); a plain
     # MagicMock would be truthy and send them down the real-reader path.
@@ -85,7 +85,7 @@ def debug_config(tmp_path):
 
 
 def make_client(cfg, recorder, app) -> AsyncClient:
-    fastapi_app = create_debug_app(cfg, recorder, app)
+    fastapi_app = create_ui_app(cfg, recorder, app)
     return AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test')
 
 
@@ -573,7 +573,7 @@ class TestEventsMalformedPartitions:
 
 class TestProbeErrorTracebackOmitted:
     def test_probe_error_dump_has_no_traceback_key(self):
-        from drakkar.debug.runner_models import ProbeError
+        from drakkar.uiserver.runner_models import ProbeError
 
         err = ProbeError(
             stage='arrange',
@@ -589,7 +589,7 @@ class TestProbeErrorTracebackOmitted:
         assert dump['exception_class'] == 'ValueError'
 
     def test_debug_report_omits_traceback_everywhere(self):
-        from drakkar.debug.runner_models import (
+        from drakkar.uiserver.runner_models import (
             DebugReport,
             ProbeError,
             ProbeInput,
@@ -622,8 +622,8 @@ class TestProbeErrorTracebackOmitted:
 
 class TestPlannedSinkCustomPayloads:
     def test_flatten_includes_custom_payloads(self):
-        from drakkar.debug.runner import DebugSinkCollector
         from drakkar.models import CollectResult, CustomPayload
+        from drakkar.uiserver.runner import DebugSinkCollector
 
         class _Doc(BaseModel):
             answer: int = 42

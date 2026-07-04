@@ -35,20 +35,6 @@ import drakkar.recorder
 import drakkar.sinks.manager
 from drakkar.cache import Cache, CacheScope, NoOpCache
 from drakkar.config import DrakkarConfig, ExecutorConfig
-from drakkar.debug.runner import (
-    DebugCacheProxy,
-    DebugReport,
-    DebugRunner,
-    DebugSinkCollector,
-    PlannedSinkRecord,
-    ProbeCacheCall,
-    ProbeError,
-    ProbeInput,
-    ProbeStageResult,
-    ProbeTaskEntry,
-    _make_value_preview,
-    _probe_stage,
-)
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
@@ -68,6 +54,20 @@ from drakkar.models import (
     RedisPayload,
     SourceMessage,
     make_task_id,
+)
+from drakkar.uiserver.runner import (
+    DebugCacheProxy,
+    DebugReport,
+    DebugRunner,
+    DebugSinkCollector,
+    PlannedSinkRecord,
+    ProbeCacheCall,
+    ProbeError,
+    ProbeInput,
+    ProbeStageResult,
+    ProbeTaskEntry,
+    _make_value_preview,
+    _probe_stage,
 )
 
 # --- shared fixtures --------------------------------------------------------
@@ -3002,7 +3002,7 @@ async def test_runner_serializes_base_model_payload_to_json_dict():
 
 def test_serialize_payload_passes_through_plain_dict():
     """Plain dict (not BaseModel) passes through unchanged via _serialize_payload."""
-    from drakkar.debug.runner import _serialize_payload
+    from drakkar.uiserver.runner import _serialize_payload
 
     payload = {'x': 1, 'y': [1, 2, 3]}
     assert _serialize_payload(payload) is payload
@@ -3010,7 +3010,7 @@ def test_serialize_payload_passes_through_plain_dict():
 
 def test_build_source_message_defaults_timestamp_to_current_time_ms():
     """Default timestamp = wall-clock ms (close to time.time() * 1000)."""
-    from drakkar.debug.runner import _build_source_message
+    from drakkar.uiserver.runner import _build_source_message
 
     before_ms = int(time.time() * 1000)
     msg = _build_source_message(ProbeInput(value='x'))
@@ -3020,7 +3020,7 @@ def test_build_source_message_defaults_timestamp_to_current_time_ms():
 
 def test_build_source_message_key_none_produces_none_bytes():
     """key=None → message.key is None (not b'')."""
-    from drakkar.debug.runner import _build_source_message
+    from drakkar.uiserver.runner import _build_source_message
 
     msg = _build_source_message(ProbeInput(value='hello'))
     assert msg.key is None
@@ -3028,7 +3028,7 @@ def test_build_source_message_key_none_produces_none_bytes():
 
 def test_build_source_message_encodes_value_and_key_as_utf8():
     """value and key are UTF-8 encoded to bytes."""
-    from drakkar.debug.runner import _build_source_message
+    from drakkar.uiserver.runner import _build_source_message
 
     msg = _build_source_message(ProbeInput(value='héllo', key='kéy'))
     assert msg.value == 'héllo'.encode()

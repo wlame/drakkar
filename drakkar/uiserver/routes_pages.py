@@ -33,15 +33,15 @@ from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisc
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from drakkar.concurrency import dispatch_to_loop
-from drakkar.debug.server_helpers import origin_allowed
+from drakkar.uiserver.server_helpers import origin_allowed
 
 if TYPE_CHECKING:
-    from drakkar.debug.server import DebugDeps
+    from drakkar.uiserver.server import UIDeps
 
 WS_DRAIN_SLEEP = 0.02  # seconds to sleep when WebSocket event queue is empty
 
 
-def create_pages_router(deps: DebugDeps, include_html: bool = True) -> tuple[APIRouter, APIRouter]:
+def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRouter, APIRouter]:
     """Build the routers that own HTML pages, top-level APIs, and the WS endpoint.
 
     Returns two leaf routers — ``(public, gated)`` — for the app to include

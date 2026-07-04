@@ -124,4 +124,4 @@ exclude = ["tests", "integration"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN"]
 "integration/*" = ["ANN"]
-"drakkar/debug_server.py" = ["ANN201", "ANN202"]  # FastAPI route return types inferred
+"drakkar/uiserver/server.py" = ["ANN201", "ANN202"]  # FastAPI route return types inferred

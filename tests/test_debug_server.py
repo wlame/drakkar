@@ -14,8 +14,9 @@ from pydantic import BaseModel
 from starlette.testclient import TestClient
 
 from drakkar.config import DrakkarConfig
-from drakkar.debug.server import (
-    create_debug_app,
+from drakkar.recorder import EventRecorder
+from drakkar.uiserver.server import (
+    create_ui_app,
     format_ts,
     format_ts_full,
     format_ts_ms,
@@ -23,7 +24,6 @@ from drakkar.debug.server import (
     origin_allowed,
     worker_group,
 )
-from drakkar.recorder import EventRecorder
 from tests.conftest import make_ui_config
 
 # ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ def mock_app():
     app.processors = {}
     app._config = DrakkarConfig()
     # UI hosting defaults ON and resolves against the real user cache /
-    # GitHub at DebugServer.start(); tests must stay hermetic.
+    # GitHub at UIServer.start(); tests must stay hermetic.
     app._config.ui.release.enabled = False
 
     pool = MagicMock()
@@ -168,7 +168,7 @@ def debug_config():
 
 @pytest.fixture
 async def client(debug_config, mock_recorder, mock_app):
-    fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         yield c
@@ -281,14 +281,14 @@ class TestWorkerGroup:
 
 
 # ---------------------------------------------------------------------------
-# 2. _build_prometheus_links (accessed via create_debug_app internals)
+# 2. _build_prometheus_links (accessed via create_ui_app internals)
 # ---------------------------------------------------------------------------
 
 
 class TestBuildPrometheusLinks:
     async def test_empty_prometheus_url_returns_empty_dicts(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', prometheus_url='')
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
 
         # The dashboard endpoint invokes _build_prometheus_links via the
         # template context. We hit /api/dashboard which does NOT include prom
@@ -309,7 +309,7 @@ class TestBuildPrometheusLinks:
             prometheus_rate_interval='5m',
             prometheus_cluster_label='cluster="test"',
         )
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/')
@@ -329,7 +329,7 @@ class TestBuildPrometheusLinks:
         )
         # Access _build_prometheus_links by extracting it from the closure.
         # We do this by creating the app and finding the inner function.
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
 
         # The function is used inside the dashboard route. We can verify its
         # output by checking the rendered dashboard contains links for each card.
@@ -353,7 +353,7 @@ class TestBuildPrometheusLinks:
             prometheus_rate_interval='5m',
             prometheus_cluster_label='',
         )
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/')
@@ -423,7 +423,7 @@ class TestApiSinks:
 class TestApiDebugDatabases:
     async def test_empty_dir_returns_empty_list(self, tmp_path, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/databases')
@@ -459,7 +459,7 @@ class TestApiDebugDatabases:
         db.close()
 
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/databases')
@@ -506,7 +506,7 @@ class TestApiDebugProcessors:
 
         mock_app.processors = {0: proc}
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/processors')
@@ -556,7 +556,7 @@ class TestDebugDownload:
         db_path.write_bytes(b'fake-sqlite')
 
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/debug/download/test.db')
@@ -566,7 +566,7 @@ class TestDebugDownload:
 
     async def test_download_directory_traversal_blocked(self, tmp_path, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/debug/download/../etc/passwd')
@@ -574,7 +574,7 @@ class TestDebugDownload:
 
     async def test_download_nonexistent_file(self, tmp_path, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/debug/download/nonexistent.db')
@@ -661,7 +661,7 @@ async def test_partitions_page_with_live_processors(debug_config, mock_recorder,
     proc.offset_tracker.pending_count = 3
     mock_app.processors = {0: proc}
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/partitions')
@@ -677,7 +677,7 @@ async def test_live_page_has_tabs_and_ws(debug_config, mock_recorder, mock_app):
     ``None`` which is not identical to the base class's method), so the
     default context renders all three — this test verifies the full set.
     """
-    fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/live')
@@ -704,7 +704,7 @@ async def test_websocket_receives_events(debug_config, mock_recorder, mock_app):
     real_recorder = EventRecorder(debug_config)
     real_recorder._running = True
 
-    fastapi_app = create_debug_app(debug_config, real_recorder, mock_app)
+    fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
 
     with TestClient(fastapi_app) as tc, tc.websocket_connect('/ws') as ws:
         real_recorder._record(
@@ -729,7 +729,7 @@ async def test_websocket_multiple_events(debug_config, mock_recorder, mock_app):
     real_recorder = EventRecorder(debug_config)
     real_recorder._running = True
 
-    fastapi_app = create_debug_app(debug_config, real_recorder, mock_app)
+    fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
 
     with TestClient(fastapi_app) as tc, tc.websocket_connect('/ws') as ws:
         for i in range(3):
@@ -754,7 +754,7 @@ async def test_websocket_cleanup_on_disconnect(debug_config, mock_recorder, mock
     real_recorder = EventRecorder(debug_config)
     real_recorder._running = True
 
-    fastapi_app = create_debug_app(debug_config, real_recorder, mock_app)
+    fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
 
     assert len(real_recorder._ws_subscribers) == 0
 
@@ -791,7 +791,7 @@ async def _start_live_recorder(tmp_path):
 
 async def test_arrange_tasks_empty_ids_returns_empty_map(mock_recorder, mock_app, debug_config):
     """POST with no task_ids → empty map, no recorder flush/query."""
-    fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post('/api/live/arrange-tasks', json={'task_ids': []})
@@ -812,7 +812,7 @@ async def test_arrange_tasks_returns_running_state(tmp_path, mock_app, debug_con
         )
         rec.record_task_started(task, partition=7)
 
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post('/api/live/arrange-tasks', json={'task_ids': ['rg-running-1']})
@@ -845,7 +845,7 @@ async def test_arrange_tasks_returns_completed_state(tmp_path, mock_app, debug_c
         )
         rec.record_task_completed(result, partition=3)
 
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post('/api/live/arrange-tasks', json={'task_ids': ['rg-done-1']})
@@ -877,7 +877,7 @@ async def test_arrange_tasks_returns_failed_state(tmp_path, mock_app, debug_conf
         )
         rec.record_task_failed(task, err, partition=9)
 
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post('/api/live/arrange-tasks', json={'task_ids': ['rg-fail-1']})
@@ -894,7 +894,7 @@ async def test_arrange_tasks_unknown_id_absent_from_response(tmp_path, mock_app,
     """IDs not in the DB aren't fabricated — just absent from the map."""
     rec = await _start_live_recorder(tmp_path)
     try:
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post(
@@ -930,7 +930,7 @@ async def test_arrange_tasks_batch_lookup_mixed_states(tmp_path, mock_app, debug
             partition=0,
         )
 
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post(
@@ -972,7 +972,7 @@ async def test_task_results_returns_latest_n(tmp_path, mock_app, debug_config):
         )
         rec.record_task_complete(task_id='rg-tr-1', partition=2, duration=0.012, output_message_count=3)
 
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/live/task-results?limit=10')
@@ -1010,7 +1010,7 @@ async def test_task_results_missing_exec_pair_surfaces_null_status(
             duration=0.008,
             output_message_count=1,
         )
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/live/task-results')
@@ -1037,7 +1037,7 @@ async def test_message_results_returns_latest_n(tmp_path, mock_app, debug_config
             replaced=0,
             output_message_count=7,
         )
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/live/message-results')
@@ -1088,7 +1088,7 @@ async def test_message_results_end_to_end_duration_paired_from_consumed(
             replaced=0,
             output_message_count=1,
         )
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/live/message-results')
@@ -1136,7 +1136,7 @@ async def test_message_results_end_to_end_picks_most_recent_prior_consumed(
             replaced=0,
             output_message_count=1,
         )
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/live/message-results')
@@ -1162,7 +1162,7 @@ async def test_window_results_returns_latest_n(tmp_path, mock_app, debug_config)
             task_count=20,
             output_message_count=35,
         )
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/live/window-results')
@@ -1182,7 +1182,7 @@ async def test_completion_endpoints_empty_when_no_events(tmp_path, mock_app, deb
     """All three endpoints return [] on an empty DB, no 500s."""
     rec = await _start_live_recorder(tmp_path)
     try:
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             for url in (
@@ -1212,7 +1212,7 @@ async def test_completion_endpoints_ordered_desc_and_limited(tmp_path, mock_app,
                 replaced=0,
                 output_message_count=1,
             )
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/live/message-results?limit=3')
@@ -1264,7 +1264,7 @@ async def test_sink_breakdown_groups_by_output_topic(tmp_path, mock_app, debug_c
             source_offset=10,
         )
 
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post(
@@ -1285,7 +1285,7 @@ async def test_sink_breakdown_empty_offsets_returns_empty_map(
     """Empty offsets list short-circuits, no SQL, returns {}."""
     rec = await _start_live_recorder(tmp_path)
     try:
-        fastapi_app = create_debug_app(debug_config, rec, mock_app)
+        fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post('/api/live/sink-breakdown', json={'partition': 0, 'offsets': []})
@@ -1300,8 +1300,8 @@ async def test_sink_breakdown_empty_offsets_returns_empty_map(
 
 def testhook_flags_no_overrides_returns_all_false():
     """Plain BaseDrakkarHandler subclass with no hook overrides → all False."""
-    from drakkar.debug.server import hook_flags
     from drakkar.handler import BaseDrakkarHandler
+    from drakkar.uiserver.server import hook_flags
 
     class H(BaseDrakkarHandler):
         pass
@@ -1316,9 +1316,9 @@ def testhook_flags_no_overrides_returns_all_false():
 
 def testhook_flags_detects_overrides():
     """Each overridden hook flips its flag; non-overridden stay False."""
-    from drakkar.debug.server import hook_flags
     from drakkar.handler import BaseDrakkarHandler
     from drakkar.models import CollectResult, ExecutorResult, MessageGroup
+    from drakkar.uiserver.server import hook_flags
 
     class H(BaseDrakkarHandler):
         async def on_task_complete(self, result: ExecutorResult) -> CollectResult | None:
@@ -1456,7 +1456,7 @@ async def test_api_workers_unclustered_at_end(client, mock_recorder, mock_app):
 async def debug_client(tmp_path, mock_recorder, mock_app):
     """Client with a real db_dir for debug database endpoints."""
     cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-    fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+    fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         yield c
@@ -1504,7 +1504,7 @@ async def test_api_debug_databases_lists_files(tmp_path, mock_recorder, mock_app
     db.close()
 
     cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-    fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+    fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/api/debug/databases')
@@ -1532,7 +1532,7 @@ async def test_api_debug_databases_skips_symlinks(tmp_path, mock_recorder, mock_
     os.symlink('w1.db', str(tmp_path / 'w1-live.db'))
 
     cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-    fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+    fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/api/debug/databases')
@@ -1570,7 +1570,7 @@ async def test_api_debug_merge(tmp_path, mock_recorder, mock_app):
         db.close()
 
     cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-    fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+    fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post(
@@ -1608,7 +1608,7 @@ async def test_debug_download(tmp_path, mock_recorder, mock_app):
     db_path.write_bytes(b'fake-sqlite')
 
     cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-    fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+    fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/debug/download/test.db')
@@ -1638,7 +1638,7 @@ class TestGetSinkUiLinksEmpty:
 
     async def test_no_sink_manager_returns_no_links(self, debug_config, mock_recorder, mock_app):
         mock_app.sink_manager = None
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/')
@@ -1655,7 +1655,7 @@ class TestGetSinkUiLinksWithUrls:
             {'sink_type': 'kafka', 'name': 'results2', 'ui_url': 'http://kafka-ui:8080'},
             {'sink_type': 'postgres', 'name': 'main-db'},
         ]
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/')
@@ -1678,7 +1678,7 @@ class TestGetLagWithConsumer:
         proc.offset_tracker.pending_count = 3
         mock_app.processors = {0: proc}
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/partitions')
@@ -1695,7 +1695,7 @@ class TestGetLagWithConsumer:
         proc.offset_tracker.pending_count = 0
         mock_app.processors = {0: proc}
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/partitions')
@@ -1713,7 +1713,7 @@ class TestDashboardTotalLag:
         proc = MagicMock()
         mock_app.processors = {0: proc}
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/')
@@ -1728,7 +1728,7 @@ class TestDashboardTotalLag:
         proc = MagicMock()
         mock_app.processors = {0: proc}
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/')
@@ -1751,7 +1751,7 @@ class TestDashboardCustomLinks:
         mock_app._worker_id = 'worker-7'
         mock_app._cluster_name = 'prod'
 
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/')
@@ -1781,7 +1781,7 @@ class TestLivePageWithTasks:
 
         mock_app.processors = {0: proc}
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/live')
@@ -1802,7 +1802,7 @@ class TestLivePageWithTasks:
 
         mock_app.processors = {0: proc}
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/live')
@@ -1852,7 +1852,7 @@ class TestTaskDetailPage:
             },
         ]
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/task/task-abc')
@@ -1863,7 +1863,7 @@ class TestTaskDetailPage:
     async def test_task_detail_retry_key_strips_suffix(self, debug_config, mock_recorder, mock_app):
         mock_recorder.get_task_events.return_value = []
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/task/task-abc:r1234567.89')
@@ -1892,7 +1892,7 @@ class TestTaskDetailPage:
             },
         ]
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/task/task-xyz')
@@ -1937,7 +1937,7 @@ class TestTaskDetailPage:
             },
         ]
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/task/task-dur')
@@ -1949,7 +1949,7 @@ class TestMergeEndpointDotPrefixed:
 
     async def test_merge_rejects_dot_prefixed_filename(self, tmp_path, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post(
@@ -1967,7 +1967,7 @@ class TestMergeEndpointFileNotFound:
         (tmp_path / 'exists.db').write_bytes(b'fake')
 
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post(
@@ -1982,7 +1982,7 @@ class TestApiDebugMetrics:
     """Cover /api/debug/metrics endpoint (lines 611-613)."""
 
     async def test_returns_metrics_list(self, debug_config, mock_recorder, mock_app):
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/metrics')
@@ -2008,7 +2008,7 @@ class TestDownloadRealpathTraversal:
         link.symlink_to(secret)
 
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(db_dir))
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/debug/download/escape.db')
@@ -2023,7 +2023,7 @@ class TestDownloadDotPrefixed:
         hidden.write_bytes(b'secret')
 
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/debug/download/.secret.db')
@@ -2061,7 +2061,7 @@ class TestApiEvents:
         mock_recorder.flush = AsyncMock()
         mock_recorder._buffer = []
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         client = AsyncClient(transport=transport, base_url='http://test')
         return client, db
@@ -2108,7 +2108,7 @@ class TestApiEvents:
         mock_recorder.reader_db = None
         mock_recorder.flush = AsyncMock()
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/events')
@@ -2188,7 +2188,7 @@ class TestApiRecentTasks:
         mock_recorder.flush = AsyncMock()
         mock_recorder.config = cfg
         mock_recorder._buffer = []
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         client = AsyncClient(transport=transport, base_url='http://test')
         return client, db
@@ -2252,7 +2252,7 @@ class TestApiRecentTasks:
         mock_recorder.reader_db = None
         mock_recorder.flush = AsyncMock()
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/recent-tasks')
@@ -2280,7 +2280,7 @@ class TestApiDashboardWithConsumerLag:
         proc = MagicMock()
         mock_app.processors = {0: proc}
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/dashboard')
@@ -2313,7 +2313,7 @@ class TestProcessorDiagnosticsArrangeAndStuck:
 
         mock_app.processors = {0: proc}
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/processors')
@@ -2356,7 +2356,7 @@ class TestProcessorDiagnosticsArrangeAndStuck:
 
         mock_app.processors = {0: proc}
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/processors')
@@ -2375,7 +2375,7 @@ class TestDebugPage:
     async def test_debug_page_shows_config_summary(self, tmp_path, mock_recorder, mock_app):
         mock_app.config_summary = 'worker=test-worker topic=events group=drakkar'
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/debug')
@@ -2390,7 +2390,7 @@ class TestDebugPage:
         endpoint behavior itself is covered by the probe endpoint tests above.
         """
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/debug')
@@ -2452,23 +2452,23 @@ class TestDebugPage:
         assert 'probe-form-chip' in html
 
 
-class TestDebugServerClass:
-    """Cover DebugServer start/stop (lines 945-977)."""
+class TestUIServerClass:
+    """Cover UIServer start/stop (lines 945-977)."""
 
     async def test_start_creates_server_and_thread(self, debug_config, mock_recorder, mock_app):
         from unittest.mock import patch
 
-        from drakkar.debug.server import DebugServer
+        from drakkar.uiserver.server import UIServer
 
-        server = DebugServer(debug_config, mock_recorder, mock_app)
+        server = UIServer(debug_config, mock_recorder, mock_app)
         assert server._server is None
         assert server._thread is None
 
         with (
-            patch('drakkar.debug.server.uvicorn.Server') as mock_uvi_server,
-            patch('drakkar.debug.server.uvicorn.Config') as mock_uvi_config,
-            patch('drakkar.debug.server.threading.Thread') as mock_thread,
-            patch('drakkar.debug.server.logger') as mock_logger,
+            patch('drakkar.uiserver.server.uvicorn.Server') as mock_uvi_server,
+            patch('drakkar.uiserver.server.uvicorn.Config') as mock_uvi_config,
+            patch('drakkar.uiserver.server.threading.Thread') as mock_thread,
+            patch('drakkar.uiserver.server.logger') as mock_logger,
         ):
             mock_uvi_server.return_value = MagicMock()
             mock_uvi_config.return_value = MagicMock()
@@ -2487,13 +2487,13 @@ class TestDebugServerClass:
     async def test_stop_signals_exit_and_joins(self, debug_config, mock_recorder, mock_app):
         from unittest.mock import patch
 
-        from drakkar.debug.server import DebugServer
+        from drakkar.uiserver.server import UIServer
 
-        server = DebugServer(debug_config, mock_recorder, mock_app)
+        server = UIServer(debug_config, mock_recorder, mock_app)
         server._server = MagicMock()
         server._thread = MagicMock()
 
-        with patch('drakkar.debug.server.logger') as mock_logger:
+        with patch('drakkar.uiserver.server.logger') as mock_logger:
             mock_logger.ainfo = AsyncMock()
             await server.stop()
 
@@ -2503,11 +2503,11 @@ class TestDebugServerClass:
     async def test_stop_when_not_started(self, debug_config, mock_recorder, mock_app):
         from unittest.mock import patch
 
-        from drakkar.debug.server import DebugServer
+        from drakkar.uiserver.server import UIServer
 
-        server = DebugServer(debug_config, mock_recorder, mock_app)
+        server = UIServer(debug_config, mock_recorder, mock_app)
 
-        with patch('drakkar.debug.server.logger') as mock_logger:
+        with patch('drakkar.uiserver.server.logger') as mock_logger:
             mock_logger.ainfo = AsyncMock()
             await server.stop()  # should not raise
 
@@ -2559,7 +2559,7 @@ class TestTaskDetailEdgeCases:
             },
         ]
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/task/task-bad-meta')
@@ -2604,7 +2604,7 @@ class TestTaskDetailEdgeCases:
             },
         ]
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/task/task-bad-args')
@@ -2645,7 +2645,7 @@ class TestApiRecentTasksEdgeCases:
         mock_recorder.flush = AsyncMock()
         mock_recorder._buffer = []
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/recent-tasks?minutes=5')
@@ -2680,7 +2680,7 @@ class TestApiRecentTasksEdgeCases:
         mock_recorder.flush = AsyncMock()
         mock_recorder._buffer = []
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/recent-tasks?minutes=5')
@@ -2704,7 +2704,7 @@ class TestPrometheusWorkerLabel:
         )
         mock_app._worker_id = 'worker-42'
 
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/')
@@ -2724,7 +2724,7 @@ class TestApiDashboardLagException:
         proc = MagicMock()
         mock_app.processors = {0: proc}
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/dashboard')
@@ -2749,7 +2749,7 @@ class TestAuthToken:
     async def test_protected_routes_require_token(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             for method, path in self.PROTECTED_ROUTES:
@@ -2759,7 +2759,7 @@ class TestAuthToken:
     async def test_protected_routes_accept_bearer_header(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         headers = {'Authorization': 'Bearer secret-123'}
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -2769,7 +2769,7 @@ class TestAuthToken:
     async def test_protected_routes_accept_query_param(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/databases?token=secret-123')
@@ -2778,7 +2778,7 @@ class TestAuthToken:
     async def test_wrong_token_returns_401(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/databases', headers={'Authorization': 'Bearer wrong'})
@@ -2787,7 +2787,7 @@ class TestAuthToken:
     async def test_no_auth_when_token_empty(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='')
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/databases')
@@ -2798,7 +2798,7 @@ class TestAuthToken:
         Kubernetes probes stay public."""
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             for path in ['/', '/partitions', '/sinks', '/live', '/history', '/debug']:
@@ -2812,7 +2812,7 @@ class TestAuthToken:
         probes cannot send bearer tokens."""
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/healthz')
@@ -2823,7 +2823,7 @@ class TestAuthToken:
     async def test_ui_routes_open_when_no_token_configured(self, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='')
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             for path in ['/', '/partitions', '/sinks', '/live', '/history', '/debug']:
@@ -2833,7 +2833,7 @@ class TestAuthToken:
     async def test_merge_requires_token(self, tmp_path, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post('/api/debug/merge', json={'filenames': []})
@@ -2858,7 +2858,7 @@ class TestAuthToken:
         _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, _probe_mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, _probe_mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             # No auth header → 401.
@@ -2890,7 +2890,7 @@ class TestAuthToken:
         """
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             # UTF-8 encoded bytes for the non-ASCII o-circumflex (U+00F4).
@@ -2912,7 +2912,7 @@ class TestAuthToken:
         """
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='non-ascïi')
         mock_recorder.config = cfg
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             # Plain ASCII provided token → compare_digest raises TypeError
@@ -2952,7 +2952,7 @@ class TestWebSocketAuth:
         """
         import secrets as secrets_mod
 
-        from drakkar.debug import server as ds
+        from drakkar.uiserver import server as ds
 
         captured_calls: list[tuple[str, str]] = []
         real_compare = secrets_mod.compare_digest
@@ -2967,7 +2967,7 @@ class TestWebSocketAuth:
         monkeypatch.setattr(ds.secrets, 'compare_digest', capturing_compare)
 
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
 
         async def _call():
             transport = ASGITransport(app=fastapi_app)
@@ -3001,7 +3001,7 @@ class TestWebSocketAuth:
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         real_recorder = EventRecorder(cfg)
         real_recorder._running = True
-        fastapi_app = create_debug_app(cfg, real_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
         with TestClient(fastapi_app) as tc:  # noqa: SIM117
             with pytest.raises(WebSocketDisconnect) as exc_info:
@@ -3023,7 +3023,7 @@ class TestWebSocketAuth:
         )
         real_recorder = EventRecorder(cfg)
         real_recorder._running = True
-        fastapi_app = create_debug_app(cfg, real_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
         with TestClient(fastapi_app) as tc:  # noqa: SIM117
             with pytest.raises(WebSocketDisconnect) as exc_info:
@@ -3045,7 +3045,7 @@ class TestWebSocketAuth:
         )
         real_recorder = EventRecorder(cfg)
         real_recorder._running = True
-        fastapi_app = create_debug_app(cfg, real_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
         with (
             TestClient(fastapi_app) as tc,
@@ -3064,7 +3064,7 @@ class TestWebSocketAuth:
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='')
         real_recorder = EventRecorder(cfg)
         real_recorder._running = True
-        fastapi_app = create_debug_app(cfg, real_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
         with (
             TestClient(fastapi_app) as tc,
@@ -3086,7 +3086,7 @@ class TestWebSocketAuth:
         )
         real_recorder = EventRecorder(cfg)
         real_recorder._running = True
-        fastapi_app = create_debug_app(cfg, real_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
         # TestClient uses ``testserver`` as the Host by default. Match it in
         # the Origin header to satisfy the same-origin fallback.
@@ -3115,7 +3115,7 @@ class TestWebSocketAuth:
         )
         real_recorder = EventRecorder(cfg)
         real_recorder._running = True
-        fastapi_app = create_debug_app(cfg, real_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
         with TestClient(fastapi_app) as tc:  # noqa: SIM117
             with pytest.raises(WebSocketDisconnect) as exc_info:
@@ -3140,7 +3140,7 @@ class TestWebSocketAuth:
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         real_recorder = EventRecorder(cfg)
         real_recorder._running = True
-        fastapi_app = create_debug_app(cfg, real_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
         # Non-ASCII ``?token=`` query param — must funnel through the same
         # handshake path that closes with 4401 on bad creds.
@@ -3167,7 +3167,7 @@ class TestWebSocketAuth:
         )
         real_recorder = EventRecorder(cfg)
         real_recorder._running = True
-        fastapi_app = create_debug_app(cfg, real_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
 
         with (
             TestClient(fastapi_app) as tc,
@@ -3191,7 +3191,7 @@ class TestWebSocketAuth:
 # ---------------------------------------------------------------------------
 # ``origin_allowed`` helper — direct unit tests
 # ---------------------------------------------------------------------------
-# The helper lives at module scope (not nested inside ``create_debug_app``),
+# The helper lives at module scope (not nested inside ``create_ui_app``),
 # so we can call it directly with synthetic ``UIConfig`` values and
 # hand-crafted origin/host strings. This gives coverage of the absent-Origin
 # branch that TestClient can't exercise (it always sends Origin), and of the
@@ -3308,7 +3308,7 @@ class TestApiPeriodicTasks:
         mock_recorder._buffer = []
         mock_recorder.config = cfg
 
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/periodic')
@@ -3351,7 +3351,7 @@ class TestApiPeriodicTasks:
         mock_recorder._buffer = []
         mock_recorder.config = cfg
 
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/periodic')
@@ -3441,7 +3441,7 @@ class TestApiLabelTrace:
 
         mock_recorder.cross_trace_by_label = _real_cross_trace
 
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         client = AsyncClient(transport=transport, base_url='http://test')
         return client, db
@@ -3473,7 +3473,7 @@ class TestApiLabelTrace:
         mock_recorder._buffer = []
         mock_recorder.config = cfg
 
-        fastapi_app = create_debug_app(cfg, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/label-keys')
@@ -3649,7 +3649,7 @@ async def test_probe_endpoint_valid_body_returns_report(mock_recorder, debug_con
     """POST with a valid ProbeInput → 200 + DebugReport with the expected keys."""
     _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post(
@@ -3683,7 +3683,7 @@ async def test_probe_endpoint_valid_body_returns_report(mock_recorder, debug_con
 
 async def test_probe_endpoint_empty_body_returns_422(mock_recorder, debug_config, _probe_mock_app):
     """POST with ``{}`` → 422 because ``value`` is a required field."""
-    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post('/api/debug/probe', json={})
@@ -3704,7 +3704,7 @@ async def test_probe_endpoint_concurrent_calls_serialize(mock_recorder, debug_co
     """
     _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp_a_coro = c.post('/api/debug/probe', json={'value': 'a', 'offset': 1})
@@ -3738,7 +3738,7 @@ async def test_probe_endpoint_use_cache_true_sees_seeded_value(mock_recorder, de
     handler.arrange = arrange_with_read  # type: ignore[method-assign]
     _probe_mock_app.handler = handler
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post('/api/debug/probe', json={'value': 'x', 'use_cache': True})
@@ -3769,7 +3769,7 @@ async def test_probe_endpoint_use_cache_false_sees_miss(mock_recorder, debug_con
     handler.arrange = arrange_with_read  # type: ignore[method-assign]
     _probe_mock_app.handler = handler
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post('/api/debug/probe', json={'value': 'x', 'use_cache': False})
@@ -3809,7 +3809,7 @@ async def test_probe_endpoint_does_not_mutate_cache(mock_recorder, debug_config,
     dirty_before = dict(real_cache._dirty)
     bytes_before = real_cache._bytes_sum
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post('/api/debug/probe', json={'value': 'x'})
@@ -3832,7 +3832,7 @@ async def test_probe_endpoint_handler_arrange_raises_returns_200_with_errors(
     handler.arrange = arrange_raises  # type: ignore[method-assign]
     _probe_mock_app.handler = handler
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post('/api/debug/probe', json={'value': 'x'})
@@ -3859,7 +3859,7 @@ async def test_probe_endpoint_timeout_returns_partial_report_with_truncated_true
       3. ``handler.cache`` is the ORIGINAL object after the request
          (the runner's ``finally`` block ran during cancellation cascade)
     """
-    import drakkar.debug.routes_debug as routes_debug_mod
+    import drakkar.uiserver.routes_debug as routes_debug_mod
     from drakkar.config import ExecutorConfig
 
     handler = _ProbeTestHandler(task_count=1)
@@ -3881,7 +3881,7 @@ async def test_probe_endpoint_timeout_returns_partial_report_with_truncated_true
     )
     monkeypatch.setattr(routes_debug_mod, 'PROBE_TIMEOUT_HEADROOM_SECONDS', -1.9)
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post('/api/debug/probe', json={'value': 'x'})
@@ -3907,7 +3907,7 @@ async def test_probe_endpoint_timeout_partial_includes_sink_records_from_complet
     records captured by completed hooks. The per-run state now
     flattens on every ``to_report`` call so the partial sees them.
     """
-    import drakkar.debug.routes_debug as routes_debug_mod
+    import drakkar.uiserver.routes_debug as routes_debug_mod
     from drakkar.config import ExecutorConfig
 
     handler = _ProbeTestHandler(task_count=1)
@@ -3926,7 +3926,7 @@ async def test_probe_endpoint_timeout_partial_includes_sink_records_from_complet
     )
     monkeypatch.setattr(routes_debug_mod, 'PROBE_TIMEOUT_HEADROOM_SECONDS', -1.9)
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post('/api/debug/probe', json={'value': 'x'})
@@ -3949,7 +3949,7 @@ async def test_probe_endpoint_empty_value_still_runs(mock_recorder, debug_config
     """
     _probe_mock_app.handler = _ProbeTestHandler(task_count=0)
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post('/api/debug/probe', json={'value': ''})
@@ -4010,7 +4010,7 @@ async def test_probe_endpoint_dispatches_to_drakkar_main_loop_when_different(
         _probe_mock_app.handler = handler
         _probe_mock_app.main_loop = main_loop
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post('/api/debug/probe', json={'value': '{"hello": "world"}'})
@@ -4040,7 +4040,7 @@ async def test_probe_endpoint_defaults_topic_to_configured_source_topic(mock_rec
         kafka=KafkaConfig(brokers='host:9092', source_topic='configured-input-topic', consumer_group='grp'),
     )
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, _probe_mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post('/api/debug/probe', json={'value': 'x'})
@@ -4155,7 +4155,7 @@ async def test_api_events_dispatches_to_drakkar_main_loop_when_different(
         mock_recorder.config = debug_config
         mock_app.main_loop = main_loop
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/events')
@@ -4208,7 +4208,7 @@ async def test_api_events_falls_back_to_inline_when_main_loop_is_mock(tmp_path, 
     # should see it's not an ``asyncio.AbstractEventLoop`` and execute
     # inline on the current loop without error.
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/api/events')
@@ -4275,7 +4275,7 @@ async def test_api_debug_processors_snapshot_runs_on_main_loop(mock_recorder, de
         mock_app.processors = {0: proc}
         mock_app.main_loop = main_loop
 
-        fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/processors')
@@ -4296,7 +4296,7 @@ async def test_api_debug_processors_snapshot_runs_on_main_loop(mock_recorder, de
 # ---------------------------------------------------------------------------
 # _flush_and_select helper (Task 9): consolidates the "flush + read via
 # reader_db with writer fallback" pattern. The helper is a closure inside
-# ``create_debug_app`` so it isn't imported directly — instead these tests
+# ``create_ui_app`` so it isn't imported directly — instead these tests
 # exercise it through ``/api/events`` which routes a minimal SELECT through
 # the helper.
 # ---------------------------------------------------------------------------
@@ -4305,7 +4305,7 @@ async def test_api_debug_processors_snapshot_runs_on_main_loop(mock_recorder, de
 async def test_flush_and_select_helper_returns_columns_and_rows(tmp_path, mock_recorder, debug_config, mock_app):
     """The helper returns (columns, rows) from a SELECT on the recorder
     DB and flushes before reading. Exercised via ``/api/events`` because
-    the helper is a closure inside ``create_debug_app``.
+    the helper is a closure inside ``create_ui_app``.
     """
     import aiosqlite
 
@@ -4349,7 +4349,7 @@ async def test_flush_and_select_helper_returns_columns_and_rows(tmp_path, mock_r
     mock_recorder.config = debug_config
     mock_recorder._buffer = []
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/api/events')
@@ -4390,7 +4390,7 @@ async def test_flush_and_select_helper_returns_none_when_db_missing(debug_config
     mock_recorder.config = debug_config
     mock_recorder._buffer = []
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/api/events')
@@ -4440,7 +4440,7 @@ async def test_flush_and_select_helper_prefers_reader_db_over_writer(tmp_path, m
     mock_recorder._buffer = []
     mock_recorder.config = debug_config
 
-    fastapi_app = create_debug_app(debug_config, mock_recorder, mock_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/api/events')
@@ -4481,7 +4481,7 @@ def probe_app(mock_app):
 
 @pytest.fixture
 async def probe_client(debug_config, mock_recorder, probe_app):
-    fastapi_app = create_debug_app(debug_config, mock_recorder, probe_app)
+    fastapi_app = create_ui_app(debug_config, mock_recorder, probe_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         yield c
@@ -4494,7 +4494,7 @@ async def test_healthz_returns_200_without_auth(debug_config, mock_recorder, pro
     must accept anonymous requests regardless of ``config.auth_token``.
     """
     cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-token')
-    fastapi_app = create_debug_app(cfg, mock_recorder, probe_app)
+    fastapi_app = create_ui_app(cfg, mock_recorder, probe_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/healthz')
@@ -4583,7 +4583,7 @@ async def test_readyz_with_auth_token_configured_still_accessible(debug_config, 
     probe_app.sink_manager.all_connected.return_value = True
     probe_app.sink_manager.disconnected_sink_names.return_value = []
 
-    fastapi_app = create_debug_app(cfg, mock_recorder, probe_app)
+    fastapi_app = create_ui_app(cfg, mock_recorder, probe_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         # No Authorization header supplied — still 200.

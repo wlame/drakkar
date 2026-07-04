@@ -47,25 +47,6 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel
 
 from drakkar.cache import CacheScope
-from drakkar.debug.runner_helpers import (
-    _build_source_message,
-    _failed_task_entry,
-    _make_value_preview,
-    _one_line_summary,
-    _serialize_payload,
-    _summarize_cache_calls,
-)
-from drakkar.debug.runner_models import (
-    DebugReport,
-    PlannedSinkRecord,
-    ProbeCacheCall,
-    ProbeError,
-    ProbeInput,
-    ProbeStageResult,
-    ProbeTaskEntry,
-    _probe_stage,
-    _stage,
-)
 from drakkar.executor import ExecutorTaskError
 from drakkar.models import (
     CollectResult,
@@ -76,6 +57,25 @@ from drakkar.models import (
     MessageGroup,
     PendingContext,
     SourceMessage,
+)
+from drakkar.uiserver.runner_helpers import (
+    _build_source_message,
+    _failed_task_entry,
+    _make_value_preview,
+    _one_line_summary,
+    _serialize_payload,
+    _summarize_cache_calls,
+)
+from drakkar.uiserver.runner_models import (
+    DebugReport,
+    PlannedSinkRecord,
+    ProbeCacheCall,
+    ProbeError,
+    ProbeInput,
+    ProbeStageResult,
+    ProbeTaskEntry,
+    _probe_stage,
+    _stage,
 )
 
 if TYPE_CHECKING:

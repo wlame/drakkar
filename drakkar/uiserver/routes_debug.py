@@ -31,10 +31,10 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from drakkar.concurrency import dispatch_to_loop
-from drakkar.debug.runner import DebugRunner, ProbeInput
+from drakkar.uiserver.runner import DebugRunner, ProbeInput
 
 if TYPE_CHECKING:
-    from drakkar.debug.server import DebugDeps
+    from drakkar.uiserver.server import UIDeps
 
 # Extra headroom (in seconds) on top of ``2 * task_timeout_seconds`` for
 # the probe's wall-clock timeout. Covers arrange + two round-trips of
@@ -64,7 +64,7 @@ def _has_unsafe_filename_char(filename: str) -> bool:
 # ``/api/debug/probe`` request body — module-scope per the FastAPI
 # "single Pydantic param = body" heuristic: an imported model is
 # treated as a query parameter and surfaces as 422 errors. Mirrors
-# ``ProbeInput`` from ``drakkar.debug.runner``.
+# ``ProbeInput`` from ``drakkar.uiserver.runner``.
 class _ProbeRequest(BaseModel):
     value: str = Field(max_length=10_000_000)
     key: str | None = Field(default=None, max_length=65_536)
@@ -75,7 +75,7 @@ class _ProbeRequest(BaseModel):
     use_cache: bool = False
 
 
-def create_debug_router(deps: DebugDeps, include_html: bool = True) -> APIRouter:
+def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
     """Build the router that owns the debug page + ``/api/debug/*`` endpoints (excluding cache).
 
     ``include_html=False`` (SPA mode) drops the ``/debug`` Jinja page so the

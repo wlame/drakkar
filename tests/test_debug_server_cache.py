@@ -39,8 +39,8 @@ from httpx import ASGITransport, AsyncClient
 
 from drakkar.cache import Cache, CacheEngine
 from drakkar.config import CacheConfig, DrakkarConfig
-from drakkar.debug.server import create_debug_app
 from drakkar.recorder import EventRecorder
+from drakkar.uiserver.server import create_ui_app
 from tests.conftest import make_ui_config
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ from tests.conftest import make_ui_config
 
 @pytest.fixture
 def mock_recorder():
-    """Same shape as test_debug_server.py — minimal recorder spy."""
+    """Same shape as test_ui_server.py — minimal recorder spy."""
     rec = AsyncMock(spec=EventRecorder)
     rec.get_stats.return_value = {
         'total_events': 0,
@@ -93,7 +93,7 @@ def _make_mock_app(cache_engine: CacheEngine | None = None):
     app.processors = {}
     app._config = DrakkarConfig()
     # UI hosting defaults ON and resolves against the real user cache /
-    # GitHub at DebugServer.start(); tests must stay hermetic.
+    # GitHub at UIServer.start(); tests must stay hermetic.
     app._config.ui.release.enabled = False
 
     pool = MagicMock()
@@ -166,7 +166,7 @@ class TestApiPeriodicSystemField:
                 (now - 10, '2026-04-21', 'cache.flush', 0.002, 0, '{"status": "ok", "system": true}'),
             ],
         )
-        fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app())
+        fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app())
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/periodic')
@@ -188,7 +188,7 @@ class TestApiPeriodicSystemField:
                 (now - 10, '2026-04-21', 'user.refresh_cache', 0.05, 0, '{"status": "ok"}'),
             ],
         )
-        fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app())
+        fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app())
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/periodic')
@@ -212,7 +212,7 @@ class TestApiPeriodicSystemField:
                 (now - 10, '2026-04-21', 'cache.flush', 0.002, 0, '{"status": "ok", "system": true}'),
             ],
         )
-        fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app())
+        fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app())
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/periodic')
@@ -237,7 +237,7 @@ class TestCacheTabInDebugPage:
 
     async def test_cache_tab_absent_when_engine_none(self, mock_recorder, debug_config):
         """No cache_engine → /debug renders without the Cache tab button or panel."""
-        fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=None))
+        fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=None))
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/debug')
@@ -251,7 +251,7 @@ class TestCacheTabInDebugPage:
         """A live cache engine → /debug includes the Cache tab button + panel."""
         engine = await _start_live_engine(tmp_path)
         try:
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/debug')
@@ -268,7 +268,7 @@ class TestCacheTabInDebugPage:
         when the engine is live (content moved into /debug as a tab)."""
         engine = await _start_live_engine(tmp_path)
         try:
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/debug/cache')
@@ -342,7 +342,7 @@ class TestApiCacheEntries:
     """``GET /api/debug/cache/entries`` returns a paginated JSON list."""
 
     async def test_returns_404_when_cache_disabled(self, mock_recorder, debug_config):
-        fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=None))
+        fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=None))
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/cache/entries')
@@ -351,7 +351,7 @@ class TestApiCacheEntries:
     async def test_empty_list_when_no_entries(self, tmp_path, mock_recorder, debug_config):
         engine = await _start_live_engine(tmp_path)
         try:
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entries')
@@ -368,7 +368,7 @@ class TestApiCacheEntries:
             await _write_entry(engine, key='k1', value='"v1"', scope='local')
             await _write_entry(engine, key='k2', value='"v2"', scope='cluster')
 
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entries')
@@ -388,7 +388,7 @@ class TestApiCacheEntries:
             for i in range(250):
                 await _write_entry(engine, key=f'k{i:03d}', value=f'"v{i}"')
 
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entries')
@@ -408,7 +408,7 @@ class TestApiCacheEntries:
         """
         engine = await _start_live_engine(tmp_path)
         try:
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entries?limit=2000')
@@ -421,7 +421,7 @@ class TestApiCacheEntries:
         """``limit=1000`` is the upper bound and returns 200."""
         engine = await _start_live_engine(tmp_path)
         try:
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entries?limit=1000')
@@ -435,7 +435,7 @@ class TestApiCacheEntries:
         engine = await _start_live_engine(tmp_path)
         try:
             await _write_entry(engine, key='k1', value='"v1"')
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entries?limit=0')
@@ -451,7 +451,7 @@ class TestApiCacheEntries:
         engine = await _start_live_engine(tmp_path)
         try:
             await _write_entry(engine, key='k1', value='"v1"')
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entries?offset=50')
@@ -468,7 +468,7 @@ class TestApiCacheEntries:
             await _write_entry(engine, key='l1', value='"v"', scope='local')
             await _write_entry(engine, key='c1', value='"v"', scope='cluster')
             await _write_entry(engine, key='g1', value='"v"', scope='global')
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entries?scope=cluster')
@@ -486,7 +486,7 @@ class TestApiCacheEntries:
             await _write_entry(engine, key='user:bob', value='"v"')
             await _write_entry(engine, key='session:xyz', value='"v"')
             await _write_entry(engine, key='job:users:42', value='"v"')
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 # Substring match — 'user' hits both 'user:*' entries AND 'job:users:42'
@@ -505,7 +505,7 @@ class TestApiCacheEntries:
         try:
             await _write_entry(engine, key='user:alice', value='"v"')
             await _write_entry(engine, key='user%bob', value='"v"')  # literal %
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entries?search=%25')  # URL-encoded %
@@ -526,7 +526,7 @@ class TestApiCacheEntries:
             await _write_entry(engine, key='live', value='"v"', expires_at_ms=future_ms)
             await _write_entry(engine, key='never', value='"v"', expires_at_ms=None)
             await _write_entry(engine, key='dead', value='"v"', expires_at_ms=past_ms)
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entries?expired_only=true')
@@ -544,7 +544,7 @@ class TestApiCacheEntries:
 
 class TestApiCacheEntryDetail:
     async def test_returns_404_when_cache_disabled(self, mock_recorder, debug_config):
-        fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=None))
+        fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=None))
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/cache/entry/foo')
@@ -553,7 +553,7 @@ class TestApiCacheEntryDetail:
     async def test_returns_404_when_key_missing(self, tmp_path, mock_recorder, debug_config):
         engine = await _start_live_engine(tmp_path)
         try:
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entry/does-not-exist')
@@ -565,7 +565,7 @@ class TestApiCacheEntryDetail:
         engine = await _start_live_engine(tmp_path)
         try:
             await _write_entry(engine, key='my-key', value='{"a": 1, "b": "hi"}', scope='global')
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entry/my-key')
@@ -590,7 +590,7 @@ class TestApiCacheEntryDetail:
         try:
             # not valid JSON on purpose — simulates legacy data or corruption
             await _write_entry(engine, key='weird', value='not valid json {')
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/entry/weird')
@@ -609,7 +609,7 @@ class TestApiCacheEntryDetail:
 
 class TestApiCacheStats:
     async def test_returns_404_when_cache_disabled(self, mock_recorder, debug_config):
-        fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=None))
+        fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=None))
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/cache/stats')
@@ -625,7 +625,7 @@ class TestApiCacheStats:
             engine._cache.set('a', 'value1')
             engine._cache.set('b', 'value2')
 
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/api/debug/cache/stats')
@@ -657,7 +657,7 @@ class TestTopLevelNavHasNoCache:
     async def test_dashboard_nav_has_no_cache_link_even_when_enabled(self, tmp_path, mock_recorder, debug_config):
         engine = await _start_live_engine(tmp_path)
         try:
-            fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 resp = await c.get('/')
@@ -668,7 +668,7 @@ class TestTopLevelNavHasNoCache:
             await engine.stop()
 
     async def test_dashboard_nav_has_no_cache_link_when_disabled(self, mock_recorder, debug_config):
-        fastapi_app = create_debug_app(debug_config, mock_recorder, _make_mock_app(cache_engine=None))
+        fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=None))
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/')

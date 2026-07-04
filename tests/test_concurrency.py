@@ -37,7 +37,7 @@ from drakkar.concurrency import dispatch_to_loop
 def secondary_loop() -> Iterator[asyncio.AbstractEventLoop]:
     """Spin up a secondary asyncio loop in a daemon thread.
 
-    Mirrors what ``DebugServer.start()`` does in production: the loop
+    Mirrors what ``UIServer.start()`` does in production: the loop
     runs on a daemon thread and stays alive for the test, then is
     stopped + joined on teardown. We expose the loop reference so tests
     can pass it as ``target_loop=`` to ``dispatch_to_loop``.

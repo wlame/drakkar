@@ -3,7 +3,7 @@
 Each function is pure (no module-level state, no contextvar reads) so it
 can be exercised in isolation without spinning up a runner. The runner
 imports these by name; tests historically import them directly from
-:mod:`drakkar.debug_runner` and that path is preserved via re-export.
+:mod:`drakkar.uiserver_runner` and that path is preserved via re-export.
 """
 
 from __future__ import annotations
@@ -13,9 +13,9 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from drakkar.debug.runner_models import ProbeCacheCall, ProbeInput, ProbeTaskEntry
 from drakkar.executor import ExecutorTaskError
 from drakkar.models import ExecutorTask, SourceMessage
+from drakkar.uiserver.runner_models import ProbeCacheCall, ProbeInput, ProbeTaskEntry
 
 
 def _make_value_preview(value: Any) -> str | None:

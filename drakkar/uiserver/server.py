@@ -14,11 +14,11 @@ factory thin:
 Each routes module defines a ``create_*_router(deps)`` factory that
 returns an ``APIRouter`` and is mounted into the app via
 ``include_router``. The shared helpers (auth/origin checks, cross-thread
-dispatch, prometheus-link builder, etc.) hang off ``DebugDeps`` so the
+dispatch, prometheus-link builder, etc.) hang off ``UIDeps`` so the
 routers can reach them through one parameter.
 
 Helpers that are pure functions (no closure over ``drakkar_app`` or
-``config``) live in :mod:`drakkar.debug.server_helpers`.
+``config``) live in :mod:`drakkar.uiserver.server_helpers`.
 """
 
 from __future__ import annotations
@@ -39,15 +39,16 @@ from fastapi.templating import Jinja2Templates
 
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.config import UIConfig
+from drakkar.recorder import EventRecorder
 
 # Re-import the helpers that used to live here so test patches like
-# ``drakkar.debug.server.hook_flags`` keep working without changes.
+# ``drakkar.uiserver.server.hook_flags`` keep working without changes.
 # ``_DEFAULT_PORTS`` / ``normalize_hostport`` / ``parse_host_header`` are
 # not referenced inside this module after the helper extraction but ARE
-# imported by tests via the original ``drakkar.debug.server.<name>``
+# imported by tests via the original ``drakkar.uiserver.server.<name>``
 # path; ``noqa: F401`` keeps the re-export visible without tripping
 # ruff's unused-import check.
-from drakkar.debug.server_helpers import (
+from drakkar.uiserver.server_helpers import (
     _DEFAULT_PORTS,  # noqa: F401  (re-exported for tests)
     format_ts,
     format_ts_full,
@@ -59,7 +60,6 @@ from drakkar.debug.server_helpers import (
     parse_host_header,  # noqa: F401  (re-exported for tests)
     worker_group,  # noqa: F401  (re-exported for tests)
 )
-from drakkar.recorder import EventRecorder
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
@@ -69,7 +69,7 @@ logger = structlog.get_logger()
 TEMPLATES_DIR = Path(__file__).parent.parent / 'templates'
 
 
-class DebugDeps:
+class UIDeps:
     """Shared dependencies + helpers passed to each route-module factory.
 
     Routes don't capture ``drakkar_app`` / ``recorder`` / ``config`` /
@@ -194,11 +194,11 @@ class DebugDeps:
         """Flush the recorder then run a SELECT against the reader connection.
 
         Consolidates the "flush → check DB → SELECT → (columns, rows)"
-        pattern shared by 11 debug-server endpoints. Reads go through
+        pattern shared by 11 UI-server endpoints. Reads go through
         ``recorder.reader_db`` (the dedicated reader aiosqlite connection
         opened alongside the writer) so UI queries don't queue behind
         writer flushes. Dispatches via ``dispatch_to_loop`` so the
-        connection stays on its owning loop when the debug server runs
+        connection stays on its owning loop when the UI server runs
         in a separate thread.
 
         Returns ``(columns, rows)`` on success or ``None`` when the reader
@@ -435,17 +435,17 @@ def register_v1_aliases(app: FastAPI, routers: Sequence[APIRouter]) -> None:
         raise RuntimeError('v1 alias registration found no legacy API routes; FastAPI routing internals changed')
 
 
-def create_debug_app(
+def create_ui_app(
     config: UIConfig,
     recorder: EventRecorder,
     drakkar_app: DrakkarApp,
     ui_root: Path | None = None,
 ) -> FastAPI:
-    """Create the FastAPI debug application.
+    """Create the FastAPI UI application.
 
     Wires up Jinja templates with the format helpers + sink-link / kafka-UI
     helpers, then mounts the four route modules onto the app. Each route
-    module receives a single ``DebugDeps`` parameter that exposes shared
+    module receives a single ``UIDeps`` parameter that exposes shared
     state and helpers.
 
     ``ui_root`` is the resolved drakkar-ui bundle directory (SPA mode, from
@@ -457,16 +457,16 @@ def create_debug_app(
     ``None`` (default) keeps the built-in server-rendered HTML pages.
     """
     # Local imports break a routes_* → server module cycle: each routes
-    # module imports ``DebugDeps`` from this module, and this module
+    # module imports ``UIDeps`` from this module, and this module
     # imports the route factories. Pulling them in at call time keeps the
     # module-import graph acyclic.
-    from drakkar.debug.routes_cache import create_cache_router
-    from drakkar.debug.routes_debug import create_debug_router
-    from drakkar.debug.routes_live import create_live_router
-    from drakkar.debug.routes_pages import create_pages_router
-    from drakkar.debug.routes_spa import create_spa_router
+    from drakkar.uiserver.routes_cache import create_cache_router
+    from drakkar.uiserver.routes_debug import create_debug_router
+    from drakkar.uiserver.routes_live import create_live_router
+    from drakkar.uiserver.routes_pages import create_pages_router
+    from drakkar.uiserver.routes_spa import create_spa_router
 
-    app = FastAPI(title='Drakkar Debug', docs_url=None, redoc_url=None)
+    app = FastAPI(title='Drakkar UI', docs_url=None, redoc_url=None)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.autoescape = True
     templates.env.globals['format_ts'] = format_ts  # ty: ignore[invalid-assignment]
@@ -474,7 +474,7 @@ def create_debug_app(
     templates.env.globals['format_ts_full'] = format_ts_full  # ty: ignore[invalid-assignment]
     templates.env.globals['format_uptime'] = format_uptime  # ty: ignore[invalid-assignment]
 
-    deps = DebugDeps(
+    deps = UIDeps(
         config=config,
         recorder=recorder,
         drakkar_app=drakkar_app,
@@ -523,8 +523,8 @@ def create_debug_app(
     return app
 
 
-class DebugServer:
-    """Manages the debug FastAPI server in a separate thread.
+class UIServer:
+    """Manages the UI FastAPI server in a separate thread.
 
     Runs Uvicorn in its own thread with a dedicated event loop so that
     CPU-intensive executor tasks on the main loop don't block the UI.
@@ -543,7 +543,7 @@ class DebugServer:
         self._thread: threading.Thread | None = None
 
     async def start(self) -> None:
-        fastapi_app = create_debug_app(
+        fastapi_app = create_ui_app(
             self._config,
             self._recorder,
             self._drakkar_app,
@@ -558,11 +558,11 @@ class DebugServer:
         self._server = uvicorn.Server(uvi_config)
         self._thread = threading.Thread(
             target=self._server.run,
-            name='drakkar-debug-ui',
+            name='drakkar-ui-server',
             daemon=True,
         )
         self._thread.start()
-        await logger.ainfo('debug_server_started', category='debug', port=self._config.port)
+        await logger.ainfo('ui_server_started', category='ui', port=self._config.port)
 
     async def _resolve_ui_root(self) -> Path | None:
         """Resolve the drakkar-ui bundle directory when ``ui.release.enabled``, else ``None``.
@@ -602,12 +602,12 @@ class DebugServer:
             self._server.should_exit = True
         if self._thread:
             self._thread.join(timeout=5.0)
-        await logger.ainfo('debug_server_stopped', category='debug')
+        await logger.ainfo('ui_server_stopped', category='ui')
 
 
 # ---------------------------------------------------------------------------
 # Re-exports for tests that still import request-body models from
-# ``drakkar.debug.server``. Kept at the bottom because importing the routes
+# ``drakkar.uiserver.server``. Kept at the bottom because importing the routes
 # modules above triggers their module-level Pydantic class definitions,
 # which we then surface here for backwards compatibility.
 # ---------------------------------------------------------------------------
@@ -615,8 +615,8 @@ class DebugServer:
 # Tests + the historical public surface expect these names on the server
 # module. Import lazily-after-module-load: routes_live and routes_debug
 # define their request-body models at module scope.
-from drakkar.debug.routes_debug import _ProbeRequest  # noqa: E402, F401
-from drakkar.debug.routes_live import (  # noqa: E402, F401
+from drakkar.uiserver.routes_debug import _ProbeRequest  # noqa: E402, F401
+from drakkar.uiserver.routes_live import (  # noqa: E402, F401
     _ArrangeTaskLookupRequest,
     _SinkBreakdownRequest,
 )

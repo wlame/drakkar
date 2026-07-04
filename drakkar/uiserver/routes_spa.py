@@ -20,10 +20,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
 if TYPE_CHECKING:
-    from drakkar.debug.server import DebugDeps
+    from drakkar.uiserver.server import UIDeps
 
 
-def create_spa_router(deps: DebugDeps, ui_root: Path) -> APIRouter:
+def create_spa_router(deps: UIDeps, ui_root: Path) -> APIRouter:
     """Build the catch-all router that serves the UI bundle at ``ui_root``."""
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
     root = ui_root.resolve()

@@ -1,7 +1,7 @@
 """Format helpers + WebSocket origin validation + handler-hook detection.
 
 Pure functions used by the debug server's route handlers. Splitting them
-out keeps the FastAPI factory in :mod:`drakkar.debug_server` focused on
+out keeps the FastAPI factory in :mod:`drakkar.uiserver_server` focused on
 route definitions and lifecycle, while the leaf logic that turns a
 timestamp into ``HH:MM:SS`` or decides whether a WebSocket Origin matches
 the configured allowlist lives here in isolation (and is straightforward
@@ -9,7 +9,7 @@ to test without spinning up a FastAPI app).
 
 The request-body Pydantic models (``_ArrangeTaskLookupRequest``,
 ``_SinkBreakdownRequest``, ``_ProbeRequest``) deliberately stay inside
-:mod:`drakkar.debug_server` — FastAPI's "single Pydantic param = request
+:mod:`drakkar.uiserver_server` — FastAPI's "single Pydantic param = request
 body" heuristic only fires when the model is defined in the same module
 as the endpoint function. An imported model is treated as a query
 parameter and surfaces as a 422 error at runtime.

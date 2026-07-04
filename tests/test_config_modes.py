@@ -156,14 +156,14 @@ class TestDebugModes:
         config = make_config(ui=make_ui_config(enabled=False))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         assert app._recorder is None
-        assert app._debug_server is None
+        assert app._ui_server is None
 
     def test_app_creation_debug_enabled_no_server_yet(self):
         config = make_config(ui=make_ui_config(enabled=True))
         app = DrakkarApp(handler=SimpleHandler(), config=config)
         # recorder and debug_server are set during _async_run, not __init__
         assert app._recorder is None
-        assert app._debug_server is None
+        assert app._ui_server is None
 
     async def test_on_assign_without_recorder(self):
         """Partition assignment works when debug is disabled (recorder=None)."""
@@ -225,7 +225,7 @@ class TestDebugModes:
         app._dlq_sink = AsyncMock()
 
         assert app._recorder is None
-        assert app._debug_server is None
+        assert app._ui_server is None
         await app._lifecycle._shutdown()
 
         app._consumer.close.assert_called_once()
@@ -239,12 +239,12 @@ class TestDebugModes:
         _setup_app_sinks(app)
         app._dlq_sink = AsyncMock()
         app._recorder = AsyncMock()
-        app._debug_server = AsyncMock()
+        app._ui_server = AsyncMock()
 
         await app._lifecycle._shutdown()
 
         app._recorder.stop.assert_called_once()
-        app._debug_server.stop.assert_called_once()
+        app._ui_server.stop.assert_called_once()
 
 
 # ============================================================================

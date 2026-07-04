@@ -11,7 +11,7 @@ Covers:
   new ``origin`` column.
 
 The tests follow the pytest-function-with-fixtures style used by the
-rest of the debug-UI suite (``test_debug_server.py``) and reuse the same
+rest of the debug-UI suite (``test_ui_server.py``) and reuse the same
 ``UIConfig`` / ``DrakkarConfig`` shapes.
 """
 
@@ -24,8 +24,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from drakkar.config import DrakkarConfig, WebAppConfig, WebClientConfig
-from drakkar.debug.server import create_debug_app
 from drakkar.recorder import EventRecorder
+from drakkar.uiserver.server import create_ui_app
 from tests.conftest import make_ui_config
 
 # ---------------------------------------------------------------------------
@@ -112,7 +112,7 @@ async def test_api_dashboard_includes_webapp_tile_when_enabled(debug_config):
     rec = _make_mock_recorder()
     app = _make_mock_app(webapp_enabled=True)
 
-    fastapi_app = create_debug_app(debug_config, rec, app)
+    fastapi_app = create_ui_app(debug_config, rec, app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/api/dashboard')
@@ -136,7 +136,7 @@ async def test_api_dashboard_omits_webapp_tile_when_disabled(debug_config):
     rec = _make_mock_recorder()
     app = _make_mock_app(webapp_enabled=False)
 
-    fastapi_app = create_debug_app(debug_config, rec, app)
+    fastapi_app = create_ui_app(debug_config, rec, app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/api/dashboard')
@@ -201,7 +201,7 @@ async def test_task_detail_renders_client_and_request_id_for_http(debug_config):
     ]
     app = _make_mock_app(webapp_enabled=True)
 
-    fastapi_app = create_debug_app(debug_config, rec, app)
+    fastapi_app = create_ui_app(debug_config, rec, app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/task/task-http-1')
@@ -249,7 +249,7 @@ async def test_task_detail_renders_partition_for_kafka(debug_config):
     ]
     app = _make_mock_app(webapp_enabled=False)
 
-    fastapi_app = create_debug_app(debug_config, rec, app)
+    fastapi_app = create_ui_app(debug_config, rec, app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.get('/task/task-k-1')
@@ -306,7 +306,7 @@ async def test_api_recent_tasks_includes_origin_fields(tmp_path, debug_config):
 
         app = _make_mock_app(webapp_enabled=True)
         # Recorder is real here, so wire it explicitly.
-        fastapi_app = create_debug_app(cfg, rec, app)
+        fastapi_app = create_ui_app(cfg, rec, app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/recent-tasks?minutes=5')
@@ -381,7 +381,7 @@ async def test_history_filters_by_origin(tmp_path):
 
         # Round-trip through the HTTP route (smoke) — page must render.
         app = _make_mock_app(webapp_enabled=True)
-        fastapi_app = create_debug_app(cfg, rec, app)
+        fastapi_app = create_ui_app(cfg, rec, app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp_all = await c.get('/history?origin=all')

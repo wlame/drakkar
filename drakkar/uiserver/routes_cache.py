@@ -26,12 +26,12 @@ from drakkar.concurrency import dispatch_to_loop
 from drakkar.metrics import cache_gauge_snapshot
 
 if TYPE_CHECKING:
-    from drakkar.debug.server import DebugDeps
+    from drakkar.uiserver.server import UIDeps
 
 logger = structlog.get_logger()
 
 
-def create_cache_router(deps: DebugDeps) -> APIRouter:
+def create_cache_router(deps: UIDeps) -> APIRouter:
     """Build the router that owns ``/api/debug/cache/*`` endpoints."""
     # Cache routes expose key/value contents — gate the whole router
     # behind require_auth (no-op without a token).

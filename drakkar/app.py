@@ -88,7 +88,7 @@ class DrakkarApp:
         )
         self._dlq_sink: DLQSink | None = None
         self._recorder: EventRecorder | None = None
-        self._debug_server = None
+        self._ui_server = None
         # Webapp HTTP server — constructed in lifecycle._async_run when
         # webapp.enabled=true. ``None`` otherwise (the lifecycle never
         # touches the field on the disabled path). Held here so the

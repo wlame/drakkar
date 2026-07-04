@@ -224,14 +224,14 @@ class AppLifecycle:
             await app._recorder.start()
             await app._recorder.write_config(app._config)
 
-            from drakkar.debug.server import DebugServer
+            from drakkar.uiserver.server import UIServer
 
-            app._debug_server = DebugServer(
+            app._ui_server = UIServer(
                 config=app._config.ui,
                 recorder=app._recorder,
                 app=app,
             )
-            await app._debug_server.start()
+            await app._ui_server.start()
 
         # Framework cache. Constructed after the recorder so the cache
         # engine can pass it as the sink for its periodic_run events. If
@@ -937,9 +937,9 @@ class AppLifecycle:
                         exc_info=True,
                     )
 
-            if app._debug_server:
+            if app._ui_server:
                 try:
-                    await app._debug_server.stop()
+                    await app._ui_server.stop()
                 except Exception as exc:
                     await log.awarning(
                         'debug_server_stop_failed',
