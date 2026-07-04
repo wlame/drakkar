@@ -53,7 +53,7 @@ path = "drakkar/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["drakkar"]
-artifacts = ["drakkar/templates/**", "drakkar/uihost/bundle/**"]
+artifacts = ["drakkar/templates/**", "drakkar/uihost/bundle/**", "drakkar/uiserver/openapi.yaml", "drakkar/uiserver/swagger/**"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -1,0 +1,1397 @@
+# Drakkar backend API — OpenAPI 3.1 rendering of docs/api-contract-v1.md.
+#
+# This file is CANONICAL for the machine-readable surface: both backends
+# vendor it byte-identically (drakkar/drakkar/uiserver/openapi.yaml and
+# drakkar-go/internal/uiserver/openapi.yaml — sync with `just sync-openapi`)
+# and each pins a unit test asserting its served route set equals `paths`
+# below. Shapes are transcribed from the prose contract; when the two
+# documents disagree, fix BOTH — the prose doc stays normative for
+# semantics, this file for the path inventory.
+openapi: 3.1.0
+info:
+  title: Drakkar Backend API
+  version: "1.2"
+  description: >-
+    The JSON surface every Drakkar backend (Python reference and Go port)
+    serves identically under /api/v1, plus the unprefixed Kubernetes probes.
+    One optional bearer token protects every /api/* route: configure
+    ui.auth_token and send `Authorization: Bearer <t>` or `?token=<t>`;
+    with no token configured, auth is disabled (private-contour default).
+
+
+    Not modeled by OpenAPI but part of the contract: `GET /ws` upgrades to a
+    WebSocket streaming recorder events — accept, then token check (close
+    4401) and origin check (close 4403); at most 100 events per drain pass,
+    20 ms idle backoff, one JSON recorder-event object per text frame.
+
+
+    Legacy unprefixed `/api/...` aliases exist for backends' built-in pages
+    and are deliberately outside this document; the SPA only calls /api/v1.
+servers:
+  - url: /
+    description: Same-origin — the backend serves both the SPA and the API.
+security:
+  - bearerAuth: []
+tags:
+  - name: probes
+    description: Kubernetes liveness/readiness (always public).
+  - name: core
+    description: Dashboard, identity, partitions, tasks, sinks, workers.
+  - name: live
+    description: Live-view feeds backing the Live page and boot-time config.
+  - name: debug-tools
+    description: Operator debug tools (databases, trace, metrics, probe).
+  - name: cache
+    description: Read-only handler-cache browser.
+  - name: meta
+    description: Self-description of this API surface.
+
+paths:
+  /healthz:
+    get:
+      tags: [probes]
+      operationId: getHealthz
+      summary: Liveness probe
+      description: Always public; reports process liveness only.
+      security: []
+      responses:
+        '200':
+          description: Alive.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HealthStatus'}
+
+  /readyz:
+    get:
+      tags: [probes]
+      operationId: getReadyz
+      summary: Readiness probe
+      description: >-
+        Always public. 200 once the worker is ready; 503 with the blocking
+        reasons while it is not.
+      security: []
+      responses:
+        '200':
+          description: Ready.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReadyStatus'}
+        '503':
+          description: Not ready yet.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReadyStatus'}
+
+  /api/v1/dashboard:
+    get:
+      tags: [core]
+      operationId: getDashboard
+      summary: Dashboard aggregates
+      description: >-
+        Uptime, per-event-type counters, partition/pool/lag gauges. The
+        `webapp_tile` key is present only when the synchronous webapp
+        pipeline is enabled, and `links` only when Prometheus/custom
+        dashboard links are configured — key presence is the feature flag.
+      responses:
+        '200':
+          description: Aggregated worker stats.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Dashboard'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/identity:
+    get:
+      tags: [core]
+      operationId: getIdentity
+      summary: Worker identity and versions
+      description: >-
+        Worker self-identity (v1.1) extended in v1.2 with backend flavor,
+        backend version, and the served drakkar-ui bundle version. v1-only —
+        no legacy unprefixed alias. Older backends omit the v1.2 fields.
+      responses:
+        '200':
+          description: Identity card.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Identity'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/partitions:
+    get:
+      tags: [core]
+      operationId: getPartitions
+      summary: Per-partition pipeline state
+      description: >-
+        Partition-summary columns enriched with live queue/offset/lag data,
+        sorted by partition. Empty array when nothing has been recorded.
+      responses:
+        '200':
+          description: Partition rows.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/PartitionRow'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/task/{task_id}:
+    get:
+      tags: [core]
+      operationId: getTask
+      summary: Single-task detail
+      description: >-
+        Full event history and metadata for one task. A `:r<start_ts>` retry
+        suffix on the id is stripped to the base id; stdout/stderr live in
+        the event rows.
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Task detail.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TaskDetail'}
+        '404':
+          description: Unknown task.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/sinks:
+    get:
+      tags: [core]
+      operationId: getSinks
+      summary: Sink delivery counters
+      responses:
+        '200':
+          description: One row per configured sink.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/SinkRow'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/workers:
+    get:
+      tags: [core]
+      operationId: getWorkers
+      summary: Known workers (self + peers)
+      description: >-
+        Peers discovered via the shared db_dir plus the current worker;
+        sorted clustered-first, then by name.
+      responses:
+        '200':
+          description: Worker list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Worker'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/events:
+    get:
+      tags: [live]
+      operationId: getEvents
+      summary: Recorder event rows
+      description: >-
+        Full recorder rows (SELECT *, id DESC). Malformed `partitions` CSV
+        or `limit` above 10000 → 422. No database → empty array.
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, default: 200, minimum: 0, maximum: 10000}
+        - name: after_id
+          in: query
+          schema: {type: integer, default: 0}
+        - name: partitions
+          in: query
+          description: CSV of partition numbers.
+          schema: {type: string}
+        - name: event_types
+          in: query
+          description: CSV of event-type names.
+          schema: {type: string}
+      responses:
+        '200':
+          description: Event rows, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/RecorderEventRow'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/recent-tasks:
+    get:
+      tags: [live]
+      operationId: getRecentTasks
+      summary: Recent task entries for the timeline
+      description: >-
+        Tasks from the last N minutes plus the computed lane count. Archived
+        retry attempts use the `task_id:r<float-ts>` composite-key format;
+        consumers must not rely on positional order.
+      parameters:
+        - name: minutes
+          in: query
+          schema: {type: integer, default: 2}
+      responses:
+        '200':
+          description: Task entries and lane count.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RecentTasks'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/live/overview:
+    get:
+      tags: [live]
+      operationId: getLiveOverview
+      summary: Live overview + runtime UI config
+      description: >-
+        Pool/partition gauges, arranging snapshots, hook flags, and the
+        Kafka-UI deep-link config. The SPA fetches this once at boot to
+        hydrate runtime config and again on the Live page. The three
+        `kafka_ui_*` keys are always present, empty strings when the
+        integration is unconfigured.
+      responses:
+        '200':
+          description: Live overview.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LiveOverview'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/live/arrange-tasks:
+    post:
+      tags: [live]
+      operationId: postArrangeTasks
+      summary: Bulk task lookups by id
+      description: Map keyed by task_id; unknown ids are simply absent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [task_ids]
+              properties:
+                task_ids:
+                  type: array
+                  maxItems: 5000
+                  items: {type: string}
+      responses:
+        '200':
+          description: task_id → task summary map (empty without a DB).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ArrangeTasksMap'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/live/task-results:
+    get:
+      tags: [live]
+      operationId: getTaskResults
+      summary: Recent per-task results
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, default: 200, minimum: 0, maximum: 5000}
+      responses:
+        '200':
+          description: Task result rows.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/TaskResultRow'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/live/message-results:
+    get:
+      tags: [live]
+      operationId: getMessageResults
+      summary: Recent per-message results
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, default: 200, minimum: 0, maximum: 5000}
+      responses:
+        '200':
+          description: Message result rows.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/MessageResultRow'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/live/window-results:
+    get:
+      tags: [live]
+      operationId: getWindowResults
+      summary: Recent per-window results
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, default: 200, minimum: 0, maximum: 5000}
+      responses:
+        '200':
+          description: Window result rows.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/WindowResultRow'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/live/sink-breakdown:
+    post:
+      tags: [live]
+      operationId: postSinkBreakdown
+      summary: Output-topic breakdown for offsets
+      description: >-
+        Count of produced payloads per output topic for the given partition
+        and source offsets; a null topic groups under "(unknown)". Missing
+        `partition` → 422.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [partition]
+              properties:
+                partition: {type: integer}
+                offsets:
+                  type: array
+                  maxItems: 5000
+                  items: {type: integer}
+      responses:
+        '200':
+          description: topic → count map (empty when nothing matches).
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {type: integer}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/processors:
+    get:
+      tags: [debug-tools]
+      operationId: getProcessors
+      summary: Per-partition processor internals
+      description: >-
+        Queue/inflight/arranging state per partition processor plus pool
+        gauges. `stuck_tasks[].stack` is best-effort — a backend that cannot
+        snapshot stacks emits an empty array.
+      responses:
+        '200':
+          description: Processor map and pool gauges.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProcessorsReport'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/databases:
+    get:
+      tags: [debug-tools]
+      operationId: getDatabases
+      summary: Recorder database files
+      responses:
+        '200':
+          description: One row per SQLite file in db_dir.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/DatabaseRow'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/merge:
+    post:
+      tags: [debug-tools]
+      operationId: postMerge
+      summary: Merge recorder databases
+      description: >-
+        Merges ≥2 recorder DB files into one downloadable file. Filename
+        hardening rejects path separators, leading dots, quotes, semicolons,
+        and control characters. Errors use the legacy {"error": ...}
+        envelope (400 malformed body, 404 missing files).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [filenames]
+              properties:
+                filenames:
+                  type: array
+                  minItems: 2
+                  items: {type: string}
+      responses:
+        '200':
+          description: Merge result.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MergeResult'}
+        '400':
+          description: Malformed body or rejected filename.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '404':
+          description: A named file does not exist.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/download/{filename}:
+    get:
+      tags: [debug-tools]
+      operationId: getDownload
+      summary: Download a recorder database
+      description: >-
+        SQLite file attachment (Content-Type application/x-sqlite3,
+        Cache-Control no-store). Filename hardening as merge. The bearer
+        token may ride as ?token= because plain <a> downloads cannot set
+        headers.
+      parameters:
+        - name: filename
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: The database file.
+          content:
+            application/x-sqlite3:
+              schema: {type: string, format: binary}
+        '400':
+          description: Rejected filename.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '404':
+          description: No such file.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/trace:
+    get:
+      tags: [debug-tools]
+      operationId: getTrace
+      summary: Trace one message by partition/offset
+      parameters:
+        - name: partition
+          in: query
+          required: true
+          schema: {type: integer, format: int32}
+        - name: offset
+          in: query
+          required: true
+          schema: {type: integer}
+      responses:
+        '200':
+          description: Event rows for that message.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/RecorderEventRow'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/label-keys:
+    get:
+      tags: [debug-tools]
+      operationId: getLabelKeys
+      summary: Distinct label keys
+      responses:
+        '200':
+          description: Sorted label-key strings.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/trace-by-label:
+    get:
+      tags: [debug-tools]
+      operationId: getTraceByLabel
+      summary: Trace events by label key/value
+      parameters:
+        - name: key
+          in: query
+          required: true
+          schema: {type: string, minLength: 1}
+        - name: value
+          in: query
+          required: true
+          schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: Matching event rows.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/RecorderEventRow'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/metrics:
+    get:
+      tags: [debug-tools]
+      operationId: getMetrics
+      summary: Prometheus families as JSON
+      description: >-
+        Framework and user metric families with samples. Untyped families
+        report type "unknown"; counter samples keep the _total suffix.
+      responses:
+        '200':
+          description: Metric families.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/MetricFamily'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/periodic:
+    get:
+      tags: [debug-tools]
+      operationId: getPeriodic
+      summary: Periodic task history
+      responses:
+        '200':
+          description: Groups sorted by name, each with ≤20 recent runs.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/PeriodicGroup'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/probe:
+    post:
+      tags: [debug-tools]
+      operationId: postProbe
+      summary: Dry-run one message through the handler
+      description: >-
+        Runs the full arrange → execute → collect pipeline against a probe
+        message without touching Kafka or sinks. Returns 200 even on
+        timeout (truncated=true); 503 when the executor pool is not ready.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProbeInput'}
+      responses:
+        '200':
+          description: The full probe report.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DebugReport'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '503':
+          description: Executor pool not ready.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/cache/entries:
+    get:
+      tags: [cache]
+      operationId: getCacheEntries
+      summary: Page through cache entries
+      description: 404 {"detail":"Cache is disabled"} when the cache is off.
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, default: 200, minimum: 0, maximum: 1000}
+        - name: offset
+          in: query
+          schema: {type: integer, default: 0, minimum: 0}
+        - name: scope
+          in: query
+          schema: {type: string}
+        - name: search
+          in: query
+          schema: {type: string}
+        - name: expired_only
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        '200':
+          description: One page of entries.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CacheEntriesPage'}
+        '404':
+          description: Cache is disabled.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/cache/entry/{key}:
+    get:
+      tags: [cache]
+      operationId: getCacheEntry
+      summary: One cache entry, decoded
+      description: >-
+        The key may contain slashes and colons and is matched greedily.
+        404 when the cache is disabled or the key is unknown; 500 when the
+        stored value cannot be read.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Entry row plus decoded value and raw string.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CacheEntryDetail'}
+        '404':
+          description: Cache disabled or key unknown.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '500':
+          description: Stored value unreadable.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/cache/stats:
+    get:
+      tags: [cache]
+      operationId: getCacheStats
+      summary: Cache memory/DB gauges
+      description: 404 {"detail":"Cache is disabled"} when the cache is off.
+      responses:
+        '200':
+          description: Cache statistics.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CacheStats'}
+        '404':
+          description: Cache is disabled.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/openapi.json:
+    get:
+      tags: [meta]
+      operationId: getOpenapi
+      summary: This document, as JSON
+      description: >-
+        The OpenAPI 3.1 description of this backend's surface, converted
+        from the canonical docs/openapi-v1.yaml vendored at build time.
+      responses:
+        '200':
+          description: OpenAPI document.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        Only enforced when ui.auth_token is configured; otherwise every
+        route is open (private-contour default). The token may also ride as
+        a ?token= query parameter (downloads, WebSocket).
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer token (only when auth is configured).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Detail'}
+    ValidationError:
+      description: Invalid parameters or body.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ValidationDetail'}
+
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status: {type: string, const: ok}
+      required: [status]
+
+    ReadyStatus:
+      type: object
+      properties:
+        status: {type: string, enum: [ready, not_ready]}
+        reasons:
+          type: array
+          items: {type: string}
+      required: [status]
+
+    Detail:
+      description: Standard error envelope for 401/404/500/503.
+      type: object
+      properties:
+        detail: {type: string}
+      required: [detail]
+
+    ValidationDetail:
+      description: Pinned-minimal 422 envelope — consumers read only msg.
+      type: object
+      properties:
+        detail:
+          type: array
+          items:
+            type: object
+            properties:
+              loc:
+                type: array
+                items: {}
+              msg: {type: string}
+            required: [loc, msg]
+      required: [detail]
+
+    ErrorEnvelope:
+      description: Legacy envelope used by merge/download errors.
+      type: object
+      properties:
+        error: {type: string}
+      required: [error]
+
+    Identity:
+      type: object
+      properties:
+        worker_id: {type: string}
+        cluster: {type: [string, 'null']}
+        config_summary:
+          type: string
+          description: One-line human-readable config summary (may be empty).
+        backend:
+          type: string
+          enum: [python, go]
+          description: Implementation flavor (v1.2).
+        backend_version:
+          type: string
+          description: >-
+            Backend-native version — installed py-drakkar version on Python,
+            git-describe build stamp on Go ("dev" when unstamped). (v1.2)
+        ui_version:
+          type: [string, 'null']
+          description: Served drakkar-ui release tag; null when built-in pages serve. (v1.2)
+        ui_source:
+          type: string
+          enum: [release, builtin]
+          description: Where the served UI comes from. (v1.2)
+      required: [worker_id, cluster, config_summary]
+
+    Dashboard:
+      type: object
+      properties:
+        uptime: {type: number}
+        stats:
+          type: object
+          description: Per-event-type counters plus total_events.
+          additionalProperties: {type: integer}
+        partition_count: {type: integer}
+        partitions:
+          type: array
+          items: {type: integer}
+        pool_active: {type: integer}
+        pool_max: {type: integer}
+        total_lag: {type: integer}
+        webapp_tile:
+          type: object
+          description: Present only when the webapp pipeline is enabled.
+          additionalProperties: true
+          properties:
+            clients:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: {type: string}
+                  rpm_limit: {type: integer}
+                required: [name, rpm_limit]
+        links:
+          type: object
+          description: Present only when dashboard links are configured (v1.1).
+          properties:
+            card_links:
+              type: object
+              additionalProperties: {type: string}
+            worker_links:
+              type: array
+              items:
+                type: object
+                properties:
+                  category: {type: string}
+                  links:
+                    type: array
+                    items:
+                      type: array
+                      prefixItems: [{type: string}, {type: string}]
+                required: [category, links]
+            cluster_links:
+              type: array
+              items:
+                type: array
+                prefixItems: [{type: string}, {type: string}]
+            custom_links:
+              type: array
+              items:
+                type: object
+                additionalProperties: {type: string}
+      required: [uptime, stats, partition_count, partitions, pool_active, pool_max, total_lag]
+
+    PartitionRow:
+      type: object
+      properties:
+        partition: {type: integer}
+        last_consumed: {type: [number, 'null']}
+        last_committed: {type: [number, 'null']}
+        last_committed_offset: {type: [integer, 'null']}
+        consumed_count: {type: integer}
+        completed_count: {type: integer}
+        failed_count: {type: integer}
+        is_live: {type: boolean}
+        queue_size: {type: integer}
+        pending_offsets: {type: integer}
+        committed_offset: {type: [integer, 'null']}
+        high_watermark: {type: [integer, 'null']}
+        lag: {type: integer}
+      required: [partition, is_live, queue_size, pending_offsets, lag]
+
+    TaskDetail:
+      type: object
+      properties:
+        task_id: {type: string}
+        events:
+          type: array
+          items: {$ref: '#/components/schemas/RecorderEventRow'}
+        started: {type: [number, 'null']}
+        completed: {type: [number, 'null']}
+        failed: {type: [number, 'null']}
+        duration: {type: [number, 'null']}
+        source_offsets: {type: [object, 'null'], additionalProperties: true}
+        args: {}
+        labels: {type: [object, 'null'], additionalProperties: true}
+        task_env: {type: [object, 'null'], additionalProperties: true}
+        partition: {type: [integer, 'null']}
+        pid: {type: [integer, 'null']}
+        exit_code: {type: [integer, 'null']}
+        binary_path: {type: string}
+        origin: {type: string}
+        client_name: {type: [string, 'null']}
+        request_id: {type: [string, 'null']}
+        webapp_request_body: {type: [string, 'null']}
+        webapp_response_body: {type: [string, 'null']}
+      required: [task_id, events]
+
+    SinkRow:
+      type: object
+      properties:
+        sink_type: {type: string}
+        name: {type: string}
+        ui_url: {type: string}
+        delivered_count: {type: integer}
+        delivered_payloads: {type: integer}
+        error_count: {type: integer}
+        retry_count: {type: integer}
+        last_delivery_ts: {type: [number, 'null']}
+        last_delivery_duration: {type: [number, 'null']}
+        last_error: {type: [string, 'null']}
+        last_error_ts: {type: [number, 'null']}
+      required: [sink_type, name, delivered_count, error_count]
+
+    Worker:
+      type: object
+      properties:
+        worker_name: {type: string}
+        cluster_name: {type: [string, 'null']}
+        ip_address: {type: [string, 'null']}
+        debug_port: {type: integer}
+        debug_url: {type: [string, 'null']}
+        url: {type: string}
+        cluster: {type: string}
+        is_current: {type: boolean}
+      required: [worker_name, url, is_current]
+
+    ProcessorsReport:
+      type: object
+      properties:
+        processors:
+          type: object
+          description: Keyed by partition id rendered as a string.
+          additionalProperties:
+            type: object
+            properties:
+              queue_size: {type: integer}
+              inflight_count: {type: integer}
+              arranging: {type: boolean}
+              arrange:
+                type: [object, 'null']
+                properties:
+                  duration: {type: number, description: Rounded to 2dp.}
+                  message_count: {type: integer}
+                  labels:
+                    type: array
+                    items: {}
+              pending_count: {type: integer}
+              completed_count: {type: integer}
+              total_tracked: {type: integer}
+              last_committed: {type: [integer, 'null']}
+              committable: {type: [integer, 'null']}
+              first_offsets:
+                type: array
+                maxItems: 20
+                items: {type: integer}
+              offset_states:
+                type: object
+                additionalProperties: {type: string}
+              active_task_count: {type: integer}
+              stuck_tasks:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name: {type: string}
+                    stack:
+                      type: array
+                      description: Best-effort; may be empty.
+                      items: {type: string}
+                  required: [name, stack]
+        pool_active: {type: integer}
+        pool_waiting: {type: integer}
+        pool_max: {type: integer}
+      required: [processors, pool_active, pool_waiting, pool_max]
+
+    LiveOverview:
+      type: object
+      properties:
+        worker_id: {type: string}
+        running_tasks: {type: integer}
+        pending_tasks: {type: integer}
+        arranging:
+          type: array
+          items:
+            type: object
+            properties:
+              partition: {type: integer}
+              duration: {type: number}
+              message_count: {type: integer}
+              labels:
+                type: array
+                maxItems: 10
+                items: {}
+            required: [partition, duration, message_count]
+        pool_active: {type: integer}
+        pool_waiting: {type: integer}
+        pool_max: {type: integer}
+        partition_count: {type: integer}
+        max_ui_rows: {type: integer}
+        ws_min_duration_ms: {type: integer}
+        hook_flags:
+          type: object
+          properties:
+            task_complete: {type: boolean}
+            message_complete: {type: boolean}
+            window_complete: {type: boolean}
+          required: [task_complete, message_complete, window_complete]
+        kafka_ui_base: {type: string}
+        kafka_ui_cluster: {type: string}
+        kafka_source_topic: {type: string}
+      required: [worker_id, running_tasks, pending_tasks, arranging, pool_active,
+                 pool_waiting, pool_max, partition_count, max_ui_rows,
+                 ws_min_duration_ms, hook_flags, kafka_ui_base, kafka_ui_cluster,
+                 kafka_source_topic]
+
+    RecorderEventRow:
+      description: >-
+        Recorder rows pass through as stored (SELECT *); column presence is
+        event-type-dependent, so every property is optional. Known columns:
+        id, event, ts, dt, partition, offset, task_id, args, stdout,
+        stdout_size, stderr, exit_code, duration, output_topic, metadata,
+        pid, labels, origin, client_name, request_id.
+      type: object
+      additionalProperties: true
+
+    RecentTasks:
+      type: object
+      properties:
+        tasks:
+          type: array
+          items: {$ref: '#/components/schemas/RecentTaskEntry'}
+        lane_count: {type: integer}
+      required: [tasks, lane_count]
+
+    RecentTaskEntry:
+      type: object
+      properties:
+        task_id: {type: string}
+        partition: {type: [integer, 'null']}
+        start_ts: {type: [number, 'null']}
+        end_ts: {type: [number, 'null']}
+        duration: {type: [number, 'null']}
+        status: {type: string}
+        args: {}
+        pid: {type: [integer, 'null']}
+        slot: {type: [integer, 'null']}
+        labels: {type: [object, 'null'], additionalProperties: true}
+        env: {type: [object, 'null'], additionalProperties: true}
+        origin: {type: string}
+        client_name: {type: [string, 'null']}
+        request_id: {type: [string, 'null']}
+      required: [task_id, status]
+
+    ArrangeTasksMap:
+      description: Keyed by task_id; empty object when nothing matches.
+      type: object
+      additionalProperties:
+        type: object
+        properties:
+          task_id: {type: string}
+          status: {type: string}
+          start_ts: {type: [number, 'null']}
+          end_ts: {type: [number, 'null']}
+          duration: {type: [number, 'null']}
+          partition: {type: [integer, 'null']}
+          source_offsets: {type: [object, 'null'], additionalProperties: true}
+          pid: {type: [integer, 'null']}
+          args: {}
+          labels: {type: [object, 'null'], additionalProperties: true}
+          exit_code: {type: [integer, 'null']}
+          origin: {type: string}
+          client_name: {type: [string, 'null']}
+          request_id: {type: [string, 'null']}
+        required: [task_id, status]
+
+    TaskResultRow:
+      type: object
+      properties:
+        ts: {type: number}
+        task_id: {type: string}
+        partition: {type: [integer, 'null']}
+        source_offsets: {type: [object, 'null'], additionalProperties: true}
+        hook_duration: {type: [number, 'null']}
+        exec_duration: {type: [number, 'null']}
+        status: {type: string}
+        exit_code: {type: [integer, 'null']}
+        output_message_count: {type: integer}
+      required: [ts, task_id, status]
+
+    MessageResultRow:
+      type: object
+      properties:
+        ts: {type: number}
+        partition: {type: integer}
+        offset: {type: integer}
+        duration: {type: [number, 'null']}
+        end_to_end_duration: {type: [number, 'null']}
+        task_count: {type: integer}
+        succeeded: {type: integer}
+        failed: {type: integer}
+        replaced: {type: integer}
+        output_message_count: {type: integer}
+      required: [ts, partition, offset, task_count]
+
+    WindowResultRow:
+      type: object
+      properties:
+        ts: {type: number}
+        partition: {type: integer}
+        window_id: {type: string}
+        duration: {type: [number, 'null']}
+        task_count: {type: integer}
+        output_message_count: {type: integer}
+      required: [ts, partition, window_id, task_count]
+
+    DatabaseRow:
+      type: object
+      properties:
+        filename: {type: string}
+        path: {type: string}
+        worker_name: {type: [string, 'null']}
+        cluster_name: {type: [string, 'null']}
+        event_count: {type: integer}
+        event_counts:
+          type: object
+          additionalProperties: {type: integer}
+        first_event_ts: {type: [number, 'null']}
+        last_event_ts: {type: [number, 'null']}
+        has_events: {type: boolean}
+        has_config: {type: boolean}
+        has_state: {type: boolean}
+        size_bytes: {type: integer}
+      required: [filename, path, event_count, size_bytes]
+
+    MergeResult:
+      type: object
+      properties:
+        filename: {type: string}
+        worker_count: {type: integer}
+        event_count: {type: integer}
+        state_count: {type: integer}
+        cluster_name: {type: [string, 'null']}
+        source_files:
+          type: array
+          items: {type: string}
+      required: [filename, worker_count, event_count, source_files]
+
+    MetricFamily:
+      type: object
+      properties:
+        name: {type: string}
+        type:
+          type: string
+          description: Prometheus family type; "unknown" for untyped families.
+        help: {type: string}
+        source: {type: string, enum: [framework, user]}
+        samples:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                description: Counter samples keep the _total suffix.
+              labels:
+                type: object
+                additionalProperties: {type: string}
+              value: {type: number}
+            required: [name, labels, value]
+      required: [name, type, help, source, samples]
+
+    PeriodicGroup:
+      type: object
+      properties:
+        name: {type: string}
+        last_run_ts: {type: [number, 'null']}
+        last_duration: {type: [number, 'null']}
+        last_status: {type: [string, 'null']}
+        last_error: {type: [string, 'null']}
+        system: {type: boolean}
+        total_ok: {type: integer}
+        total_error: {type: integer}
+        recent:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            properties:
+              ts: {type: number}
+              duration: {type: [number, 'null']}
+              status: {type: string}
+              error: {type: [string, 'null']}
+            required: [ts, status]
+      required: [name, system, total_ok, total_error, recent]
+
+    ProbeInput:
+      type: object
+      properties:
+        value:
+          type: string
+          description: Raw message value; capped at 10 MB.
+        key: {type: [string, 'null']}
+        partition: {type: integer, minimum: 0}
+        offset: {type: integer, minimum: 0}
+        topic: {type: string}
+        timestamp: {type: [integer, 'null']}
+        use_cache: {type: boolean}
+      required: [value]
+
+    ProbeStageResult:
+      description: Outcome of one probe pipeline stage.
+      type: object
+      additionalProperties: true
+
+    ProbeError:
+      type: object
+      description: No traceback field — it must not be emitted.
+      properties:
+        stage: {type: string}
+        exception_class:
+          type: string
+          description: Language-specific; treat as opaque.
+        message: {type: string}
+        occurred_at_ms: {type: number}
+      required: [stage, exception_class, message]
+
+    ProbeTaskEntry:
+      type: object
+      properties:
+        task_id: {type: string}
+        parent_task_id: {type: [string, 'null']}
+        labels: {type: [object, 'null'], additionalProperties: true}
+        source_offsets: {type: [object, 'null'], additionalProperties: true}
+        precomputed: {}
+        status: {type: string, enum: [done, failed, replaced]}
+        exit_code: {type: [integer, 'null']}
+        duration_seconds: {type: [number, 'null']}
+        stdin: {type: [string, 'null']}
+        stdout: {type: [string, 'null']}
+        stderr: {type: [string, 'null']}
+        subprocess_exception: {type: [string, 'null']}
+        on_task_complete_duration: {type: [number, 'null']}
+        on_task_complete_result:
+          description: CollectResult — per-sink arrays may be absent (absent = empty).
+          type: [object, 'null']
+          additionalProperties: true
+        on_task_complete_error: {type: [string, 'null']}
+        retry_of: {type: [string, 'null']}
+        replacement_for: {type: [string, 'null']}
+      required: [task_id, status]
+
+    ProbeCacheCall:
+      type: object
+      properties:
+        op: {type: string, enum: [get, set, peek, delete, contains]}
+        key: {type: string}
+        scope: {type: [string, 'null']}
+        outcome: {type: string, enum: [hit, miss, suppressed]}
+        value_preview: {type: [string, 'null']}
+        origin_stage: {type: string}
+        ms_since_start: {type: number}
+      required: [op, key, outcome, origin_stage]
+
+    PlannedSinkRecord:
+      type: object
+      properties:
+        sink_type:
+          type: string
+          enum: [kafka, postgres, mongo, http, redis, files, custom]
+        destination: {type: string}
+        origin_stage: {type: string}
+        payload: {}
+        extras: {type: [object, 'null'], additionalProperties: true}
+      required: [sink_type, destination, origin_stage]
+
+    DebugReport:
+      type: object
+      properties:
+        input: {$ref: '#/components/schemas/ProbeInput'}
+        deserialize_error:
+          oneOf:
+            - {$ref: '#/components/schemas/ProbeError'}
+            - {type: 'null'}
+        parsed_payload: {}
+        message_label: {type: [string, 'null']}
+        arrange: {$ref: '#/components/schemas/ProbeStageResult'}
+        tasks:
+          type: array
+          items: {$ref: '#/components/schemas/ProbeTaskEntry'}
+        on_message_complete:
+          oneOf:
+            - {$ref: '#/components/schemas/ProbeStageResult'}
+            - {type: 'null'}
+        on_window_complete:
+          oneOf:
+            - {$ref: '#/components/schemas/ProbeStageResult'}
+            - {type: 'null'}
+        planned_sink_payloads:
+          type: array
+          items: {$ref: '#/components/schemas/PlannedSinkRecord'}
+        cache_calls:
+          type: array
+          items: {$ref: '#/components/schemas/ProbeCacheCall'}
+        cache_summary:
+          type: object
+          properties:
+            calls: {type: integer}
+            hits: {type: integer}
+            misses: {type: integer}
+            writes_suppressed: {type: integer}
+          required: [calls, hits, misses, writes_suppressed]
+        timing:
+          type: object
+          properties:
+            total_wallclock: {type: number}
+            arrange: {type: [number, 'null']}
+            on_message_complete: {type: [number, 'null']}
+            on_window_complete: {type: [number, 'null']}
+          required: [total_wallclock]
+        errors:
+          type: array
+          items: {$ref: '#/components/schemas/ProbeError'}
+        truncated: {type: boolean}
+      required: [input, arrange, tasks, planned_sink_payloads, cache_calls,
+                 cache_summary, timing, errors, truncated]
+
+    CacheEntry:
+      type: object
+      properties:
+        key: {type: string}
+        scope: {type: [string, 'null']}
+        value:
+          type: string
+          description: Raw stored string.
+        size_bytes: {type: integer}
+        created_at_ms: {type: integer}
+        updated_at_ms: {type: integer}
+        expires_at_ms: {type: [integer, 'null']}
+        origin_worker_id: {type: [string, 'null']}
+      required: [key, size_bytes, created_at_ms, updated_at_ms]
+
+    CacheEntriesPage:
+      type: object
+      properties:
+        entries:
+          type: array
+          items: {$ref: '#/components/schemas/CacheEntry'}
+        total: {type: integer}
+        limit: {type: integer}
+        offset: {type: integer}
+      required: [entries, total, limit, offset]
+
+    CacheEntryDetail:
+      allOf:
+        - {$ref: '#/components/schemas/CacheEntry'}
+        - type: object
+          properties:
+            value:
+              description: Decoded JSON value (null when not decodable).
+            raw_value: {type: string}
+          required: [raw_value]
+
+    CacheStats:
+      type: object
+      properties:
+        entries_in_memory: {type: integer}
+        bytes_in_memory: {type: integer}
+        entries_in_db: {type: integer}
+        bytes_in_db: {type: integer}
+      required: [entries_in_memory, bytes_in_memory, entries_in_db, bytes_in_db]
