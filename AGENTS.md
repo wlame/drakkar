@@ -96,13 +96,16 @@ Design points every agent should know:
   — immune to the anonymous 60 req/h API rate limit. The API is only a
   fallback (private repos via `GITHUB_TOKEN`, renamed assets).
 - **Resolution ladder** (never fatal, bounded ~30s, runs in a worker
-  thread): cached resolved tag → fetch → recheck cache (a concurrent worker
-  may have installed it) → cached pin → newest cached release (unpinned
-  workers only — a pin guarantees contract compatibility) → keep the
-  **built-in Jinja pages** (the embedded placeholder is never served while
-  Jinja pages exist; `UIServer._resolve_ui_bundle` returns None for
-  `source == 'embedded'`). The built-in pages carry a "built-in UI" header
-  badge so operators can tell them from a served release.
+  thread): cached resolved tag → fetch (with optional `.sha256` sidecar
+  verification — binding when the asset exists) → recheck cache (a
+  concurrent worker may have installed it) → cached pin → newest cached
+  release (unpinned workers only — a pin guarantees contract
+  compatibility) → the **release embedded as package data** (`just embed-ui
+  vX.Y.Z` refreshes `drakkar/uihost/bundle/` + its VERSION file; identity
+  reports `ui_source: "embedded"`). The built-in Jinja pages serve only
+  when `ui.release.enabled=false` or resolution errored; they carry a
+  "built-in UI" header badge so operators can tell them from a served
+  release.
 - **Cache management CLI**: the `drakkar-ui` console script
   (`drakkar/uihost/cli.py`, `just drakkar-ui …`) mirrors the Go backend's
   `cmd/drakkar-ui` byte-for-byte (`where` / `fetch --version=vX` /
@@ -161,8 +164,14 @@ mounts the host UI cache so all workers share one bundle download.
   (503 envelopes). Kubernetes probes live on the UI server.
 - Retry visualization convention: archived task attempts get composite keys
   `task_id:r<start_ts>` — server and SPA both rely on it.
-- `pyproject.toml` ships `drakkar/uihost/bundle/**` as package data (the
-  embedded placeholder); keep it in the wheel.
+- `pyproject.toml` ships `drakkar/uihost/bundle/**` as package data (a real
+  drakkar-ui release + VERSION file); keep it in the wheel.
+- Cross-backend DB interop is test-pinned: `tests/test_cross_backend_db.py`
+  reads fixture DBs written by the GO engines from `tests/fixtures/go-db/`
+  (regenerate with the Go repo's `just gen-db-fixtures`; `just
+  gen-db-fixtures` here feeds the Go repo). Framework datetimes in JSON use
+  ONE canonical format via `drakkar.format_rfc3339_micro` — never call
+  `isoformat()` on framework-controlled values.
 
 ## Directory map
 
