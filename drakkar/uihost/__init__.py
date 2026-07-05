@@ -17,7 +17,8 @@ Resolution order (graceful degradation, never fatal):
    fetch failure a stale cached copy of that version still serves;
 4. with no resolvable version at all, the newest previously cached version
    (semver order, lexicographic fallback) serves;
-5. finally the embedded placeholder page shipped as package data.
+5. finally the drakkar-ui release embedded as package data (refreshed with
+   ``just embed-ui vX.Y.Z``), so the SPA works fully offline.
 
 A fetch failure is never fatal — the worker still starts and serves whatever
 bundle is available (cache or embedded).
@@ -74,9 +75,20 @@ Source = Literal['embedded', 'cache', 'fetched']
 # or embedded bundle; they never delay worker startup past this budget.
 UI_RESOLVE_TIMEOUT_SECONDS = 30.0
 
-# The placeholder page baked into the package so SPA mode works fully
-# offline out of the box (mirrors Go's go:embed fallback bundle).
+# The drakkar-ui release baked into the package (``just embed-ui vX.Y.Z``
+# refreshes it) so SPA mode works fully offline out of the box — mirrors
+# Go's go:embed fallback bundle. The bundled release tag lives in the
+# VERSION file the embed recipe writes alongside index.html.
 EMBEDDED_BUNDLE_DIR = Path(__file__).parent / 'bundle'
+
+
+def embedded_bundle_version() -> str | None:
+    """Release tag of the embedded bundle, or None for a pre-embed stub."""
+    try:
+        return (EMBEDDED_BUNDLE_DIR / 'VERSION').read_text().strip() or None
+    except OSError:
+        return None
+
 
 # Cached bundle directories are named after release tags (``v1.2.0``).
 _SEMVER_TAG_RE = re.compile(r'^v(\d+)\.(\d+)\.(\d+)$')
@@ -86,9 +98,10 @@ _SEMVER_TAG_RE = re.compile(r'^v(\d+)\.(\d+)\.(\d+)$')
 class ResolvedBundle:
     """The UI bundle ``resolve`` selected: directory, provenance, version.
 
-    ``version`` is the release tag the directory holds (``v1.2.0``), or
-    ``None`` for the embedded placeholder — surfaced by the identity
-    endpoint so operators can see which UI a backend actually serves.
+    ``version`` is the release tag the directory holds (``v1.2.0``; the
+    embedded bundle's tag comes from its VERSION file), or ``None`` when
+    no tag is known — surfaced by the identity endpoint so operators can
+    see which UI a backend actually serves.
     """
 
     root: Path
@@ -228,10 +241,11 @@ def resolve(
             logger.info('ui_served_from_cache', category='ui', version=newest, dir=str(root / newest))
             return ResolvedBundle(root=root / newest, source='cache', version=newest)
 
-    # 5. Embedded placeholder fallback.
+    # 5. Embedded fallback — the drakkar-ui release baked into the package.
     if dir_has_index(EMBEDDED_BUNDLE_DIR):
-        logger.info('ui_served_from_embedded_fallback', category='ui')
-        return ResolvedBundle(root=EMBEDDED_BUNDLE_DIR, source='embedded', version=None)
+        version = embedded_bundle_version()
+        logger.info('ui_served_from_embedded_fallback', category='ui', version=version)
+        return ResolvedBundle(root=EMBEDDED_BUNDLE_DIR, source='embedded', version=version)
     logger.warning('ui_embedded_fallback_missing', category='ui', dir=str(EMBEDDED_BUNDLE_DIR))
     return None
 

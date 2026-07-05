@@ -812,11 +812,16 @@ components:
             git-describe build stamp on Go ("dev" when unstamped). (v1.2)
         ui_version:
           type: [string, 'null']
-          description: Served drakkar-ui release tag; null when built-in pages serve. (v1.2)
+          description: >-
+            Served drakkar-ui release tag; null when built-in pages serve
+            (or when an embedded pre-release stub carries no tag). (v1.2)
         ui_source:
           type: string
-          enum: [release, builtin]
-          description: Where the served UI comes from. (v1.2)
+          enum: [release, embedded, builtin]
+          description: >-
+            Where the served UI comes from - a fetched/cached release, the
+            release embedded in the backend binary/package, or the built-in
+            fallback pages. (v1.2)
       required: [worker_id, cluster, config_summary]
 
     Dashboard:

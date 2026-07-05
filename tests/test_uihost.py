@@ -710,3 +710,26 @@ def test_resolve_pinned_cached_beats_unfetchable_latest(stub_github, tmp_path):
     assert bundle is not None
     assert bundle.source == 'cache'
     assert bundle.root == tmp_path / 'cache' / 'v1.0.0'
+
+
+def test_embedded_bundle_is_a_real_release_with_version(tmp_path):
+    """The package-baked bundle is a REAL drakkar-ui release, tag included.
+
+    ``just embed-ui vX.Y.Z`` writes the release into drakkar/uihost/bundle
+    plus a VERSION file; the resolver's last rung serves it (and reports
+    the tag through identity) instead of falling back to built-in pages.
+    """
+    from drakkar.uihost import EMBEDDED_BUNDLE_DIR, embedded_bundle_version
+
+    version = embedded_bundle_version()
+    assert version is not None and version.startswith('v')
+    assert version == (EMBEDDED_BUNDLE_DIR / 'VERSION').read_text().strip()
+    # A built SPA references its hashed assets — the retired stub did not.
+    assert 'assets/' in (EMBEDDED_BUNDLE_DIR / 'index.html').read_text()
+
+    # The offline ladder (empty cache, no repo configured) lands on the
+    # embedded rung and carries the version through.
+    bundle = resolve(ui_config(tmp_path, repo=''))
+    assert bundle is not None
+    assert bundle.source == 'embedded'
+    assert bundle.version == version

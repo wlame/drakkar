@@ -449,6 +449,7 @@ def create_ui_app(
     drakkar_app: DrakkarApp,
     ui_root: Path | None = None,
     ui_version: str | None = None,
+    ui_source: str = 'release',
 ) -> FastAPI:
     """Create the FastAPI UI application.
 
@@ -493,7 +494,10 @@ def create_ui_app(
         drakkar_app=drakkar_app,
         templates=templates,
         ui_version=ui_version if ui_root is not None else None,
-        ui_source='release' if ui_root is not None else 'builtin',
+        # Identity's ui_source contract value: 'release'/'embedded' in SPA
+        # mode (whatever the caller resolved), 'builtin' when the Jinja
+        # pages serve.
+        ui_source=ui_source if ui_root is not None else 'builtin',
     )
 
     # Jinja globals that need access to the live app/config — bound
@@ -566,6 +570,9 @@ class UIServer:
             self._drakkar_app,
             ui_root=bundle.root if bundle else None,
             ui_version=bundle.version if bundle else None,
+            # Contract v1.2 label: cache/fetched bundles are a 'release';
+            # the package-baked copy reports 'embedded'.
+            ui_source='embedded' if bundle and bundle.source == 'embedded' else 'release',
         )
         uvi_config = uvicorn.Config(
             app=fastapi_app,
@@ -592,7 +599,10 @@ class UIServer:
         The resolution (cache → GitHub fetch → embedded fallback) runs in a
         worker thread so a slow network fetch never blocks the main loop; it
         is bounded internally by ``UI_RESOLVE_TIMEOUT_SECONDS`` and is never
-        fatal — any failure leaves the server on its built-in HTML pages.
+        fatal. The ladder always lands somewhere: an offline host with an
+        empty cache serves the release embedded in the package. Only a
+        resolution *error* (or ``ui.release.enabled=false``) leaves the
+        server on its built-in HTML pages.
         """
         from drakkar.config import UIConfig
         from drakkar.uihost import resolve
@@ -609,13 +619,10 @@ class UIServer:
             return None
         if bundle is None:
             return None
-        # The embedded placeholder page is strictly worse than the built-in
-        # Jinja pages this worker already has — never serve it; None keeps
-        # the built-in UI. (The placeholder only exists for hosts with no
-        # other UI at all.)
-        if bundle.source == 'embedded':
-            await logger.ainfo('ui_using_builtin_pages', category='ui', reason='no bundle fetchable and cache empty')
-            return None
+        # 'embedded' is the real drakkar-ui release baked into the package
+        # (``just embed-ui``) — a first-class rung of the ladder, served
+        # like any other bundle. The built-in Jinja pages remain only for
+        # ``ui.release.enabled=false`` and resolution errors.
         await logger.ainfo(
             'ui_bundle_resolved', category='ui', source=bundle.source, version=bundle.version, dir=str(bundle.root)
         )

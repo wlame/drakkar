@@ -780,6 +780,32 @@ class TestApiV1Identity:
         assert data['ui_version'] == 'v1.0.0'
         assert data['ui_source'] == 'release'
 
+    async def test_ui_fields_report_embedded_bundle(self, tmp_path, debug_config, mock_recorder, mock_app):
+        """The package-baked bundle reports ui_source='embedded' (v1.2)."""
+        from drakkar.uihost import EMBEDDED_BUNDLE_DIR, embedded_bundle_version
+
+        mock_app.config_summary = '[test-worker]'
+        mock_recorder.config = debug_config
+        fastapi_app = create_ui_app(
+            debug_config,
+            mock_recorder,
+            mock_app,
+            ui_root=EMBEDDED_BUNDLE_DIR,
+            ui_version=embedded_bundle_version(),
+            ui_source='embedded',
+        )
+        async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test') as c:
+            data = (await c.get('/api/v1/identity')).json()
+            index = await c.get('/')
+        assert data['ui_source'] == 'embedded'
+        # The embedded bundle is a REAL drakkar-ui release: it carries its
+        # tag (from the VERSION file `just embed-ui` writes) and serves a
+        # built SPA index, not the retired stub page.
+        assert data['ui_version'] == embedded_bundle_version()
+        assert data['ui_version'] is not None
+        assert index.status_code == 200
+        assert 'assets/' in index.text
+
     async def test_cluster_name_surfaces(self, debug_config, mock_recorder, mock_app):
         mock_app._cluster_name = 'main'
         mock_app.config_summary = '[test-worker/main] topic=input-events'

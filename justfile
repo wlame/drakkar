@@ -60,6 +60,24 @@ cover:
 gen-db-fixtures:
     uv run python scripts/gen_db_fixtures.py --out=../drakkar-go/internal/crossbackend/testdata/python-db
 
+# Embed a drakkar-ui release as the offline fallback bundle (then commit the result)
+embed-ui version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tag="{{ version }}"
+    url="https://github.com/wlame/drakkar-ui/releases/download/${tag}/drakkar-ui-${tag}.tar.gz"
+    dest="drakkar/uihost/bundle"
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    echo "downloading ${url}"
+    curl -fsSL "$url" -o "$tmp/bundle.tar.gz"
+    mkdir "$tmp/x" && tar -xzf "$tmp/bundle.tar.gz" -C "$tmp/x"
+    test -f "$tmp/x/index.html" || { echo "no index.html at archive root" >&2; exit 1; }
+    rm -rf "$dest" && mkdir -p "$dest"
+    cp -R "$tmp/x/." "$dest/"
+    printf '%s\n' "$tag" > "$dest/VERSION"
+    echo "embedded ${tag} into ${dest} — review and commit"
+
 # ---------------------------------------------------------------------------
 # CI / pre-push
 # ---------------------------------------------------------------------------
