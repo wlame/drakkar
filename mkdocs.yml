@@ -56,6 +56,7 @@ nav:
   - Webapp: webapp.md
   - Executor: executor.md
   - Observability: observability.md
+  - Local Databases: local-databases.md
   - Performance: performance.md
   - Deployment: deployment.md
   - Config Calculator: calculator.md
