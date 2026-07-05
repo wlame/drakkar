@@ -494,7 +494,7 @@ drakkar-ui fetch --version=v0.2.0   # download a specific release
 
 All subcommands accept `--repo=owner/name`, `--cache-dir=DIR`, and `--api-base=URL` (GitHub Enterprise); a `GITHUB_TOKEN` in the environment raises rate limits and unlocks private repos. Cached versions are never re-downloaded -- release tags are immutable. `just drakkar-ui <args>` wraps the same command for repo-local use.
 
-When no bundle is available at all (offline host, empty cache), the worker serves its built-in server-rendered pages instead -- those pages carry a **built-in UI** tag in the header so operators can tell at a glance they are on the fallback rather than a drakkar-ui release.
+When neither the cache nor GitHub can supply a bundle (offline host, empty cache), the worker serves the drakkar-ui release **embedded in the package** (`just embed-ui vX.Y.Z` refreshes it; identity reports `ui_source: "embedded"`). The built-in server-rendered pages appear only when `ui.release.enabled=false` or resolution errored -- those pages carry a **built-in UI** tag in the header so operators can tell at a glance they are on the fallback rather than a drakkar-ui release.
 
 ---
 

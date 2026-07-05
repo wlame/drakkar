@@ -52,9 +52,11 @@ the failure mode so you can decide what your deployment needs.
    on restart) and disables the OOM watchdog (`{db_dir}/{worker}.watchdog`).
 4. **The SPA bundle needs the UI server.** `ui.release.enabled` fetches
    and serves the drakkar-ui release; any fetch failure is non-fatal
-   and falls back to the built-in pages (marked with a "built-in UI"
-   badge). Disable it (`ui.release.enabled: false`) for air-gapped
-   deployments.
+   and falls back to the release **embedded in the binary/package**
+   (identity reports `ui_source: "embedded"`), so the SPA works fully
+   offline. The built-in pages (marked with a "built-in UI" badge)
+   serve only when `ui.release.enabled: false` — e.g. deliberately, for
+   air-gapped deployments that prefer them — or when resolution errored.
 5. **Fleet features need a SHARED `db_dir` + `store_config`.** Worker
    autodiscovery, the workers list, cross-worker links, and cross-worker
    tracing all work by scanning one shared directory for other workers'
