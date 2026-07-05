@@ -71,6 +71,16 @@ class DrakkarApp:
             self._config = load_config(config_path)
 
         self._handler = handler
+        # Fail fast on a webapp/handler mismatch, mirroring the Go
+        # backend's app.New check: a webapp without the HTTP hooks (or
+        # the typed models they need) can never serve a request, so
+        # surface it at construction rather than at the first POST. The
+        # import is local because the webapp stack (FastAPI/uvicorn) is
+        # deliberately loaded only when the webapp is enabled.
+        if self._config.webapp.enabled:
+            from drakkar.webapp.server import validate_webapp_handler
+
+            validate_webapp_handler(handler)
         self._worker_id = worker_id or os.environ.get(self._config.worker_name_env, '') or f'drakkar-{id(self):x}'
         self._cluster_name = ''
         if self._config.cluster_name_env:

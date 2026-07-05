@@ -233,6 +233,16 @@ class AppLifecycle:
                 app=app,
             )
             await app._ui_server.start()
+        else:
+            # The UI server is this worker's ONLY probe surface — without
+            # it nothing serves /healthz or /readyz and Kubernetes probes
+            # simply fail. Warn loudly (same event name on both backends)
+            # because that consequence is easy to miss.
+            await log.awarning(
+                'ui_disabled_no_probes',
+                category='lifecycle',
+                reason='ui.enabled=false — /healthz and /readyz are not served; Kubernetes probes need the UI server',
+            )
 
         # Framework cache. Constructed after the recorder so the cache
         # engine can pass it as the sink for its periodic_run events. If

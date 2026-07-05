@@ -852,6 +852,10 @@ class WebAppConfig(BaseModel):
     sinks_enabled: bool = False
     request_timeout_seconds: float = 30.0
     max_concurrent: int = 64
+    # Cap on a single POST body (bytes); requests beyond it get a 413
+    # ``request_too_large`` envelope before the body is buffered. Same
+    # key, default, and behavior as the Go backend.
+    max_body_bytes: int = 10 * 1024 * 1024
     clients: list[WebClientConfig] = Field(
         default_factory=lambda: [WebClientConfig(name='anonymous', token='', rpm=4)],
         description=(
@@ -881,6 +885,10 @@ class WebAppConfig(BaseModel):
         # requests indefinitely.
         if self.max_concurrent <= 0:
             raise ValueError(f'webapp.max_concurrent must be > 0, got {self.max_concurrent}')
+        # A zero/negative body cap would reject every non-empty POST at
+        # the body-read gate.
+        if self.max_body_bytes <= 0:
+            raise ValueError(f'webapp.max_body_bytes must be > 0, got {self.max_body_bytes}')
         # At least one client. The default factory ensures this for an
         # omitted ``clients`` block, but explicit ``clients: []`` in YAML
         # would otherwise silently give us a webapp that rejects every

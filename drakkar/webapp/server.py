@@ -137,6 +137,49 @@ class ConfigurationError(RuntimeError):
     """
 
 
+def validate_webapp_handler(handler: Any) -> None:
+    """Fail fast when ``webapp.enabled`` but the handler can't serve HTTP.
+
+    Called from ``DrakkarApp.__init__`` — construction time, mirroring the
+    Go backend's ``app.New`` check — and again defensively when the webapp
+    server is built. Two requirements:
+
+    - both HTTP hooks are overridden (the ``BaseDrakkarHandler`` defaults
+      only raise ``NotImplementedError`` at request time), and
+    - the 3rd/4th generic slots carry concrete Pydantic models
+      (``http_request_model`` / ``http_response_model``).
+    """
+    from drakkar.handler import BaseDrakkarHandler
+
+    handler_cls = type(handler)
+    # Types first: the 4-slot generic is the primary opt-in mechanism and
+    # its message names the offending class — the most useful pointer for
+    # a handler that has no webapp support at all.
+    request_model = getattr(handler, 'http_request_model', None)
+    response_model = getattr(handler, 'http_response_model', None)
+    if request_model is None or response_model is None:
+        cls_name = handler_cls.__name__
+        raise ConfigurationError(
+            f'webapp.enabled=true but {cls_name} did not declare '
+            f'HttpRequestT/HttpResponseT — extend '
+            f'BaseDrakkarHandler[InputT, OutputT, HttpRequestT, '
+            f'HttpResponseT] with concrete Pydantic models in slots '
+            f'3 and 4. See docs/webapp.md for an example.'
+        )
+    base = BaseDrakkarHandler
+    hooks_overridden = (
+        getattr(handler_cls, 'arrange_http_request', base.arrange_http_request) is not base.arrange_http_request
+        and getattr(handler_cls, 'on_http_request_complete', base.on_http_request_complete)
+        is not base.on_http_request_complete
+    )
+    if not hooks_overridden:
+        raise ConfigurationError(
+            'webapp.enabled=true but the handler does not override '
+            'arrange_http_request + on_http_request_complete — implement '
+            'both hooks or disable the webapp section'
+        )
+
+
 class WebApp:
     """Owns the webapp FastAPI server and its uvicorn-on-thread lifecycle.
 
@@ -426,26 +469,13 @@ class WebApp:
             ctx.cancelled.set()
 
     def _validate_handler_types(self) -> None:
-        """Fail fast if the handler is missing webapp HTTP types.
+        """Fail fast if the handler is missing webapp hooks or HTTP types.
 
-        Reads ``http_request_model`` / ``http_response_model`` off the
-        handler subclass — populated by ``BaseDrakkarHandler.__init_subclass__``
-        when the user declares concrete Pydantic models in the 3rd / 4th
-        Generic slots. ``None`` means "this slot was left at the PEP 696
-        default", which is a configuration error when ``webapp.enabled=True``.
+        Delegates to :func:`validate_webapp_handler` — the same check
+        ``DrakkarApp.__init__`` runs at construction time. Kept here as a
+        defense for direct ``WebApp(...)`` embedders who bypass the app.
         """
-        handler = self._app._handler
-        request_model = getattr(handler, 'http_request_model', None)
-        response_model = getattr(handler, 'http_response_model', None)
-        if request_model is None or response_model is None:
-            cls_name = type(handler).__name__
-            raise ConfigurationError(
-                f'webapp.enabled=true but {cls_name} did not declare '
-                f'HttpRequestT/HttpResponseT — extend '
-                f'BaseDrakkarHandler[InputT, OutputT, HttpRequestT, '
-                f'HttpResponseT] with concrete Pydantic models in slots '
-                f'3 and 4. See docs/webapp.md for an example.'
-            )
+        validate_webapp_handler(self._app._handler)
 
     def _build_app(self) -> FastAPI:
         """Construct the FastAPI app and register the single POST route.
@@ -627,11 +657,41 @@ class WebApp:
                     },
                 )
 
+            # Cap the body read so an authenticated client cannot exhaust
+            # worker memory with one huge POST — same semantics and 413
+            # envelope as the Go backend's MaxBytesReader path. Counting
+            # streamed bytes (not trusting Content-Length) means a lying
+            # or absent header cannot bypass the cap; exactly
+            # ``max_body_bytes`` is still accepted.
+            max_body = self._config.max_body_bytes
+            chunks: list[bytes] = []
+            received = 0
+            too_large = False
+            async for chunk in request.stream():
+                received += len(chunk)
+                if received > max_body:
+                    too_large = True
+                    break
+                chunks.append(chunk)
+            if too_large:
+                self._observe_outcome(request=request, client=metric_client, status='error')
+                # 413 (not the parse gate's 422): the payload was never
+                # even read, so "invalid" would mislead clients into
+                # retrying the same oversized body.
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        'error': 'request_too_large',
+                        'request_id': gate_request_id,
+                        'details': f'request body exceeds webapp.max_body_bytes ({max_body} bytes)',
+                    },
+                )
+
             # Parse the body manually so we control the 422 envelope
             # shape. Declaring the parameter as the typed model would
             # let FastAPI auto-422 with its own envelope; we want a flat
             # body matching the documented webapp shape.
-            body_bytes = await request.body()
+            body_bytes = b''.join(chunks)
             try:
                 parsed = self._http_request_type.model_validate_json(body_bytes)
             except ValidationError as exc:

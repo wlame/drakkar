@@ -52,7 +52,12 @@ class _HttpResp(BaseModel):
 
 
 class _WebHandler(BaseDrakkarHandler[_Input, _Output, _HttpReq, _HttpResp]):
-    """Handler with all four Generic slots populated for webapp use."""
+    """Handler with all four Generic slots populated for webapp use.
+
+    Overrides both HTTP hooks — construction-time validation (mirroring
+    the Go backend) rejects a webapp-enabled handler that leaves them at
+    the raising Base defaults.
+    """
 
     async def arrange(self, messages, pending):
         return [
@@ -63,6 +68,12 @@ class _WebHandler(BaseDrakkarHandler[_Input, _Output, _HttpReq, _HttpResp]):
             )
             for msg in messages
         ]
+
+    async def arrange_http_request(self, req, pending):
+        return []
+
+    async def on_http_request_complete(self, group):
+        return _HttpResp()
 
 
 class _PlainHandler(BaseDrakkarHandler):
@@ -415,3 +426,34 @@ async def test_shutdown_calls_webapp_stop_after_processor_drain(shutdown_app):
     webapp_calls = [c for c in call_log if c.startswith('webapp.')]
     assert webapp_calls[0] == 'webapp.shutdown_event.set'
     assert webapp_calls[-1] == 'webapp.stop'
+
+
+# ---------------------------------------------------------------------------
+# Construction-time fail-fast (parity with the Go backend's app.New check)
+# ---------------------------------------------------------------------------
+
+
+def test_app_construction_fails_fast_when_webapp_enabled_without_hooks():
+    """webapp.enabled + a handler without the HTTP hooks → immediate error.
+
+    Mirrors the Go backend, which rejects this pairing at ``app.New``.
+    Before this check the misconfiguration was only discovered when the
+    webapp thread failed to start (non-fatal, worker continued without
+    the webapp) — or worse, at the first POST.
+    """
+    from drakkar.webapp import ConfigurationError
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        DrakkarApp(handler=_PlainHandler(), config=_build_config(webapp_enabled=True))
+    assert 'webapp.enabled=true' in str(exc_info.value)
+
+
+def test_app_construction_succeeds_when_webapp_enabled_with_full_handler():
+    app = DrakkarApp(handler=_WebHandler(), config=_build_config(webapp_enabled=True))
+    assert app is not None
+
+
+def test_app_construction_skips_webapp_validation_when_disabled():
+    """A plain handler stays valid as long as the webapp is off."""
+    app = DrakkarApp(handler=_PlainHandler(), config=_build_config(webapp_enabled=False))
+    assert app is not None

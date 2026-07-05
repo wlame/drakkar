@@ -77,10 +77,33 @@ class _HttpResp(BaseModel):
 
 
 class _WebHandler(BaseDrakkarHandler[_Input, _Output, _HttpReq, _HttpResp]):
-    """Handler with all four Generic slots populated."""
+    """Handler with all four Generic slots populated.
+
+    Overrides both HTTP hooks — construction-time validation (mirroring
+    the Go backend) rejects a webapp-enabled handler that leaves them at
+    the raising Base defaults.
+    """
 
     async def arrange(self, messages, pending):
         return []
+
+    async def arrange_http_request(self, req, pending):
+        return []
+
+    async def on_http_request_complete(self, group):
+        return _HttpResp()
+
+
+class _RaisingWebHandler(_WebHandler):
+    """Hooks present (passes construction validation) but raising.
+
+    For tests that assert the route's flat-500 mapping of handler
+    errors — the pre-validation era relied on the raising Base default
+    for this; now the raise must be an explicit override.
+    """
+
+    async def arrange_http_request(self, req, pending):
+        raise NotImplementedError('arrange_http_request')
 
 
 class _NoHttpHandler(BaseDrakkarHandler[_Input, _Output]):
@@ -157,7 +180,7 @@ def test_construction_succeeds_with_full_4_param_handler():
 
 def test_start_in_thread_and_wait_until_ready_returns_once_serving():
     """Server binds the port and ``wait_until_ready`` resolves cleanly."""
-    handler = _WebHandler()
+    handler = _RaisingWebHandler()
     app = _make_app_stub(handler, is_ready=True)
     port = _free_port()
     config = _make_config(port=port)
@@ -180,9 +203,8 @@ def test_start_in_thread_and_wait_until_ready_returns_once_serving():
             # Hit the configured route — body shape matters now
             # because Task 6a parses the body before dispatching to
             # the runner. Empty JSON validates against the test's
-            # ``_HttpReq`` model (all defaults). The default
-            # ``arrange_http_request`` raises ``NotImplementedError``
-            # which the route handler maps to a flat 500.
+            # ``_HttpReq`` model (all defaults). The fixture's raising
+            # ``arrange_http_request`` maps to a flat 500 from the route.
             response = client.post(f'http://127.0.0.1:{port}/process', json={})
             assert response.status_code == 500
             body = response.json()
@@ -294,13 +316,12 @@ def test_request_during_shutdown_returns_503_with_status_shutdown():
 def test_request_when_ready_and_not_shutting_down_dispatches_to_runner():
     """Both gates pass → request flows into the runner (Task 6a).
 
-    The bare ``_WebHandler`` test fixture inherits the default
-    ``arrange_http_request`` that raises ``NotImplementedError``. That
-    failure surfaces as a flat 500 from the route handler — confirming
-    body parse + runner dispatch happened. The happy-path runner tests
-    live in ``tests/test_webapp_runner.py``.
+    ``_RaisingWebHandler.arrange_http_request`` raises
+    ``NotImplementedError``; that failure surfaces as a flat 500 from the
+    route handler — confirming body parse + runner dispatch happened. The
+    happy-path runner tests live in ``tests/test_webapp_runner.py``.
     """
-    handler = _WebHandler()
+    handler = _RaisingWebHandler()
     app = _make_app_stub(handler, is_ready=True)
     port = _free_port()
     config = _make_config(port=port)
@@ -317,5 +338,61 @@ def test_request_when_ready_and_not_shutting_down_dispatches_to_runner():
             assert body['status'] == 'error'
             assert body['error'] == 'internal error'
             assert 'request_id' in body
+    finally:
+        webapp.stop(drain_timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# Body-size cap (parity with the Go backend's max_body_bytes / 413 path)
+# ---------------------------------------------------------------------------
+
+
+def test_oversized_body_returns_413_with_go_parity_envelope():
+    """A body beyond ``max_body_bytes`` trips 413 BEFORE parsing.
+
+    The envelope (keys and details text) matches the Go backend's
+    MaxBytesReader path byte-for-byte, and the cap fires ahead of the
+    422 parse gate — the payload is never read, so "invalid" would
+    mislead clients into retrying the same oversized body.
+    """
+    handler = _WebHandler()
+    app = _make_app_stub(handler, is_ready=True)
+    port = _free_port()
+    config = WebAppConfig(
+        enabled=True,
+        host='127.0.0.1',
+        port=port,
+        path='/process',
+        max_body_bytes=64,
+        clients=[WebClientConfig(name='anonymous', token='', rpm=100)],
+    )
+    webapp = WebApp(app, config)
+
+    try:
+        webapp.start_in_thread()
+        webapp.wait_until_ready(timeout=5.0)
+
+        with httpx.Client() as client:
+            # 100 bytes of non-JSON: the cap (64) must answer before the
+            # parse gate ever sees the payload.
+            response = client.post(
+                f'http://127.0.0.1:{port}/process',
+                content=b'x' * 100,
+                headers={'content-type': 'application/json'},
+            )
+            assert response.status_code == 413
+            body = response.json()
+            assert body['error'] == 'request_too_large'
+            assert body['details'] == 'request body exceeds webapp.max_body_bytes (64 bytes)'
+            assert 'request_id' in body
+
+            # Exactly at the limit is still accepted by the cap — this
+            # invalid JSON reaches the parse gate and 422s instead.
+            response = client.post(
+                f'http://127.0.0.1:{port}/process',
+                content=b'y' * 64,
+                headers={'content-type': 'application/json'},
+            )
+            assert response.status_code == 422
     finally:
         webapp.stop(drain_timeout=2.0)

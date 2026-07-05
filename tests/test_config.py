@@ -488,6 +488,7 @@ def test_webapp_config_defaults():
     assert cfg.sinks_enabled is False
     assert cfg.request_timeout_seconds == 30.0
     assert cfg.max_concurrent == 64
+    assert cfg.max_body_bytes == 10 * 1024 * 1024  # same default as the Go backend
     assert len(cfg.clients) == 1
     assert cfg.clients[0].name == 'anonymous'
     assert cfg.clients[0].token == ''
@@ -578,6 +579,14 @@ def test_webapp_config_rejects_zero_max_concurrent():
     with pytest.raises(ValidationError) as exc_info:
         WebAppConfig(max_concurrent=0)
     assert 'max_concurrent' in str(exc_info.value)
+
+
+def test_webapp_config_rejects_non_positive_max_body_bytes():
+    # A zero/negative cap would reject every non-empty POST — same
+    # validation rule (and message shape) as the Go backend.
+    with pytest.raises(ValidationError) as exc_info:
+        WebAppConfig(max_body_bytes=0)
+    assert 'max_body_bytes must be > 0' in str(exc_info.value)
 
 
 def test_webapp_config_rejects_negative_max_concurrent():
