@@ -106,7 +106,7 @@ Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execut
 - **[Backpressure](performance.md#backpressure)** -- Kafka pause/resume keeps memory bounded regardless of consumer lag
 - **[Typed messages](handler.md#typed-messages)** -- Pydantic models for input/output with auto-deserialization
 - **[Cache (optional)](cache.md)** -- `self.cache` key/value store with memory + write-behind SQLite + eventually-consistent peer sync across workers
-- **[Operator UI](observability.md#operator-ui)** -- built-in FastAPI dashboard with executor timeline, partition lag, message tracing
+- **[Operator UI](observability.md#operator-ui)** -- the versioned [drakkar-ui](https://github.com/wlame/drakkar-ui) SPA (fetched from GitHub Releases at startup, one shared cache for Python and Go workers) with executor timeline, partition lag, message tracing; built-in fallback pages when offline
 - **[Prometheus metrics](observability.md#prometheus-metrics)** -- pipeline, executor, and per-sink counters/histograms
 - **[Structured logging](observability.md#structured-logging)** -- JSON/ECS-compatible via structlog, ready for Elastic
 - **[Periodic tasks](handler.md#periodic-tasks)** -- `@periodic` decorator for recurring background coroutines
@@ -213,10 +213,17 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 | [Cache](cache.md) | `self.cache` API, scope rules, peer sync, LWW semantics, "delete is local-only" sharp edge |
 | [Fan-out](fan-out.md) | One message → many tasks → one aggregate. `MessageGroup`, `on_message_complete`, replacement-chain tracing. |
 | [Configuration](configuration.md) | Full YAML reference, env var overrides, `DrakkarConfig` model |
+| [Features & Enable Order](features.md) | Which switch enables what, dependency rules, tiered rollout order |
 | [Sinks](sinks.md) | Sink types, payload models, routing, multi-instance setup |
 | [Executor](executor.md) | Subprocess pool, concurrency, timeouts, retries, binary resolution |
+| [Webapp](webapp.md) | Synchronous HTTP pipeline, auth, rate limits, status codes |
 | [Observability](observability.md) | Operator UI pages, Prometheus metrics, structured logging setup |
+| [Local Databases](local-databases.md) | SQLite spec: schemas, discovery, peer sync, mixed-fleet support |
 | [Performance](performance.md) | Per-task overhead, bottleneck analysis, tuning recommendations |
 | [Config Calculator](calculator.md) | Interactive calculator for recommended config values |
 | [Integration Tests](integration.md) | Docker Compose test environment, chaos test scenario |
 | [Data Flow](data-flow.md) | End-to-end pipeline walkthrough: poll through commit |
+| [Config Reference](config-reference.md) | Annotated `drakkar.yaml` with every field + env override |
+| [Deployment](deployment.md) | Kubernetes probes, rolling restarts |
+| [Development](development.md) | uv setup, just recipes, docs build, CI |
+| [FAQ](faq.md) | Operator Q&A across all subsystems |

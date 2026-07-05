@@ -323,7 +323,9 @@ DK_UI__PORT=8081
 
 ### Operator UI
 
-Enabled by default at `:8080`. Pages:
+Enabled by default at `:8080`. At startup the worker fetches the latest [drakkar-ui](https://github.com/wlame/drakkar-ui) release — the one versioned SPA shared by the Python and Go backends — caches it per-user under `~/.cache/drakkar/ui/`, and serves it at `/`. When GitHub is unreachable it falls back to the built-in server-rendered pages below (marked with a **built-in UI** badge in the header). The installed `drakkar-ui` CLI manages the shared cache (`drakkar-ui where` / `update` / `fetch --version=vX.Y.Z`), command-for-command identical to the Go backend's CLI.
+
+Pages:
 
 - `/` -- dashboard with partition tiles, pool utilization, event counters
 - `/partitions` -- per-partition stats
@@ -333,6 +335,8 @@ Enabled by default at `:8080`. Pages:
 - `/task/{task_id}` -- task detail with PID, duration, CLI command, stdout/stderr
 
 Optional: set `kafka.ui_url` and `kafka.ui_cluster_name` in config to render a small Kafka-UI icon next to every `<partition:offset>` link; clicking the icon opens the corresponding message in Kafka-UI (provectus).
+
+The server also self-describes: `GET /api/v1/identity` reports the backend flavor, build version, and the served UI version (rendered in the UI header's version popover), and the full `/api/v1` contract is browsable via `GET /api/v1/openapi.json` plus a self-hosted Swagger UI at `GET /docs` (no CDN).
 
 ### Message Probe
 
