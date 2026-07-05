@@ -16,6 +16,7 @@ from drakkar.recorder.core import EventRecorder, logger  # noqa: F401  (re-expor
 from drakkar.recorder.helpers import (
     _HAS_ORJSON,  # noqa: F401  (re-exported for tests)
     _SECRET_ENV_PATTERNS,  # noqa: F401  (re-exported for tests)
+    _json_default,  # noqa: F401  (re-exported for tests)
     detect_worker_ip,  # noqa: F401  (re-exported for tests)
     encode_json,  # noqa: F401  (re-exported for tests)
     encode_json_str,  # noqa: F401  (re-exported for tests)

@@ -55,9 +55,12 @@ async def discover_peer_dbs(
     if not db_dir or not os.path.isdir(db_dir):
         return
 
-    # glob returns symlinks themselves, not their targets, which is what we want
+    # glob returns symlinks themselves, not their targets, which is what we
+    # want. Sorted so peers are visited in a deterministic order — the Go
+    # backend's filepath.Glob returns sorted paths, and an identical visit
+    # order keeps log order and first-match scans comparable across backends.
     pattern = os.path.join(db_dir, f'*{suffix}')
-    for link_path in glob.glob(pattern):
+    for link_path in sorted(glob.glob(pattern)):
         # skip plain files — only true symlinks are peer live-links
         if not os.path.islink(link_path):
             continue

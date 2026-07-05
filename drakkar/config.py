@@ -279,24 +279,28 @@ class SinksConfig(BaseModel):
     def summary(self) -> dict[str, list[str]]:
         """Return a dict of sink type → list of instance names.
 
-        Useful for startup logging. Only includes types with at least one instance.
+        Useful for startup logging. Only includes types with at least one
+        instance. Instance names are SORTED (and custom types render after
+        the built-ins, sorted by type name) so the config-summary one-liner
+        is byte-identical to the Go backend's, whose maps have no insertion
+        order to preserve.
         """
         result: dict[str, list[str]] = {}
         if self.kafka:
-            result['kafka'] = list(self.kafka.keys())
+            result['kafka'] = sorted(self.kafka)
         if self.postgres:
-            result['postgres'] = list(self.postgres.keys())
+            result['postgres'] = sorted(self.postgres)
         if self.mongo:
-            result['mongo'] = list(self.mongo.keys())
+            result['mongo'] = sorted(self.mongo)
         if self.http:
-            result['http'] = list(self.http.keys())
+            result['http'] = sorted(self.http)
         if self.redis:
-            result['redis'] = list(self.redis.keys())
+            result['redis'] = sorted(self.redis)
         if self.filesystem:
-            result['filesystem'] = list(self.filesystem.keys())
-        for type_name, instances in self.custom.items():
-            if instances:
-                result[type_name] = list(instances.keys())
+            result['filesystem'] = sorted(self.filesystem)
+        for type_name in sorted(self.custom):
+            if self.custom[type_name]:
+                result[type_name] = sorted(self.custom[type_name])
         return result
 
 

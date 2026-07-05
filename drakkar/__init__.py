@@ -32,6 +32,7 @@ from drakkar.models import (
     make_task_id,
 )
 from drakkar.periodic import periodic
+from drakkar.timefmt import format_rfc3339_micro
 from drakkar.utils import make_request_id
 from drakkar.webapp import SinkDeliverySummary, WebReport, WebRequestContext
 
@@ -69,6 +70,7 @@ __all__ = [
     'WebClientConfig',
     'WebReport',
     'WebRequestContext',
+    'format_rfc3339_micro',
     'load_config',
     'make_request_id',
     'make_task_id',

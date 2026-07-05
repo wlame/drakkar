@@ -1012,7 +1012,9 @@ class TestConfigSummary:
             ),
         )
         summary = cfg.config_summary(worker_id='w')
-        assert 'kf:events,alerts' in summary
+        # Sorted instance names — byte-parity with the Go backend's
+        # summary, which cannot preserve YAML insertion order.
+        assert 'kf:alerts,events' in summary
         assert 'pg:main' in summary
 
     def test_summary_no_sinks(self):

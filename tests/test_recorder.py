@@ -3604,7 +3604,7 @@ def testencode_json_orjson_stdlib_byte_parity(payload):
         return json.dumps(
             obj,
             sort_keys=True,
-            default=str,
+            default=recorder._json_default,
             separators=(',', ':'),
             ensure_ascii=False,
         ).encode('utf-8')
@@ -3621,18 +3621,27 @@ def testencode_json_monkeypatched_fallback_matches_orjson(monkeypatch):
     can't actually uninstall orjson at test time, but we can run the
     fallback code and prove its output matches.
     """
+    from datetime import UTC, datetime
+
     from drakkar import recorder
 
-    # Capture the fast-path bytes before patching.
-    payload = {'b': 1, 'a': 2, 'nested': {'y': 'val', 'x': 3}, 'unicode': 'naïve'}
+    # Capture the fast-path bytes before patching. The datetime proves the
+    # canonical-timestamp fallback hook is what both paths run through.
+    payload = {
+        'b': 1,
+        'a': 2,
+        'nested': {'y': 'val', 'x': 3},
+        'unicode': 'naïve',
+        'ts': datetime(2026, 4, 24, 12, 30, 45, 7, tzinfo=UTC),
+    }
     fast_path_bytes = recorder.encode_json(payload)
 
-    # Swap in the stdlib fallback (verbatim from recorder.py).
+    # Swap in the stdlib fallback (verbatim from recorder helpers).
     def fallback(obj):
         return json.dumps(
             obj,
             sort_keys=True,
-            default=str,
+            default=recorder._json_default,
             separators=(',', ':'),
             ensure_ascii=False,
         ).encode('utf-8')
@@ -3643,32 +3652,28 @@ def testencode_json_monkeypatched_fallback_matches_orjson(monkeypatch):
     assert fast_path_bytes == fallback_bytes
 
 
-def testencode_json_datetime_utc_z_suffix():
-    """UTC datetimes encode with a trailing ``Z``, not ``+00:00``.
+def testencode_json_datetime_canonical_format():
+    """Datetimes encode in the canonical cross-backend format on BOTH paths.
 
-    orjson's ``OPT_UTC_Z`` flag emits ``Z`` directly. The stdlib fallback
-    uses ``default=str`` which yields ``datetime.isoformat()`` — that
-    writes ``+00:00``. This test pins the orjson behaviour; if we ever
-    swap encoders the test will catch a regression in the format.
+    Fixed six-digit microseconds + ``Z`` suffix (:mod:`drakkar.timefmt`) —
+    the exact string the Go backend writes for the same instant. The
+    orjson fast path reaches the shared ``_json_default`` hook via
+    ``OPT_PASSTHROUGH_DATETIME``, so the format cannot depend on whether
+    the ``perf`` extra is installed. Whole seconds keep the full
+    ``.000000`` fraction: deterministic width is the point.
 
-    The recorder uses ``format_dt`` for persisted timestamps (which
-    does the ``+00:00`` → ``Z`` swap itself), so the encoder's datetime
-    handling only affects ad-hoc datetimes embedded inside payload
-    dicts — still worth pinning.
+    The recorder's ``dt`` columns use ``format_dt`` (their own display
+    format); this governs datetimes embedded inside payload JSON.
     """
     from datetime import UTC, datetime
 
-    from drakkar.recorder import _HAS_ORJSON, encode_json
+    from drakkar.recorder import encode_json
 
-    dt = datetime(2026, 4, 24, 12, 30, 45, tzinfo=UTC)
-    encoded = encode_json({'ts': dt})
+    whole = datetime(2026, 4, 24, 12, 30, 45, tzinfo=UTC)
+    assert encode_json({'ts': whole}) == b'{"ts":"2026-04-24T12:30:45.000000Z"}'
 
-    if _HAS_ORJSON:
-        # orjson: native datetime support, OPT_UTC_Z → "Z" suffix.
-        assert encoded == b'{"ts":"2026-04-24T12:30:45Z"}'
-    else:
-        # stdlib fallback: default=str → isoformat → "+00:00".
-        assert encoded == b'{"ts":"2026-04-24T12:30:45+00:00"}'
+    micro = datetime(2026, 4, 24, 12, 30, 45, 123456, tzinfo=UTC)
+    assert encode_json({'ts': micro}) == b'{"ts":"2026-04-24T12:30:45.123456Z"}'
 
 
 def testencode_json_str_decodes_bytes():
@@ -4511,3 +4516,32 @@ async def test_update_live_link_no_op_when_no_db_path(tmp_path):
     # No DB path → early return. No exception, no symlink created.
     rec._update_live_link()
     await rec.stop()
+
+
+# --- Pinned event-row shape (cross-backend + API contract) -----------------
+
+
+async def test_event_columns_pin_matches_live_table(tmp_path):
+    """``EVENT_COLUMNS`` matches the live ``events`` table exactly, in order.
+
+    The constant is the contract for every SELECT-*-pass-through surface
+    (/ws, /api/v1/events, /api/v1/trace, /api/v1/trace-by-label) and for
+    cross-backend DB interop; the Go backend pins the identical list
+    (internal/recorder/schema.go EventColumns) and the normative copy
+    lives in drakkar-ui/docs/api-contract-v1.md. If this test fails, the
+    schema changed without updating the pinned contract — update all
+    three together or revert.
+    """
+    from drakkar.recorder.schema import EVENT_COLUMNS, SCHEMA_EVENTS
+
+    async with aiosqlite.connect(tmp_path / 'pin.db') as db:
+        await db.executescript(SCHEMA_EVENTS)
+        async with db.execute('PRAGMA table_info(events)') as cur:
+            rows = await cur.fetchall()
+    assert tuple(row[1] for row in rows) == EVENT_COLUMNS
+
+
+def test_webapp_required_columns_are_a_subset_of_the_pin():
+    from drakkar.recorder.schema import EVENT_COLUMNS, WEBAPP_REQUIRED_EVENT_COLUMNS
+
+    assert set(WEBAPP_REQUIRED_EVENT_COLUMNS) <= set(EVENT_COLUMNS)

@@ -63,6 +63,7 @@ from drakkar.peer_discovery import discover_peer_dbs
 from drakkar.recorder.helpers import (
     _HAS_ORJSON,  # noqa: F401  (re-exported for tests)
     _SECRET_ENV_PATTERNS,  # noqa: F401  (re-exported for tests)
+    BUSY_TIMEOUT_MS,
     detect_worker_ip,
     encode_json,  # noqa: F401  (re-exported for tests)
     encode_json_str,
@@ -82,6 +83,7 @@ from drakkar.recorder.schema import (
     WEBAPP_REQUIRED_EVENT_COLUMNS,
     RecorderSchemaError,
 )
+from drakkar.timefmt import format_rfc3339_micro
 from drakkar.utils import redact_url
 
 if TYPE_CHECKING:
@@ -291,6 +293,9 @@ class EventRecorder:
                 # Applied per-connection (SQLite stores the mode in the DB
                 # header; the reader picks it up automatically on open).
                 await self._db.execute('PRAGMA journal_mode=WAL')
+                # Explicit busy_timeout so shared-db_dir contention behaves
+                # identically to the Go backend (which has no driver default).
+                await self._db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
                 # Webapp-release schema check (Task 8 of the webapp pipeline
                 # plan). Run BEFORE ``_create_schema`` so a pre-existing
                 # legacy DB is rejected before ``CREATE INDEX`` references
@@ -1103,7 +1108,7 @@ class EventRecorder:
         """
         body_bytes = self._compute_body_bytes(ctx)
         metadata: dict[str, Any] = {
-            'started_at': ctx.started_at.isoformat() if ctx.started_at is not None else None,
+            'started_at': format_rfc3339_micro(ctx.started_at) if ctx.started_at is not None else None,
         }
         if body_bytes is not None:
             metadata['body_bytes'] = body_bytes
@@ -1458,9 +1463,11 @@ class EventRecorder:
         if self._db_path:
             searched_paths.add(os.path.realpath(self._db_path))
 
-        # 2. Fallback: other workers' live DBs
+        # 2. Fallback: other workers' live DBs. Sorted so the first-match
+        # scan visits peers in the same deterministic order as the Go
+        # backend (filepath.Glob returns sorted paths).
         live_pattern = os.path.join(self._store.db_dir, '*-live.db')
-        for link_path in glob.glob(live_pattern):
+        for link_path in sorted(glob.glob(live_pattern)):
             if not os.path.islink(link_path):
                 continue
             link_name = os.path.basename(link_path)
@@ -1797,6 +1804,7 @@ class EventRecorder:
         new_db = await aiosqlite.connect(new_path)
         try:
             await new_db.execute('PRAGMA journal_mode=WAL')
+            await new_db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
             await self._create_schema(new_db)
         except Exception:
             # Avoid leaking the fd: close the new connection and re-raise.

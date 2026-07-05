@@ -102,3 +102,12 @@ WHERE
 # Kept separate from the SQL constants above so "which of these knobs are
 # runtime tunables vs DDL/DML?" is obvious at a glance.
 PEER_CLUSTER_CACHE_TTL_SECONDS = 300.0
+
+# Explicit per-connection busy timeouts, in milliseconds — identical on
+# both backends so lock contention on a shared cache DB behaves the same
+# no matter which backend opened it (see docs/local-databases.md). The
+# engine's own writer/reader wait longer than ephemeral peer reads: the
+# local engine should ride out a checkpoint, while a slow PEER must fail
+# fast and be isolated by the per-peer error handling.
+BUSY_TIMEOUT_MS = 10000
+PEER_BUSY_TIMEOUT_MS = 5000

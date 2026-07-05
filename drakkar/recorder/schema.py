@@ -48,6 +48,38 @@ WEBAPP_REQUIRED_EVENT_COLUMNS: tuple[str, ...] = (
     'request_id',
 )
 
+# The PINNED recorder event-row shape, in DDL order. This is the contract
+# for every surface that passes event rows through as JSON objects —
+# ``/ws``, ``/api/v1/events``, ``/api/v1/trace``, ``/api/v1/trace-by-label``
+# — and for cross-backend DB interop (a Go worker reads these columns from
+# a Python-written file and vice versa). The list is mirrored in
+# ``drakkar-ui/docs/api-contract-v1.md`` ("Recorder event row shape") and
+# in the Go backend's ``internal/recorder/schema.go``; a parity test in
+# each backend asserts the live table matches. Column PRESENCE is the
+# contract — values stay event-type-dependent (nullable).
+EVENT_COLUMNS: tuple[str, ...] = (
+    'id',
+    'ts',
+    'dt',
+    'event',
+    'partition',
+    'offset',
+    'task_id',
+    'args',
+    'stdout_size',
+    'stdout',
+    'stderr',
+    'exit_code',
+    'duration',
+    'output_topic',
+    'metadata',
+    'pid',
+    'labels',
+    'origin',
+    'client_name',
+    'request_id',
+)
+
 
 class RecorderSchemaError(RuntimeError):
     """Raised at recorder open when the existing DB predates required columns.

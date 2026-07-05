@@ -16,6 +16,7 @@ no-ops. The handler still sees a ``Cache`` instance; it just never persists.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import time
 from pathlib import Path
@@ -28,7 +29,9 @@ from drakkar import metrics
 from drakkar.cache.memory import Cache
 from drakkar.cache.models import CacheScope, _now_ms
 from drakkar.cache.sql import (
+    BUSY_TIMEOUT_MS,
     LWW_UPSERT_SQL,
+    PEER_BUSY_TIMEOUT_MS,
     PEER_CLUSTER_CACHE_TTL_SECONDS,
     SCHEMA_CACHE_ENTRIES,
 )
@@ -55,6 +58,22 @@ logger = structlog.get_logger()
 # guidance. Low enough to fire within ~half a minute at the default
 # flush interval, high enough that a single transient blip stays quiet.
 FLUSH_FAILURE_ESCALATION_THRESHOLD = 5
+
+
+@contextlib.asynccontextmanager
+async def _peer_reader(db_path: str):
+    """Open a read-only connection to a PEER's database.
+
+    All three peer-read paths (cluster-name resolution, batch pull,
+    same-ms tail drain) come through here so every ephemeral peer
+    connection carries the same explicit ``busy_timeout`` — matching the
+    Go backend's peer reads byte-for-byte in behavior. The shorter peer
+    timeout (vs the engine's own writer/reader) keeps a lock-wedged peer
+    inside the per-peer failure isolation instead of stalling the cycle.
+    """
+    async with aiosqlite.connect(f'file:{db_path}?mode=ro', uri=True) as db:
+        await db.execute(f'PRAGMA busy_timeout = {PEER_BUSY_TIMEOUT_MS}')
+        yield db
 
 
 class CacheEngine:
@@ -335,6 +354,9 @@ class CacheEngine:
         # and peer-opened ephemeral connections will see WAL files
         # already on disk.
         await self._writer_db.execute('PRAGMA journal_mode = WAL')
+        # Explicit busy_timeout mirroring the Go engine's writer DSN, so
+        # lock contention on a shared cache DB behaves identically.
+        await self._writer_db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
         await self._writer_db.commit()
 
     async def start(self) -> None:
@@ -380,6 +402,9 @@ class CacheEngine:
         # the reader see consistent snapshots while the writer commits.
         reader_uri = f'file:{self._db_path}?mode=ro'
         self._reader_db = await aiosqlite.connect(reader_uri, uri=True)
+        # Same explicit busy_timeout as the writer (mirrors the Go
+        # engine's reader DSN).
+        await self._reader_db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
         # If a Cache has already been attached (typical — engine.attach_cache
         # happens before start()), wire the reader through now; if it gets
         # attached later, the caller is responsible for calling
@@ -883,7 +908,7 @@ class CacheEngine:
         # ``asyncio.TimeoutError`` propagates into the outer ``except`` below.
         timeout = self._config.peer_sync.timeout_seconds
         try:
-            async with aiosqlite.connect(f'file:{live_link}?mode=ro', uri=True) as db:
+            async with _peer_reader(live_link) as db:
                 async with db.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='worker_config'"
                 ) as cur:
@@ -1000,14 +1025,12 @@ class CacheEngine:
         # cycle. Timeout raises ``asyncio.TimeoutError`` which the caller's
         # per-peer try/except catches and isolates.
         timeout = self._config.peer_sync.timeout_seconds
-        async with (
-            aiosqlite.connect(f'file:{peer_db_path}?mode=ro', uri=True) as db,
-            db.execute(query, params) as cur,
-        ):
-            # aiosqlite's ``fetchall`` returns ``Iterable[Row]``; we materialize
-            # to a concrete tuple-list so callers can index by column position
-            # (keys come back at row[0], scope at row[1], etc.) without worrying
-            # about cursor lifetime after the ``async with`` closes.
+        async with _peer_reader(peer_db_path) as db, db.execute(query, params) as cur:
+            # aiosqlite's ``fetchall`` returns ``Iterable[Row]``; we
+            # materialize to a concrete tuple-list so callers can index by
+            # column position (keys come back at row[0], scope at row[1],
+            # etc.) without worrying about cursor lifetime after the
+            # ``async with`` closes.
             fetched = await asyncio.wait_for(cur.fetchall(), timeout=timeout)
             return [tuple(row) for row in fetched]
 
@@ -1058,7 +1081,7 @@ class CacheEngine:
         # cursor still guarantees forward progress and distinct pages per
         # iteration.
         timeout = self._config.peer_sync.timeout_seconds
-        async with aiosqlite.connect(f'file:{peer_db_path}?mode=ro', uri=True) as db:
+        async with _peer_reader(peer_db_path) as db:
             while True:
                 params = (*scope_params, now_ms, ms, cursor_key, batch_size)
                 async with db.execute(query, params) as cur:

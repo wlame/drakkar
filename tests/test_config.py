@@ -233,13 +233,16 @@ def test_sinks_config_multiple_types():
 
 
 def test_sinks_config_multiple_instances_same_type():
+    # Instance names come back SORTED (not YAML order) — the summary is
+    # byte-parity contractual with the Go backend, whose maps have no
+    # insertion order to preserve.
     cfg = SinksConfig(
         kafka={
             'results': KafkaSinkConfig(topic='results'),
             'notifications': KafkaSinkConfig(topic='notifications'),
         },
     )
-    assert cfg.summary() == {'kafka': ['results', 'notifications']}
+    assert cfg.summary() == {'kafka': ['notifications', 'results']}
 
 
 def test_sinks_config_all_types():

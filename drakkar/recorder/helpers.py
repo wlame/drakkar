@@ -24,6 +24,7 @@ from typing import Any
 
 import aiosqlite
 
+from drakkar.timefmt import format_rfc3339_micro
 from drakkar.utils import redact_url
 
 # Fast JSON encoder for the recorder hot path. orjson is an optional
@@ -41,10 +42,23 @@ from drakkar.utils import redact_url
 #   on insert; those sites use ``encode_json_str``.
 # - Keys are SORTED so repeated encodes of the same dict produce
 #   identical output (deterministic hashes / cache dedup downstream).
-# - Datetimes use ``isoformat()`` in both paths (T separator, +00:00
-#   suffix for UTC). orjson's OPT_UTC_Z further rewrites +00:00 → Z;
-#   the stdlib path keeps +00:00.
+# - Datetimes render via :func:`drakkar.timefmt.format_rfc3339_micro`
+#   in BOTH paths (fixed six-digit microseconds, ``Z`` suffix) — the
+#   canonical cross-backend format, byte-identical to the Go backend.
 # - Other non-JSON-native types fall back to ``str()``.
+
+
+def _json_default(obj: Any) -> Any:
+    """Fallback serializer shared by both encoder paths.
+
+    Datetimes render in the canonical cross-backend timestamp format;
+    anything else JSON can't represent degrades to ``str()``.
+    """
+    if isinstance(obj, datetime):
+        return format_rfc3339_micro(obj)
+    return str(obj)
+
+
 try:
     import orjson  # ty: ignore[unresolved-import]
 
@@ -55,24 +69,20 @@ try:
 
         Options:
         - ``OPT_SORT_KEYS``: deterministic output regardless of insertion order.
-        - ``OPT_UTC_Z``: UTC datetimes serialize as ``...Z`` (not ``+00:00``).
+        - ``OPT_PASSTHROUGH_DATETIME``: orjson hands datetimes to
+          ``default`` instead of rendering them natively, so both encoder
+          paths emit the one canonical timestamp format. orjson's native
+          rendering omits the fraction for whole seconds — neither
+          deterministic-width nor what the Go backend writes.
         - ``OPT_NON_STR_KEYS``: coerce non-string dict keys (rare but safe).
-        The ``default=str`` hook catches anything orjson can't serialize
-        natively (custom classes etc.), matching the stdlib fallback.
         """
         return orjson.dumps(
             obj,
-            option=orjson.OPT_SORT_KEYS | orjson.OPT_UTC_Z | orjson.OPT_NON_STR_KEYS,
-            default=str,
+            option=orjson.OPT_SORT_KEYS | orjson.OPT_PASSTHROUGH_DATETIME | orjson.OPT_NON_STR_KEYS,
+            default=_json_default,
         )
 except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
     _HAS_ORJSON = False
-
-    def _json_default(obj: Any) -> Any:
-        # datetime.isoformat() gives the T separator; str() would give a space.
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        return str(obj)
 
     def encode_json(obj: Any) -> bytes:
         """Stdlib fallback encoder (used when orjson is not installed).
@@ -83,8 +93,8 @@ except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
           escaping non-ASCII (e.g. ``"naïve"`` stays as-is, not
           ``"na\\u00efve"``). orjson always writes raw UTF-8.
         - ``sort_keys=True`` → deterministic key order.
-        - ``default=_json_default`` → datetimes via ``isoformat()``,
-          other types via ``str()``.
+        - ``default=_json_default`` → the same fallback hook the orjson
+          path uses (canonical datetimes, ``str()`` for the rest).
 
         These choices keep the on-disk recorder DB stable regardless of
         which path (orjson vs. stdlib) produced the bytes, so swapping
@@ -164,6 +174,14 @@ def list_db_files(db_dir: str, worker_name: str) -> list[str]:
     return files
 
 
+# Canonical recorder busy_timeout, in milliseconds — set explicitly on
+# every recorder connection (writer, own reader, peer reads) on BOTH
+# backends so cross-process WAL contention in a shared db_dir behaves
+# identically no matter which backend opened the file. The cache uses
+# its own values (drakkar/cache/sql.py). See docs/local-databases.md.
+BUSY_TIMEOUT_MS = 5000
+
+
 async def open_reader(db_path: str) -> aiosqlite.Connection:
     """Open a read-only aiosqlite connection to ``db_path``.
 
@@ -172,7 +190,9 @@ async def open_reader(db_path: str) -> aiosqlite.Connection:
     connection spawns its own worker thread, which is the property that
     lets debug-UI SELECTs run in parallel with writer flushes/commits.
     """
-    return await aiosqlite.connect(f'file:{db_path}?mode=ro', uri=True)
+    db = await aiosqlite.connect(f'file:{db_path}?mode=ro', uri=True)
+    await db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
+    return db
 
 
 def detect_worker_ip() -> str:

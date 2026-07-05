@@ -17,9 +17,21 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PlainSerializer
+
+from drakkar.timefmt import format_rfc3339_micro
+
+# JSON dumps of report timestamps use the canonical cross-backend format
+# (fixed six-digit microseconds, ``Z`` suffix) so a Python worker's
+# response body is byte-identical to the Go backend's for the same
+# instant. ``when_used='json'`` keeps plain ``model_dump()`` returning
+# real datetimes for in-process consumers.
+UTCMicroDatetime = Annotated[
+    datetime,
+    PlainSerializer(format_rfc3339_micro, return_type=str, when_used='json'),
+]
 
 # ---------------------------------------------------------------------------
 # WebRequestContext — the per-request envelope passed from T2 (webapp loop)
@@ -179,8 +191,8 @@ class WebReport(BaseModel):
 
     request_id: str
     client: str
-    started_at: datetime
-    finished_at: datetime
+    started_at: UTCMicroDatetime
+    finished_at: UTCMicroDatetime
     duration_ms: float
     status: WebReportStatus
     result: Any | None = None

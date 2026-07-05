@@ -66,6 +66,7 @@ from drakkar.partition import PartitionProcessor
 from drakkar.periodic import discover_periodic_tasks, run_periodic_task
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.manager import SinkNotConfiguredError
+from drakkar.timefmt import format_rfc3339_micro
 from drakkar.utils import wait_for_aligned_startup
 from drakkar.watchdog import WatchdogFile
 
@@ -362,7 +363,7 @@ class AppLifecycle:
                 min_wait_seconds=min_wait,
                 align_interval_seconds=interval,
                 target_wall_unix=target_wall,
-                target_wall_iso=datetime.fromtimestamp(target_wall, tz=UTC).isoformat(),
+                target_wall_iso=format_rfc3339_micro(datetime.fromtimestamp(target_wall, tz=UTC)),
             )
             slept = await wait_for_aligned_startup(min_wait, interval)
             await log.ainfo('startup_align_done', category='lifecycle', slept_seconds=round(slept, 3))
