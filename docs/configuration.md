@@ -594,6 +594,7 @@ See [Webapp](webapp.md) for the full feature guide (enabling, hooks, request/res
 | `sinks_enabled` | `bool` | `false` | | When `true`, calls `on_message_complete` after the executor fan-out and routes returned `CollectResult` payloads through the [SinkManager](sinks.md). When `false`, sinks are skipped and the response carries `sinks: null`. |
 | `request_timeout_seconds` | `float` | `30.0` | > 0 | Per-request budget enforced via `asyncio.wait_for` on the webapp loop. On timeout the client receives a 504 and the runner's post-execute hooks are cooperatively cancelled. |
 | `max_concurrent` | `int` | `64` | > 0 | Per-worker semaphore capacity for in-flight HTTP requests. The 65th concurrent request returns 503 `status='capacity'` immediately rather than queuing. |
+| `max_body_bytes` | `int` | `10485760` (10 MiB) | > 0 | Cap on a single POST body; oversized requests receive 413 `error='request_too_large'` before the body is buffered. Same key, default, and envelope as the Go backend. |
 | `clients` | `list[WebClientConfig]` | one anonymous client (`name='anonymous'`, `token=''`, `rpm=4`) | length >= 1 | Configured tenants. Empty `clients: []` fails at config load. |
 
 ### Webapp Clients (`webapp.clients[]`)
@@ -613,6 +614,7 @@ webapp:
   sinks_enabled: false
   request_timeout_seconds: 30.0
   max_concurrent: 64
+  max_body_bytes: 10485760
   clients:
     - name: anonymous
       token: ""

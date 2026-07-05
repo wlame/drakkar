@@ -52,6 +52,7 @@ nav:
   - Cache: cache.md
   - Fan-out (one message → many tasks): fan-out.md
   - Configuration: configuration.md
+  - Features & Enable Order: features.md
   - Sinks: sinks.md
   - Webapp: webapp.md
   - Executor: executor.md

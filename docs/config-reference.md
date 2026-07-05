@@ -377,6 +377,7 @@ webapp:
   sinks_enabled: false             # when true, route on_message_complete payloads through SinkManager. env: DK_WEBAPP__SINKS_ENABLED
   request_timeout_seconds: 30.0    # per-request budget; > 0. env: DK_WEBAPP__REQUEST_TIMEOUT_SECONDS
   max_concurrent: 64               # per-worker in-flight cap; > 0. 65th concurrent request 503s. env: DK_WEBAPP__MAX_CONCURRENT
+  max_body_bytes: 10485760         # request-body cap in bytes; > 0 (413 beyond); same key/default on both backends. env: DK_WEBAPP__MAX_BODY_BYTES
 
   # Configured tenants. At least one entry is required; default is one
   # anonymous client with rpm=4 so the webapp works out of the box.
