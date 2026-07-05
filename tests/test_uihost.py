@@ -116,6 +116,14 @@ class StubGitHub:
         if latest:
             self.routes[f'/{repo}/releases/latest'] = (302, f'{self.base_url}/{repo}/releases/tag/{tag}', b'')
 
+    def add_direct_checksum(self, repo: str, tag: str, body: bytes) -> None:
+        """Register the optional ``.sha256`` sidecar for a direct release."""
+        self.routes[f'/{repo}/releases/download/{tag}/drakkar-ui-{tag}.tar.gz.sha256'] = (
+            200,
+            'text/plain',
+            body,
+        )
+
     def close(self) -> None:
         self.server.shutdown()
         self.server.server_close()
@@ -206,7 +214,12 @@ def test_fetch_via_direct_url_without_api(stub_github, tmp_path):
     assert bundle is not None
     assert bundle.source == 'fetched'
     assert (bundle.root / 'index.html').read_bytes() == BUNDLE_FILES['index.html']
-    assert stub_github.requests == ['/wlame/drakkar-ui/releases/download/v1.0.0/drakkar-ui-v1.0.0.tar.gz']
+    # Two plain-web requests, zero API requests: the tarball plus the
+    # optional .sha256 sidecar probe (404 here → verification skipped).
+    assert stub_github.requests == [
+        '/wlame/drakkar-ui/releases/download/v1.0.0/drakkar-ui-v1.0.0.tar.gz',
+        '/wlame/drakkar-ui/releases/download/v1.0.0/drakkar-ui-v1.0.0.tar.gz.sha256',
+    ]
 
 
 def test_latest_resolves_via_redirect_without_api(stub_github, tmp_path):
@@ -733,3 +746,69 @@ def test_embedded_bundle_is_a_real_release_with_version(tmp_path):
     assert bundle is not None
     assert bundle.source == 'embedded'
     assert bundle.version == version
+
+
+# --- sha256 checksum sidecar verification ----------------------------------
+
+
+def _checksum_body(tarball: bytes, tag: str) -> bytes:
+    import hashlib
+
+    return f'{hashlib.sha256(tarball).hexdigest()}  drakkar-ui-{tag}.tar.gz\n'.encode()
+
+
+def test_fetch_verifies_published_checksum(stub_github, tmp_path):
+    """A matching .sha256 sidecar lets the install proceed normally."""
+    tarball = make_tar_gz(BUNDLE_FILES)
+    stub_github.add_direct_release('wlame/drakkar-ui', 'v1.0.0', tarball)
+    stub_github.add_direct_checksum('wlame/drakkar-ui', 'v1.0.0', _checksum_body(tarball, 'v1.0.0'))
+
+    bundle = resolve(ui_config(tmp_path, pinned_version='v1.0.0'), api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'fetched'
+    assert (tmp_path / 'cache' / 'v1.0.0' / 'index.html').is_file()
+
+
+def test_fetch_rejects_checksum_mismatch(stub_github, tmp_path):
+    """A present-but-wrong digest aborts the install before extraction.
+
+    resolve() degrades to the embedded rung and nothing lands in the
+    cache — a tampered or corrupted asset must never be served.
+    """
+    stub_github.add_direct_release('wlame/drakkar-ui', 'v1.0.0', make_tar_gz(BUNDLE_FILES))
+    stub_github.add_direct_checksum('wlame/drakkar-ui', 'v1.0.0', ('f' * 64 + '\n').encode())
+
+    bundle = resolve(ui_config(tmp_path, pinned_version='v1.0.0'), api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'embedded'
+    assert not (tmp_path / 'cache' / 'v1.0.0').exists()
+
+
+def test_fetch_rejects_malformed_checksum_asset(stub_github, tmp_path):
+    stub_github.add_direct_release('wlame/drakkar-ui', 'v1.0.0', make_tar_gz(BUNDLE_FILES))
+    stub_github.add_direct_checksum('wlame/drakkar-ui', 'v1.0.0', b'definitely not a digest')
+
+    bundle = resolve(ui_config(tmp_path, pinned_version='v1.0.0'), api_base=stub_github.base_url)
+
+    assert bundle is not None
+    assert bundle.source == 'embedded'
+    assert not (tmp_path / 'cache' / 'v1.0.0').exists()
+
+
+def test_fetch_release_checksum_mismatch_error_message(stub_github, tmp_path):
+    """The mismatch error text is byte-identical to the Go backend's."""
+    from drakkar.uihost import fetch_release
+
+    stub_github.add_direct_release('wlame/drakkar-ui', 'v1.0.0', make_tar_gz(BUNDLE_FILES))
+    stub_github.add_direct_checksum('wlame/drakkar-ui', 'v1.0.0', ('a' * 64).encode())
+
+    with pytest.raises(Exception, match=r'release v1\.0\.0 bundle checksum mismatch: expected a{64}, got [0-9a-f]{64}'):
+        fetch_release(
+            stub_github.base_url,
+            'wlame/drakkar-ui',
+            'v1.0.0',
+            tmp_path / 'cache' / 'v1.0.0',
+            download_base=stub_github.base_url,
+        )

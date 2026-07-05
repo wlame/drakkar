@@ -8,8 +8,10 @@ so both backends fetch, validate, and cache bundles identically.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import tarfile
@@ -43,6 +45,10 @@ _MAX_RELEASE_JSON_BYTES = 1 * 1024 * 1024  # 1 MiB
 
 # Fallback per-request timeout when the caller supplies no deadline.
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
+
+# A sha256 hex digest — the first token of the optional ``.sha256``
+# checksum sidecar published next to the bundle asset.
+_HEX64_RE = re.compile(r'[0-9a-fA-F]{64}')
 
 
 class FetchError(Exception):
@@ -147,6 +153,7 @@ def fetch_release(
                 _download(direct_url, tarball, deadline=deadline)
             except FetchError as direct_exc:
                 _download_via_api(api_base, repo, version, tarball, direct_exc, deadline=deadline)
+            _verify_checksum(tarball, f'{direct_url}.sha256', version, deadline=deadline)
             tarball.seek(0)
             _extract_tar_gz(tarball, incoming)
         if not (incoming / 'index.html').is_file():
@@ -196,6 +203,37 @@ def _install_bundle(incoming: Path, dest_dir: Path) -> None:
         if dir_has_index(dest_dir):
             return  # lost the final race to a valid install
         raise
+
+
+def _verify_checksum(tarball: IO[bytes], checksum_url: str, version: str, *, deadline: float | None) -> None:
+    """Verify the tarball against the release's optional ``.sha256`` sidecar.
+
+    The drakkar-ui release workflow publishes
+    ``drakkar-ui-<tag>.tar.gz.sha256`` alongside the bundle. Releases that
+    predate the sidecar have no such asset, so an UNAVAILABLE sidecar
+    skips verification (the download is already HTTPS-authenticated to
+    GitHub). A PRESENT sidecar is binding: a malformed one, or a digest
+    that does not match the downloaded bytes, aborts the install before
+    any extraction work. Error messages match the Go backend verbatim.
+    """
+    try:
+        with tempfile.TemporaryFile() as sumfile:
+            _download(checksum_url, sumfile, deadline=deadline)
+            sumfile.seek(0)
+            raw = sumfile.read(512)
+    except FetchError:
+        return  # no sidecar published for this release — skip verification
+    fields = raw.decode('ascii', errors='replace').split()
+    if not fields or not _HEX64_RE.fullmatch(fields[0]):
+        raise FetchError(f'release {version} checksum asset is malformed')
+    expected = fields[0].lower()
+    digest = hashlib.sha256()
+    tarball.seek(0)
+    while chunk := tarball.read(1 << 16):
+        digest.update(chunk)
+    actual = digest.hexdigest()
+    if actual != expected:
+        raise FetchError(f'release {version} bundle checksum mismatch: expected {expected}, got {actual}')
 
 
 def _download_via_api(
