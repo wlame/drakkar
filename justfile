@@ -55,6 +55,11 @@ test *args:
 cover:
     uv run --extra=dev pytest --cov=drakkar --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
 
+# Regenerate the Python-written cross-backend DB fixtures consumed by
+# drakkar-go's interop tests (commit the result in that repo)
+gen-db-fixtures:
+    uv run python scripts/gen_db_fixtures.py --out=../drakkar-go/internal/crossbackend/testdata/python-db
+
 # ---------------------------------------------------------------------------
 # CI / pre-push
 # ---------------------------------------------------------------------------
