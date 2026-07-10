@@ -1,6 +1,7 @@
 """Tests for periodic task decorator, discovery, and scheduling."""
 
 import asyncio
+import warnings
 
 import pytest
 
@@ -58,6 +59,19 @@ def test_periodic_rejects_sync_function():
 
         @periodic(seconds=10)
         def not_async(self):
+            pass
+
+
+def test_periodic_decorator_emits_no_deprecation_warning():
+    """Guard for Python 3.14+: asyncio.iscoroutinefunction is deprecated
+    (removal slated for 3.16); the decorator must not trip it. On 3.13 no
+    warning exists, so this passes trivially — the guard protects the
+    newer CI lanes."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', DeprecationWarning)
+
+        @periodic(seconds=10)
+        async def my_task(self):
             pass
 
 

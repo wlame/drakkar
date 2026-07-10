@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
@@ -50,7 +51,7 @@ def periodic(
         raise ValueError(f'periodic seconds must be positive, got {seconds}')
 
     def decorator(fn: Callable[..., Coroutine[Any, Any, Any]]) -> Callable[..., Coroutine[Any, Any, Any]]:
-        if not asyncio.iscoroutinefunction(fn):
+        if not inspect.iscoroutinefunction(fn):
             raise TypeError(f'@periodic can only decorate async functions, got {fn!r}')
         setattr(fn, PERIODIC_ATTR, PeriodicMeta(seconds=seconds, on_error=on_error))
         return fn
