@@ -502,7 +502,7 @@ class RipgrepHandler(
         return sinks
 
     async def on_error(self, task: dk.ExecutorTask, error: dk.ExecutorError) -> str:
-        error_type = 'timeout' if error.exception and 'Timeout' in error.exception else 'exit_code'
+        error_type = 'timeout' if error.kind == 'timeout' else 'exit_code'
         search_errors_total.labels(error_type=error_type).inc()
 
         await logger.awarning(
