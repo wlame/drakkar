@@ -228,6 +228,11 @@ class WebappRunner:
             key=ctx.client_name.encode('utf-8'),
             value=request_body_bytes,
             timestamp=ts_ms,
+            # Kafka-path invariant parity: deserialize_message sets payload
+            # to the parsed input model before hooks fire; the webapp path
+            # does the same with the already-parsed request so
+            # on_http_request_complete never needs to re-parse ``value``.
+            payload=ctx.request,
         )
 
         # ----- Stage: arrange_http_request -----

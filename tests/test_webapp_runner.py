@@ -355,6 +355,30 @@ async def test_runner_increments_request_seq_per_call():
 
 
 @pytest.mark.asyncio
+async def test_runner_synthetic_message_payload_is_parsed_request():
+    """source_message.payload carries the SAME parsed model that
+    arrange_http_request received — the webapp path upholds the Kafka-path
+    invariant (deserialize_message sets payload before hooks fire)."""
+    handler = _RecordingHandler()
+    captured: dict[str, Any] = {}
+
+    async def complete_impl(group):
+        captured['group'] = group
+        return _HttpResp()
+
+    handler.on_http_request_complete_impl = complete_impl
+    pool = _make_pool_returning([])
+    runner = WebappRunner(_make_stub_app(handler, pool=pool), _make_config())
+    ctx = _make_ctx()
+
+    await runner.run(ctx)
+
+    group = captured['group']
+    assert group.source_message.payload is ctx.request
+    assert isinstance(group.source_message.payload, _HttpReq)
+
+
+@pytest.mark.asyncio
 async def test_runner_handles_failed_task_in_summary():
     """A subprocess raising surfaces as failed=1 in task_summary."""
     handler = _RecordingHandler()

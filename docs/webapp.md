@@ -235,7 +235,11 @@ response body (see [Response shape](#request-response-examples)).
 The `MessageGroup` carries a synthetic `SourceMessage` with `partition=-1`
 and a key set to the matched client name; `group.origin == 'http'`,
 `group.client_name`, and `group.request_id` are populated from the
-request envelope.
+request envelope. `source_message.payload` carries the parsed request
+model — the same object `arrange_http_request` received — so the
+Kafka-path invariant ("`payload` is the parsed input model by the time
+hooks fire") holds on the webapp path too; handlers never need to
+re-parse `source_message.value`.
 
 ```python
 async def on_http_request_complete(self, group: dk.MessageGroup) -> RankResponse:
