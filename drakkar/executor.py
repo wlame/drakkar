@@ -388,6 +388,7 @@ class ExecutorPool:
             raise ExecutorTaskError(
                 error=ExecutorError(
                     task=task,
+                    kind='nonzero_exit',
                     exit_code=result.exit_code,
                     stderr=result.stderr,
                     pid=None,
@@ -404,7 +405,7 @@ class ExecutorPool:
                 'ExecutorTask.binary_path provides a path to the executable.'
             )
             raise ExecutorTaskError(
-                error=ExecutorError(task=task, exception=msg),
+                error=ExecutorError(task=task, kind='launch_failure', exception=msg),
                 result=ExecutorResult(
                     exit_code=-1,
                     stdout='',
@@ -507,6 +508,7 @@ class ExecutorPool:
                 raise ExecutorTaskError(
                     error=ExecutorError(
                         task=task,
+                        kind='nonzero_exit',
                         exit_code=result.exit_code,
                         stderr=result.stderr,
                         pid=pid,
@@ -529,6 +531,7 @@ class ExecutorPool:
             raise ExecutorTaskError(  # noqa: B904
                 error=ExecutorError(
                     task=task,
+                    kind='timeout',
                     stderr='task timed out',
                     exception=f'Timeout after {self._task_timeout}s',
                     pid=timeout_pid,
@@ -548,6 +551,7 @@ class ExecutorPool:
             raise ExecutorTaskError(  # noqa: B904
                 error=ExecutorError(
                     task=task,
+                    kind='launch_failure',
                     exception=str(e),
                 ),
                 result=ExecutorResult(

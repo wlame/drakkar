@@ -1455,6 +1455,7 @@ class DebugRunner:
             )
             synthesized_error = ExecutorError(
                 task=task,
+                kind='internal',
                 exception=str(tc_exception),
                 stderr=str(tc_exception),
             )

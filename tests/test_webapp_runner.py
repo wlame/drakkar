@@ -476,6 +476,7 @@ async def test_runner_synthesizes_executor_error_for_unexpected_exception():
     assert group.errors[0].task.task_id == task_bad.task_id
     assert group.errors[0].exception == 'RuntimeError: boom'
     assert group.errors[0].exit_code is None
+    assert group.errors[0].kind == 'internal'
 
 
 @pytest.mark.asyncio

@@ -517,10 +517,13 @@ The `ExecutorError` fields:
 | Field       | Type         | Description                                       |
 |-------------|--------------|---------------------------------------------------|
 | `task`      | ExecutorTask | The task that failed                               |
+| `kind`      | `'nonzero_exit' \| 'timeout' \| 'launch_failure' \| 'internal'` | Structured failure classification. `'nonzero_exit'` (default) -- non-zero exit code. `'timeout'` -- exceeded `executor.task_timeout_seconds`. `'launch_failure'` -- process could not be started. `'internal'` -- synthesized by the framework with no subprocess outcome behind it (e.g. a hook raised or the pool violated its contract) |
 | `exit_code` | int or None  | Process exit code; `None` if never started/timeout |
 | `stderr`    | str          | Process stderr or error description                |
 | `exception` | str or None  | Exception message for timeout/launch failures      |
 | `pid`       | int or None  | Process ID; `None` if never started                |
+
+`internal` &hArr; the error was synthesized by the framework rather than produced from a subprocess outcome. Discriminate failures by `kind` -- never by parsing `exception` text.
 
 ```python
 async def on_error(self, task, error):

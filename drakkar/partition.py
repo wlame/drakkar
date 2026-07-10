@@ -671,7 +671,7 @@ class PartitionProcessor:
 
         except ExecutorTaskError as e:
             executor_tasks.labels(status='failed').inc()
-            if e.error.exception and 'Timeout' in (e.error.exception or ''):
+            if e.error.kind == 'timeout':
                 executor_timeouts.inc()
             if self._recorder:
                 self._recorder.record_task_failed(
@@ -753,6 +753,7 @@ class PartitionProcessor:
             # exceptions like retries-exhausted failures).
             task_error = ExecutorError(
                 task=task,
+                kind='internal',
                 exception=str(e),
                 stderr=str(e),
             )

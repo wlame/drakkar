@@ -283,6 +283,19 @@ class ExecutorError(BaseModel):
     """Error information when an executor task fails."""
 
     task: ExecutorTask = Field(description='The task that failed.')
+    kind: Literal['nonzero_exit', 'timeout', 'launch_failure', 'internal'] = Field(
+        default='nonzero_exit',
+        description=(
+            'Structured failure classification — discriminate failures by this '
+            "field, never by parsing ``exception`` text. Values: 'nonzero_exit' "
+            '(the subprocess or precomputed result finished with a non-zero exit '
+            "code; the default), 'timeout' (exceeded executor.task_timeout_seconds), "
+            "'launch_failure' (the process could not be started: missing binary or "
+            "spawn error), 'internal' (synthesized by the framework with no "
+            'subprocess outcome behind it — e.g. a hook raised or the pool '
+            'violated its contract).'
+        ),
+    )
     exit_code: int | None = Field(
         default=None,
         description='Process exit code. None if the process failed to start or timed out.',

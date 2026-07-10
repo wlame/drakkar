@@ -135,10 +135,13 @@ When a task fails, the framework calls your [on_error()](handler.md#on_error) ho
 | Field | Type | Description |
 |-------|------|-------------|
 | `task` | `ExecutorTask` | The task that failed. |
+| `kind` | `'nonzero_exit' \| 'timeout' \| 'launch_failure' \| 'internal'` | Structured failure classification. `'nonzero_exit'` (default) -- the subprocess or precomputed result finished with a non-zero exit code. `'timeout'` -- exceeded `executor.task_timeout_seconds`. `'launch_failure'` -- the process could not be started (missing binary or spawn error). `'internal'` -- synthesized by the framework with no subprocess outcome behind it (e.g. a hook raised or the pool violated its contract). |
 | `exit_code` | `int \| None` | Process exit code. `None` if the process failed to start or timed out. |
 | `stderr` | `str` | Process stderr or a short error description (e.g., `'task timed out'`). |
 | `exception` | `str \| None` | Exception message for timeout/launch failures. `None` for normal non-zero exits. |
 | `pid` | `int \| None` | Process ID. `None` if the process never started. |
+
+`internal` &hArr; the error was synthesized by the framework rather than produced from a subprocess outcome. Discriminate failures by `kind` -- never by parsing `exception` text.
 
 ### Return Values
 
@@ -162,7 +165,7 @@ class MyHandler(BaseDrakkarHandler):
             return ErrorAction.RETRY
 
         # Timeout: try a lighter binary as fallback
-        if error.exception and 'Timeout' in error.exception:
+        if error.kind == 'timeout':
             return [ExecutorTask(
                 task_id=make_task_id('fallback'),
                 args=task.args + ['--fast-mode'],

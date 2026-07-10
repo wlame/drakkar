@@ -313,7 +313,9 @@ class WebappRunner:
             elif isinstance(outcome, Exception):
                 # Unexpected (non-executor) failure: keep it visible in the
                 # group rather than reducing it to a bare count.
-                group_errors.append(ExecutorError(task=task, exception=f'{type(outcome).__name__}: {outcome}'))
+                group_errors.append(
+                    ExecutorError(task=task, kind='internal', exception=f'{type(outcome).__name__}: {outcome}')
+                )
             else:
                 # Any other BaseException (KeyboardInterrupt, SystemExit):
                 # never convert interpreter-level signals into task errors.

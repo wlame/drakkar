@@ -59,6 +59,7 @@ async def test_execute_nonzero_exit_raises():
         await pool.execute(task)
     assert exc_info.value.error.exit_code == 42
     assert exc_info.value.result.exit_code == 42
+    assert exc_info.value.error.kind == 'nonzero_exit'
 
 
 async def test_execute_timeout_kills_process():
@@ -71,6 +72,7 @@ async def test_execute_timeout_kills_process():
     with pytest.raises(ExecutorTaskError) as exc_info:
         await pool.execute(task)
     assert 'timed out' in exc_info.value.error.stderr
+    assert exc_info.value.error.kind == 'timeout'
 
 
 async def test_execute_invalid_binary():
@@ -83,6 +85,7 @@ async def test_execute_invalid_binary():
     with pytest.raises(ExecutorTaskError) as exc_info:
         await pool.execute(task)
     assert exc_info.value.error.exception is not None
+    assert exc_info.value.error.kind == 'launch_failure'
 
 
 async def test_execute_concurrency_limit():
@@ -309,6 +312,7 @@ async def test_no_binary_path_anywhere_raises_error():
     assert 'binary_path' in str(exc_info.value).lower()
     assert exc_info.value.error.exception is not None
     assert exc_info.value.result.exit_code == -1
+    assert exc_info.value.error.kind == 'launch_failure'
 
 
 async def test_pool_binary_path_none_task_binary_path_none_explicit():
@@ -763,6 +767,7 @@ async def test_precomputed_non_zero_exit_raises_executor_task_error():
     assert exc_info.value.result.exit_code == 7
     assert exc_info.value.error.stderr == 'cached-failure-stderr'
     assert exc_info.value.error.pid is None
+    assert exc_info.value.error.kind == 'nonzero_exit'
 
 
 async def test_precomputed_does_not_consume_pool_slot():

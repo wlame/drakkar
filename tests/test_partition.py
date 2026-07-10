@@ -6,11 +6,14 @@ import sys
 import pytest
 from pydantic import BaseModel as BM
 
-from drakkar.executor import ExecutorPool
+from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler
+from drakkar.metrics import executor_timeouts
 from drakkar.models import (
     CollectResult,
     ErrorAction,
+    ExecutorError,
+    ExecutorResult,
     ExecutorTask,
     KafkaPayload,
     SourceMessage,
@@ -2426,3 +2429,87 @@ async def test_replacement_mixed_with_retries_then_replaced(failing_pool):
     assert w.results[0].task.task_id == 'repl-success'
     assert w.results[0].exit_code == 0
     assert w.is_complete
+
+
+class _StubFailurePool(ExecutorPool):
+    """Pool stand-in that raises a caller-supplied ``ExecutorTaskError``
+    instead of spawning a subprocess — lets a test pin the exact
+    ``ExecutorError.kind`` driving ``_execute_and_track``'s metric logic
+    without depending on real timing/exit-code behaviour."""
+
+    def __init__(self, error: ExecutorError, result: ExecutorResult) -> None:
+        super().__init__(binary_path='/bin/true', max_executors=4, task_timeout_seconds=10)
+        self._stub_error = error
+        self._stub_result = result
+
+    async def execute(self, task, recorder=None, partition_id=0):
+        raise ExecutorTaskError(error=self._stub_error, result=self._stub_result)
+
+
+class _SkipOnceHandler(BaseDrakkarHandler):
+    """Single task per message, SKIP on error, signals via on_window_complete."""
+
+    def __init__(self):
+        self.window_complete_calls: list[int] = []
+
+    async def arrange(self, messages, pending):
+        return [ExecutorTask(task_id=f'stub-{m.offset}', args=['x'], source_offsets=[m.offset]) for m in messages]
+
+    async def on_error(self, task, error):
+        return ErrorAction.SKIP
+
+    async def on_window_complete(self, results, source_messages):
+        self.window_complete_calls.append(len(results))
+        return None
+
+
+async def test_timeout_kind_increments_timeout_metric():
+    """kind='timeout' → executor_timeouts ticks; text is NOT consulted."""
+    task = ExecutorTask(task_id='stub-0', args=['x'], source_offsets=[0])
+    error = ExecutorError(
+        task=task,
+        stderr='task timed out',
+        exception='Timeout after 5s',
+        kind='timeout',
+    )
+    result = ExecutorResult(exit_code=-1, stdout='', stderr='task timed out', duration_seconds=0.01, task=task)
+    stub_pool = _StubFailurePool(error=error, result=result)
+    handler = _SkipOnceHandler()
+
+    before = executor_timeouts._value.get()  # type: ignore[attr-defined]
+
+    proc = PartitionProcessor(partition_id=0, handler=handler, executor_pool=stub_pool, window_size=10)
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(handler.window_complete_calls) == 1, timeout=5)
+    await proc.stop()
+
+    after = executor_timeouts._value.get()  # type: ignore[attr-defined]
+    assert after == before + 1, f'expected executor_timeouts to increment by 1, before={before} after={after}'
+
+
+async def test_timeout_text_without_timeout_kind_does_not_increment():
+    """kind='nonzero_exit' with 'Timeout' in the free text → NO tick (pins
+    the refinement: classification is by kind, never by parsing text)."""
+    task = ExecutorTask(task_id='stub-0', args=['x'], source_offsets=[0])
+    error = ExecutorError(
+        task=task,
+        exit_code=1,
+        stderr='boom',
+        exception='Timeout after 5s (misleading text — this is NOT a real timeout)',
+        kind='nonzero_exit',
+    )
+    result = ExecutorResult(exit_code=1, stdout='', stderr='boom', duration_seconds=0.01, task=task)
+    stub_pool = _StubFailurePool(error=error, result=result)
+    handler = _SkipOnceHandler()
+
+    before = executor_timeouts._value.get()  # type: ignore[attr-defined]
+
+    proc = PartitionProcessor(partition_id=0, handler=handler, executor_pool=stub_pool, window_size=10)
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: len(handler.window_complete_calls) == 1, timeout=5)
+    await proc.stop()
+
+    after = executor_timeouts._value.get()  # type: ignore[attr-defined]
+    assert after == before, f'expected executor_timeouts NOT to increment, before={before} after={after}'

@@ -370,7 +370,7 @@ When a task fails (`ExecutorTaskError` raised):
 ### 6.1 Metrics and Recording
 
 - `executor_tasks` counter incremented with `status='failed'`.
-- If the error contains "Timeout" in the exception message: `executor_timeouts` counter incremented.
+- If the error's `kind` is `'timeout'`: `executor_timeouts` counter incremented (classification is by the structured `kind` field, never by parsing the exception text).
 - Flight recorder records a `task_failed` event with error details.
 
 ### 6.2 on_error Hook
@@ -378,6 +378,7 @@ When a task fails (`ExecutorTaskError` raised):
 The framework calls `handler.on_error(task, error)`:
 - `task`: the failed `ExecutorTask`
 - `error`: an `ExecutorError` with:
+  - `kind` (`'nonzero_exit' | 'timeout' | 'launch_failure' | 'internal'`): structured failure classification — non-zero exit code (default), exceeded `executor.task_timeout_seconds`, process could not be started, or synthesized by the framework with no subprocess outcome behind it
   - `exit_code` (int | None): the process exit code, or None if it never started / timed out
   - `stderr` (str): process stderr or error description
   - `exception` (str | None): exception message for timeout/launch failures, None for normal non-zero exits
