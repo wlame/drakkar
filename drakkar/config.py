@@ -1000,11 +1000,15 @@ class DrakkarConfig(BaseSettings):
         """One-line human-readable config summary for startup logging and debug UI.
 
         Format (Option C — structured-but-readable):
-        [worker/cluster] topic=... group=... exec=4w/100win/100poll retries=3/120s ui=on:8080 metrics=9090 dlq=on sinks=[kafka:a,b pg:main] log=INFO
+        [worker/cluster] topic=... group=... exec=4w/100win/100poll retries=3/120s ui=on:8080 webapp=on:8090 cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
 
         The ``ui`` token reports the UI server state; the ``ui.release``
         bundle-fetch settings are deliberately excluded (they never affect
         pipeline behavior). Byte-parity with the Go backend is contractual.
+
+        The ``webapp`` token reports the synchronous-ingress server
+        (``webapp.host``/``port`` bind; port shown, host omitted like the
+        other tokens).
         """
         identity = worker_id or '?'
         if cluster_name:
@@ -1015,6 +1019,7 @@ class DrakkarConfig(BaseSettings):
         retries_part = f'{ex.max_retries}/{ex.task_timeout_seconds}s'
 
         ui_part = f'on:{self.ui.port}' if self.ui.enabled else 'off'
+        webapp_part = f'on:{self.webapp.port}' if self.webapp.enabled else 'off'
 
         # Cache summary: 'off' when disabled; otherwise 'on:f=Ns/s=Ns|off/c=Ns[/max=N]'.
         # :g format trims trailing zeros on integer-valued floats (3.0 → '3'), keeping
@@ -1056,6 +1061,7 @@ class DrakkarConfig(BaseSettings):
             f' exec={exec_part}'
             f' retries={retries_part}'
             f' ui={ui_part}'
+            f' webapp={webapp_part}'
             f' cache={cache_part}'
             f' metrics={metrics_part}'
             f' dlq={dlq_part}'

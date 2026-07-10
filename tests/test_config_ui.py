@@ -113,3 +113,9 @@ def test_config_summary_uses_ui_token():
 def test_config_summary_ui_off():
     cfg = DrakkarConfig(ui={'enabled': False})
     assert ' ui=off ' in cfg.config_summary(worker_id='w1')
+
+
+def test_config_summary_webapp_token_follows_ui():
+    cfg = DrakkarConfig()
+    summary = cfg.config_summary(worker_id='w1')
+    assert ' ui=on:8080 webapp=off ' in summary

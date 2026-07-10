@@ -963,6 +963,7 @@ class TestConfigSummary:
         assert 'exec=2w/' in summary
         assert 'retries=' in summary
         assert 'ui=off' in summary
+        assert 'webapp=off' in summary
         assert 'sinks=[kf:out]' in summary
         assert 'log=WARNING' in summary
 
@@ -981,6 +982,17 @@ class TestConfigSummary:
         cfg = make_config(ui=make_ui_config(enabled=True, port=8080))
         summary = cfg.config_summary(worker_id='w')
         assert 'ui=on:8080' in summary
+
+    def test_summary_webapp_on(self):
+        cfg = make_config(webapp={'enabled': True, 'port': 8090})
+        summary = cfg.config_summary(worker_id='w')
+        # Adjacency pins both value and position (right after the ui token).
+        assert ' ui=off webapp=on:8090 ' in summary
+
+    def test_summary_webapp_off_by_default(self):
+        cfg = make_config()
+        summary = cfg.config_summary(worker_id='w')
+        assert ' webapp=off ' in summary
 
     def test_summary_metrics_enabled(self):
         cfg = make_config(metrics=MetricsConfig(enabled=True, port=9090))
