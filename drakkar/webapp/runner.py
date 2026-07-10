@@ -65,11 +65,13 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from drakkar.config import WebAppConfig
+from drakkar.executor import ExecutorTaskError
 from drakkar.metrics import webapp_dropped_after_timeout, webapp_inflight
 from drakkar.models import (
     CollectResult,
     DeliveryAction,
     DeliveryError,
+    ExecutorError,
     ExecutorResult,
     ExecutorTask,
     MessageGroup,
@@ -286,22 +288,36 @@ class WebappRunner:
         # We submit all tasks concurrently via ``asyncio.gather`` so
         # arrange_http_request can fan out without authoring its own
         # concurrency control. ``return_exceptions=True`` keeps a
-        # single failing task from cancelling siblings — failure
-        # bookkeeping (success/failed counts) is computed below.
+        # single failing task from cancelling siblings — outcome
+        # classification (successes / group errors) happens below.
         results = await self._submit_tasks(tasks)
         timeline.append(StageTiming(stage='execute', duration_ms=(time.monotonic() - execute_started) * 1000.0))
 
-        # Split gathered outcomes into successes/failures for the
-        # synthetic MessageGroup and the WebReport summary. The
-        # executor pool raises ``ExecutorTaskError`` on a non-zero exit;
-        # we treat any exception as a terminal failure for the request.
+        # Classify gathered outcomes. Terminal task failures surface into
+        # the group's errors as the SAME ExecutorError the pool built —
+        # exactly what the Kafka path appends per terminal task
+        # (partition.py) — so shared hook code behaves identically on both
+        # paths. There is no retry machinery over HTTP: a failure is
+        # terminal on its first attempt.
         successful_results: list[ExecutorResult] = []
-        failed_count = 0
-        for outcome in results:
+        group_errors: list[ExecutorError] = []
+        for task, outcome in zip(tasks, results, strict=True):
             if isinstance(outcome, ExecutorResult):
                 successful_results.append(outcome)
+            elif isinstance(outcome, ExecutorTaskError):
+                group_errors.append(outcome.error)
+            elif isinstance(outcome, asyncio.CancelledError):
+                # Shutdown/cancellation must never masquerade as a task
+                # failure — abort the request, like the cancellation gates.
+                raise outcome
+            elif isinstance(outcome, Exception):
+                # Unexpected (non-executor) failure: keep it visible in the
+                # group rather than reducing it to a bare count.
+                group_errors.append(ExecutorError(task=task, exception=f'{type(outcome).__name__}: {outcome}'))
             else:
-                failed_count += 1
+                # Any other BaseException (KeyboardInterrupt, SystemExit):
+                # never convert interpreter-level signals into task errors.
+                raise outcome
 
         # ----- Cancellation gate (post-execute) -----
         # T2's ``wait_for`` may have timed out while we were inside the
@@ -332,7 +348,7 @@ class WebappRunner:
             source_message=source_message,
             tasks=list(tasks),
             results=successful_results,
-            errors=[],  # Task 6a does not surface terminal failures into errors[]
+            errors=group_errors,
             started_at=run_started_monotonic,
             finished_at=time.monotonic(),
             origin='http',
@@ -420,7 +436,7 @@ class WebappRunner:
             task_summary=TaskSummary(
                 total=len(tasks),
                 success=len(successful_results),
-                failed=failed_count,
+                failed=len(group_errors),
             ),
             # Task 6a does not thread per-request cache stats through the
             # runner — the cache exposes only Prometheus counters today,

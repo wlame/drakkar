@@ -35,8 +35,10 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from drakkar.config import WebAppConfig, WebClientConfig
+from drakkar.executor import ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import (
+    ExecutorError,
     ExecutorResult,
     ExecutorTask,
     PendingContext,
@@ -163,7 +165,7 @@ def _make_pool_returning(results: list[Any]) -> MagicMock:
     """Build a stub executor pool whose ``execute`` returns canned results.
 
     ``results`` is consumed in order — one entry per call. Items can be
-    :class:`ExecutorResult` for success or any ``Exception`` instance to
+    :class:`ExecutorResult` for success or any ``BaseException`` instance to
     simulate a terminal failure (the runner treats both via
     ``return_exceptions=True`` and aggregates accordingly).
     """
@@ -172,7 +174,9 @@ def _make_pool_returning(results: list[Any]) -> MagicMock:
 
     async def _execute(task: ExecutorTask, recorder, partition_id: int) -> ExecutorResult:
         outcome = next(iterator)
-        if isinstance(outcome, Exception):
+        if isinstance(outcome, BaseException):
+            # BaseException (not just Exception) so CancelledError — which
+            # asyncio raises for real on shutdown — is raised, not returned.
             raise outcome
         return outcome
 
@@ -401,6 +405,104 @@ async def test_runner_handles_failed_task_in_summary():
     # The failed task is intentionally NOT in ``report.tasks`` — Task 6a
     # only reports successful executions there. Task 6b/6c may revisit.
     assert len(report.tasks) == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_surfaces_terminal_failures_in_group_errors():
+    """An ExecutorTaskError outcome lands in group.errors — the SAME
+    ExecutorError object the pool built, matching the Kafka path."""
+    handler = _RecordingHandler()
+    task_ok = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
+    task_bad = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
+
+    async def arrange_impl(req, pending):
+        return [task_ok, task_bad]
+
+    captured: dict[str, Any] = {}
+
+    async def complete_impl(group):
+        captured['group'] = group
+        return _HttpResp()
+
+    handler.arrange_http_request_impl = arrange_impl
+    handler.on_http_request_complete_impl = complete_impl
+
+    task_error = ExecutorError(task=task_bad, exit_code=2, stderr='exploded')
+    pool = _make_pool_returning(
+        [
+            _make_canned_result(task_ok),
+            ExecutorTaskError(error=task_error, result=_make_canned_result(task_bad, exit_code=2)),
+        ]
+    )
+    runner = WebappRunner(_make_stub_app(handler, pool=pool), _make_config())
+
+    report = await runner.run(_make_ctx())
+
+    group = captured['group']
+    assert group.errors == [task_error]
+    assert group.errors[0] is task_error
+    assert len(group.results) == 1
+    assert group.failed == 1
+    assert report.task_summary.success == 1
+    assert report.task_summary.failed == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_synthesizes_executor_error_for_unexpected_exception():
+    """A non-ExecutorTaskError exception becomes a synthesized ExecutorError
+    bound to the right task — framework surprises stay visible."""
+    handler = _RecordingHandler()
+    task_ok = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
+    task_bad = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
+
+    async def arrange_impl(req, pending):
+        return [task_ok, task_bad]
+
+    captured: dict[str, Any] = {}
+
+    async def complete_impl(group):
+        captured['group'] = group
+        return _HttpResp()
+
+    handler.arrange_http_request_impl = arrange_impl
+    handler.on_http_request_complete_impl = complete_impl
+    pool = _make_pool_returning([_make_canned_result(task_ok), RuntimeError('boom')])
+    runner = WebappRunner(_make_stub_app(handler, pool=pool), _make_config())
+
+    await runner.run(_make_ctx())
+
+    group = captured['group']
+    assert len(group.errors) == 1
+    assert group.errors[0].task.task_id == task_bad.task_id
+    assert group.errors[0].exception == 'RuntimeError: boom'
+    assert group.errors[0].exit_code is None
+
+
+@pytest.mark.asyncio
+async def test_runner_reraises_cancelled_error_from_pool():
+    """A CancelledError outcome aborts the request — shutdown must never
+    masquerade as a task failure, and the response hook must not run."""
+    handler = _RecordingHandler()
+    task = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
+
+    async def arrange_impl(req, pending):
+        return [task]
+
+    hook_calls: list[Any] = []
+
+    async def complete_impl(group):
+        hook_calls.append(group)
+        return _HttpResp()
+
+    handler.arrange_http_request_impl = arrange_impl
+    handler.on_http_request_complete_impl = complete_impl
+    pool = _make_pool_returning([asyncio.CancelledError()])
+    runner = WebappRunner(_make_stub_app(handler, pool=pool), _make_config())
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner.run(_make_ctx())
+
+    assert hook_calls == []
 
 
 # ---------------------------------------------------------------------------

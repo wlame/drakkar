@@ -239,7 +239,13 @@ request envelope. `source_message.payload` carries the parsed request
 model — the same object `arrange_http_request` received — so the
 Kafka-path invariant ("`payload` is the parsed input model by the time
 hooks fire") holds on the webapp path too; handlers never need to
-re-parse `source_message.value`.
+re-parse `source_message.value`. On this path `group.results` holds
+the terminal successes and `group.errors` the terminal failures — the
+same `ExecutorError` objects the Kafka path delivers, so shared hook
+code behaves identically on both paths. There is no retry machinery
+over HTTP (a failure is terminal on its first attempt), and
+cancellation aborts the request rather than being recorded as a task
+failure.
 
 ```python
 async def on_http_request_complete(self, group: dk.MessageGroup) -> RankResponse:
