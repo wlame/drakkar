@@ -80,6 +80,8 @@ executor:
   binary_path: null                # default binary for tasks. env: DK_EXECUTOR__BINARY_PATH  · null = ExecutorTask must set its own
   max_executors: 4                 # concurrent subprocesses. env: DK_EXECUTOR__MAX_EXECUTORS  · reasonable: 2–32
   task_timeout_seconds: 120        # wall-clock cap per task. env: DK_EXECUTOR__TASK_TIMEOUT_SECONDS  · reasonable: 30–600
+  max_stdout_bytes: 0              # stdout bytes retained per task (0 = unlimited). env: DK_EXECUTOR__MAX_STDOUT_BYTES
+  max_stderr_bytes: 0              # stderr bytes retained per task (0 = unlimited). env: DK_EXECUTOR__MAX_STDERR_BYTES
   window_size: 100                 # max messages collected per arrange() window. env: DK_EXECUTOR__WINDOW_SIZE
   max_retries: 3                   # retries per failed task (0 = no retries). env: DK_EXECUTOR__MAX_RETRIES
   drain_timeout_seconds: 30        # graceful-shutdown wait for in-flight tasks. env: DK_EXECUTOR__DRAIN_TIMEOUT_SECONDS

@@ -89,11 +89,11 @@ The framework calls `asyncio.create_subprocess_exec` with:
 
 ### 4. Communicate
 
-`proc.communicate(input=stdin_bytes)` writes stdin (if any) and waits for the process to exit. All stdout and stderr are captured in memory.
+`proc.communicate(input=stdin_bytes)` writes stdin (if any) and waits for the process to exit. All stdout and stderr are captured in memory. With `executor.max_stdout_bytes` / `max_stderr_bytes` set, the framework streams the pipes instead, retaining up to the cap per stream and discarding the rest — see [Output Caps](#output-caps).
 
 ### 5. Enforce Timeout
 
-The entire `communicate()` call is wrapped in `asyncio.wait_for(timeout=executor.task_timeout_seconds)` (default: 120 seconds).
+The entire capture call (`communicate()`, or the capped streaming reader when output caps are set) is wrapped in `asyncio.wait_for(timeout=executor.task_timeout_seconds)` (default: 120 seconds).
 
 ### 6. Handle Outcome
 
@@ -125,6 +125,8 @@ Returned on successful execution (exit code 0). Also attached to `ExecutorTaskEr
 | `duration_seconds` | `float` | Wall-clock time from process start to completion, rounded to 3 decimal places. |
 | `task` | `ExecutorTask` | The original task that produced this result. Carries `metadata` and `labels` through the pipeline. |
 | `pid` | `int \| None` | OS process ID. `None` if the process never started. |
+| `stdout_truncated` | `bool` | `True` when stdout retention stopped at `executor.max_stdout_bytes` and the remainder was discarded. Always `False` with unlimited caps and for precomputed results. |
+| `stderr_truncated` | `bool` | Same for stderr, governed by `executor.max_stderr_bytes`. |
 
 ---
 
@@ -304,6 +306,25 @@ When `stdin` is `None` (the default), the process stdin is not connected at all.
 
 ---
 
+## Output Caps
+
+By default the executor retains everything a task writes to stdout and stderr. Processes that emit very large output can make that retention the peak memory cost of the worker — one string per task, multiplied by `max_executors`. Two opt-in caps bound it:
+
+```yaml
+executor:
+  max_stdout_bytes: 1048576   # keep at most 1 MiB of stdout per task
+  max_stderr_bytes: 65536     # keep at most 64 KiB of stderr per task
+```
+
+- `0` (the default) means unlimited — behavior is unchanged.
+- The process is **never throttled or blocked**: past the cap the framework keeps reading and discards the excess, so a chatty child cannot deadlock on a full pipe.
+- The retained prefix is cut at a UTF-8 character boundary (at most 3 bytes below the cap), so the decoded string never ends mid-character.
+- Output exactly equal to the cap is not considered truncated.
+- When a stream is cut, `ExecutorResult.stdout_truncated` / `stderr_truncated` is set, a warning (`executor_output_truncated`) is logged, and `drakkar_executor_output_truncated_total{stream}` increments.
+- Caps apply to real subprocess output only: handler-supplied precomputed results pass through untouched, and a timed-out task still discards all captured output.
+
+---
+
 ## Environment Variables
 
 Custom environment variables can be passed to executor subprocesses at
@@ -457,6 +478,8 @@ executor:
   binary_path: /usr/local/bin/my-worker    # default binary (optional)
   max_executors: 4                           # concurrent subprocess limit
   task_timeout_seconds: 120                # per-task wall-clock timeout
+  max_stdout_bytes: 0                       # stdout bytes retained (0 = unlimited)
+  max_stderr_bytes: 0                       # stderr bytes retained (0 = unlimited)
   window_size: 100                         # max messages per arrange() call
   max_retries: 3                           # retry limit per failed task
   drain_timeout_seconds: 30                # max wait for in-flight tasks on shutdown
@@ -469,6 +492,8 @@ executor:
 | `binary_path` | `str \| None` | `None` | 1 char | Default subprocess binary. `None` requires per-task override via `ExecutorTask.binary_path`. |
 | `max_executors` | `int` | `4` | 1 | Concurrent subprocess limit (semaphore size). |
 | `task_timeout_seconds` | `int` | `120` | 1 | Per-subprocess wall-clock timeout in seconds. |
+| `max_stdout_bytes` | `int` | `0` | 0 | Maximum bytes of stdout retained per task. `0` = unlimited. Excess output is still read and discarded (the process never blocks on a full pipe); the retained prefix is cut at a UTF-8 character boundary and `ExecutorResult.stdout_truncated` is set. |
+| `max_stderr_bytes` | `int` | `0` | 0 | Same as `max_stdout_bytes`, for stderr; sets `ExecutorResult.stderr_truncated`. |
 | `window_size` | `int` | `100` | 1 | Max messages per `arrange()` window. |
 | `max_retries` | `int` | `3` | 0 | Max retries per failed task. 0 disables retries. |
 | `drain_timeout_seconds` | `int` | `30` | 1 | Max wait for in-flight tasks during graceful shutdown. On timeout, offsets of still-in-flight tasks are **not** committed (they replay on restart). |

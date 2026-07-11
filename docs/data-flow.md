@@ -269,9 +269,9 @@ The `ExecutorPool` uses an `asyncio.Semaphore(max_executors)` to limit concurren
    - `stdout`: `asyncio.subprocess.PIPE` (always captured)
    - `stderr`: `asyncio.subprocess.PIPE` (always captured)
 
-3. **Communication**: `proc.communicate(input=stdin_bytes)` writes stdin (if any) and waits for the process to exit, capturing all stdout and stderr.
+3. **Communication**: `proc.communicate(input=stdin_bytes)` writes stdin (if any) and waits for the process to exit, capturing all stdout and stderr. When `executor.max_stdout_bytes` / `max_stderr_bytes` are set, the pipes are streamed instead: up to the cap is retained per stream, the rest is read and discarded, and the result's `stdout_truncated` / `stderr_truncated` flags are set.
 
-4. **Timeout enforcement**: the entire `communicate()` call is wrapped in `asyncio.wait_for(timeout=executor.task_timeout_seconds)` (default: `120` seconds).
+4. **Timeout enforcement**: the entire capture call is wrapped in `asyncio.wait_for(timeout=executor.task_timeout_seconds)` (default: `120` seconds).
 
 ### 4.3 Possible Outcomes
 
