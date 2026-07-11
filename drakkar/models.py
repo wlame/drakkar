@@ -51,8 +51,9 @@ def make_stable_task_id(prefix: str, *parts: str) -> str:
     ``make_task_id`` is random and can never match — do not use it
     for dedup.
 
-    Each part is length-prefixed before hashing so part boundaries
-    matter: ('a', 'bc') and ('ab', 'c') yield different IDs.
+    Each part is length-prefixed (8-byte big-endian, over the part's
+    UTF-8 bytes) before hashing so part boundaries matter: ('a', 'bc')
+    and ('ab', 'c') yield different IDs.
 
     Raises ValueError when no parts are given — a partless ID would be
     one constant value and silently dedupe every task into one.

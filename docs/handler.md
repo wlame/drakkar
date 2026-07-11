@@ -183,12 +183,16 @@ passed to `arrange()`. This happens continuously while the worker is
 running and the partition is assigned.
 
 `pending.pending_task_ids` is a `set[str]` of task IDs currently
-in-flight for this partition. Use it for O(1) deduplication — but deduplication only works with
-CONTENT-DERIVED task IDs. A freshly generated `make_task_id` is random
-and can never match an in-flight ID (the check below would be dead
-code); derive the ID from the work itself with `make_stable_task_id`,
-so a redelivered message (e.g. after a rebalance) arranges to the same
-ID and the pending check genuinely fires:
+in-flight for this partition. Use it for O(1) deduplication — but
+deduplication only works with CONTENT-DERIVED task IDs. A freshly
+generated `make_task_id` is random and can never match an in-flight ID
+(the check below would be dead code); derive the ID from the work
+itself with `make_stable_task_id`, so a redelivered message (e.g.
+after a rebalance) arranges to the same ID and the pending check
+genuinely fires. Note the pending check dedupes against in-flight tasks
+from earlier windows; two content-identical messages inside the same
+window still arrange to one shared ID — keep a local `seen` set inside
+`arrange()` if your topic can carry duplicates within one poll:
 
 ```python
 async def arrange(self, messages, pending):
