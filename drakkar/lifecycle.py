@@ -189,6 +189,8 @@ class AppLifecycle:
             # drain first). See ``BaseDrakkarHandler.task_priority`` for
             # the override contract.
             priority_fn=app._handler.task_priority,
+            max_stdout_bytes=app._config.executor.max_stdout_bytes,
+            max_stderr_bytes=app._config.executor.max_stderr_bytes,
         )
 
         start_metrics_server(app._config.metrics)

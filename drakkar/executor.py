@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from drakkar.metrics import executor_priority_fn_errors, tasks_precomputed
+from drakkar.metrics import executor_priority_fn_errors, output_truncated, tasks_precomputed
 from drakkar.models import ExecutorError, ExecutorResult, ExecutorTask
 
 if TYPE_CHECKING:
@@ -28,6 +28,47 @@ logger = structlog.get_logger()
 # below). Windows has no ``os.killpg`` / session semantics — fall back to the
 # parent-only kill on that platform.
 _IS_POSIX = sys.platform != 'win32'
+
+# Chunk size for the capped-capture pipe readers. 64 KiB matches the typical
+# OS pipe buffer, so a full buffer drains in one read.
+_READ_CHUNK_BYTES = 65536
+
+
+def _trim_incomplete_utf8(data: bytes) -> bytes:
+    """Strip a trailing incomplete-but-valid UTF-8 sequence (at most 3 bytes).
+
+    Applied only to truncated captures: a byte-exact cut can split a
+    multi-byte character, and the dangling prefix decodes differently across
+    backends (Python emits one replacement char per maximal subpart, Go one
+    per byte). Removing the incomplete tail keeps the decoded text identical
+    on both. Genuinely invalid tails (an 0xF8-0xFF lead, a stray
+    continuation byte) are left in place — ``decode(errors='replace')``
+    already renders those identically on both backends.
+    """
+    for back in range(1, min(3, len(data)) + 1):
+        byte = data[-back]
+        if byte < 0x80:
+            # ASCII tail — nothing dangling.
+            return data
+        if byte >= 0xC0:
+            # Lead byte: how long should its sequence be?
+            if byte < 0xE0:
+                expected = 2
+            elif byte < 0xF0:
+                expected = 3
+            elif byte < 0xF8:
+                expected = 4
+            else:
+                # Invalid lead byte — leave it for decode-replace.
+                return data
+            if expected > back:
+                # Fewer continuation bytes present than promised — the cut
+                # split this character. Strip the whole partial sequence.
+                return data[:-back]
+            return data
+        # 0x80-0xBF: continuation byte — keep scanning backwards.
+    return data
+
 
 # ``priority_fn`` callable signature. The return value is anything ``heapq``
 # can compare with ``__lt__`` — typically an int (Kafka offset), a tuple
@@ -199,6 +240,8 @@ class ExecutorPool:
         inherit_parent_env: bool = True,
         inherit_deny_patterns: list[str] | None = None,
         priority_fn: PriorityFn | None = None,
+        max_stdout_bytes: int = 0,
+        max_stderr_bytes: int = 0,
     ) -> None:
         """Configure the pool.
 
@@ -214,6 +257,12 @@ class ExecutorPool:
                 the ``OffsetTracker`` watermark advances. The wiring
                 from the handler's ``task_priority`` method to this
                 kwarg lives in :class:`drakkar.app.DrakkarApp`.
+            max_stdout_bytes: 0 (the default) = unlimited; positive
+                values cap how many bytes of stdout are retained per
+                task.
+            max_stderr_bytes: 0 (the default) = unlimited; positive
+                values cap how many bytes of stderr are retained per
+                task.
         """
         self._binary_path = binary_path
         self._max_executors = max_executors
@@ -227,6 +276,8 @@ class ExecutorPool:
         # FIFO. See ``PriorityGate`` for the design.
         self._gate = PriorityGate(max_executors)
         self._priority_fn: PriorityFn = priority_fn or default_priority
+        self._max_stdout_bytes = max_stdout_bytes
+        self._max_stderr_bytes = max_stderr_bytes
         self._active_count = 0
         self._waiting_count = 0
         self._available_slots: list[int] = list(range(max_executors))
@@ -452,6 +503,61 @@ class ExecutorPool:
         key_upper = key.upper()
         return any(fnmatch.fnmatchcase(key_upper, p.upper()) for p in self._inherit_deny_patterns)
 
+    async def _communicate_capped(
+        self,
+        proc: asyncio.subprocess.Process,
+        stdin_bytes: bytes | None,
+    ) -> tuple[bytes, int, bytes, int]:
+        """``communicate()`` replacement that caps per-stream retention.
+
+        Reads both pipes to EOF in chunks, retaining at most the configured
+        cap per stream (0 = unlimited) and counting every byte. Reading
+        NEVER stops at the cap: a reader that stopped would let the OS pipe
+        buffer fill and block the child, turning a chatty process into a
+        spurious timeout kill. Returns ``(stdout_raw, stdout_total,
+        stderr_raw, stderr_total)`` — the caller derives the truncation
+        flags and applies the UTF-8-safe trim.
+        """
+
+        async def feed_stdin(data: bytes) -> None:
+            # Mirrors communicate()'s stdin handling: write, drain, close —
+            # swallowing the two errors a child that exits before reading
+            # all of its stdin produces.
+            assert proc.stdin is not None
+            try:
+                proc.stdin.write(data)
+                await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                proc.stdin.close()
+
+        async def read_capped(stream: asyncio.StreamReader, cap: int) -> tuple[bytes, int]:
+            retained = bytearray()
+            total = 0
+            while chunk := await stream.read(_READ_CHUNK_BYTES):
+                total += len(chunk)
+                if cap == 0:
+                    retained.extend(chunk)
+                elif len(retained) < cap:
+                    retained.extend(chunk[: cap - len(retained)])
+            return bytes(retained), total
+
+        assert proc.stdout is not None and proc.stderr is not None
+        if proc.stdin is not None:
+            (stdout_raw, stdout_total), (stderr_raw, stderr_total), _ = await asyncio.gather(
+                read_capped(proc.stdout, self._max_stdout_bytes),
+                read_capped(proc.stderr, self._max_stderr_bytes),
+                feed_stdin(stdin_bytes or b''),
+            )
+        else:
+            (stdout_raw, stdout_total), (stderr_raw, stderr_total) = await asyncio.gather(
+                read_capped(proc.stdout, self._max_stdout_bytes),
+                read_capped(proc.stderr, self._max_stderr_bytes),
+            )
+        await proc.wait()
+        return stdout_raw, stdout_total, stderr_raw, stderr_total
+
     async def _run_subprocess(self, task: ExecutorTask) -> ExecutorResult:
         binary = self._resolve_binary(task)
         start = time.monotonic()
@@ -482,10 +588,40 @@ class ExecutorPool:
                 **platform_kwargs,
             )
             stdin_bytes = task.stdin.encode() if task.stdin is not None else None
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(input=stdin_bytes),
-                timeout=self._task_timeout,
-            )
+            if self._max_stdout_bytes == 0 and self._max_stderr_bytes == 0:
+                # Unlimited capture: communicate() handles stdin write,
+                # dual-pipe reads, and process wait in one call.
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(input=stdin_bytes),
+                    timeout=self._task_timeout,
+                )
+                stdout_truncated = stderr_truncated = False
+            else:
+                stdout_bytes, stdout_total, stderr_bytes, stderr_total = await asyncio.wait_for(
+                    self._communicate_capped(proc, stdin_bytes),
+                    timeout=self._task_timeout,
+                )
+                stdout_truncated = 0 < self._max_stdout_bytes < stdout_total
+                stderr_truncated = 0 < self._max_stderr_bytes < stderr_total
+                if stdout_truncated:
+                    stdout_bytes = _trim_incomplete_utf8(stdout_bytes)
+                if stderr_truncated:
+                    stderr_bytes = _trim_incomplete_utf8(stderr_bytes)
+
+                for stream_name, truncated, cap, total in (
+                    ('stdout', stdout_truncated, self._max_stdout_bytes, stdout_total),
+                    ('stderr', stderr_truncated, self._max_stderr_bytes, stderr_total),
+                ):
+                    if truncated:
+                        output_truncated.labels(stream=stream_name).inc()
+                        await logger.awarning(
+                            'executor_output_truncated',
+                            category='executor',
+                            task_id=task.task_id,
+                            stream=stream_name,
+                            cap_bytes=cap,
+                            total_bytes=total,
+                        )
             duration = time.monotonic() - start
 
             pid = proc.pid
@@ -502,6 +638,8 @@ class ExecutorPool:
                 duration_seconds=round(duration, 3),
                 task=task,
                 pid=pid,
+                stdout_truncated=stdout_truncated,
+                stderr_truncated=stderr_truncated,
             )
 
             if result.exit_code != 0:

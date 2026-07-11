@@ -5,8 +5,9 @@ import contextlib
 import sys
 
 import pytest
+from structlog.testing import capture_logs
 
-from drakkar.executor import ExecutorPool, ExecutorTaskError
+from drakkar.executor import ExecutorPool, ExecutorTaskError, _trim_incomplete_utf8
 from drakkar.models import ExecutorTask, PrecomputedResult
 
 
@@ -1358,3 +1359,257 @@ async def test_executor_pool_priority_does_not_break_precomputed_fast_path():
     # Precomputed tasks return BEFORE _compute_priority; priority_fn
     # must never be called for them.
     assert captured == []
+
+
+async def test_stdout_cap_truncates_and_sets_flag():
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+        max_stdout_bytes=10,
+    )
+    task = make_task(args=['-c', "import sys; sys.stdout.write('x' * 100)"])
+    result = await pool.execute(task)
+    assert result.exit_code == 0
+    assert result.stdout == 'x' * 10
+    assert result.stdout_truncated is True
+    assert result.stderr_truncated is False
+
+
+async def test_stderr_cap_truncates_and_sets_flag():
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+        max_stderr_bytes=10,
+    )
+    task = make_task(args=['-c', "import sys; sys.stderr.write('e' * 100)"])
+    result = await pool.execute(task)
+    assert result.exit_code == 0
+    assert result.stderr == 'e' * 10
+    assert result.stderr_truncated is True
+    assert result.stdout_truncated is False
+
+
+async def test_output_exactly_at_cap_not_truncated():
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+        max_stdout_bytes=10,
+    )
+    task = make_task(args=['-c', "import sys; sys.stdout.write('x' * 10)"])
+    result = await pool.execute(task)
+    assert result.stdout == 'x' * 10
+    assert result.stdout_truncated is False
+
+
+async def test_caps_apply_per_stream_independently():
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+        max_stdout_bytes=5,
+    )
+    task = make_task(args=['-c', "import sys; sys.stdout.write('o' * 20); sys.stderr.write('e' * 20)"])
+    result = await pool.execute(task)
+    assert result.stdout == 'ooooo'
+    assert result.stdout_truncated is True
+    assert result.stderr == 'e' * 20  # stderr cap unset - unlimited
+    assert result.stderr_truncated is False
+
+
+async def test_capped_capture_drains_past_cap_without_deadlock():
+    """A child writing far more than the OS pipe buffer (~64 KiB) must still
+    complete with a tiny cap: the reader has to keep draining past the cap.
+    A reader that stopped would let the pipe fill, block the child, and turn
+    this test into a 30 s timeout failure.
+    """
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=30,
+        max_stdout_bytes=1024,
+    )
+    task = make_task(args=['-c', "import sys; sys.stdout.write('y' * (2 * 1024 * 1024))"])
+    result = await pool.execute(task)
+    assert result.exit_code == 0
+    assert result.stdout_truncated is True
+    assert len(result.stdout) == 1024
+
+
+async def test_cap_cut_mid_character_is_utf8_safe():
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+        max_stdout_bytes=5,
+    )
+    # Three e-acute characters = 6 bytes; the 5-byte cap lands mid-character.
+    task = make_task(args=['-c', "import sys; sys.stdout.buffer.write('\\u00e9\\u00e9\\u00e9'.encode())"])
+    result = await pool.execute(task)
+    assert result.stdout == 'éé'  # 4 bytes retained after the trim
+    assert result.stdout_truncated is True
+
+
+async def test_stdin_still_delivered_with_cap_set():
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+        max_stdout_bytes=1000,
+    )
+    task = ExecutorTask(
+        task_id='t-stdin-cap',
+        args=['-c', 'import sys; sys.stdout.write(sys.stdin.read())'],
+        stdin='ping',
+        source_offsets=[0],
+    )
+    result = await pool.execute(task)
+    assert result.stdout == 'ping'
+    assert result.stdout_truncated is False
+
+
+@pytest.mark.parametrize(
+    ('data', 'expected'),
+    [
+        (b'hello', b'hello'),  # ASCII tail untouched
+        (b'caf\xc3', b'caf'),  # 1 of 2 bytes of e-acute - strip
+        (b'ab\xe2\x82', b'ab'),  # 2 of 3 bytes of euro sign - strip
+        (b'ab\xe2', b'ab'),  # 1 of 3 bytes - strip
+        (b'ab\xf0\x9f\x98', b'ab'),  # 3 of 4 bytes of emoji - strip
+        (b'ab\xf0\x9f', b'ab'),  # 2 of 4 bytes - strip
+        (b'ab\xf0', b'ab'),  # 1 of 4 bytes - strip
+        (b'caf\xc3\xa9', b'caf\xc3\xa9'),  # complete e-acute - untouched
+        (b'ab\xff', b'ab\xff'),  # invalid lead - decode-replace handles it
+        (b'ab\x80', b'ab\x80'),  # stray continuation - decode-replace handles it
+        (b'a\xc3\xa9\xa9', b'a\xc3\xa9\xa9'),  # complete char + stray continuation
+        (b'', b''),  # empty
+        (b'\xe2\x82', b''),  # everything stripped
+        (b'\x80\x80\x80\x80', b'\x80\x80\x80\x80'),  # continuations only, no lead in last 3
+    ],
+)
+def test_trim_incomplete_utf8_golden(data: bytes, expected: bytes):
+    """Cross-backend golden vectors — the Go suite pins the identical table.
+
+    Do not change inputs or outputs without changing the Go twin in the
+    same change set.
+    """
+    assert _trim_incomplete_utf8(data) == expected
+
+
+async def test_truncation_increments_metric_per_stream():
+    from drakkar.metrics import output_truncated
+
+    before_out = output_truncated.labels(stream='stdout')._value.get()
+    before_err = output_truncated.labels(stream='stderr')._value.get()
+
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+        max_stdout_bytes=5,
+        max_stderr_bytes=5,
+    )
+    task = make_task(args=['-c', "import sys; sys.stdout.write('o' * 20); sys.stderr.write('e' * 20)"])
+    await pool.execute(task)
+
+    assert output_truncated.labels(stream='stdout')._value.get() == before_out + 1
+    assert output_truncated.labels(stream='stderr')._value.get() == before_err + 1
+
+
+async def test_no_truncation_no_metric_increment():
+    from drakkar.metrics import output_truncated
+
+    before = output_truncated.labels(stream='stdout')._value.get()
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+        max_stdout_bytes=1000,
+    )
+    await pool.execute(make_task(args=['-c', "print('small')"]))
+    assert output_truncated.labels(stream='stdout')._value.get() == before
+
+
+async def test_truncation_emits_warning_log():
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+        max_stdout_bytes=5,
+    )
+    task = make_task('t-log', args=['-c', "import sys; sys.stdout.write('x' * 20)"])
+    with capture_logs() as cap:
+        await pool.execute(task)
+
+    events = [e for e in cap if e.get('event') == 'executor_output_truncated']
+    assert len(events) == 1
+    record = events[0]
+    assert record['log_level'] == 'warning'
+    assert record['task_id'] == 't-log'
+    assert record['stream'] == 'stdout'
+    assert record['cap_bytes'] == 5
+    assert record['total_bytes'] == 20
+
+
+async def test_timeout_with_cap_discards_partial_output():
+    """Timeout keeps today's contract even when caps are set: the synthetic
+    result carries no captured output and the flags stay False."""
+    from drakkar.metrics import output_truncated
+
+    before = output_truncated.labels(stream='stdout')._value.get()
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=1,
+        max_stdout_bytes=10,
+    )
+    task = make_task(args=['-c', "import sys, time; sys.stdout.write('x' * 100); sys.stdout.flush(); time.sleep(30)"])
+    with pytest.raises(ExecutorTaskError) as exc_info:
+        await pool.execute(task)
+    assert exc_info.value.error.kind == 'timeout'
+    assert exc_info.value.result.stdout == ''
+    assert exc_info.value.result.stdout_truncated is False
+    assert exc_info.value.result.stderr_truncated is False
+    assert output_truncated.labels(stream='stdout')._value.get() == before
+
+
+async def test_precomputed_results_exempt_from_caps():
+    pool = ExecutorPool(
+        binary_path='/bin/echo',
+        max_executors=2,
+        task_timeout_seconds=10,
+        max_stdout_bytes=5,
+        max_stderr_bytes=5,
+    )
+    task = ExecutorTask(
+        task_id='pc-cap',
+        source_offsets=[0],
+        precomputed=PrecomputedResult(stdout='x' * 100),
+    )
+    result = await pool.execute(task)
+    assert result.stdout == 'x' * 100
+    assert result.stdout_truncated is False
+    assert result.stderr_truncated is False
+
+
+async def test_nonzero_exit_error_carries_truncated_stderr():
+    pool = ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=2,
+        task_timeout_seconds=10,
+        max_stderr_bytes=5,
+    )
+    task = make_task(args=['-c', "import sys; sys.stderr.write('e' * 20); sys.exit(3)"])
+    with pytest.raises(ExecutorTaskError) as exc_info:
+        await pool.execute(task)
+    assert exc_info.value.error.exit_code == 3
+    assert exc_info.value.error.stderr == 'eeeee'
+    assert exc_info.value.result.stderr_truncated is True
+
+
+async def test_default_unlimited_flags_stay_false(echo_pool):
+    result = await echo_pool.execute(make_task(args=['hello']))
+    assert result.stdout_truncated is False
+    assert result.stderr_truncated is False

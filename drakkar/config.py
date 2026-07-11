@@ -380,6 +380,27 @@ class ExecutorConfig(BaseModel):
     )
     max_executors: int = Field(default=4, ge=1)
     task_timeout_seconds: int = Field(default=120, ge=1)
+    max_stdout_bytes: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            'Maximum bytes of stdout retained per task. 0 (the default) = '
+            'unlimited. When a process writes more, the retained prefix is '
+            'cut at a UTF-8 character boundary, the rest is read and '
+            'discarded (the process is never blocked on a full pipe), and '
+            'ExecutorResult.stdout_truncated is set. Useful when '
+            'subprocesses can emit very large output.'
+        ),
+    )
+    max_stderr_bytes: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            'Maximum bytes of stderr retained per task. 0 (the default) = '
+            'unlimited. Same semantics as max_stdout_bytes, applied to the '
+            'stderr stream; sets ExecutorResult.stderr_truncated on cut.'
+        ),
+    )
     window_size: int = Field(default=100, ge=1)
     max_retries: int = Field(default=3, ge=0)
     drain_timeout_seconds: int = Field(

@@ -56,6 +56,8 @@ def test_executor_config_defaults():
     assert cfg.drain_timeout_seconds == 30
     assert cfg.backpressure_high_multiplier == 32
     assert cfg.backpressure_low_multiplier == 4
+    assert cfg.max_stdout_bytes == 0
+    assert cfg.max_stderr_bytes == 0
 
 
 def test_executor_config_custom_values():
@@ -78,6 +80,30 @@ def test_executor_config_rejects_empty_binary_path():
 def test_executor_config_rejects_zero_workers():
     with pytest.raises(ValidationError):
         ExecutorConfig(binary_path='/bin/echo', max_executors=0)
+
+
+def test_executor_config_output_caps_default_to_unlimited():
+    cfg = ExecutorConfig()
+    assert cfg.max_stdout_bytes == 0
+    assert cfg.max_stderr_bytes == 0
+
+
+def test_executor_config_rejects_negative_stdout_cap():
+    with pytest.raises(ValidationError):
+        ExecutorConfig(max_stdout_bytes=-1)
+
+
+def test_executor_config_rejects_negative_stderr_cap():
+    with pytest.raises(ValidationError):
+        ExecutorConfig(max_stderr_bytes=-1)
+
+
+def test_executor_config_output_caps_env_override(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv('DK_EXECUTOR__MAX_STDOUT_BYTES', '1048576')
+    monkeypatch.setenv('DK_EXECUTOR__MAX_STDERR_BYTES', '65536')
+    cfg = DrakkarConfig()
+    assert cfg.executor.max_stdout_bytes == 1048576
+    assert cfg.executor.max_stderr_bytes == 65536
 
 
 # --- Sink config models ---

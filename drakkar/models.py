@@ -315,6 +315,22 @@ class ExecutorResult(BaseModel):
         default=None,
         description='OS process ID of the subprocess. None if the process never started.',
     )
+    stdout_truncated: bool = Field(
+        default=False,
+        description=(
+            'True when stdout retention stopped at executor.max_stdout_bytes '
+            'and the remainder was discarded. Always False when the cap is '
+            'unlimited (0) and for handler-supplied precomputed results.'
+        ),
+    )
+    stderr_truncated: bool = Field(
+        default=False,
+        description=(
+            'True when stderr retention stopped at executor.max_stderr_bytes '
+            'and the remainder was discarded. Always False when the cap is '
+            'unlimited (0) and for handler-supplied precomputed results.'
+        ),
+    )
 
 
 class ExecutorError(BaseModel):

@@ -108,6 +108,16 @@ executor_timeouts = Counter(
     'Total executor tasks that timed out',
 )
 
+output_truncated = Counter(
+    'drakkar_executor_output_truncated_total',
+    (
+        'Total executor task output streams truncated to '
+        'executor.max_stdout_bytes / executor.max_stderr_bytes, labeled by '
+        'stream (stdout|stderr).'
+    ),
+    ['stream'],
+)
+
 task_retries = Counter(
     'drakkar_task_retries_total',
     'Total executor tasks retried after failure',

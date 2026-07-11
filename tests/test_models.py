@@ -184,6 +184,35 @@ def _error(task: ExecutorTask) -> ExecutorError:
     return ExecutorError(task=task, exit_code=1, stderr='nope')
 
 
+# --- ExecutorResult truncation flags ---
+
+
+def test_executor_result_truncation_flags_default_false(executor_task):
+    result = ExecutorResult(
+        exit_code=0,
+        stdout='',
+        stderr='',
+        duration_seconds=0.1,
+        task=executor_task,
+    )
+    assert result.stdout_truncated is False
+    assert result.stderr_truncated is False
+
+
+def test_executor_result_truncation_flags_settable(executor_task):
+    result = ExecutorResult(
+        exit_code=0,
+        stdout='partial',
+        stderr='',
+        duration_seconds=0.1,
+        task=executor_task,
+        stdout_truncated=True,
+        stderr_truncated=True,
+    )
+    assert result.stdout_truncated is True
+    assert result.stderr_truncated is True
+
+
 def test_message_group_all_succeeded_counts():
     t1 = _task('t1')
     group = MessageGroup(
