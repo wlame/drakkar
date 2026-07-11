@@ -29,6 +29,7 @@ from drakkar.models import (
     SinkDeliveryFailedError,
     SourceMessage,
     TaskOrigin,
+    make_stable_task_id,
     make_task_id,
 )
 from drakkar.periodic import periodic
@@ -73,6 +74,7 @@ __all__ = [
     'format_rfc3339_micro',
     'load_config',
     'make_request_id',
+    'make_stable_task_id',
     'make_task_id',
     'periodic',
 ]

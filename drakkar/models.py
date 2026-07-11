@@ -4,6 +4,7 @@ Defines source messages, executor tasks/results, sink payloads,
 and the CollectResult that routes data to configured sinks.
 """
 
+import hashlib
 import os
 import time
 from enum import StrEnum
@@ -27,10 +28,46 @@ def make_task_id(prefix: str = 't') -> str:
 
     Time-sortable: lexicographic order matches creation order.
     Unique: nanosecond timestamp + 32-bit random suffix.
+
+    NOT suitable for PendingContext dedup — a fresh random ID can never
+    match an in-flight one. Use make_stable_task_id for that.
     """
     ts = time.time_ns()
     rnd = int.from_bytes(os.urandom(4))
     return f'{prefix}-{ts:016x}-{rnd:08x}'
+
+
+def make_stable_task_id(prefix: str, *parts: str) -> str:
+    """Derive a deterministic task ID from the work's content.
+
+    Format: {prefix}-{16 hex chars of sha256}
+    Example: make_stable_task_id('t', 'alpha', 'beta') -> 't-5d11bfa62398519b'
+
+    Same prefix+parts always produce the same ID — across retries,
+    restarts, workers, and backends (the Go MakeStableTaskID emits
+    byte-identical output). That determinism is what makes
+    ``PendingContext`` deduplication work: a redelivered message
+    arranges to the same ID, which IS in ``pending_task_ids``.
+    ``make_task_id`` is random and can never match — do not use it
+    for dedup.
+
+    Each part is length-prefixed before hashing so part boundaries
+    matter: ('a', 'bc') and ('ab', 'c') yield different IDs.
+
+    Raises ValueError when no parts are given — a partless ID would be
+    one constant value and silently dedupe every task into one.
+    """
+    if not parts:
+        raise ValueError(
+            'make_stable_task_id requires at least one part; a partless id '
+            'would be constant and dedupe every task into one'
+        )
+    digest = hashlib.sha256()
+    for part in parts:
+        encoded = part.encode('utf-8')
+        digest.update(len(encoded).to_bytes(8, 'big'))
+        digest.update(encoded)
+    return f'{prefix}-{digest.hexdigest()[:16]}'
 
 
 InputT = TypeVar('InputT', bound=BaseModel)

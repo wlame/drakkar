@@ -1,5 +1,6 @@
 """Tests for Drakkar data models."""
 
+import pytest
 from pydantic import BaseModel
 
 from drakkar.models import (
@@ -17,6 +18,7 @@ from drakkar.models import (
     RedisPayload,
     SourceMessage,
     TaskOrigin,
+    make_stable_task_id,
     make_task_id,
 )
 
@@ -123,6 +125,44 @@ def test_make_task_id_is_time_sortable():
 
 def test_make_task_id_prefix():
     assert make_task_id('rg').startswith('rg-')
+
+
+# --- make_stable_task_id ---
+
+
+def test_make_stable_task_id_is_deterministic():
+    """Same prefix+parts → the same id, always (that determinism IS the feature)."""
+    a = make_stable_task_id('rg', 'pattern', '/var/log/app.log')
+    b = make_stable_task_id('rg', 'pattern', '/var/log/app.log')
+    assert a == b
+
+
+def test_make_stable_task_id_shape():
+    """{prefix}-{16 lowercase hex}; no ':' (retry composite keys split on ':r')."""
+    sid = make_stable_task_id('rg', 'x')
+    assert sid.startswith('rg-')
+    suffix = sid.removeprefix('rg-')
+    assert len(suffix) == 16
+    assert all(c in '0123456789abcdef' for c in suffix)
+    assert ':' not in sid
+
+
+def test_make_stable_task_id_part_joining_is_injective():
+    """('a','bc') and ('ab','c') concatenate identically — the length prefix
+    must keep them distinct."""
+    assert make_stable_task_id('x', 'a', 'bc') != make_stable_task_id('x', 'ab', 'c')
+
+
+def test_make_stable_task_id_requires_parts():
+    """Zero parts would produce one constant id and dedupe EVERYTHING."""
+    with pytest.raises(ValueError, match='at least one part'):
+        make_stable_task_id('rg')
+
+
+def test_make_stable_task_id_cross_backend_golden():
+    """Byte-parity pin — the Go suite pins this SAME literal (mixed fleets
+    must see one convention)."""
+    assert make_stable_task_id('t', 'alpha', 'beta') == 't-5d11bfa62398519b'
 
 
 # --- MessageGroup properties ---
