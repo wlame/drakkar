@@ -393,6 +393,7 @@ async def test_postgres_sink_deliver(pg_sink_config):
 
 
 async def test_postgres_sink_deliver_batch(pg_sink_config):
+    """Rows sharing a (table, column-set) go out as ONE multi-row INSERT."""
     sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
 
     payloads = [
@@ -401,7 +402,82 @@ async def test_postgres_sink_deliver_batch(pg_sink_config):
     ]
     await sink.deliver(payloads)
 
+    assert mock_conn.execute.call_count == 1
+    query, *values = mock_conn.execute.call_args[0]
+    assert query.count('INSERT INTO') == 1
+    # Two value tuples, with parameters numbered continuously across them.
+    assert '$1' in query and f'${len(values)}' in query
+    assert query.count('), (') == 1
+
+
+async def test_postgres_sink_groups_by_table_and_columns(pg_sink_config):
+    """Different tables — or different column sets — cannot share a statement."""
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    payloads = [
+        PostgresPayload(table='results', data=DBResultModel(id=1)),
+        PostgresPayload(table='audit', data=DBResultModel(id=2)),
+        PostgresPayload(table='results', data=DBResultModel(id=3)),
+    ]
+    await sink.deliver(payloads)
+
+    # Two groups: the two 'results' rows batch together, 'audit' goes alone.
     assert mock_conn.execute.call_count == 2
+    tables = [call[0][0].split()[2] for call in mock_conn.execute.call_args_list]
+    assert tables == ['"results"', '"audit"'], 'group order must follow first appearance'
+
+
+async def test_postgres_sink_batch_failure_falls_back_per_row(pg_sink_config):
+    """A failed batch is retried row-by-row so the error names the bad row.
+
+    Without this, batching would coarsen failure granularity: one bad row
+    would fail the whole statement and the operator would lose which
+    payload caused it. Divergence #18 promises identical attribution.
+    """
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    calls: list[str] = []
+
+    async def execute(query, *values):
+        calls.append(query)
+        # Fail only the multi-row statement, not the per-row retries.
+        if query.count('), (') >= 1:
+            raise RuntimeError('batch rejected')
+
+    mock_conn.execute.side_effect = execute
+
+    payloads = [
+        PostgresPayload(table='results', data=DBResultModel(id=1)),
+        PostgresPayload(table='results', data=DBResultModel(id=2)),
+    ]
+    await sink.deliver(payloads)
+
+    # One batch attempt + one statement per row.
+    assert len(calls) == 3
+    assert calls[0].count('), (') == 1
+    assert all(c.count('), (') == 0 for c in calls[1:])
+
+
+async def test_postgres_sink_bad_payload_keeps_preceding_side_effects(pg_sink_config):
+    """The rows before an invalid payload are still inserted, then it raises.
+
+    The pre-batching loop executed each row as it went, so a bad payload
+    halfway through left the earlier rows committed. Building all rows up
+    front must not silently turn that into all-or-nothing.
+    """
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    payloads = [
+        PostgresPayload(table='results', data=DBResultModel(id=1)),
+        PostgresPayload(table='bad; DROP TABLE x--', data=DBResultModel(id=2)),
+        PostgresPayload(table='results', data=DBResultModel(id=3)),
+    ]
+    with pytest.raises(ValueError, match='Invalid SQL identifier'):
+        await sink.deliver(payloads)
+
+    # Only the row before the bad payload was executed.
+    assert mock_conn.execute.call_count == 1
+    assert '"results"' in mock_conn.execute.call_args[0][0]
 
 
 async def test_postgres_sink_deliver_empty(pg_sink_config):
@@ -523,6 +599,7 @@ async def test_mongo_sink_deliver(mongo_sink_config):
 
 
 async def test_mongo_sink_deliver_batch(mongo_sink_config):
+    """Documents sharing a collection go out as ONE insert_many."""
     sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
 
     payloads = [
@@ -531,6 +608,34 @@ async def test_mongo_sink_deliver_batch(mongo_sink_config):
     ]
     await sink.deliver(payloads)
 
+    assert mock_collection.insert_one.call_count == 0
+    assert mock_collection.insert_many.call_count == 1
+    documents = mock_collection.insert_many.call_args[0][0]
+    assert [d['request_id'] for d in documents] == ['r1', 'r2'], 'payload order must be preserved'
+
+
+async def test_mongo_sink_single_payload_uses_insert_one(mongo_sink_config):
+    """A one-document group keeps the exact call the per-payload loop made."""
+    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+
+    await sink.deliver([MongoPayload(collection='results', data=SampleOutput(request_id='r1'))])
+
+    assert mock_collection.insert_one.call_count == 1
+    assert mock_collection.insert_many.call_count == 0
+
+
+async def test_mongo_sink_batch_failure_falls_back_per_document(mongo_sink_config):
+    """A failed insert_many is retried per document so attribution survives."""
+    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+    mock_collection.insert_many.side_effect = RuntimeError('batch rejected')
+
+    payloads = [
+        MongoPayload(collection='results', data=SampleOutput(request_id='r1')),
+        MongoPayload(collection='results', data=SampleOutput(request_id='r2')),
+    ]
+    await sink.deliver(payloads)
+
+    assert mock_collection.insert_many.call_count == 1
     assert mock_collection.insert_one.call_count == 2
 
 

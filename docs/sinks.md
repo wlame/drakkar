@@ -81,6 +81,11 @@ Inserts a row into a PostgreSQL table.
 builds an `INSERT INTO <table> (<columns>) VALUES (<placeholders>)` query. Column and
 table names are validated against SQL injection.
 
+**Batching:** rows in one delivery are grouped by `(table, column-set)` and each group
+is sent as a single multi-row `INSERT` (chunked at 65535 bind parameters), rather than
+one round-trip per payload. If a batch statement fails, the framework retries that
+chunk row-by-row so the surfaced error still names the offending row.
+
 ```python
 from drakkar import PostgresPayload
 
@@ -100,7 +105,12 @@ Inserts a document into a MongoDB collection.
 | `collection` | `str` | Target MongoDB collection name |
 | `data` | `BaseModel` | Payload model |
 
-**Serialization:** `data.model_dump()` produces a dict, inserted via `insert_one`.
+**Serialization:** `data.model_dump()` produces a dict.
+
+**Batching:** documents in one delivery are grouped by collection and each group is
+sent as a single `insert_many`, rather than one `insert_one` per payload. A group of
+one uses `insert_one`. If `insert_many` fails, the framework retries that group
+document-by-document so the surfaced error still names the offending document.
 
 ```python
 from drakkar import MongoPayload
@@ -144,6 +154,11 @@ Sets a key-value pair in Redis.
 **Serialization:** `data.model_dump_json()` becomes the Redis string value. The full
 Redis key is `{config.key_prefix}{payload.key}`. When `ttl` is set, the key expires
 after that many seconds (`SET key value EX ttl`).
+
+**Batching:** multiple payloads in one delivery are written through a single pipeline
+rather than one round-trip per key. If the pipeline fails, the framework retries the
+keys individually so the surfaced error still names the offending key — safe to replay
+because `SET` is write-replace.
 
 ```python
 from drakkar import RedisPayload

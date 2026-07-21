@@ -7,6 +7,7 @@ then inserted into the specified table.
 
 import re
 import time
+from dataclasses import dataclass
 
 import asyncpg
 import structlog
@@ -20,6 +21,12 @@ logger = structlog.get_logger()
 
 _IDENT_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
 
+# Caps the positional parameters in one multi-row INSERT — the Postgres
+# wire protocol limits a statement to 65535 bind parameters, so oversized
+# groups are chunked into multiple statements. Matches the Go backend's
+# ``maxInsertParams``.
+MAX_INSERT_PARAMS = 65535
+
 
 def _quote_ident(name: str) -> str:
     """Quote a SQL identifier to prevent injection.
@@ -30,6 +37,56 @@ def _quote_ident(name: str) -> str:
     if not _IDENT_RE.match(name):
         raise ValueError(f'Invalid SQL identifier: {name!r}')
     return f'"{name}"'
+
+
+@dataclass(frozen=True)
+class _PgRow:
+    """One payload reduced to its INSERT building blocks, identifiers quoted."""
+
+    quoted_table: str
+    quoted_columns: list[str]
+    values: list[object]
+
+    @property
+    def group_key(self) -> tuple[str, tuple[str, ...]]:
+        """Rows sharing this key can go in one multi-row INSERT."""
+        return (self.quoted_table, tuple(self.quoted_columns))
+
+
+def _group_rows_by_key(rows: list[_PgRow]) -> list[list[_PgRow]]:
+    """Bucket rows by (table, column-set).
+
+    Preserves first-appearance group order and payload order within each
+    group, so the SQL a batch emits reaches the database in the same
+    sequence the per-payload loop used.
+    """
+    index: dict[tuple[str, tuple[str, ...]], int] = {}
+    groups: list[list[_PgRow]] = []
+    for row in rows:
+        key = row.group_key
+        i = index.get(key)
+        if i is None:
+            i = len(groups)
+            index[key] = i
+            groups.append([])
+        groups[i].append(row)
+    return groups
+
+
+def _build_multi_insert(rows: list[_PgRow]) -> tuple[str, list[object]]:
+    """Build one INSERT covering every row (all share a table + column set)."""
+    columns = rows[0].quoted_columns
+    col_names = ', '.join(columns)
+    tuples = []
+    values: list[object] = []
+    param = 1
+    for row in rows:
+        placeholders = ', '.join(f'${param + j}' for j in range(len(columns)))
+        param += len(columns)
+        tuples.append(f'({placeholders})')
+        values.extend(row.values)
+    query = f'INSERT INTO {rows[0].quoted_table} ({col_names}) VALUES {", ".join(tuples)}'
+    return query, values
 
 
 class PostgresSink(BaseSink[PostgresPayload]):
@@ -82,10 +139,19 @@ class PostgresSink(BaseSink[PostgresPayload]):
         )
 
     async def deliver(self, payloads: list[PostgresPayload]) -> None:
-        """Insert all payloads into their respective tables.
+        """Insert every payload into its target table.
 
-        Each payload's data is serialized via model_dump() and inserted
-        as a row. Table and column names are validated against SQL injection.
+        Each payload's data is serialized via ``model_dump()`` to a
+        column-name → value mapping; the table and every column identifier
+        are validated against SQL injection.
+
+        Rows are grouped by ``(table, column-set)`` and each group is sent
+        as ONE multi-row ``INSERT`` instead of one round-trip per payload.
+        Failure granularity is preserved: a batch that fails is retried
+        row-by-row so the error an operator sees names the offending row,
+        exactly as the per-payload loop did. See the Go backend's
+        ``internal/sinks/postgres.go`` — the two must stay observably
+        identical (divergence #18 in its migration notes).
         """
         if not payloads or not self._pool:
             return
@@ -93,22 +159,75 @@ class PostgresSink(BaseSink[PostgresPayload]):
         start = time.monotonic()
         labels = {'sink_type': self.sink_type, 'sink_name': self._name}
         try:
+            rows, bad_index, build_error = self._build_rows(payloads)
             async with self._pool.acquire() as conn:
-                for payload in payloads:
-                    data = payload.data.model_dump()
-                    columns = list(data.keys())
-                    table = _quote_ident(payload.table)
-                    col_names = ', '.join(_quote_ident(c) for c in columns)
-                    placeholders = ', '.join(f'${i + 1}' for i in range(len(columns)))
-                    query = f'INSERT INTO {table} ({col_names}) VALUES ({placeholders})'
-                    values = list(data.values())
-                    await conn.execute(query, *values)
+                if build_error is not None:
+                    # The per-payload loop executed every row BEFORE the
+                    # invalid payload, then raised. Reproduce those side
+                    # effects (an exec failure on the way takes precedence,
+                    # exactly as the sequential loop would have hit first).
+                    for row in rows[:bad_index]:
+                        await self._exec_single(conn, row)
+                    raise build_error
+                for group in _group_rows_by_key(rows):
+                    await self._deliver_group(conn, group)
 
             sink_payloads_delivered.labels(**labels).inc(len(payloads))
             sink_deliver_duration.labels(**labels).observe(time.monotonic() - start)
         except Exception:
             sink_deliver_errors.labels(**labels).inc()
             raise
+
+    def _build_rows(self, payloads: list[PostgresPayload]) -> tuple[list[_PgRow], int, Exception | None]:
+        """Validate and convert every payload up front.
+
+        On the first bad payload returns the rows built so far, the failing
+        index, and the error — the caller replays the legacy partial side
+        effects before raising it.
+        """
+        rows: list[_PgRow] = []
+        for i, payload in enumerate(payloads):
+            try:
+                data = payload.data.model_dump()
+                rows.append(
+                    _PgRow(
+                        quoted_table=_quote_ident(payload.table),
+                        quoted_columns=[_quote_ident(c) for c in data],
+                        values=list(data.values()),
+                    )
+                )
+            except Exception as e:
+                return rows, i, e
+        return rows, len(rows), None
+
+    async def _deliver_group(self, conn: asyncpg.Connection, group: list[_PgRow]) -> None:
+        """Insert one (table, column-set) group, chunked to the parameter cap."""
+        # A payload whose data serializes to an empty mapping has zero
+        # columns; dividing by zero would raise here instead of surfacing
+        # the graceful "INSERT INTO t () ..." SQL error the per-payload
+        # loop produced. Route those through the single-row path.
+        columns = len(group[0].quoted_columns)
+        rows_per_statement = max(MAX_INSERT_PARAMS // columns, 1) if columns else 1
+        for start in range(0, len(group), rows_per_statement):
+            chunk = group[start : start + rows_per_statement]
+            if len(chunk) == 1:
+                await self._exec_single(conn, chunk[0])
+                continue
+            query, values = _build_multi_insert(chunk)
+            try:
+                await conn.execute(query, *values)
+            except Exception:
+                # Batch failed — fall back to per-row delivery so the error
+                # names the offending row (and to ride out a
+                # statement-level transient).
+                for row in chunk:
+                    await self._exec_single(conn, row)
+
+    @staticmethod
+    async def _exec_single(conn: asyncpg.Connection, row: _PgRow) -> None:
+        """Insert one row — the shape the pre-batching loop produced."""
+        query, values = _build_multi_insert([row])
+        await conn.execute(query, *values)
 
     async def close(self) -> None:
         """Close the connection pool."""

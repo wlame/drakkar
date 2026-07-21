@@ -481,7 +481,13 @@ async def test_rotate_creates_new_db_and_flushes(tmp_path):
 
 
 async def test_rotate_flushes_buffer_to_old_db(tmp_path):
-    config = make_debug_config(tmp_path, retention_hours=24)
+    # retention_max_events must leave room for BOTH files: rotation prunes
+    # to max(1, retention_max_events // 10_000) files, so the suite default
+    # of 1000 (= 1 file) deletes the old DB before this test can read it.
+    # The test then re-created it by connecting, and asserted against an
+    # empty database — it only passed when start and rotate happened to land
+    # in the same wall-clock second and reused one filename.
+    config = make_debug_config(tmp_path, retention_hours=24, retention_max_events=20_000)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
