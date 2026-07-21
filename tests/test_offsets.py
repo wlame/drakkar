@@ -1,6 +1,6 @@
 """Tests for Drakkar offset watermark tracker."""
 
-from drakkar.offsets import OffsetTracker
+from drakkar.offsets import OffsetState, OffsetTracker
 
 
 def test_empty_tracker():
@@ -149,3 +149,50 @@ def test_has_pending_with_mixed_state():
 
     tracker.complete(11)
     assert not tracker.has_pending()
+
+
+def test_pending_count_matches_a_full_recount_through_every_transition():
+    """The incrementally-maintained counter must never drift from reality.
+
+    ``pending_count`` is O(1) precisely because it is no longer recomputed:
+    it is read twice per message and polled every 50ms while draining, and a
+    scan degrades exactly when the tracked set grows. That makes the counter
+    load-bearing, so it is pinned here against a brute-force recount after
+    every kind of transition — including the idempotent and no-op paths that
+    are the easy ones to miscount.
+    """
+    tracker = OffsetTracker()
+
+    def recount() -> int:
+        return sum(1 for s in tracker._offsets.values() if s is OffsetState.PENDING)
+
+    def check(label: str) -> None:
+        assert tracker.pending_count == recount(), label
+        assert tracker.completed_count == len(tracker._offsets) - recount(), label
+        assert tracker.has_pending() == (recount() > 0), label
+
+    for offset in range(10):
+        tracker.register(offset)
+    check('after register')
+
+    tracker.register(3)  # duplicate registration is a no-op
+    check('after duplicate register')
+
+    for offset in (0, 1, 2, 5):
+        tracker.complete(offset)
+    check('after complete')
+
+    tracker.complete(5)  # completing twice must not double-decrement
+    check('after duplicate complete')
+
+    tracker.complete(99)  # unknown offset is a no-op
+    check('after unknown complete')
+
+    committable = tracker.committable()
+    assert committable == 3, 'offsets 0-2 are the gap-free completed prefix'
+    tracker.acknowledge_commit(committable)
+    check('after acknowledge_commit')
+
+    tracker.clear()
+    check('after clear')
+    assert tracker.pending_count == 0

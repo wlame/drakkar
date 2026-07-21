@@ -271,6 +271,11 @@ class ExecutorPool:
         self._inherit_parent_env = inherit_parent_env
         # Patterns are compared case-insensitively against env var names.
         self._inherit_deny_patterns = list(inherit_deny_patterns or [])
+        # Upper-cased once at construction: the matcher previously re-cased
+        # every (constant) pattern for every env var, for every task.
+        self._denied_patterns_upper = [p.upper() for p in self._inherit_deny_patterns]
+        # Filled on first use by _filtered_parent_env(); see its docstring.
+        self._filtered_parent_env_cache: dict[str, str] | None = None
         # Priority gate replaces ``asyncio.Semaphore``. Same acquire/release
         # contract; contended waiters wake in priority order rather than
         # FIFO. See ``PriorityGate`` for the design.
@@ -490,18 +495,38 @@ class ExecutorPool:
 
         merged: dict[str, str] = {}
         if self._inherit_parent_env:
-            for key, val in os.environ.items():
-                if not self._is_env_key_denied(key):
-                    merged[key] = val
+            merged.update(self._filtered_parent_env())
         # Custom env always wins — operator/handler chose these explicitly.
         merged.update(self._config_env)
         merged.update(task.env)
         return merged
 
+    def _filtered_parent_env(self) -> dict[str, str]:
+        """The parent environment minus deny-listed names, computed once.
+
+        The result depends only on ``os.environ`` and the deny patterns, and
+        neither changes once the worker is running — but it used to be
+        recomputed for every task, at roughly 80us of event-loop time each on
+        a typical environment. That cost is unavoidable by configuration: the
+        "inherit verbatim" fast path above needs an EMPTY deny list, and the
+        default ships seven patterns, so real deployments never reach it.
+
+        Computed lazily on first use rather than in ``__init__`` so variables
+        set by startup hooks are still picked up. The consequence is that
+        mutating ``os.environ`` after the first task no longer affects later
+        subprocesses — use ``executor.env`` or ``ExecutorTask.env`` for values
+        that need to vary per task. The Go backend caches the same way.
+        """
+        if self._filtered_parent_env_cache is None:
+            self._filtered_parent_env_cache = {
+                key: val for key, val in os.environ.items() if not self._is_env_key_denied(key)
+            }
+        return self._filtered_parent_env_cache
+
     def _is_env_key_denied(self, key: str) -> bool:
         """Case-insensitive glob match against any deny pattern."""
         key_upper = key.upper()
-        return any(fnmatch.fnmatchcase(key_upper, p.upper()) for p in self._inherit_deny_patterns)
+        return any(fnmatch.fnmatchcase(key_upper, p.upper()) for p in self._denied_patterns_upper)
 
     async def _communicate_capped(
         self,

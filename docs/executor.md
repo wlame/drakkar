@@ -388,6 +388,20 @@ The `PATH` and other standard vars are still subject to the deny list;
 if you rely on them, make sure your patterns don't match them (they
 don't with the defaults).
 
+The filtered parent environment is computed **once**, on the first task, and
+reused for every subsequent subprocess — the result depends only on the
+process environment and the deny patterns, neither of which changes while the
+worker runs. Two consequences worth knowing:
+
+- Mutating `os.environ` after the first task does **not** affect later
+  subprocesses. Use `executor.env` (config-level) or `ExecutorTask.env`
+  (per-task) for anything that needs to vary; both are applied fresh on every
+  task and still override the parent snapshot.
+- Variables exported by startup hooks *are* picked up, because the snapshot is
+  taken lazily on first use rather than at pool construction.
+
+The Go backend caches identically.
+
 ### Config-level env
 
 Set `executor.env` in your YAML config to pass variables to every task:

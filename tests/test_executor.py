@@ -2,7 +2,9 @@
 
 import asyncio
 import contextlib
+import os
 import sys
+from unittest.mock import patch
 
 import pytest
 from structlog.testing import capture_logs
@@ -1613,3 +1615,59 @@ async def test_default_unlimited_flags_stay_false(echo_pool):
     result = await echo_pool.execute(make_task(args=['hello']))
     assert result.stdout_truncated is False
     assert result.stderr_truncated is False
+
+
+def test_parent_env_is_filtered_once_not_rebuilt_per_task():
+    """The deny-filtered parent env is computed once, not per task.
+
+    The documented "inherit verbatim" fast path requires an EMPTY deny list,
+    but the default ships seven patterns — so real deployments always took the
+    filtering path and paid a full ``os.environ`` scan (~80us of event-loop
+    time) on every task, even though the result is identical every time.
+
+    The second half pins the documented consequence of caching: mutating
+    ``os.environ`` after the first task does NOT affect later subprocesses.
+    Per-task values belong in ``executor.env`` / ``ExecutorTask.env``.
+    """
+    pool = ExecutorPool(
+        binary_path='/bin/echo',
+        max_executors=1,
+        task_timeout_seconds=5,
+        inherit_parent_env=True,
+        inherit_deny_patterns=['DK_*', '*SECRET*'],
+    )
+    task = make_task()
+
+    with patch.dict(os.environ, {'DK_HIDDEN': 'x', 'MY_SECRET': 'y', 'KEEP_ME': 'z'}):
+        first = pool._build_env(task)
+        assert first is not None
+        assert first['KEEP_ME'] == 'z', 'non-denied vars are inherited'
+        assert 'DK_HIDDEN' not in first, 'DK_* must be filtered'
+        assert 'MY_SECRET' not in first, '*SECRET* must be filtered'
+
+    # The patch has exited, so os.environ no longer holds those names — but
+    # the cached snapshot is unchanged. This is the documented trade-off.
+    assert pool._build_env(task) == first
+
+
+def test_task_env_still_overrides_the_cached_parent_env():
+    """Caching the parent snapshot must not freeze per-task overrides."""
+    pool = ExecutorPool(
+        binary_path='/bin/echo',
+        max_executors=1,
+        task_timeout_seconds=5,
+        inherit_parent_env=True,
+        inherit_deny_patterns=['DK_*'],
+        env={'FROM_CONFIG': 'cfg'},
+    )
+    first = pool._build_env(make_task())
+    assert first is not None and first['FROM_CONFIG'] == 'cfg'
+
+    task = make_task()
+    task.env = {'FROM_CONFIG': 'task-wins', 'PER_TASK': '1'}
+    second = pool._build_env(task)
+    assert second is not None
+    assert second['FROM_CONFIG'] == 'task-wins', 'task env must beat config env'
+    assert second['PER_TASK'] == '1'
+    # The earlier result must not have been mutated by the later call.
+    assert first['FROM_CONFIG'] == 'cfg'
