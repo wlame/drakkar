@@ -30,7 +30,7 @@ from drakkar.config import (
 )
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
-from drakkar.metrics import dlq_dropped_payloads, message_parse_failures
+from drakkar.metrics import dlq_dropped_payloads, message_parse_failures, partition_processor_deaths
 from drakkar.models import (
     CollectResult,
     DeliveryAction,
@@ -259,12 +259,21 @@ async def test_policy_raise_stops_partition_without_commit(echo_pool):
         on_commit=on_commit,
         on_parse_error='raise',
     )
-    proc.enqueue(make_msg(offset=5, value=b'broken'))
     proc.start()
-    # MessageParseError propagates out of the window loop; the processor
-    # task logs partition_processor_error and exits.
+    # MessageParseError propagates out of the window loop, which kills it —
+    # but the supervisor restarts the loop once (PARTITION_RESTART_LIMIT),
+    # so reaching the exited state takes two failing windows. Wait for the
+    # restart before enqueuing the second, or both messages land in one
+    # window and only crash the loop once.
+    restarts = partition_processor_deaths.labels(partition='0', outcome='restarted')
+    before = restarts._value.get()
+    proc.enqueue(make_msg(offset=5, value=b'broken'))
+    await wait_for(lambda: restarts._value.get() > before, timeout=5)
+    proc.enqueue(make_msg(offset=6, value=b'broken'))
+
     await wait_for(lambda: proc._task is not None and proc._task.done(), timeout=5)
 
+    assert proc.is_dead, 'a loop that died twice must be marked dead so /readyz fails'
     assert handler.arranged == []
     assert not committed
 

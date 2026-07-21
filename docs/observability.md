@@ -55,6 +55,7 @@ metrics:
 |--------|------|--------|-------------|
 | `drakkar_partition_queue_size` | Gauge | `partition` | Messages waiting in the partition's internal queue |
 | `drakkar_offset_lag` | Gauge | `partition` | Pending (uncommitted) offsets per partition |
+| `drakkar_partition_processor_deaths_total` | Counter | `partition`, `outcome` | Partition loops that exited on an unexpected error. `outcome="restarted"` came back; `outcome="dead"` gave up and now fails `/readyz`. Alert on any non-zero rate — see [Deployment](deployment.md#dead-partition-loops) |
 | `drakkar_backpressure_active` | Gauge | -- | Whether the consumer is paused due to [backpressure](performance.md#backpressure). `1` = paused, `0` = flowing |
 | `drakkar_total_queued` | Gauge | -- | Total messages buffered in all partition queues plus in-flight tasks |
 | `drakkar_assigned_partitions` | Gauge | -- | Number of partitions currently assigned to this worker |

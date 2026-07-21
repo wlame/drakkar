@@ -4628,6 +4628,63 @@ async def test_readyz_returns_503_when_sink_disconnected(probe_client, probe_app
     assert 'sink_kafka:results_not_connected' in body['reasons']
 
 
+class _DeadProcessorStub:
+    """Minimal stand-in for a PartitionProcessor that gave up."""
+
+    def __init__(self, dead: bool) -> None:
+        self.is_dead = dead
+
+
+async def test_readyz_returns_503_when_a_partition_processor_died(probe_client, probe_app):
+    """A dead partition loop must take the pod out of rotation.
+
+    Nothing drains that partition's queue and nothing commits its offsets
+    for the life of the process, so a worker that keeps reporting ready
+    holds an assignment it cannot serve — the failure stays invisible
+    until consumer lag alerts fire, with nothing naming the cause.
+    """
+    probe_app.is_ready = True
+    probe_app.sink_manager.all_connected.return_value = True
+    probe_app.processors = {3: _DeadProcessorStub(dead=True)}
+
+    resp = await probe_client.get('/readyz')
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body['status'] == 'not_ready'
+    assert 'partition_3_processor_died' in body['reasons']
+
+
+async def test_readyz_stays_200_while_partitions_are_alive(probe_client, probe_app):
+    """Live processors must not trip readiness."""
+    probe_app.is_ready = True
+    probe_app.sink_manager.all_connected.return_value = True
+    probe_app.processors = {0: _DeadProcessorStub(dead=False), 1: _DeadProcessorStub(dead=False)}
+
+    resp = await probe_client.get('/readyz')
+
+    assert resp.status_code == 200
+
+
+async def test_readyz_names_every_dead_partition(probe_client, probe_app):
+    """Each dead partition is named, so the reason list identifies all of them."""
+    probe_app.is_ready = True
+    probe_app.sink_manager.all_connected.return_value = True
+    probe_app.processors = {
+        0: _DeadProcessorStub(dead=True),
+        1: _DeadProcessorStub(dead=False),
+        2: _DeadProcessorStub(dead=True),
+    }
+
+    resp = await probe_client.get('/readyz')
+
+    assert resp.status_code == 503
+    reasons = resp.json()['reasons']
+    assert 'partition_0_processor_died' in reasons
+    assert 'partition_2_processor_died' in reasons
+    assert 'partition_1_processor_died' not in reasons
+
+
 async def test_readyz_reports_multiple_reasons(probe_client, probe_app):
     """When both the worker isn't ready and a sink is down, /readyz lists both."""
     probe_app.is_ready = False

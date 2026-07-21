@@ -30,13 +30,42 @@ for Kubernetes integration to work.
 
 - **``/readyz``** — returns ``{"status": "ready"}`` only when the worker
   has completed its startup sequence (consumer subscribed, sinks
-  connected, first poll cycle completed) **and** every registered sink
-  is currently connected. Otherwise returns ``{"status": "not_ready",
-  "reasons": [...]}`` with a 503 status code and a list of machine-
-  readable reasons (e.g. ``"not_started"``,
-  ``"sink_kafka:results_not_connected"``). The kubelet removes the pod
+  connected, first poll cycle completed), every registered sink is
+  currently connected, **and** no partition's processing loop has died.
+  Otherwise returns ``{"status": "not_ready", "reasons": [...]}`` with a
+  503 status code and a list of machine-readable reasons (e.g.
+  ``"not_started"``, ``"sink_kafka:results_not_connected"``,
+  ``"partition_3_processor_died"``). The kubelet removes the pod
   from the service endpoints on failure but does NOT restart it — the
   worker is considered recoverable and will self-register once ready.
+
+### Dead partition loops
+
+A partition's processing loop can exit on an unexpected error — a handler
+bug, a dependency that fails in a way the framework does not model. Left
+alone this is invisible: Kafka keeps the partition assigned, the consumer
+keeps enqueuing, and the queue grows with nothing draining it while
+offsets stop committing.
+
+The framework restarts a dead loop **once**. A second death is treated as
+a deterministic fault: the partition is marked dead, a CRITICAL
+``partition_processor_died`` log records the cause and the impact, and
+``/readyz`` starts failing with ``partition_<id>_processor_died``. The
+pod leaves the service endpoints and, once replaced, the partition is
+reassigned to a healthy worker.
+
+``drakkar_partition_processor_deaths_total{partition,outcome}`` counts
+both paths — ``outcome="restarted"`` and ``outcome="dead"``. Alert on any
+non-zero rate: a restart is a warning, a death means that partition is
+stalled until the worker is replaced.
+
+Note what a restart does **not** do. Offsets are registered before the
+handler's ``arrange`` runs, so a crash there leaves that window's offsets
+uncommitted for the life of the process, and the commit watermark stops
+behind them. The restarted loop keeps processing, but its lag climbs until
+a rebalance or restart hands those offsets to an owner that redelivers
+them. That is the correct at-least-once outcome — those messages were
+never processed, so committing past them would lose them.
 
 ### Example probe configuration
 

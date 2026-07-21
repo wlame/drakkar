@@ -18,7 +18,7 @@ from drakkar.models import (
     KafkaPayload,
     SourceMessage,
 )
-from drakkar.partition import MAX_RETRIES, PartitionProcessor, Window
+from drakkar.partition import MAX_RETRIES, PARTITION_RESTART_LIMIT, PartitionProcessor, Window
 from tests.conftest import wait_for
 
 
@@ -2686,3 +2686,193 @@ async def test_timeout_text_without_timeout_kind_does_not_increment():
 
     after = executor_timeouts._value.get()  # type: ignore[attr-defined]
     assert after == before, f'expected executor_timeouts NOT to increment, before={before} after={after}'
+
+
+# --- Run-loop supervision (restart once, then declare the partition dead) ---
+
+
+class _CrashingHandler(EchoHandler):
+    """Raises from ``arrange`` for the first ``crashes`` windows.
+
+    ``arrange`` runs inside ``_process_window``, which is inside the run
+    loop's try block — so raising here is the realistic shape of a loop
+    death: a handler bug or a transient dependency failure, not a
+    contrived injection into framework internals.
+    """
+
+    def __init__(self, crashes: int) -> None:
+        super().__init__()
+        self.remaining_crashes = crashes
+        # Separate counter: EchoHandler.arrange_calls is a list of tuples.
+        self.arrange_attempts = 0
+
+    async def arrange(self, messages, pending):
+        self.arrange_attempts += 1
+        if self.remaining_crashes > 0:
+            self.remaining_crashes -= 1
+            raise RuntimeError('handler exploded')
+        return await super().arrange(messages, pending)
+
+
+async def test_run_loop_restarts_once_after_an_unexpected_error(echo_pool):
+    """A single crash must not take the partition out of the pipeline.
+
+    Before supervision the loop caught the exception, logged it, and
+    returned — the task completed *successfully*, so nothing restarted it
+    and nothing reported it. Messages kept arriving and the queue grew
+    with nothing draining it.
+    """
+    handler = _CrashingHandler(crashes=1)
+    collected: list[CollectResult] = []
+
+    async def on_collect(result, partition_id):
+        collected.append(result)
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=1,
+        on_collect=on_collect,
+    )
+    proc.start()
+    try:
+        proc.enqueue(make_msg(partition=0, offset=1))
+        await wait_for(lambda: handler.remaining_crashes == 0)  # crash happened
+
+        # The loop is back: a message enqueued after the crash is processed.
+        proc.enqueue(make_msg(partition=0, offset=2))
+        await wait_for(lambda: len(collected) > 0)  # loop resumed after the crash
+        assert not proc.is_dead
+    finally:
+        await proc.stop()
+
+
+async def test_restart_leaves_the_crashed_window_uncommitted(echo_pool):
+    """Pins the limit of a restart: processing resumes, the watermark does not.
+
+    ``_process_window`` registers each offset BEFORE arrange runs, so a
+    crash there leaves those offsets PENDING for the life of the process.
+    ``committable()`` stops at the first incomplete offset, so every later
+    message completes without ever becoming committable. That is the
+    correct at-least-once outcome — those messages were never processed,
+    and committing past them would lose them — but it means a restarted
+    partition keeps working while its lag climbs, until a rebalance or
+    restart hands the offsets to an owner that will redeliver them.
+    """
+    handler = _CrashingHandler(crashes=1)
+    collected: list[CollectResult] = []
+    committed: list[tuple[int, int]] = []
+
+    async def on_collect(result, partition_id):
+        collected.append(result)
+
+    async def on_commit(partition_id, offset):
+        committed.append((partition_id, offset))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=1,
+        on_collect=on_collect,
+        on_commit=on_commit,
+    )
+    proc.start()
+    try:
+        proc.enqueue(make_msg(partition=0, offset=1))
+        await wait_for(lambda: handler.remaining_crashes == 0)
+        proc.enqueue(make_msg(partition=0, offset=2))
+        await wait_for(lambda: len(collected) > 0)
+
+        await asyncio.sleep(0.1)
+        assert committed == [], 'the crashed window\'s offset must keep blocking the watermark'
+        assert proc.offset_tracker.pending_count == 1
+    finally:
+        await proc.stop()
+
+
+async def test_run_loop_dies_after_a_second_crash(echo_pool):
+    """A loop failing deterministically is declared dead rather than looped forever."""
+    handler = _CrashingHandler(crashes=2)
+
+    proc = PartitionProcessor(
+        partition_id=7,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=1,
+    )
+    proc.start()
+    try:
+        proc.enqueue(make_msg(partition=7, offset=1))
+        proc.enqueue(make_msg(partition=7, offset=2))
+        await wait_for(lambda: proc.is_dead)  # second crash marks the partition dead
+        assert 'handler exploded' in proc.death_reason
+    finally:
+        await proc.stop()
+
+
+async def test_dead_partition_stops_restarting(echo_pool):
+    """Once dead, the loop stays down — no endless restart storm."""
+    handler = _CrashingHandler(crashes=10)
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=1,
+    )
+    proc.start()
+    try:
+        for offset in range(5):
+            proc.enqueue(make_msg(partition=0, offset=offset))
+        await wait_for(lambda: proc.is_dead)
+
+        # PARTITION_RESTART_LIMIT=1 means exactly two arrange attempts:
+        # the original run and its one restart.
+        calls_when_dead = handler.arrange_attempts
+        await asyncio.sleep(0.2)
+        assert handler.arrange_attempts == calls_when_dead, 'loop kept restarting after being declared dead'
+        assert calls_when_dead == PARTITION_RESTART_LIMIT + 1
+    finally:
+        await proc.stop()
+
+
+async def test_clean_shutdown_is_not_treated_as_a_death(echo_pool):
+    """The ordinary drain-and-exit path must not count as a crash."""
+    handler = EchoHandler()
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=1,
+    )
+    proc.start()
+    await asyncio.sleep(0.05)
+    await proc.stop()
+
+    assert not proc.is_dead
+    assert proc.death_reason == ''
+
+
+async def test_crash_during_shutdown_drain_is_not_restarted(echo_pool):
+    """A loop already on its way out is declared dead, not restarted.
+
+    Restarting here would re-enter a drain that has already been
+    accounted for by the caller awaiting ``stop()``.
+    """
+    handler = _CrashingHandler(crashes=1)
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=1,
+    )
+    proc.start()
+    # Queue work, then immediately signal stop so the crash lands on the
+    # post-_running drain path rather than the main loop.
+    proc.signal_stop()
+    proc.enqueue(make_msg(partition=0, offset=1))
+    await proc.stop()
+
+    assert handler.arrange_attempts <= 1, 'a shutdown-path crash must not be restarted'

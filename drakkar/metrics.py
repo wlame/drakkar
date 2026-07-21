@@ -165,6 +165,19 @@ offset_lag = Gauge(
     ['partition'],
 )
 
+# A partition loop that dies takes its partition out of the pipeline
+# silently: Kafka keeps assigning it, the consumer keeps enqueuing, and
+# the queue grows without anything draining it. ``outcome`` distinguishes
+# a loop that came back (``restarted``) from one that has given up
+# (``dead``) — any ``dead`` sample means that partition is stalled until
+# the worker is replaced, and the worker fails ``/readyz`` accordingly.
+# Alert on any non-zero rate of either.
+partition_processor_deaths = Counter(
+    'drakkar_partition_processor_deaths_total',
+    'Partition processing loops that exited on an unexpected error',
+    ['partition', 'outcome'],
+)
+
 backpressure_active = Gauge(
     'drakkar_backpressure_active',
     'Whether consumer is paused due to backpressure (1=paused, 0=flowing)',

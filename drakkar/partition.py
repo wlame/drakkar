@@ -22,6 +22,7 @@ from drakkar.metrics import (
     handler_hook_errors,
     messages_consumed,
     offset_lag,
+    partition_processor_deaths,
     partition_queue_size,
     suppressed_zombie_deliveries,
     task_retries,
@@ -55,6 +56,13 @@ StallCallback = Callable[[int], Awaitable[None]]
 
 MAX_RETRIES = 3  # default, overridden by config.executor.max_retries
 DRAIN_POLL_INTERVAL = 0.05  # seconds between checks when draining in-flight work
+
+# How many times a partition's processing loop is restarted after an
+# unexpected error before the partition is declared dead. One restart
+# absorbs a transient fault; a loop that dies twice is failing
+# deterministically, and restarting it forever would bury the fault under
+# an endless error stream instead of surfacing it on /readyz.
+PARTITION_RESTART_LIMIT = 1
 
 
 @dataclass
@@ -226,10 +234,31 @@ class PartitionProcessor:
         # results or committing their offsets here would double-write /
         # clobber the new owner's progress.
         self._deliveries_suppressed = False
+        # Set when the run loop has exhausted its restart budget and this
+        # partition is permanently stalled in this process. Surfaced on
+        # ``/readyz`` so the pod is taken out of rotation — see ``is_dead``.
+        self._dead = False
+        self._death_reason = ''
 
     @property
     def partition_id(self) -> int:
         return self._partition_id
+
+    @property
+    def is_dead(self) -> bool:
+        """True when the processing loop gave up and this partition is stalled.
+
+        The loop is restarted once after an unexpected error (see
+        :meth:`_supervise`); a second death sets this flag. Nothing drains
+        the queue afterwards, so the worker reports itself unready rather
+        than holding an assignment it cannot serve.
+        """
+        return self._dead
+
+    @property
+    def death_reason(self) -> str:
+        """Message from the error that killed the loop, or '' while alive."""
+        return self._death_reason
 
     @property
     def queue_size(self) -> int:
@@ -252,9 +281,9 @@ class PartitionProcessor:
         partition_queue_size.labels(partition=str(self._partition_id)).set(self._queue.qsize())
 
     def start(self) -> None:
-        """Start the partition processing loop."""
+        """Start the partition processing loop under its supervisor."""
         self._running = True
-        self._task = asyncio.create_task(self._run())
+        self._task = asyncio.create_task(self._supervise())
 
     def signal_stop(self) -> None:
         """Signal the run loop to exit without awaiting task completion.
@@ -370,8 +399,84 @@ class PartitionProcessor:
             # termination cause instead of a clean return.
             await log.ainfo('partition_processor_cancelled')
             raise
-        except Exception as e:
-            await log.aerror('partition_processor_error', error=str(e), exc_info=True)
+        # No generic ``except Exception`` here: _supervise owns crash
+        # handling. Swallowing it at this level is what used to make a
+        # dead loop invisible — the task completed successfully, so
+        # nothing restarted it and nothing reported it.
+
+    async def _supervise(self) -> None:
+        """Run the processing loop, restarting it once if it dies unexpectedly.
+
+        A partition loop that exits on an unexpected error takes its
+        partition out of the pipeline *silently*: Kafka still assigns it,
+        ``enqueue`` still accepts messages, and the queue grows with
+        nothing draining it. Offsets stop committing, so the lag climbs
+        until the consumer is evicted for a poll timeout — with no signal
+        that names the actual cause.
+
+        The policy is restart-once, then give up:
+
+        * **First death** — log an error, count it as ``restarted``, and
+          start the loop again. The queue, offset tracker, and pending
+          state are all preserved, so buffered messages are processed and
+          uncommitted offsets are retried. This covers the transient case
+          (a blip in a sink, a momentary resource failure).
+        * **Second death** — mark the partition dead, log CRITICAL, count
+          it as ``dead``, and stop. A loop that dies twice is failing
+          deterministically; restarting it forever would hide the fault
+          behind an endless error stream. ``/readyz`` then fails, naming
+          this partition, so orchestration replaces the pod and the
+          partition is reassigned to a healthy worker.
+
+        A crash *after* ``_running`` goes false (i.e. during the shutdown
+        drain) is never restarted — the loop was on its way out anyway,
+        and a restart would re-enter a drain that has already been
+        accounted for.
+
+        **What a restart does not fix.** ``_process_window`` registers
+        each offset *before* arrange runs, so a crash there leaves those
+        offsets PENDING for the life of the process, and ``committable()``
+        stops at the first incomplete offset. The restarted loop keeps
+        processing, but its commit watermark never advances past the
+        window that died — lag climbs until a rebalance or restart hands
+        those offsets to an owner that redelivers them. That is the
+        correct at-least-once outcome (the messages were never processed,
+        so committing past them would lose them), not an oversight: a
+        restart buys continued processing, not recovery of the lost
+        window.
+        """
+        log = logger.bind(partition=self._partition_id, category='partition')
+        label = str(self._partition_id)
+        restarts = 0
+        while True:
+            try:
+                await self._run()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if restarts >= PARTITION_RESTART_LIMIT or not self._running:
+                    self._dead = True
+                    self._death_reason = str(e)
+                    partition_processor_deaths.labels(partition=label, outcome='dead').inc()
+                    await log.acritical(
+                        'partition_processor_died',
+                        error=str(e),
+                        restarts=restarts,
+                        impact='partition is no longer processed; queued messages are not drained '
+                        'and offsets are not committed. The worker now fails /readyz so it can be '
+                        'replaced and the partition reassigned.',
+                        exc_info=True,
+                    )
+                    return
+                restarts += 1
+                partition_processor_deaths.labels(partition=label, outcome='restarted').inc()
+                await log.aerror(
+                    'partition_processor_restarting',
+                    error=str(e),
+                    restarts=restarts,
+                    exc_info=True,
+                )
 
     async def _collect_window(self) -> list[SourceMessage]:
         """Collect up to window_size messages from the queue."""

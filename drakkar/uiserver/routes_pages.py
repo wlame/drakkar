@@ -193,6 +193,14 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
         if not mgr.all_connected():
             for sink_id in mgr.disconnected_sink_names():
                 reasons.append(f'sink_{sink_id}_not_connected')
+        # A partition whose loop gave up is stalled for the life of this
+        # process: its queue is never drained and its offsets are never
+        # committed. Failing readiness is what gets the pod replaced and
+        # the partition reassigned to a worker that can serve it — without
+        # this the worker looks healthy while silently processing nothing.
+        for pid, processor in sorted(drakkar_app.processors.items()):
+            if processor.is_dead:
+                reasons.append(f'partition_{pid}_processor_died')
         if reasons:
             return JSONResponse({'status': 'not_ready', 'reasons': reasons}, status_code=503)
         return JSONResponse({'status': 'ready'})
