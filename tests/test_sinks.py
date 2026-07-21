@@ -1230,6 +1230,45 @@ async def test_dlq_sink_send_no_longer_calls_flush():
     mock_producer.flush.assert_not_called()
 
 
+async def test_dlq_message_serialization_cross_backend_golden():
+    """Byte-parity pin — the Go suite pins this SAME literal.
+
+    DLQ JSON byte-stability is contractual: tooling byte-compares entries
+    produced by either backend. The envelope carries Python's ``json.dumps``
+    default separators (``", "`` and ``": "``); the Go backend hand-assembles
+    the identical bytes in ``serializeDLQMessage``/``encodePythonJSON``,
+    because ``encoding/json`` only emits compact JSON.
+
+    The embedded payload strings stay **compact** — they come from
+    ``model_dump_json()`` on this side and ``json.Marshal`` on Go's. The
+    flight recorder likewise encodes compact on both backends. That asymmetry
+    is deliberate; do not unify the two.
+
+    The sibling test below parses the JSON before asserting, so it cannot see
+    separator drift — which is exactly how the two backends diverged
+    unnoticed until an audit generated both outputs and diffed them.
+    """
+    from drakkar.models import DeliveryError
+    from drakkar.sinks.dlq import DLQMessage
+
+    error = DeliveryError(
+        sink_name='results',
+        sink_type='kafka',
+        error='connection refused',
+        payloads=[SampleOutput()],
+    )
+    msg = DLQMessage(delivery_error=error, partition_id=2, attempt_count=1)
+
+    with patch('drakkar.sinks.dlq.time.time', return_value=1700000000.0):
+        data = msg.serialize()
+
+    assert data == (
+        b'{"original_payloads": ["{\\"request_id\\":\\"abc\\",\\"answer\\":\\"42\\"}"], '
+        b'"sink_name": "results", "sink_type": "kafka", "error": "connection refused", '
+        b'"timestamp": 1700000000.0, "partition": 2, "attempt_count": 1}'
+    )
+
+
 async def test_dlq_message_serialization():
     from drakkar.sinks.dlq import DLQMessage
 
