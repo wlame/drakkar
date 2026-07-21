@@ -128,13 +128,40 @@ Design points every agent should know:
 2. **Tooling**: `uv` only (never pip), `ruff` (format + lint, single quotes
    for code / double for user-facing text), `ty` for types, pytest
    (function-based, fixtures, parametrize). Coverage gate **75%**
-   (`just cover`).
+   (`just cover`) — but the suite actually sits at ~94%, so the floor is
+   not the bar to aim at: new code without tests erodes real coverage
+   long before it trips the gate.
 3. **Tests are hermetic** — no real network. UI hosting defaults ON, so test
    fixtures with a real `DrakkarConfig` must set `ui.release.enabled = False`
    (the `mock_app` fixtures do) or use `tests/test_uihost.py`'s `StubGitHub` +
    `ui_config()` helpers.
 4. Errors are explicit; never silently swallowed. Structured logging via
    structlog (ECS-compatible).
+5. **SQLite files are secured before the driver opens them.** Both stores
+   call `drakkar.dbfiles.secure_db_file(path)` *before* connecting —
+   SQLite copies the main DB's mode onto the `-wal`/`-shm` sidecars as it
+   creates them, so chmod-ing afterwards leaves both sidecars at 0644.
+   Never move that call after the connect or after `journal_mode=WAL`.
+6. **A partition loop that dies is restarted exactly once**
+   (`PARTITION_RESTART_LIMIT`), then marked dead, counted in
+   `drakkar_partition_processor_deaths_total`, and surfaced on `/readyz`
+   as `partition_<id>_processor_died`. Never swallow an exception in
+   `_run` — `_supervise` owns crash handling. A restart resumes
+   processing but does NOT recover the crashed window's offsets: they
+   stay pending by design (committing past unprocessed messages would
+   lose them).
+7. **`_on_revoke` blocks until the drain commits.** It is awaited by the
+   consumer's rebalance callback, which librdkafka waits on, so returning
+   early re-opens the duplicate-delivery window. The wait must stay
+   bounded by `executor.drain_timeout_seconds` —
+   `run_coroutine_threadsafe(...).result()` has no timeout of its own.
+8. **Sink deliveries are batched with per-payload fallback.** Postgres
+   groups by `(table, column-set)`, mongo by collection, redis pipelines;
+   each falls back to per-payload delivery when a batch fails so error
+   attribution stays identical to the Go backend (divergence #18). The
+   Kafka sink keeps its per-batch `flush()` — `AIOProducer` buffers to
+   `batch_size=1000` / `buffer_timeout=1.0s`, so dropping it would stall
+   every delivery on a one-second timer.
 
 ## Build / test / run (always via just)
 
