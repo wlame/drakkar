@@ -198,6 +198,10 @@ class PartitionProcessor:
 
         self._queue: asyncio.Queue[SourceMessage] = asyncio.Queue()
         self._offset_tracker = OffsetTracker()
+        # Serializes the read → commit → acknowledge sequence in
+        # _try_commit, which is called concurrently from every task
+        # completion as well as the run loop. See _try_commit's docstring.
+        self._commit_lock = asyncio.Lock()
         self._pending_tasks: dict[str, ExecutorTask] = {}
         self._window_counter = 0
         self._running = False
@@ -1042,13 +1046,28 @@ class PartitionProcessor:
         self._message_trackers.pop(tracker.source_message.offset, None)
 
     async def _try_commit(self) -> None:
-        """Commit offsets if the watermark has advanced."""
+        """Commit offsets if the watermark has advanced.
+
+        The whole read → commit → acknowledge sequence runs under
+        ``_commit_lock``. Without it, two task completions can interleave
+        across the ``await`` on the commit RPC: A reads watermark 6 and
+        starts its round-trip, B reads 8 and starts its own, B's lands
+        first, then A's ``acknowledge_commit(6)`` overwrites the tracker's
+        ``_last_committed`` with the smaller value — and because the two
+        RPCs are in flight concurrently, the broker itself can apply them
+        out of order and move the group's committed offset backwards.
+        Offsets 6-7 would then be reprocessed if the worker died in that
+        window. Holding the lock also means each waiter re-reads a fresh
+        watermark, so a queued commit never re-sends a stale one.
+        """
         if self._deliveries_suppressed:
             # Zombie path: the partition belongs to another worker now.
             # Committing here could clobber the new owner's progress.
             return
-        committable = self._offset_tracker.committable()
-        if committable is not None:
+        async with self._commit_lock:
+            committable = self._offset_tracker.committable()
+            if committable is None:
+                return
             if self._on_commit:
                 try:
                     await self._on_commit(self._partition_id, committable)

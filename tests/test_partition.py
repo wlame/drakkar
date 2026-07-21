@@ -1776,6 +1776,45 @@ async def test_on_task_complete_sink_exception_stall_mode_stalls_offset(echo_poo
     assert proc.offset_tracker.has_pending(), 'offset stays pending (stalled watermark)'
 
 
+async def test_concurrent_try_commit_does_not_resend_a_stale_watermark(echo_pool):
+    """Two overlapping commits must not both send the same watermark.
+
+    ``_try_commit`` is read → RPC → acknowledge, and every task completion
+    calls it concurrently with the run loop. Without a lock both callers read
+    the same ``committable()`` before either acknowledges, so the identical
+    offset is committed twice — and with two RPCs in flight at once the broker
+    can apply them out of order, moving the group's committed offset
+    *backwards* and causing already-processed messages to be replayed.
+    """
+    commits: list[int] = []
+    release = asyncio.Event()
+
+    async def slow_on_commit(pid, off):
+        commits.append(off)
+        await release.wait()
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=_TaskCollectHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=slow_on_commit,
+    )
+    proc.offset_tracker.register(0)
+    proc.offset_tracker.complete(0)
+
+    # First commit parks inside the lock, mid-RPC.
+    first = asyncio.create_task(proc._try_commit())
+    await wait_for(lambda: bool(commits), timeout=2)
+    # Second arrives while the first is still in flight.
+    second = asyncio.create_task(proc._try_commit())
+    await asyncio.sleep(0.05)
+    release.set()
+    await asyncio.gather(first, second)
+
+    assert commits == [1], f'watermark committed more than once: {commits}'
+
+
 async def test_on_error_replacement_preserves_explicit_parent_task_id(failing_pool):
     """If handler's on_error sets parent_task_id explicitly, framework must
     NOT override it. Lets the user point replacements at a non-obvious
