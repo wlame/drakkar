@@ -358,6 +358,64 @@ async def test_max_retries_exceeded(failing_pool):
     assert any(c[1] == 1 for c in committed)
 
 
+# --- A raising on_error must not freeze the commit watermark ---
+
+
+async def test_raising_on_error_settles_the_task_and_keeps_committing(failing_pool):
+    """A broken on_error degrades to SKIP instead of wedging the partition.
+
+    on_error is called from inside an ``except ExecutorTaskError`` clause, so
+    a raise there is NOT caught by the sibling ``except Exception`` — Python
+    only matches sibling handlers against exceptions from the ``try`` body.
+    Before the fix the exception escaped the fire-and-forget task and skipped
+    the tracker-settling loop, leaving that offset PENDING forever. Since
+    ``committable()`` stops at the first incomplete offset, one broken hook
+    call froze every later commit on the partition and forced a full replay
+    from the wedge point on the next restart.
+    """
+    hook_calls = 0
+
+    class BrokenOnErrorHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id=f'broken-{m.offset}',
+                    args=['-c', 'import sys; sys.exit(1)'],
+                    source_offsets=[m.offset],
+                )
+                for m in messages
+            ]
+
+        async def on_error(self, task, error):
+            nonlocal hook_calls
+            hook_calls += 1
+            raise RuntimeError('handler bug inside on_error')
+
+    committed: list[tuple[int, int]] = []
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=BrokenOnErrorHandler(),
+        executor_pool=failing_pool,
+        window_size=10,
+        on_commit=on_commit,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.enqueue(make_msg(offset=1))
+    proc.start()
+    # Offset 1 committing proves BOTH messages settled: the watermark only
+    # advances past a gap-free prefix, so a wedged offset 0 would cap it at 1.
+    await wait_for(lambda: any(c[1] == 2 for c in committed), timeout=10)
+    await proc.stop()
+
+    assert hook_calls == 2, 'both failing tasks should have reached on_error'
+    assert proc.offset_tracker.pending_count == 0, 'a hook bug left an offset pending'
+
+
 # --- Bug #1: RETRY must not drive _inflight_count negative ---
 
 

@@ -521,6 +521,17 @@ partition. Return one of:
 | `ErrorAction.SKIP`      | Drop the task, continue processing (default)  |
 | `list[ExecutorTask]`    | Spawn replacement tasks instead               |
 
+If `on_error` **itself raises**, the framework contains the exception and
+treats the task as a terminal `SKIP`, logging `on_error_hook_failed` and
+incrementing `drakkar_handler_hook_errors_total{hook="on_error"}`. A handler
+bug must not wedge offset commits: an uncontained exception here would leave
+the message's offset pending forever, and since the commit watermark only
+advances over a gap-free prefix, that would freeze **every later commit on
+the partition** and force a full replay from the wedge point on restart.
+Alert on a non-zero rate of that counter — the pipeline keeps flowing, so
+nothing else will tell you the hook is broken. The Go backend contains the
+equivalent hook error identically.
+
 The `ExecutorError` fields:
 
 | Field       | Type         | Description                                       |

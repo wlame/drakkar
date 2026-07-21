@@ -19,6 +19,7 @@ from drakkar.metrics import (
     executor_tasks,
     executor_timeouts,
     handler_duration,
+    handler_hook_errors,
     messages_consumed,
     offset_lag,
     partition_queue_size,
@@ -686,9 +687,40 @@ class PartitionProcessor:
 
             bind_contextvars(hook='on_error', task_id=task.task_id)
             on_error_start = time.monotonic()
-            action = await self._handler.on_error(task, e.error)
-            handler_duration.labels(hook='on_error').observe(time.monotonic() - on_error_start)
-            unbind_contextvars('hook', 'task_id')
+            try:
+                action = await self._handler.on_error(task, e.error)
+            except Exception as hook_exc:
+                # A broken on_error must never wedge the partition. This
+                # call sits inside an ``except`` clause, so a raise here is
+                # NOT caught by the sibling ``except Exception`` below —
+                # Python only matches sibling handlers against exceptions
+                # from the ``try`` body. The escaping exception would skip
+                # the tracker-settling loop after this try/finally, leaving
+                # the offset PENDING forever; because ``committable()``
+                # stops at the first incomplete offset, that freezes the
+                # whole partition's commit watermark and every later
+                # message replays on restart.
+                #
+                # Degrade to SKIP: the task settles as a terminal failure,
+                # the tracker completes, the watermark keeps advancing.
+                # At-least-once holds either way. Matches the Go backend,
+                # which contains the equivalent hook error the same way.
+                action = ErrorAction.SKIP
+                handler_hook_errors.labels(hook='on_error').inc()
+                await log.aerror(
+                    'on_error_hook_failed',
+                    error=str(hook_exc),
+                    error_type=type(hook_exc).__name__,
+                    action='treating as skip (terminal failure)',
+                    exc_info=True,
+                )
+            finally:
+                # In a ``finally`` so a raising hook still records its
+                # latency and still releases the bound contextvars —
+                # otherwise ``hook``/``task_id`` leak into every later log
+                # line emitted by this coroutine.
+                handler_duration.labels(hook='on_error').observe(time.monotonic() - on_error_start)
+                unbind_contextvars('hook', 'task_id')
             if isinstance(action, list):
                 # Replacement: the original task is "replaced" (not a
                 # terminal failure of the group). Decrement its contribution

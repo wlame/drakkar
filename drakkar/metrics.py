@@ -294,6 +294,16 @@ handler_duration = Histogram(
     buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30),
 )
 
+# A user hook raised instead of returning. The framework contains the
+# failure and keeps the partition flowing, which means nothing else would
+# tell an operator their handler is broken — the pipeline just quietly
+# takes the fallback path for every message. Alert on any non-zero rate.
+handler_hook_errors = Counter(
+    'drakkar_handler_hook_errors_total',
+    'User handler hooks that raised instead of returning',
+    ['hook'],
+)
+
 
 # --- Cache ---
 #
