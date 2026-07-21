@@ -834,7 +834,7 @@ class SinkManager:
                     if action == DeliveryAction.RETRY and attempt < max_retries:
                         stats.retry_count += 1
                         sink_delivery_retries.labels(sink_type=sink_type, sink_name=sink_name).inc()
-                        await logger.awarning(
+                        logger.warning(
                             'sink_delivery_retry',
                             category='sink',
                             sink_type=sink_type,
@@ -851,7 +851,7 @@ class SinkManager:
                         # this loop releases the probe slot if we were the probe,
                         # so SKIP cannot wedge a half-open circuit.
                         sink_deliveries_skipped.labels(sink_type=sink_type, sink_name=sink_name).inc()
-                        await logger.awarning(
+                        logger.warning(
                             'sink_delivery_skipped',
                             category='sink',
                             sink_type=sink_type,
@@ -865,7 +865,7 @@ class SinkManager:
                         # This is a terminal failure for the sink — tell the breaker
                         # so consecutive failures can accumulate toward the trip threshold.
                         sink.record_failure()
-                        await logger.awarning(
+                        logger.warning(
                             'sink_delivery_failed_to_dlq',
                             category='sink',
                             sink_type=sink_type,

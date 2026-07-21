@@ -639,7 +639,7 @@ class ExecutorPool:
                 ):
                     if truncated:
                         output_truncated.labels(stream=stream_name).inc()
-                        await logger.awarning(
+                        logger.warning(
                             'executor_output_truncated',
                             category='executor',
                             task_id=task.task_id,

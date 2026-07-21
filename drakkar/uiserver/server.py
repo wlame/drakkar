@@ -236,7 +236,12 @@ class UIDeps:
                 rows: list = list(await cur.fetchall())
             return columns, rows
 
-        return await dispatch_to_loop(_inner(), self.drakkar_app.main_loop)
+        # Bounded: a bare dispatch waits forever, so a wedged main loop would
+        # hang every one of the endpoints sharing this helper — including the
+        # pages an operator opens precisely because the worker is misbehaving.
+        # On timeout the caller sees the same ``None`` it already handles for
+        # "no reader connection", so no endpoint needs a new branch.
+        return await self.dispatch_bounded(_inner(), default=None)
 
     async def dispatch_bounded(self, coro: Coroutine[Any, Any, Any], default: Any = None) -> Any:
         """Run ``coro`` on the main loop, giving up after a bounded wait.

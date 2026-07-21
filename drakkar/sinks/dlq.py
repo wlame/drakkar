@@ -150,7 +150,7 @@ class DLQSink(BaseSink[BaseModel]):
             )
             await future
             sink_dlq_messages.inc()
-            await logger.ainfo(
+            logger.info(
                 'dlq_message_sent',
                 category='sink',
                 sink_name=delivery_error.sink_name,

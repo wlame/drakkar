@@ -114,7 +114,14 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         """List all debug database files in db_dir with stats."""
         from drakkar.merge import scan_directory
 
-        databases = scan_directory(config.recorder.db_dir)
+        # Offloaded: scan_directory uses the SYNCHRONOUS sqlite3 module and
+        # runs COUNT(*) / GROUP BY over every .db file in db_dir. Inline, that
+        # blocked the UI server's single event loop for the whole sweep — and
+        # db_dir defaults to /tmp, shared by co-located workers, so the file
+        # count grows with the host. /healthz and /readyz live on this same
+        # loop. The /api/debug/merge route below already offloads its own
+        # blocking work; this one was simply missed.
+        databases = await asyncio.to_thread(scan_directory, config.recorder.db_dir)
         return JSONResponse(
             [
                 {

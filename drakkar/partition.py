@@ -728,7 +728,14 @@ class PartitionProcessor:
                     pool_waiting=self._executor_pool.waiting_count,
                     duration_seconds=e.result.duration_seconds,
                 )
-            await log.awarning('executor_task_failed', error=str(e))
+            # Sync, not ``await log.awarning``: structlog's async variants
+            # copy the context and hop through the default thread pool, which
+            # measured ~8.5x the cost of the sync call (83us vs 10us) and adds
+            # a scheduling point. This line fires once per FAILED task, so the
+            # cost peaks exactly when the worker is already struggling — the
+            # same reasoning applies to the other per-task/per-batch log
+            # statements in the delivery path.
+            log.warning('executor_task_failed', error=str(e))
 
             bind_contextvars(hook='on_error', task_id=task.task_id)
             on_error_start = time.monotonic()

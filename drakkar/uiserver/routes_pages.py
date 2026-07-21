@@ -770,13 +770,41 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
 
         await ws.accept()
         q = recorder.subscribe()
+
+        # Starlette only surfaces a client disconnect through receive(), and
+        # this handler is send-only — so WebSocketDisconnect could never fire
+        # and a closed browser tab's coroutine (plus its 10k-slot queue, which
+        # can pin whole stdout/stderr payloads the recorder has already
+        # flushed) survived until the next send happened to fail. On a quiet
+        # worker that could be minutes, or never. This watcher makes the
+        # disconnect observable immediately.
+        disconnected = asyncio.Event()
+
+        async def _watch_disconnect() -> None:
+            try:
+                while True:
+                    message = await ws.receive()
+                    if message.get('type') == 'websocket.disconnect':
+                        break
+            except Exception:
+                pass
+            finally:
+                disconnected.set()
+
+        watcher = asyncio.create_task(_watch_disconnect())
         try:
-            while True:
-                # drain all available events from queue in one batch
+            while not disconnected.is_set():
+                # Drain what is already queued, without ever blocking. The
+                # previous q.get(timeout=0.1) was a stdlib queue.Queue call —
+                # a real OS-level block inside an async handler. The UI server
+                # runs uvicorn on ONE thread with ONE loop, so during that
+                # wait nothing else on this server could run: not other
+                # WebSocket clients, not /healthz, not /readyz. An idle
+                # dashboard tab was enough to trigger it, and the Kubernetes
+                # probes share the loop. Polling costs a wakeup every
+                # WS_DRAIN_SLEEP instead, and lowers idle latency besides.
                 batch = []
                 try:
-                    batch.append(q.get(timeout=0.1))
-                    # grab more without blocking
                     while len(batch) < 100:
                         batch.append(q.get_nowait())
                 except queue_mod.Empty:
@@ -792,6 +820,7 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
         except WebSocketDisconnect:
             pass
         finally:
+            watcher.cancel()
             recorder.unsubscribe(q)
 
     return public, router

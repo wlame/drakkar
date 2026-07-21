@@ -92,6 +92,52 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+# Cross-worker sweep bounds. A cross-trace MISS — the common case when an
+# operator pastes an offset that is not in this cluster — walks every
+# candidate database in db_dir, opening each and running a query. db_dir
+# defaults to /tmp and is shared by co-located workers, so it accumulates live
+# and rotated files from every worker on the host. The sweep is reached from a
+# UI request but executes on the MAIN loop (UI reads of live state hop there),
+# so an unbounded scan stalls Kafka polling — and it is trivially repeatable
+# by refreshing the page. Values match the Go backend.
+CROSS_TRACE_MAX_FILES = 64
+CROSS_TRACE_BUDGET_SECONDS = 5.0
+
+
+class _ScanBudget:
+    """Bounds a cross-worker sweep in file count and wall-clock time.
+
+    Records whether it stopped early so the caller can say so, rather than
+    silently reporting "not found" for data that was never actually reached —
+    a distinction that matters during an incident.
+    """
+
+    def __init__(self) -> None:
+        self._deadline = time.monotonic() + CROSS_TRACE_BUDGET_SECONDS
+        self._remaining = CROSS_TRACE_MAX_FILES
+        self.truncated = False
+
+    def allow(self) -> bool:
+        """Whether one more database file may be opened (consuming budget)."""
+        if self._remaining <= 0 or time.monotonic() > self._deadline:
+            self.truncated = True
+            return False
+        self._remaining -= 1
+        return True
+
+    def report(self, op: str) -> None:
+        """Log once if the sweep stopped early."""
+        if not self.truncated:
+            return
+        logger.warning(
+            'cross_trace_scan_truncated',
+            category='recorder',
+            op=op,
+            max_files=CROSS_TRACE_MAX_FILES,
+            budget_seconds=CROSS_TRACE_BUDGET_SECONDS,
+            hint='result may be incomplete; narrow db_dir or prune rotated databases',
+        )
+
 
 class EventRecorder:
     """Records processing events to timestamped SQLite database files.
@@ -1478,6 +1524,40 @@ class EventRecorder:
         # 2. Fallback: other workers' live DBs. Sorted so the first-match
         # scan visits peers in the same deterministic order as the Go
         # backend (filepath.Glob returns sorted paths).
+        budget = _ScanBudget()
+
+        # The directory walks below are synchronous stat/readlink syscalls, and
+        # this coroutine runs on the MAIN loop — inline they stall Kafka
+        # polling for the whole sweep, unboundedly on a slow or stale mount.
+        # Enumeration is offloaded; only the aiosqlite queries stay here.
+        live_targets = await asyncio.to_thread(self._enumerate_peer_live_dbs)
+        for target in live_targets:
+            searched_paths.add(target)
+            if not budget.allow():
+                break
+            events = await self._trace_db_file(target, partition, msg_offset)
+            if events:
+                return events
+
+        # 3. Fallback: rotated DB files (newest first)
+        rotated = await asyncio.to_thread(self._enumerate_rotated_dbs, searched_paths)
+        for full in rotated:
+            if not budget.allow():
+                break
+            events = await self._trace_db_file(full, partition, msg_offset)
+            if events:
+                return events
+
+        budget.report('cross_trace')
+        return []
+
+    def _enumerate_peer_live_dbs(self) -> list[str]:
+        """Resolve other workers' live-DB symlinks. Blocking; call in a thread.
+
+        Sorted so the first-match scan visits peers in the same deterministic
+        order as the Go backend (filepath.Glob returns sorted paths).
+        """
+        targets: list[str] = []
         live_pattern = os.path.join(self._store.db_dir, '*-live.db')
         for link_path in sorted(glob.glob(live_pattern)):
             if not os.path.islink(link_path):
@@ -1485,13 +1565,11 @@ class EventRecorder:
             link_name = os.path.basename(link_path)
             if link_name.removesuffix('-live.db') == self._worker_name:
                 continue
-            target = os.path.realpath(link_path)
-            searched_paths.add(target)
-            events = await self._trace_db_file(target, partition, msg_offset)
-            if events:
-                return events
+            targets.append(os.path.realpath(link_path))
+        return targets
 
-        # 3. Fallback: rotated DB files (newest first)
+    def _enumerate_rotated_dbs(self, searched_paths: set[str]) -> list[str]:
+        """List rotated DB files newest first. Blocking; call in a thread."""
         all_dbs = []
         for entry in os.listdir(self._store.db_dir):
             if not entry.endswith('.db'):
@@ -1502,16 +1580,9 @@ class EventRecorder:
             if os.path.realpath(full) in searched_paths:
                 continue
             all_dbs.append((entry, full))
-
-        # sort newest first (timestamp is in filename)
+        # Newest first (the timestamp is in the filename).
         all_dbs.sort(key=lambda x: x[0], reverse=True)
-
-        for _entry, full in all_dbs:
-            events = await self._trace_db_file(full, partition, msg_offset)
-            if events:
-                return events
-
-        return []
+        return [full for _entry, full in all_dbs]
 
     async def get_task_events(self, task_id: str) -> list[dict]:
         """Get all events for a specific task_id, ordered chronologically."""
