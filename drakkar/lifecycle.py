@@ -536,22 +536,50 @@ class AppLifecycle:
         app._background_tasks.add(t)
         t.add_done_callback(app._background_tasks.discard)
 
-    def _on_revoke(self, partition_ids: list[int]) -> None:
-        """Handle partition revocation."""
+    async def _on_revoke(self, partition_ids: list[int]) -> None:
+        """Handle partition revocation, blocking until the drain commits.
+
+        This coroutine does NOT return until every revoked partition has
+        drained and committed. ``AIOConsumer`` runs rebalance callbacks via
+        ``run_coroutine_threadsafe(...).result()``, so librdkafka's
+        rebalance thread waits here — which is what holds the rebalance
+        open until our offsets are committed.
+
+        Returning early (the previous behaviour, which spawned detached
+        tasks) let the rebalance complete while this worker was still
+        draining: the new owner began consuming from the last committed
+        offset while in-flight work here was still producing sink
+        deliveries for the same messages, so every message between the
+        last commit and the drain end was delivered twice.
+
+        The wait is bounded, not open-ended: each ``_stop_processor`` is
+        capped by ``executor.drain_timeout_seconds`` and suppresses
+        deliveries when it expires, so this always returns. That bound
+        matters — ``run_coroutine_threadsafe(...).result()`` has no
+        timeout of its own, so an unbounded wait here would wedge the
+        consumer thread permanently. Teardown runs concurrently across
+        partitions, so N revoked partitions cost one drain timeout, not N.
+
+        The handler's ``on_revoke`` hook stays on a background task — it is
+        a user notification, not part of the commit contract, and a slow
+        hook must not eat into the rebalance budget.
+        """
         app = self._app
         if app._recorder:
             app._recorder.record_revoked(partition_ids)
+        to_stop: list[PartitionProcessor] = []
         for pid in partition_ids:
             # A revoked partition is no longer ours — clear any stall-pause
             # bookkeeping so a future reassignment starts fresh.
             app._stalled_partitions.discard(pid)
             processor = app._processors.pop(pid, None)
             if processor:
-                t = asyncio.ensure_future(self._stop_processor(processor))
-                app._background_tasks.add(t)
-                t.add_done_callback(app._background_tasks.discard)
+                to_stop.append(processor)
 
         assigned_partitions.set(len(app._processors))
+
+        if to_stop:
+            await asyncio.gather(*(self._stop_processor(p) for p in to_stop))
 
         async def _on_revoke_with_ctx() -> None:
             bind_contextvars(hook='on_revoke', partitions=partition_ids)

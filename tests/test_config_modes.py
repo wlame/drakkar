@@ -188,7 +188,7 @@ class TestDebugModes:
         app._consumer = AsyncMock()
 
         app._lifecycle._on_assign([0, 1])
-        app._lifecycle._on_revoke([0])
+        await app._lifecycle._on_revoke([0])
         await asyncio.sleep(0.3)
 
         assert 0 not in app.processors

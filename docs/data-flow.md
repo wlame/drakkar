@@ -167,17 +167,34 @@ When Kafka's cooperative-sticky rebalancer assigns new partitions to this worker
 
 When partitions are revoked (rebalance, scaling event):
 
+The revoke callback **blocks until every revoked partition has drained and
+committed**. `AIOConsumer` runs rebalance callbacks via
+`run_coroutine_threadsafe(...).result()`, so librdkafka's rebalance thread
+waits here — which is what holds the rebalance open until our offsets are
+committed. Returning early would let the new owner start consuming from the
+last committed offset while in-flight work here was still delivering the
+same messages, duplicating everything between the last commit and the drain
+end.
+
+The wait is bounded, not open-ended: each stop sequence is capped by
+`executor.drain_timeout_seconds` and suppresses deliveries when it expires,
+so the callback always returns. That bound matters —
+`run_coroutine_threadsafe(...).result()` has no timeout of its own, so an
+unbounded wait would wedge the consumer thread permanently. Teardown runs
+concurrently across partitions, so N revoked partitions cost one drain
+timeout, not N.
+
 1. Records a `revoked` event per partition.
-2. For each revoked partition:
+2. For each revoked partition (concurrently, all awaited before returning):
    - Removes the processor from `_processors`.
-   - Initiates an async stop sequence:
+   - Runs the stop sequence:
      1. Sets `processor._running = False`.
      2. Waits up to `executor.drain_timeout_seconds` (default: `30`, min: `1`) for in-flight work to complete.
      3. **Only if drain completed cleanly**, commits the offset watermark. If drain timed out, in-flight tasks may still be running and committing their offsets would silently skip them on reassign — safer to let at-least-once replay recover them.
      4. **On drain timeout**, the still-running tasks are marked as *zombies*: their late results are suppressed (no sink deliveries, no offset commits) because the new partition owner replays their messages from the last committed offset — delivering here would be a guaranteed double-write, and a late commit could clobber the new owner's progress. Suppressions are counted in `drakkar_suppressed_zombie_deliveries_total` and logged as `zombie_delivery_suppressed`. The same suppression applies to tasks that outlive the shutdown drain timeout.
      5. Calls `processor.stop()`.
 3. Updates the `assigned_partitions` gauge.
-4. Calls the handler's `on_revoke(partition_ids)` hook asynchronously.
+4. Calls the handler's `on_revoke(partition_ids)` hook on a background task. The hook is a user notification, not part of the commit contract, so a slow hook does not eat into the rebalance budget.
 
 ---
 

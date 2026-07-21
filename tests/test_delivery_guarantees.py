@@ -456,11 +456,54 @@ async def test_revoke_clears_stall_bookkeeping(app_config):
     app = DrakkarApp(handler=SimpleHandler(), config=app_config)
     app._stalled_partitions.add(4)
 
-    app._lifecycle._on_revoke([4])
+    await app._lifecycle._on_revoke([4])
     # let the fire-and-forget revoke hooks run
     await asyncio.sleep(0.05)
 
     assert 4 not in app._stalled_partitions
+
+
+async def test_revoke_blocks_until_the_drain_commits(app_config, echo_pool):
+    """Pins the rebalance contract: the revoke must not return early.
+
+    ``AIOConsumer`` runs rebalance callbacks via
+    ``run_coroutine_threadsafe(...).result()``, so librdkafka's rebalance
+    thread waits on this coroutine. Returning before the drain finished
+    let the rebalance complete while this worker was still processing:
+    the new owner started from the last committed offset while in-flight
+    work here was still delivering the same messages, duplicating
+    everything between the last commit and the drain end.
+    """
+    committed: list[tuple[int, int]] = []
+
+    app = DrakkarApp(handler=SimpleHandler(), config=app_config)
+    app._consumer = AsyncMock()
+
+    async def record_commit(offsets: dict[int, int]) -> None:
+        for pid, off in offsets.items():
+            committed.append((pid, off))
+
+    app._consumer.commit.side_effect = record_commit
+
+    proc = PartitionProcessor(
+        partition_id=4,
+        handler=SimpleHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=app._handle_commit,
+    )
+    app._processors[4] = proc
+    proc.start()
+    proc.enqueue(make_msg(offset=7))
+
+    # Revoke with the message still unprocessed: the drain inside
+    # _stop_processor must finish it AND commit before _on_revoke returns.
+    await app._lifecycle._on_revoke([4])
+
+    # No wait_for here: by the time _on_revoke returns, the commit must
+    # ALREADY have happened. Polling would hide an early return.
+    assert committed == [(4, 8)], f'revoke returned before committing; commits = {committed}'
+    assert 4 not in app._processors
 
 
 # --- recorder DB file permissions ---

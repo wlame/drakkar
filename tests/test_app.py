@@ -239,7 +239,7 @@ async def test_app_on_revoke_removes_processors(test_config):
     app._lifecycle._on_assign([0, 1, 2])
     assert len(app.processors) == 3
 
-    app._lifecycle._on_revoke([1])
+    await app._lifecycle._on_revoke([1])
     await asyncio.sleep(0.3)
     assert 1 not in app.processors
     assert len(app.processors) == 2
@@ -473,7 +473,7 @@ async def test_stop_processor_handles_arrange_error(test_config):
     app.processors[0].enqueue(msg)
     await asyncio.sleep(0.3)
 
-    app._lifecycle._on_revoke([0])
+    await app._lifecycle._on_revoke([0])
     await asyncio.sleep(0.5)
     assert 0 not in app.processors
 
@@ -1316,7 +1316,7 @@ async def test_revoke_mid_window_no_offset_loss(test_config):
 
     # Fire revoke. _on_revoke pops the processor from app.processors
     # synchronously, then schedules _stop_processor as a background task.
-    app._lifecycle._on_revoke([0])
+    await app._lifecycle._on_revoke([0])
     assert 0 not in app.processors, 'processor must be popped from app.processors immediately on revoke'
 
     # Wait for the background _stop_processor task to finish draining,
@@ -1399,7 +1399,7 @@ async def test_revoke_mid_window_clean_drain_commits_finished_messages(test_conf
 
     await wait_for(lambda: processor.inflight_count >= 1, timeout=5)
 
-    app._lifecycle._on_revoke([0])
+    await app._lifecycle._on_revoke([0])
     await wait_for(lambda: len(app._background_tasks) == 0, timeout=10)
 
     # Processor removed, no zombie.
@@ -1475,7 +1475,7 @@ async def test_revoke_while_arrange_running(test_config):
     assert processor._arranging is True, 'processor must be mid-arrange when revoke fires'
 
     # Fire revoke mid-arrange.
-    app._lifecycle._on_revoke([0])
+    await app._lifecycle._on_revoke([0])
     assert 0 not in app.processors
 
     # The background _stop_processor must complete — processor stops

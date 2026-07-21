@@ -162,7 +162,13 @@ async def test_on_revoke_callback(mock_cls, kafka_config):
     mock_cls.return_value = mock_inner
 
     revoked = []
-    consumer = KafkaConsumer(kafka_config, on_revoke=lambda parts: revoked.extend(parts))
+
+    # The revoke callback is awaited: the rebalance must not complete until
+    # the worker has drained and committed the revoked partitions.
+    async def on_revoke(parts):
+        revoked.extend(parts)
+
+    consumer = KafkaConsumer(kafka_config, on_revoke=on_revoke)
     await consumer.subscribe()
 
     call_kwargs = mock_inner.subscribe.call_args[1]

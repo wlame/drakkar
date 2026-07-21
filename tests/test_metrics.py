@@ -502,7 +502,7 @@ async def test_on_revoke_decreases_assigned_partitions_gauge():
     app._lifecycle._on_assign([20, 21, 22])
     assert gauge_val(assigned_partitions) == len(app.processors)
 
-    app._lifecycle._on_revoke([21])
+    await app._lifecycle._on_revoke([21])
     await asyncio.sleep(0.3)
     assert gauge_val(assigned_partitions) == len(app.processors)
 

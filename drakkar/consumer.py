@@ -5,7 +5,7 @@ Rebalance callbacks run on the event loop — no call_soon_threadsafe needed.
 """
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
@@ -19,7 +19,11 @@ from drakkar.models import SourceMessage
 logger = structlog.get_logger()
 
 OnAssignCallback = Callable[[list[int]], Any]
-OnRevokeCallback = Callable[[list[int]], Any]
+# The revoke callback is awaited: the rebalance must not complete until the
+# worker has drained and committed the revoked partitions (see
+# AppLifecycle._on_revoke). AIOConsumer runs this via
+# run_coroutine_threadsafe(...).result(), so librdkafka waits on it.
+OnRevokeCallback = Callable[[list[int]], Awaitable[None]]
 
 # Wall-clock cap on the metadata RPCs behind the UI's lag panels
 # (``committed`` / ``get_watermark_offsets``). librdkafka blocks
@@ -102,7 +106,7 @@ class KafkaConsumer:
             count=len(partition_ids),
         )
         if self._on_revoke_cb:
-            self._on_revoke_cb(partition_ids)
+            await self._on_revoke_cb(partition_ids)
 
     async def poll_batch(self, max_messages: int | None = None, timeout: float = 1.0) -> list[SourceMessage]:
         """Poll up to max_messages from Kafka."""
