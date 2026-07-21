@@ -2872,6 +2872,85 @@ class TestAuthToken:
             )
             assert resp.status_code == 200
 
+    async def test_merge_disabled_returns_403_naming_the_config_key(self, tmp_path, mock_recorder, mock_app):
+        """``ui.merge_enabled=false`` closes the one UI endpoint that writes files."""
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='', merge_enabled=False)
+        mock_recorder.config = cfg
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post('/api/debug/merge', json={'filenames': ['a.db', 'b.db']})
+            assert resp.status_code == 403
+            assert 'ui.merge_enabled' in resp.json()['error']
+
+    async def test_merge_gate_precedes_body_validation(self, tmp_path, mock_recorder, mock_app):
+        """A disabled endpoint answers 403 even for a malformed body.
+
+        Otherwise a caller could distinguish "disabled" from "enabled but
+        your JSON was bad", and the request body would be parsed on an
+        endpoint the operator has switched off.
+        """
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='', merge_enabled=False)
+        mock_recorder.config = cfg
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post(
+                '/api/debug/merge',
+                content=b'not json at all',
+                headers={'Content-Type': 'application/json'},
+            )
+            assert resp.status_code == 403
+
+    async def test_probe_disabled_returns_403_naming_the_config_key(self, mock_recorder, _probe_mock_app):
+        """``ui.probe_enabled=false`` closes the endpoint that runs caller bytes."""
+        _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='', probe_enabled=False)
+        mock_recorder.config = cfg
+        fastapi_app = create_ui_app(cfg, mock_recorder, _probe_mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post('/api/debug/probe', json={'value': 'x'})
+            assert resp.status_code == 403
+            assert 'ui.probe_enabled' in resp.json()['error']
+
+    async def test_probe_gate_holds_even_with_a_valid_token(self, mock_recorder, _probe_mock_app):
+        """The gate is independent of auth, so it still refuses an authenticated caller.
+
+        This is the point of the switch: an operator who *has* configured a
+        token may still want the probe closed, because a valid token is not
+        the same as consent to burn executor slots on demand.
+        """
+        _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
+        cfg = make_ui_config(
+            enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123', probe_enabled=False
+        )
+        mock_recorder.config = cfg
+        fastapi_app = create_ui_app(cfg, mock_recorder, _probe_mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post(
+                '/api/debug/probe',
+                json={'value': 'x'},
+                headers={'Authorization': 'Bearer secret-123'},
+            )
+            assert resp.status_code == 403
+
+    async def test_probe_and_merge_are_enabled_by_default(self, tmp_path, mock_recorder, _probe_mock_app):
+        """Defaults preserve behaviour — the gates are opt-in, not opt-out."""
+        _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='')
+        assert cfg.probe_enabled is True
+        assert cfg.merge_enabled is True
+        mock_recorder.config = cfg
+        fastapi_app = create_ui_app(cfg, mock_recorder, _probe_mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            assert (await c.post('/api/debug/probe', json={'value': 'x'})).status_code == 200
+            # Two non-existent files: past the gate, into ordinary validation.
+            resp = await c.post('/api/debug/merge', json={'filenames': ['a.db', 'b.db']})
+            assert resp.status_code == 404
+
     async def test_non_ascii_bearer_token_returns_401_not_500(self, mock_recorder, mock_app):
         """Non-ASCII bearer tokens must fail-closed to 401 instead of 500.
 

@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from structlog.testing import capture_logs
 
 from drakkar.app import DrakkarApp, warn_if_ui_unauthenticated
+from drakkar.app_security import SIDE_EFFECTING_ENDPOINTS
 from drakkar.config import (
     DrakkarConfig,
     ExecutorConfig,
@@ -1085,9 +1086,74 @@ def test_warn_if_ui_unauthenticated_emits_warning(config_with_ui):
     # var) so operators don't have to guess which knob to turn.
     assert 'ui.auth_token' in record['message']
     assert 'DK_UI__AUTH_TOKEN' in record['message']
-    # The "read-only by design" rationale is part of the message — operators
-    # reading the warning should immediately understand WHY this is opt-in.
+    # The rationale is part of the message — operators reading the warning
+    # should immediately understand WHY this is opt-in. It must stay
+    # truthful: the message used to claim the UI was read-only outright,
+    # which two endpoints have never been.
     assert 'read-only' in record['message']
+    assert 'but not all' in record['message']
+
+
+def test_warn_if_ui_unauthenticated_names_the_side_effecting_endpoints(config_with_ui):
+    """The warning must name what an unauthenticated caller can actually DO.
+
+    The old text asserted the UI "cannot stop workers, replay messages, or
+    modify state" and left it there — true as far as it went, but it let an
+    operator conclude the exposure was read-only when probe executes
+    caller-supplied bytes and merge writes files. Each live endpoint is
+    named alongside the key that closes it.
+    """
+    config = config_with_ui(make_ui_config(enabled=True, auth_token=''))
+    with capture_logs() as cap:
+        warn_if_ui_unauthenticated(config)
+
+    message = _captured_unauth_events(cap)[0]['message']
+    for endpoint in SIDE_EFFECTING_ENDPOINTS:
+        assert endpoint.route in message
+        assert f'{endpoint.config_key}=false' in message
+
+
+@pytest.mark.parametrize(
+    ('probe_enabled', 'merge_enabled', 'expected_routes'),
+    [
+        (True, False, ['POST /api/debug/probe']),
+        (False, True, ['POST /api/debug/merge']),
+    ],
+)
+def test_warn_if_ui_unauthenticated_names_only_live_endpoints(
+    config_with_ui, probe_enabled: bool, merge_enabled: bool, expected_routes: list[str]
+):
+    """An operator who already closed one endpoint isn't warned about it."""
+    config = config_with_ui(
+        make_ui_config(
+            enabled=True,
+            auth_token='',
+            probe_enabled=probe_enabled,
+            merge_enabled=merge_enabled,
+        )
+    )
+    with capture_logs() as cap:
+        warn_if_ui_unauthenticated(config)
+
+    message = _captured_unauth_events(cap)[0]['message']
+    for endpoint in SIDE_EFFECTING_ENDPOINTS:
+        if endpoint.route in expected_routes:
+            assert endpoint.route in message
+        else:
+            assert endpoint.route not in message
+
+
+def test_warn_if_ui_unauthenticated_reports_a_fully_read_only_ui(config_with_ui):
+    """With both side-effecting endpoints closed, the read-only claim is true again."""
+    config = config_with_ui(
+        make_ui_config(enabled=True, auth_token='', probe_enabled=False, merge_enabled=False)
+    )
+    with capture_logs() as cap:
+        warn_if_ui_unauthenticated(config)
+
+    message = _captured_unauth_events(cap)[0]['message']
+    assert 'Every endpoint still served is read-only' in message
+    assert 'but not all' not in message
 
 
 def test_warn_if_ui_unauthenticated_silent_when_token_set(config_with_ui):

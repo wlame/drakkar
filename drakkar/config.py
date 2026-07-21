@@ -622,12 +622,15 @@ class UIConfig(BaseModel):
             'entirely — every endpoint (including database download, merge, and '
             'message-probe) is reachable without credentials and the WebSocket '
             'live-event stream skips both token and Origin checks. This is a '
-            'deliberate opt-in design: the UI is read-only (no endpoint stops a '
-            'worker, replays Kafka messages, mutates sinks, or fakes pipeline '
-            'data) and Drakkar is intended for deployment inside a private '
-            'contour (VPC / internal cluster / operator-only ingress). A startup '
-            'warning fires whenever the UI is enabled without a token so the '
-            'unauthenticated posture is visible in logs. '
+            'deliberate opt-in design: no endpoint stops a worker, replays '
+            'Kafka messages, mutates sinks, or commits offsets, and Drakkar is '
+            'intended for deployment inside a private contour (VPC / internal '
+            'cluster / operator-only ingress). Most endpoints are read-only, '
+            'but the probe and merge routes are not — close those with '
+            '``probe_enabled`` / ``merge_enabled``, which act independently of '
+            'this token. A startup warning fires whenever the UI is enabled '
+            'without a token so the unauthenticated posture is visible in logs, '
+            'naming whichever side-effecting endpoint is still enabled. '
             'When set to a non-empty value, protected HTTP endpoints require '
             'an ``Authorization: Bearer <token>`` header or ``?token=<token>`` '
             'query parameter; WebSocket connections without a valid token are '
@@ -644,6 +647,30 @@ class UIConfig(BaseModel):
             'Explicit allowlist of WebSocket origins. Empty list with non-empty '
             'auth_token defaults to same-origin only; empty list with empty '
             'auth_token = no origin check (dev workflow preserved).'
+        ),
+    )
+    probe_enabled: bool = Field(
+        default=True,
+        description=(
+            'Serve ``POST /api/debug/probe``. This is the one UI endpoint that '
+            'runs caller-supplied bytes through the live handler and the real '
+            'executor subprocess pool, so it is neither read-only nor free: it '
+            'competes with production traffic for executor slots. Set to false '
+            'to serve 403 instead — independently of ``auth_token``, so a '
+            'deployment that cannot set a token can still close the endpoint, '
+            'and a deployment that has one can still close it as defence in '
+            'depth. Probes never write sinks, recorder rows, cache entries, or '
+            'offsets, so switching it off costs no pipeline behaviour.'
+        ),
+    )
+    merge_enabled: bool = Field(
+        default=True,
+        description=(
+            'Serve ``POST /api/debug/merge``. This is the one UI endpoint that '
+            'writes to disk: each call creates a new ``merged-<ts>.db`` in '
+            '``ui.recorder.db_dir`` and nothing reclaims it, so repeated calls '
+            'grow unbounded. Set to false to serve 403 instead — independently '
+            'of ``auth_token``, per the reasoning on ``probe_enabled``.'
         ),
     )
 

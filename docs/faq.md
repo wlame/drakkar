@@ -244,7 +244,8 @@ Typical shape: one `StatefulSet` (or `Deployment` with a PVC per replica) × N r
 The UI runs on a separate thread with its own asyncio event loop, so most read-only endpoints don't interfere. Real effects to be aware of:
 
 - **Message Probe** monkey-patches `handler.cache` process-wide while a probe runs — production hooks during that window see a `DebugCacheProxy` and their `cache.set()` calls are silently suppressed.
-- **Probe consumes `ExecutorPool` slots** exactly like production messages.
+- **Probe consumes `ExecutorPool` slots** exactly like production messages. Close it with `ui.probe_enabled: false`.
+- **Merge writes files.** `POST /api/debug/merge` creates a `merged-<ts>.db` in `ui.recorder.db_dir` that nothing reclaims. Close it with `ui.merge_enabled: false`.
 - **GIL contention** between the UI thread and the main loop under heavy UI use.
 - **aiosqlite connections** are per-thread workers; UI reads don't block pipeline writes thanks to SQLite WAL mode.
 
@@ -252,7 +253,9 @@ See [Observability — Operator UI](observability.md#operator-ui) for the endpoi
 
 ### Is the UI safe to expose to a team of operators?
 
-Auth is **opt-in by default**. The UI is read-only by design (no endpoint stops a worker, replays Kafka messages, mutates sinks, or fakes pipeline data) and Drakkar is intended to run inside a private contour, so the framework starts unauthenticated when `ui.auth_token` is empty (the default) and emits a structured `ui_unauthenticated` warning at startup naming the host:port and the two opt-in paths (`ui.auth_token` in YAML or `DK_UI__AUTH_TOKEN` env var).
+Auth is **opt-in by default**. No endpoint stops a worker, replays Kafka messages, mutates sinks, or commits offsets, and Drakkar is intended to run inside a private contour, so the framework starts unauthenticated when `ui.auth_token` is empty (the default) and emits a structured `ui_unauthenticated` warning at startup naming the host:port and the two opt-in paths (`ui.auth_token` in YAML or `DK_UI__AUTH_TOKEN` env var).
+
+Most endpoints are read-only, but two are not: `POST /api/debug/probe` runs caller-supplied bytes through the live handler, and `POST /api/debug/merge` writes a file that nothing reclaims. Set `ui.probe_enabled: false` / `ui.merge_enabled: false` to close them — independently of `auth_token`, so this works both when you cannot set a token and when you have one and want defence in depth. The startup warning names whichever is still enabled.
 
 For multi-operator setups, set a strong `ui.auth_token`:
 
@@ -264,7 +267,7 @@ Even with auth, the read-only pages expose task stdout/stderr, task env (after [
 
 ### Why does my worker emit a `ui_unauthenticated` warning at startup?
 
-You have `ui.enabled=true` and `ui.auth_token` is empty (the default). That's an intentional, supported configuration — Drakkar treats the UI as opt-in-auth because it is read-only and meant for private-network deployments. The warning is informational; the worker continues starting normally.
+You have `ui.enabled=true` and `ui.auth_token` is empty (the default). That's an intentional, supported configuration — Drakkar treats the UI as opt-in-auth because no endpoint touches the pipeline and it is meant for private-network deployments. The warning is informational; the worker continues starting normally. It also names any side-effecting endpoint still enabled (`probe`, `merge`) so the exposure is explicit rather than implied.
 
 To silence it (i.e. require auth), pick one of:
 

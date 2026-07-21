@@ -119,3 +119,19 @@ def test_config_summary_webapp_token_follows_ui():
     cfg = DrakkarConfig()
     summary = cfg.config_summary(worker_id='w1')
     assert ' ui=on:8080 webapp=off ' in summary
+
+
+def test_probe_and_merge_default_to_enabled():
+    """The gates are opt-in — an existing deployment keeps serving both endpoints."""
+    cfg = UIConfig()
+    assert cfg.probe_enabled is True
+    assert cfg.merge_enabled is True
+
+
+def test_probe_and_merge_env_overrides(monkeypatch):
+    """Reachable via ``DK_UI__*`` so a deployment can close them without a config file."""
+    monkeypatch.setenv('DK_UI__PROBE_ENABLED', 'false')
+    monkeypatch.setenv('DK_UI__MERGE_ENABLED', 'false')
+    cfg = DrakkarConfig()
+    assert cfg.ui.probe_enabled is False
+    assert cfg.ui.merge_enabled is False

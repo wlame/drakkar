@@ -212,10 +212,11 @@ class AppLifecycle:
 
         if app._config.ui.enabled:
             # Auth is opt-in. Emit a startup warning naming how to set a
-            # token when none is configured — the UI is read-only by design
-            # and meant for private-network deployment, so this is
-            # informational rather than fail-fast. See README §"Security &
-            # trust model" for the rationale.
+            # token when none is configured — no endpoint touches the
+            # pipeline and the UI is meant for private-network deployment,
+            # so this is informational rather than fail-fast. The warning
+            # also names any side-effecting endpoint (probe, merge) left
+            # enabled. See README §"Security & trust model".
             warn_if_ui_unauthenticated(app._config)
 
             app._recorder = EventRecorder(

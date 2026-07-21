@@ -276,10 +276,16 @@ ui:
   port: 8080                       # 1–65535. env: DK_UI__PORT
   public_url: ''                   # external URL advertised to peers (LB / ingress). env: DK_UI__PUBLIC_URL
 
-  # --- Auth (opt-in by default; UI is read-only) ---
+  # --- Auth (opt-in by default; most endpoints are read-only) ---
   auth_token: ''                   # bearer token; empty = unauthenticated + startup warning. env: DK_UI__AUTH_TOKEN
                                    # Generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
   allowed_ws_origins: []           # WebSocket Origin allowlist. env: DK_UI__ALLOWED_WS_ORIGINS (JSON list)
+
+  # --- Side-effecting endpoints (gated independently of auth_token) ---
+  probe_enabled: true              # POST /api/debug/probe; runs caller bytes through the live handler
+                                   # and takes executor slots. false = 403. env: DK_UI__PROBE_ENABLED
+  merge_enabled: true              # POST /api/debug/merge; writes merged-<ts>.db into recorder.db_dir,
+                                   # never reclaimed. false = 403. env: DK_UI__MERGE_ENABLED
 
   # --- Deployment metadata ---
   expose_env_vars: []              # env vars captured into worker_config table. env: DK_UI__EXPOSE_ENV_VARS (JSON list)

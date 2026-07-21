@@ -75,6 +75,21 @@ class _ProbeRequest(BaseModel):
     use_cache: bool = False
 
 
+def _disabled_response(endpoint: str, config_key: str) -> JSONResponse:
+    """403 for an endpoint an operator has switched off.
+
+    403 rather than 404: the route exists and the caller may well be
+    authenticated — it is policy, not absence, that refuses. Naming the
+    config key in the body turns "the button stopped working" into a
+    one-line fix without a trip through the logs. Uses the same
+    ``{"error": ...}`` envelope as the rest of the debug API (contract v1).
+    """
+    return JSONResponse(
+        {'error': f'The {endpoint} endpoint is disabled by configuration (set {config_key}=true to enable it)'},
+        status_code=403,
+    )
+
+
 def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
     """Build the router that owns the debug page + ``/api/debug/*`` endpoints (excluding cache).
 
@@ -147,6 +162,13 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         """Merge selected database files into one."""
 
         from drakkar.merge import merge_databases
+
+        # Policy gate, checked before the body is even read: merge is the
+        # one UI endpoint that writes to disk, and nothing reclaims what it
+        # writes. Independent of auth_token by design — see
+        # ``UIConfig.merge_enabled``.
+        if not config.merge_enabled:
+            return _disabled_response('merge', 'ui.merge_enabled')
 
         # A malformed body is a caller error, not a server bug — 400 with
         # the legacy {"error": ...} envelope (contract v1), never a 500.
@@ -385,7 +407,15 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         fires (``2 * task_timeout_seconds + PROBE_TIMEOUT_HEADROOM_SECONDS``),
         also returns 200 but with ``truncated=true`` and whatever partial
         state the runner had captured up to the cancellation point.
+
+        Returns 403 when ``ui.probe_enabled`` is false. That gate is
+        independent of ``auth_token``: the probe runs caller-supplied bytes
+        through the live handler and competes with production traffic for
+        executor slots, so an operator may want it closed regardless of
+        whether auth is configured.
         """
+        if not config.probe_enabled:
+            return _disabled_response('probe', 'ui.probe_enabled')
         runner = _get_probe_runner()
         # Default empty topic to the configured source topic so handlers
         # that key on ``msg.topic`` see a realistic value. The model
