@@ -506,6 +506,11 @@ class WebApp:
             title='Drakkar Webapp',
             docs_url=None,
             redoc_url=None,
+            # No auto-generated schema route: it would be served without the
+            # per-client bearer auth every real webapp route enforces. The
+            # webapp exposes exactly one documented endpoint, so there is
+            # nothing for a schema route to usefully describe.
+            openapi_url=None,
             lifespan=lifespan,
         )
 

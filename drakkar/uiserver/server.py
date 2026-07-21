@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import threading
-from collections.abc import Sequence
+from collections.abc import Coroutine, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -66,6 +66,14 @@ if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
 
 logger = structlog.get_logger()
+
+# Cap on how long a UI request waits for the main loop to answer a
+# live-state read. Bare ``dispatch_to_loop`` waits forever, so a wedged
+# pipeline would hang every operator page that touches worker state —
+# exactly the pages someone opens when the worker is misbehaving. Generous
+# enough that a merely busy loop still answers, short enough that a browser
+# tab never appears frozen.
+MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS = 5.0
 
 TEMPLATES_DIR = Path(__file__).parent.parent / 'templates'
 
@@ -230,17 +238,66 @@ class UIDeps:
 
         return await dispatch_to_loop(_inner(), self.drakkar_app.main_loop)
 
+    async def dispatch_bounded(self, coro: Coroutine[Any, Any, Any], default: Any = None) -> Any:
+        """Run ``coro`` on the main loop, giving up after a bounded wait.
+
+        Bare ``dispatch_to_loop`` waits forever. When the main loop is wedged
+        (a stuck sink flush, an executor deadlock) every UI request that
+        touches live worker state hangs with it — including the pages an
+        operator opens *because* something is wrong. Bounding the wait turns
+        that into a fast degraded response instead of a dead browser tab.
+
+        Returns ``default`` on timeout or error; the caller renders its own
+        empty shape. Errors are swallowed deliberately here — these are
+        best-effort display reads, and the underlying operations already log
+        and count their own failures.
+        """
+        try:
+            return await asyncio.wait_for(
+                dispatch_to_loop(coro, self.drakkar_app.main_loop),
+                timeout=MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                'ui_main_loop_dispatch_timeout',
+                category='debug',
+                timeout_seconds=MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS,
+                hint='main loop did not answer in time — the pipeline may be stalled',
+            )
+            return default
+        except Exception as exc:
+            logger.warning(
+                'ui_main_loop_dispatch_failed',
+                category='debug',
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return default
+
     async def get_lag(self) -> dict[int, dict]:
-        """Return per-partition lag info for currently assigned partitions."""
+        """Return per-partition lag info for currently assigned partitions.
+
+        Hops to the main loop per the live-state ownership rule, and is
+        bounded twice over: the Kafka metadata RPCs carry their own timeout
+        (``consumer.LAG_QUERY_TIMEOUT_SECONDS``) and the dispatch itself is
+        capped, so a broker outage degrades the lag panel instead of the page.
+        """
         consumer = self.drakkar_app._consumer
         if not consumer or not self.drakkar_app.processors:
             return {}
-        try:
-            return await consumer.get_partition_lag(
-                list(self.drakkar_app.processors.keys()),
-            )
-        except Exception:
-            return {}
+        partition_ids = list(self.drakkar_app.processors.keys())
+        return await self.dispatch_bounded(consumer.get_partition_lag(partition_ids), default={})
+
+    async def get_total_lag(self, partition_ids: list[int]) -> int:
+        """Return summed lag across ``partition_ids`` (0 when unavailable).
+
+        Same bounding rationale as :meth:`get_lag`. Callers previously awaited
+        the consumer directly from the UI loop with no cap at all.
+        """
+        consumer = self.drakkar_app._consumer
+        if not consumer or not partition_ids:
+            return 0
+        return await self.dispatch_bounded(consumer.get_total_lag(partition_ids), default=0)
 
     # --- Prometheus link builder ---
 
@@ -480,7 +537,14 @@ def create_ui_app(
     from drakkar.uiserver.routes_pages import create_pages_router
     from drakkar.uiserver.routes_spa import create_spa_router
 
-    app = FastAPI(title='Drakkar UI', docs_url=None, redoc_url=None)
+    # ``openapi_url=None`` disables FastAPI's auto-generated schema route.
+    # Disabling docs_url/redoc_url alone still leaves ``GET /openapi.json``
+    # served, and that route is created by FastAPI itself so it carries none
+    # of our auth dependencies — it answered 200 with the full route table
+    # (including every /api/debug/* path) even with ui.auth_token set. The
+    # contract surface is served instead by routes_openapi.py, which vendors
+    # the spec and is auth-gated like the rest of its route class.
+    app = FastAPI(title='Drakkar UI', docs_url=None, redoc_url=None, openapi_url=None)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.autoescape = True
     templates.env.globals['format_ts'] = format_ts  # ty: ignore[invalid-assignment]

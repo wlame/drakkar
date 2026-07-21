@@ -383,6 +383,26 @@ class EventRecorder:
         """Unsubscribe from live event stream."""
         self._ws_subscribers.discard(q)
 
+    def _fanout_ws(self, event: dict) -> None:
+        """Push ``event`` to every live subscriber, dropping on a full queue.
+
+        Iterates a **snapshot** of the subscriber set, not the set itself.
+        ``subscribe``/``unsubscribe`` run on the UI-server thread (inside the
+        ``/ws`` route) while this runs on the main loop, so iterating the live
+        set raises ``RuntimeError: Set changed size during iteration`` the
+        moment a browser tab opens or closes mid-fan-out. That exception would
+        surface on the message-processing path — ``_record`` is called from
+        ``PartitionProcessor.enqueue``, which has no ``except`` — and kill the
+        worker. ``list(set)`` completes in C without executing bytecode, so no
+        thread switch can occur inside it. The Go backend guards the same
+        fan-out with ``subsMu``; this is the CPython-idiomatic equivalent.
+        """
+        for q in list(self._ws_subscribers):
+            try:
+                q.put_nowait(event)
+            except queue.Full:
+                pass
+
     def _record(self, event: dict, *, skip_ws: bool = False, skip_db: bool = False) -> None:
         """Append event to buffer and broadcast to WS subscribers.
 
@@ -405,20 +425,12 @@ class EventRecorder:
             self._buffer.append(event)
             recorder_buffer_size.set(len(self._buffer))
         if not skip_ws and self._ws_subscribers:
-            for q in self._ws_subscribers:
-                try:
-                    q.put_nowait(event)
-                except queue.Full:
-                    pass
+            self._fanout_ws(event)
 
     def _broadcast_ws(self, event: dict) -> None:
         """Send event to WebSocket subscribers without buffering to DB."""
         if self._ws_subscribers:
-            for q in self._ws_subscribers:
-                try:
-                    q.put_nowait(event)
-                except queue.Full:
-                    pass
+            self._fanout_ws(event)
 
     def _send_deferred_start(self, task_id: str) -> None:
         """Timer callback: task is still running after ws_min_duration_ms, send its start event."""

@@ -21,6 +21,25 @@ logger = structlog.get_logger()
 OnAssignCallback = Callable[[list[int]], Any]
 OnRevokeCallback = Callable[[list[int]], Any]
 
+# Wall-clock cap on the metadata RPCs behind the UI's lag panels
+# (``committed`` / ``get_watermark_offsets``). librdkafka blocks
+# INDEFINITELY when the timeout is omitted, and every AIOConsumer call —
+# including ``consume`` and ``commit`` — shares one small thread pool, so an
+# untimed lag query against an unreachable partition leader parks a pool
+# thread forever and the poll loop eventually queues behind it. The worker
+# then stops consuming with no error, while readiness still reports healthy.
+# 2s matches the Go backend's context timeout for the same queries
+# (``app/providers.go``); keep the two in step.
+LAG_QUERY_TIMEOUT_SECONDS = 2.0
+
+# AIOConsumer defaults to 2 executor threads for EVERY consumer operation.
+# The UI's per-partition watermark fan-out can submit one work item per
+# assigned partition at once, so a 2-thread pool leaves the pipeline's
+# ``consume``/``commit`` calls waiting behind UI traffic. The timeout above
+# bounds the damage; this gives the pipeline headroom so it is not merely
+# bounded but unimpeded.
+CONSUMER_MAX_WORKERS = 8
+
 
 class KafkaConsumer:
     """Wraps confluent_kafka.AIOConsumer with cooperative-sticky rebalancing
@@ -47,7 +66,8 @@ class KafkaConsumer:
                 'max.poll.interval.ms': config.max_poll_interval_ms,
                 'session.timeout.ms': config.session_timeout_ms,
                 'heartbeat.interval.ms': config.heartbeat_interval_ms,
-            }
+            },
+            max_workers=CONSUMER_MAX_WORKERS,
         )
 
     async def subscribe(self) -> None:
@@ -141,7 +161,7 @@ class KafkaConsumer:
 
         tps = [TopicPartition(self._config.source_topic, pid) for pid in partition_ids]
         try:
-            committed_list = await self._consumer.committed(tps)
+            committed_list = await self._consumer.committed(tps, timeout=LAG_QUERY_TIMEOUT_SECONDS)
         except Exception as e:
             # A lag of 0 here is a lie told to keep the caller simple —
             # make the failure visible so a broker outage doesn't read
@@ -164,7 +184,7 @@ class KafkaConsumer:
         async def _watermark(pid: int) -> int:
             try:
                 tp = TopicPartition(self._config.source_topic, pid)
-                _low, high = await self._consumer.get_watermark_offsets(tp)
+                _low, high = await self._consumer.get_watermark_offsets(tp, timeout=LAG_QUERY_TIMEOUT_SECONDS)
                 return max(0, high - committed_map.get(pid, 0))
             except Exception as e:
                 consumer_errors.inc()
@@ -196,7 +216,7 @@ class KafkaConsumer:
         # single batched committed() call for all partitions
         committed_map: dict[int, int] = {}
         try:
-            committed_list = await self._consumer.committed(tps)
+            committed_list = await self._consumer.committed(tps, timeout=LAG_QUERY_TIMEOUT_SECONDS)
             for tp_result in committed_list or []:
                 if tp_result and tp_result.offset >= 0:
                     committed_map[tp_result.partition] = tp_result.offset
@@ -214,7 +234,7 @@ class KafkaConsumer:
         async def _watermark(pid: int) -> tuple[int, int]:
             try:
                 tp = TopicPartition(self._config.source_topic, pid)
-                _low, high = await self._consumer.get_watermark_offsets(tp)
+                _low, high = await self._consumer.get_watermark_offsets(tp, timeout=LAG_QUERY_TIMEOUT_SECONDS)
                 return pid, high
             except Exception as e:
                 consumer_errors.inc()

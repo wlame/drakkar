@@ -1001,6 +1001,63 @@ async def test_broadcast_to_multiple_subscribers(tmp_path):
     await rec.stop()
 
 
+class _MutatingSubscriber:
+    """Subscriber that mutates the subscriber set from inside the fan-out.
+
+    Reproduces the UI-thread/main-loop interleaving deterministically: the
+    real hazard is a ``subscribe``/``unsubscribe`` landing between two
+    iterations of the fan-out loop, which a timing-based test could only hit
+    by luck.
+    """
+
+    def __init__(self, action):
+        self._action = action
+        self.events: list[dict] = []
+
+    def put_nowait(self, event: dict) -> None:
+        self.events.append(event)
+        self._action()
+
+
+async def test_record_survives_subscriber_added_during_fanout(tmp_path):
+    """A browser tab opening mid-fan-out must not kill the recording path.
+
+    ``_record`` runs on the main loop via ``PartitionProcessor.enqueue``,
+    which has no ``except`` — so a RuntimeError here propagates out of the
+    poll loop and terminates the worker.
+    """
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    opened: list = []
+    sub = _MutatingSubscriber(lambda: opened.append(rec.subscribe()))
+    rec._ws_subscribers.add(sub)
+
+    rec.record_committed(partition=1, offset=7)
+
+    assert len(sub.events) == 1, 'fan-out did not reach the subscriber'
+    assert len(opened) == 1, 'the mid-fan-out subscribe did not run'
+    await rec.stop()
+
+
+async def test_record_survives_subscriber_removed_during_fanout(tmp_path):
+    """A browser tab closing mid-fan-out must not kill the recording path."""
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    victim = rec.subscribe()
+    sub = _MutatingSubscriber(lambda: rec.unsubscribe(victim))
+    rec._ws_subscribers.add(sub)
+
+    rec.record_committed(partition=2, offset=11)
+
+    assert len(sub.events) == 1
+    assert victim not in rec._ws_subscribers
+    await rec.stop()
+
+
 async def test_broadcast_drops_on_full_queue(tmp_path):
     """If subscriber queue is full, events are dropped without error."""
     config = make_debug_config(tmp_path)

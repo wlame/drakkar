@@ -204,14 +204,8 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
         stats = await recorder.get_stats()
         processors = drakkar_app.processors
         pool = drakkar_app._executor_pool
-        consumer = drakkar_app._consumer
         partition_ids = sorted(processors.keys())
-        total_lag = 0
-        if consumer and partition_ids:
-            try:
-                total_lag = await consumer.get_total_lag(partition_ids)
-            except Exception:
-                pass
+        total_lag = await deps.get_total_lag(partition_ids)
         # Expand custom link URL templates
         custom_links = []
         if config.custom_links:
@@ -541,13 +535,7 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
         processors = drakkar_app.processors
         pool = drakkar_app._executor_pool
         partition_ids = sorted(processors.keys())
-        consumer = drakkar_app._consumer
-        total_lag = 0
-        if consumer and partition_ids:
-            try:
-                total_lag = await consumer.get_total_lag(partition_ids)
-            except Exception:
-                pass
+        total_lag = await deps.get_total_lag(partition_ids)
         webapp_tile = await _build_webapp_tile()
         payload = {
             'uptime': time.monotonic() - drakkar_app._start_time,

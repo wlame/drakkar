@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from drakkar.config import KafkaConfig
-from drakkar.consumer import KafkaConsumer
+from drakkar.consumer import CONSUMER_MAX_WORKERS, LAG_QUERY_TIMEOUT_SECONDS, KafkaConsumer
 
 
 @pytest.fixture
@@ -214,7 +214,8 @@ async def test_get_total_lag(mock_cls, kafka_config):
     mock_inner.committed.return_value = [tp0, tp1]
 
     # watermarks: (low, high)
-    async def fake_watermarks(tp):
+    async def fake_watermarks(tp, *, timeout=None):
+        assert timeout == LAG_QUERY_TIMEOUT_SECONDS, 'watermark query must carry the lag timeout'
         if tp.partition == 0:
             return (0, 100)  # lag = 100 - 90 = 10
         return (0, 95)  # lag = 95 - 80 = 15
@@ -249,6 +250,50 @@ async def test_get_total_lag_empty_partitions(mock_cls, kafka_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
+async def test_lag_metadata_rpcs_carry_an_explicit_timeout(mock_cls, kafka_config):
+    """Both lag RPCs must pass a timeout — librdkafka blocks forever without one.
+
+    These calls share one small executor pool with ``consume`` and ``commit``.
+    An untimed query against an unreachable partition leader parks a pool
+    thread indefinitely; once the pool is exhausted the poll loop queues
+    behind it and the worker silently stops consuming while still reporting
+    ready. The timeout is what bounds that, so it is pinned here.
+    """
+    from confluent_kafka import TopicPartition
+
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
+    mock_inner.committed.return_value = [TopicPartition(kafka_config.source_topic, 0, 5)]
+
+    async def fake_watermarks(tp, *, timeout=None):
+        assert timeout == LAG_QUERY_TIMEOUT_SECONDS
+        return (0, 10)
+
+    mock_inner.get_watermark_offsets.side_effect = fake_watermarks
+
+    consumer = KafkaConsumer(kafka_config)
+    await consumer.get_total_lag([0])
+    await consumer.get_partition_lag([0])
+
+    for call in mock_inner.committed.call_args_list:
+        assert call.kwargs.get('timeout') == LAG_QUERY_TIMEOUT_SECONDS
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_consumer_pool_is_larger_than_the_two_thread_default(mock_cls, kafka_config):
+    """AIOConsumer's 2-thread default is shared by every consumer operation.
+
+    The UI's watermark fan-out submits one work item per assigned partition,
+    so the default leaves ``consume``/``commit`` waiting behind UI traffic.
+    """
+    mock_cls.return_value = AsyncMock()
+    KafkaConsumer(kafka_config)
+
+    assert mock_cls.call_args.kwargs['max_workers'] == CONSUMER_MAX_WORKERS
+    assert CONSUMER_MAX_WORKERS > 2
+
+
+@patch('drakkar.consumer.AIOConsumer')
 async def test_get_total_lag_committed_exception(mock_cls, kafka_config):
     """get_total_lag returns 0 when committed() raises."""
     mock_inner = AsyncMock()
@@ -272,7 +317,8 @@ async def test_get_total_lag_watermark_exception(mock_cls, kafka_config):
     tp1 = TopicPartition(kafka_config.source_topic, 1, 80)
     mock_inner.committed.return_value = [tp0, tp1]
 
-    async def fake_watermarks(tp):
+    async def fake_watermarks(tp, *, timeout=None):
+        assert timeout == LAG_QUERY_TIMEOUT_SECONDS, 'watermark query must carry the lag timeout'
         if tp.partition == 0:
             raise RuntimeError('timeout')
         return (0, 100)  # partition 1 lag = 100 - 80 = 20
@@ -292,7 +338,8 @@ async def test_get_partition_lag(mock_cls, kafka_config):
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
-    async def fake_watermarks(tp):
+    async def fake_watermarks(tp, *, timeout=None):
+        assert timeout == LAG_QUERY_TIMEOUT_SECONDS, 'watermark query must carry the lag timeout'
         if tp.partition == 0:
             return (0, 100)
         return (0, 200)
@@ -335,7 +382,8 @@ async def test_get_total_lag_committed_negative_offset(mock_cls, kafka_config):
     tp0 = TopicPartition(kafka_config.source_topic, 0, -1001)
     mock_inner.committed.return_value = [tp0]
 
-    async def fake_watermarks(tp):
+    async def fake_watermarks(tp, *, timeout=None):
+        assert timeout == LAG_QUERY_TIMEOUT_SECONDS, 'watermark query must carry the lag timeout'
         return (0, 50)
 
     mock_inner.get_watermark_offsets.side_effect = fake_watermarks
@@ -354,7 +402,8 @@ async def test_get_partition_lag_negative_committed_offset(mock_cls, kafka_confi
     mock_inner = AsyncMock()
     mock_cls.return_value = mock_inner
 
-    async def fake_watermarks(tp):
+    async def fake_watermarks(tp, *, timeout=None):
+        assert timeout == LAG_QUERY_TIMEOUT_SECONDS, 'watermark query must carry the lag timeout'
         return (0, 100)
 
     mock_inner.get_watermark_offsets.side_effect = fake_watermarks

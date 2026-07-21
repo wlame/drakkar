@@ -113,6 +113,30 @@ async def test_docs_gated_when_token_configured():
         assert ok.status_code == 200
 
 
+async def test_framework_openapi_route_is_not_served():
+    """FastAPI's auto-generated /openapi.json must not exist.
+
+    It is created by FastAPI itself, so it carries none of our auth
+    dependencies: with a token configured it answered 200 with the full route
+    table — every /api/debug/* path included — while the vendored spec at
+    /api/v1/openapi.json correctly returned 401. Only the vendored, gated
+    route may serve the contract.
+    """
+    recorder = AsyncMock(spec=EventRecorder)
+    cfg = make_ui_config(auth_token='secret-123')
+    recorder.config = cfg
+    app = MagicMock()
+    app._worker_id = 'parity-worker'
+    app._cluster_name = ''
+    app._start_time = time.monotonic()
+    app._config = DrakkarConfig()
+    transport = ASGITransport(app=create_ui_app(cfg, recorder, app))
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        assert (await client.get('/openapi.json')).status_code == 404
+        # The gated route still exists and still demands the token.
+        assert (await client.get('/api/v1/openapi.json')).status_code == 401
+
+
 async def test_docs_page_escapes_reflected_token():
     """A hostile ?token= value must not break out of the HTML/JS context."""
     transport = ASGITransport(app=_stub_app())
