@@ -1700,6 +1700,82 @@ async def test_on_message_complete_sink_exception_stall_mode_stalls_offset(echo_
     assert proc.offset_tracker.has_pending(), 'offset stays pending (stalled watermark)'
 
 
+class _TaskCollectHandler(BaseDrakkarHandler):
+    """Emits its payload from on_task_complete rather than on_message_complete."""
+
+    async def arrange(self, messages, pending):
+        return [ExecutorTask(task_id=f'tc-{m.offset}', args=['ok'], source_offsets=[m.offset]) for m in messages]
+
+    async def on_task_complete(self, result):
+        return CollectResult(kafka=[KafkaPayload(data=_Out(v='per-task'))])
+
+
+async def test_on_task_complete_sink_exception_drop_mode_commits(echo_pool):
+    """Default dlq.on_send_failure=drop: the offset still commits.
+
+    Mirrors the on_message_complete path — a deterministic handler bug must
+    not wedge the partition when the operator chose 'drop'.
+    """
+    delivery_calls, failing_on_collect = _failing_collect_fixture()
+    committed: list[tuple[int, int]] = []
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=_TaskCollectHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_collect=failing_on_collect,
+        on_commit=on_commit,
+    )
+    proc.enqueue(make_msg(offset=40))
+    proc.start()
+    await wait_for(lambda: any(c[1] == 41 for c in committed), timeout=5)
+    await proc.stop()
+
+    assert delivery_calls, 'on_collect must have been invoked'
+
+
+async def test_on_task_complete_sink_exception_stall_mode_stalls_offset(echo_pool):
+    """dlq.on_send_failure=stall: the offset must NOT commit.
+
+    This call site previously caught only SinkDeliveryFailedError, so any
+    other exception — notably SinkNotConfiguredError / AmbiguousSinkError
+    from validate_collect when a payload names a sink that is not
+    configured — fell through to the generic task-failure handler. The
+    payload was discarded without ever reaching a sink or the DLQ, and the
+    offset committed anyway, silently defeating the 'stall' setting the
+    operator chose specifically to prevent loss.
+    """
+    delivery_calls, failing_on_collect = _failing_collect_fixture()
+    committed: list[tuple[int, int]] = []
+
+    async def on_commit(pid, off):
+        committed.append((pid, off))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=_TaskCollectHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_collect=failing_on_collect,
+        on_commit=on_commit,
+        on_dlq_failure='stall',
+    )
+    proc.enqueue(make_msg(offset=40))
+    proc.start()
+    await wait_for(lambda: bool(delivery_calls), timeout=5)
+    # Give the (not expected) commit a chance to fire before asserting.
+    await asyncio.sleep(0.1)
+    await proc.stop()
+
+    assert delivery_calls, 'on_collect must have been invoked'
+    assert not committed, 'offset must NOT commit when delivery is unconfirmed'
+    assert proc.offset_tracker.has_pending(), 'offset stays pending (stalled watermark)'
+
+
 async def test_on_error_replacement_preserves_explicit_parent_task_id(failing_pool):
     """If handler's on_error sets parent_task_id explicitly, framework must
     NOT override it. Lets the user point replacements at a non-obvious

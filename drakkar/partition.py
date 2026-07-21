@@ -537,6 +537,18 @@ class PartitionProcessor:
         )
         await self._signal_stall()
 
+    def _mark_offsets_delivery_failed(self, source_offsets: list[int]) -> None:
+        """Flag every tracker owning ``source_offsets`` as undelivered.
+
+        ``_finalize_message_tracker`` then stalls those offsets rather than
+        committing past data whose delivery could not be confirmed. A task
+        may fan in from several source messages, so this marks all of them.
+        """
+        for src_offset in source_offsets:
+            affected = self._message_trackers.get(src_offset)
+            if affected is not None:
+                affected.delivery_failed = True
+
     async def _handle_parse_failure(self, msg: SourceMessage) -> None:
         """Apply the 'dlq' / 'raise' parse-error policy to one message.
 
@@ -656,16 +668,45 @@ class PartitionProcessor:
                     # _finalize_message_tracker stalls the offset instead
                     # of committing past undelivered data. The task itself
                     # succeeded — group/window accounting proceeds normally.
-                    for src_offset in task.source_offsets:
-                        affected = self._message_trackers.get(src_offset)
-                        if affected is not None:
-                            affected.delivery_failed = True
+                    self._mark_offsets_delivery_failed(task.source_offsets)
                     await log.aerror(
                         'task_sink_delivery_failed',
                         error=str(e),
                         source_offsets=task.source_offsets,
                         hint='affected offsets will not commit (redelivery on restart)',
                     )
+                except Exception as e:
+                    # Unexpected error — delivery state is unknown, so the
+                    # dlq.on_send_failure strategy decides whether the
+                    # watermark may advance past a payload that may never
+                    # have been written: 'stall' treats unknown as
+                    # undelivered (replay on restart), 'drop' commits so a
+                    # deterministic handler bug cannot wedge the partition.
+                    # Mirrors _finalize_message_tracker and the window path,
+                    # which have always applied the strategy here.
+                    #
+                    # Reachable whenever validate_collect rejects a payload
+                    # (a sink name that is unconfigured or ambiguous) and
+                    # whenever a user's on_delivery_error re-raises. Before
+                    # this branch existed such payloads were discarded —
+                    # never delivered, never DLQ'd — while the offset
+                    # committed anyway, silently defeating 'stall'.
+                    #
+                    # Re-raised so the outer handler still synthesizes a
+                    # terminal task failure: that accounting is unchanged and
+                    # identical on the Go backend (settleSuccess →
+                    # synthesizeFailure). Only the offset decision is new.
+                    if self._on_dlq_failure == 'stall':
+                        self._mark_offsets_delivery_failed(task.source_offsets)
+                    await log.aerror(
+                        'task_sink_delivery_error',
+                        category='handler',
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        source_offsets=task.source_offsets,
+                        offset_action='stall' if self._on_dlq_failure == 'stall' else 'commit',
+                    )
+                    raise
 
             window.results.append(result)
             task_result = result

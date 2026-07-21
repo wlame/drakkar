@@ -457,6 +457,17 @@ pause/resume cycle — backpressure recovery never silently un-pauses it. Choose
 `stall` when downstream data must never be dropped (audit, billing); keep `drop`
 when pipeline liveness matters more than occasional loss during a double outage.
 
+The same strategy also governs **unexpected** delivery errors — anything that is
+not a confirmed DLQ failure, such as a payload naming a sink that is not
+configured (or whose name is ambiguous across plugin sinks), or a
+`on_delivery_error` hook that itself raises. In those cases the delivery state is
+genuinely unknown, so `stall` treats it as undelivered and leaves the offset for
+redelivery, while `drop` commits and logs. This applies uniformly at all three
+delivery points — after `on_task_complete`, after `on_message_complete`, and
+after `on_window_complete` — and identically on both backends. The task is still
+reported as a terminal failure to the handler in every case; only the offset
+decision changes.
+
 ### DLQ replay
 
 `scripts/replay_dlq.py` is a reference operator tool that reads DLQ entries
