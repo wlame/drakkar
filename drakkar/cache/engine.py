@@ -35,6 +35,7 @@ from drakkar.cache.sql import (
     PEER_CLUSTER_CACHE_TTL_SECONDS,
     SCHEMA_CACHE_ENTRIES,
 )
+from drakkar.dbfiles import DB_DIR_MODE, secure_db_file
 
 # Imported at module scope for the same monkeypatch reason — tests replace
 # this helper with a fake that yields canned ``(worker_name, target_path)``
@@ -389,8 +390,18 @@ class CacheEngine:
             )
             return
 
-        os.makedirs(db_dir, exist_ok=True)
+        # Owner-only when we create it: the cache DB inside holds handler
+        # results derived from message payloads. Mode applies to the leaf
+        # directory only (Python passes it to the final mkdir; any
+        # intermediate parents keep the default 0777 & ~umask), which is
+        # the one that actually contains the files.
+        os.makedirs(db_dir, mode=DB_DIR_MODE, exist_ok=True)
         self._db_path = self._cache_db_file_path(db_dir, self._worker_id)
+        # Owner-only before the driver opens the file and ``_create_schema``
+        # turns on WAL, so the -wal/-shm sidecars inherit 0600 as SQLite
+        # creates them. The cache DB holds handler results derived from
+        # message payloads. See :func:`drakkar.dbfiles.secure_db_file`.
+        secure_db_file(self._db_path)
         self._writer_db = await aiosqlite.connect(self._db_path)
         await self._create_schema()
 

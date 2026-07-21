@@ -37,6 +37,7 @@ import structlog
 from pydantic import BaseModel
 
 from drakkar.config import UIConfig
+from drakkar.dbfiles import secure_db_file
 from drakkar.metrics import (
     recorder_buffer_size,
     recorder_dropped_events,
@@ -333,6 +334,14 @@ class EventRecorder:
             # typically doesn't call ``stop()`` on a failed ``start`` and
             # the partially-opened ``_db`` handle leaks its fd + lock.
             try:
+                # The DB stores task args + subprocess stdout/stderr, which
+                # may carry message-derived data. Create it owner-only
+                # BEFORE the driver opens it and turns on WAL: SQLite
+                # copies this file's mode onto the -wal/-shm sidecars as it
+                # creates them, so the order is what makes those
+                # owner-only too. See
+                # :func:`drakkar.dbfiles.secure_db_file`.
+                secure_db_file(self._db_path)
                 self._db = await aiosqlite.connect(self._db_path)
                 # WAL mode is what lets a separate reader connection coexist
                 # with the writer without serializing reads behind writes.
@@ -361,15 +370,6 @@ class EventRecorder:
                 # so the reader always sees a ready DB. URI with ``mode=ro``
                 # rejects any accidental write attempt through this handle.
                 self._reader_db = await open_reader(self._db_path)
-                # The DB stores task args + subprocess stdout/stderr, which
-                # may carry message-derived data. SQLite creates files with
-                # 0644 & ~umask; tighten to owner-only so other local users
-                # on shared hosts (e.g. world-readable /tmp) cannot read
-                # them. Same-user peer workers (cache sync, debug merge)
-                # are unaffected. Best-effort: chmod failure must not
-                # abort recorder startup.
-                with contextlib.suppress(OSError):
-                    os.chmod(self._db_path, 0o600)
             except Exception:
                 # Best-effort cleanup of whichever connections opened before
                 # the exception. Reset attrs so a retry of start() starts
@@ -1884,6 +1884,11 @@ class EventRecorder:
         # creation fails, close the orphaned connection and leave
         # self._db untouched so the caller can retry on the next tick.
         new_path = make_db_path(self._store.db_dir, self._worker_name)
+        # Same ordering contract as ``start``: owner-only before the driver
+        # opens the file, so the rotated DB's sidecars are created
+        # owner-only too. Rotation previously skipped this entirely, so
+        # every post-rotation file was world-readable.
+        secure_db_file(new_path)
         new_db = await aiosqlite.connect(new_path)
         try:
             await new_db.execute('PRAGMA journal_mode=WAL')
