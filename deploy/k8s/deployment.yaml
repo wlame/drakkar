@@ -38,6 +38,13 @@ spec:
       # commit Kafka offsets before SIGKILL. Tune in tandem with
       # executor.drain_timeout_seconds in your DrakkarConfig.
       terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: worker
           # <-- replace with your built image, e.g. ghcr.io/wlame/drakkar-worker:0.12.0
@@ -92,6 +99,25 @@ spec:
             limits:
               cpu: "2"
               memory: 2Gi
+          # The worker needs no root privileges: it binds ports above 1024,
+          # writes only to the mounted volumes, and execs the handler binary
+          # as itself. The handler binary must therefore also run unprivileged
+          # and write only under /var/lib/drakkar or /tmp.
+          #
+          # Two gotchas when enabling readOnlyRootFilesystem, both of which
+          # surface only at runtime as a read-only-filesystem error:
+          #   - Neither executor sets a working directory for the subprocess,
+          #     so a handler that writes relative paths writes into the image
+          #     WORKDIR. Have it write absolute paths under the mounts below.
+          #   - HOME is unset for UID 65532 (no passwd entry), so a handler or
+          #     library that caches under $HOME has nowhere to write. Set
+          #     HOME=/tmp under env: below if yours does.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           env:
             # WORKER_ID is read by Drakkar at startup (config field
             # worker_name_env, default "WORKER_ID"). Pulling it from
@@ -135,6 +161,8 @@ spec:
             # when you want post-mortem access after a pod terminates.
             - name: data
               mountPath: /var/lib/drakkar
+            - name: tmp
+              mountPath: /tmp
           # preStop sleep gives the kube-proxy / Service endpoint
           # controller time to drop this pod from rotation before the
           # process receives SIGTERM. Without it, requests can race the
@@ -150,4 +178,6 @@ spec:
           configMap:
             name: drakkar-config
         - name: data
+          emptyDir: {}
+        - name: tmp
           emptyDir: {}
