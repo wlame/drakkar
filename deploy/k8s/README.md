@@ -76,7 +76,7 @@ env:
     value: "kafka-bootstrap.kafka:9092"
   - name: DK_EXECUTOR__MAX_EXECUTORS
     value: "16"
-  - name: DK_DEBUG__AUTH_TOKEN
+  - name: DK_UI__AUTH_TOKEN
     valueFrom:
       secretKeyRef:
         name: drakkar-secrets
@@ -131,19 +131,24 @@ alongside lag for hybrid scaling.
 
 ## Auth & exposure
 
-The debug UI is **read-only by design** — no endpoint stops a worker,
-replays Kafka messages, or mutates sinks — but it does expose
-subprocess output, cache contents, and live event streams. Out of the
-box `debug.auth_token` is empty and a startup warning fires
-(`debug_ui_unauthenticated`) so the unauthenticated posture is visible
-in logs.
+No endpoint stops a worker, replays Kafka messages, mutates sinks, or
+commits offsets, but the UI does expose subprocess output, cache
+contents, and live event streams. Most endpoints are read-only, but
+two are not: `POST /api/debug/probe` runs caller-supplied bytes
+through the live handler, and `POST /api/debug/merge` writes a file
+that nothing reclaims. Close either independently of `auth_token` with
+`ui.probe_enabled: false` / `ui.merge_enabled: false`.
+
+Out of the box `ui.auth_token` is empty and a startup warning fires
+(`ui_unauthenticated`) so the unauthenticated posture — and any
+side-effecting endpoint still enabled — is visible in logs.
 
 You have two paths to safe deployment:
 
 1. **Keep the Service ClusterIP-only.** No Ingress, no LoadBalancer.
    Reach the UI via `kubectl port-forward svc/drakkar-worker 8080:8080`
    when you need it. This is the default these manifests assume.
-2. **Set `DK_DEBUG__AUTH_TOKEN` in a Secret.** The sample
+2. **Set `DK_UI__AUTH_TOKEN` in a Secret.** The sample
    `deployment.yaml` references `drakkar-secrets/debug_auth_token`
    (optional: true). Populate it with a 32+ character random value
    (`python -c "import secrets; print(secrets.token_urlsafe(32))"`).

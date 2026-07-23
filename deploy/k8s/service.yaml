@@ -1,11 +1,14 @@
 # Drakkar worker — Service.
 #
-# Intentionally ClusterIP-only. The debug port hosts a read-only
-# operator UI that is unauthenticated by default; exposing it via
-# LoadBalancer or Ingress without first setting DK_DEBUG__AUTH_TOKEN
-# would put cache contents, subprocess output, and live event streams
-# on the public internet. Keep the Service ClusterIP and reach it via
-# `kubectl port-forward` or an internal-only ingress.
+# Intentionally ClusterIP-only. The debug port hosts the operator UI,
+# unauthenticated by default. Most endpoints are read-only, but the
+# message probe and the merge endpoint are not — close them with
+# ui.probe_enabled=false / ui.merge_enabled=false, independently of
+# auth_token. Exposing this port via LoadBalancer or Ingress without
+# first setting DK_UI__AUTH_TOKEN would put cache contents, subprocess
+# output, and live event streams on the public internet. Keep the
+# Service ClusterIP and reach it via `kubectl port-forward` or an
+# internal-only ingress.
 apiVersion: v1
 kind: Service
 metadata:

@@ -8,12 +8,12 @@
 #     then `kubectl rollout restart deployment/drakkar-worker` so pods
 #     pick up the new file.
 #   - For single-field tweaks (rotate broker list, change a port,
-#     toggle debug.enabled) prefer DK_<SECTION>__<FIELD> env vars on
+#     toggle ui.enabled) prefer DK_<SECTION>__<FIELD> env vars on
 #     the Deployment — they win over the YAML at config load time and
 #     don't require re-applying the ConfigMap. Examples:
 #       DK_KAFKA__BROKERS=kafka:9092
-#       DK_DEBUG__PORT=8080
-#       DK_DEBUG__AUTH_TOKEN=<token>
+#       DK_UI__PORT=8080
+#       DK_UI__AUTH_TOKEN=<token>
 #       DK_EXECUTOR__MAX_EXECUTORS=16
 #
 # All fields below match the real DrakkarConfig schema (see
@@ -71,29 +71,30 @@ data:
       format: "json"
       output: "stderr"
 
-    debug:
+    ui:
       enabled: true
       # 0.0.0.0 binds on all interfaces inside the pod so kube-probes
       # and the Service can reach the port. Keep auth_token set in a
       # Secret if the Service is ever exposed beyond ClusterIP.
       host: "0.0.0.0"
       port: 8080
-      # Override via DK_DEBUG__AUTH_TOKEN from a Secret in the
-      # Deployment. Leaving this empty keeps the read-only UI
-      # unauthenticated — acceptable only on a private network.
+      # Override via DK_UI__AUTH_TOKEN from a Secret in the
+      # Deployment. Leaving this empty keeps the UI unauthenticated —
+      # acceptable only on a private network.
       auth_token: ""
-      # Matches the emptyDir volumeMount in deployment.yaml. The
-      # recorder and cache SQLite files live here.
-      db_dir: "/var/lib/drakkar"
-      store_events: true
-      store_config: true
-      store_state: true
-      retention_hours: 24
-      retention_max_events: 100000
+      recorder:
+        # Matches the emptyDir volumeMount in deployment.yaml. The
+        # recorder and cache SQLite files live here.
+        db_dir: "/var/lib/drakkar"
+        store_events: true
+        store_config: true
+        store_state: true
+        retention_hours: 24
+        retention_max_events: 100000
 
     cache:
       # Off by default — flip to true if your handler uses
-      # `self.cache`. db_dir empty falls back to debug.db_dir above.
+      # `self.cache`. db_dir empty falls back to ui.recorder.db_dir above.
       enabled: false
       db_dir: ""
       flush_interval_seconds: 3.0

@@ -44,8 +44,11 @@ spec:
           image: <image>:<tag>
           imagePullPolicy: IfNotPresent
           ports:
-            # Debug HTTP port. Hosts /healthz, /readyz, and the operator
-            # debug UI (read-only by default — see auth note below).
+            # Debug HTTP port. Hosts /healthz, /readyz, and the
+            # Operator UI. Most endpoints are read-only, but the message
+            # probe and the merge endpoint are not — close them with
+            # ui.probe_enabled=false / ui.merge_enabled=false,
+            # independently of auth_token.
             - name: debug
               containerPort: 8080
               protocol: TCP
@@ -81,7 +84,7 @@ spec:
           # a starting point — measure with your real handler binary
           # and tune. Memory limit should leave headroom above the
           # cache and recorder buffers (cache.max_memory_entries,
-          # debug.max_buffer) plus subprocess RSS.
+          # ui.recorder.max_buffer) plus subprocess RSS.
           resources:
             requests:
               cpu: 500m
@@ -111,11 +114,11 @@ spec:
                   name: drakkar-secrets  # <-- create this Secret
                   key: kafka_brokers
                   optional: true
-            # Debug UI auth token. Empty (or unset) leaves the UI
+            # Operator UI auth token. Empty (or unset) leaves the UI
             # unauthenticated — only acceptable when the Service is
             # ClusterIP-only on a private network. For any non-private
             # exposure, populate this from a Secret.
-            - name: DK_DEBUG__AUTH_TOKEN
+            - name: DK_UI__AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: drakkar-secrets
