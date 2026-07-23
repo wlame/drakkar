@@ -1145,9 +1145,7 @@ def test_warn_if_ui_unauthenticated_names_only_live_endpoints(
 
 def test_warn_if_ui_unauthenticated_reports_a_fully_read_only_ui(config_with_ui):
     """With both side-effecting endpoints closed, the read-only claim is true again."""
-    config = config_with_ui(
-        make_ui_config(enabled=True, auth_token='', probe_enabled=False, merge_enabled=False)
-    )
+    config = config_with_ui(make_ui_config(enabled=True, auth_token='', probe_enabled=False, merge_enabled=False))
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
 

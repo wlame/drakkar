@@ -2922,9 +2922,7 @@ class TestAuthToken:
         the same as consent to burn executor slots on demand.
         """
         _probe_mock_app.handler = _ProbeTestHandler(task_count=1)
-        cfg = make_ui_config(
-            enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123', probe_enabled=False
-        )
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123', probe_enabled=False)
         mock_recorder.config = cfg
         fastapi_app = create_ui_app(cfg, mock_recorder, _probe_mock_app)
         transport = ASGITransport(app=fastapi_app)

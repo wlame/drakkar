@@ -2786,7 +2786,7 @@ async def test_restart_leaves_the_crashed_window_uncommitted(echo_pool):
         await wait_for(lambda: len(collected) > 0)
 
         await asyncio.sleep(0.1)
-        assert committed == [], 'the crashed window\'s offset must keep blocking the watermark'
+        assert committed == [], "the crashed window's offset must keep blocking the watermark"
         assert proc.offset_tracker.pending_count == 1
     finally:
         await proc.stop()
