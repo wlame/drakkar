@@ -43,6 +43,13 @@ lint-fix:
 typecheck:
     uv run ty check drakkar/
 
+# Dependency CVE scan (pip-audit against the resolved lock).
+# Deliberately NOT part of `just ci`: a newly published CVE must fail the
+# security job without blocking every unrelated PR behind an unrelated gate.
+# Mirrors the Go backend's `just vuln`.
+audit:
+    uv run --with=pip-audit pip-audit
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
