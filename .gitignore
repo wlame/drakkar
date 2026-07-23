@@ -54,7 +54,6 @@ docs/plans/
 # Environment and secrets
 .env
 .env.*
-.vb.env
 *.pem
 credentials.json
 
@@ -68,4 +67,4 @@ integration/shared/*
 !integration/shared/README.md
 
 # vibrator workspace pin — may contain plaintext prereq tokens
-.vb
+.vb*
