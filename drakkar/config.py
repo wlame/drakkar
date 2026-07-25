@@ -117,7 +117,7 @@ class PostgresSinkConfig(BaseModel):
 class MongoSinkConfig(BaseModel):
     """Configuration for a MongoDB output sink.
 
-    Each named instance connects to a database via motor AsyncIOMotorClient.
+    Each named instance connects to a database via PyMongo's AsyncMongoClient.
     """
 
     uri: str

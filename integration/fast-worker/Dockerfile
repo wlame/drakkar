@@ -8,7 +8,7 @@ RUN uv pip install --system --no-cache-dir \
     confluent-kafka pydantic pydantic-settings asyncpg \
     prometheus-client structlog pyyaml \
     aiosqlite fastapi 'uvicorn[standard]' jinja2 \
-    motor httpx redis
+    pymongo httpx redis
 
 COPY drakkar/ /app/drakkar/
 COPY integration/fast-worker/main.py /app/main.py

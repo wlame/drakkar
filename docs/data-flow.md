@@ -679,7 +679,7 @@ When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
 - `sink_manager.close_all()`: calls `close()` on each sink. Exceptions are caught and logged as warnings (never raised during shutdown).
   - KafkaSink: closes the Kafka producer, sets to None.
   - PostgresSink: closes the asyncpg pool, sets to None.
-  - MongoSink: closes the motor client, sets to None.
+  - MongoSink: closes the PyMongo async client, sets to None.
   - HttpSink: calls `client.aclose()`, sets to None.
   - RedisSink: calls `client.aclose()`, sets to None.
   - FileSink: no-op (no persistent connection).

@@ -553,7 +553,7 @@ def mongo_sink_config():
 
 
 def _make_mongo_sink(mongo_sink_config):
-    """Helper: create a MongoSink with mocked motor client."""
+    """Helper: create a MongoSink with a mocked PyMongo async client."""
     from unittest.mock import MagicMock
 
     from drakkar.sinks.mongo import MongoSink
@@ -563,6 +563,11 @@ def _make_mongo_sink(mongo_sink_config):
     mock_db.__getitem__ = MagicMock(return_value=mock_collection)
     mock_client = MagicMock()
     mock_client.__getitem__ = MagicMock(return_value=mock_db)
+    # close() is a coroutine on PyMongo's AsyncMongoClient (it was sync on
+    # motor). An AsyncMock records awaits separately from calls, so a missing
+    # `await` in MongoSink.close() fails assert_awaited_once() instead of
+    # silently leaking the client.
+    mock_client.close = AsyncMock()
 
     sink = MongoSink('analytics', mongo_sink_config)
     sink._client = mock_client
@@ -573,7 +578,7 @@ def _make_mongo_sink(mongo_sink_config):
 async def test_mongo_sink_connect(mongo_sink_config):
     from drakkar.sinks.mongo import MongoSink
 
-    with patch('motor.motor_asyncio.AsyncIOMotorClient') as mock_cls:
+    with patch('pymongo.AsyncMongoClient') as mock_cls:
         mock_client = MagicMock()
         mock_db = MagicMock()
         mock_client.__getitem__ = MagicMock(return_value=mock_db)
@@ -665,7 +670,10 @@ async def test_mongo_sink_close(mongo_sink_config):
     sink, _, mock_client = _make_mongo_sink(mongo_sink_config)
     await sink.close()
 
-    mock_client.close.assert_called_once()
+    # assert_awaited_once, not assert_called_once: a call is recorded even
+    # when the coroutine is never awaited, which is exactly the bug this
+    # guards against.
+    mock_client.close.assert_awaited_once()
     assert sink._client is None
     assert sink._db is None
 

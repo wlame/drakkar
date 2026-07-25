@@ -1,6 +1,6 @@
 """MongoDB sink — inserts documents into collections.
 
-Wraps motor's AsyncIOMotorClient. Each MongoPayload's data field is
+Wraps PyMongo's AsyncMongoClient. Each MongoPayload's data field is
 serialized via model_dump() to get a dict suitable for MongoDB insertion.
 """
 
@@ -52,7 +52,7 @@ class MongoSink(BaseSink[MongoPayload]):
         - collection = payload.collection
         - document = payload.data.model_dump()
 
-    Uses motor's AsyncIOMotorClient for native asyncio support.
+    Uses PyMongo's AsyncMongoClient for native asyncio support.
     """
 
     sink_type = 'mongo'
@@ -73,10 +73,10 @@ class MongoSink(BaseSink[MongoPayload]):
         self._db = None
 
     async def connect(self) -> None:
-        """Create the motor client and get database reference."""
-        from motor.motor_asyncio import AsyncIOMotorClient
+        """Create the PyMongo async client and get database reference."""
+        from pymongo import AsyncMongoClient
 
-        self._client = AsyncIOMotorClient(self._config.uri)
+        self._client = AsyncMongoClient(self._config.uri)
         self._db = self._client[self._config.database]
         await logger.ainfo(
             'mongo_sink_connected',
@@ -159,10 +159,16 @@ class MongoSink(BaseSink[MongoPayload]):
         await self._db[doc.collection].insert_one(doc.document)
 
     async def close(self) -> None:
-        """Close the motor client."""
+        """Close the PyMongo async client.
+
+        ``AsyncMongoClient.close`` is a coroutine — unlike motor's sync
+        ``close()``. Calling it without ``await`` creates an un-awaited
+        coroutine that never closes the client, leaking connections on
+        shutdown with no error.
+        """
         if self._client is not None:
             try:
-                self._client.close()
+                await self._client.close()
             except Exception as e:
                 await logger.awarning(
                     'mongo_sink_close_error',

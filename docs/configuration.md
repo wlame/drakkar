@@ -219,7 +219,7 @@ Inserts rows into a PostgreSQL database via an asyncpg connection pool.
 
 ### MongoDB Sink (`sinks.mongo.<name>`)
 
-Inserts documents into a MongoDB database via motor AsyncIOMotorClient.
+Inserts documents into a MongoDB database via PyMongo's AsyncMongoClient.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

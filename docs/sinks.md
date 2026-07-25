@@ -644,7 +644,7 @@ sinks:
 **KafkaSink** inherits `kafka.brokers` when its own `brokers` field is empty, so you
 only need to specify brokers once for sinks on the same cluster.
 
-**MongoSink** uses motor's `AsyncIOMotorClient` for native asyncio support.
+**MongoSink** uses PyMongo's `AsyncMongoClient` for native asyncio support.
 
 **FileSink** requires `base_path` (non-empty) and validates it exists at connect time. All payload paths are contained within `base_path` — traversal attempts raise `ValueError`.
 Individual payload paths must have existing parent directories.
