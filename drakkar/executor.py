@@ -33,6 +33,13 @@ _IS_POSIX = sys.platform != 'win32'
 # OS pipe buffer, so a full buffer drains in one read.
 _READ_CHUNK_BYTES = 65536
 
+# Cap on reaping a process after SIGKILL. A process that responds to SIGKILL
+# at all dies in milliseconds; anything still alive after this is wedged in
+# the kernel (uninterruptible sleep on a hung mount or failing disk) and
+# waiting longer gains nothing. Bounded because this sits on the shutdown
+# path, where an unbounded wait hangs the whole worker.
+_KILL_REAP_TIMEOUT_SECONDS = 5.0
+
 
 def _trim_incomplete_utf8(data: bytes) -> bytes:
     """Strip a trailing incomplete-but-valid UTF-8 sequence (at most 3 bytes).
@@ -764,9 +771,20 @@ class ExecutorPool:
             # Windows path: single-process kill, no process group concept.
             proc.kill()
         # proc.wait() is safe to call even if the child is already gone — it
-        # just returns the cached returncode. Always await so we don't leave
-        # a zombie or a dangling Transport.
-        await proc.wait()
+        # just returns the cached returncode. Bounded: a process in
+        # uninterruptible sleep survives SIGKILL and would otherwise hang
+        # shutdown forever.
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_KILL_REAP_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning(
+                'executor_kill_reap_timeout',
+                category='executor',
+                pid=proc.pid,
+                timeout_seconds=_KILL_REAP_TIMEOUT_SECONDS,
+                hint='process survived SIGKILL — likely blocked in uninterruptible I/O; '
+                'it is left unreaped so shutdown can proceed',
+            )
 
 
 class ExecutorTaskError(Exception):

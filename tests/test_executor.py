@@ -994,6 +994,33 @@ async def test_killpg_process_lookup_error_swallowed(monkeypatch):
     assert len(calls) == 1, f'expected exactly one killpg call, got {len(calls)}'
 
 
+async def test_kill_process_tree_bounded_when_process_ignores_sigkill(monkeypatch):
+    """A process wedged in uninterruptible sleep must not hang the shutdown path."""
+    from unittest.mock import MagicMock
+
+    from drakkar.executor import ExecutorPool
+
+    proc = MagicMock()
+    proc.pid = 4242
+
+    async def never_returns():
+        await asyncio.sleep(3600)
+
+    proc.wait = never_returns
+    monkeypatch.setattr('os.getpgid', lambda pid: pid)
+    monkeypatch.setattr('os.killpg', lambda pgid, sig: None)
+    # Shorten the reap-timeout constant so this test doesn't burn the real
+    # production 5s wait on every run; the shipped value stays 5.0 in
+    # drakkar/executor.py (_KILL_REAP_TIMEOUT_SECONDS) and is not touched here.
+    monkeypatch.setattr('drakkar.executor._KILL_REAP_TIMEOUT_SECONDS', 0.05)
+
+    # Must return rather than hang. Outer bound is 40x the monkeypatched
+    # timeout above — generous enough that a slow runner won't make this
+    # flaky, while staying far below the real 5s production timeout so the
+    # test itself stays fast.
+    await asyncio.wait_for(ExecutorPool._kill_process_tree(proc), timeout=2.0)
+
+
 # --- PriorityGate primitive --------------------------------------------------
 #
 # The gate is a custom semaphore-shaped allocator that selects the next
