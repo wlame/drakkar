@@ -354,16 +354,25 @@ stripped before the subprocess starts. The default patterns are:
 ```
 DK_*        # framework internals (KAFKA__BROKERS, SINKS__*__DSN, ...)
 *PASSWORD*
+*PASSWD*
 *SECRET*
 *TOKEN*
 *_KEY
 *_DSN
 *CREDENTIAL*
+*SALT*
 ```
 
 This keeps operator-configured secrets — most commonly the `DK_*`
 env overrides like `DK_SINKS__POSTGRES__MAIN__DSN` — from reaching
 the executor binary where they could be read, logged, or exfiltrated.
+
+This list is deliberately more conservative than the recorder's
+redaction patterns (see [Per-task env is visible in the
+UI](#per-task-env)): a pattern here **withholds** the variable from
+your binary, so `*_KEY` stays suffix-anchored and names with common
+non-secret uses (`AUTH_SERVICE_URL`, `CERT_PATH`, `PRIVATE_SUBNET`) are
+deliberately excluded.
 
 Two knobs control the behavior:
 
@@ -373,11 +382,13 @@ executor:
   env_inherit_deny:                # override the default patterns
     - DK_*
     - '*PASSWORD*'
+    - '*PASSWD*'
     - '*SECRET*'
     - '*TOKEN*'
     - '*_KEY'
     - '*_DSN'
     - '*CREDENTIAL*'
+    - '*SALT*'
 ```
 
 Set `env_inherit_deny: []` to trust the full parent environment (e.g.,
@@ -447,10 +458,13 @@ environment variables and different messages need different settings.
     Values in `task.env` are surfaced on the Message Trace and Task
     Results tabs of the operator UI — the full env dict is stored in the
     recorder's `task_started` event metadata. Before storage, values
-    whose names match secret patterns (`*PASSWORD*`, `*SECRET*`,
-    `*TOKEN*`, `*_KEY`, `*API_KEY*`, `*CREDENTIAL*`, `*_DSN`) are
-    replaced with `***`; other values have URL-embedded credentials
-    stripped. The subprocess still receives the real values — only the
+    whose names match secret patterns (`*PASSWORD*`, `*PASSWD*`,
+    `*SECRET*`, `*TOKEN*`, `*KEY*`, `*API_KEY*`, `*CREDENTIAL*`, `*_DSN`,
+    `*AUTH*`, `*PRIVATE*`, `*CERT*`, `*SALT*`) are replaced with `***`;
+    other values have URL-embedded credentials stripped. This list is
+    intentionally broader than `executor.env_inherit_deny` (above) — a
+    redaction miss here only leaks into a debug DB, not into a running
+    subprocess. The subprocess still receives the real values — only the
     recorded copy is redacted. For secrets whose names don't match the
     patterns, use `ExecutorConfig.env` (framework-level, never written
     to the recorder) or pass them via files on disk. See

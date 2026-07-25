@@ -118,14 +118,25 @@ def encode_json_str(obj: Any) -> str:
 # recorder SQLite file. Applied case-insensitively. The recorder DB can be
 # downloaded via the debug UI, so writing raw secrets would effectively
 # publish them — this filter is the last line of defence.
+#
+# Deliberately BROADER than ExecutorConfig.env_inherit_deny: over-matching
+# here costs an operator one ``***`` and nothing else, whereas over-matching
+# in the inheritance list withholds a variable the user's binary may need.
+# ``*KEY*`` therefore also matches innocent names like MONKEY_PATCH_ENABLED —
+# accepted by design.
 _SECRET_ENV_PATTERNS = (
     '*PASSWORD*',
+    '*PASSWD*',
     '*SECRET*',
     '*TOKEN*',
-    '*_KEY',
+    '*KEY*',
     '*API_KEY*',
     '*CREDENTIAL*',
     '*_DSN',
+    '*AUTH*',
+    '*PRIVATE*',
+    '*CERT*',
+    '*SALT*',
 )
 
 

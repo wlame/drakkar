@@ -258,6 +258,17 @@ async def test_record_task_started_env_redaction_coverage(recorder, name: str, e
         assert stored == 'test-value-123', f'{name!r} expected to pass through; got {stored!r}'
 
 
+@pytest.mark.parametrize(
+    'name',
+    ['DB_PASSWD', 'SERVICE_AUTH', 'PRIVATE_KEY_PEM', 'TLS_CERT', 'HASH_SALT', 'MONKEY_PATCH'],
+)
+def test_recorder_redacts_broadened_secret_names(name):
+    """Redaction over-matches on purpose: a needless *** costs an operator nothing."""
+    from drakkar.recorder.helpers import sanitize_env_value
+
+    assert sanitize_env_value(name, 'sensitive-value') == '***'
+
+
 async def test_record_task_started_env_sanitize_does_not_mutate_task(recorder):
     """The real task.env must stay intact on the task object — the subprocess
     launch still needs the real secret values; only the recorded copy is redacted.

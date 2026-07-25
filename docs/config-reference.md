@@ -97,11 +97,13 @@ executor:
   env_inherit_deny:                # fnmatch patterns NOT inherited (case-insensitive). env: DK_EXECUTOR__ENV_INHERIT_DENY (JSON list)
     - 'DK_*'                       # framework internals
     - '*PASSWORD*'
+    - '*PASSWD*'
     - '*SECRET*'
     - '*TOKEN*'
     - '*_KEY'
     - '*_DSN'
     - '*CREDENTIAL*'
+    - '*SALT*'
 ```
 
 ---

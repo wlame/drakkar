@@ -1,5 +1,6 @@
 """Tests for Drakkar configuration loading."""
 
+import fnmatch
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,23 @@ def test_executor_config_output_caps_env_override(monkeypatch: pytest.MonkeyPatc
     cfg = DrakkarConfig()
     assert cfg.executor.max_stdout_bytes == 1048576
     assert cfg.executor.max_stderr_bytes == 65536
+
+
+def _denied(name: str) -> bool:
+    """Mirror ExecutorPool._is_env_key_denied against the configured defaults."""
+    patterns = ExecutorConfig().env_inherit_deny
+    return any(fnmatch.fnmatchcase(name.upper(), p.upper()) for p in patterns)
+
+
+@pytest.mark.parametrize('name', ['AUTH_SERVICE_URL', 'CERT_PATH', 'PRIVATE_SUBNET', 'MONKEY_PATCH'])
+def test_env_inherit_deny_does_not_withhold_common_non_secrets(name):
+    """Withholding a variable breaks the user's binary — this list stays conservative."""
+    assert not _denied(name)
+
+
+@pytest.mark.parametrize('name', ['DB_PASSWD', 'HASH_SALT'])
+def test_env_inherit_deny_withholds_unambiguous_secrets(name):
+    assert _denied(name)
 
 
 # --- Sink config models ---

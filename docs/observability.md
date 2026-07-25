@@ -600,10 +600,10 @@ This table is what enables the worker autodiscovery feature -- other workers sca
       URIs. `SASL_SSL://alice:s3cret@host:9094` becomes
       `SASL_SSL://***:***@host:9094`. Host and port remain visible.
     - **`worker_config.env_vars_json`** — values for env var names matching
-      secret patterns (`*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*_KEY`,
-      `*API_KEY*`, `*CREDENTIAL*`, `*_DSN`) are replaced with `***`. For
-      other names, any URL-shaped value has its embedded `user:pass@`
-      credentials stripped.
+      secret patterns (`*PASSWORD*`, `*PASSWD*`, `*SECRET*`, `*TOKEN*`,
+      `*KEY*`, `*API_KEY*`, `*CREDENTIAL*`, `*_DSN`, `*AUTH*`, `*PRIVATE*`,
+      `*CERT*`, `*SALT*`) are replaced with `***`. For other names, any
+      URL-shaped value has its embedded `user:pass@` credentials stripped.
     - **per-task `env` metadata** — `task.env` values written by your
       handler in `arrange()` are sanitized with the same patterns before
       the `task_started` event is recorded. The original task object is
@@ -617,6 +617,13 @@ This table is what enables the worker autodiscovery feature -- other workers sca
     value visible. The `ExecutorConfig.env` (framework-level) values are
     **never written** to the recorder at all — they only reach the
     subprocess environment.
+
+    These patterns are deliberately broader than
+    `executor.env_inherit_deny` (see [Parent-env
+    filtering](executor.md#parent-env-filtering-secrets-guard)): an
+    over-matched redaction here just costs `***` in a downloadable debug
+    DB, while an over-matched inheritance-deny pattern would withhold a
+    variable a subprocess actually needs.
 
     This protects operators who add secret-named vars to `expose_env_vars`
     without thinking, DSNs passed through otherwise-innocuous var names

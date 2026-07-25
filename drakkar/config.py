@@ -363,19 +363,22 @@ class ExecutorConfig(BaseModel):
         default_factory=lambda: [
             'DK_*',  # framework internals (SINKS__, KAFKA__, DEBUG__, ...)
             '*PASSWORD*',
+            '*PASSWD*',
             '*SECRET*',
             '*TOKEN*',
             '*_KEY',
             '*_DSN',
             '*CREDENTIAL*',
+            '*SALT*',
         ],
         description=(
             'Case-insensitive fnmatch patterns against parent env var names. '
             'Matching vars are NOT inherited by subprocesses, even when '
-            'env_inherit_parent is True. Default excludes DK_* internals '
-            'and common secret names so handler-configured secrets do not '
-            'leak to executor binaries. Set to [] to fully trust the parent '
-            'environment.'
+            'env_inherit_parent is True. Deliberately narrower than the '
+            'recorder redaction list: a pattern here WITHHOLDS the variable '
+            'from your binary, so names with common non-secret uses '
+            '(AUTH_SERVICE_URL, CERT_PATH, PRIVATE_SUBNET) are excluded. '
+            'Set to [] to fully trust the parent environment.'
         ),
     )
     max_executors: int = Field(default=4, ge=1)
