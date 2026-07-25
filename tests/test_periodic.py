@@ -13,7 +13,7 @@ from drakkar.periodic import (
     periodic,
     run_periodic_task,
 )
-from tests.conftest import make_ui_config
+from tests.conftest import make_ui_config, wait_for
 
 # --- Decorator tests ---
 
@@ -239,10 +239,7 @@ async def test_run_periodic_task_on_error_stop():
     )
 
     # poll until the task self-terminates (avoids flaky wall-clock sleep)
-    deadline = asyncio.get_event_loop().time() + 2.0
-    while not t.done() and asyncio.get_event_loop().time() < deadline:
-        await asyncio.sleep(0.02)
-    assert t.done()
+    await wait_for(lambda: t.done(), timeout=2.0)
     assert call_count == 1
 
 

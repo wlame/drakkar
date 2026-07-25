@@ -31,6 +31,7 @@ from typing import Any
 import pytest
 
 from drakkar.concurrency import dispatch_to_loop
+from tests.conftest import wait_for
 
 
 @pytest.fixture
@@ -184,14 +185,10 @@ async def test_cross_thread_cancellation_propagates(secondary_loop):
 
     # Wait until the dispatched coroutine has actually started and is
     # parked at the ``asyncio.sleep`` await on the secondary loop.
-    # Using a short asyncio.sleep loop on the test side rather than a
-    # blocking ``started.wait`` because we want the awaiter task to
-    # progress past the ``run_coroutine_threadsafe`` call first.
-    for _ in range(50):
-        if started.is_set():
-            break
-        await asyncio.sleep(0.02)
-    assert started.is_set(), 'dispatched coroutine never started on secondary loop'
+    # Polling ``started`` on the test side rather than a blocking
+    # ``started.wait`` because we want the awaiter task to progress past
+    # the ``run_coroutine_threadsafe`` call first.
+    await wait_for(lambda: started.is_set())
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

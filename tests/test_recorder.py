@@ -36,7 +36,7 @@ from drakkar.recorder.core import (
     CROSS_TRACE_MAX_FILES,
     _ScanBudget,
 )
-from tests.conftest import make_ui_config
+from tests.conftest import make_ui_config, wait_for
 
 
 class _RecData(BaseModel):
@@ -2458,8 +2458,9 @@ async def test_ws_threshold_broadcasts_slow_task(tmp_path):
     task = make_task('t-slow')
     rec.record_task_started(task, partition=0)
 
-    # wait for the deferred timer to fire (10ms threshold)
-    await asyncio.sleep(0.05)
+    # wait for the deferred timer to fire (10ms threshold) and broadcast
+    # the held-back task_started event
+    await wait_for(lambda: q.qsize() >= 1)
 
     rec.record_task_completed(make_slow_result('t-slow', task=task), partition=0)
 

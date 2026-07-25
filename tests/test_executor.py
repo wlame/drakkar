@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import os
 import sys
+import time
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +12,7 @@ from structlog.testing import capture_logs
 
 from drakkar.executor import ExecutorPool, ExecutorTaskError, _trim_incomplete_utf8
 from drakkar.models import ExecutorTask, PrecomputedResult
+from tests.conftest import wait_for
 
 
 def make_task(task_id: str = 't1', args: list[str] | None = None) -> ExecutorTask:
@@ -32,11 +34,22 @@ def echo_pool() -> ExecutorPool:
 
 async def test_execute_echo(echo_pool: ExecutorPool):
     task = make_task(args=['hello', 'world'])
+    started_at = time.monotonic()
     result = await echo_pool.execute(task)
+    observed_elapsed = time.monotonic() - started_at
     assert result.exit_code == 0
     assert result.stdout.strip() == 'hello world'
     assert result.stderr == ''
-    assert result.duration_seconds > 0
+    # duration_seconds is rounded to milliseconds (see executor.py), so a
+    # subprocess that finishes in well under 0.5ms legitimately rounds to
+    # 0.0 — asserting ``> 0`` flakes under CI load. Instead confirm the
+    # value is a real, bounded measurement: non-negative, and no larger
+    # than the wall-clock time this test itself observed around the call
+    # (with slack for scheduling jitter at the measurement boundary).
+    # That still catches a regression that stops measuring real time
+    # (e.g. a hardcoded or wildly-wrong duration), which is what this
+    # assertion is actually meant to guard against.
+    assert 0 <= result.duration_seconds <= observed_elapsed + 0.05
     assert result.task.task_id == 't1'
 
 
@@ -348,14 +361,12 @@ async def test_waiting_count_tracks_queued_tasks():
     # fill the single slot with a slow task
     slow = make_task('slow', args=['-c', 'import time; time.sleep(0.5)'])
     slow_future = asyncio.create_task(pool.execute(slow))
-    await asyncio.sleep(0.05)  # let it acquire the semaphore
-    assert pool.active_count == 1
+    await wait_for(lambda: pool.active_count == 1)  # let it acquire the semaphore
 
     # queue a second task — it should be waiting
     fast = make_task('fast', args=['-c', 'print("ok")'])
     fast_future = asyncio.create_task(pool.execute(fast))
-    await asyncio.sleep(0.05)
-    assert pool.waiting_count == 1
+    await wait_for(lambda: pool.waiting_count == 1)
 
     # wait for both to complete
     await slow_future
@@ -505,13 +516,11 @@ async def test_cancel_while_waiting_does_not_leak_waiting_count():
     )
     slow = make_task('slow-hold', args=['-c', 'import time; time.sleep(1.0)'])
     slow_future = asyncio.create_task(pool.execute(slow))
-    await asyncio.sleep(0.05)
-    assert pool.active_count == 1
+    await wait_for(lambda: pool.active_count == 1)
 
     waiter = make_task('waiter', args=['-c', 'pass'])
     waiter_future = asyncio.create_task(pool.execute(waiter))
-    await asyncio.sleep(0.05)
-    assert pool.waiting_count == 1
+    await wait_for(lambda: pool.waiting_count == 1)
 
     waiter_future.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -785,16 +794,13 @@ async def test_precomputed_does_not_consume_pool_slot():
 
     # Hold the ONE real slot with a slow real task so any precomputed call
     # that mistakenly waits on the semaphore would deadlock the test.
-    import time
-
     hold_pool = ExecutorPool(
         binary_path=sys.executable,
         max_executors=1,
         task_timeout_seconds=10,
     )
     blocker = asyncio.create_task(hold_pool.execute(make_task('blocker', args=['-c', 'import time; time.sleep(0.8)'])))
-    await asyncio.sleep(0.05)
-    assert hold_pool.active_count == 1
+    await wait_for(lambda: hold_pool.active_count == 1)
 
     # Run 5 precomputed tasks on a DIFFERENT pool whose semaphore is size 1.
     # If they went through the slot path they'd serialise; here they must
@@ -935,18 +941,16 @@ async def test_timeout_kills_grandchildren_via_process_group(tmp_path):
 
     # killpg sends SIGKILL to the whole group; the kernel reaps the grandchild
     # asynchronously, so give it a generous grace window before asserting.
-    # 5s keeps the test robust on slow/overloaded CI runners.
-    deadline = asyncio.get_running_loop().time() + 5.0
-    alive = True
-    while asyncio.get_running_loop().time() < deadline:
+    # 5s (wait_for's default timeout) keeps the test robust on slow/overloaded
+    # CI runners.
+    def grandchild_gone() -> bool:
         try:
             _os.kill(grandchild_pid, 0)
         except ProcessLookupError:
-            alive = False
-            break
-        await asyncio.sleep(0.05)
+            return True
+        return False
 
-    assert not alive, f'grandchild pid={grandchild_pid} was not reaped by killpg'
+    await wait_for(grandchild_gone)
 
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='POSIX-only: os.killpg')
@@ -1271,7 +1275,7 @@ async def test_executor_pool_orders_waiters_by_priority():
 
     holder_task = asyncio.create_task(holder())
     await holder_started.wait()
-    await asyncio.sleep(0.01)  # let the holder claim the slot
+    await wait_for(lambda: pool.active_count == 1)  # let the holder claim the slot
 
     waiters = [
         asyncio.create_task(run('p9', 9)),
@@ -1318,7 +1322,7 @@ async def test_executor_pooldefault_priority_is_min_source_offset():
 
     holder_task = asyncio.create_task(holder())
     await holder_started.wait()
-    await asyncio.sleep(0.01)
+    await wait_for(lambda: pool.active_count == 1)
 
     waiters = [
         asyncio.create_task(run(300)),

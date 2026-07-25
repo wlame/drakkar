@@ -69,6 +69,7 @@ from drakkar.uiserver.runner import (
     _make_value_preview,
     _probe_stage,
 )
+from tests.conftest import wait_for
 
 # --- shared fixtures --------------------------------------------------------
 
@@ -3273,12 +3274,9 @@ async def test_concurrent_probes_with_different_use_cache_dont_chain_proxies():
     task_a = asyncio.create_task(runner._run_with_state(state_a))
 
     # Wait a beat for A to actually enter on_task_complete (holding the lock).
-    # A small sleep is fine — on_task_complete is reached after arrange
-    # + executor.execute on a precomputed task, which is near-instant.
-    for _ in range(50):
-        if handler.read_value != '__unset__':
-            break
-        await asyncio.sleep(0.01)
+    # on_task_complete is reached after arrange + executor.execute on a
+    # precomputed task, which is near-instant.
+    await wait_for(lambda: handler.read_value != '__unset__')
     assert handler.read_value is None, 'probe A should have observed miss (use_cache=False)'
 
     # Now A is inside on_task_complete, holding the lock. Build probe B:

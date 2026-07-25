@@ -39,7 +39,7 @@ from drakkar.cache import (
     CacheScope,
 )
 from drakkar.config import CacheConfig, CachePeerSyncConfig, UIConfig
-from tests.conftest import make_ui_config
+from tests.conftest import make_ui_config, wait_for
 
 # --- helpers (mirrors test_cache_sync_pull helpers) -------------------------
 
@@ -751,20 +751,21 @@ async def test_peer_sync_deadline_does_not_leave_stale_memory(tmp_path):
         # the caller's ``wait_for`` raises ``TimeoutError``. The post-
         # commit invalidation runs INSIDE that shielded region, so it
         # executes eventually — but not before ``wait_for`` returns.
-        # Wait for the shielded commit to finish its patched 0.5s sleep
+        # Poll until the shielded commit finishes its patched 0.5s sleep
         # so we can assert on the final memory state (what subsequent
         # ``Cache.get()`` calls would see once the shield completes).
         #
         # Pre-fix behavior: the post-shield invalidation would be SKIPPED
         # entirely when ``CancelledError`` propagated. Even after the
         # shielded task finished, 'shared' would remain in memory forever
-        # — until TTL or a local overwrite. No amount of sleeping would
-        # invalidate it.
+        # — until TTL or a local overwrite. No amount of waiting would
+        # invalidate it, so this poll is bounded by wait_for's own
+        # timeout rather than looping forever.
         #
-        # Post-fix behavior: sleeping for longer than the slow-commit sleep
-        # gives the shielded coro time to complete; its internal
-        # ``_invalidate_memory_keys`` call runs and 'shared' is evicted.
-        await asyncio.sleep(0.6)
+        # Post-fix behavior: once the shielded coro completes, its
+        # internal ``_invalidate_memory_keys`` call runs and 'shared' is
+        # evicted from memory.
+        await wait_for(lambda: 'shared' not in cache._memory)  # type: ignore[reportPrivateUsage]
 
         # Restore the original commit BEFORE any further engine I/O —
         # otherwise ``engine.stop()`` in the finally block would wait

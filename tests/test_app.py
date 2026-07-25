@@ -261,8 +261,7 @@ async def test_app_on_revoke_removes_processors(test_config):
     assert len(app.processors) == 3
 
     await app._lifecycle._on_revoke([1])
-    await asyncio.sleep(0.3)
-    assert 1 not in app.processors
+    await wait_for(lambda: 1 not in app.processors)
     assert len(app.processors) == 2
 
     for proc in list(app.processors.values()):
@@ -495,8 +494,7 @@ async def test_stop_processor_handles_arrange_error(test_config):
     await asyncio.sleep(0.3)
 
     await app._lifecycle._on_revoke([0])
-    await asyncio.sleep(0.5)
-    assert 0 not in app.processors
+    await wait_for(lambda: 0 not in app.processors)
 
 
 async def test_safe_call_catches_handler_errors(test_config):
@@ -692,13 +690,9 @@ async def test_newly_assigned_partition_is_paused_when_backpressure_active(test_
     app._lifecycle._on_assign([0])
     app._lifecycle._on_assign([5, 7])
 
-    # Let the background pause task run.
-    await asyncio.sleep(0.05)
-
-    # The second assign should have triggered a pause on the new partitions.
-    assert any(call.args[0] == [5, 7] for call in app._consumer.pause.call_args_list), (
-        f'expected pause([5,7]), got calls: {app._consumer.pause.call_args_list}'
-    )
+    # Let the background pause task run, then confirm the second assign
+    # triggered a pause on the new partitions.
+    await wait_for(lambda: any(call.args[0] == [5, 7] for call in app._consumer.pause.call_args_list))
 
     for proc in list(app.processors.values()):
         await proc.stop()

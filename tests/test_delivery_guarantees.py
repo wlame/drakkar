@@ -457,10 +457,7 @@ async def test_revoke_clears_stall_bookkeeping(app_config):
     app._stalled_partitions.add(4)
 
     await app._lifecycle._on_revoke([4])
-    # let the fire-and-forget revoke hooks run
-    await asyncio.sleep(0.05)
-
-    assert 4 not in app._stalled_partitions
+    await wait_for(lambda: 4 not in app._stalled_partitions)
 
 
 async def test_revoke_blocks_until_the_drain_commits(app_config, echo_pool):

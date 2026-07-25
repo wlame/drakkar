@@ -6,7 +6,6 @@ toggles, db_dir empty, max_retries=0, window_size=1, single vs multiple
 sinks, and various edge cases.
 """
 
-import asyncio
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
@@ -189,9 +188,7 @@ class TestDebugModes:
 
         app._lifecycle._on_assign([0, 1])
         await app._lifecycle._on_revoke([0])
-        await asyncio.sleep(0.3)
-
-        assert 0 not in app.processors
+        await wait_for(lambda: 0 not in app.processors)
         for proc in app.processors.values():
             await proc.stop()
 
