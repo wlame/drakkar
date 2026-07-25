@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -47,6 +48,26 @@ class SimpleHandler(BaseDrakkarHandler):
             )
             for msg in messages
         ]
+
+
+class WebCapableHandler(BaseDrakkarHandler[_D, _D, _D, _D]):
+    """A handler with all four Generic slots filled in.
+
+    ``DrakkarApp.__init__`` fails fast on ``webapp.enabled=True`` unless the
+    handler declares concrete HTTP request/response models and overrides
+    both HTTP hooks (see ``validate_webapp_handler``). ``SimpleHandler``
+    above deliberately leaves those slots at their defaults, so tests that
+    need a webapp-enabled app to actually construct use this handler instead.
+    """
+
+    async def arrange(self, messages, pending):
+        return []
+
+    async def arrange_http_request(self, req, pending):
+        return []
+
+    async def on_http_request_complete(self, group):
+        return _D()
 
 
 @pytest.fixture
@@ -1769,3 +1790,327 @@ async def test_lifecycle_claim_watchdog_slot_no_op_when_disabled(test_config):
     # Must not raise, must leave the field as None.
     await lifecycle._claim_watchdog_slot()
     assert lifecycle._watchdog is None
+
+
+# --- Boot sequence ordering and failure paths ---
+#
+# The startup sequence was extracted into named boot-step methods on
+# ``AppLifecycle`` so each step is independently testable. These tests
+# pin down designed behaviours that were previously impossible to check
+# in isolation: the relative ordering between two steps, and each step's
+# documented failure-tolerance contract.
+
+
+async def test_boot_connects_sinks_before_subscribing_the_consumer(test_config, monkeypatch):
+    """Subscribing before sinks are up would accept messages nothing can deliver."""
+    cfg = test_config.model_copy(deep=True)
+    # Skip the wall-clock alignment sleep between _start_consumer and subscribe.
+    cfg.kafka.startup_align_enabled = False
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+    calls: list[str] = []
+
+    def recorder(name):
+        async def _step():
+            calls.append(name)
+
+        return _step
+
+    for step in (
+        '_setup_watchdog',
+        '_build_executor_pool',
+        '_start_observability',
+        '_start_ui_and_recorder',
+        '_start_cache',
+        '_start_webapp',
+    ):
+        monkeypatch.setattr(app._lifecycle, step, recorder('other'))
+    monkeypatch.setattr(app._lifecycle, '_connect_sinks', recorder('sinks'))
+
+    # _async_run calls app._consumer.subscribe() AFTER _start_consumer returns,
+    # so the stub must leave a usable consumer behind or that line raises
+    # AttributeError on None.
+    async def fake_start_consumer():
+        calls.append('consumer')
+        app._consumer = AsyncMock()
+
+    monkeypatch.setattr(app._lifecycle, '_start_consumer', fake_start_consumer)
+    monkeypatch.setattr(app._lifecycle, '_claim_watchdog_slot', recorder('watchdog_claim'))
+    monkeypatch.setattr(app._lifecycle, '_poll_loop', recorder('poll'))
+    monkeypatch.setattr(app._lifecycle, '_shutdown', recorder('shutdown'))
+
+    await app._lifecycle._async_run()
+
+    assert calls.index('sinks') < calls.index('consumer')
+
+
+async def test_webapp_construction_failure_does_not_abort_startup(test_config, monkeypatch):
+    """The webapp is optional infrastructure; sinks and the consumer are the critical path."""
+    cfg = test_config.model_copy(deep=True)
+    cfg.webapp.enabled = True
+    # WebCapableHandler (not SimpleHandler) — DrakkarApp.__init__ validates
+    # the handler declares HTTP request/response models whenever
+    # webapp.enabled=True, before this test can even reach _start_webapp.
+    app = DrakkarApp(handler=WebCapableHandler(), config=cfg)
+
+    def explode(*a, **kw):
+        raise RuntimeError('port already bound')
+
+    monkeypatch.setattr('drakkar.webapp.WebApp', explode)
+
+    with capture_logs() as cap:
+        await app._lifecycle._start_webapp()
+
+    assert app._webapp is None
+    assert any(e['event'] == 'webapp_start_failed' for e in cap)
+
+
+async def test_ui_disabled_warns_that_probes_are_unserved(test_config):
+    """The UI server is the ONLY probe surface — disabling it must be loud."""
+    cfg = test_config.model_copy(deep=True)
+    cfg.ui.enabled = False
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+
+    with capture_logs() as cap:
+        await app._lifecycle._start_ui_and_recorder()
+
+    assert app._recorder is None
+    assert any(e['event'] == 'ui_disabled_no_probes' for e in cap)
+
+
+async def test_empty_db_dir_disables_the_watchdog_rather_than_using_cwd(test_config):
+    """Falling back to CWD would break the no-on-disk-state promise on read-only mounts."""
+    cfg = test_config.model_copy(deep=True)
+    cfg.ui.recorder.db_dir = ''
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+
+    with capture_logs() as cap:
+        await app._lifecycle._setup_watchdog()
+
+    assert app._lifecycle._watchdog is None
+    assert any(e['event'] == 'watchdog_disabled_no_db_dir' for e in cap)
+
+
+async def test_watchdog_write_failure_disables_it_and_continues(test_config, monkeypatch):
+    """Observability must never block startup — a read-only mount is not fatal."""
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._lifecycle._watchdog = MagicMock()
+    app._lifecycle._watchdog.write.side_effect = OSError('read-only file system')
+    app._lifecycle._watchdog.path = Path('/nowhere/wd')
+
+    with capture_logs() as cap:
+        await app._lifecycle._claim_watchdog_slot()
+
+    assert app._lifecycle._watchdog is None
+    assert any(e['event'] == 'watchdog_write_failed' for e in cap)
+
+
+# --- Remaining boot-step bodies (beyond the brief's five) ---
+#
+# The five tests above cover the ordering invariant and the failure/disabled
+# branches called out in the brief. They leave the *successful* body of most
+# boot steps unexercised — this section closes the largest of those gaps
+# with the same direct-call technique, each test still pinned to a real
+# designed behaviour rather than a line-touching smoke call.
+
+
+async def test_build_executor_pool_wires_config_and_handler_priority(test_config):
+    """A wiring slip here would silently run the wrong executor count or
+    drop the handler's task-priority override back to plain FIFO."""
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+
+    await app._lifecycle._build_executor_pool()
+
+    pool = app._executor_pool
+    assert pool is not None
+    assert pool.max_executors == test_config.executor.max_executors
+    # The handler's own ``task_priority`` must be the pool's live priority
+    # function — losing this wiring silently reverts every handler to the
+    # framework's default (source-offset) ordering.
+    assert pool._priority_fn == app._handler.task_priority
+
+
+async def test_start_observability_logs_discovered_user_metrics(test_config):
+    """A handler-declared Prometheus metric must be surfaced at startup so
+    an operator can confirm it's wired without waiting for the first sample."""
+    from prometheus_client import Counter
+
+    class MetricHandler(SimpleHandler):
+        widgets_seen = Counter('test_boot_widgets_seen_total', 'Widgets seen by the boot-sequence test')
+
+    app = DrakkarApp(handler=MetricHandler(), config=test_config)
+
+    with capture_logs() as cap:
+        await app._lifecycle._start_observability()
+
+    events = [e for e in cap if e['event'] == 'user_metrics_discovered']
+    assert len(events) == 1
+    assert events[0]['metrics'] == ['test_boot_widgets_seen (counter)']
+
+
+async def test_async_run_swallows_cancelled_error_and_still_shuts_down(test_config, monkeypatch):
+    """A cancelled poll loop must not crash the worker — shutdown still runs
+    so in-flight work drains and offsets get committed."""
+    cfg = test_config.model_copy(deep=True)
+    cfg.kafka.startup_align_enabled = False
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+
+    for step in (
+        '_setup_watchdog',
+        '_build_executor_pool',
+        '_start_observability',
+        '_start_ui_and_recorder',
+        '_start_cache',
+        '_connect_sinks',
+        '_start_webapp',
+        '_claim_watchdog_slot',
+    ):
+        monkeypatch.setattr(app._lifecycle, step, AsyncMock())
+
+    async def fake_start_consumer():
+        app._consumer = AsyncMock()
+
+    monkeypatch.setattr(app._lifecycle, '_start_consumer', fake_start_consumer)
+
+    async def raise_cancelled():
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(app._lifecycle, '_poll_loop', raise_cancelled)
+    shutdown_mock = AsyncMock()
+    monkeypatch.setattr(app._lifecycle, '_shutdown', shutdown_mock)
+
+    # Must not raise: CancelledError from the poll loop is expected during
+    # normal shutdown signalling, not a crash.
+    await app._lifecycle._async_run()
+
+    shutdown_mock.assert_awaited_once()
+
+
+async def test_async_run_logs_wall_clock_alignment_window(test_config, monkeypatch):
+    """The alignment log events must name the exact wall-clock boundary a
+    fleet converges on, and report how long this worker actually waited."""
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    assert app.config.kafka.startup_align_enabled  # precondition: default is on
+
+    for step in (
+        '_setup_watchdog',
+        '_build_executor_pool',
+        '_start_observability',
+        '_start_ui_and_recorder',
+        '_start_cache',
+        '_connect_sinks',
+        '_start_webapp',
+        '_claim_watchdog_slot',
+        '_poll_loop',
+        '_shutdown',
+    ):
+        monkeypatch.setattr(app._lifecycle, step, AsyncMock())
+
+    async def fake_start_consumer():
+        app._consumer = AsyncMock()
+
+    monkeypatch.setattr(app._lifecycle, '_start_consumer', fake_start_consumer)
+    monkeypatch.setattr('drakkar.lifecycle.wait_for_aligned_startup', AsyncMock(return_value=0.25))
+
+    with capture_logs() as cap:
+        await app._lifecycle._async_run()
+
+    waiting = next(e for e in cap if e['event'] == 'startup_align_waiting')
+    done = next(e for e in cap if e['event'] == 'startup_align_done')
+    # The published target must actually sit on an interval boundary —
+    # that's the entire point of the alignment sleep.
+    assert waiting['target_wall_unix'] % app.config.kafka.startup_align_interval_seconds == 0
+    assert done['slept_seconds'] == 0.25
+
+
+async def test_connect_sinks_wires_recorder_and_dlq_after_connecting(test_config, monkeypatch):
+    """Delivery failures can only route to the DLQ once this step has run —
+    attach_runtime is the one-shot wiring that makes that possible."""
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+
+    connect_all_mock = AsyncMock()
+    monkeypatch.setattr(app, '_build_sinks', lambda: None)
+    monkeypatch.setattr(app._sink_manager, 'connect_all', connect_all_mock)
+    monkeypatch.setattr(app, '_build_dlq', lambda: None)
+    fake_dlq = AsyncMock()
+    fake_dlq.topic = 'test-in_dlq'
+    app._dlq_sink = fake_dlq
+
+    with capture_logs() as cap:
+        await app._lifecycle._connect_sinks()
+
+    connect_all_mock.assert_awaited_once()
+    fake_dlq.connect.assert_awaited_once()
+    # The sink manager needs the live DLQ reference to route circuit-open /
+    # delivery-failure errors — this is the wiring step that supplies it.
+    assert app._sink_manager._dlq_sink is fake_dlq
+    sinks_events = [e for e in cap if e['event'] == 'sinks_configured']
+    assert len(sinks_events) == 1
+    assert sinks_events[0]['dlq_topic'] == 'test-in_dlq'
+
+
+async def test_start_consumer_exposes_connected_postgres_pool_to_on_ready(test_config):
+    """on_ready must see the already-connected postgres pool so a handler
+    can run startup queries (migrations, lookup tables) on the same
+    connection the rest of the worker uses, instead of opening its own."""
+
+    class CapturingHandler(SimpleHandler):
+        seen_pg_pool: object = 'unset'
+
+        async def on_ready(self, config, db_pool):
+            self.seen_pg_pool = db_pool
+
+    handler = CapturingHandler()
+    app = DrakkarApp(handler=handler, config=test_config)
+    _setup_app_sinks(app)
+    pg_sink = next(sink for (sink_type, _), sink in app._sink_manager.sinks.items() if sink_type == 'postgres')
+    pg_sink.pool = 'sentinel-pool'
+
+    await app._lifecycle._start_consumer()
+
+    assert app._consumer is not None
+    assert handler.seen_pg_pool == 'sentinel-pool'
+
+
+async def test_start_consumer_schedules_declared_periodic_tasks(test_config):
+    """A handler's ``@periodic`` method must actually be scheduled at
+    startup — silently dropping it would mean the interval task never runs
+    and the handler's periodic work (cleanup, refresh, sync) never fires."""
+    from drakkar.periodic import periodic
+
+    class PeriodicHandler(SimpleHandler):
+        @periodic(seconds=3600)
+        async def sweep(self) -> None:
+            pass
+
+    handler = PeriodicHandler()
+    app = DrakkarApp(handler=handler, config=test_config)
+    _setup_app_sinks(app)
+
+    await app._lifecycle._start_consumer()
+
+    try:
+        assert len(app._periodic_tasks) == 1
+        assert app._periodic_tasks[0].get_name() == 'periodic:sweep'
+    finally:
+        for task in app._periodic_tasks:
+            task.cancel()
+        await asyncio.gather(*app._periodic_tasks, return_exceptions=True)
+
+
+async def test_start_cache_wires_a_persisting_cache_when_enabled(test_config, tmp_path):
+    """The handler's ``self.cache`` must become the real, persisting cache
+    once cache.enabled=true — leaving the default NoOpCache stub in place
+    would make every set/get silently discard instead of persisting."""
+    cfg = test_config.model_copy(deep=True)
+    cfg.cache.enabled = True
+    cfg.cache.db_dir = str(tmp_path)
+    app = DrakkarApp(handler=SimpleHandler(), config=cfg)
+
+    await app._lifecycle._start_cache()
+
+    try:
+        assert app._cache_engine is not None
+        app._handler.cache.set('k', 'v')
+        assert app._handler.cache.peek('k') == 'v'
+    finally:
+        await app._cache_engine.stop()
