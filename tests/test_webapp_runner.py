@@ -1156,6 +1156,55 @@ async def test_runner_sinks_cancellation_between_batches_skips_remaining():
 
 
 @pytest.mark.asyncio
+async def test_runner_records_dropped_request_during_sinks_delivery():
+    """When a recorder is configured, the in-loop during_sinks
+    cancellation gate must also persist a row via
+    record_webapp_request_dropped_after_timeout — the same contract the
+    other two gates uphold (see
+    test_runner_records_dropped_request_when_recorder_configured for the
+    post-execute gate). Reuses the mid-delivery cancellation setup from
+    test_runner_sinks_cancellation_between_batches_skips_remaining, adding
+    a recorder to assert on."""
+    handler = _RecordingHandler()
+    task = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
+
+    async def arrange_impl(req, pending):
+        return [task]
+
+    handler.arrange_http_request_impl = arrange_impl
+
+    async def on_message_complete_impl(group):
+        # Two batches (kafka + postgres) so there's a "next" iteration
+        # for the gate to intercept.
+        return _make_collect_result_kafka_postgres(kafka_count=1, postgres_count=1)
+
+    handler.on_message_complete = on_message_complete_impl  # type: ignore[method-assign]
+
+    pool = _make_pool_returning([_make_canned_result(task)])
+
+    ctx = _make_ctx()
+    ctx.cancelled = asyncio.Event()
+
+    class _FlippingSinkManager(_StubSinkManager):
+        async def deliver_all(self, result, on_delivery_error, partition_id):
+            await super().deliver_all(result, on_delivery_error, partition_id)
+            # Flip cancellation AFTER the kafka batch — the runner's
+            # during_sinks gate will see this before postgres dispatch.
+            ctx.cancelled.set()
+
+    sink_manager = _FlippingSinkManager()
+    app = _make_stub_app_with_sinks(handler, pool=pool, sink_manager=sink_manager)
+    recorder = MagicMock()
+    app._recorder = recorder
+    runner = WebappRunner(app, _make_sinks_enabled_config())
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner.run(ctx)
+
+    recorder.record_webapp_request_dropped_after_timeout.assert_called_once_with(ctx)
+
+
+@pytest.mark.asyncio
 async def test_runner_sinks_enabled_but_on_message_complete_returns_none():
     """sinks_enabled=True + on_message_complete returns None → WebReport.sinks=None."""
     handler = _RecordingHandler()
@@ -1229,12 +1278,21 @@ async def test_runner_sink_validation_failure_records_error_and_skips_that_sink_
 
 
 @pytest.mark.asyncio
-async def test_runner_drops_after_timeout_detected_during_sinks_delivery():
-    """A timeout landing during sinks delivery must still skip
-    on_http_request_complete — this is the SECOND cancellation gate,
-    distinct from the post-execute one: T2 may 504 the caller while the
-    sinks stage is still running, and the user's response hook must not
-    run afterward on a request the caller already gave up on.
+async def test_runner_drops_request_when_timeout_detected_before_response_hook():
+    """A timeout detected after the sinks stage finishes (but before the
+    user's response hook runs) must still skip on_http_request_complete.
+
+    This exercises the ``pre_on_http_request_complete`` gate
+    (``runner.py:383-394``), distinct from the post-execute gate: T2 may
+    504 the caller while ``_deliver_sinks`` is still on the call stack,
+    and the user's response hook must not run afterward on a request the
+    caller already gave up on. This is NOT the in-loop ``during_sinks``
+    gate (``runner.py:653-667``) — ``on_message_complete`` returns
+    ``None`` below, so ``_deliver_sinks`` short-circuits before that
+    per-sink-type loop is ever reached. The ``during_sinks`` gate itself
+    is covered by ``test_runner_sinks_cancellation_between_batches_skips_remaining``
+    above; its recorder sub-branch is covered separately by
+    ``test_runner_records_dropped_request_during_sinks_delivery``.
     """
     handler = _RecordingHandler()
     task = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
@@ -1249,8 +1307,11 @@ async def test_runner_drops_after_timeout_detected_during_sinks_delivery():
 
     # Flip the cancellation flag from inside on_message_complete — this
     # simulates T2's timeout landing after the post-execute gate already
-    # passed (ctx.cancelled was clear then) but while sinks delivery is
-    # still in flight, ahead of the pre-response-hook gate.
+    # passed (ctx.cancelled was clear then) but before the
+    # pre_on_http_request_complete gate runs. on_message_complete
+    # returning None means _deliver_sinks short-circuits immediately
+    # (see its own "no payloads -> no sink writes" branch), so the
+    # in-loop during_sinks gate is never reached here.
     async def on_message_complete_impl(group):
         ctx.cancelled.set()
         return None
