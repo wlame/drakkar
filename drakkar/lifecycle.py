@@ -119,6 +119,83 @@ class AppLifecycle:
 
         log = logger.bind(worker_id=app._worker_id)
 
+        await self._setup_watchdog()
+
+        bind_contextvars(hook='on_startup')
+        app._config = await app._handler.on_startup(app._config)
+        unbind_contextvars('hook')
+
+        app._config_summary = app._config.config_summary(
+            worker_id=app._worker_id,
+            cluster_name=app._cluster_name,
+        )
+        await log.ainfo('drakkar_starting', category='lifecycle', config=app._config_summary)
+
+        # validate at least one sink is configured
+        if app._config.sinks.is_empty:
+            raise SinkNotConfiguredError('No sinks configured. Add at least one sink to the sinks: section in config.')
+
+        await self._build_executor_pool()
+        await self._start_observability()
+        await self._start_ui_and_recorder()
+        await self._start_cache()
+        await self._connect_sinks()
+        await self._start_webapp()
+        await self._start_consumer()
+
+        # Stagger startup: sleep until the next wall-clock alignment
+        # boundary so a fleet of workers in a rolling deploy converges
+        # on a single Kafka consumer-group rebalance instead of N. See
+        # KafkaConfig.startup_align_* for tuning and rationale.
+        if app._config.kafka.startup_align_enabled:
+            min_wait = app._config.kafka.startup_min_wait_seconds
+            interval = app._config.kafka.startup_align_interval_seconds
+            target_wall = math.ceil((time.time() + min_wait) / interval) * interval
+            await log.ainfo(
+                'startup_align_waiting',
+                category='lifecycle',
+                min_wait_seconds=min_wait,
+                align_interval_seconds=interval,
+                target_wall_unix=target_wall,
+                target_wall_iso=format_rfc3339_micro(datetime.fromtimestamp(target_wall, tz=UTC)),
+            )
+            slept = await wait_for_aligned_startup(min_wait, interval)
+            await log.ainfo('startup_align_done', category='lifecycle', slept_seconds=round(slept, 3))
+
+        assert app._consumer is not None
+        await app._consumer.subscribe()
+
+        # Claim the watchdog slot for this run NOW — only once we're
+        # committed to running. See ``_claim_watchdog_slot`` for the
+        # OSError-tolerance contract; deferring the call to this point
+        # ensures a startup-stage exception (above) leaves any previous
+        # watchdog state untouched and never falsely flags the next
+        # startup as OOM-killed.
+        await self._claim_watchdog_slot()
+
+        app._running = True
+
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, self._handle_signal)
+
+        try:
+            await self._poll_loop()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await self._shutdown()
+
+    async def _setup_watchdog(self) -> None:
+        """Construct the watchdog file and check the previous run.
+
+        Extracted from ``_async_run`` so the boot sequence is testable step by
+        step; the body is unchanged. Must run first so ``check_previous()``
+        reads the prior run's file, and must NOT call ``write()`` -- that stays
+        in ``_claim_watchdog_slot()``, which runs after ``subscribe()``.
+        """
+        app = self._app
+        log = logger.bind(worker_id=app._worker_id)
         # Watchdog file for OOM / SIGKILL detection. Resolves the durable
         # directory from ``config.ui.recorder.db_dir`` (the canonical location
         # for per-worker durable files in this codebase — already used by
@@ -162,20 +239,13 @@ class AppLifecycle:
                 reason='ui.recorder.db_dir is empty — OOM/SIGKILL detection disabled for this run',
             )
 
-        bind_contextvars(hook='on_startup')
-        app._config = await app._handler.on_startup(app._config)
-        unbind_contextvars('hook')
+    async def _build_executor_pool(self) -> None:
+        """Construct the subprocess pool from executor config.
 
-        app._config_summary = app._config.config_summary(
-            worker_id=app._worker_id,
-            cluster_name=app._cluster_name,
-        )
-        await log.ainfo('drakkar_starting', category='lifecycle', config=app._config_summary)
-
-        # validate at least one sink is configured
-        if app._config.sinks.is_empty:
-            raise SinkNotConfiguredError('No sinks configured. Add at least one sink to the sinks: section in config.')
-
+        Extracted from ``_async_run`` so the boot sequence is testable step by
+        step; the body is unchanged.
+        """
+        app = self._app
         app._executor_pool = ExecutorPool(
             binary_path=app._config.executor.binary_path,
             max_executors=app._config.executor.max_executors,
@@ -193,6 +263,14 @@ class AppLifecycle:
             max_stderr_bytes=app._config.executor.max_stderr_bytes,
         )
 
+    async def _start_observability(self) -> None:
+        """Start the metrics server and publish worker + handler metrics.
+
+        Extracted from ``_async_run`` so the boot sequence is testable step by
+        step; the body is unchanged.
+        """
+        app = self._app
+        log = logger.bind(worker_id=app._worker_id)
         start_metrics_server(app._config.metrics)
         worker_info.info(
             {
@@ -210,6 +288,14 @@ class AppLifecycle:
                 metrics=[f'{m._name} ({m._type})' for m in user_metrics.values()],
             )
 
+    async def _start_ui_and_recorder(self) -> None:
+        """Start the recorder and UI server, or warn when the UI is disabled.
+
+        Extracted from ``_async_run`` so the boot sequence is testable step by
+        step; the body is unchanged.
+        """
+        app = self._app
+        log = logger.bind(worker_id=app._worker_id)
         if app._config.ui.enabled:
             # Auth is opt-in. Emit a startup warning naming how to set a
             # token when none is configured — no endpoint touches the
@@ -247,6 +333,13 @@ class AppLifecycle:
                 reason='ui.enabled=false — /healthz and /readyz are not served; Kubernetes probes need the UI server',
             )
 
+    async def _start_cache(self) -> None:
+        """Construct the cache engine and wire the handler-facing Cache.
+
+        Extracted from ``_async_run`` so the boot sequence is testable step by
+        step; the body is unchanged.
+        """
+        app = self._app
         # Framework cache. Constructed after the recorder so the cache
         # engine can pass it as the sink for its periodic_run events. If
         # cache.enabled=false, we leave the handler's default NoOpCache stub
@@ -274,6 +367,14 @@ class AppLifecycle:
             # installed — signatures are identical.
             app._handler.cache = handler_cache
 
+    async def _connect_sinks(self) -> None:
+        """Build and connect sinks and the DLQ, then wire the sink manager.
+
+        Extracted from ``_async_run`` so the boot sequence is testable step by
+        step; the body is unchanged.
+        """
+        app = self._app
+        log = logger.bind(worker_id=app._worker_id)
         # build and connect sinks
         app._build_sinks()
         await app._sink_manager.connect_all()
@@ -303,6 +404,14 @@ class AppLifecycle:
             dlq_topic=app._dlq_sink.topic,
         )
 
+    async def _start_webapp(self) -> None:
+        """Start the optional webapp HTTP server.
+
+        Extracted from ``_async_run`` so the boot sequence is testable step by
+        step; the body is unchanged.
+        """
+        app = self._app
+        log = logger.bind(worker_id=app._worker_id)
         # Webapp HTTP server. Constructed AFTER sinks connect (so the
         # readyz/health gate the route uses is meaningful) and BEFORE
         # consumer subscribe (so the route is reachable even during the
@@ -331,6 +440,13 @@ class AppLifecycle:
                 )
                 app._webapp = None
 
+    async def _start_consumer(self) -> None:
+        """Construct the consumer, run on_ready, and start periodic tasks.
+
+        Extracted from ``_async_run`` so the boot sequence is testable step by
+        step; the body is unchanged.
+        """
+        app = self._app
         app._consumer = KafkaConsumer(
             config=app._config.kafka,
             on_assign=self._on_assign,
@@ -361,48 +477,6 @@ class AppLifecycle:
                 name=f'periodic:{name}',
             )
             app._periodic_tasks.append(task)
-
-        # Stagger startup: sleep until the next wall-clock alignment
-        # boundary so a fleet of workers in a rolling deploy converges
-        # on a single Kafka consumer-group rebalance instead of N. See
-        # KafkaConfig.startup_align_* for tuning and rationale.
-        if app._config.kafka.startup_align_enabled:
-            min_wait = app._config.kafka.startup_min_wait_seconds
-            interval = app._config.kafka.startup_align_interval_seconds
-            target_wall = math.ceil((time.time() + min_wait) / interval) * interval
-            await log.ainfo(
-                'startup_align_waiting',
-                category='lifecycle',
-                min_wait_seconds=min_wait,
-                align_interval_seconds=interval,
-                target_wall_unix=target_wall,
-                target_wall_iso=format_rfc3339_micro(datetime.fromtimestamp(target_wall, tz=UTC)),
-            )
-            slept = await wait_for_aligned_startup(min_wait, interval)
-            await log.ainfo('startup_align_done', category='lifecycle', slept_seconds=round(slept, 3))
-
-        await app._consumer.subscribe()
-
-        # Claim the watchdog slot for this run NOW — only once we're
-        # committed to running. See ``_claim_watchdog_slot`` for the
-        # OSError-tolerance contract; deferring the call to this point
-        # ensures a startup-stage exception (above) leaves any previous
-        # watchdog state untouched and never falsely flags the next
-        # startup as OOM-killed.
-        await self._claim_watchdog_slot()
-
-        app._running = True
-
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, self._handle_signal)
-
-        try:
-            await self._poll_loop()
-        except asyncio.CancelledError:
-            pass
-        finally:
-            await self._shutdown()
 
     async def _poll_loop(self) -> None:
         """Main polling loop with backpressure via Kafka pause/resume."""
