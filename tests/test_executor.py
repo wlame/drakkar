@@ -1652,9 +1652,10 @@ def test_parent_env_is_filtered_once_not_rebuilt_per_task():
     """The deny-filtered parent env is computed once, not per task.
 
     The documented "inherit verbatim" fast path requires an EMPTY deny list,
-    but the default ships seven patterns — so real deployments always took the
-    filtering path and paid a full ``os.environ`` scan (~80us of event-loop
-    time) on every task, even though the result is identical every time.
+    but the default ships several patterns — so real deployments always took
+    the filtering path and paid a full ``os.environ`` scan (~80us of
+    event-loop time) on every task, even though the result is identical
+    every time.
 
     The second half pins the documented consequence of caching: mutating
     ``os.environ`` after the first task does NOT affect later subprocesses.
