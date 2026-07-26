@@ -31,8 +31,13 @@ pointer here:
   writes.
 - **The operator UI is an operator tool, not a public surface.**
   Authentication is opt-in (`ui.auth_token`); a startup warning names
-  the unauthenticated posture. It is intended for private-network
-  deployment.
+  the unauthenticated posture. Most endpoints are read-only, but two are
+  not, and each can be closed independently of `auth_token`: the
+  **Message Probe** (`ui.probe_enabled`) executes the live handler
+  against pasted input and competes with production traffic for
+  executor slots, and **Merge** (`ui.merge_enabled`) writes a
+  `merged-<ts>.db` into `db_dir` that nothing reclaims. It is intended
+  for private-network deployment.
 
 Findings that break *out* of these boundaries — for example remote code
 execution without a trusted binary, authentication bypass when

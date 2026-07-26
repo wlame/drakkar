@@ -10,8 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - CI now scans dependencies for known vulnerabilities on every run
-  (`pip-audit` against the resolved lock), backed by a weekly Dependabot
-  job that tracks both Python package and GitHub Actions updates.
+  (`pip-audit` against the installed environment), backed by a weekly
+  Dependabot job that tracks both Python package and GitHub Actions
+  updates.
 - A scheduled nightly workflow runs the full Docker-based integration
   harness against real Kafka, Postgres, Mongo, and Redis.
 

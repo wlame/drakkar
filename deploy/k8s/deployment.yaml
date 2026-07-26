@@ -109,9 +109,13 @@ spec:
           #   - Neither executor sets a working directory for the subprocess,
           #     so a handler that writes relative paths writes into the image
           #     WORKDIR. Have it write absolute paths under the mounts below.
-          #   - HOME is unset for UID 65532 (no passwd entry), so a handler or
-          #     library that caches under $HOME has nowhere to write. Set
-          #     HOME=/tmp under env: below if yours does.
+          #   - HOME is unset for UID 65532 (no passwd entry), so anything
+          #     that caches under $HOME has nowhere to write. That is not
+          #     just your handler binary or its libraries: Drakkar's own
+          #     drakkar-ui bundle cache defaults to ~/.cache/drakkar/ui, so
+          #     with no writable HOME the worker silently falls back to the
+          #     built-in Jinja pages instead of the richer UI bundle. Set
+          #     HOME=/tmp under env: below if either side needs it.
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
