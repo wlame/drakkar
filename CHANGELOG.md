@@ -51,10 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dictionary before resending it. Previously that leftover `_id` made the
   retry collide with the document Mongo had already inserted, so the
   fallback reported the wrong document as the failure and gave up before
-  reaching the one that actually failed. On a partly-failed batch, the
-  error now identifies the document that really caused it, and the rest
-  of the batch is still delivered — at the cost of documents the failed
+  reaching the one that actually failed. On a partly-failed batch the
+  error now identifies the document that really caused it, and every
+  document ahead of it is delivered — at the cost of documents the failed
   batch had already written being written again under a new `_id`.
+  Documents after the failing one are still not attempted in that call,
+  unchanged from the pre-batching behavior.
 
 ### Security
 
