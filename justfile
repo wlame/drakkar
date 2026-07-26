@@ -5,7 +5,7 @@
 set shell := ["bash", "-uc"]
 
 # Coverage floor — mirrored by [tool.coverage.report] fail_under in pyproject.toml.
-coverage_min := "75"
+coverage_min := "95"
 
 # List all recipes
 default:
