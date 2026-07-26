@@ -46,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kafka.on_parse_error` policies (`skip`, `dlq`, `raise`) instead of
   only the default, so the documented behavior for an unparseable
   message matches what actually happens.
+- The MongoDB sink's per-document fallback (used when a batch insert
+  fails) now strips the `_id` PyMongo writes back into a document's
+  dictionary before resending it. Previously that leftover `_id` made the
+  retry collide with the document Mongo had already inserted, so the
+  fallback reported the wrong document as the failure and gave up before
+  reaching the one that actually failed. On a partly-failed batch, the
+  error now identifies the document that really caused it, and the rest
+  of the batch is still delivered — at the cost of documents the failed
+  batch had already written being written again under a new `_id`.
 
 ### Security
 

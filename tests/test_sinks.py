@@ -644,6 +644,62 @@ async def test_mongo_sink_batch_failure_falls_back_per_document(mongo_sink_confi
     assert mock_collection.insert_one.call_count == 2
 
 
+async def test_mongo_sink_batch_fallback_strips_injected_id(mongo_sink_config):
+    """The per-document fallback must strip the `_id` PyMongo injects.
+
+    PyMongo's real ``insert_many`` mutates every document it is handed in
+    place, writing a generated ``_id`` into it, even when the batch as a
+    whole is rejected before anything is actually committed. An ``AsyncMock``
+    can't reproduce that on its own, so this test's fake ``insert_many``
+    performs the same mutation PyMongo does before raising — modeling the
+    verified real driver behavior rather than inventing one.
+
+    If the fallback resent a document still carrying that leftover ``_id``,
+    Mongo would treat it as colliding with a document already written and
+    raise DuplicateKeyError on the first document tried, regardless of which
+    one was actually bad — so the fake ``insert_one`` raises DuplicateKeyError
+    for any document that still has an ``_id``, and a distinct error for the
+    one genuinely-bad document (r3).
+    """
+    from pymongo.errors import DuplicateKeyError
+
+    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+
+    def fake_insert_many(documents):
+        for i, doc in enumerate(documents):
+            doc['_id'] = f'injected-{i}'
+        raise RuntimeError('batch rejected')
+
+    def fake_insert_one(document):
+        if '_id' in document:
+            raise DuplicateKeyError('E11000 duplicate key error collection: testdb.results index: _id_ dup key')
+        if document['request_id'] == 'r3':
+            raise RuntimeError('constraint violation for r3')
+        return None
+
+    mock_collection.insert_many.side_effect = fake_insert_many
+    mock_collection.insert_one.side_effect = fake_insert_one
+
+    payloads = [
+        MongoPayload(collection='results', data=SampleOutput(request_id='r1')),
+        MongoPayload(collection='results', data=SampleOutput(request_id='r2')),
+        MongoPayload(collection='results', data=SampleOutput(request_id='r3')),
+    ]
+
+    with pytest.raises(RuntimeError, match='r3'):
+        await sink.deliver(payloads)
+
+    sent_docs = [call.args[0] for call in mock_collection.insert_one.call_args_list]
+
+    # Every document the fallback resent must be free of the leftover `_id`.
+    assert all('_id' not in d for d in sent_docs)
+
+    # The fallback reached, and attempted, every document up to and
+    # including the genuinely bad one (r1, r2 before it were not skipped),
+    # and the surfaced error names the real culprit (r3), not r1.
+    assert [d['request_id'] for d in sent_docs] == ['r1', 'r2', 'r3']
+
+
 async def test_mongo_sink_deliver_empty(mongo_sink_config):
     sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
 

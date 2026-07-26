@@ -138,7 +138,15 @@ class MongoSink(BaseSink[MongoPayload]):
         return docs, len(docs), None
 
     async def _deliver_group(self, group: list[_MongoDoc]) -> None:
-        """Insert one collection's documents, falling back per-document on failure."""
+        """Insert one collection's documents, falling back per-document on failure.
+
+        On an ``insert_many`` failure, the fallback resends each document one
+        at a time so the error an operator sees names the document that
+        actually failed. A side effect: documents earlier in the group that
+        the failed batch already wrote get re-inserted as brand-new documents
+        (with a fresh, server-assigned ``_id``) — an accepted duplicate under
+        this framework's at-least-once delivery guarantee.
+        """
         if len(group) == 1:
             await self._insert_single(group[0])
             return
@@ -151,6 +159,23 @@ class MongoSink(BaseSink[MongoPayload]):
             # names the offending document (and to ride out a transient).
             pass
         for doc in group:
+            # PyMongo's insert_many mutates every document it is handed,
+            # writing a generated ``_id`` back into the caller's dict —
+            # even on documents whose insert never actually committed
+            # (e.g. the whole batch was rejected before the server was
+            # reached). If we resend a document that now carries that
+            # leftover ``_id``, Mongo treats it as an update-in-place
+            # against an existing document with that id and raises
+            # DuplicateKeyError on the FIRST document, no matter which one
+            # was genuinely bad — misnaming the culprit and aborting the
+            # fallback before it reaches the real offender. Stripping the
+            # injected id makes each retry insert as a brand-new document
+            # (get a fresh, server-assigned id), so the error correctly
+            # names the actual failure. The cost is accepted: documents
+            # already written by the failed batch get written again under
+            # a new id — an allowed duplicate under this framework's
+            # at-least-once delivery guarantee.
+            doc.document.pop('_id', None)
             await self._insert_single(doc)
 
     async def _insert_single(self, doc: _MongoDoc) -> None:
