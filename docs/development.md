@@ -22,7 +22,7 @@ just install        # uv sync with the dev + perf extras
 | Recipe | What it does |
 |--------|--------------|
 | `just test` | Run the unit test suite (`pytest`). Extra args pass through: `just test -k cache`, `just test tests/test_partition.py -x` |
-| `just cover` | Tests with the coverage gate — fails under the 75% floor from `pyproject.toml`, writes `coverage.xml` + `junit.xml` |
+| `just cover` | Tests with the coverage gate — fails under the 95% floor from `pyproject.toml`, writes `coverage.xml` + `junit.xml` |
 | `just fmt` | Format with **ruff** (`ruff format`) |
 | `just fmt-check` | Formatting check only — the CI gate |
 | `just lint` | Lint with **ruff** (`ruff check`); `just lint-fix` applies safe autofixes |

@@ -127,10 +127,9 @@ Design points every agent should know:
    deliberately excluded from it), and the `/api/v1` shapes.
 2. **Tooling**: `uv` only (never pip), `ruff` (format + lint, single quotes
    for code / double for user-facing text), `ty` for types, pytest
-   (function-based, fixtures, parametrize). Coverage gate **75%**
-   (`just cover`) — but the suite actually sits at ~94%, so the floor is
-   not the bar to aim at: new code without tests erodes real coverage
-   long before it trips the gate.
+   (function-based, fixtures, parametrize). Coverage gate **95%**
+   (`just cover`) — the suite sits just above it (~95.3%), so the floor is
+   a live constraint: new code without tests will trip the gate.
 3. **Tests are hermetic** — no real network. UI hosting defaults ON, so test
    fixtures with a real `DrakkarConfig` must set `ui.release.enabled = False`
    (the `mock_app` fixtures do) or use `tests/test_uihost.py`'s `StubGitHub` +
@@ -167,7 +166,7 @@ Design points every agent should know:
 
 ```bash
 just test               # full suite (uv run pytest)
-just cover              # THE gate: 75% floor
+just cover              # THE gate: 95% floor
 just ci                 # exactly what CI runs: fmt-check lint typecheck cover
 just check              # ci + strict docs build
 just integration-up     # full docker harness (Kafka, sinks, 3 workers + load gen)

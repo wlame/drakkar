@@ -431,7 +431,7 @@ just typecheck        # type-check with ty
 just ci               # everything CI enforces: format check → lint → types → tests + coverage gate
 
 # more
-just cover            # tests with the coverage gate (75% floor) + xml/junit artifacts
+just cover            # tests with the coverage gate (95%) + xml/junit artifacts
 just docs-serve       # live-reload docs at http://127.0.0.1:8000
 just check            # full pre-push battery: ci + strict docs build
 just release minor    # run ci, bump the version, commit + tag (prints push commands, never pushes)
