@@ -26,16 +26,6 @@ relies on. Engine-internal hooks like ``attach_reader_db``, ``swap_dirty``,
 ``restore_dirty``, ``_invalidate_memory_keys``, ``_expire_purge`` are not
 part of the user contract — they couple memory layout to the SQLite
 write-behind path and live on ``Cache`` only.
-
-Design note (deviates from Phase 4 plan's design sketch)
---------------------------------------------------------
-The plan's design sketch listed seven methods (``get``, ``put``,
-``invalidate``, ``invalidate_keys``, ``copy_scope``, ``hit_rate_recent``,
-``flush_all``). Those names do not match the real handler API. The real
-API — verified against ``drakkar/cache/memory.py:Cache`` and ``NoOpCache``
-— is ``set``, ``peek``, ``delete``, ``__contains__``, ``get``. The Protocol
-mirrors what handlers actually call on ``self.cache``; the plan checkbox
-text records the divergence.
 """
 
 from __future__ import annotations

@@ -516,7 +516,7 @@ class ExecutorPool:
         recomputed for every task, at roughly 80us of event-loop time each on
         a typical environment. That cost is unavoidable by configuration: the
         "inherit verbatim" fast path above needs an EMPTY deny list, and the
-        default ships seven patterns, so real deployments never reach it.
+        default ships several patterns, so real deployments never reach it.
 
         Computed lazily on first use rather than in ``__init__`` so variables
         set by startup hooks are still picked up. The consequence is that
