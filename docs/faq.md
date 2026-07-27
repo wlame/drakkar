@@ -363,7 +363,7 @@ They're separate SQLite files with separate schemas and separate reader/writer c
 
 ## Security and trust model
 
-This section expands the five trust assumptions listed in the [project README](https://github.com/wlame/drakkar#security--trust-model) -- each one is an architectural trust boundary, not a latent bug. Read this before a production deploy.
+Drakkar makes five explicit trust assumptions -- each one an architectural trust boundary, not a latent bug. Read this before a production deploy.
 
 ### Why is the handler binary trusted?
 

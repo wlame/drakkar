@@ -302,7 +302,7 @@ class AppLifecycle:
             # pipeline and the UI is meant for private-network deployment,
             # so this is informational rather than fail-fast. The warning
             # also names any side-effecting endpoint (probe, merge) left
-            # enabled. See README §"Security & trust model".
+            # enabled. See docs/faq.md §"Security and trust model".
             warn_if_ui_unauthenticated(app._config)
 
             app._recorder = EventRecorder(

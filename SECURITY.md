@@ -18,10 +18,10 @@ reproduction if you have one. Expect an acknowledgement within a week.
 
 ## Trust model — please read before reporting
 
-Drakkar documents explicit trust boundaries in the README under
-"Security & trust model". These are **design assumptions, not
-vulnerabilities**, and reports resting on them will be closed with a
-pointer here:
+Drakkar documents explicit trust boundaries in the
+[FAQ](docs/faq.md#security-and-trust-model). These are **design
+assumptions, not vulnerabilities**, and reports resting on them will be
+closed with a pointer here:
 
 - **The handler binary is fully trusted.** `executor.binary_path` is
   operator-configured and message bytes reach its stdin without
