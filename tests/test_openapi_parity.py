@@ -14,7 +14,6 @@ import time
 from unittest.mock import AsyncMock, MagicMock
 
 import yaml
-from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 
 from drakkar.config import DrakkarConfig
@@ -31,16 +30,40 @@ def _spec_routes() -> set[tuple[str, str]]:
     return {(method.upper(), path) for path, item in doc['paths'].items() for method in item if method in _HTTP_METHODS}
 
 
+def _walk_routes(routes, seen=None):
+    """Yield every route object reachable from ``routes``, nesting included.
+
+    Whether an included router's routes end up as flat copies on the app or
+    stay behind a nested container is a FastAPI implementation detail that
+    has changed between versions. Recursing over anything that itself
+    carries ``.routes`` keeps the pinned surface independent of that choice
+    — otherwise a version that nests would report every natively-registered
+    ``/api/v1`` route as missing while the app serves them perfectly well.
+    """
+    seen = set() if seen is None else seen
+    for route in routes:
+        if id(route) in seen:
+            continue  # cycle guard: a router may reference itself
+        seen.add(id(route))
+        yield route
+        nested = getattr(route, 'routes', None)
+        if nested:
+            yield from _walk_routes(nested, seen)
+
+
 def _app_routes(app) -> set[tuple[str, str]]:
     out: set[tuple[str, str]] = set()
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
-        path = route.path
+    for route in _walk_routes(app.routes):
+        # Duck-typed rather than ``isinstance(route, APIRoute)``: an
+        # unrecognised route class must not be skipped silently, or the
+        # assertion below blames the app for endpoints it really serves.
+        path = getattr(route, 'path', None)
+        if path is None:
+            continue  # APIRouter and friends expose no path of their own
         if not (path.startswith('/api/v1/') or path in ('/healthz', '/readyz')):
             continue  # legacy aliases, /ws, /docs, SPA catch-all: out of scope
         path = path.replace(':path}', '}')  # FastAPI converter suffix
-        for method in route.methods or ():
+        for method in getattr(route, 'methods', None) or ():
             if method in ('HEAD', 'OPTIONS'):
                 continue
             out.add((method, path))
