@@ -819,7 +819,7 @@ async def test_http_sink_deliver(http_sink_config):
     call_kwargs = mock_client.request.call_args[1]
     assert call_kwargs['method'] == 'POST'
     assert call_kwargs['url'] == 'https://api.example.com/results'
-    assert b'"request_id":"r1"' in call_kwargs['content'].encode()
+    assert b'"request_id":"r1"' in call_kwargs['content']
 
 
 async def test_http_sink_deliver_batch(http_sink_config):
@@ -925,6 +925,98 @@ def test_http_sink_type(http_sink_config):
 
     sink = HttpSink('webhook', http_sink_config)
     assert sink.sink_type == 'http'
+
+
+async def test_http_sink_json_encoding_is_unchanged_by_default(http_sink_config):
+    sink, mock_client = _make_http_sink(http_sink_config)
+    mock_client.request.return_value = _mock_response(200)
+
+    await sink.deliver([HttpPayload(data=SampleOutput(request_id='r1'))])
+
+    call_kwargs = mock_client.request.call_args[1]
+    assert call_kwargs['content'] == b'{"request_id":"r1","answer":"42"}'
+    assert call_kwargs['headers']['Content-Type'] == 'application/json'
+
+
+async def test_http_sink_form_encoding_sends_urlencoded_body():
+    config = HttpSinkConfig(url='https://api.example.com/results', encoding='form')
+    sink, mock_client = _make_http_sink(config)
+    mock_client.request.return_value = _mock_response(200)
+
+    await sink.deliver([HttpPayload(data=SampleOutput(request_id='r1'))])
+
+    call_kwargs = mock_client.request.call_args[1]
+    assert call_kwargs['content'] == b'answer=42&request_id=r1'
+    assert call_kwargs['headers']['Content-Type'] == 'application/x-www-form-urlencoded'
+
+
+async def test_http_sink_multipart_encoding_sends_multipart_body():
+    config = HttpSinkConfig(url='https://api.example.com/results', encoding='multipart')
+    sink, mock_client = _make_http_sink(config)
+    mock_client.request.return_value = _mock_response(200)
+
+    await sink.deliver([HttpPayload(data=SampleOutput(request_id='r1'))])
+
+    call_kwargs = mock_client.request.call_args[1]
+    content_type = call_kwargs['headers']['Content-Type']
+    assert content_type.startswith('multipart/form-data; boundary=')
+    boundary = content_type.rsplit('=', 1)[1]
+    assert call_kwargs['content'].startswith(f'--{boundary}\r\n'.encode())
+    assert b'name="request_id"' in call_kwargs['content']
+
+
+async def test_http_sink_multipart_boundary_differs_per_request():
+    config = HttpSinkConfig(url='https://api.example.com/results', encoding='multipart')
+    sink, mock_client = _make_http_sink(config)
+    mock_client.request.return_value = _mock_response(200)
+
+    await sink.deliver(
+        [
+            HttpPayload(data=SampleOutput(request_id='r1')),
+            HttpPayload(data=SampleOutput(request_id='r2')),
+        ]
+    )
+
+    first = mock_client.request.call_args_list[0][1]['headers']['Content-Type']
+    second = mock_client.request.call_args_list[1][1]['headers']['Content-Type']
+    assert first != second
+
+
+async def test_http_sink_configured_headers_still_reach_the_request():
+    config = HttpSinkConfig(
+        url='https://api.example.com/results',
+        encoding='form',
+        headers={'Authorization': 'Bearer t'},
+    )
+    sink, mock_client = _make_http_sink(config)
+    mock_client.request.return_value = _mock_response(200)
+
+    await sink.deliver([HttpPayload(data=SampleOutput(request_id='r1'))])
+
+    assert mock_client.request.call_args[1]['headers']['Authorization'] == 'Bearer t'
+
+
+async def test_http_sink_headers_cannot_override_content_type():
+    # The config validator rejects this, but a caller can build the config
+    # in Python and never validate it. The encoder's Content-Type must still
+    # win — httpx gives per-request headers precedence over client headers,
+    # and this test pins that so a future refactor cannot silently invert it.
+    config = HttpSinkConfig.model_construct(
+        url='https://api.example.com/results',
+        method='POST',
+        timeout_seconds=30,
+        max_retries=3,
+        ui_url='',
+        encoding='form',
+        headers={'Content-Type': 'application/vnd.custom+json'},
+    )
+    sink, mock_client = _make_http_sink(config)
+    mock_client.request.return_value = _mock_response(200)
+
+    await sink.deliver([HttpPayload(data=SampleOutput(request_id='r1'))])
+
+    call_kwargs = mock_client.request.call_args[1]
+    assert call_kwargs['headers']['Content-Type'] == 'application/x-www-form-urlencoded'
 
 
 # =============================================================================

@@ -1,8 +1,8 @@
-"""HTTP sink — POSTs JSON payloads to an HTTP endpoint.
+"""HTTP sink — POSTs payloads to an HTTP endpoint.
 
-Wraps httpx.AsyncClient. Each HttpPayload's data field is serialized
-via model_dump_json() and sent as the request body with Content-Type:
-application/json.
+Wraps httpx.AsyncClient. Each HttpPayload's data field is encoded per the
+sink's ``encoding`` setting (json, form, or multipart); the encoder
+returns both the body and the Content-Type that describes it.
 """
 
 import time
@@ -11,6 +11,7 @@ import httpx
 import structlog
 
 from drakkar.config import HttpSinkConfig
+from drakkar.http_encoding import encode_body
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
 from drakkar.models import HttpPayload
 from drakkar.sinks.base import BaseSink
@@ -19,11 +20,12 @@ logger = structlog.get_logger()
 
 
 class HttpSink(BaseSink[HttpPayload]):
-    """Sends JSON payloads to an HTTP endpoint.
+    """Sends payloads to an HTTP endpoint with configurable body encoding.
 
-    Each HttpPayload is serialized:
-        - body = payload.data.model_dump_json()
-        - Content-Type: application/json
+    Each HttpPayload is encoded per the config's ``encoding`` setting:
+        - json: application/json (default)
+        - form: application/x-www-form-urlencoded
+        - multipart: multipart/form-data
 
     Non-2xx responses raise httpx.HTTPStatusError so the framework
     can route the failure through on_delivery_error.
@@ -52,10 +54,7 @@ class HttpSink(BaseSink[HttpPayload]):
         """Create the httpx async client with configured timeout and headers."""
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(self._config.timeout_seconds),
-            headers={
-                'Content-Type': 'application/json',
-                **self._config.headers,
-            },
+            headers=dict(self._config.headers),
         )
         await logger.ainfo(
             'http_sink_connected',
@@ -66,7 +65,7 @@ class HttpSink(BaseSink[HttpPayload]):
         )
 
     async def deliver(self, payloads: list[HttpPayload]) -> None:
-        """Send each payload as a JSON request to the configured URL.
+        """Send each payload to the configured URL with encoded body.
 
         Raises httpx.HTTPStatusError on non-2xx responses.
         """
@@ -77,11 +76,12 @@ class HttpSink(BaseSink[HttpPayload]):
         labels = {'sink_type': self.sink_type, 'sink_name': self._name}
         try:
             for payload in payloads:
-                body = payload.data.model_dump_json()
+                body, content_type = encode_body(payload.data, self._config.encoding)
                 response = await self._client.request(
                     method=self._config.method,
                     url=self._config.url,
                     content=body,
+                    headers={**self._config.headers, 'Content-Type': content_type},
                 )
                 response.raise_for_status()
 
