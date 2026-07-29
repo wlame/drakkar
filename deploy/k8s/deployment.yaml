@@ -144,6 +144,19 @@ spec:
                   name: drakkar-secrets  # <-- create this Secret
                   key: kafka_brokers
                   optional: true
+            # Kafka SASL password. Keep the credential out of the
+            # ConfigMap: the protocol, mechanism, and username belong in
+            # kafka.security in the YAML, and only the secret comes from
+            # here. DK_* variables are withheld from executor
+            # subprocesses by the default executor.env_inherit_deny list,
+            # so the handler binary never sees this value.
+            # Drop this entry entirely for a PLAINTEXT cluster.
+            - name: DK_KAFKA__SECURITY__SASL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: drakkar-secrets
+                  key: kafka_sasl_password
+                  optional: true
             # Operator UI auth token. Empty (or unset) leaves the UI
             # unauthenticated — only acceptable when the Service is
             # ClusterIP-only on a private network. For any non-private

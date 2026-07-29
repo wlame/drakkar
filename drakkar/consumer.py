@@ -13,6 +13,7 @@ from confluent_kafka import KafkaError, TopicPartition
 from confluent_kafka.aio import AIOConsumer
 
 from drakkar.config import KafkaConfig
+from drakkar.kafka_security import merge_client_config
 from drakkar.metrics import consumer_errors, offsets_committed, rebalance_events
 from drakkar.models import SourceMessage
 
@@ -60,17 +61,26 @@ class KafkaConsumer:
         self._on_assign_cb = on_assign
         self._on_revoke_cb = on_revoke
 
+        # Framework-owned keys first, then the typed security block, then the
+        # raw client_config escape hatch. ``merge_client_config`` defines that
+        # precedence; the keys this dict sets which must never be overridden
+        # (manual commit, cooperative-sticky) are refused at config load by
+        # RESERVED_CLIENT_KEYS, so the merge cannot break invariants #6/#7.
         self._consumer = AIOConsumer(
-            {
-                'bootstrap.servers': config.brokers,
-                'group.id': config.consumer_group,
-                'enable.auto.commit': False,
-                'auto.offset.reset': 'earliest',
-                'partition.assignment.strategy': 'cooperative-sticky',
-                'max.poll.interval.ms': config.max_poll_interval_ms,
-                'session.timeout.ms': config.session_timeout_ms,
-                'heartbeat.interval.ms': config.heartbeat_interval_ms,
-            },
+            merge_client_config(
+                {
+                    'bootstrap.servers': config.brokers,
+                    'group.id': config.consumer_group,
+                    'enable.auto.commit': False,
+                    'auto.offset.reset': 'earliest',
+                    'partition.assignment.strategy': 'cooperative-sticky',
+                    'max.poll.interval.ms': config.max_poll_interval_ms,
+                    'session.timeout.ms': config.session_timeout_ms,
+                    'heartbeat.interval.ms': config.heartbeat_interval_ms,
+                },
+                config.security,
+                config.client_config,
+            ),
             max_workers=CONSUMER_MAX_WORKERS,
         )
 

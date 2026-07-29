@@ -125,6 +125,18 @@ Design points every agent should know:
    DLQ JSON byte-stability, metric names, the config-summary one-liner
    (renders `ui=on:8080`; the `ui.release.*` bundle-fetch settings are
    deliberately excluded from it), and the `/api/v1` shapes.
+   `kafka.security` / `kafka.client_config` (plus the sink and DLQ
+   equivalents) ship on BOTH backends with identical YAML keys, env names,
+   defaults, and validation rules; `drakkar/kafka_security.py` and Go's
+   `kafka_security.go` are the paired references. Three behaviours differ
+   because the Kafka libraries differ (confluent-kafka/librdkafka here,
+   franz-go there), all documented in `docs/configuration.md`: Go rejects
+   GSSAPI/OAUTHBEARER and `ssl_key_password` at startup, and Go reads
+   certificate files at startup while librdkafka fails at first connect.
+   Go's `client_config` accepts only keys with a franz equivalent. The
+   config-summary line and the recorder schema were deliberately left
+   untouched on both sides, so this addition never touched a byte-parity
+   surface.
 2. **Tooling**: `uv` only (never pip), `ruff` (format + lint, single quotes
    for code / double for user-facing text), `ty` for types, pytest
    (function-based, fixtures, parametrize). Coverage gate **95%**
@@ -215,6 +227,7 @@ drakkar/
   uihost/                  drakkar-ui bundle fetch/cache/serve engine
   templates/               legacy Jinja UI (also the SPA's UX reference)
   config.py                pydantic-settings config (YAML + DK_ env overrides)
+  kafka_security.py        SASL/TLS config model + librdkafka mapping (leaf module)
 integration/               docker-compose harness (Kafka, sinks, workers, load gen)
 docs/                      mkdocs documentation site
 scripts/                   replay_dlq.py etc.

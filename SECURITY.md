@@ -29,6 +29,13 @@ closed with a pointer here:
 - **Peer workers sharing a `db_dir` are fully trusted.** Cache and
   recorder peer sync have no cryptographic authentication of peer
   writes.
+- **Kafka transport security is configured, not assumed.** `kafka.security`
+  supports SASL (PLAIN, SCRAM, GSSAPI, OAUTHBEARER) and TLS including
+  mutual TLS; the default is `PLAINTEXT`, which is appropriate only inside
+  a trusted network. Running against an untrusted network without
+  configuring it is a deployment choice, not a framework vulnerability —
+  see [Kafka security](docs/configuration.md#kafka-security-kafkasecurity).
+
 - **The operator UI is an operator tool, not a public surface.**
   Authentication is opt-in (`ui.auth_token`); a startup warning names
   the unauthenticated posture. Most endpoints are read-only, but two are

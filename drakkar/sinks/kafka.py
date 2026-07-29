@@ -7,11 +7,13 @@ and produces it with the payload's key to the configured topic.
 
 import asyncio
 import time
+from collections.abc import Mapping
 
 import structlog
 from confluent_kafka.aio import AIOProducer
 
 from drakkar.config import KafkaSinkConfig
+from drakkar.kafka_security import KafkaSecurityConfig, merge_client_config, resolve_client
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
 from drakkar.models import KafkaPayload
 from drakkar.sinks.base import BaseSink
@@ -44,10 +46,29 @@ class KafkaSink(BaseSink[KafkaPayload]):
     # transient-error retry by the SinkManager.
     idempotent = False
 
-    def __init__(self, name: str, config: KafkaSinkConfig, brokers_fallback: str = '') -> None:
+    def __init__(
+        self,
+        name: str,
+        config: KafkaSinkConfig,
+        brokers_fallback: str = '',
+        security_fallback: KafkaSecurityConfig | None = None,
+        client_config_fallback: Mapping[str, str] | None = None,
+    ) -> None:
         super().__init__(name, ui_url=config.ui_url)
         self._config = config
-        self._brokers = config.brokers or brokers_fallback
+        # An empty ``brokers`` means "the consumer's cluster", so the
+        # consumer's credentials come with it — see ``resolve_client``.
+        resolved = resolve_client(
+            config.brokers,
+            config.security,
+            config.client_config,
+            fallback_brokers=brokers_fallback,
+            fallback_security=security_fallback or KafkaSecurityConfig(),
+            fallback_client_config=client_config_fallback or {},
+        )
+        self._brokers = resolved.brokers
+        self._security = resolved.security
+        self._client_config = resolved.client_config
         self._producer: AIOProducer | None = None
 
     @property
@@ -57,13 +78,16 @@ class KafkaSink(BaseSink[KafkaPayload]):
 
     async def connect(self) -> None:
         """Create the AIOProducer connection."""
-        self._producer = AIOProducer({'bootstrap.servers': self._brokers})
+        self._producer = AIOProducer(
+            merge_client_config({'bootstrap.servers': self._brokers}, self._security, self._client_config)
+        )
         await logger.ainfo(
             'kafka_sink_connected',
             category='sink',
             sink_name=self._name,
             topic=self._config.topic,
             brokers=redact_url(self._brokers),
+            security=self._security.describe(),
         )
 
     async def deliver(self, payloads: list[KafkaPayload]) -> None:

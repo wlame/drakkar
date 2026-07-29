@@ -56,6 +56,33 @@ kafka:
   #   raise — fail fast: MessageParseError stops the partition processor (schema-broken deploys)
   on_parse_error: skip
 
+  # Transport security. Default PLAINTEXT emits no client properties at all, so a worker
+  # that configures nothing here connects exactly as it always did. Kafka sinks and the DLQ
+  # inherit this block whenever their own `brokers` field is empty.
+  security:
+    protocol: PLAINTEXT            # PLAINTEXT | SSL | SASL_PLAINTEXT | SASL_SSL. env: DK_KAFKA__SECURITY__PROTOCOL
+    sasl_mechanism: null           # PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512 | GSSAPI | OAUTHBEARER.
+                                   #   Required for SASL_* protocols, rejected for the others.
+                                   #   env: DK_KAFKA__SECURITY__SASL_MECHANISM
+    sasl_username: ''              # env: DK_KAFKA__SECURITY__SASL_USERNAME
+    sasl_password: ''              # prefer the env override over a YAML literal.
+                                   #   env: DK_KAFKA__SECURITY__SASL_PASSWORD
+    ssl_ca_location: ''            # PEM CA bundle; empty uses the system trust store.
+                                   #   env: DK_KAFKA__SECURITY__SSL_CA_LOCATION
+    ssl_certificate_location: ''   # client cert (mutual TLS). env: DK_KAFKA__SECURITY__SSL_CERTIFICATE_LOCATION
+    ssl_key_location: ''           # client key (mutual TLS); requires ssl_certificate_location.
+                                   #   env: DK_KAFKA__SECURITY__SSL_KEY_LOCATION
+    ssl_key_password: ''           # passphrase for an encrypted client key.
+                                   #   env: DK_KAFKA__SECURITY__SSL_KEY_PASSWORD
+    ssl_endpoint_identification_algorithm: null  # unset = librdkafka default ("https", verification on).
+                                   #   Set to "none" ONLY for internal CAs without matching SANs.
+
+  # Escape hatch: raw librdkafka properties, merged AFTER `security` so they win.
+  # For options the typed block does not model. These four keys are rejected at startup —
+  # each one backs a delivery invariant: enable.auto.commit, partition.assignment.strategy,
+  # group.id, bootstrap.servers.
+  client_config: {}                # env: DK_KAFKA__CLIENT_CONFIG (JSON object)
+
   # Kafka-UI deep-link integration: when both are set, the operator UI shows a clickable
   # icon next to every <partition:offset>. Both empty = feature disabled silently.
   ui_url: ''                       # env: DK_KAFKA__UI_URL  · example: http://kafka-ui:8080
@@ -123,8 +150,12 @@ sinks:
   kafka:
     results:                       # instance name (free-form, referenced from handler code)
       topic: search-results        # required. env: DK_SINKS__KAFKA__RESULTS__TOPIC
-      brokers: ''                  # empty = inherit kafka.brokers. env: DK_SINKS__KAFKA__RESULTS__BROKERS
+      brokers: ''                  # empty = inherit kafka.brokers AND kafka.security.
+                                   #   env: DK_SINKS__KAFKA__RESULTS__BROKERS
       ui_url: ''                   # link to Kafka-UI/Kowl in the UI dashboard. env: DK_SINKS__KAFKA__RESULTS__UI_URL
+      security: {}                 # only consulted when `brokers` is set above; same fields as
+                                   #   kafka.security. Leaving brokers empty is the usual choice.
+      client_config: {}            # raw librdkafka overrides for this sink
 ```
 
 ### PostgreSQL sink

@@ -8,13 +8,14 @@ metadata so they can be investigated and reprocessed later.
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 
 import structlog
 from confluent_kafka import KafkaError
 from confluent_kafka.aio import AIOConsumer, AIOProducer
 from pydantic import BaseModel
 
+from drakkar.kafka_security import KafkaSecurityConfig, merge_client_config
 from drakkar.metrics import dlq_send_failures, sink_dlq_messages
 from drakkar.models import DeliveryError
 from drakkar.sinks.base import BaseSink
@@ -83,10 +84,20 @@ class DLQSink(BaseSink[BaseModel]):
     # Duplicate DLQ entries are harmless (operators inspect them manually)
     # but we keep the conservative default so nothing ever retries.
 
-    def __init__(self, topic: str, brokers: str) -> None:
+    def __init__(
+        self,
+        topic: str,
+        brokers: str,
+        security: KafkaSecurityConfig | None = None,
+        client_config: Mapping[str, str] | None = None,
+    ) -> None:
         super().__init__('dlq')
         self._topic = topic
         self._brokers = brokers
+        # Already resolved by the caller (DrakkarApp._build_dlq), which
+        # applies the same empty-brokers-inherits rule the Kafka sinks use.
+        self._security = security or KafkaSecurityConfig()
+        self._client_config = dict(client_config or {})
         self._producer: AIOProducer | None = None
 
     @property
@@ -96,12 +107,15 @@ class DLQSink(BaseSink[BaseModel]):
 
     async def connect(self) -> None:
         """Create the AIOProducer for the DLQ topic."""
-        self._producer = AIOProducer({'bootstrap.servers': self._brokers})
+        self._producer = AIOProducer(
+            merge_client_config({'bootstrap.servers': self._brokers}, self._security, self._client_config)
+        )
         await logger.ainfo(
             'dlq_sink_connected',
             category='sink',
             topic=self._topic,
             brokers=redact_url(self._brokers),
+            security=self._security.describe(),
         )
 
     async def deliver(self, payloads: list[BaseModel]) -> None:
@@ -202,6 +216,8 @@ async def read_dlq_entries(
     limit: int | None = None,
     poll_timeout: float = 2.0,
     idle_polls_before_stop: int = 2,
+    security: KafkaSecurityConfig | None = None,
+    client_config: Mapping[str, str] | None = None,
 ) -> AsyncIterator[dict]:
     """Consume DLQ entries from the DLQ Kafka topic, from the beginning.
 
@@ -225,13 +241,19 @@ async def read_dlq_entries(
     code and is not exercised by the worker runtime.
     """
     group_id = f'drakkar-dlq-reader-{uuid.uuid4().hex[:12]}'
+    # A DLQ on a secured cluster is only useful if it can be read back, so
+    # the replay path takes the same security settings as the writer.
     consumer = AIOConsumer(
-        {
-            'bootstrap.servers': brokers,
-            'group.id': group_id,
-            'enable.auto.commit': False,
-            'auto.offset.reset': 'earliest',
-        }
+        merge_client_config(
+            {
+                'bootstrap.servers': brokers,
+                'group.id': group_id,
+                'enable.auto.commit': False,
+                'auto.offset.reset': 'earliest',
+            },
+            security or KafkaSecurityConfig(),
+            client_config,
+        )
     )
     try:
         await consumer.subscribe([topic])

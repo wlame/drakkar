@@ -47,6 +47,7 @@ from drakkar.app_security import warn_if_ui_unauthenticated
 from drakkar.cache import Cache, CacheEngine
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
+from drakkar.kafka_security import KafkaSecurityConfig, describe_mixed_security
 from drakkar.logging import close_logging
 from drakkar.metrics import (
     assigned_partitions,
@@ -130,6 +131,7 @@ class AppLifecycle:
             cluster_name=app._cluster_name,
         )
         await log.ainfo('drakkar_starting', category='lifecycle', config=app._config_summary)
+        await self._report_kafka_security()
 
         # validate at least one sink is configured
         if app._config.sinks.is_empty:
@@ -185,6 +187,50 @@ class AppLifecycle:
             pass
         finally:
             await self._shutdown()
+
+    async def _report_kafka_security(self) -> None:
+        """Log how the worker will authenticate to Kafka, and flag mismatches.
+
+        The one-line ``config_summary`` deliberately does not carry security
+        (adding a token would break byte-parity with the Go backend until it
+        ships the same change), so this is where an operator confirms the
+        worker negotiated what they configured. Protocol and mechanism only —
+        never a username, password, or key path.
+
+        The warning covers the one combination that is almost always a
+        mistake: the consumer authenticates, but a sink or DLQ pointing at
+        its own brokers carries no security block and would connect in
+        plaintext.
+        """
+        app = self._app
+        log = logger.bind(worker_id=app._worker_id)
+        consumer_security = app._config.kafka.security
+
+        await log.ainfo(
+            'kafka_security',
+            category='lifecycle',
+            protocol=consumer_security.protocol,
+            mechanism=consumer_security.sasl_mechanism or '',
+            summary=consumer_security.describe(),
+        )
+
+        clients: list[tuple[str, str, KafkaSecurityConfig]] = [
+            ('dlq', app._config.dlq.brokers, app._config.dlq.security),
+            *((f'sinks.kafka.{name}', cfg.brokers, cfg.security) for name, cfg in app._config.sinks.kafka.items()),
+        ]
+        for label, brokers, security in clients:
+            # Only a client with its own brokers can diverge; an empty
+            # brokers field inherits the consumer's settings wholesale.
+            if not brokers:
+                continue
+            message = describe_mixed_security(security, consumer_security)
+            if message:
+                await log.awarning(
+                    'kafka_security_mismatch',
+                    category='lifecycle',
+                    client=label,
+                    message=message,
+                )
 
     async def _setup_watchdog(self) -> None:
         """Construct the watchdog file and check the previous run.

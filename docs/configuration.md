@@ -105,6 +105,8 @@ Settings for the Kafka consumer that reads input messages.
 | `startup_align_enabled` | `bool` | `true` | When `true`, delay the first Kafka subscribe until a shared wall-clock boundary so a fleet of workers converges on a single rebalance. Disable for single-process dev runs. |
 | `startup_min_wait_seconds` | `float` | `4.0` | Minimum seconds to sleep before aligning. Acts as a buffer for slow init (DB connects, schema migrations, cache warm-up). Must be `>= 0`. |
 | `startup_align_interval_seconds` | `int` | `10` | Alignment interval in seconds. Workers wake at the next `time.time() % interval == 0` boundary — default `10` aligns on `:00/:10/:20/:30/:40/:50` of every minute. Must be `>= 1`. |
+| `security` | `KafkaSecurityConfig` | PLAINTEXT | Transport authentication and encryption. See [Kafka security](#kafka-security-kafkasecurity). |
+| `client_config` | `dict[str, str]` | `{}` | Raw librdkafka properties merged after `security`. See [the escape hatch](#raw-librdkafka-overrides-client_config). |
 
 ```yaml
 kafka:
@@ -121,6 +123,115 @@ kafka:
   startup_min_wait_seconds: 4.0
   startup_align_interval_seconds: 10
 ```
+
+### Kafka security (`kafka.security`)
+
+The default is `PLAINTEXT`, which emits no librdkafka properties at all — a worker that configures nothing here connects exactly as it did before this block existed. Configure it to reach a cluster that requires authentication or TLS.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `protocol` | `'PLAINTEXT'` \| `'SSL'` \| `'SASL_PLAINTEXT'` \| `'SASL_SSL'` | `'PLAINTEXT'` | Wire protocol. `SSL` adds TLS, `SASL_PLAINTEXT` adds authentication without encryption, `SASL_SSL` adds both and is what managed clusters normally require. |
+| `sasl_mechanism` | `'PLAIN'` \| `'SCRAM-SHA-256'` \| `'SCRAM-SHA-512'` \| `'GSSAPI'` \| `'OAUTHBEARER'` \| `null` | `null` | Required when `protocol` is a `SASL_*` value, and **rejected** otherwise so a mechanism that would be silently ignored never sits in your config. |
+| `sasl_username` | `str` | `''` | Required for `PLAIN` and the SCRAM mechanisms. |
+| `sasl_password` | `SecretStr` | `''` | Required for `PLAIN` and the SCRAM mechanisms. Never rendered by `repr()` or `model_dump()`. |
+| `ssl_ca_location` | `str` | `''` | Path to a PEM CA bundle. Empty uses the system trust store. |
+| `ssl_certificate_location` | `str` | `''` | Client certificate for mutual TLS. |
+| `ssl_key_location` | `str` | `''` | Client private key for mutual TLS. Requires `ssl_certificate_location`. |
+| `ssl_key_password` | `SecretStr` | `''` | Passphrase for an encrypted client key. |
+| `ssl_endpoint_identification_algorithm` | `'https'` \| `'none'` \| `null` | `null` | Unset uses librdkafka's default (`https` — hostname verification on). Set `none` only for internal CAs whose certificates lack matching SANs. |
+
+**Keep credentials out of YAML.** Every field takes a `DK_` environment override, and `DK_*` variables are withheld from executor subprocesses by the default `executor.env_inherit_deny` list — so a password supplied that way never reaches your handler binary.
+
+```bash
+export DK_KAFKA__SECURITY__SASL_PASSWORD='s3cret'
+```
+
+Incoherent combinations fail at startup rather than at first poll, because librdkafka reports most of them as an opaque connection error long after the mistake was made:
+
+- a `SASL_*` protocol with no `sasl_mechanism`
+- `PLAIN`/SCRAM without `sasl_username` **and** `sasl_password`
+- a `sasl_mechanism` set while `protocol` is `PLAINTEXT` or `SSL`
+- `ssl_key_location` without `ssl_certificate_location`
+
+Certificate paths are *not* checked when config loads. A missing file logs a warning at startup and librdkafka fails the connect — a hard failure at parse time would turn an init-container mount race into a crash loop.
+
+#### Confluent Cloud / Aiven (SASL_SSL + PLAIN)
+
+```yaml
+kafka:
+  brokers: pkc-abc12.eu-west-1.aws.confluent.cloud:9092
+  security:
+    protocol: SASL_SSL
+    sasl_mechanism: PLAIN
+    sasl_username: MYCLUSTERAPIKEY
+    # password via DK_KAFKA__SECURITY__SASL_PASSWORD
+```
+
+#### Self-managed cluster with SCRAM and a private CA
+
+```yaml
+kafka:
+  brokers: kafka-1:9093,kafka-2:9093
+  security:
+    protocol: SASL_SSL
+    sasl_mechanism: SCRAM-SHA-512
+    sasl_username: drakkar
+    ssl_ca_location: /etc/ssl/certs/internal-ca.pem
+```
+
+#### Mutual TLS (no SASL)
+
+```yaml
+kafka:
+  brokers: kafka-1:9093
+  security:
+    protocol: SSL
+    ssl_ca_location: /etc/ssl/certs/ca.pem
+    ssl_certificate_location: /etc/ssl/certs/client.pem
+    ssl_key_location: /etc/ssl/private/client.key
+```
+
+#### How sinks and the DLQ get their credentials
+
+A Kafka sink or DLQ whose own `brokers` field is **empty** inherits `kafka.brokers`, `kafka.security`, and `kafka.client_config` together — same cluster, same credentials. This is the usual configuration and needs nothing extra:
+
+```yaml
+kafka:
+  brokers: kafka-1:9093
+  security:
+    protocol: SASL_SSL
+    sasl_mechanism: SCRAM-SHA-512
+    sasl_username: drakkar
+
+sinks:
+  kafka:
+    results:
+      topic: search-results   # brokers omitted -> inherits security above
+```
+
+Setting `brokers` on a sink makes it self-contained: it then uses only its own `security` block, which defaults to `PLAINTEXT`. If the consumer is secured and such a sink has no security block, startup logs a `kafka_security_mismatch` warning naming the sink.
+
+### Raw librdkafka overrides (`client_config`)
+
+For properties the typed block does not model — OAUTHBEARER token settings, Kerberos tuning, connection-pool knobs:
+
+```yaml
+kafka:
+  client_config:
+    sasl.oauthbearer.config: 'principal=drakkar'
+    socket.keepalive.enable: 'true'
+```
+
+`client_config` is merged **after** `security`, so it wins on any key both set. Four properties are rejected at startup, because each one backs a delivery invariant:
+
+| Rejected key | Why |
+|---|---|
+| `enable.auto.commit` | At-least-once delivery depends on Drakkar committing on its own per-partition watermark; auto-commit would advance past unprocessed messages. |
+| `partition.assignment.strategy` | The drain-on-revoke path assumes cooperative-sticky rebalancing. |
+| `group.id` | Set it with `kafka.consumer_group`. |
+| `bootstrap.servers` | Set it with `kafka.brokers`. |
+
+Rejecting beats ignoring: an override that is silently dropped looks like it worked.
 
 ### Staggered startup alignment
 

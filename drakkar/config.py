@@ -14,6 +14,8 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from drakkar.kafka_security import KafkaSecurityConfig, validate_client_config
+
 # Module-scope logger for config-time warnings (field/model validators).
 # These fire once per process at config load, so the sync structlog API
 # is fine — no coroutine context to await in.
@@ -42,6 +44,17 @@ class KafkaConfig(BaseModel):
     brokers: str = 'localhost:9092'
     source_topic: str = 'input-events'
     consumer_group: str = 'drakkar-workers'
+
+    # Transport security for the consumer. Also inherited by Kafka sinks and
+    # the DLQ producer whose own ``brokers`` field is empty (same cluster =>
+    # same credentials); see ``KafkaSinkConfig.security``.
+    security: KafkaSecurityConfig = Field(default_factory=KafkaSecurityConfig)
+
+    # Raw librdkafka properties merged after ``security``, for options the
+    # typed block does not model. Reserved keys are rejected at load time —
+    # see ``drakkar.kafka_security.RESERVED_CLIENT_KEYS``.
+    client_config: dict[str, str] = Field(default_factory=dict)
+
     max_poll_records: int = 100
     max_poll_interval_ms: int = 300_000
     session_timeout_ms: int = 45_000
@@ -86,6 +99,11 @@ class KafkaConfig(BaseModel):
     startup_min_wait_seconds: float = Field(default=4.0, ge=0.0)
     startup_align_interval_seconds: int = Field(default=10, ge=1)
 
+    @field_validator('client_config')
+    @classmethod
+    def _reject_reserved_client_keys(cls, v: dict[str, str]) -> dict[str, str]:
+        return validate_client_config(v)
+
 
 # --- Sink config models ---
 
@@ -94,12 +112,26 @@ class KafkaSinkConfig(BaseModel):
     """Configuration for a Kafka output sink.
 
     Each named instance produces messages to a specific topic.
-    If `brokers` is empty, inherits from `kafka.brokers` (same cluster).
+    If `brokers` is empty, inherits from `kafka.brokers` (same cluster) —
+    and, because it is the same cluster, inherits `kafka.security` and
+    `kafka.client_config` along with it. Setting `brokers` here makes the
+    sink self-contained: it then uses only its own security block, which
+    defaults to PLAINTEXT.
     """
 
     topic: str
     brokers: str = ''
     ui_url: str = ''
+
+    # Only consulted when ``brokers`` is set; an inheriting sink takes the
+    # consumer's security instead. See ``resolve_kafka_client_settings``.
+    security: KafkaSecurityConfig = Field(default_factory=KafkaSecurityConfig)
+    client_config: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator('client_config')
+    @classmethod
+    def _reject_reserved_client_keys(cls, v: dict[str, str]) -> dict[str, str]:
+        return validate_client_config(v)
 
 
 class PostgresSinkConfig(BaseModel):
@@ -309,11 +341,22 @@ class DLQConfig(BaseModel):
 
     Failed sink deliveries are written to this Kafka topic.
     If `topic` is empty, defaults to `{source_topic}_dlq` at runtime.
-    If `brokers` is empty, inherits from `kafka.brokers`.
+    If `brokers` is empty, inherits from `kafka.brokers` — and with them
+    `kafka.security` and `kafka.client_config`, on the same
+    same-cluster-means-same-credentials rule the Kafka sinks follow.
     """
 
     topic: str = ''
     brokers: str = ''
+
+    # Only consulted when ``brokers`` is set; see ``KafkaSinkConfig.security``.
+    security: KafkaSecurityConfig = Field(default_factory=KafkaSecurityConfig)
+    client_config: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator('client_config')
+    @classmethod
+    def _reject_reserved_client_keys(cls, v: dict[str, str]) -> dict[str, str]:
+        return validate_client_config(v)
 
     # Strategy when the DLQ write itself fails (or no DLQ sink exists) after
     # a sink delivery already failed — the payloads have nowhere safe to go:

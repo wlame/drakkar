@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Kafka transport security.** `kafka.security` configures SASL (PLAIN,
+  SCRAM-SHA-256/512, GSSAPI, OAUTHBEARER) and TLS including mutual TLS,
+  so the framework can now reach managed and secured clusters —
+  Confluent Cloud, AWS MSK, Aiven, Redpanda Cloud, and self-managed
+  clusters behind SASL or TLS. It applies to every Kafka client: the
+  consumer, Kafka sinks, the DLQ producer, and the DLQ replay reader.
+
+  The default is `PLAINTEXT` and emits no client properties at all, so a
+  worker that configures nothing connects exactly as before. Incoherent
+  combinations (a SASL protocol with no mechanism, SCRAM without
+  credentials, a mechanism on a non-SASL protocol, a TLS key without its
+  certificate) now fail at startup instead of surfacing as an opaque
+  librdkafka connection error at first poll.
+
+  Passwords are `SecretStr` and never appear in `repr()` or
+  `model_dump()`. Prefer the environment overrides — for example
+  `DK_KAFKA__SECURITY__SASL_PASSWORD` — over YAML literals; `DK_*`
+  variables are already withheld from executor subprocesses.
+
+  A Kafka sink or DLQ whose `brokers` field is empty inherits the
+  consumer's brokers *and* its security together. Setting `brokers`
+  makes that client self-contained; if it then carries no security while
+  the consumer is secured, startup logs a `kafka_security_mismatch`
+  warning naming it.
+
+  See [Kafka security](docs/configuration.md#kafka-security-kafkasecurity).
+
+- **`kafka.client_config`** — a raw librdkafka escape hatch, merged after
+  `security` so it wins, for properties the typed block does not model.
+  Four keys are rejected at startup because each backs a delivery
+  invariant: `enable.auto.commit`, `partition.assignment.strategy`,
+  `group.id`, `bootstrap.servers`. The same field exists on Kafka sinks
+  and the DLQ.
+
+- A `kafka_security` startup log line reports the negotiated protocol and
+  mechanism (never credentials). The one-line config summary is
+  deliberately unchanged, to preserve byte-parity with the Go backend.
+
 - CI now scans dependencies for known vulnerabilities on every run
   (`pip-audit` against the installed environment), backed by a weekly
   Dependabot job that tracks both Python package and GitHub Actions

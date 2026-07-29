@@ -27,6 +27,7 @@ from drakkar.config import DrakkarConfig, load_config
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
+from drakkar.kafka_security import resolve_client
 from drakkar.logging import setup_logging
 from drakkar.metrics import dlq_dropped_payloads
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError, SinkDeliveryFailedError
@@ -239,7 +240,15 @@ class DrakkarApp:
         kafka_brokers = self._config.kafka.brokers
 
         for name, cfg in self._config.sinks.kafka.items():
-            self._sink_manager.register(KafkaSink(name, cfg, brokers_fallback=kafka_brokers))
+            self._sink_manager.register(
+                KafkaSink(
+                    name,
+                    cfg,
+                    brokers_fallback=kafka_brokers,
+                    security_fallback=self._config.kafka.security,
+                    client_config_fallback=self._config.kafka.client_config,
+                )
+            )
 
         for name, cfg in self._config.sinks.postgres.items():
             self._sink_manager.register(PostgresSink(name, cfg))
@@ -286,8 +295,20 @@ class DrakkarApp:
     def _build_dlq(self) -> None:
         """Create the DLQ sink from config."""
         dlq_topic = self._config.dlq.topic or f'{self._config.kafka.source_topic}_dlq'
-        dlq_brokers = self._config.dlq.brokers or self._config.kafka.brokers
-        self._dlq_sink = DLQSink(topic=dlq_topic, brokers=dlq_brokers)
+        resolved = resolve_client(
+            self._config.dlq.brokers,
+            self._config.dlq.security,
+            self._config.dlq.client_config,
+            fallback_brokers=self._config.kafka.brokers,
+            fallback_security=self._config.kafka.security,
+            fallback_client_config=self._config.kafka.client_config,
+        )
+        self._dlq_sink = DLQSink(
+            topic=dlq_topic,
+            brokers=resolved.brokers,
+            security=resolved.security,
+            client_config=resolved.client_config,
+        )
 
     def _total_queued(self) -> int:
         """Total messages buffered across all partition queues + in-flight tasks."""
