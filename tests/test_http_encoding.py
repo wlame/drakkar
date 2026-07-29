@@ -145,7 +145,9 @@ def test_multipart_encoding_of_empty_model_is_closing_delimiter_only():
 
     body, _ = encode_body(Empty(), 'multipart', boundary='BOUND')
 
-    assert body == b'--BOUND--\r\n'
+    # The leading CRLF is the close-delimiter's per RFC 2046; with no parts
+    # nothing precedes it to supply it, so it appears alone.
+    assert body == b'\r\n--BOUND--\r\n'
 
 
 def test_multipart_encoding_escapes_quotes_in_field_names():
@@ -157,12 +159,13 @@ def test_multipart_encoding_escapes_quotes_in_field_names():
     assert b'name="a\\"b\\\\c"' in body
 
 
-def test_multipart_rejects_field_name_with_line_break():
+@pytest.mark.parametrize('bad_name', ['a\nb', 'a\rb'])
+def test_multipart_rejects_field_name_with_line_break(bad_name):
     class Raw(RootModel[dict[str, str]]):
         pass
 
     with pytest.raises(HttpEncodingError) as excinfo:
-        encode_body(Raw({'a\nb': 'v'}), 'multipart', boundary='BOUND')
+        encode_body(Raw({bad_name: 'v'}), 'multipart', boundary='BOUND')
 
     assert 'line break' in str(excinfo.value)
 

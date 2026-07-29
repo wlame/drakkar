@@ -152,14 +152,18 @@ def _encode_multipart(data: BaseModel, boundary: str) -> bytes:
     final delimiter) mirrors Go's ``mime/multipart`` writer byte for byte.
     """
     chunks: list[bytes] = []
-    for name, value in _extract_fields(data):
+    for index, (name, value) in enumerate(_extract_fields(data)):
         if '\r' in name or '\n' in name:
             raise HttpEncodingError(f'multipart field name {name!r} contains a line break, which cannot be encoded')
-        chunks.append(f'--{boundary}\r\n'.encode())
+        # Go's multipart.Writer prefixes every part after the first with CRLF
+        # and writes one unconditionally at Close, rather than trailing each
+        # part with it. Mirroring that shape means the zero-field body comes
+        # out as CRLF + close-delimiter with no special case, matching both
+        # Go and RFC 2046's close-delimiter grammar.
+        chunks.append((f'--{boundary}\r\n' if index == 0 else f'\r\n--{boundary}\r\n').encode())
         chunks.append(f'Content-Disposition: form-data; name="{_escape_field_name(name)}"\r\n\r\n'.encode())
         chunks.append(value.encode())
-        chunks.append(b'\r\n')
-    chunks.append(f'--{boundary}--\r\n'.encode())
+    chunks.append(f'\r\n--{boundary}--\r\n'.encode())
     return b''.join(chunks)
 
 
