@@ -117,3 +117,62 @@ def test_unknown_encoding_raises():
         encode_body(Flat(zeta='z', alpha='a', mid=1), 'xml')
 
     assert 'xml' in str(excinfo.value)
+
+
+def test_multipart_encoding_frames_sorted_fields():
+    model = Flat(zeta='z', alpha='a', mid=7)
+
+    body, content_type = encode_body(model, 'multipart', boundary='BOUND')
+
+    assert content_type == 'multipart/form-data; boundary=BOUND'
+    assert body == (
+        b'--BOUND\r\n'
+        b'Content-Disposition: form-data; name="alpha"\r\n\r\n'
+        b'a\r\n'
+        b'--BOUND\r\n'
+        b'Content-Disposition: form-data; name="mid"\r\n\r\n'
+        b'7\r\n'
+        b'--BOUND\r\n'
+        b'Content-Disposition: form-data; name="zeta"\r\n\r\n'
+        b'z\r\n'
+        b'--BOUND--\r\n'
+    )
+
+
+def test_multipart_encoding_of_empty_model_is_closing_delimiter_only():
+    class Empty(BaseModel):
+        pass
+
+    body, _ = encode_body(Empty(), 'multipart', boundary='BOUND')
+
+    assert body == b'--BOUND--\r\n'
+
+
+def test_multipart_encoding_escapes_quotes_in_field_names():
+    class Raw(RootModel[dict[str, str]]):
+        pass
+
+    body, _ = encode_body(Raw({'a"b\\c': 'v'}), 'multipart', boundary='BOUND')
+
+    assert b'name="a\\"b\\\\c"' in body
+
+
+def test_multipart_rejects_field_name_with_line_break():
+    class Raw(RootModel[dict[str, str]]):
+        pass
+
+    with pytest.raises(HttpEncodingError) as excinfo:
+        encode_body(Raw({'a\nb': 'v'}), 'multipart', boundary='BOUND')
+
+    assert 'line break' in str(excinfo.value)
+
+
+def test_multipart_generates_a_unique_boundary_when_none_supplied():
+    model = Flat(zeta='z', alpha='a', mid=1)
+
+    _, first = encode_body(model, 'multipart')
+    _, second = encode_body(model, 'multipart')
+
+    assert first != second
+    assert first.startswith('multipart/form-data; boundary=')
+    assert len(first.rsplit('=', 1)[1]) == 60

@@ -135,6 +135,34 @@ def generate_boundary() -> str:
     return secrets.token_hex(_BOUNDARY_RANDOM_BYTES)
 
 
+def _escape_field_name(name: str) -> str:
+    """Escape a field name for a Content-Disposition header.
+
+    Matches Go's ``mime/multipart`` escaping, which is what the Go
+    backend emits: backslash and double quote are escaped, nothing else.
+    """
+    return name.replace('\\', '\\\\').replace('"', '\\"')
+
+
+def _encode_multipart(data: BaseModel, boundary: str) -> bytes:
+    """Encode as multipart/form-data with field parts only.
+
+    No filename parameter and no per-part Content-Type: this carries form
+    fields, not files. The framing (CRLF everywhere, closing ``--`` on the
+    final delimiter) mirrors Go's ``mime/multipart`` writer byte for byte.
+    """
+    chunks: list[bytes] = []
+    for name, value in _extract_fields(data):
+        if '\r' in name or '\n' in name:
+            raise HttpEncodingError(f'multipart field name {name!r} contains a line break, which cannot be encoded')
+        chunks.append(f'--{boundary}\r\n'.encode())
+        chunks.append(f'Content-Disposition: form-data; name="{_escape_field_name(name)}"\r\n\r\n'.encode())
+        chunks.append(value.encode())
+        chunks.append(b'\r\n')
+    chunks.append(f'--{boundary}--\r\n'.encode())
+    return b''.join(chunks)
+
+
 def encode_body(
     data: BaseModel,
     encoding: str,
@@ -150,4 +178,7 @@ def encode_body(
         return data.model_dump_json().encode(), JSON_CONTENT_TYPE
     if encoding == 'form':
         return _encode_form(data), FORM_CONTENT_TYPE
+    if encoding == 'multipart':
+        resolved = boundary or generate_boundary()
+        return _encode_multipart(data, resolved), MULTIPART_CONTENT_TYPE.format(boundary=resolved)
     raise HttpEncodingError(f"unknown HTTP sink encoding {encoding!r}; expected 'json', 'form', or 'multipart'")
