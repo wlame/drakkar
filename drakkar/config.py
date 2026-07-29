@@ -162,6 +162,11 @@ class HttpSinkConfig(BaseModel):
 
     Each named instance POSTs JSON payloads to a URL.
 
+    The ``encoding`` setting selects the request body format. The body and
+    the Content-Type header always derive from it together, so a
+    Content-Type in ``headers`` is rejected rather than silently
+    contradicting the body.
+
     SSRF note: the URL is operator-configured (YAML/env), never drawn
     from message content. Validation here protects against typos and
     obvious mistakes (unsupported scheme, missing host) and refuses to
@@ -173,6 +178,7 @@ class HttpSinkConfig(BaseModel):
     method: str = 'POST'
     timeout_seconds: int = Field(default=30, ge=1)
     headers: dict[str, str] = Field(default_factory=dict)
+    encoding: Literal['json', 'form', 'multipart'] = 'json'
     max_retries: int = Field(default=3, ge=0)
     ui_url: str = ''
 
@@ -192,6 +198,23 @@ class HttpSinkConfig(BaseModel):
                 'If this is intentional, update _HTTP_BLOCKED_METADATA_HOSTS.'
             )
         return v
+
+    @model_validator(mode='after')
+    def _reject_content_type_header(self) -> 'HttpSinkConfig':
+        """Refuse a Content-Type header — ``encoding`` owns it.
+
+        Headers are applied over the encoder's Content-Type, so allowing
+        an override would let the declared type contradict the bytes
+        actually sent. Multipart additionally needs a generated boundary
+        parameter, which a static header can never carry correctly.
+        """
+        for key in self.headers:
+            if key.lower() == 'content-type':
+                raise ValueError(
+                    f"headers must not set {key!r}; the Content-Type is determined by "
+                    f'encoding={self.encoding!r}. Remove the header or change the encoding.'
+                )
+        return self
 
 
 class RedisSinkConfig(BaseModel):

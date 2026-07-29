@@ -230,6 +230,53 @@ def test_http_sink_config_accepts_normal_urls():
         assert cfg.url == url
 
 
+def test_http_sink_config_encoding_defaults_to_json():
+    config = HttpSinkConfig(url='https://api.example.com/hook')
+
+    assert config.encoding == 'json'
+
+
+@pytest.mark.parametrize('encoding', ['json', 'form', 'multipart'])
+def test_http_sink_config_accepts_every_supported_encoding(encoding):
+    config = HttpSinkConfig(url='https://api.example.com/hook', encoding=encoding)
+
+    assert config.encoding == encoding
+
+
+def test_http_sink_config_rejects_unknown_encoding():
+    with pytest.raises(ValidationError):
+        HttpSinkConfig(url='https://api.example.com/hook', encoding='xml')
+
+
+def test_http_sink_config_rejects_content_type_header():
+    with pytest.raises(ValidationError) as excinfo:
+        HttpSinkConfig(
+            url='https://api.example.com/hook',
+            encoding='form',
+            headers={'Content-Type': 'application/xml'},
+        )
+
+    assert 'Content-Type' in str(excinfo.value)
+    assert 'form' in str(excinfo.value)
+
+
+def test_http_sink_config_rejects_content_type_header_case_insensitively():
+    with pytest.raises(ValidationError):
+        HttpSinkConfig(
+            url='https://api.example.com/hook',
+            headers={'content-type': 'application/json'},
+        )
+
+
+def test_http_sink_config_allows_other_headers():
+    config = HttpSinkConfig(
+        url='https://api.example.com/hook',
+        headers={'Authorization': 'Bearer t', 'X-Trace': '1'},
+    )
+
+    assert config.headers == {'Authorization': 'Bearer t', 'X-Trace': '1'}
+
+
 def test_redis_sink_config_defaults():
     cfg = RedisSinkConfig()
     assert cfg.url == 'redis://localhost:6379/0'
