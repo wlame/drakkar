@@ -96,7 +96,7 @@ def _compact_json(value: Any) -> str:
     if isinstance(value, dict):
         pairs = (f'{_escape_json_string(cast(str, key))}:{_compact_json(item)}' for key, item in sorted(value.items()))
         return '{' + ','.join(pairs) + '}'
-    raise HttpEncodingError(f"cannot encode value of type {type(value).__name__}")
+    raise HttpEncodingError(f'cannot encode value of type {type(value).__name__}')
 
 
 def _render_value(value: Any) -> str:
@@ -120,7 +120,7 @@ def _extract_fields(data: BaseModel) -> list[tuple[str, str]]:
         parse_float=_RawNumber,
     )
     if not isinstance(decoded, dict):
-        raise HttpEncodingError(f"form encodings require a JSON object at the top level, got {type(decoded).__name__}")
+        raise HttpEncodingError(f'form encodings require a JSON object at the top level, got {type(decoded).__name__}')
     return [(name, _render_value(decoded[name])) for name in sorted(decoded)]
 
 

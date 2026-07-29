@@ -104,7 +104,7 @@ ignore = [
 ]
 
 [tool.ruff.format]
-quote-style = "preserve"
+quote-style = "single"
 
 [dependency-groups]
 dev = [

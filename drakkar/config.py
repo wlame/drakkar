@@ -211,7 +211,7 @@ class HttpSinkConfig(BaseModel):
         for key in self.headers:
             if key.lower() == 'content-type':
                 raise ValueError(
-                    f"headers must not set {key!r}; the Content-Type is determined by "
+                    f'headers must not set {key!r}; the Content-Type is determined by '
                     f'encoding={self.encoding!r}. Remove the header or change the encoding.'
                 )
         return self
