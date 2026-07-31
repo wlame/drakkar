@@ -1,0 +1,90 @@
+[
+  {
+    "name": "scalars_sorted",
+    "model": {"zeta": "z", "alpha": "a", "mid": 7},
+    "encoding": "form",
+    "boundary": null,
+    "body": "alpha=a&mid=7&zeta=z",
+    "content_type": "application/x-www-form-urlencoded"
+  },
+  {
+    "name": "every_json_type",
+    "model": {"name": "n", "count": 42, "ratio": 1.5, "ok": true, "missing": null, "tags": ["x", "y"], "meta": {"k": 1}},
+    "encoding": "form",
+    "boundary": null,
+    "body": "count=42&meta=%7B%22k%22%3A1%7D&missing=null&name=n&ok=true&ratio=1.5&tags=%5B%22x%22%2C%22y%22%5D",
+    "content_type": "application/x-www-form-urlencoded"
+  },
+  {
+    "name": "large_integer_literal",
+    "model": {"n": 9007199254740993},
+    "encoding": "form",
+    "boundary": null,
+    "body": "n=9007199254740993",
+    "content_type": "application/x-www-form-urlencoded"
+  },
+  {
+    "name": "reserved_characters",
+    "model": {"field": "a&b=c d+e"},
+    "encoding": "form",
+    "boundary": null,
+    "body": "field=a%26b%3Dc+d%2Be",
+    "content_type": "application/x-www-form-urlencoded"
+  },
+  {
+    "name": "inline_json_keeps_utf8_and_html_characters",
+    "model": {"meta": {"k": "café<&>"}},
+    "encoding": "form",
+    "boundary": null,
+    "body": "meta=%7B%22k%22%3A%22caf%C3%A9%3C%26%3E%22%7D",
+    "content_type": "application/x-www-form-urlencoded"
+  },
+  {
+    "name": "inline_json_control_character_escapes",
+    "model": {"meta": {"k": "a\nb\tc"}},
+    "encoding": "form",
+    "boundary": null,
+    "body": "meta=%7B%22k%22%3A%22a%5Cnb%5Ctc%22%7D",
+    "content_type": "application/x-www-form-urlencoded"
+  },
+  {
+    "name": "nested_object_keys_sorted",
+    "model": {"meta": {"z": 1, "a": 2}},
+    "encoding": "form",
+    "boundary": null,
+    "body": "meta=%7B%22a%22%3A2%2C%22z%22%3A1%7D",
+    "content_type": "application/x-www-form-urlencoded"
+  },
+  {
+    "name": "empty_model_form",
+    "model": {},
+    "encoding": "form",
+    "boundary": null,
+    "body": "",
+    "content_type": "application/x-www-form-urlencoded"
+  },
+  {
+    "name": "multipart_sorted_fields",
+    "model": {"zeta": "z", "alpha": "a", "mid": 7},
+    "encoding": "multipart",
+    "boundary": "BOUND",
+    "body": "--BOUND\r\nContent-Disposition: form-data; name=\"alpha\"\r\n\r\na\r\n--BOUND\r\nContent-Disposition: form-data; name=\"mid\"\r\n\r\n7\r\n--BOUND\r\nContent-Disposition: form-data; name=\"zeta\"\r\n\r\nz\r\n--BOUND--\r\n",
+    "content_type": "multipart/form-data; boundary=BOUND"
+  },
+  {
+    "name": "multipart_empty_model",
+    "model": {},
+    "encoding": "multipart",
+    "boundary": "BOUND",
+    "body": "\r\n--BOUND--\r\n",
+    "content_type": "multipart/form-data; boundary=BOUND"
+  },
+  {
+    "name": "json_default",
+    "model": {"zeta": "z", "alpha": "a", "mid": 7},
+    "encoding": "json",
+    "boundary": null,
+    "body": "{\"zeta\":\"z\",\"alpha\":\"a\",\"mid\":7}",
+    "content_type": "application/json"
+  }
+]

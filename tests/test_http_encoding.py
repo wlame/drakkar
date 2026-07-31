@@ -1,5 +1,9 @@
 """Unit tests for the HTTP sink body encoders."""
 
+import json as json_module
+from pathlib import Path
+from typing import Any
+
 import pytest
 from pydantic import BaseModel, RootModel
 
@@ -179,3 +183,30 @@ def test_multipart_generates_a_unique_boundary_when_none_supplied():
     assert first != second
     assert first.startswith('multipart/form-data; boundary=')
     assert len(first.rsplit('=', 1)[1]) == 60
+
+
+VECTORS_PATH = Path(__file__).parent / 'fixtures' / 'http_encoding_vectors.json'
+
+
+class VectorModel(RootModel[dict[str, Any]]):
+    """Carries a fixture's model verbatim, preserving its key order.
+
+    A ``RootModel`` over a dict is used rather than a generated
+    ``BaseModel`` so the fixture's key order survives to
+    ``model_dump_json()`` — the ``json`` vector asserts declaration order,
+    not sorted order, because the JSON path skips field extraction.
+    """
+
+
+@pytest.mark.parametrize(
+    'vector',
+    json_module.loads(VECTORS_PATH.read_text()),
+    ids=lambda v: v['name'],
+)
+def test_golden_vector(vector):
+    model = VectorModel(vector['model'])
+
+    body, content_type = encode_body(model, vector['encoding'], boundary=vector['boundary'])
+
+    assert body.decode() == vector['body']
+    assert content_type == vector['content_type']
