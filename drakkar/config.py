@@ -160,7 +160,7 @@ class MongoSinkConfig(BaseModel):
 class HttpSinkConfig(BaseModel):
     """Configuration for an HTTP output sink.
 
-    Each named instance POSTs JSON payloads to a URL.
+    Each named instance POSTs a payload to a URL, encoded per ``encoding``.
 
     The ``encoding`` setting selects the request body format. The body and
     the Content-Type header always derive from it together, so a
