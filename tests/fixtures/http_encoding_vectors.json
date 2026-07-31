@@ -86,5 +86,13 @@
     "boundary": null,
     "body": "{\"zeta\":\"z\",\"alpha\":\"a\",\"mid\":7}",
     "content_type": "application/json"
+  },
+  {
+    "name": "json_keeps_utf8_and_html_characters",
+    "model": {"a": "x<y&z café"},
+    "encoding": "json",
+    "boundary": null,
+    "body": "{\"a\":\"x<y&z café\"}",
+    "content_type": "application/json"
   }
 ]
