@@ -360,6 +360,26 @@ Sends JSON payloads to an HTTP endpoint.
     hostnames are **not** blocked — internal webhook services remain
     legitimate targets.
 
+#### Body encoding (`sinks.http.<name>.encoding`)
+
+The HTTP sink sends `application/json` by default. Set `encoding` to
+`form` or `multipart` for endpoints that require a form body.
+
+| value | body | Content-Type |
+|---|---|---|
+| `json` (default) | the payload model serialized as JSON | `application/json` |
+| `form` | `name=value` pairs | `application/x-www-form-urlencoded` |
+| `multipart` | one part per field | `multipart/form-data; boundary=…` |
+
+For `form` and `multipart` the model is flattened to fields sorted by
+name. String values are sent as-is; every other value — number, boolean,
+null, object, array — is rendered as compact JSON in that field. Multipart
+carries fields only, never files.
+
+The Content-Type always derives from `encoding`, so setting a
+`Content-Type` in `headers` is a configuration error. Remove the header
+or change the encoding.
+
 ### Redis Sink (`sinks.redis.<name>`)
 
 Sets key-value pairs in Redis.

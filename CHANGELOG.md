@@ -54,7 +54,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A scheduled nightly workflow runs the full Docker-based integration
   harness against real Kafka, Postgres, Mongo, and Redis.
 
+- **HTTP sink body encodings.** `sinks.http.<name>.encoding` selects the
+  request body format: `json` (the default, unchanged), `form`
+  (`application/x-www-form-urlencoded`), or `multipart`
+  (`multipart/form-data`, fields only). For the form encodings the payload
+  model is flattened to fields sorted by name, with non-string values
+  rendered as compact JSON. Both backends emit byte-identical bodies, with
+  one documented exception: a `json`-encoded payload containing U+2028 or
+  U+2029 differs, because Go's JSON encoder escapes those two characters
+  unconditionally (recorded as divergence #21 in the Go backend).
+
 ### Changed
+
+- **An HTTP sink that sets a `Content-Type` header now fails at startup.**
+  The Content-Type is determined by `encoding`, so an explicit header
+  could only contradict the body actually sent — which is what happened
+  silently before. Remove the header, or set `encoding` to the format you
+  intended.
 
 - **The MongoDB sink now uses PyMongo's async client instead of the
   deprecated `motor` driver.** No configuration change is required, and

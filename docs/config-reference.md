@@ -200,6 +200,7 @@ sinks:
       timeout_seconds: 30          # request timeout. env: DK_SINKS__HTTP__WEBHOOK__TIMEOUT_SECONDS
       max_retries: 3               # retries per failed request. env: DK_SINKS__HTTP__WEBHOOK__MAX_RETRIES
       headers: {}                  # extra request headers. env: DK_SINKS__HTTP__WEBHOOK__HEADERS (JSON)
+      encoding: json               # body format: json | form | multipart. env: DK_SINKS__HTTP__WEBHOOK__ENCODING
       ui_url: ''                   # env: DK_SINKS__HTTP__WEBHOOK__UI_URL
 ```
 

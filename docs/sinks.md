@@ -130,8 +130,10 @@ Sends a JSON request to an HTTP endpoint.
 | `sink` | `str` | Target sink instance name (empty string for default) |
 | `data` | `BaseModel` | Payload model |
 
-**Serialization:** `data.model_dump_json()` becomes the request body with
-`Content-Type: application/json`. Non-2xx responses raise an error routed through
+**Serialization:** The request body format follows the sink's `encoding` setting — `json`
+(the default), `form`, or `multipart`. The encoder supplies the
+`Content-Type` along with the body, so the two always agree. See
+[Body encoding](configuration.md#body-encoding-sinkshttpnameencoding). Non-2xx responses raise an error routed through
 [on_delivery_error()](handler.md#on_delivery_error).
 
 ```python
