@@ -64,6 +64,24 @@ class HttpSink(BaseSink[HttpPayload]):
             method=self._config.method,
         )
 
+    def _request_headers(self, content_type: str) -> dict[str, str]:
+        """Build per-request headers with the encoder's Content-Type winning.
+
+        Config validation rejects a Content-Type in ``headers``, but a caller
+        can build a config with ``model_construct`` and never validate it, so
+        the strip happens here too. The comparison is case-insensitive
+        because HTTP header names are, while a dict merge is not — leaving a
+        differently-cased key in place would put two Content-Type lines on
+        the wire instead of letting the encoder's value win.
+
+        The configured headers are re-applied per request (rather than relying
+        on the client defaults set in ``connect``) so ``deliver`` produces a
+        complete header set on its own.
+        """
+        headers = {k: v for k, v in self._config.headers.items() if k.lower() != 'content-type'}
+        headers['Content-Type'] = content_type
+        return headers
+
     async def deliver(self, payloads: list[HttpPayload]) -> None:
         """Send each payload to the configured URL with encoded body.
 
@@ -81,7 +99,7 @@ class HttpSink(BaseSink[HttpPayload]):
                     method=self._config.method,
                     url=self._config.url,
                     content=body,
-                    headers={**self._config.headers, 'Content-Type': content_type},
+                    headers=self._request_headers(content_type),
                 )
                 response.raise_for_status()
 

@@ -807,6 +807,24 @@ async def test_http_sink_connect_custom_headers():
     await sink.close()
 
 
+async def test_http_sink_connect_no_hardcoded_content_type():
+    """Verify connect() does not set Content-Type in client default headers.
+
+    The encoder provides Content-Type per request in deliver(), so the client
+    should not have a hardcoded value that would require filtering.
+    """
+    from drakkar.sinks.http import HttpSink
+
+    config = HttpSinkConfig(url='https://api.example.com/results')
+    sink = HttpSink('webhook', config)
+    await sink.connect()
+
+    # Check that no content-type variant is in the client headers
+    has_content_type = any(k.lower() == 'content-type' for k in sink._client.headers)
+    assert not has_content_type
+    await sink.close()
+
+
 async def test_http_sink_deliver(http_sink_config):
 
     sink, mock_client = _make_http_sink(http_sink_config)
@@ -996,11 +1014,15 @@ async def test_http_sink_configured_headers_still_reach_the_request():
     assert mock_client.request.call_args[1]['headers']['Authorization'] == 'Bearer t'
 
 
-async def test_http_sink_headers_cannot_override_content_type():
+@pytest.mark.parametrize(
+    'content_type_key',
+    ['Content-Type', 'content-type', 'CONTENT-TYPE'],
+)
+async def test_http_sink_headers_cannot_override_content_type(content_type_key):
     # The config validator rejects this, but a caller can build the config
     # in Python and never validate it. The encoder's Content-Type must still
-    # win — httpx gives per-request headers precedence over client headers,
-    # and this test pins that so a future refactor cannot silently invert it.
+    # win. HTTP header names are case-insensitive, so test all common cases
+    # to verify the sink removes any variant and replaces it with the encoder's.
     config = HttpSinkConfig.model_construct(
         url='https://api.example.com/results',
         method='POST',
@@ -1008,7 +1030,7 @@ async def test_http_sink_headers_cannot_override_content_type():
         max_retries=3,
         ui_url='',
         encoding='form',
-        headers={'Content-Type': 'application/vnd.custom+json'},
+        headers={content_type_key: 'application/vnd.custom+json'},
     )
     sink, mock_client = _make_http_sink(config)
     mock_client.request.return_value = _mock_response(200)
@@ -1016,7 +1038,11 @@ async def test_http_sink_headers_cannot_override_content_type():
     await sink.deliver([HttpPayload(data=SampleOutput(request_id='r1'))])
 
     call_kwargs = mock_client.request.call_args[1]
-    assert call_kwargs['headers']['Content-Type'] == 'application/x-www-form-urlencoded'
+    headers = call_kwargs['headers']
+    # Exactly one Content-Type, set to the encoder's value
+    assert headers['Content-Type'] == 'application/x-www-form-urlencoded'
+    # Verify no duplicate header with different case exists
+    assert sum(1 for k in headers if k.lower() == 'content-type') == 1
 
 
 # =============================================================================
