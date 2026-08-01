@@ -52,3 +52,48 @@ def render_insert(quoted_table: str, quoted_columns: list[str], row_count: int) 
     width = len(quoted_columns)
     tuples = ['(' + ', '.join(f'${row * width + col + 1}' for col in range(width)) + ')' for row in range(row_count)]
     return f'INSERT INTO {quoted_table} ({col_names}) VALUES {", ".join(tuples)}'
+
+
+def render_update(
+    quoted_table: str,
+    quoted_set_columns: list[str],
+    quoted_where_columns: list[str],
+    quoted_null_where_columns: list[str],
+) -> str:
+    """Render a single-row UPDATE.
+
+    Parameters are numbered SET values first, then the ``quoted_where_columns``
+    values, so the caller flattens its arguments in that order.
+
+    ``quoted_null_where_columns`` render ``IS NULL`` and consume no parameter:
+    ``= NULL`` is never true in SQL's three-valued logic, so it would match no
+    row and report success. They are appended after the equality predicates,
+    which keeps the emitted clause order deterministic regardless of the
+    caller's mapping order.
+    """
+    assignments = [f'{col} = ${i}' for i, col in enumerate(quoted_set_columns, start=1)]
+    predicates = [f'{col} = ${i}' for i, col in enumerate(quoted_where_columns, start=len(quoted_set_columns) + 1)]
+    predicates.extend(f'{col} IS NULL' for col in quoted_null_where_columns)
+    return f'UPDATE {quoted_table} SET {", ".join(assignments)} WHERE {" AND ".join(predicates)}'
+
+
+def render_upsert(
+    quoted_table: str,
+    quoted_columns: list[str],
+    row_count: int,
+    quoted_conflict: list[str],
+    quoted_update_columns: list[str],
+) -> str:
+    """Render a multi-row INSERT with an ON CONFLICT tail.
+
+    An empty ``quoted_update_columns`` means every inserted column belongs to
+    the conflict target, so there is nothing left to overwrite; that renders
+    ``DO NOTHING`` rather than a ``DO UPDATE SET`` with no assignments, which
+    is a syntax error.
+    """
+    statement = render_insert(quoted_table, quoted_columns, row_count)
+    target = ', '.join(quoted_conflict)
+    if not quoted_update_columns:
+        return f'{statement} ON CONFLICT ({target}) DO NOTHING'
+    assignments = ', '.join(f'{col} = EXCLUDED.{col}' for col in quoted_update_columns)
+    return f'{statement} ON CONFLICT ({target}) DO UPDATE SET {assignments}'
