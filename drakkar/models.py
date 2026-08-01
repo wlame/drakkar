@@ -10,7 +10,7 @@ import time
 from enum import StrEnum
 from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # Marks where a task / message-group originated. ``'kafka'`` is the historical
 # source path (consumer poll → arrange → executor). ``'http'`` is the webapp
@@ -537,16 +537,164 @@ class KafkaPayload(BaseModel):
     )
 
 
-class PostgresPayload(BaseModel):
-    """Payload for a PostgreSQL sink — inserts a row into a table.
+class PostgresOp(StrEnum):
+    """Which statement the Postgres sink builds for a payload.
 
-    The framework serializes `data` via `model_dump()` to get a column-name
-    to value mapping, then executes an INSERT statement.
+    ``INSERT``/``UPDATE``/``UPSERT`` are built by the framework from the
+    payload's own fields. ``STATEMENT`` instead names SQL the operator
+    authored in configuration, which the framework looks up and binds
+    parameters into — the escape hatch for anything the declarative fields
+    cannot express, such as value-dependent expressions
+    (``attempts = attempts + 1``) or guarded predicates.
+    """
+
+    INSERT = 'insert'
+    UPDATE = 'update'
+    UPSERT = 'upsert'
+    STATEMENT = 'statement'
+
+
+# Per-op field contract: (required, must-be-unset). Enforced in BOTH
+# directions — a field the op does not use has to be a loud error rather
+# than silently dropped, which is the one real hazard of expressing four
+# operations as one class with optional fields.
+_PG_OP_FIELDS: dict[PostgresOp, tuple[frozenset[str], frozenset[str]]] = {
+    PostgresOp.INSERT: (
+        frozenset({'table', 'data'}),
+        frozenset({'where', 'conflict', 'update_columns', 'statement', 'params'}),
+    ),
+    PostgresOp.UPDATE: (
+        frozenset({'table', 'data', 'where'}),
+        frozenset({'conflict', 'update_columns', 'statement', 'params'}),
+    ),
+    PostgresOp.UPSERT: (
+        frozenset({'table', 'data', 'conflict'}),
+        frozenset({'where', 'statement', 'params'}),
+    ),
+    PostgresOp.STATEMENT: (
+        frozenset({'statement'}),
+        frozenset({'table', 'data', 'where', 'conflict', 'update_columns'}),
+    ),
+}
+
+# The value each field holds when the user has not set it. Doubles as the
+# "is this required field missing?" test, so an empty ``conflict`` list fails
+# the UPSERT requirement without a separate length check.
+_PG_FIELD_UNSET: dict[str, object] = {
+    'table': '',
+    'data': None,
+    'where': None,
+    'conflict': [],
+    'update_columns': None,
+    'statement': '',
+    'params': None,
+}
+
+
+class PostgresPayload(BaseModel):
+    """Payload for a PostgreSQL sink — one INSERT, UPDATE, UPSERT, or named statement.
+
+    ``op`` selects the operation and defaults to ``INSERT``, so
+    ``PostgresPayload(table=..., data=...)`` inserts a row.
+
+    Examples::
+
+        # INSERT
+        PostgresPayload(table='results', data=row)
+
+        # UPDATE ... SET status = $1 WHERE id = $2
+        PostgresPayload(
+            op=PostgresOp.UPDATE,
+            table='jobs',
+            data=JobStatus(status='done'),
+            where=JobKey(id=42),
+        )
+
+        # INSERT ... ON CONFLICT (id) DO UPDATE SET last_seen = EXCLUDED.last_seen
+        PostgresPayload(
+            op=PostgresOp.UPSERT,
+            table='sessions',
+            data=Session(id=1, created_at=t0, last_seen=t1),
+            conflict=['id'],
+            update_columns=['last_seen'],
+        )
+
+        # operator-authored SQL from sinks.postgres.<instance>.statements
+        PostgresPayload(
+            op=PostgresOp.STATEMENT,
+            statement='claim_job',
+            params=ClaimParams(id=42, status='running'),
+        )
     """
 
     sink: str = _SINK_FIELD
-    table: str = Field(description='Target table name for the INSERT statement.')
-    data: BaseModel = Field(description='Payload model. Serialized via model_dump() to a column→value dict for INSERT.')
+    op: PostgresOp = Field(
+        default=PostgresOp.INSERT,
+        description='Which statement to build. Defaults to a plain INSERT.',
+    )
+    table: str = Field(
+        default='',
+        description='Target table. Required for insert/update/upsert, unused by statement.',
+    )
+    data: BaseModel | None = Field(
+        default=None,
+        description=(
+            'Payload model. Serialized via model_dump() to a column→value dict — '
+            'the inserted row, or the SET assignments for an update.'
+        ),
+    )
+    where: BaseModel | None = Field(
+        default=None,
+        description=(
+            'Update only, required. Serialized via model_dump() to an equality '
+            'predicate, ANDed together. A None value renders IS NULL. Never '
+            'optional: an empty predicate would rewrite every row in the table.'
+        ),
+    )
+    conflict: list[str] = Field(
+        default_factory=list,
+        description='Upsert only, required. ON CONFLICT target columns.',
+    )
+    update_columns: list[str] | None = Field(
+        default=None,
+        description=(
+            'Upsert only. Which columns to overwrite on conflict; defaults to '
+            'every data column not in `conflict`. Name a subset to preserve the '
+            'rest (e.g. keep created_at while refreshing last_seen).'
+        ),
+    )
+    statement: str = Field(
+        default='',
+        description=(
+            'Statement only, required. Key under sinks.postgres.<instance>.statements naming the SQL to execute.'
+        ),
+    )
+    params: BaseModel | None = Field(
+        default=None,
+        description=(
+            'Statement only. Serialized via model_dump() and bound to the '
+            "statement's :name placeholders. May be None only when the "
+            'statement declares no placeholders.'
+        ),
+    )
+
+    @model_validator(mode='after')
+    def _check_op_fields(self) -> 'PostgresPayload':
+        """Enforce the per-op field contract in both directions."""
+        required, forbidden = _PG_OP_FIELDS[self.op]
+        for name in sorted(required):
+            if getattr(self, name) == _PG_FIELD_UNSET[name]:
+                raise ValueError(f'PostgresPayload(op={self.op.value!r}) requires {name!r}')
+        for name in sorted(forbidden):
+            if getattr(self, name) != _PG_FIELD_UNSET[name]:
+                raise ValueError(
+                    f'PostgresPayload(op={self.op.value!r}) does not use {name!r} — remove it or change op'
+                )
+        if self.update_columns is not None:
+            overlap = sorted(set(self.update_columns) & set(self.conflict))
+            if overlap:
+                raise ValueError(f'update_columns overlaps conflict columns: {overlap}')
+        return self
 
 
 class MongoPayload(BaseModel):
