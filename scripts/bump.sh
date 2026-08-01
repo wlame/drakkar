@@ -52,9 +52,16 @@ TODAY=$(date +%F)
 
 # ── preflight ────────────────────────────────────────────────────────────
 
+# A dirty tree blocks a real run but not a preview — you often want to see
+# the plan before committing the last change.
 if ! git diff --quiet HEAD 2>/dev/null; then
-    echo "Error: working tree has uncommitted changes. Commit or stash first."
-    exit 1
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "Warning: working tree has uncommitted changes — a real run would refuse."
+        echo
+    else
+        echo "Error: working tree has uncommitted changes. Commit or stash first."
+        exit 1
+    fi
 fi
 
 if git rev-parse "$TAG" >/dev/null 2>&1; then
@@ -134,7 +141,7 @@ echo "  git push origin $TAG"
 echo
 echo "  # The GitHub Release is what publishes to PyPI. Pushing the tag alone"
 echo "  # does not trigger release.yml."
-echo "  awk '/^## \\[${NEW_VERSION}\\]/{f=1;next} /^## \\[/{f=0} f' $CHANGELOG > /tmp/notes-${NEW_VERSION}.md"
+echo "  just release-notes ${NEW_VERSION} > /tmp/notes-${NEW_VERSION}.md"
 echo "  gh release create $TAG --title=\"$TAG\" --notes-file=/tmp/notes-${NEW_VERSION}.md"
 echo
 echo "  gh run watch   # follow lint -> test -> verify-tag -> publish"

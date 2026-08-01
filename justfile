@@ -128,9 +128,7 @@ clean:
     rm -rf dist/ build/ site/ .pytest_cache/ .coverage coverage.xml junit.xml
     find . -type d -name __pycache__ -not -path './.venv/*' -exec rm -rf {} +
 
-# Requires main + clean tree, runs the full ci gate, then bumps the version
-# (major|minor|patch), commits, and tags via scripts/bump.sh. It prints the
-# push commands and NEVER pushes automatically.
+# Cut a release (major|minor|patch): ci gate, changelog, version, commit, tag — never pushes
 release part='patch':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -149,6 +147,10 @@ release part='patch':
 # Show what a release would do without changing anything
 release-dry part='patch':
     @./scripts/bump.sh {{ part }} --dry-run
+
+# Print one version's changelog section (e.g. just release-notes 1.3.0)
+release-notes version:
+    @awk '/^## \[{{ version }}\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md
 
 # ---------------------------------------------------------------------------
 # Product routines
