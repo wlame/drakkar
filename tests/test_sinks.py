@@ -1056,10 +1056,25 @@ def redis_sink_config():
 
 
 def _make_redis_sink(redis_sink_config):
-    """Helper: create a RedisSink with a mocked redis client."""
+    """Helper: create a RedisSink with a mocked redis client.
+
+    The pipeline mock mirrors redis-py's REAL shape, which is asymmetric:
+    ``client.pipeline()`` is synchronous and returns a Pipeline, the
+    pipeline's command methods (``set``, ``delete``, …) are synchronous and
+    queue the command, and only ``execute()`` is awaitable.
+
+    A plain ``AsyncMock`` gets this wrong — ``client.pipeline(...)`` returns
+    a coroutine, so ``pipe.set(...)`` raises ``AttributeError`` and the
+    batch path never actually runs under test. Reach the queued commands
+    via ``mock_client.pipeline.return_value``.
+    """
     from drakkar.sinks.redis import RedisSink
 
     mock_client = AsyncMock()
+    pipe = MagicMock()
+    pipe.execute = AsyncMock(return_value=[])
+    mock_client.pipeline = MagicMock(return_value=pipe)
+
     sink = RedisSink('cache', redis_sink_config)
     sink._client = mock_client
     return sink, mock_client
@@ -1104,7 +1119,16 @@ async def test_redis_sink_deliver_with_ttl(redis_sink_config):
 
 
 async def test_redis_sink_deliver_batch(redis_sink_config):
+    """A multi-payload delivery goes through ONE pipeline, not per-key SETs.
+
+    This previously asserted ``mock_client.set.call_count == 2`` and passed
+    by exercising the per-key fallback: the mock made ``pipeline()`` return
+    a coroutine, ``pipe.set`` raised AttributeError, and a bare
+    ``except Exception: pass`` swallowed it. The pipeline path had no real
+    coverage at all.
+    """
     sink, mock_client = _make_redis_sink(redis_sink_config)
+    pipe = mock_client.pipeline.return_value
 
     payloads = [
         RedisPayload(key='k1', data=SampleOutput(request_id='r1')),
@@ -1112,7 +1136,93 @@ async def test_redis_sink_deliver_batch(redis_sink_config):
     ]
     await sink.deliver(payloads)
 
-    assert mock_client.set.call_count == 2
+    # Exactly one pipeline, non-transactional, executed once.
+    mock_client.pipeline.assert_called_once_with(transaction=False)
+    pipe.execute.assert_awaited_once()
+    # Both commands were queued on the pipeline, in payload order…
+    assert pipe.set.call_count == 2
+    assert [c.args[0] for c in pipe.set.call_args_list] == ['drakkar:k1', 'drakkar:k2']
+    # …with the TTL riding on the payload that carries one.
+    assert pipe.set.call_args_list[0].kwargs == {}
+    assert pipe.set.call_args_list[1].kwargs == {'ex': 60}
+    # …and nothing went through the per-key path.
+    mock_client.set.assert_not_called()
+
+
+async def test_redis_sink_pipeline_failure_propagates_without_replay(redis_sink_config):
+    """A failing ``execute()`` surfaces the error instead of being swallowed.
+
+    The deleted ``except Exception: pass`` turned every pipeline failure —
+    including bugs like the broken mock above — into a silent fallback.
+    """
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+    pipe = mock_client.pipeline.return_value
+    pipe.execute = AsyncMock(side_effect=RuntimeError('pipeline exploded'))
+
+    payloads = [
+        RedisPayload(key='k1', data=SampleOutput(request_id='r1')),
+        RedisPayload(key='k2', data=SampleOutput(request_id='r2')),
+    ]
+    with pytest.raises(RuntimeError, match='pipeline exploded'):
+        await sink.deliver(payloads)
+
+
+@pytest.mark.parametrize(
+    ('redis_error_name', 'expected_builtin'),
+    [
+        ('ConnectionError', ConnectionError),
+        ('TimeoutError', TimeoutError),
+    ],
+)
+async def test_redis_sink_remaps_transient_errors_to_builtins(redis_sink_config, redis_error_name, expected_builtin):
+    """redis-py's transient errors surface as the BUILTIN equivalents.
+
+    ``SinkManager._TRANSIENT_ERRORS`` matches the builtin
+    ``ConnectionError``/``TimeoutError``, but ``redis.exceptions.*``
+    inherit only from ``RedisError``. Without this remap a dropped Redis
+    connection was never eligible for the fast-retry, so
+    ``RedisSink.idempotent = True`` did nothing at all — while the Go
+    backend, which classifies structurally, has always retried.
+    """
+    import redis.exceptions
+
+    redis_error = getattr(redis.exceptions, redis_error_name)
+    # Guard the premise: if these ever start inheriting from the builtins,
+    # the remap becomes redundant and this test should be revisited.
+    assert not issubclass(redis_error, expected_builtin)
+
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+    mock_client.set = AsyncMock(side_effect=redis_error('connection lost'))
+
+    with pytest.raises(expected_builtin, match='connection lost'):
+        await sink.deliver([RedisPayload(key='k1', data=SampleOutput(request_id='r1'))])
+
+
+async def test_redis_sink_transient_remap_preserves_the_original_error(redis_sink_config):
+    """The redis-py error is chained, so nothing is lost in translation."""
+    import redis.exceptions
+
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+    original = redis.exceptions.ConnectionError('connection lost')
+    mock_client.set = AsyncMock(side_effect=original)
+
+    with pytest.raises(ConnectionError) as excinfo:
+        await sink.deliver([RedisPayload(key='k1', data=SampleOutput(request_id='r1'))])
+
+    assert excinfo.value.__cause__ is original
+
+
+async def test_redis_sink_leaves_non_transient_errors_alone(redis_sink_config):
+    """A command error is NOT a transient — remapping it would make the
+    manager retry a request that will fail identically every time.
+    """
+    import redis.exceptions
+
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+    mock_client.set = AsyncMock(side_effect=redis.exceptions.ResponseError('WRONGTYPE'))
+
+    with pytest.raises(redis.exceptions.ResponseError, match='WRONGTYPE'):
+        await sink.deliver([RedisPayload(key='k1', data=SampleOutput(request_id='r1'))])
 
 
 async def test_redis_sink_deliver_empty(redis_sink_config):

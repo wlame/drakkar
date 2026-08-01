@@ -28,6 +28,38 @@ class _RedisItem:
     ttl: int | None
 
 
+def _as_builtin_transient(exc: BaseException) -> BaseException | None:
+    """Translate a redis-py transient error into the builtin equivalent.
+
+    ``SinkManager`` classifies transient errors by matching the BUILTIN
+    ``ConnectionError`` / ``TimeoutError`` (``manager._TRANSIENT_ERRORS``),
+    but ``redis.exceptions.ConnectionError`` and its ``TimeoutError``
+    inherit only from ``RedisError``. A dropped Redis connection was
+    therefore never eligible for the idempotent fast-retry, so this sink's
+    ``idempotent = True`` declaration did nothing — while the Go backend,
+    whose classifier is structural, has always retried. Remapping here
+    closes that divergence.
+
+    ``manager`` explicitly delegates this responsibility to sinks: "raise a
+    library-specific exception that the sink implementation can remap
+    before re-raising".
+
+    Returns ``None`` when the error is not transient, so the caller can
+    re-raise it untouched — remapping a command error such as ``WRONGTYPE``
+    would make the manager retry a request that fails identically every
+    time. The redis import is local because ``redis`` is only imported when
+    this sink is actually used.
+    """
+    from redis.exceptions import ConnectionError as RedisConnectionError
+    from redis.exceptions import TimeoutError as RedisTimeoutError
+
+    if isinstance(exc, RedisTimeoutError):
+        return TimeoutError(str(exc))
+    if isinstance(exc, RedisConnectionError):
+        return ConnectionError(str(exc))
+    return None
+
+
 class RedisSink(BaseSink[RedisPayload]):
     """Sets key-value pairs in Redis.
 
@@ -43,9 +75,15 @@ class RedisSink(BaseSink[RedisPayload]):
     # same command produces the same post-state regardless of how many
     # times it ran. That makes RedisSink safe to retry on transient
     # errors (connection reset mid-command, timeout, etc.), so we opt
-    # into automatic retry via ``idempotent=True``. TTLs are also set as
-    # part of the SET so the retry doesn't "refresh" a key that was
-    # already written in an earlier attempt in some surprising way.
+    # into automatic retry via ``idempotent=True``.
+    #
+    # TTLs ride along on the SET, which means a retried ``SET … EX 3600``
+    # DOES restart the expiry window. That is accepted: the drift is
+    # bounded by the fast-retry's backoff (hundreds of milliseconds). The
+    # alternative — an absolute ``EXAT`` deadline computed here — would
+    # converge exactly but would take the timestamp from the worker's
+    # clock, so worker/server skew would shift real expiry times. Clock
+    # skew is the worse operational hazard.
     idempotent = True
 
     def __init__(self, name: str, config: RedisSinkConfig) -> None:
@@ -103,8 +141,11 @@ class RedisSink(BaseSink[RedisPayload]):
 
             sink_payloads_delivered.labels(**labels).inc(len(payloads))
             sink_deliver_duration.labels(**labels).observe(time.monotonic() - start)
-        except Exception:
+        except Exception as exc:
             sink_deliver_errors.labels(**labels).inc()
+            transient = _as_builtin_transient(exc)
+            if transient is not None:
+                raise transient from exc
             raise
 
     def _build_items(self, payloads: list[RedisPayload]) -> tuple[list[_RedisItem], int, Exception | None]:
@@ -129,23 +170,27 @@ class RedisSink(BaseSink[RedisPayload]):
         return items, len(items), None
 
     async def _set_batch(self, items: list[_RedisItem]) -> None:
-        """Write every item through one pipeline, falling back per key on failure."""
+        """Write every item through one pipeline, propagating any failure.
+
+        A failure is NOT replayed key-by-key. The previous fallback caught
+        every exception, discarded it, and re-sent the whole batch as
+        individual ``SET``s — which hid real defects (including a broken
+        test mock that meant this path was never exercised at all) and
+        would double-apply any command that accumulates rather than
+        replaces.
+
+        Transient errors are handled one level up instead: ``deliver``
+        remaps them to the builtins ``SinkManager`` recognises, so the
+        manager's bounded fast-retry re-sends the batch when that is safe.
+        """
         assert self._client is not None
-        try:
-            pipe = self._client.pipeline(transaction=False)
-            for item in items:
-                if item.ttl is not None:
-                    pipe.set(item.key, item.value, ex=item.ttl)
-                else:
-                    pipe.set(item.key, item.value)
-            await pipe.execute()
-            return
-        except Exception:
-            # Pipeline failed — fall back to per-key SETs so the error names
-            # the offending key. Safe to replay: SET is write-replace.
-            pass
+        pipe = self._client.pipeline(transaction=False)
         for item in items:
-            await self._set_single(item)
+            if item.ttl is not None:
+                pipe.set(item.key, item.value, ex=item.ttl)
+            else:
+                pipe.set(item.key, item.value)
+        await pipe.execute()
 
     async def _set_single(self, item: _RedisItem) -> None:
         """Set one key — the shape the pre-batching loop produced."""

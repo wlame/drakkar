@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Redis sink never retried a dropped connection, despite declaring
+  itself safe to.** `RedisSink` sets `idempotent = True` so the framework
+  retries it on transient errors, but the check matched Python's builtin
+  `ConnectionError` and `TimeoutError` while `redis-py` raises its own
+  classes, which inherit from `RedisError` instead. No Redis connection
+  failure ever qualified. The sink now translates those two errors to
+  their builtin equivalents, so a connection reset or timeout gets the
+  bounded fast-retry before reaching `on_delivery_error`, and a Redis
+  worker rides out a blip that previously surfaced as a delivery failure.
+  The Go backend classifies errors structurally and has always retried,
+  so this also removes a behavioural difference between the two backends.
+
+  Command errors such as `WRONGTYPE` are deliberately left untranslated —
+  retrying one would fail identically every time.
+
+- **A failed Redis pipeline was silently retried key by key.** Any
+  exception from the batched write was discarded and the whole batch
+  re-sent as individual `SET`s. That masked real errors — including a
+  defect that meant the batched path was never exercised by the test
+  suite at all — and would double-apply any future command that
+  accumulates rather than replaces. Pipeline failures now propagate, and
+  transient ones are handled by the retry above.
+
+### Changed
+
+- The Redis sink's `idempotent` comment claimed that setting `EX` as part
+  of `SET` prevented a retry from refreshing an already-written key. The
+  opposite is true: a retried `SET … EX 3600` restarts the expiry window.
+  The comment now records the real behaviour and why relative TTLs are
+  still preferred over absolute deadlines.
+
 ## [1.3.0] - 2026-08-01
 
 ### Added
