@@ -5,15 +5,24 @@ transformation, which is the whole point of keeping them in a module that
 imports nothing from ``drakkar``.
 """
 
+import json
+from pathlib import Path
+
 import pytest
 
 from drakkar.pgsql import (
     MAX_INSERT_PARAMS,
+    compile_named_statement,
     quote_ident,
     render_insert,
     render_update,
     render_upsert,
 )
+
+# Shared with drakkar-go: the same file is mirrored there and drives the same
+# assertions, so a divergence between the two tokenizers fails a test rather
+# than reaching an operator's SQL.
+_CORPUS = json.loads((Path(__file__).parent / 'fixtures' / 'pg_statements.json').read_text())
 
 
 def test_quote_ident_wraps_valid_name():
@@ -95,3 +104,29 @@ def test_render_upsert_empty_update_columns_becomes_do_nothing():
     """Every data column is a conflict column — DO UPDATE SET would be invalid."""
     sql = render_upsert('"seen"', ['"key"'], 1, ['"key"'], [])
     assert sql == 'INSERT INTO "seen" ("key") VALUES ($1) ON CONFLICT ("key") DO NOTHING'
+
+
+@pytest.mark.parametrize('case', _CORPUS['ok'], ids=lambda c: c['case'])
+def test_compile_named_statement_corpus(case):
+    """The corpus is shared with drakkar-go — both backends must agree."""
+    sql, params = compile_named_statement(case['sql'])
+    assert sql == case['expected_sql']
+    assert params == case['params']
+
+
+@pytest.mark.parametrize('case', _CORPUS['errors'], ids=lambda c: c['case'])
+def test_compile_named_statement_corpus_errors(case):
+    with pytest.raises(ValueError, match=case['error']):
+        compile_named_statement(case['sql'])
+
+
+def test_compile_named_statement_param_order_is_first_appearance():
+    _, params = compile_named_statement('UPDATE t SET z = :zed, a = :ay WHERE k = :zed')
+    assert params == ['zed', 'ay']
+
+
+def test_compile_named_statement_lone_dollar_is_copied_verbatim():
+    """A `$` that opens no dollar-quote tag is ordinary text, not an error."""
+    sql, params = compile_named_statement('UPDATE t SET a = :v WHERE cost > 5$')
+    assert sql == 'UPDATE t SET a = $1 WHERE cost > 5$'
+    assert params == ['v']

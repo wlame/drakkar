@@ -1,0 +1,122 @@
+{
+  "_comment": "Shared corpus for the :name -> $n statement compiler used by the Postgres sink. Mirrored verbatim into drakkar-go, so both backends compile operator-authored SQL to the same text with the same parameter order.",
+  "ok": [
+    {
+      "case": "two distinct params",
+      "sql": "UPDATE t SET a = :a WHERE id = :id",
+      "expected_sql": "UPDATE t SET a = $1 WHERE id = $2",
+      "params": ["a", "id"]
+    },
+    {
+      "case": "repeated name collapses to one index and one param",
+      "sql": "UPDATE t SET a = :v, b = :v WHERE id = :id",
+      "expected_sql": "UPDATE t SET a = $1, b = $1 WHERE id = $2",
+      "params": ["v", "id"]
+    },
+    {
+      "case": "cast operator is not a placeholder",
+      "sql": "UPDATE t SET a = :v::text WHERE id = :id",
+      "expected_sql": "UPDATE t SET a = $1::text WHERE id = $2",
+      "params": ["v", "id"]
+    },
+    {
+      "case": "colon inside a string literal is untouched",
+      "sql": "UPDATE t SET note = 'a:b' WHERE id = :id",
+      "expected_sql": "UPDATE t SET note = 'a:b' WHERE id = $1",
+      "params": ["id"]
+    },
+    {
+      "case": "doubled-quote escape inside a literal",
+      "sql": "UPDATE t SET note = 'it''s :nope' WHERE id = :id",
+      "expected_sql": "UPDATE t SET note = 'it''s :nope' WHERE id = $1",
+      "params": ["id"]
+    },
+    {
+      "case": "colon inside a quoted identifier is untouched",
+      "sql": "UPDATE \"odd:name\" SET a = :a",
+      "expected_sql": "UPDATE \"odd:name\" SET a = $1",
+      "params": ["a"]
+    },
+    {
+      "case": "dollar-quoted string without a tag",
+      "sql": "UPDATE t SET body = $$:nope$$ WHERE id = :id",
+      "expected_sql": "UPDATE t SET body = $$:nope$$ WHERE id = $1",
+      "params": ["id"]
+    },
+    {
+      "case": "dollar-quoted string with a tag",
+      "sql": "UPDATE t SET body = $tag$:nope$tag$ WHERE id = :id",
+      "expected_sql": "UPDATE t SET body = $tag$:nope$tag$ WHERE id = $1",
+      "params": ["id"]
+    },
+    {
+      "case": "line comment",
+      "sql": "-- :nope\nUPDATE t SET a = :a",
+      "expected_sql": "-- :nope\nUPDATE t SET a = $1",
+      "params": ["a"]
+    },
+    {
+      "case": "nested block comment",
+      "sql": "/* outer /* :nope */ still */ UPDATE t SET a = :a",
+      "expected_sql": "/* outer /* :nope */ still */ UPDATE t SET a = $1",
+      "params": ["a"]
+    },
+    {
+      "case": "array slice colon is copied verbatim",
+      "sql": "UPDATE t SET a = arr[1:3] WHERE id = :id",
+      "expected_sql": "UPDATE t SET a = arr[1:3] WHERE id = $1",
+      "params": ["id"]
+    },
+    {
+      "case": "assignment operator colon is copied verbatim",
+      "sql": "UPDATE t SET a := :v",
+      "expected_sql": "UPDATE t SET a := $1",
+      "params": ["v"]
+    },
+    {
+      "case": "non-ASCII digit after a dollar is not a positional placeholder",
+      "sql": "UPDATE t SET a = :v, b = $٣",
+      "expected_sql": "UPDATE t SET a = $1, b = $٣",
+      "params": ["v"]
+    },
+    {
+      "case": "no placeholders at all",
+      "sql": "DELETE FROM t WHERE done",
+      "expected_sql": "DELETE FROM t WHERE done",
+      "params": []
+    },
+    {
+      "case": "expression and guard, the motivating case for operator-authored SQL",
+      "sql": "UPDATE jobs SET status = :status, attempts = attempts + 1 WHERE id = :id AND status = 'pending'",
+      "expected_sql": "UPDATE jobs SET status = $1, attempts = attempts + 1 WHERE id = $2 AND status = 'pending'",
+      "params": ["status", "id"]
+    }
+  ],
+  "errors": [
+    {
+      "case": "author-written positional placeholder",
+      "sql": "UPDATE t SET a = $1 WHERE id = :id",
+      "error": "positional"
+    },
+    {
+      "case": "unterminated string literal",
+      "sql": "UPDATE t SET a = 'oops",
+      "error": "Unterminated"
+    },
+    {
+      "case": "unterminated quoted identifier",
+      "sql": "UPDATE \"oops SET a = 1",
+      "error": "Unterminated"
+    },
+    {
+      "case": "unterminated block comment",
+      "sql": "/* oops UPDATE t SET a = :a",
+      "error": "Unterminated"
+    },
+    {
+      "case": "unterminated dollar-quoted string",
+      "sql": "UPDATE t SET a = $$oops",
+      "error": "Unterminated"
+    }
+  ]
+}

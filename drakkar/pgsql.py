@@ -97,3 +97,154 @@ def render_upsert(
         return f'{statement} ON CONFLICT ({target}) DO NOTHING'
     assignments = ', '.join(f'{col} = EXCLUDED.{col}' for col in quoted_update_columns)
     return f'{statement} ON CONFLICT ({target}) DO UPDATE SET {assignments}'
+
+
+_PARAM_NAME_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+_DOLLAR_TAG_RE = re.compile(r'\$([A-Za-z_][A-Za-z0-9_]*)?\$')
+
+# ASCII digits only. ``str.isdigit()`` is also True for characters like '٣'
+# (ARABIC-INDIC THREE), which Postgres would never accept as a placeholder
+# index — treating one as a positional parameter would reject valid SQL.
+_ASCII_DIGITS = '0123456789'
+
+
+def _scan_quoted(sql: str, start: int, quote: str) -> int:
+    """Return the index just past a quoted run beginning at ``start``.
+
+    Handles the doubled-quote escape (``''`` / ``""``), which is how both a
+    literal and a quoted identifier embed their own delimiter.
+    """
+    i = start + 1
+    n = len(sql)
+    while i < n:
+        if sql[i] == quote:
+            if i + 1 < n and sql[i + 1] == quote:
+                i += 2
+                continue
+            return i + 1
+        i += 1
+    raise ValueError(f'Unterminated {quote}-quoted run in statement SQL')
+
+
+def _scan_block_comment(sql: str, start: int) -> int:
+    """Return the index just past a ``/* ... */`` comment.
+
+    Postgres nests block comments, unlike C, so this counts depth rather than
+    stopping at the first ``*/``.
+    """
+    depth = 0
+    i = start
+    n = len(sql)
+    while i < n:
+        if sql.startswith('/*', i):
+            depth += 1
+            i += 2
+        elif sql.startswith('*/', i):
+            depth -= 1
+            i += 2
+            if depth == 0:
+                return i
+        else:
+            i += 1
+    raise ValueError('Unterminated block comment in statement SQL')
+
+
+def _scan_dollar_quoted(sql: str, start: int) -> int | None:
+    """Return the index past a dollar-quoted string, or None if ``start`` opens none."""
+    match = _DOLLAR_TAG_RE.match(sql, start)
+    if match is None:
+        return None
+    tag = match.group(0)
+    end = sql.find(tag, match.end())
+    if end == -1:
+        raise ValueError('Unterminated dollar-quoted string in statement SQL')
+    return end + len(tag)
+
+
+def compile_named_statement(sql: str) -> tuple[str, list[str]]:
+    """Rewrite ``:name`` placeholders in operator-authored SQL to positional ``$n``.
+
+    Returns ``(rewritten_sql, param_names)``. ``param_names`` is in
+    first-appearance order with duplicates collapsed, so ``:id`` used twice
+    binds one value and is named once — the caller supplies exactly one value
+    per returned name.
+
+    Compiled once per statement at config validation and again at sink
+    ``connect()``; never on the delivery path.
+
+    The scan copies verbatim, and never interprets ``:``, inside single-quoted
+    literals, double-quoted identifiers, dollar-quoted strings, ``--`` line
+    comments, and nested ``/* */`` block comments. In code regions:
+
+    - ``::`` is the cast operator, so ``::text`` is never read as a parameter.
+    - ``:`` followed by an identifier is a named parameter.
+    - ``:`` followed by anything else is copied verbatim — ``arr[1:3]`` slices
+      and ``:=`` are legal SQL.
+    - ``$`` followed by an ASCII digit raises: it is an author-written
+      positional placeholder the framework cannot bind a value to. Unambiguous,
+      because a dollar-quote tag never starts with a digit.
+    """
+    out: list[str] = []
+    order: list[str] = []
+    index: dict[str, int] = {}
+    i = 0
+    n = len(sql)
+
+    while i < n:
+        if sql.startswith('--', i):
+            end = sql.find('\n', i)
+            end = n if end == -1 else end
+            out.append(sql[i:end])
+            i = end
+            continue
+
+        if sql.startswith('/*', i):
+            end = _scan_block_comment(sql, i)
+            out.append(sql[i:end])
+            i = end
+            continue
+
+        if sql[i] in ("'", '"'):
+            end = _scan_quoted(sql, i, sql[i])
+            out.append(sql[i:end])
+            i = end
+            continue
+
+        if sql[i] == '$':
+            if i + 1 < n and sql[i + 1] in _ASCII_DIGITS:
+                raise ValueError(
+                    'Statement SQL must use :name placeholders, not positional '
+                    f'{sql[i : i + 2]!r} — the framework cannot bind it'
+                )
+            end = _scan_dollar_quoted(sql, i)
+            if end is None:
+                out.append('$')
+                i += 1
+            else:
+                out.append(sql[i:end])
+                i = end
+            continue
+
+        if sql.startswith('::', i):
+            out.append('::')
+            i += 2
+            continue
+
+        if sql[i] == ':':
+            match = _PARAM_NAME_RE.match(sql, i + 1)
+            if match is None:
+                out.append(':')
+                i += 1
+                continue
+            name = match.group(0)
+            if name not in index:
+                index[name] = len(order) + 1
+                order.append(name)
+            out.append(f'${index[name]}')
+            i = match.end()
+            continue
+
+        out.append(sql[i])
+        i += 1
+
+    return ''.join(out), order
