@@ -56,6 +56,22 @@
     "content_type": "application/x-www-form-urlencoded"
   },
   {
+    "name": "inline_json_full_escape_set_and_control_fallback",
+    "model": {"meta": {"k": "\"\\\b\f\r\u0001"}},
+    "encoding": "form",
+    "boundary": null,
+    "body": "meta=%7B%22k%22%3A%22%5C%22%5C%5C%5Cb%5Cf%5Cr%5Cu0001%22%7D",
+    "content_type": "application/x-www-form-urlencoded"
+  },
+  {
+    "name": "form_boolean_false_literal",
+    "model": {"flag": false},
+    "encoding": "form",
+    "boundary": null,
+    "body": "flag=false",
+    "content_type": "application/x-www-form-urlencoded"
+  },
+  {
     "name": "empty_model_form",
     "model": {},
     "encoding": "form",
