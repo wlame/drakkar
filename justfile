@@ -146,6 +146,10 @@ release part='patch':
     just ci
     ./scripts/bump.sh {{ part }}
 
+# Show what a release would do without changing anything
+release-dry part='patch':
+    @./scripts/bump.sh {{ part }} --dry-run
+
 # ---------------------------------------------------------------------------
 # Product routines
 # ---------------------------------------------------------------------------
