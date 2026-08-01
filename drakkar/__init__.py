@@ -1,6 +1,6 @@
 """Drakkar — Kafka subprocess orchestration framework."""
 
-__version__ = '1.3.0'
+__version__ = '1.3.1'
 
 from drakkar.app import DrakkarApp
 from drakkar.cache import CacheLike, CacheScope
