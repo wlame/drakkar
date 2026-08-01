@@ -5,7 +5,6 @@ serialized via model_dump() to get a column-name → value mapping,
 then inserted into the specified table.
 """
 
-import re
 import time
 from dataclasses import dataclass
 
@@ -15,28 +14,10 @@ import structlog
 from drakkar.config import PostgresSinkConfig
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
 from drakkar.models import PostgresPayload
+from drakkar.pgsql import MAX_INSERT_PARAMS, quote_ident, render_insert
 from drakkar.sinks.base import BaseSink
 
 logger = structlog.get_logger()
-
-_IDENT_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
-
-# Caps the positional parameters in one multi-row INSERT — the Postgres
-# wire protocol limits a statement to 65535 bind parameters, so oversized
-# groups are chunked into multiple statements. Matches the Go backend's
-# ``maxInsertParams``.
-MAX_INSERT_PARAMS = 65535
-
-
-def _quote_ident(name: str) -> str:
-    """Quote a SQL identifier to prevent injection.
-
-    Only allows simple alphanumeric+underscore identifiers.
-    Raises ValueError for anything suspicious.
-    """
-    if not _IDENT_RE.match(name):
-        raise ValueError(f'Invalid SQL identifier: {name!r}')
-    return f'"{name}"'
 
 
 @dataclass(frozen=True)
@@ -75,17 +56,10 @@ def _group_rows_by_key(rows: list[_PgRow]) -> list[list[_PgRow]]:
 
 def _build_multi_insert(rows: list[_PgRow]) -> tuple[str, list[object]]:
     """Build one INSERT covering every row (all share a table + column set)."""
-    columns = rows[0].quoted_columns
-    col_names = ', '.join(columns)
-    tuples = []
+    query = render_insert(rows[0].quoted_table, rows[0].quoted_columns, len(rows))
     values: list[object] = []
-    param = 1
     for row in rows:
-        placeholders = ', '.join(f'${param + j}' for j in range(len(columns)))
-        param += len(columns)
-        tuples.append(f'({placeholders})')
         values.extend(row.values)
-    query = f'INSERT INTO {rows[0].quoted_table} ({col_names}) VALUES {", ".join(tuples)}'
     return query, values
 
 
@@ -191,8 +165,8 @@ class PostgresSink(BaseSink[PostgresPayload]):
                 data = payload.data.model_dump()
                 rows.append(
                     _PgRow(
-                        quoted_table=_quote_ident(payload.table),
-                        quoted_columns=[_quote_ident(c) for c in data],
+                        quoted_table=quote_ident(payload.table),
+                        quoted_columns=[quote_ident(c) for c in data],
                         values=list(data.values()),
                     )
                 )

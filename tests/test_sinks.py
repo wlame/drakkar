@@ -497,12 +497,17 @@ async def test_postgres_sink_sql_injection_table(pg_sink_config):
 
 
 async def test_postgres_sink_sql_injection_column():
-    """Reject suspicious column names via _quote_ident."""
-    from drakkar.sinks.postgres import _quote_ident
+    """Reject suspicious column names via quote_ident.
 
-    assert _quote_ident('valid_name') == '"valid_name"'
+    The exhaustive rejection cases live in ``tests/test_pgsql.py`` against
+    the pure module; this keeps a sink-level smoke check so the injection
+    defence stays visibly wired into the sink's own test file.
+    """
+    from drakkar.pgsql import quote_ident
+
+    assert quote_ident('valid_name') == '"valid_name"'
     with pytest.raises(ValueError):
-        _quote_ident('col; DROP TABLE x')
+        quote_ident('col; DROP TABLE x')
 
 
 async def test_postgres_sink_deliver_error_increments_metrics(pg_sink_config):
