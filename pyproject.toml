@@ -123,6 +123,15 @@ dev = [
 # inline hover info keep working.
 exclude = ["tests", "integration"]
 
+[tool.pyright]
+# Editor/agent LSP only — ``ty`` remains the type checker CI gates on
+# (``just typecheck``). Without these two keys pyright resolves against the
+# interpreter that launched it rather than the project environment, so every
+# third-party import reports as unresolved and the diagnostics drown out real
+# findings.
+venvPath = "."
+venv = ".venv"
+
 [tool.uv]
 # Supply-chain mitigation: do not resolve packages published after this date.
 # Bump this when intentionally upgrading dependencies (keep ~7 days behind
