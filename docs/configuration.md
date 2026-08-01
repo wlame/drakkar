@@ -378,8 +378,13 @@ null, object, array — is rendered as compact JSON in that field. Multipart
 carries fields only, never files.
 
 The Content-Type always derives from `encoding`, so setting a
-`Content-Type` in `headers` is a configuration error. Remove the header
-or change the encoding.
+`Content-Type` in `headers` is a configuration error — rejected even when
+the header agrees with the body the encoder would send anyway. For the
+default `encoding: json`, a previously configured `Content-Type:
+application/json` was correct and worked, as was `application/json;
+charset=utf-8`; the `charset` parameter can no longer be expressed at
+all. Per RFC 8259, UTF-8 is JSON's default charset, so receivers should
+be unaffected. Remove the header, or change the encoding.
 
 **Cross-backend byte parity.** Both backends are pinned against the same
 golden vectors and guarantee byte-identical bodies for strings, booleans,

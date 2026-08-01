@@ -69,9 +69,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **An HTTP sink that sets a `Content-Type` header now fails at startup.**
-  The Content-Type is determined by `encoding`, so an explicit header
-  could only contradict the body actually sent — which is what happened
-  silently before. Remove the header, or set `encoding` to the format you
+  The `encoding` setting owns the Content-Type, so a `Content-Type` header
+  is now rejected even when it agrees with the body it would have
+  produced. For `encoding: json` — the default, and the only encoding
+  that existed before this change — a header of `Content-Type:
+  application/json` was previously correct and worked; so was
+  `application/json; charset=utf-8`, which is now unrepresentable, since
+  the `charset` parameter can no longer be expressed at all. Per RFC
+  8259, UTF-8 is JSON's default charset, so receivers should be
+  unaffected. Remove the header, or set `encoding` to the format you
   intended.
 
 - **The MongoDB sink now uses PyMongo's async client instead of the
