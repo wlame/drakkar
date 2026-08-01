@@ -262,7 +262,7 @@ Configure any combination in the `sinks:` section. Each type supports multiple n
 | `KafkaPayload` | `data: BaseModel`, `key: bytes` | `data.model_dump_json().encode()` -> value |
 | `PostgresPayload` | `data: BaseModel`, `table: str` | `data.model_dump()` -> column mapping |
 | `MongoPayload` | `data: BaseModel`, `collection: str` | `data.model_dump()` -> BSON document |
-| `HttpPayload` | `data: BaseModel` | `data.model_dump_json()` -> POST body |
+| `HttpPayload` | `data: BaseModel` | POST body per `encoding` (`json`/`form`/`multipart`) |
 | `RedisPayload` | `data: BaseModel`, `key: str`, `ttl: int?` | `data.model_dump_json()` -> string value |
 | `FilePayload` | `data: BaseModel`, `path: str` | `data.model_dump_json() + "\n"` -> JSONL line |
 

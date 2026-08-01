@@ -564,12 +564,17 @@ class MongoPayload(BaseModel):
 class HttpPayload(BaseModel):
     """Payload for an HTTP sink — sends a POST request to a configured endpoint.
 
-    The framework serializes `data` via `model_dump_json()` as the request body
-    with Content-Type: application/json.
+    The framework serializes `data` into the request body per the sink's
+    `encoding` setting: `json` (the default, via `model_dump_json()`),
+    `form`, or `multipart`. The Content-Type always matches the chosen
+    encoding.
     """
 
     sink: str = _SINK_FIELD
-    data: BaseModel = Field(description='Payload model. Serialized via model_dump_json() as the JSON request body.')
+    data: BaseModel = Field(
+        description='Payload model. Serialized into the request body per the sink encoding setting '
+        "('json' by default, or 'form'/'multipart')."
+    )
 
 
 class RedisPayload(BaseModel):

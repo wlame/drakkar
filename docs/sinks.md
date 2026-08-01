@@ -123,7 +123,7 @@ MongoPayload(
 
 ### HttpPayload
 
-Sends a JSON request to an HTTP endpoint.
+Sends a request to an HTTP endpoint, body format per the sink's `encoding` setting.
 
 | Field | Type | Description |
 |-------|------|-------------|
