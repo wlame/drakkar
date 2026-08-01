@@ -340,7 +340,7 @@ Inserts documents into a MongoDB database via PyMongo's AsyncMongoClient.
 
 ### HTTP Sink (`sinks.http.<name>`)
 
-Sends JSON payloads to an HTTP endpoint.
+Sends payloads to an HTTP endpoint (JSON by default).
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
@@ -348,6 +348,7 @@ Sends JSON payloads to an HTTP endpoint.
 | `method` | `str` | `'POST'` | | HTTP method to use. |
 | `timeout_seconds` | `int` | `30` | >= 1 | Request timeout in seconds. |
 | `headers` | `dict[str, str]` | `{}` | | Additional HTTP headers sent with each request. |
+| `encoding` | `Literal['json', 'form', 'multipart']` | `'json'` | one of `json`, `form`, `multipart`; `headers` must not set `Content-Type` | Request body format. See [Body encoding](#body-encoding-sinkshttpnameencoding). |
 | `max_retries` | `int` | `3` | >= 0 | Maximum retry attempts for failed HTTP requests. |
 | `ui_url` | `str` | `''` | | URL to a related web UI. |
 
