@@ -2044,6 +2044,137 @@ async def test_base_sink_default_idempotent_is_false():
     assert sink.idempotent is False
 
 
+# --- BaseSink.batch_idempotent per-batch retry decision -------------------
+
+
+async def test_batch_idempotent_defaults_to_class_flag():
+    """The default implementation delegates to the class-level attribute,
+    so every sink that does not override it keeps its existing behavior.
+
+    This is what makes the hook a safe drop-in: the manager can call
+    ``batch_idempotent`` unconditionally without changing any sink.
+    """
+    payloads = [KafkaPayload(data=SampleData())]
+
+    assert FakeSink('plain').batch_idempotent(payloads) is False
+    assert IdempotentSink('opted-in').batch_idempotent(payloads) is True
+
+
+async def test_batch_idempotent_default_ignores_payload_contents():
+    """The default answer must not depend on the batch — an empty list and
+    a populated one agree, because the class flag is the only input.
+    """
+    sink = IdempotentSink('opted-in')
+
+    assert sink.batch_idempotent([]) is True
+    assert sink.batch_idempotent([KafkaPayload(data=SampleData())]) is True
+
+
+async def test_manager_retries_when_batch_idempotent_overrides_false_flag():
+    """A sink whose CLASS flag is False but whose ``batch_idempotent``
+    returns True for this batch gets the fast-retry.
+
+    This is the whole point of the hook: the Postgres sink is not
+    idempotent for INSERT but is for a batch of UPDATEs, and the decision
+    can only be made once the payloads are known. Asserting through the
+    manager (not the sink) pins the call-site swap.
+    """
+
+    class PerBatchSink(FakeSink):
+        # Class flag stays False — the conservative default.
+        idempotent = False
+
+        def batch_idempotent(self, payloads: list) -> bool:
+            return True
+
+    mgr = SinkManager()
+    sink = PerBatchSink('out', sink_type='kafka')
+    mgr.register(sink)
+
+    call_count = 0
+
+    async def flaky_deliver(payloads: list) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise ConnectionError('transient: connection reset')
+        sink.delivered.append(payloads)
+
+    sink.deliver = flaky_deliver  # type: ignore[assignment]
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    # Retried despite ``idempotent`` being False on the class.
+    assert call_count == 2
+    on_error.assert_not_called()
+    assert len(sink.delivered) == 1
+
+
+async def test_manager_skips_retry_when_batch_idempotent_overrides_true_flag():
+    """The override works in the restrictive direction too: a sink whose
+    class flag is True but whose ``batch_idempotent`` returns False for
+    this batch gets exactly one attempt.
+
+    Redis needs this — ``SET`` is retry-safe but a batch containing
+    ``INCRBY`` is not, and a wrongly-retried counter is silent corruption.
+    """
+
+    class PerBatchSink(FakeSink):
+        idempotent = True
+
+        def batch_idempotent(self, payloads: list) -> bool:
+            return False
+
+    mgr = SinkManager()
+    sink = PerBatchSink('out', sink_type='kafka')
+    mgr.register(sink)
+
+    call_count = 0
+
+    async def failing_deliver(payloads: list) -> None:
+        nonlocal call_count
+        call_count += 1
+        raise ConnectionError('transient: connection reset')
+
+    sink.deliver = failing_deliver  # type: ignore[assignment]
+    on_error = AsyncMock(return_value=DeliveryAction.SKIP)
+
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    # Exactly one attempt — the batch declared itself unsafe to repeat.
+    assert call_count == 1
+    on_error.assert_called_once()
+
+
+async def test_manager_passes_the_actual_batch_to_batch_idempotent():
+    """The hook receives the same payload list that ``deliver`` will get,
+    so an implementation can inspect ops. Without this, a sink could only
+    answer from the class flag and the hook would be pointless.
+    """
+    seen: list[list] = []
+
+    class RecordingSink(FakeSink):
+        def batch_idempotent(self, payloads: list) -> bool:
+            seen.append(payloads)
+            return False
+
+    mgr = SinkManager()
+    sink = RecordingSink('out', sink_type='kafka')
+    mgr.register(sink)
+
+    payload = KafkaPayload(data=SampleData())
+    await mgr.deliver_all(
+        CollectResult(kafka=[payload]),
+        on_delivery_error=AsyncMock(return_value=DeliveryAction.SKIP),
+        partition_id=0,
+    )
+
+    assert seen == [[payload]]
+
+
 async def test_builtin_sinks_idempotent_attribute_declarations():
     """Every shipped sink class declares its ``idempotent`` attribute
     explicitly on the class (no reliance on the BaseSink default), so a

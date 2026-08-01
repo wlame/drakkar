@@ -709,6 +709,81 @@ async def test_sink_collector_flatten_empty():
     assert collector.flatten() == []
 
 
+# --- payloads that carry no data -----------------------------------------
+#
+# The write-operations work gives Postgres, Redis, and Mongo operations that
+# have nothing to serialize: a named statement passes bound params, a Redis
+# DELETE names only a key, a Mongo delete carries only a filter. Those
+# payloads have ``data=None`` and the collector must flatten them rather than
+# raise ``AttributeError`` on ``None.model_dump()`` — otherwise the very
+# payloads the feature adds are the ones that break
+# ``POST /api/v1/debug/probe``.
+#
+# ``data`` is still a required field today, so these build the future shape
+# with ``model_construct`` (which skips validation). When the payload models
+# gain ``data: BaseModel | None``, these tests keep passing unchanged.
+
+
+async def test_sink_collector_flatten_postgres_payload_without_data():
+    """A Postgres payload with no data flattens with ``payload=None``."""
+    collector = DebugSinkCollector()
+    cr = CollectResult(postgres=[PostgresPayload.model_construct(table='jobs', data=None)])
+    await collector(cr, 0)
+
+    flat = collector.flatten()
+    assert len(flat) == 1
+    assert flat[0].sink_type == 'postgres'
+    assert flat[0].payload is None
+    assert flat[0].destination == 'jobs'
+
+
+async def test_sink_collector_flatten_redis_payload_without_data():
+    """A Redis payload with no data flattens with ``payload=None``."""
+    collector = DebugSinkCollector()
+    cr = CollectResult(redis=[RedisPayload.model_construct(key='session:42', data=None, ttl=None)])
+    await collector(cr, 0)
+
+    flat = collector.flatten()
+    assert len(flat) == 1
+    assert flat[0].sink_type == 'redis'
+    assert flat[0].payload is None
+    assert flat[0].destination == 'session:42'
+
+
+async def test_sink_collector_flatten_mongo_payload_without_data():
+    """A Mongo payload with no data flattens with ``payload=None``."""
+    collector = DebugSinkCollector()
+    cr = CollectResult(mongo=[MongoPayload.model_construct(collection='jobs', data=None)])
+    await collector(cr, 0)
+
+    flat = collector.flatten()
+    assert len(flat) == 1
+    assert flat[0].sink_type == 'mongo'
+    assert flat[0].payload is None
+    assert flat[0].destination == 'jobs'
+
+
+async def test_sink_collector_flatten_mixes_data_and_dataless_payloads():
+    """A batch mixing both shapes flattens completely and in payload order.
+
+    Pins that the guard is per payload rather than per batch — one dataless
+    payload must not suppress serialization of its neighbours.
+    """
+    collector = DebugSinkCollector()
+    cr = CollectResult(
+        postgres=[
+            PostgresPayload(table='audit', data=_TinyOutput(id=7)),
+            PostgresPayload.model_construct(table='jobs', data=None),
+        ],
+    )
+    await collector(cr, 0)
+
+    flat = collector.flatten()
+    assert [r.destination for r in flat] == ['audit', 'jobs']
+    assert flat[0].payload == {'id': 7, 'note': 'hello'}
+    assert flat[1].payload is None
+
+
 async def test_sink_collector_flatten_preserves_entry_order():
     """When two CollectResults are captured across stages, their origin_stage is preserved."""
     collector = DebugSinkCollector()

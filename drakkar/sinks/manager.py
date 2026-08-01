@@ -570,13 +570,20 @@ class SinkManager:
     ) -> None:
         """Run ``sink.deliver(payloads)`` with a bounded fast-retry on transient errors.
 
-        The retry budget is consulted ONLY when ``sink.idempotent is True``:
-        duplicate delivery is safe (broker-dedup, write-replace, etc.) so a
-        transient error (network blip, connection reset) is worth retrying
-        before we burn the user-facing ``on_delivery_error`` budget and
-        advance the circuit breaker. Non-idempotent sinks get a single
-        attempt — a retry could double-submit, and the caller's error
-        handler is the right place to decide SKIP / DLQ / RETRY.
+        The retry budget is consulted ONLY when
+        ``sink.batch_idempotent(payloads)`` is True: duplicate delivery is
+        safe (broker-dedup, write-replace, etc.) so a transient error
+        (network blip, connection reset) is worth retrying before we burn
+        the user-facing ``on_delivery_error`` budget and advance the
+        circuit breaker. Non-idempotent batches get a single attempt — a
+        retry could double-submit, and the caller's error handler is the
+        right place to decide SKIP / DLQ / RETRY.
+
+        The decision is per BATCH rather than per sink because a sink whose
+        payloads carry an operation discriminator can be idempotent for one
+        delivery and not the next. ``BaseSink.batch_idempotent`` defaults to
+        the class-level ``idempotent`` flag, so sinks that do not override
+        it are unaffected.
 
         Non-transient exceptions (``ValueError``, ``RuntimeError``, sink
         configuration errors, etc.) are NOT retried even when the sink
@@ -593,7 +600,7 @@ class SinkManager:
         # Non-idempotent fast path: a single shot, exactly as before.
         # We intentionally do NOT wrap in try/except here so the
         # exception propagates unchanged to the caller's handling logic.
-        if not sink.idempotent:
+        if not sink.batch_idempotent(payloads):
             await sink.deliver(payloads)
             return
 

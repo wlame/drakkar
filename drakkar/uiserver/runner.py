@@ -338,6 +338,18 @@ class DebugCacheProxy:
 # ---- sink collector --------------------------------------------------------
 
 
+def _dump_or_none(data: BaseModel | None) -> Any:
+    """Serialize a payload's ``data`` for the probe, tolerating its absence.
+
+    Several sink operations carry no payload body — a Postgres named
+    statement passes bound params instead, a Redis ``DELETE`` names only a
+    key, a Mongo delete carries only a filter. Those payloads have
+    ``data=None``, and the probe must still report the planned record
+    rather than raise ``AttributeError`` on ``None.model_dump()``.
+    """
+    return None if data is None else data.model_dump(mode='json')
+
+
 class DebugSinkCollector:
     """Capture every ``CollectResult`` the handler returns during the probe.
 
@@ -428,7 +440,7 @@ class DebugSinkCollector:
                         sink_type='postgres',
                         destination=pp.table,
                         origin_stage=stage,
-                        payload=pp.data.model_dump(mode='json'),
+                        payload=_dump_or_none(pp.data),
                         extras={'sink_instance': pp.sink},
                     )
                 )
@@ -438,7 +450,7 @@ class DebugSinkCollector:
                         sink_type='mongo',
                         destination=mp.collection,
                         origin_stage=stage,
-                        payload=mp.data.model_dump(mode='json'),
+                        payload=_dump_or_none(mp.data),
                         extras={'sink_instance': mp.sink},
                     )
                 )
@@ -458,7 +470,7 @@ class DebugSinkCollector:
                         sink_type='redis',
                         destination=rp.key,
                         origin_stage=stage,
-                        payload=rp.data.model_dump(mode='json'),
+                        payload=_dump_or_none(rp.data),
                         extras={'sink_instance': rp.sink, 'ttl': rp.ttl},
                     )
                 )

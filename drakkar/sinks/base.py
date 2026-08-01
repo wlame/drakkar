@@ -84,6 +84,25 @@ class BaseSink(ABC, Generic[PayloadT]):
         into automatic transient-error retries.
     """
 
+    def batch_idempotent(self, payloads: list[PayloadT]) -> bool:
+        """Whether retrying THIS batch is safe. Defaults to the class flag.
+
+        ``idempotent`` is a property of the sink type, which is too coarse
+        for a sink whose payloads carry an operation discriminator: a
+        Postgres batch of ``UPDATE``s is retry-safe while one containing an
+        ``INSERT`` is not, and only the payloads say which. Overriding this
+        lets a sink answer per delivery.
+
+        ``SinkManager`` calls this instead of reading ``idempotent``
+        directly. The default delegates to the flag, so a sink that does
+        not override it behaves exactly as before.
+
+        Implementations must be conservative: return ``False`` whenever a
+        repeat could produce a different final state. A wrongly-``True``
+        answer double-applies an accumulating write with no error.
+        """
+        return self.idempotent
+
     def __init__(self, name: str, ui_url: str = '') -> None:
         self._name = name
         self._ui_url = ui_url
