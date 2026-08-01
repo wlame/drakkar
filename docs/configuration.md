@@ -381,6 +381,15 @@ The Content-Type always derives from `encoding`, so setting a
 `Content-Type` in `headers` is a configuration error. Remove the header
 or change the encoding.
 
+**Cross-backend byte parity.** Both backends are pinned against the same
+golden vectors and guarantee byte-identical bodies for strings, booleans,
+null, integers, objects, arrays, and field ordering. Byte parity is
+**not** guaranteed for float formatting (`42.0` in Python vs `42` in Go)
+or for U+2028/U+2029 inside a `json`-encoded string (escaped by Go's JSON
+encoder, emitted literally by Python's). Both are numerically and
+semantically equivalent — see the Go repository's divergence list
+(`docs/migration.md`, entries #25 and #26) for the full detail.
+
 ### Redis Sink (`sinks.redis.<name>`)
 
 Sets key-value pairs in Redis.

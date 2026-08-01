@@ -60,9 +60,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`multipart/form-data`, fields only). For the form encodings the payload
   model is flattened to fields sorted by name, with non-string values
   rendered as compact JSON. Both backends emit byte-identical bodies, with
-  one documented exception: a `json`-encoded payload containing U+2028 or
-  U+2029 differs, because Go's JSON encoder escapes those two characters
-  unconditionally (recorded as divergence #21 in the Go backend).
+  two documented exceptions: floats render in each language's native form
+  (`42.0` in Python, `42` in Go), and a `json`-encoded payload containing
+  U+2028 or U+2029 differs because Go's JSON encoder escapes those two
+  characters unconditionally (recorded as divergences #25 and #26 in the
+  Go backend).
 
 ### Changed
 
