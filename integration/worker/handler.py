@@ -26,8 +26,12 @@ from metrics import (
     search_match_count,
 )
 from models import (
+    PatternStatsParams,
     RankRequest,
     RankResponse,
+    RequestKey,
+    RequestNotified,
+    RequestSummary,
     SearchAggregate,
     SearchNotification,
     SearchRequest,
@@ -472,6 +476,103 @@ class RipgrepHandler(
             ],
         )
 
+        # ---- write operations beyond INSERT ------------------------------
+        #
+        # Everything above this point is "append a record". A pipeline that
+        # maintains state needs more, and each payload below shows one of
+        # the operations that exist for it.
+
+        # UPSERT: one row per request, keyed on request_id.
+        #
+        # Delivery is at-least-once, so a redelivered request would duplicate
+        # this row under a plain INSERT. `update_columns` deliberately omits
+        # `notified`, so a redelivery cannot un-send a webhook that already
+        # went out — the columns an upsert overwrites are a choice, not
+        # automatically "all of them".
+        sinks.postgres.append(
+            dk.PostgresPayload(
+                op=dk.PostgresOp.UPSERT,
+                table='request_summaries',
+                data=RequestSummary(
+                    request_id=req.request_id,
+                    total_matches=aggregate.total_matches,
+                    succeeded_tasks=aggregate.succeeded_tasks,
+                    failed_tasks=aggregate.failed_tasks,
+                    duration_seconds=aggregate.duration_seconds,
+                ),
+                conflict=['request_id'],
+                update_columns=['total_matches', 'succeeded_tasks', 'failed_tasks', 'duration_seconds'],
+                sink='archive_results_db',
+            ),
+        )
+
+        # STATEMENT: running totals per pattern. The new value depends on the
+        # old one, which no declarative operation can express, so the SQL
+        # lives in configuration under a name and the payload supplies only
+        # bound parameters.
+        for pattern in req.patterns:
+            sinks.postgres.append(
+                dk.PostgresPayload(
+                    op=dk.PostgresOp.STATEMENT,
+                    statement='bump_pattern_stats',
+                    params=PatternStatsParams(pattern=pattern, matches=aggregate.total_matches),
+                    sink='archive_results_db',
+                ),
+            )
+
+        # Redis, beyond the per-task SET in on_task_complete.
+        #
+        # HSET writes several fields of one hash in one command; its values
+        # are a plain mapping rather than a model, because hash fields are
+        # frequently dynamic keys. EXPIRE is separate because HSET carries no
+        # TTL of its own.
+        sinks.redis.extend(
+            [
+                dk.RedisPayload(
+                    op=dk.RedisOp.HSET,
+                    key=f'request:{req.request_id}',
+                    fields={
+                        'total_matches': aggregate.total_matches,
+                        'succeeded': aggregate.succeeded_tasks,
+                        'failed': aggregate.failed_tasks,
+                    },
+                    sink='hot_match_cache',
+                ),
+                dk.RedisPayload(
+                    op=dk.RedisOp.EXPIRE,
+                    key=f'request:{req.request_id}',
+                    ttl=3600,
+                    sink='hot_match_cache',
+                ),
+                # INCRBY accumulates, which is why a batch containing one is
+                # never fast-retried: re-running it would count twice.
+                dk.RedisPayload(
+                    op=dk.RedisOp.INCRBY,
+                    key='matches:total',
+                    amount=aggregate.total_matches,
+                    sink='hot_match_cache',
+                ),
+                # ZADD sets a score rather than incrementing it, so it
+                # converges on a retry. The mapping is member -> score.
+                dk.RedisPayload(
+                    op=dk.RedisOp.ZADD,
+                    key='leaderboard:requests',
+                    members={req.request_id: float(aggregate.total_matches)},
+                    sink='hot_match_cache',
+                ),
+                # SCRIPT: append to a capped recent-requests list. As two
+                # commands this could interleave with another worker between
+                # the push and the trim; inside a script it cannot.
+                dk.RedisPayload(
+                    op=dk.RedisOp.SCRIPT,
+                    script='push_and_cap',
+                    keys=['recent:requests'],
+                    args=[req.request_id, 50],
+                    sink='hot_match_cache',
+                ),
+            ],
+        )
+
         # Conditional: a "hot" Postgres row for requests with significant
         # match volume — kept small and fast-queryable for dashboards.
         if aggregate.total_matches > 20:
@@ -492,6 +593,23 @@ class RipgrepHandler(
                 message=(f'Request matched {aggregate.total_matches} lines across {aggregate.succeeded_tasks} tasks'),
             )
             sinks.http.append(dk.HttpPayload(data=notification))
+
+            # UPDATE: record that the webhook went out. The predicate is
+            # required and may never be empty — an empty one would rewrite
+            # every row in the table.
+            #
+            # This payload is appended AFTER the upsert above, and execution
+            # order always equals payload order, so it can never run first
+            # and be overwritten by it.
+            sinks.postgres.append(
+                dk.PostgresPayload(
+                    op=dk.PostgresOp.UPDATE,
+                    table='request_summaries',
+                    data=RequestNotified(),
+                    where=RequestKey(request_id=req.request_id),
+                    sink='archive_results_db',
+                ),
+            )
 
         # Conditional: JSONL file log for very high-match requests.
         if aggregate.total_matches > 50:
