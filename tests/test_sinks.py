@@ -1,6 +1,7 @@
 """Tests for individual sink implementations."""
 
 import asyncio
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -1490,9 +1491,183 @@ def _make_redis_sink(redis_sink_config):
     pipe.execute = AsyncMock(side_effect=_execute)
     mock_client.pipeline = MagicMock(return_value=pipe)
 
+    def _fake_script(body: str) -> AsyncMock:
+        """Stand in for redis-py's AsyncScript.
+
+        A real one issues EVALSHA against whatever client it is handed — a
+        pipeline QUEUES it (synchronously, returning the pipeline), a client
+        AWAITS it. Modelling that matters: without it the script contributes
+        no queued command, and the result list would not line up with the
+        commands the sink thinks it sent.
+        """
+
+        async def _call(keys: list | None = None, args: list | None = None, client: object = None) -> None:
+            queued = client.evalsha(f'sha:{body[:12]}', len(keys or []), *(keys or []), *(args or []))
+            if inspect.isawaitable(queued):
+                await queued
+
+        return AsyncMock(side_effect=_call)
+
+    # register_script is SYNCHRONOUS in redis-py — it computes the SHA1
+    # locally with no round trip — and returns an AsyncScript that IS
+    # awaitable. An AsyncMock would get both halves wrong.
+    mock_client.register_script = MagicMock(side_effect=_fake_script)
+
     sink = RedisSink('cache', redis_sink_config)
     sink._client = mock_client
     return sink, mock_client
+
+
+async def _connect_redis_sink(redis_sink_config):
+    """Helper: a RedisSink taken through the REAL connect().
+
+    Script tests go this way rather than poking ``sink._scripts``, so what
+    they exercise is the registration the sink actually performs.
+    """
+    from drakkar.sinks.redis import RedisSink
+
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+    sink._client = None
+    with patch('redis.asyncio.from_url', return_value=mock_client):
+        await sink.connect()
+    assert isinstance(sink, RedisSink)
+    return sink, mock_client
+
+
+# --- named Lua scripts ---
+
+
+def _script_config(**overrides):
+    from drakkar.config import RedisSinkConfig
+
+    return RedisSinkConfig(
+        url='redis://localhost:6379/0',
+        key_prefix='drakkar:',
+        scripts={
+            'push_and_cap': "redis.call('LPUSH', KEYS[1], ARGV[1])\nredis.call('LTRIM', KEYS[1], 0, ARGV[2])",
+            'claim_once': "return redis.call('SET', KEYS[1], ARGV[1], 'NX')",
+        },
+        **overrides,
+    )
+
+
+def test_every_redis_op_has_a_renderer_or_the_script_path():
+    """Adding an op to the enum without wiring it must fail here, loudly.
+
+    The build path indexes the renderer table directly, so a missing op
+    would otherwise surface as a KeyError at delivery time.
+    """
+    from drakkar.models import RedisOp
+    from drakkar.sinks.redis import _COMMAND_RENDERERS
+
+    unwired = {op.value for op in RedisOp} - {op.value for op in _COMMAND_RENDERERS} - {RedisOp.SCRIPT.value}
+    assert not unwired, f'ops with no renderer: {sorted(unwired)}'
+
+
+async def test_redis_sink_registers_every_configured_script_at_connect():
+    """register_script computes the SHA1 locally, so connect() stays cheap.
+
+    No round trip means a briefly unavailable Redis does not fail startup.
+    """
+    sink, mock_client = await _connect_redis_sink(_script_config())
+
+    registered = [call.args[0] for call in mock_client.register_script.call_args_list]
+    assert len(registered) == 2
+    assert any('LPUSH' in body for body in registered)
+    assert set(sink._scripts) == {'push_and_cap', 'claim_once'}
+
+
+async def test_redis_sink_registers_nothing_when_no_scripts_are_configured(redis_sink_config):
+    sink, mock_client = await _connect_redis_sink(redis_sink_config)
+
+    mock_client.register_script.assert_not_called()
+    assert sink._scripts == {}
+
+
+async def test_redis_sink_runs_a_named_script_with_prefixed_keys():
+    """EVERY entry of `keys` is prefixed, not just the single-key ops.
+
+    The prefix is the sink instance's namespace; a script that bypassed it
+    could reach keys outside that namespace.
+    """
+    sink, _ = await _connect_redis_sink(_script_config())
+    script = sink._scripts['push_and_cap']
+
+    await sink.deliver(
+        [
+            RedisPayload(
+                op='script',
+                script='push_and_cap',
+                keys=['recent', 'recent:meta'],
+                args=['{"a":1}', 100],
+            )
+        ]
+    )
+
+    script.assert_awaited_once()
+    assert script.await_args.kwargs['keys'] == ['drakkar:recent', 'drakkar:recent:meta']
+    assert script.await_args.kwargs['args'] == ['{"a":1}', 100]
+
+
+async def test_redis_sink_queues_a_script_onto_the_pipeline():
+    """A script batches with plain commands — it is queued, not executed early.
+
+    AsyncScript.__call__ detects a Pipeline and registers itself, so
+    Pipeline.execute() does SCRIPT EXISTS / SCRIPT LOAD first. NOSCRIPT
+    recovery is redis-py's job, not ours.
+    """
+    sink, mock_client = await _connect_redis_sink(_script_config())
+    pipe = mock_client.pipeline.return_value
+    script = sink._scripts['claim_once']
+
+    await sink.deliver(
+        [
+            RedisPayload(key='k1', data=SampleOutput(request_id='r1')),
+            RedisPayload(op='script', script='claim_once', keys=['lock'], args=['owner']),
+        ]
+    )
+
+    mock_client.pipeline.assert_called_once_with(transaction=False)
+    assert script.await_args.kwargs['client'] is pipe
+
+
+async def test_redis_sink_unknown_script_names_the_configured_ones():
+    sink, mock_client = await _connect_redis_sink(_script_config())
+
+    with pytest.raises(ValueError, match='unknown redis script') as excinfo:
+        await sink.deliver([RedisPayload(op='script', script='nope', keys=['k'])])
+
+    # Sorted, so the operator sees what IS available rather than just a miss.
+    assert 'claim_once, push_and_cap' in str(excinfo.value)
+    mock_client.pipeline.assert_not_called()
+
+
+async def test_redis_sink_unknown_script_says_so_when_none_are_configured(redis_sink_config):
+    sink, _ = await _connect_redis_sink(redis_sink_config)
+
+    with pytest.raises(ValueError, match='<none configured>'):
+        await sink.deliver([RedisPayload(op='script', script='push_and_cap', keys=['k'])])
+
+
+async def test_redis_sink_script_failure_is_attributed_by_name_not_body():
+    """DLQ entries and logs carry the script NAME — a body can leak row data."""
+    from drakkar.sinks.redis import RedisCommandError
+
+    sink, mock_client = await _connect_redis_sink(_script_config())
+    pipe = mock_client.pipeline.return_value
+    pipe.execute = AsyncMock(return_value=[True, Exception('ERR user_script failed')])
+
+    with pytest.raises(RedisCommandError) as excinfo:
+        await sink.deliver(
+            [
+                RedisPayload(key='k1', data=SampleOutput(request_id='r1')),
+                RedisPayload(op='script', script='push_and_cap', keys=['recent'], args=['x']),
+            ]
+        )
+
+    message = str(excinfo.value)
+    assert 'push_and_cap' in message
+    assert 'LPUSH' not in message, 'the script body must never reach an error message'
 
 
 async def test_redis_sink_connect(redis_sink_config):
@@ -1655,22 +1830,6 @@ async def test_redis_sink_passes_field_values_through_untouched(redis_sink_confi
     mapping = mock_client.hset.call_args.kwargs['mapping']
     assert mapping == {'a': 1, 'b': 2.5, 'c': 'three'}
     assert [type(v) for v in mapping.values()] == [int, float, str]
-
-
-async def test_redis_sink_rejects_ops_it_cannot_yet_build(redis_sink_config):
-    """TEMPORARY guard — delete as each op lands.
-
-    RedisOp declares every command the design specifies before the sink can
-    build them. Without this, a `delete` payload would reach the SET path
-    and be mis-executed rather than rejected.
-    """
-    from drakkar.models import RedisOp
-
-    sink, mock_client = _make_redis_sink(redis_sink_config)
-
-    with pytest.raises(ValueError, match='cannot yet build'):
-        await sink.deliver([RedisPayload(op=RedisOp.SCRIPT, script='push_and_cap', keys=['recent'])])
-    mock_client.set.assert_not_called()
 
 
 async def test_redis_sink_deliver_without_ttl(redis_sink_config):
