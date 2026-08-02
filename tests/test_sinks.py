@@ -3429,3 +3429,43 @@ async def test_mongo_sink_statement_error_names_the_statement_not_its_document()
 
     with pytest.raises(ValueError, match="mongo statement 'record_attempt'"):
         await sink.deliver([MongoPayload(op='statement', statement='record_attempt', params=_Partial())])
+
+
+async def test_mongo_sink_remaps_connection_failure_to_the_builtin(mongo_sink_config):
+    """SinkManager matches the BUILTIN ConnectionError, not PyMongo's.
+
+    pymongo.errors.ConnectionFailure inherits only from PyMongoError, so
+    without this remapping a dropped connection could never be fast-retried
+    — the same latent defect the Redis sink had.
+    """
+    from pymongo.errors import ConnectionFailure
+
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
+    _mongo_collection(collections).insert_one.side_effect = ConnectionFailure('connection reset')
+
+    with pytest.raises(ConnectionError, match='connection reset') as excinfo:
+        await sink.deliver([MongoPayload(collection='results', data=SampleOutput())])
+
+    assert isinstance(excinfo.value.__cause__, ConnectionFailure), 'the original must be chained'
+
+
+async def test_mongo_sink_remaps_network_timeout_to_the_builtin(mongo_sink_config):
+    """NetworkTimeout inherits from ConnectionFailure, so order matters."""
+    from pymongo.errors import NetworkTimeout
+
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
+    _mongo_collection(collections).insert_one.side_effect = NetworkTimeout('timed out')
+
+    with pytest.raises(TimeoutError, match='timed out'):
+        await sink.deliver([MongoPayload(collection='results', data=SampleOutput())])
+
+
+async def test_mongo_sink_does_not_remap_a_write_error(mongo_sink_config):
+    """A duplicate key fails identically on every retry, so it stays put."""
+    from pymongo.errors import DuplicateKeyError
+
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
+    _mongo_collection(collections).insert_one.side_effect = DuplicateKeyError('E11000')
+
+    with pytest.raises(DuplicateKeyError):
+        await sink.deliver([MongoPayload(collection='results', data=SampleOutput())])

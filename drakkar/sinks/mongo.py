@@ -46,6 +46,37 @@ class MongoWriteError(Exception):
     """
 
 
+def _as_builtin_transient(exc: BaseException) -> BaseException | None:
+    """Translate a PyMongo transient error into the builtin equivalent.
+
+    ``SinkManager`` classifies transient errors by matching the BUILTIN
+    ``ConnectionError`` / ``TimeoutError`` (``manager._TRANSIENT_ERRORS``),
+    but ``pymongo.errors.ConnectionFailure`` and ``NetworkTimeout`` inherit
+    only from ``PyMongoError``. A dropped Mongo connection was therefore
+    never eligible for the idempotent fast-retry — the same latent defect
+    the Redis sink had. Nothing depended on it while this sink was
+    unconditionally non-idempotent; ``batch_idempotent`` makes it live for
+    update, upsert and delete batches, so it is fixed first.
+
+    ``manager`` explicitly delegates this responsibility to sinks: "raise a
+    library-specific exception that the sink implementation can remap before
+    re-raising".
+
+    Returns ``None`` when the error is not transient, so the caller can
+    re-raise it untouched — remapping a write error such as a duplicate key
+    would make the manager retry a request that fails identically every
+    time. ``NetworkTimeout`` is checked first because it inherits from
+    ``ConnectionFailure``.
+    """
+    from pymongo.errors import ConnectionFailure, NetworkTimeout
+
+    if isinstance(exc, NetworkTimeout):
+        return TimeoutError(str(exc))
+    if isinstance(exc, ConnectionFailure):
+        return ConnectionError(str(exc))
+    return None
+
+
 @dataclass(frozen=True)
 class _MongoUnit:
     """One payload reduced to the write it performs.
@@ -325,8 +356,11 @@ class MongoSink(BaseSink[MongoPayload]):
 
             sink_payloads_delivered.labels(**labels).inc(len(payloads))
             sink_deliver_duration.labels(**labels).observe(time.monotonic() - start)
-        except Exception:
+        except Exception as exc:
             sink_deliver_errors.labels(**labels).inc()
+            transient = _as_builtin_transient(exc)
+            if transient is not None:
+                raise transient from exc
             raise
 
     def _build_units(self, payloads: list[MongoPayload]) -> tuple[list[_MongoUnit], int, Exception | None]:
