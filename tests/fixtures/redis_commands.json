@@ -1,0 +1,141 @@
+{
+  "_comment": "Golden WIRE-LEVEL Redis commands per write operation. Mirrored verbatim into drakkar-go so both backends issue byte-identical commands. Each 'command' is the argument vector as it reaches the server (RESP argv), NOT a client method call: redis-py's method names differ from the commands they send ('delete' sends DEL) and its keyword sugar expands ('mapping=' becomes flat field/value pairs, 'ex=' becomes a trailing EX). Pinning the wire form is what makes the corpus consumable by a backend whose client library has an entirely different surface. Every 'key' is emitted with the sink's key_prefix applied, and for 'script' EVERY entry of 'keys' is prefixed too. MAPPING arguments (hset fields, zadd members) are emitted in SORTED key order because the Go backend decodes them into a map with no order to preserve; LIST arguments (hdel fields, sadd/srem members) keep the caller's order, which both backends can reproduce. ZADD emits 'score member', flipped from the payload's member-to-score mapping — a client that takes (score, member) pairs must flip explicitly. 'data' objects declare their keys already sorted so the serialized value is stable whichever rule a backend's JSON encoder uses; the value itself is an opaque blob the framework never inspects. EVALSHA carries the plain SHA1 hex of the script body, which both backends compute locally.",
+  "key_prefix": "drakkar:",
+  "scripts": {
+    "push_and_cap": "redis.call('LPUSH', KEYS[1], ARGV[1])\nredis.call('LTRIM', KEYS[1], 0, tonumber(ARGV[2]) - 1)",
+    "sweep": "return redis.call('DEL', KEYS[1])"
+  },
+  "cases": [
+    {
+      "case": "set without ttl",
+      "payload": { "op": "set", "key": "result:abc", "data": { "request_id": "r1" } },
+      "command": ["SET", "drakkar:result:abc", "{\"request_id\":\"r1\"}"]
+    },
+    {
+      "case": "set with ttl appends EX",
+      "payload": { "op": "set", "key": "result:abc", "data": { "request_id": "r1" }, "ttl": 3600 },
+      "command": ["SET", "drakkar:result:abc", "{\"request_id\":\"r1\"}", "EX", 3600]
+    },
+    {
+      "case": "delete sends DEL, not the method name",
+      "payload": { "op": "delete", "key": "session:42" },
+      "command": ["DEL", "drakkar:session:42"]
+    },
+    {
+      "case": "expire",
+      "payload": { "op": "expire", "key": "session:42", "ttl": 900 },
+      "command": ["EXPIRE", "drakkar:session:42", 900]
+    },
+    {
+      "case": "incrby",
+      "payload": { "op": "incrby", "key": "hits:today", "amount": 5 },
+      "command": ["INCRBY", "drakkar:hits:today", 5]
+    },
+    {
+      "case": "incrby accepts a negative amount",
+      "payload": { "op": "incrby", "key": "hits:today", "amount": -3 },
+      "command": ["INCRBY", "drakkar:hits:today", -3]
+    },
+    {
+      "case": "incrby zero is a legitimate no-op",
+      "payload": { "op": "incrby", "key": "hits:today", "amount": 0 },
+      "command": ["INCRBY", "drakkar:hits:today", 0]
+    },
+    {
+      "case": "hset one field",
+      "payload": { "op": "hset", "key": "session:42", "fields": { "ip": "10.0.0.1" } },
+      "command": ["HSET", "drakkar:session:42", "ip", "10.0.0.1"]
+    },
+    {
+      "case": "hset flattens several fields in sorted key order",
+      "payload": {
+        "op": "hset",
+        "key": "session:42",
+        "fields": { "zone": "eu", "ip": "10.0.0.1", "hits": 3 }
+      },
+      "command": ["HSET", "drakkar:session:42", "hits", 3, "ip", "10.0.0.1", "zone", "eu"]
+    },
+    {
+      "case": "hset preserves value types rather than stringifying",
+      "payload": { "op": "hset", "key": "s", "fields": { "count": 7, "ratio": 0.5 } },
+      "command": ["HSET", "drakkar:s", "count", 7, "ratio", 0.5]
+    },
+    {
+      "case": "hdel keeps the caller's field order",
+      "payload": { "op": "hdel", "key": "session:42", "fields": ["zone", "ip"] },
+      "command": ["HDEL", "drakkar:session:42", "zone", "ip"]
+    },
+    {
+      "case": "push defaults to the left",
+      "payload": { "op": "push", "key": "recent", "data": { "id": 1 } },
+      "command": ["LPUSH", "drakkar:recent", "{\"id\":1}"]
+    },
+    {
+      "case": "push left",
+      "payload": { "op": "push", "key": "recent", "data": { "id": 1 }, "side": "left" },
+      "command": ["LPUSH", "drakkar:recent", "{\"id\":1}"]
+    },
+    {
+      "case": "push right",
+      "payload": { "op": "push", "key": "recent", "data": { "id": 1 }, "side": "right" },
+      "command": ["RPUSH", "drakkar:recent", "{\"id\":1}"]
+    },
+    {
+      "case": "trim",
+      "payload": { "op": "trim", "key": "recent", "start": 0, "stop": 99 },
+      "command": ["LTRIM", "drakkar:recent", 0, 99]
+    },
+    {
+      "case": "trim to an empty range",
+      "payload": { "op": "trim", "key": "recent", "start": 1, "stop": 0 },
+      "command": ["LTRIM", "drakkar:recent", 1, 0]
+    },
+    {
+      "case": "sadd keeps the caller's member order",
+      "payload": { "op": "sadd", "key": "seen", "members": ["zulu", "alpha"] },
+      "command": ["SADD", "drakkar:seen", "zulu", "alpha"]
+    },
+    {
+      "case": "srem one member",
+      "payload": { "op": "srem", "key": "seen", "members": ["alpha"] },
+      "command": ["SREM", "drakkar:seen", "alpha"]
+    },
+    {
+      "case": "zadd flips the mapping to score then member",
+      "payload": { "op": "zadd", "key": "leaderboard", "members": { "alice": 12.5 } },
+      "command": ["ZADD", "drakkar:leaderboard", 12.5, "alice"]
+    },
+    {
+      "case": "zadd emits several members in sorted member order",
+      "payload": {
+        "op": "zadd",
+        "key": "leaderboard",
+        "members": { "zoe": 1.5, "amy": 2.5 }
+      },
+      "command": ["ZADD", "drakkar:leaderboard", 2.5, "amy", 1.5, "zoe"]
+    },
+    {
+      "case": "script prefixes every key and passes args in order",
+      "payload": {
+        "op": "script",
+        "script": "push_and_cap",
+        "keys": ["recent", "recent:meta"],
+        "args": ["{\"id\":1}", 100]
+      },
+      "command": [
+        "EVALSHA",
+        "c72b339a0700022288734a2d690296185c676f58",
+        2,
+        "drakkar:recent",
+        "drakkar:recent:meta",
+        "{\"id\":1}",
+        100
+      ]
+    },
+    {
+      "case": "script with no args",
+      "payload": { "op": "script", "script": "sweep", "keys": ["stale"] },
+      "command": ["EVALSHA", "b0d697da25b13e49157b2c214a4033546aba2104", 1, "drakkar:stale"]
+    }
+  ]
+}
