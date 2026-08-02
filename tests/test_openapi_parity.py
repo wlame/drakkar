@@ -33,12 +33,19 @@ def _spec_routes() -> set[tuple[str, str]]:
 def _walk_routes(routes, seen=None):
     """Yield every route object reachable from ``routes``, nesting included.
 
-    Whether an included router's routes end up as flat copies on the app or
-    stay behind a nested container is a FastAPI implementation detail that
-    has changed between versions. Recursing over anything that itself
-    carries ``.routes`` keeps the pinned surface independent of that choice
-    — otherwise a version that nests would report every natively-registered
+    How an included router's routes reach the app is a FastAPI
+    implementation detail that has changed twice: they used to be flattened
+    onto the app, then kept behind a nested container carrying ``.routes``,
+    and since 0.14x they sit behind a lazy ``_IncludedRouter`` that resolves
+    only when a request arrives. This handles all three, because a version
+    that hides them would otherwise report every natively-registered
     ``/api/v1`` route as missing while the app serves them perfectly well.
+
+    The lazy wrapper is asked for its EFFECTIVE routes rather than being
+    unwrapped by hand: the objects it returns carry the final path with the
+    include prefix already applied, which is exactly what "served" means
+    here. Reading ``original_router.routes`` instead would report the paths
+    without their prefix.
     """
     seen = set() if seen is None else seen
     for route in routes:
@@ -46,6 +53,10 @@ def _walk_routes(routes, seen=None):
             continue  # cycle guard: a router may reference itself
         seen.add(id(route))
         yield route
+        resolve = getattr(route, 'effective_route_contexts', None)
+        if callable(resolve):
+            yield from _walk_routes(list(resolve()), seen)
+            continue
         nested = getattr(route, 'routes', None)
         if nested:
             yield from _walk_routes(nested, seen)
