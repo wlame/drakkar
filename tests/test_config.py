@@ -926,3 +926,155 @@ def test_redis_sink_config_scripts_from_env(minimal_config_dict, tmp_path, monke
 
     cfg = load_config(cfg_file)
     assert cfg.sinks.redis['cache'].scripts == {'push_and_cap': "redis.call('LPUSH', KEYS[1], ARGV[1])"}
+
+
+# --- Mongo operator-authored statements ---
+
+
+def _mongo_config(**overrides):
+    from drakkar.config import MongoSinkConfig
+
+    return MongoSinkConfig(uri='mongodb://localhost:27017', database='app', **overrides)
+
+
+def _claim_job(**overrides):
+    """A well-formed statement, for tests that vary one thing about it."""
+    statement = {
+        'collection': 'jobs',
+        'op': 'update_one',
+        'filter': {'_id': ':id', 'status': 'pending'},
+        'update': {'$set': {'status': ':status'}, '$inc': {'attempts': 1}},
+    }
+    statement.update(overrides)
+    return statement
+
+
+def test_mongo_sink_config_statements_default_empty():
+    cfg = _mongo_config()
+    assert cfg.statements == {}
+
+
+def test_mongo_sink_config_accepts_a_named_statement():
+    cfg = _mongo_config(statements={'claim_job': _claim_job()})
+
+    statement = cfg.statements['claim_job']
+    assert statement.collection == 'jobs'
+    assert statement.op == 'update_one'
+    # The template is preserved verbatim — the sink compiles it, not the
+    # config type.
+    assert statement.filter['_id'] == ':id'
+
+
+def test_mongo_sink_config_accepts_a_pipeline_update():
+    """A list update is MongoDB's own mechanism for computed updates."""
+    cfg = _mongo_config(statements={'recompute': _claim_job(update=[{'$set': {'total': ':total'}}])})
+    assert isinstance(cfg.statements['recompute'].update, list)
+
+
+def test_mongo_sink_config_accepts_a_delete_statement_without_an_update():
+    cfg = _mongo_config(
+        statements={'sweep': {'collection': 'staging', 'op': 'delete_many', 'filter': {'batch': ':batch'}}}
+    )
+    assert cfg.statements['sweep'].update is None
+
+
+@pytest.mark.parametrize(
+    ('name', 'overrides', 'expected'),
+    [
+        # Names reach structured logs, so they stay lowercase snake_case.
+        ('ClaimJob', {}, 'Invalid statement name'),
+        ('1claim', {}, 'Invalid statement name'),
+        ('claim-job', {}, 'Invalid statement name'),
+        ('', {}, 'Invalid statement name'),
+        # An empty filter matches EVERY document — delete_many({}) empties a
+        # collection outright.
+        ('claim_job', {'filter': {}}, 'filter'),
+        ('claim_job', {'collection': ''}, 'collection'),
+        # The escape hatch exists for what the declarative tier cannot
+        # express, and an insert is fully expressible already.
+        ('claim_job', {'op': 'insert'}, 'op'),
+        ('claim_job', {'op': 'statement'}, 'op'),
+        ('claim_job', {'op': 'nonsense'}, 'op'),
+        # update present/absent per op.
+        ('claim_job', {'update': None}, 'update'),
+        (
+            'sweep',
+            {'op': 'delete_many', 'update': {'$set': {'a': 1}}},
+            'update',
+        ),
+        # Malformed placeholders fail at startup, not at first delivery.
+        ('claim_job', {'filter': {'_id': ':'}}, 'placeholder'),
+        ('claim_job', {'filter': {':id': 1}}, 'key'),
+    ],
+)
+def test_mongo_sink_config_rejects_bad_statements(name, overrides, expected):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match=expected):
+        _mongo_config(statements={name: _claim_job(**overrides)})
+
+
+@pytest.mark.parametrize('operator', ['$where', '$function'])
+def test_mongo_sink_config_rejects_server_side_javascript(operator):
+    """Both execute JavaScript on the server, and an operator learns at startup."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match=r'\$'):
+        _mongo_config(statements={'bad': _claim_job(filter={operator: 'this.x < 1'})})
+
+
+@pytest.mark.parametrize('operator', ['$where', '$function'])
+def test_mongo_sink_config_rejects_javascript_inside_a_pipeline_stage(operator):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match=r'\$'):
+        _mongo_config(statements={'bad': _claim_job(update=[{'$set': {'x': {operator: 'code'}}}])})
+
+
+def test_mongo_sink_config_statements_from_yaml(minimal_config_dict, tmp_path):
+    """The operator-facing path: a statement declared in YAML."""
+    import yaml
+
+    from drakkar.config import load_config
+
+    minimal_config_dict['sinks'] = {
+        'mongo': {
+            'main': {
+                'uri': 'mongodb://localhost:27017',
+                'database': 'app',
+                'statements': {'claim_job': _claim_job()},
+            }
+        }
+    }
+    cfg_file = tmp_path / 'drakkar.yaml'
+    cfg_file.write_text(yaml.dump(minimal_config_dict))
+
+    cfg = load_config(cfg_file)
+    assert cfg.sinks.mongo['main'].statements['claim_job'].collection == 'jobs'
+
+
+def test_mongo_sink_config_statements_from_env(minimal_config_dict, tmp_path, monkeypatch):
+    """One level deeper than either companion sink's env override.
+
+    A statement is a nested MODEL rather than a string, so the DK_ path has
+    to reach a field inside a mapping entry.
+    """
+    import yaml
+
+    from drakkar.config import load_config
+
+    minimal_config_dict['sinks'] = {
+        'mongo': {
+            'main': {
+                'uri': 'mongodb://localhost:27017',
+                'database': 'app',
+                'statements': {'claim_job': _claim_job()},
+            }
+        }
+    }
+    cfg_file = tmp_path / 'drakkar.yaml'
+    cfg_file.write_text(yaml.dump(minimal_config_dict))
+    monkeypatch.setenv('DK_SINKS__MONGO__MAIN__STATEMENTS__CLAIM_JOB__COLLECTION', 'archived_jobs')
+
+    cfg = load_config(cfg_file)
+    assert cfg.sinks.mongo['main'].statements['claim_job'].collection == 'archived_jobs'
