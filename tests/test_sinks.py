@@ -3515,3 +3515,35 @@ async def test_mongo_sink_keeps_the_class_flag_as_the_conservative_fallback(mong
 
     assert sink.idempotent is False
     assert sink.batch_idempotent([MongoPayload(op='delete_many', collection='c', filter=_JobKey())]) is True
+
+
+async def test_mongo_sink_partial_side_effects_precede_a_build_error(mongo_sink_config):
+    """A payload the sink cannot build stops the delivery — after the ones
+    before it have been written, exactly as the pre-batching loop did."""
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
+
+    with pytest.raises(ValueError, match='matches every document'):
+        await sink.deliver(
+            [
+                MongoPayload(collection='results', data=SampleOutput(request_id='r1')),
+                MongoPayload(op='delete_many', collection='results', filter=_Empty()),
+            ]
+        )
+
+    assert collections['results'].insert_one.await_count == 1
+
+
+async def test_mongo_sink_reraises_a_bulk_error_carrying_no_write_errors(mongo_sink_config):
+    """Without an index there is no payload to blame, so it propagates as-is."""
+    from pymongo.errors import BulkWriteError
+
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
+    _mongo_collection(collections).bulk_write.side_effect = BulkWriteError({'nInserted': 0})
+
+    with pytest.raises(BulkWriteError):
+        await sink.deliver(
+            [
+                MongoPayload(collection='results', data=SampleOutput(request_id='r1')),
+                MongoPayload(collection='results', data=SampleOutput(request_id='r2')),
+            ]
+        )
