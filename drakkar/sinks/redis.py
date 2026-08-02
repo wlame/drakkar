@@ -147,6 +147,11 @@ _COMMAND_RENDERERS: dict[RedisOp, _CommandRenderer] = {
 }
 
 
+# Ops a retry could apply twice with a different end state. Everything else
+# in RedisOp converges, which is why the class-level flag stays True.
+_NOT_IDEMPOTENT_OPS = frozenset({RedisOp.INCRBY, RedisOp.PUSH, RedisOp.SCRIPT})
+
+
 class RedisCommandError(Exception):
     """One or more commands in a pipeline failed on the server.
 
@@ -201,11 +206,12 @@ class RedisSink(BaseSink[RedisPayload]):
 
     sink_type = 'redis'
 
-    # Redis ``SET`` is write-replace on a fixed key — re-executing the
-    # same command produces the same post-state regardless of how many
-    # times it ran. That makes RedisSink safe to retry on transient
-    # errors (connection reset mid-command, timeout, etc.), so we opt
-    # into automatic retry via ``idempotent=True``.
+    # Most Redis writes are write-replace on a fixed key or a removal, so
+    # re-executing one produces the same post-state however many times it
+    # ran. That makes the SET-shaped ops safe to retry on transient errors
+    # (connection reset mid-command, timeout), which is what this flag opts
+    # into. The real decision is per batch — see ``batch_idempotent`` — and
+    # this stays as the value for a batch that contains only convergent ops.
     #
     # TTLs ride along on the SET, which means a retried ``SET … EX 3600``
     # DOES restart the expiry window. That is accepted: the drift is
@@ -215,6 +221,21 @@ class RedisSink(BaseSink[RedisPayload]):
     # clock, so worker/server skew would shift real expiry times. Clock
     # skew is the worse operational hazard.
     idempotent = True
+
+    def batch_idempotent(self, payloads: list[RedisPayload]) -> bool:
+        """Retry-safe unless the batch contains a command that accumulates.
+
+        ``SET``/``HSET`` replace, ``DELETE``/``HDEL``/``SREM`` converge on
+        removal, ``SADD`` is a no-op for a member already present, ``ZADD``
+        sets the score rather than incrementing it, and ``TRIM`` to a fixed
+        range converges. ``INCRBY`` and ``PUSH`` accumulate, and operator
+        Lua is opaque to the framework — exactly like a Postgres named
+        statement.
+
+        Marking individual scripts idempotent in configuration is a natural
+        extension, deliberately left out for now.
+        """
+        return not any(payload.op in _NOT_IDEMPOTENT_OPS for payload in payloads)
 
     def __init__(self, name: str, config: RedisSinkConfig) -> None:
         super().__init__(name, ui_url=config.ui_url)

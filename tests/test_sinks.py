@@ -1551,6 +1551,57 @@ def _script_config(**overrides):
     )
 
 
+# --- per-batch retry safety ---
+
+
+@pytest.mark.parametrize(
+    ('payloads', 'expected'),
+    [
+        # Write-replace on a fixed key/field, or a removal — all converge.
+        ([{'key': 'k', 'data': None}], True),
+        ([{'op': 'delete', 'key': 'k'}], True),
+        ([{'op': 'expire', 'key': 'k', 'ttl': 60}], True),
+        ([{'op': 'hset', 'key': 'k', 'fields': {'a': 1}}], True),
+        ([{'op': 'hdel', 'key': 'k', 'fields': ['a']}], True),
+        ([{'op': 'sadd', 'key': 'k', 'members': ['m']}], True),
+        ([{'op': 'srem', 'key': 'k', 'members': ['m']}], True),
+        ([{'op': 'zadd', 'key': 'k', 'members': {'m': 1.0}}], True),
+        ([{'op': 'trim', 'key': 'k', 'start': 0, 'stop': 9}], True),
+        # A batch of several convergent ops is still safe.
+        ([{'op': 'delete', 'key': 'k'}, {'op': 'sadd', 'key': 's', 'members': ['m']}], True),
+        # INCRBY accumulates.
+        ([{'op': 'incrby', 'key': 'k', 'amount': 1}], False),
+        # PUSH appends a duplicate element.
+        ([{'op': 'push', 'key': 'k', 'data': None}], False),
+        # Operator Lua is opaque — the framework cannot tell.
+        ([{'op': 'script', 'script': 's', 'keys': ['k']}], False),
+        # One unsafe payload vetoes an otherwise safe batch.
+        ([{'op': 'delete', 'key': 'k'}, {'op': 'incrby', 'key': 'c', 'amount': 1}], False),
+        # Vacuously safe — nothing to duplicate.
+        ([], True),
+    ],
+)
+def test_redis_sink_batch_idempotent(redis_sink_config, payloads, expected):
+    sink, _ = _make_redis_sink(redis_sink_config)
+    # `data: None` in the table means "this op needs a payload model"; the
+    # value itself is irrelevant to the retry decision.
+    built = []
+    for kwargs in payloads:
+        if 'data' in kwargs:
+            kwargs = {**kwargs, 'data': SampleOutput(request_id='r')}
+        built.append(RedisPayload(**kwargs))
+
+    assert sink.batch_idempotent(built) is expected
+
+
+def test_redis_sink_keeps_the_class_flag_for_the_set_shaped_ops(redis_sink_config):
+    """The type-level flag stays True; the per-batch hook narrows it."""
+    sink, _ = _make_redis_sink(redis_sink_config)
+
+    assert sink.idempotent is True
+    assert sink.batch_idempotent([RedisPayload(op='incrby', key='k', amount=1)]) is False
+
+
 def test_every_redis_op_has_a_renderer_or_the_script_path():
     """Adding an op to the enum without wiring it must fail here, loudly.
 
