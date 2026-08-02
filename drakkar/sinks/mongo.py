@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import structlog
+from pydantic import BaseModel
 
 from drakkar.config import MongoSinkConfig
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
@@ -23,6 +24,9 @@ if TYPE_CHECKING:
     from pymongo.operations import DeleteMany, DeleteOne, InsertOne, UpdateMany, UpdateOne
 
     _WriteModel = InsertOne | UpdateOne | UpdateMany | DeleteOne | DeleteMany
+    # What a per-op builder returns: the bulk-write model, plus the
+    # driver method and arguments the single-payload path calls.
+    _BuiltUnit = tuple[_WriteModel, str, tuple[object, ...], dict[str, object]]
 
 logger = structlog.get_logger()
 
@@ -86,28 +90,100 @@ def _group_into_runs(units: list[_MongoUnit]) -> list[list[_MongoUnit]]:
     return runs
 
 
+def _dumped(model: BaseModel | None, field: str, op: MongoOp) -> dict:
+    """Serialize a payload body, refusing an empty result.
+
+    This is the second of two independent guards on the unbounded-write
+    hazard, and the reason it exists separately from the payload validator:
+    the validator checks the payload as CONSTRUCTED, while this checks what
+    the model actually dumps, so a model mutated afterwards — or one whose
+    fields are all None — cannot slip through. An empty Mongo filter matches
+    EVERY document, so ``delete_many`` with one empties a collection; an
+    empty ``$set`` is simply malformed.
+
+    The two guards also route differently: the validator surfaces through
+    ``on_error`` in the handler's own code, this one through
+    ``on_delivery_error``.
+    """
+    assert model is not None  # the per-op field contract guarantees it
+    dumped = model.model_dump()
+    if not dumped:
+        raise ValueError(
+            f'MongoPayload(op={op.value!r}) has an empty {field!r} — '
+            f'an empty filter matches every document in the collection'
+            if field == 'filter'
+            else f'MongoPayload(op={op.value!r}) has an empty {field!r}'
+        )
+    return dumped
+
+
+def _build_insert(payload: MongoPayload) -> '_BuiltUnit':
+    """InsertOne — the document as given."""
+    from pymongo import InsertOne
+
+    document = _dumped(payload.data, 'data', payload.op)
+    return InsertOne(document), 'insert_one', (document,), {}
+
+
+def _build_update(payload: MongoPayload) -> '_BuiltUnit':
+    """UpdateOne/UpdateMany/UpdateOne(upsert=True) with a $set assignment."""
+    from pymongo import UpdateMany, UpdateOne
+
+    predicate = _dumped(payload.filter, 'filter', payload.op)
+    update = {'$set': _dumped(payload.data, 'data', payload.op)}
+    if payload.op is MongoOp.UPDATE_MANY:
+        return UpdateMany(predicate, update), 'update_many', (predicate, update), {}
+    if payload.op is MongoOp.UPSERT:
+        return UpdateOne(predicate, update, upsert=True), 'update_one', (predicate, update), {'upsert': True}
+    return UpdateOne(predicate, update), 'update_one', (predicate, update), {}
+
+
+def _build_delete(payload: MongoPayload) -> '_BuiltUnit':
+    """DeleteOne/DeleteMany against a required, non-empty filter."""
+    from pymongo import DeleteMany, DeleteOne
+
+    predicate = _dumped(payload.filter, 'filter', payload.op)
+    if payload.op is MongoOp.DELETE_MANY:
+        return DeleteMany(predicate), 'delete_many', (predicate,), {}
+    return DeleteOne(predicate), 'delete_one', (predicate,), {}
+
+
+# Which driver write each op builds. A table rather than a branch chain: the
+# mapping IS the specification, and it is what the Go backend has to
+# reproduce operation for operation.
+#
+# One and many stay separate entries rather than a flag, because the blast
+# radius differs by orders of magnitude and the driver makes the distinction
+# primary.
+_MONGO_UNIT_BUILDERS = {
+    MongoOp.INSERT: _build_insert,
+    MongoOp.UPDATE_ONE: _build_update,
+    MongoOp.UPDATE_MANY: _build_update,
+    MongoOp.UPSERT: _build_update,
+    MongoOp.DELETE_ONE: _build_delete,
+    MongoOp.DELETE_MANY: _build_delete,
+}
+
+
 def _build_unit(payload: MongoPayload) -> _MongoUnit:
     """Reduce one payload to the write its operation performs.
 
     TEMPORARY guard: ``MongoPayload`` already carries every op, so an op
-    the sink cannot yet execute must fail loudly rather than fall through
-    to an insert of the wrong thing. Removed as each op lands.
+    without a builder must fail loudly rather than fall through to something
+    else. Only ``statement`` lacks one now.
     """
-    from pymongo import InsertOne
-
-    if payload.op is not MongoOp.INSERT:
+    builder = _MONGO_UNIT_BUILDERS.get(payload.op)
+    if builder is None:
         raise ValueError(f'mongo op {payload.op.value!r} cannot be built yet')
-    # The per-op field contract guarantees it for an insert.
-    assert payload.data is not None
-    document = payload.data.model_dump()
+    model, method, args, kwargs = builder(payload)
     return _MongoUnit(
         op=payload.op,
         collection=payload.collection,
         label=f'{payload.op.value} collection={payload.collection}',
-        model=InsertOne(document),
-        method='insert_one',
-        args=(document,),
-        kwargs={},
+        model=model,
+        method=method,
+        args=args,
+        kwargs=kwargs,
     )
 
 
