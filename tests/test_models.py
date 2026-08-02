@@ -12,6 +12,7 @@ from drakkar.models import (
     HttpPayload,
     KafkaPayload,
     MessageGroup,
+    MongoOp,
     MongoPayload,
     PostgresOp,
     PostgresPayload,
@@ -693,3 +694,119 @@ def test_dlq_message_preserves_payload_data():
     )
     entry = json.loads(DLQMessage(error, partition_id=0).serialize())
     assert json.loads(entry['original_payloads'][0])['data'] == _DLQ_ROW_JSON
+
+
+# --- MongoPayload operations ---
+
+
+def test_mongo_payload_defaults_to_insert():
+    """Existing MongoPayload(collection=…, data=…) call sites keep working."""
+    payload = MongoPayload(collection='audit', data=SampleData())
+    assert payload.op is MongoOp.INSERT
+
+
+def test_mongo_payload_op_serializes_as_a_plain_string():
+    """DLQ JSON byte-stability: op must serialize as its value."""
+    payload = MongoPayload(op=MongoOp.DELETE_MANY, collection='staging', filter=SampleData())
+    assert '"op":"delete_many"' in payload.model_dump_json().replace(' ', '')
+
+
+def test_mongo_payload_field_order_is_the_dlq_contract():
+    """The Go backend must emit these fields in this order — byte-stability."""
+    assert list(MongoPayload.model_fields) == [
+        'sink',
+        'op',
+        'collection',
+        'data',
+        'filter',
+        'statement',
+        'params',
+    ]
+
+
+def test_mongo_payload_bodies_serialize_duck_typed():
+    """SerializeAsAny, or model_dump_json() emits {} for every body.
+
+    pydantic serializes against the DECLARED type, and BaseModel has no
+    fields — the bug fixed in 5ecc683 for every other payload type.
+    """
+    payload = MongoPayload(op=MongoOp.UPDATE_ONE, collection='jobs', data=SampleData(), filter=SampleData())
+    dumped = payload.model_dump_json()
+    assert '"data":{}' not in dumped.replace(' ', '')
+    assert '"filter":{}' not in dumped.replace(' ', '')
+
+
+@pytest.mark.parametrize(
+    ('op', 'kwargs', 'missing'),
+    [
+        ('insert', {'data': SampleData()}, 'collection'),
+        ('insert', {'collection': 'c'}, 'data'),
+        ('update_one', {'collection': 'c', 'data': SampleData()}, 'filter'),
+        ('update_one', {'collection': 'c', 'filter': SampleData()}, 'data'),
+        ('update_many', {'collection': 'c', 'data': SampleData()}, 'filter'),
+        ('upsert', {'collection': 'c', 'data': SampleData()}, 'filter'),
+        ('delete_one', {'collection': 'c'}, 'filter'),
+        ('delete_many', {'collection': 'c'}, 'filter'),
+        ('delete_one', {'filter': SampleData()}, 'collection'),
+        ('statement', {}, 'statement'),
+    ],
+)
+def test_mongo_payload_requires_the_fields_its_op_uses(op, kwargs, missing):
+    with pytest.raises(ValidationError, match=f"requires '{missing}'"):
+        MongoPayload(op=op, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ('op', 'kwargs', 'unused'),
+    [
+        ('insert', {'collection': 'c', 'data': SampleData(), 'filter': SampleData()}, 'filter'),
+        ('insert', {'collection': 'c', 'data': SampleData(), 'statement': 's'}, 'statement'),
+        (
+            'update_one',
+            {'collection': 'c', 'data': SampleData(), 'filter': SampleData(), 'statement': 's'},
+            'statement',
+        ),
+        (
+            'delete_one',
+            {'collection': 'c', 'filter': SampleData(), 'data': SampleData()},
+            'data',
+        ),
+        (
+            'delete_many',
+            {'collection': 'c', 'filter': SampleData(), 'params': SampleData()},
+            'params',
+        ),
+        ('statement', {'statement': 's', 'collection': 'c'}, 'collection'),
+        ('statement', {'statement': 's', 'data': SampleData()}, 'data'),
+        ('statement', {'statement': 's', 'filter': SampleData()}, 'filter'),
+    ],
+)
+def test_mongo_payload_rejects_fields_the_op_does_not_use(op, kwargs, unused):
+    """A mis-set field must be a loud error, not silently ignored.
+
+    Seven operations in one class with optional fields would otherwise let
+    MongoPayload(op='delete_one', data=doc) quietly drop the document.
+    """
+    with pytest.raises(ValidationError, match=f"does not use '{unused}'"):
+        MongoPayload(op=op, **kwargs)
+
+
+def test_mongo_payload_statement_params_are_optional():
+    """A template may declare no placeholders at all."""
+    payload = MongoPayload(op=MongoOp.STATEMENT, statement='sweep')
+    assert payload.params is None
+
+
+@pytest.mark.parametrize('op', ['update_one', 'update_many', 'upsert', 'delete_one', 'delete_many'])
+def test_mongo_payload_requires_a_filter_for_every_mutating_op(op):
+    """An empty Mongo filter matches EVERY document.
+
+    delete_many({}) empties a collection outright, which makes this the
+    worst failure mode in the feature — worse than the Postgres analogue,
+    where an empty WHERE at least leaves the rows in place.
+    """
+    kwargs = {'collection': 'c'}
+    if op != 'delete_one' and op != 'delete_many':
+        kwargs['data'] = SampleData()
+    with pytest.raises(ValidationError, match="requires 'filter'"):
+        MongoPayload(op=op, **kwargs)

@@ -11,7 +11,7 @@ import structlog
 
 from drakkar.config import MongoSinkConfig
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
-from drakkar.models import MongoPayload
+from drakkar.models import MongoOp, MongoPayload
 from drakkar.sinks.base import BaseSink
 from drakkar.utils import redact_url
 
@@ -43,6 +43,20 @@ def _group_docs_by_collection(docs: list[_MongoDoc]) -> list[list[_MongoDoc]]:
             groups.append([])
         groups[i].append(doc)
     return groups
+
+
+def _build_doc(payload: MongoPayload) -> _MongoDoc:
+    """Reduce one payload to the document its operation writes.
+
+    TEMPORARY guard: ``MongoPayload`` already carries every op, so an op
+    the sink cannot yet execute must fail loudly rather than fall through
+    to an insert of the wrong thing. Removed as each op lands.
+    """
+    if payload.op is not MongoOp.INSERT:
+        raise ValueError(f'mongo op {payload.op.value!r} cannot be built yet')
+    # The per-op field contract guarantees it for an insert.
+    assert payload.data is not None
+    return _MongoDoc(collection=payload.collection, document=payload.data.model_dump())
 
 
 class MongoSink(BaseSink[MongoPayload]):
@@ -132,7 +146,7 @@ class MongoSink(BaseSink[MongoPayload]):
         docs: list[_MongoDoc] = []
         for i, payload in enumerate(payloads):
             try:
-                docs.append(_MongoDoc(collection=payload.collection, document=payload.data.model_dump()))
+                docs.append(_build_doc(payload))
             except Exception as e:
                 return docs, i, e
         return docs, len(docs), None

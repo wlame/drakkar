@@ -3105,3 +3105,15 @@ async def test_postgres_sink_update_sorts_set_and_predicate_columns(pg_sink_conf
     query, *values = mock_conn.execute.call_args[0]
     assert query == 'UPDATE "jobs" SET "finished_at" = $1, "status" = $2 WHERE "id" = $3 AND "owner" = $4'
     assert values == ['t1', 'done', 42, 'me']
+
+
+async def test_mongo_sink_rejects_ops_it_cannot_yet_build(mongo_sink_config):
+    """The guard exists only between the payload type gaining every op and
+    the sink learning to execute them. Delete it, and this test, once all
+    six declarative ops build."""
+    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+
+    with pytest.raises(ValueError, match='cannot be built yet'):
+        await sink.deliver([MongoPayload(op='delete_many', collection='c', filter=SampleOutput(request_id='r'))])
+
+    mock_collection.insert_one.assert_not_awaited()
