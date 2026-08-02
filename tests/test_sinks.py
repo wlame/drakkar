@@ -1536,6 +1536,69 @@ async def test_redis_plain_command_queues_and_executes_the_same_call():
     client.set.assert_awaited_once_with('drakkar:k', '{}', ex=60)
 
 
+@pytest.mark.parametrize(
+    ('payload_kwargs', 'method', 'args', 'kwargs'),
+    [
+        (
+            {'op': 'delete', 'key': 'session:42'},
+            'delete',
+            ('drakkar:session:42',),
+            {},
+        ),
+        (
+            {'op': 'expire', 'key': 'session:42', 'ttl': 900},
+            'expire',
+            ('drakkar:session:42', 900),
+            {},
+        ),
+        (
+            {'op': 'incrby', 'key': 'hits:today', 'amount': 5},
+            'incrby',
+            ('drakkar:hits:today', 5),
+            {},
+        ),
+        # A negative or zero amount is legitimate.
+        (
+            {'op': 'incrby', 'key': 'hits:today', 'amount': -1},
+            'incrby',
+            ('drakkar:hits:today', -1),
+            {},
+        ),
+        (
+            {'op': 'trim', 'key': 'recent', 'start': 0, 'stop': 99},
+            'ltrim',
+            ('drakkar:recent', 0, 99),
+            {},
+        ),
+    ],
+)
+async def test_redis_sink_renders_keyed_scalar_commands(redis_sink_config, payload_kwargs, method, args, kwargs):
+    """Command name and argument order per op — the parity surface."""
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+
+    await sink.deliver([RedisPayload(**payload_kwargs)])
+
+    call = getattr(mock_client, method)
+    call.assert_awaited_once_with(*args, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ('side', 'method'),
+    [(None, 'lpush'), ('left', 'lpush'), ('right', 'rpush')],
+)
+async def test_redis_sink_push_honours_side_and_defaults_to_left(redis_sink_config, side, method):
+    """`side` selects the command; omitting it means LPUSH."""
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+
+    await sink.deliver([RedisPayload(op='push', key='recent', data=SampleOutput(request_id='r1'), side=side)])
+
+    call = getattr(mock_client, method)
+    call.assert_awaited_once()
+    assert call.call_args.args[0] == 'drakkar:recent'
+    # One list element is one serialized object, exactly as for SET.
+    assert '"request_id":"r1"' in call.call_args.args[1]
+
+
 async def test_redis_sink_rejects_ops_it_cannot_yet_build(redis_sink_config):
     """TEMPORARY guard — delete as each op lands.
 
@@ -1548,7 +1611,7 @@ async def test_redis_sink_rejects_ops_it_cannot_yet_build(redis_sink_config):
     sink, mock_client = _make_redis_sink(redis_sink_config)
 
     with pytest.raises(ValueError, match='cannot yet build'):
-        await sink.deliver([RedisPayload(op=RedisOp.DELETE, key='doomed')])
+        await sink.deliver([RedisPayload(op=RedisOp.SCRIPT, script='push_and_cap', keys=['recent'])])
     mock_client.set.assert_not_called()
 
 

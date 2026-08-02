@@ -6,6 +6,7 @@ key prefix + payload key, with optional TTL.
 """
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import structlog
@@ -51,6 +52,42 @@ class _PlainCommand:
     async def execute(self, client: object) -> None:
         """Run this command directly, outside a pipeline."""
         await getattr(client, self.method)(*self.args, **self.kwargs)
+
+
+# One rendered redis-py call: method name, positional args, keyword args.
+_Rendered = tuple[str, tuple[object, ...], dict[str, object]]
+# A renderer receives the payload and its ALREADY-PREFIXED key.
+_CommandRenderer = Callable[[RedisPayload, str], _Rendered]
+
+
+def _render_set(payload: RedisPayload, key: str) -> _Rendered:
+    """SET pk <json> [EX ttl]."""
+    assert payload.data is not None  # the per-op contract guarantees it
+    kwargs: dict[str, object] = {'ex': payload.ttl} if payload.ttl is not None else {}
+    return 'set', (key, payload.data.model_dump_json()), kwargs
+
+
+def _render_push(payload: RedisPayload, key: str) -> _Rendered:
+    """LPUSH/RPUSH pk <json> — one list element is one serialized object."""
+    assert payload.data is not None
+    method = 'rpush' if payload.side == 'right' else 'lpush'
+    return method, (key, payload.data.model_dump_json()), {}
+
+
+# Which redis-py call each op renders to. A table rather than a branch chain:
+# the mapping IS the specification, and it is what the Go backend has to
+# reproduce argument-for-argument.
+#
+# Every renderer receives the ALREADY-PREFIXED key, so no renderer can
+# forget the sink instance's namespace.
+_COMMAND_RENDERERS: dict[RedisOp, _CommandRenderer] = {
+    RedisOp.SET: _render_set,
+    RedisOp.DELETE: lambda p, key: ('delete', (key,), {}),
+    RedisOp.EXPIRE: lambda p, key: ('expire', (key, p.ttl), {}),
+    RedisOp.INCRBY: lambda p, key: ('incrby', (key, p.amount), {}),
+    RedisOp.PUSH: _render_push,
+    RedisOp.TRIM: lambda p, key: ('ltrim', (key, p.start, p.stop), {}),
+}
 
 
 class RedisCommandError(Exception):
@@ -202,25 +239,21 @@ class RedisSink(BaseSink[RedisPayload]):
     def _build_command(self, payload: RedisPayload) -> _PlainCommand:
         """Reduce one payload to the redis-py call that carries it out.
 
-        The op guard is TEMPORARY. ``RedisOp`` declares every command the
-        design specifies, but this sink builds only ``SET`` so far; without
-        the guard a ``delete`` payload would reach the SET path and be
-        mis-executed rather than rejected. Each branch disappears as its op
-        lands.
+        The unknown-op guard is TEMPORARY: ``RedisOp`` declares every command
+        the design specifies before every renderer exists, and without the
+        guard a payload naming an unrendered op would fall through silently
+        rather than fail. It goes away once the table is complete.
         """
-        if payload.op is not RedisOp.SET:
-            raise ValueError(f"RedisSink cannot yet build op {payload.op.value!r} — only 'set' is implemented")
-        if payload.data is None:  # pragma: no cover - the validator guarantees it for SET
-            raise ValueError(f'RedisPayload(op={payload.op.value!r}) requires data')
+        renderer = _COMMAND_RENDERERS.get(payload.op)
+        if renderer is None:
+            raise ValueError(f'RedisSink cannot yet build op {payload.op.value!r}')
         key = self._config.key_prefix + payload.key
-        kwargs: dict[str, object] = {}
-        if payload.ttl is not None:
-            kwargs['ex'] = payload.ttl
+        method, args, kwargs = renderer(payload, key)
         return _PlainCommand(
             op=payload.op,
             label=f'{payload.op.value} key={key}',
-            method='set',
-            args=(key, payload.data.model_dump_json()),
+            method=method,
+            args=args,
             kwargs=kwargs,
         )
 
