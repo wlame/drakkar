@@ -160,7 +160,106 @@ validating there would couple worker startup to schema state.
 That last row is the same behaviour an `INSERT` naming a missing table has
 always had.
 
-## Column order
+## Redis
+
+`RedisPayload.op` selects the command and defaults to `set`, so existing
+handlers are unaffected. One write verb per data type:
+
+| `op` | Command | Required fields |
+|------|---------|-----------------|
+| `set` (default) | `SET pk <json> [EX ttl]` | `key`, `data` |
+| `delete` | `DEL pk` | `key` |
+| `expire` | `EXPIRE pk ttl` | `key`, `ttl` |
+| `incrby` | `INCRBY pk amount` | `key`, `amount` |
+| `hset` | `HSET pk f v [f v …]` | `key`, `fields` (mapping) |
+| `hdel` | `HDEL pk f [f …]` | `key`, `fields` (list) |
+| `push` | `LPUSH`/`RPUSH pk <json>` | `key`, `data` |
+| `trim` | `LTRIM pk start stop` | `key`, `start`, `stop` |
+| `sadd` | `SADD pk m [m …]` | `key`, `members` (list) |
+| `srem` | `SREM pk m [m …]` | `key`, `members` (list) |
+| `zadd` | `ZADD pk score member […]` | `key`, `members` (mapping) |
+| `script` | `EVALSHA sha n pk… args…` | `script`, `keys` |
+
+Reads are deliberately absent, for the same reason `SELECT` is absent from the
+Postgres sink: a sink discards results. A read-modify-write cycle belongs in the
+handler, through the sink's [`client` property](sinks.md#sink-specific-details).
+
+A field the chosen `op` does not use is a validation error rather than a
+silently ignored value, and a required collection may not be empty —
+`hset` with `fields={}` would be a malformed command.
+
+```python
+RedisPayload(key=f'result:{request_id}', data=summary, ttl=3600)
+RedisPayload(op=RedisOp.INCRBY, key=f'hits:{day}', amount=1)
+RedisPayload(op=RedisOp.HSET, key=f'session:{sid}', fields={'ip': ip})
+RedisPayload(op=RedisOp.ZADD, key='leaderboard', members={user: score})
+```
+
+`data` is a model only where the value IS a serialized object (`set`, `push`).
+Hash fields and sorted-set members are frequently dynamic keys — a leaderboard
+keyed by user id cannot be a model with static field names — so those take
+plain typed mappings and lists instead.
+
+### script — arbitrary Lua, operator-controlled
+
+Multi-step or conditional logic goes in a **named script**. Lua also buys
+something no declarative op can: **a script is atomic on the server**, while a
+pipeline is not a transaction. An LPUSH-then-LTRIM pair issued as two ops can
+interleave with another writer; the same pair inside a script cannot.
+
+```yaml
+sinks:
+  redis:
+    result_cache:
+      url: "redis://redis:6379/0"
+      key_prefix: "drakkar:"
+      scripts:
+        push_and_cap: |
+          redis.call('LPUSH', KEYS[1], ARGV[1])
+          redis.call('LTRIM', KEYS[1], 0, tonumber(ARGV[2]) - 1)
+          return redis.call('LLEN', KEYS[1])
+```
+
+```python
+RedisPayload(
+    op=RedisOp.SCRIPT,
+    script='push_and_cap',
+    keys=['recent'],
+    args=[summary.model_dump_json(), 100],
+)
+```
+
+Script names must match `^[a-z_][a-z0-9_]*$`, because they appear as
+structured-log fields. `keys` must be non-empty: a keyless script cannot be
+routed under Redis Cluster, so declaring keys keeps scripts cluster-safe from
+the start.
+
+**Every entry of `keys` is prefixed**, not just the single-key ops' `key`. The
+prefix is the sink instance's namespace, and a script given raw keys could write
+outside it.
+
+Values reach the script through `KEYS` and `ARGV` and are never interpolated
+into the body, so message content cannot alter what runs. Scripts are **not**
+validated against a live server — there is no Lua parser available without one,
+and validating there would couple worker startup to Redis availability. A
+broken script fails at delivery through `on_delivery_error`. Registration at
+startup computes the SHA1 locally with no round trip, so it stays cheap and
+survives a briefly unavailable Redis.
+
+### Argument order
+
+Mapping arguments (`hset` fields, `zadd` members) are emitted in **sorted key
+order**; lists (`hdel` fields, `sadd`/`srem` members) keep the order you supply.
+Order changes neither command's end state, but it does change the emitted
+command, and the Go backend decodes a mapping into a map with no order to
+preserve — so sorting is the only rule both backends can honour. This is the
+same reasoning as [Postgres column order](#postgres-column-order) below.
+
+`zadd` takes `members` as member→score, which is the natural shape and matches
+the client's own signature; Redis receives `score member`, flipped during
+rendering.
+
+## Postgres column order
 
 Columns are emitted in **sorted** order, not in the order the payload model
 declares its fields:
@@ -186,10 +285,12 @@ the data columns and is therefore sorted with them.
 
 ## Batching and ordering
 
-Payloads batch only with **adjacent** same-shaped neighbours, so the order
-statements reach the database always matches the order the handler returned
-them. Grouping globally would batch better but would execute a payload before
-its predecessor — harmless for inserts, a silently lost write for updates.
+Execution order always equals payload order on both sinks. How they get there
+differs, because the two datastores batch differently.
+
+**Postgres** batches only with **adjacent** same-shaped neighbours. Grouping
+globally would batch better but would execute a payload before its predecessor —
+harmless for inserts, a silently lost write for updates.
 
 | Run of | Sent as |
 |---|---|
@@ -200,12 +301,25 @@ When a batch fails, the framework retries it payload-by-payload so the surfaced
 error names the offending payload. That fallback cannot double-write: a failed
 `executemany` is atomic, and a failed multi-row `INSERT` wrote nothing.
 
+**Redis** has no shape-grouping problem at all: a pipeline carries heterogeneous
+commands and executes them in order, so one delivery is one pipeline and
+ordering is preserved for free. There is no chunking either — batch size is
+bounded by `executor.window_size` and Redis has no per-command parameter limit.
+
+A failing Redis command is attributed **positionally**, and nothing is re-sent:
+the pipeline returns one result per command, with per-command errors present as
+values rather than raised, so the offending payload is named without repeating
+the ones that succeeded. That is what makes `incrby` and `push` safe to batch.
+A connection-level failure is different — there the framework cannot know what
+was applied, so the error propagates with the whole batch.
+
 ## Retry safety
 
-Retry-safety is a property of the *batch*, not of the sink, so `PostgresSink`
-answers per delivery through
-[`batch_idempotent`](sinks.md#retry-contract) rather than through the
-class-level `idempotent` flag:
+Retry-safety is a property of the *batch*, not of the sink, so both sinks answer
+per delivery through [`batch_idempotent`](sinks.md#retry-contract) rather than
+through the class-level `idempotent` flag.
+
+**Postgres:**
 
 | Batch contains | Retry-safe |
 |---|---|
@@ -213,17 +327,36 @@ class-level `idempotent` flag:
 | any `insert` | no — a plain insert duplicates rows |
 | any `statement` | no — the SQL is opaque to the framework |
 
+**Redis** is mostly-idempotent by nature, so the veto list is short:
+
+| Batch contains | Retry-safe |
+|---|---|
+| only `set`, `delete`, `expire`, `hset`, `hdel`, `sadd`, `srem`, `zadd`, `trim` | yes — each replaces or converges |
+| any `incrby` | no — it accumulates |
+| any `push` | no — it appends a duplicate element |
+| any `script` | no — the Lua is opaque to the framework |
+
 `attempts = attempts + 1` is not idempotent, and the framework cannot inspect
-operator SQL to know whether a given statement is. Marking individual statements
-idempotent in configuration is a natural extension, deliberately left out for
-now.
+operator SQL or Lua to know whether a given one is. Marking individual
+statements and scripts idempotent in configuration is a natural extension,
+deliberately left out for now.
+
+A TTL is the one place a retry is not exactly convergent: `SET … EX 3600`
+restarts the expiry window, so a fast-retry can shift it by the backoff — a few
+hundred milliseconds. The alternative, an absolute `EXAT` deadline computed by
+the worker, would converge exactly but would take the timestamp from the
+worker's clock, making worker/server skew shift real expiry times. Clock skew is
+the worse hazard, so TTLs stay relative.
 
 ## Observability
 
-The message probe (`POST /api/v1/debug/probe`) reports the planned operation:
-`extras.op` carries the discriminator, `extras.where` and `extras.conflict`
-appear for the operations that use them, and `destination` is the statement name
-for a named statement or the table for everything else.
+The message probe (`POST /api/v1/debug/probe`) reports the planned operation on
+both sinks: `extras.op` carries the discriminator, and `destination` is the
+escape hatch's name — the statement for Postgres `op=statement`, the script for
+Redis `op=script` — or the table/key for everything else. Postgres additionally
+reports `extras.where` and `extras.conflict` for the operations that use them.
 
-Delivery-failure logs name the operations and the statement names involved,
-never the SQL text.
+Delivery-failure logs name the operations and the statement or script names
+involved, never the SQL or Lua text, which can carry row data.
+
+No metric names or labels change on either sink.

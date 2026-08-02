@@ -164,33 +164,44 @@ HttpPayload(data=notification)
 
 ### RedisPayload
 
-Sets a key-value pair in Redis.
+Issues one Redis write command, or runs an operator-authored Lua script. The
+`op` field selects which; it defaults to `set`.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `sink` | `str` | Target sink instance name (empty string for default) |
-| `key` | `str` | Redis key suffix |
-| `data` | `BaseModel` | Payload model |
-| `ttl` | `int \| None` | Optional expiry in seconds |
+| Field | Type | Ops | Description |
+|-------|------|-----|-------------|
+| `sink` | `str` | all | Target sink instance name (empty string for default) |
+| `op` | `RedisOp` | all | Which command to issue; defaults to `set` |
+| `key` | `str` | all but `script` | Redis key suffix. The full key is `{config.key_prefix}{key}` |
+| `data` | `BaseModel` | set, push | Serialized via `model_dump_json()` as the stored value |
+| `ttl` | `int \| None` | set (optional), expire (required) | Expiry in seconds |
+| `fields` | `dict \| list` | hset (mapping), hdel (names) | Hash fields. Must be non-empty |
+| `members` | `dict \| list` | zadd (member→score), sadd/srem (names) | Must be non-empty |
+| `amount` | `int` | incrby | The increment; may be negative or zero |
+| `side` | `'left' \| 'right'` | push | Which end; `None` means left |
+| `start` / `stop` | `int` | trim | Range to keep |
+| `script` | `str` | script | Name of a script declared in sink config |
+| `keys` | `list[str]` | script | Passed as `KEYS`, each prefixed. Required and non-empty |
+| `args` | `list` | script | Passed as `ARGV`, in order |
 
-**Serialization:** `data.model_dump_json()` becomes the Redis string value. The full
-Redis key is `{config.key_prefix}{payload.key}`. When `ttl` is set, the key expires
-after that many seconds (`SET key value EX ttl`).
+A field the chosen `op` does not use is a validation error, not a silently
+ignored value — `RedisPayload(op='delete', amount=5)` raises.
 
-**Batching:** multiple payloads in one delivery are written through a single pipeline
-rather than one round-trip per key. If the pipeline fails, the framework retries the
-keys individually so the surfaced error still names the offending key — safe to replay
-because `SET` is write-replace.
+**Batching:** one delivery is one pipeline, in payload order. A command that
+fails is named by position; **nothing is ever re-sent**, which is what makes
+`incrby` and `push` safe to batch.
 
 ```python
-from drakkar import RedisPayload
+from drakkar import RedisOp, RedisPayload
 
-RedisPayload(
-    key=f'search:{request_id}',
-    data=search_summary,
-    ttl=3600,  # 1 hour
-)
+RedisPayload(key=f'search:{request_id}', data=search_summary, ttl=3600)
+
+RedisPayload(op=RedisOp.INCRBY, key=f'hits:{day}', amount=1)
+
+RedisPayload(op=RedisOp.ZADD, key='leaderboard', members={user: score})
 ```
+
+See [Sink Write Operations](sink-write-operations.md) for every command, the
+named-script escape hatch, and the ordering and retry rules.
 
 ### FilePayload
 
@@ -402,14 +413,19 @@ Keep the default when duplicate delivery has observable side effects:
 | `DLQSink` | `False` | Same as `KafkaSink`; DLQ also uses its own `send()` path. |
 | `PostgresSink` | per batch | `UPDATE`/`UPSERT` converge on retry; plain `INSERT` duplicates. See below. |
 | `MongoSink` | `False` | `insert_*` without a stable `_id` duplicates on retry. |
-| `RedisSink` | `True` | `SET` on a fixed key is write-replace. |
+| `RedisSink` | per batch | Most commands converge; `incrby`/`push`/`script` do not. See below. |
 
 `PostgresSink` overrides `batch_idempotent()` rather than setting the flag: a
 batch of only `update` and `upsert` payloads is retry-safe, while any `insert`
 or `statement` payload makes it unsafe (`attempts = attempts + 1` is not
-idempotent, and the framework cannot inspect operator SQL to know). Any sink can
-do the same when retry-safety is a property of the payloads rather than of the
-sink:
+idempotent, and the framework cannot inspect operator SQL to know).
+
+`RedisSink` does the same from the other direction: most Redis writes replace
+or converge, so a batch is retry-safe unless it contains `incrby` (accumulates),
+`push` (appends a duplicate), or `script` (opaque Lua).
+
+Any sink can do this when retry-safety is a property of the payloads rather than
+of the sink:
 
 ```python
 def batch_idempotent(self, payloads):
@@ -665,8 +681,15 @@ sinks:
         Authorization: "Bearer ${WEBHOOK_TOKEN}"
 ```
 
-**RedisSink** uses `redis.asyncio` (via `from_url`), connecting to the URL specified
-in config:
+**RedisSink** exposes the `redis.asyncio` client via its `client` property, the
+counterpart to `PostgresSink.pool`. It is the way to run a read-modify-write
+cycle, since sinks discard results and read commands are deliberately absent.
+Note the current limit: handlers are never handed sink instances, so this is
+reachable only from a plugin sink subclass. A general `self.sinks` accessor is
+a separate design.
+
+It uses `redis.asyncio` (via `from_url`), connecting to the URL specified in
+config:
 
 ```yaml
 sinks:

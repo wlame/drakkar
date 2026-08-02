@@ -1,8 +1,15 @@
-"""Redis sink — sets key-value pairs in Redis.
+"""Redis sink — one write command per payload, or a named Lua script.
 
-Wraps redis.asyncio.Redis. Each RedisPayload's data field is serialized
-via model_dump_json() and stored as a string value under the configured
-key prefix + payload key, with optional TTL.
+Wraps redis.asyncio.Redis. A RedisPayload's ``op`` selects the command:
+one write verb per data type (SET, DEL, EXPIRE, INCRBY, HSET, HDEL,
+LPUSH/RPUSH, LTRIM, SADD, SREM, ZADD), or ``script`` to run Lua the
+operator authored in configuration, invoked by name with KEYS and ARGV
+bound rather than interpolated.
+
+Every key is namespaced with ``config.key_prefix``, including every entry
+of a script's ``keys``. One delivery is one pipeline, and a per-command
+failure is attributed positionally — nothing is ever re-sent, which is
+what makes a command that accumulates (INCRBY, LPUSH) safe to batch.
 """
 
 import time
@@ -219,12 +226,12 @@ def _as_builtin_transient(exc: BaseException) -> BaseException | None:
 
 
 class RedisSink(BaseSink[RedisPayload]):
-    """Sets key-value pairs in Redis.
+    """Issues one Redis write command per payload.
 
-    Each RedisPayload is serialized:
-        - key = config.key_prefix + payload.key
-        - value = payload.data.model_dump_json()
-        - TTL = payload.ttl (optional, in seconds)
+    ``RedisPayload.op`` selects the command and defaults to ``SET``. Keys
+    are always namespaced with ``config.key_prefix``. Operator-authored Lua
+    declared under ``sinks.redis.<instance>.scripts`` is registered at
+    connect() and invoked by name.
     """
 
     sink_type = 'redis'

@@ -122,9 +122,11 @@ Design points every agent should know:
 ## Invariants
 
 1. **Contract parity with drakkar-go** — config format (YAML + `DK_` env),
-   DLQ JSON byte-stability, metric names, emitted Postgres SQL (columns are
-   SORTED, never left in model-declaration order, because Go decodes payload
-   data into an orderless map), the config-summary one-liner
+   DLQ JSON byte-stability, metric names, emitted Postgres SQL and emitted
+   Redis commands (mapping arguments are SORTED — Postgres columns, Redis
+   `hset` fields and `zadd` members — never left in model-declaration or
+   dict order, because Go decodes payload data into an orderless map;
+   caller-supplied LISTS keep their order), the config-summary one-liner
    (renders `ui=on:8080`; the `ui.release.*` bundle-fetch settings are
    deliberately excluded from it), and the `/api/v1` shapes.
    `kafka.security` / `kafka.client_config` (plus the sink and DLQ
@@ -168,17 +170,28 @@ Design points every agent should know:
    early re-opens the duplicate-delivery window. The wait must stay
    bounded by `executor.drain_timeout_seconds` —
    `run_coroutine_threadsafe(...).result()` has no timeout of its own.
-8. **Sink deliveries are batched with per-payload fallback.** Payloads
-   batch only with ADJACENT same-shaped neighbours, so execution order
-   always equals payload order — global bucketing would reorder a payload
-   past its successor, which is a lost update for `UPDATE`. Postgres runs
-   group by op + shape (`insert`/`upsert` → one multi-row `VALUES`;
-   `update`/`statement` → one `executemany`), mongo by collection, redis
-   pipelines; each falls back to per-payload delivery when a batch fails
-   so error attribution stays identical to the Go backend (divergence
-   #18). The Kafka sink keeps its per-batch `flush()` — `AIOProducer`
-   buffers to `batch_size=1000` / `buffer_timeout=1.0s`, so dropping it
-   would stall every delivery on a one-second timer.
+8. **Sink deliveries are batched, and execution order always equals
+   payload order.** Postgres batches only with ADJACENT same-shaped
+   neighbours — global bucketing would reorder a payload past its
+   successor, which is a lost update for `UPDATE` — grouping by op +
+   shape (`insert`/`upsert` → one multi-row `VALUES`;
+   `update`/`statement` → one `executemany`). Mongo groups by collection.
+   Postgres and mongo fall back to per-payload delivery when a batch
+   fails, so error attribution stays identical to the Go backend
+   (divergence #18); that fallback is safe only because the failed batch
+   is atomic and wrote nothing.
+
+   **Redis does NOT fall back.** Its pipeline runs with
+   `raise_on_error=False`, which returns one result per queued command
+   with per-command errors as VALUES, so the failing payload is named
+   positionally and nothing is ever re-sent. Do not reintroduce a replay
+   — it would double-apply `INCRBY` and `LPUSH`. A short result list is a
+   loud error (`zip(..., strict=True)`) rather than silently dropped
+   failures.
+
+   The Kafka sink keeps its per-batch `flush()` — `AIOProducer` buffers to
+   `batch_size=1000` / `buffer_timeout=1.0s`, so dropping it would stall
+   every delivery on a one-second timer.
 
 ## Build / test / run (always via just)
 
