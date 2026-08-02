@@ -46,6 +46,12 @@ class MongoWriteError(Exception):
     """
 
 
+# Ops a retry could apply twice with a different end state. Everything else
+# in MongoOp converges, which is what makes a batch of updates and deletes
+# safe to fast-retry even though the sink's type-level flag says otherwise.
+_NOT_IDEMPOTENT_OPS = frozenset({MongoOp.INSERT, MongoOp.STATEMENT})
+
+
 def _as_builtin_transient(exc: BaseException) -> BaseException | None:
     """Translate a PyMongo transient error into the builtin equivalent.
 
@@ -282,14 +288,27 @@ class MongoSink(BaseSink[MongoPayload]):
 
     sink_type = 'mongo'
 
-    # ``insert_one`` / ``insert_many`` without a stable ``_id`` and
-    # unique-index is NOT idempotent — a retry can duplicate documents
-    # in the collection. We keep the safe default of ``False`` so
-    # transient Mongo errors route to ``on_delivery_error`` instead of
-    # being auto-retried. Users who set a deterministic ``_id`` on the
-    # payload (or use an upsert in a custom subclass) can flip this to
-    # ``True`` to opt into automatic transient-error retry.
+    # An insert without a stable ``_id`` and a unique index is NOT
+    # idempotent — a retry can duplicate documents in the collection. This
+    # stays the conservative type-level fallback for any path that still
+    # reads the flag; the real decision is per batch, in
+    # ``batch_idempotent``, because a batch of updates and deletes IS safe
+    # to repeat and only the payloads say which kind a batch is.
     idempotent = False
+
+    def batch_idempotent(self, payloads: list[MongoPayload]) -> bool:
+        """Retry-safe unless the batch inserts or runs operator MQL.
+
+        ``$set`` against a fixed filter converges, an upsert converges on
+        insert-or-set, and a delete converges on removal. A plain insert
+        duplicates documents, and an operator's MQL is opaque to the
+        framework — ``$inc`` accumulates and we cannot tell.
+
+        Marking individual statements idempotent in configuration is a
+        natural extension, deliberately left out for now, as it is in both
+        companion sinks.
+        """
+        return not any(payload.op in _NOT_IDEMPOTENT_OPS for payload in payloads)
 
     def __init__(self, name: str, config: MongoSinkConfig) -> None:
         super().__init__(name, ui_url=config.ui_url)
