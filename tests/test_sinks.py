@@ -1,11 +1,14 @@
 """Tests for individual sink implementations."""
 
 import asyncio
+import json
+from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model
 
 from drakkar.config import (
     FileSinkConfig,
@@ -2407,3 +2410,77 @@ def test_postgres_sink_batch_idempotent_empty_batch_is_safe(pg_sink_config):
     sink, _, _ = _make_pg_sink(pg_sink_config)
 
     assert sink.batch_idempotent([]) is True
+
+
+# --- golden rendered SQL, shared with drakkar-go ---------------------------
+#
+# tests/fixtures/pg_rendered_sql.json is mirrored verbatim into the Go repo.
+# These cases run through the sink's own unit builder and renderers rather
+# than a test-local copy of that logic, so a divergence between the two
+# backends fails here instead of reaching an operator's database.
+
+_RENDERED_SQL_CORPUS = json.loads((Path(__file__).parent / 'fixtures' / 'pg_rendered_sql.json').read_text())
+
+
+def _golden_model(pairs):
+    """Build a model whose model_dump() yields the fixture's columns in order."""
+    return create_model('GoldenModel', **{name: (Any, value) for name, value in pairs})()
+
+
+def _golden_payloads(case):
+    """Turn one fixture case into the payloads a handler would have returned."""
+    from drakkar.models import PostgresOp
+
+    op = PostgresOp(case['op'])
+    if op is PostgresOp.UPDATE:
+        (row,) = case['rows']
+        return [
+            PostgresPayload(
+                op=op,
+                table=case['table'],
+                data=_golden_model(row),
+                where=_golden_model(case['where']),
+            )
+        ]
+    extra = {}
+    if op is PostgresOp.UPSERT:
+        extra = {'conflict': case['conflict'], 'update_columns': case['update_columns']}
+    return [PostgresPayload(op=op, table=case['table'], data=_golden_model(row), **extra) for row in case['rows']]
+
+
+@pytest.mark.parametrize('case', _RENDERED_SQL_CORPUS['cases'], ids=lambda c: c['case'])
+def test_postgres_rendered_sql_corpus(pg_sink_config, case):
+    """Both backends must emit this SQL and bind these values, in this order."""
+    sink, _, _ = _make_pg_sink(pg_sink_config)
+
+    units = [sink._build_unit(p) for p in _golden_payloads(case)]
+    if len(units) > 1:
+        keys = {u.group_key for u in units}
+        assert len(keys) == 1, 'a multi-row case must describe one batchable run'
+
+    from drakkar.sinks.postgres import _StmtUnit
+
+    first = units[0]
+    # An update is one fixed statement; an insert or upsert renders against
+    # the number of rows batched into it.
+    sql = first.sql if isinstance(first, _StmtUnit) else first.render(len(units))
+    values = [v for u in units for v in u.values]
+
+    assert sql == case['expected_sql']
+    assert values == case['expected_values']
+
+
+@pytest.mark.parametrize('name', _RENDERED_SQL_CORPUS['identifiers']['valid'])
+def test_postgres_rendered_sql_corpus_valid_identifiers(name):
+    from drakkar.pgsql import quote_ident
+
+    assert quote_ident(name) == f'"{name}"'
+
+
+@pytest.mark.parametrize('name', _RENDERED_SQL_CORPUS['identifiers']['invalid'])
+def test_postgres_rendered_sql_corpus_invalid_identifiers(name):
+    """The injection defence is a parity surface — it must not diverge."""
+    from drakkar.pgsql import quote_ident
+
+    with pytest.raises(ValueError, match='Invalid SQL identifier'):
+        quote_ident(name)
