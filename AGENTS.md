@@ -189,6 +189,17 @@ Design points every agent should know:
    loud error (`zip(..., strict=True)`) rather than silently dropped
    failures.
 
+   **Mongo does NOT fall back either.** A run of one collection's payloads
+   goes out as one `bulk_write(ordered=True)`, and
+   `BulkWriteError.details['writeErrors'][*]['index']` is positionally
+   aligned with the submitted operations, so the failing payload is named
+   exactly. This RETIRED the `_id`-stripping workaround: PyMongo writes a
+   generated `_id` back into every document it is handed, so the old
+   per-document replay raised a duplicate-key error on the FIRST document
+   rather than the guilty one, and stripping the id knowingly wrote
+   duplicates. With no replay the problem is gone — do not reintroduce
+   either half.
+
    The Kafka sink keeps its per-batch `flush()` — `AIOProducer` buffers to
    `batch_size=1000` / `buffer_timeout=1.0s`, so dropping it would stall
    every delivery on a one-second timer.

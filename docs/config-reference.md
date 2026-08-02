@@ -190,7 +190,22 @@ sinks:
       uri: mongodb://mongo:27017   # required. env: DK_SINKS__MONGO__LOGS__URI
       database: app_logs           # required. env: DK_SINKS__MONGO__LOGS__DATABASE
       ui_url: ''                   # Mongo Express URL. env: DK_SINKS__MONGO__LOGS__UI_URL
+      statements:                  # optional. Operator-authored MQL by name
+        record_attempt:            # env: DK_SINKS__MONGO__LOGS__STATEMENTS__RECORD_ATTEMPT__COLLECTION
+          collection: jobs
+          op: update_one           # one of: update_one, update_many, upsert, delete_one, delete_many
+          filter: { _id: ":id" }   # required, and never empty
+          update:                  # required for the update ops, absent for the deletes
+            $set: { last_seen: ":now" }
+            $inc: { attempts: 1 }
 ```
+
+Statement names must match `^[a-z_][a-z0-9_]*$`. Values bind through `":name"`
+placeholders, whole values only and type-preserved; `"::name"` escapes a literal
+leading colon. `$where` and `$function` are rejected at startup at any depth,
+including inside aggregation-pipeline stages. Statements are not verified
+against the live database. See
+[Sink Write Operations](sink-write-operations.md#mongo).
 
 ### HTTP sink
 

@@ -117,29 +117,45 @@ named-statement escape hatch, and the ordering and retry rules.
 
 ### MongoPayload
 
-Inserts a document into a MongoDB collection.
+Performs one write operation against a MongoDB collection — or runs a named
+MQL statement.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `sink` | `str` | Target sink instance name (empty string for default) |
-| `collection` | `str` | Target MongoDB collection name |
-| `data` | `BaseModel` | Payload model |
+| `op` | `MongoOp` | Which operation to perform; defaults to `insert` |
+| `collection` | `str` | Target collection. Required for every op except `statement`, which declares its own |
+| `data` | `BaseModel \| None` | Insert and update ops: the document, or the `$set` assignments |
+| `filter` | `BaseModel \| None` | Update, upsert and delete ops: the predicate. Required, and never empty |
+| `statement` | `str` | `statement` only: the key under `sinks.mongo.<name>.statements` |
+| `params` | `BaseModel \| None` | `statement` only: values bound to the template's `":name"` placeholders |
 
-**Serialization:** `data.model_dump()` produces a dict.
+**Serialization:** `data.model_dump()` produces the document; `filter.model_dump()`
+produces an equality predicate. A field the chosen `op` does not use is a
+validation error rather than a silently ignored value.
 
-**Batching:** documents in one delivery are grouped by collection and each group is
-sent as a single `insert_many`, rather than one `insert_one` per payload. A group of
-one uses `insert_one`. If `insert_many` fails, the framework retries that group
-document-by-document so the surfaced error still names the offending document.
+**Batching:** payloads are grouped into consecutive runs of the same collection
+and each run is sent as one `bulk_write(ordered=True)`, which carries
+heterogeneous operations and names the failing payload positionally without
+re-sending anything. A run of one uses the direct method (`insert_one`,
+`update_one`, …).
 
 ```python
-from drakkar import MongoPayload
+from drakkar import MongoOp, MongoPayload
+
+MongoPayload(collection='search_archive', data=search_result)
 
 MongoPayload(
-    collection='search_archive',
-    data=search_result,
+    op=MongoOp.UPDATE_ONE,
+    collection='jobs',
+    data=JobStatus(status='done'),
+    filter=JobKey(id=job_id),
 )
 ```
+
+The full operation table, the `statements:` config block, and the parameter
+binding rules are in
+[Sink write operations](sink-write-operations.md#mongo).
 
 ### HttpPayload
 
@@ -412,7 +428,7 @@ Keep the default when duplicate delivery has observable side effects:
 | `FileSink` | `False` | Append mode duplicates records on retry. |
 | `DLQSink` | `False` | Same as `KafkaSink`; DLQ also uses its own `send()` path. |
 | `PostgresSink` | per batch | `UPDATE`/`UPSERT` converge on retry; plain `INSERT` duplicates. See below. |
-| `MongoSink` | `False` | `insert_*` without a stable `_id` duplicates on retry. |
+| `MongoSink` | per batch | Updates, upserts and deletes converge; a plain `insert` duplicates. See below. |
 | `RedisSink` | per batch | Most commands converge; `incrby`/`push`/`script` do not. See below. |
 
 `PostgresSink` overrides `batch_idempotent()` rather than setting the flag: a
@@ -423,6 +439,11 @@ idempotent, and the framework cannot inspect operator SQL to know).
 `RedisSink` does the same from the other direction: most Redis writes replace
 or converge, so a batch is retry-safe unless it contains `incrby` (accumulates),
 `push` (appends a duplicate), or `script` (opaque Lua).
+
+`MongoSink` follows the Redis pattern: `$set` against a fixed filter converges,
+upsert converges, and removal converges, so a batch is retry-safe unless it
+contains an `insert` (duplicates documents) or a `statement` (opaque MQL —
+`$inc` accumulates).
 
 Any sink can do this when retry-safety is a property of the payloads rather than
 of the sink:
@@ -702,7 +723,24 @@ sinks:
 **KafkaSink** inherits `kafka.brokers` when its own `brokers` field is empty, so you
 only need to specify brokers once for sinks on the same cluster.
 
-**MongoSink** uses PyMongo's `AsyncMongoClient` for native asyncio support.
+**MongoSink** uses PyMongo's `AsyncMongoClient` for native asyncio support, and
+holds any operator-authored MQL under `statements`:
+
+```yaml
+sinks:
+  mongo:
+    main:
+      uri: "mongodb://mongo:27017"
+      database: app
+      statements:
+        record_attempt:
+          collection: jobs
+          op: update_one
+          filter: { _id: ":id" }
+          update:
+            $set: { last_seen: ":now" }
+            $inc: { attempts: 1 }
+```
 
 **FileSink** requires `base_path` (non-empty) and validates it exists at connect time. All payload paths are contained within `base_path` — traversal attempts raise `ValueError`.
 Individual payload paths must have existing parent directories.

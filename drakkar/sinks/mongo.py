@@ -1,7 +1,16 @@
-"""MongoDB sink — inserts documents into collections.
+"""MongoDB sink — one write operation per payload, or a named MQL statement.
 
-Wraps PyMongo's AsyncMongoClient. Each MongoPayload's data field is
-serialized via model_dump() to get a dict suitable for MongoDB insertion.
+Wraps PyMongo's AsyncMongoClient. A MongoPayload's ``op`` selects the
+operation: ``insert``, ``update_one``/``update_many``, ``upsert``,
+``delete_one``/``delete_many``, or ``statement`` to run MQL the operator
+authored in configuration, invoked by name with parameters bound into
+whole-value positions rather than interpolated.
+
+Payloads are grouped into consecutive runs of the same collection and each
+run is sent as one ordered bulk write, so execution order equals payload
+order and a failing operation is attributed positionally — nothing is ever
+re-sent, which is what makes a batch containing an insert safe to send at
+all.
 """
 
 import time
@@ -277,11 +286,13 @@ def _build_unit(payload: MongoPayload, statements: dict[str, _CompiledStatement]
 
 
 class MongoSink(BaseSink[MongoPayload]):
-    """Inserts documents into MongoDB collections.
+    """Performs one write operation per payload against MongoDB.
 
-    Each MongoPayload is serialized:
-        - collection = payload.collection
-        - document = payload.data.model_dump()
+    ``MongoPayload.op`` selects the operation and defaults to ``insert``.
+    ``data`` and ``filter`` are serialized with ``model_dump()`` — the
+    document, and the equality predicate selecting what to write.
+    Operator-authored MQL declared under ``sinks.mongo.<instance>.statements``
+    is compiled at connect() and invoked by name.
 
     Uses PyMongo's AsyncMongoClient for native asyncio support.
     """

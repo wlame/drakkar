@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Mongo sink writes more than inserts.** `MongoPayload.op` selects
+  `insert` (the default, so existing handlers are unaffected), `update_one`,
+  `update_many`, `upsert`, `delete_one`, `delete_many`, or `statement`. The
+  update ops take a `filter` serialized to an equality predicate and assign
+  `data` through `$set`; `upsert` is insert-or-set on the same filter. One
+  and many stay explicit rather than hiding behind a flag, because the blast
+  radius differs by orders of magnitude.
+
+  `filter` is required and may never be empty, guarded twice: the payload
+  validator rejects a missing one at construction, and the build step rejects
+  one that *dumps* empty. An empty Mongo filter matches every document, so
+  `delete_many({})` would empty a collection outright.
+
+- **Operator-authored MQL, invoked by name.** Statements declared under
+  `sinks.mongo.<instance>.statements` are compiled at startup and run by a
+  payload with `op='statement'` and bound `params`. This is the escape hatch
+  for anything the declarative fields cannot express — `$inc`, `$push`,
+  computed pipeline updates. Unlike the Postgres and Redis equivalents a
+  statement is a structured model rather than a string, because MQL is data:
+  it carries its own collection, op, filter, and update.
+
+  Values bind through `":name"` placeholders — whole values only, never a
+  fragment of a longer string, never a key, and with their type preserved so
+  a numeric field still matches. `"::name"` escapes a literal leading colon.
+  `$where` and `$function` are rejected at config load at any depth,
+  including inside aggregation-pipeline stages, because both execute
+  server-side JavaScript.
+
+- The message probe now reports which operation a Mongo payload plans
+  (`extras.op`, plus `extras.filter` for the ops that carry one); a statement
+  reports its name as the record's `destination`.
+
 - **The Redis sink issues more than SET.** `RedisPayload.op` selects one
   write command per data type — `set` (the default, so existing handlers
   are unaffected), `delete`, `expire`, `incrby`, `hset`, `hdel`, `push`,
@@ -35,6 +67,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Mongo deliveries are one ordered bulk write per collection run, and
+  nothing is re-sent.** `bulk_write(ordered=True)` replaces `insert_many`:
+  execution order equals payload order, execution stops at the first failure,
+  and `writeErrors[*].index` names the offending payload exactly. A run can
+  now carry heterogeneous operations, which `insert_many` could not express.
+
+- **Mongo payloads batch only with adjacent same-collection neighbours.**
+  Payloads were previously bucketed globally, which could execute a payload
+  before its predecessor — harmless for inserts, a silently lost write once
+  updates and deletes exist.
+
+- `MongoSink` decides retry-safety per batch: updates, upserts and deletes
+  converge, so those batches get the transient fast-retry, while any `insert`
+  or `statement` payload vetoes it.
+
+- PyMongo's `ConnectionFailure` and `NetworkTimeout` are remapped to the
+  builtin `ConnectionError`/`TimeoutError` the sink manager matches, with the
+  original chained. They inherit only from `PyMongoError`, so a dropped Mongo
+  connection had never been eligible for the fast-retry — the same latent
+  defect the Redis sink had. Nothing depended on it while the sink was
+  unconditionally non-idempotent; per-batch retry makes it live.
+
 - **Redis pipeline failures are attributed positionally and nothing is
   re-sent.** The pipeline now runs with `raise_on_error=False`, so a
   per-command error names its own payload while the commands that
@@ -49,6 +103,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `zadd` members) so both backends issue identical commands;
   caller-supplied lists (`hdel` fields, `sadd`/`srem` members) keep their
   order. New shared corpus: `tests/fixtures/redis_commands.json`.
+
+### Removed
+
+- **The Mongo `_id`-stripping fallback**, and the duplicate writes it
+  knowingly accepted. It existed only because the per-document replay re-sent
+  documents the failed batch had already written, and PyMongo writes a
+  generated `_id` back into every document it is handed — so a resent
+  document raised a duplicate-key error on the FIRST document rather than the
+  guilty one. Positional attribution removes the replay, so the workaround
+  and its cost are both gone. This supersedes the fix shipped in 1.3.0 rather
+  than reverting it.
 
 ### Fixed
 
