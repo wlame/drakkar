@@ -3561,3 +3561,38 @@ async def test_sink_collector_postgres_statement_destination_is_the_statement_na
     assert flat[0].destination == 'claim_job'
     assert flat[0].extras['op'] == 'statement'
     assert flat[0].payload is None
+
+
+async def test_sink_collector_reports_the_mongo_operation():
+    """extras.op always; filter only for the ops that carry one."""
+    from drakkar.models import MongoOp
+
+    collector = DebugSinkCollector()
+    cr = CollectResult(
+        mongo=[
+            MongoPayload(collection='audit', data=_TinyOutput(id=1)),
+            MongoPayload(op=MongoOp.UPDATE_ONE, collection='jobs', data=_TinyOutput(id=2), filter=_TinyOutput(id=9)),
+        ]
+    )
+    await collector(cr, 0)
+
+    insert, update = collector.flatten()
+    assert insert.extras == {'sink_instance': '', 'op': 'insert'}
+    assert insert.destination == 'audit'
+    assert update.extras['op'] == 'update_one'
+    assert update.extras['filter']['id'] == 9
+    assert update.destination == 'jobs'
+
+
+async def test_sink_collector_identifies_a_mongo_statement_by_name():
+    """A statement declares its own collection, so its name is the destination."""
+    from drakkar.models import MongoOp
+
+    collector = DebugSinkCollector()
+    cr = CollectResult(mongo=[MongoPayload(op=MongoOp.STATEMENT, statement='record_attempt')])
+    await collector(cr, 0)
+
+    record = collector.flatten()[0]
+    assert record.destination == 'record_attempt'
+    assert record.extras['op'] == 'statement'
+    assert record.payload is None

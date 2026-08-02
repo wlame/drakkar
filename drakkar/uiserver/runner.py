@@ -55,6 +55,7 @@ from drakkar.models import (
     ExecutorResult,
     ExecutorTask,
     MessageGroup,
+    MongoOp,
     PendingContext,
     PostgresOp,
     RedisOp,
@@ -456,13 +457,20 @@ class DebugSinkCollector:
                     )
                 )
             for mp in cr.mongo:
+                # A named statement declares its own collection, so its name
+                # is what identifies the write — the same rule a Postgres
+                # named statement follows. ``filter`` is reported only for
+                # the ops that carry one.
+                mongo_extras: dict[str, Any] = {'sink_instance': mp.sink, 'op': mp.op.value}
+                if mp.filter is not None:
+                    mongo_extras['filter'] = mp.filter.model_dump(mode='json')
                 records.append(
                     PlannedSinkRecord(
                         sink_type='mongo',
-                        destination=mp.collection,
+                        destination=mp.statement if mp.op is MongoOp.STATEMENT else mp.collection,
                         origin_stage=stage,
                         payload=_dump_or_none(mp.data),
-                        extras={'sink_instance': mp.sink},
+                        extras=mongo_extras,
                     )
                 )
             for hp in cr.http:
