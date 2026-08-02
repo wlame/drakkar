@@ -8,6 +8,7 @@ key prefix + payload key, with optional TTL.
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -16,6 +17,11 @@ from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_pay
 from drakkar.models import RedisOp, RedisPayload
 from drakkar.sinks.base import BaseSink
 from drakkar.utils import redact_url
+
+if TYPE_CHECKING:
+    # Type-only: the runtime import stays inside connect(), so importing
+    # drakkar does not pull in redis for workers that never use this sink.
+    import redis.asyncio
 
 logger = structlog.get_logger()
 
@@ -257,10 +263,27 @@ class RedisSink(BaseSink[RedisPayload]):
     def __init__(self, name: str, config: RedisSinkConfig) -> None:
         super().__init__(name, ui_url=config.ui_url)
         self._config = config
-        self._client = None
+        self._client: redis.asyncio.Redis | None = None
         # Operator-authored Lua, registered at connect(). Never registered on
         # the delivery path.
         self._scripts: dict[str, _RegisteredScript] = {}
+
+    @property
+    def client(self) -> 'redis.asyncio.Redis | None':
+        """The ``redis.asyncio`` client, available after connect().
+
+        Mirrors ``PostgresSink.pool``, and closes the asymmetry between the
+        two sinks.
+
+        **Reachability, stated plainly:** a handler cannot get here today.
+        Handlers never receive sink instances — ``SinkManager.sinks`` lives
+        on the manager, and ``on_ready(config, db_pool)`` is handed only the
+        Postgres pool. So this is reachable only from a plugin sink
+        subclass. Giving handlers general access to sink clients affects
+        every sink type and is a separate design, deliberately not settled
+        as a side effect of the Redis command work.
+        """
+        return self._client
 
     async def connect(self) -> None:
         """Create the Redis client from the configured URL."""

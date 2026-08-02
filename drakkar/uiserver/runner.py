@@ -57,6 +57,7 @@ from drakkar.models import (
     MessageGroup,
     PendingContext,
     PostgresOp,
+    RedisOp,
     SourceMessage,
 )
 from drakkar.uiserver.runner_helpers import (
@@ -475,13 +476,15 @@ class DebugSinkCollector:
                     )
                 )
             for rp in cr.redis:
+                # A script has no key, so its name is what identifies the
+                # write — the same rule a Postgres named statement follows.
                 records.append(
                     PlannedSinkRecord(
                         sink_type='redis',
-                        destination=rp.key,
+                        destination=rp.script if rp.op is RedisOp.SCRIPT else rp.key,
                         origin_stage=stage,
                         payload=_dump_or_none(rp.data),
-                        extras={'sink_instance': rp.sink, 'ttl': rp.ttl},
+                        extras={'sink_instance': rp.sink, 'op': rp.op.value, 'ttl': rp.ttl},
                     )
                 )
             for fp in cr.files:

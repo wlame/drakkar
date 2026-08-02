@@ -1671,6 +1671,25 @@ def test_redis_sink_keeps_the_class_flag_for_the_set_shaped_ops(redis_sink_confi
     assert sink.batch_idempotent([RedisPayload(op='incrby', key='k', amount=1)]) is False
 
 
+async def test_redis_sink_exposes_its_client_after_connect(redis_sink_config):
+    """Mirrors PostgresSink.pool — the prerequisite for read-modify-write.
+
+    Reads are out of scope for the sink itself (a sink discards results), so
+    a handler that needs one goes through the client. Reachable only from a
+    plugin sink subclass today; see the property's docstring.
+    """
+    from drakkar.sinks.redis import RedisSink
+
+    sink = RedisSink('cache', redis_sink_config)
+    assert sink.client is None, 'no client before connect()'
+
+    connected, mock_client = await _connect_redis_sink(redis_sink_config)
+    assert connected.client is mock_client
+
+    await connected.close()
+    assert connected.client is None, 'close() must not leave a dead client exposed'
+
+
 def test_every_redis_op_has_a_renderer_or_the_script_path():
     """Adding an op to the enum without wiring it must fail here, loudly.
 
