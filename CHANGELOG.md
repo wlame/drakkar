@@ -49,6 +49,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the statement is built, instead of reaching the database as a syntax
   error.
 
+- **Postgres columns are now emitted in sorted order** rather than in the
+  order the payload model declares its fields, and bound values follow the
+  same sort. This closes a long-standing difference with the Go backend,
+  which decodes payload data into a map with no field order to preserve and
+  has always sorted. The emitted SQL is semantically unchanged — columns and
+  values stay aligned — but the statement text differs, which matters if you
+  assert on it or read it in query logs. `conflict` and an explicit
+  `update_columns` keep the order you wrote them in.
+
 ## [1.3.1] - 2026-08-02
 
 ### Fixed

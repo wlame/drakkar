@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden SQL per Postgres write operation. Mirrored verbatim into drakkar-go so both backends emit byte-identical statements and bind values in the same order. Column maps are [name, value] PAIR LISTS rather than JSON objects because object key order is not preserved by every JSON decoder, and column order is part of what this file pins. 'rows' carries one entry per batched row; insert and upsert cases with several rows pin the continuous parameter numbering of one multi-row statement.",
+  "_comment": "Golden SQL per Postgres write operation. Mirrored verbatim into drakkar-go so both backends emit byte-identical statements and bind values in the same order. Column maps are [name, value] PAIR LISTS rather than JSON objects because object key order is not preserved by every JSON decoder. Emitted columns are SORTED, never left in the order the payload model declares them: Go decodes payload data into a map with no order to preserve, so sorting is the only rule both backends can honour unconditionally. A case whose pairs are not already sorted therefore expects sorted SQL. 'rows' carries one entry per batched row; insert and upsert cases with several rows pin the continuous parameter numbering of one multi-row statement.",
   "identifiers": {
     "valid": ["valid_name", "_leading_underscore", "a1", "T"],
     "invalid": ["col; DROP TABLE x", "has space", "1leading_digit", "", "quote\"inside", "café"]
@@ -39,8 +39,8 @@
       "table": "jobs",
       "rows": [[["status", "done"], ["finished_at", "2026-08-02T09:00:00Z"]]],
       "where": [["id", 42]],
-      "expected_sql": "UPDATE \"jobs\" SET \"status\" = $1, \"finished_at\" = $2 WHERE \"id\" = $3",
-      "expected_values": ["done", "2026-08-02T09:00:00Z", 42]
+      "expected_sql": "UPDATE \"jobs\" SET \"finished_at\" = $1, \"status\" = $2 WHERE \"id\" = $3",
+      "expected_values": ["2026-08-02T09:00:00Z", "done", 42]
     },
     {
       "case": "update null predicate renders IS NULL and consumes no parameter",
@@ -86,8 +86,8 @@
       "rows": [[["id", 1], ["created_at", "t0"], ["last_seen", "t1"]]],
       "conflict": ["id"],
       "update_columns": ["last_seen"],
-      "expected_sql": "INSERT INTO \"sessions\" (\"id\", \"created_at\", \"last_seen\") VALUES ($1, $2, $3) ON CONFLICT (\"id\") DO UPDATE SET \"last_seen\" = EXCLUDED.\"last_seen\"",
-      "expected_values": [1, "t0", "t1"]
+      "expected_sql": "INSERT INTO \"sessions\" (\"created_at\", \"id\", \"last_seen\") VALUES ($1, $2, $3) ON CONFLICT (\"id\") DO UPDATE SET \"last_seen\" = EXCLUDED.\"last_seen\"",
+      "expected_values": ["t0", 1, "t1"]
     },
     {
       "case": "upsert where every data column is a conflict column becomes DO NOTHING",

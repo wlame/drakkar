@@ -122,7 +122,9 @@ Design points every agent should know:
 ## Invariants
 
 1. **Contract parity with drakkar-go** — config format (YAML + `DK_` env),
-   DLQ JSON byte-stability, metric names, the config-summary one-liner
+   DLQ JSON byte-stability, metric names, emitted Postgres SQL (columns are
+   SORTED, never left in model-declaration order, because Go decodes payload
+   data into an orderless map), the config-summary one-liner
    (renders `ui=on:8080`; the `ui.release.*` bundle-fetch settings are
    deliberately excluded from it), and the `/api/v1` shapes.
    `kafka.security` / `kafka.client_config` (plus the sink and DLQ

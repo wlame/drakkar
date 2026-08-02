@@ -2484,3 +2484,44 @@ def test_postgres_rendered_sql_corpus_invalid_identifiers(name):
 
     with pytest.raises(ValueError, match='Invalid SQL identifier'):
         quote_ident(name)
+
+
+async def test_postgres_sink_emits_columns_in_sorted_order(pg_sink_config):
+    """Columns are sorted, not left in model-declaration order.
+
+    Go builds its column map from a JSON round-trip into map[string]any,
+    which has no order to preserve, so sorting is the only rule both
+    backends can honour unconditionally.
+    """
+
+    class Declared(BaseModel):
+        request_id: str = 'r'
+        answer: int = 1
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    await sink.deliver([PostgresPayload(table='results', data=Declared())])
+
+    query, *values = mock_conn.execute.call_args[0]
+    assert query == 'INSERT INTO "results" ("answer", "request_id") VALUES ($1, $2)'
+    assert values == [1, 'r'], 'values must follow the sorted column order'
+
+
+async def test_postgres_sink_update_sorts_set_and_predicate_columns(pg_sink_config):
+    from drakkar.models import PostgresOp
+
+    class Declared(BaseModel):
+        status: str = 'done'
+        finished_at: str = 't1'
+
+    class Key(BaseModel):
+        owner: str = 'me'
+        id: int = 42
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    await sink.deliver([PostgresPayload(op=PostgresOp.UPDATE, table='jobs', data=Declared(), where=Key())])
+
+    query, *values = mock_conn.execute.call_args[0]
+    assert query == 'UPDATE "jobs" SET "finished_at" = $1, "status" = $2 WHERE "id" = $3 AND "owner" = $4'
+    assert values == ['t1', 'done', 42, 'me']
