@@ -53,6 +53,17 @@ class _PlainCommand:
         await getattr(client, self.method)(*self.args, **self.kwargs)
 
 
+class RedisCommandError(Exception):
+    """One or more commands in a pipeline failed on the server.
+
+    Deliberately NOT a subclass of the builtin ``ConnectionError`` or
+    ``TimeoutError``: ``SinkManager`` treats those as transient and
+    fast-retries them, and a command error such as ``WRONGTYPE`` fails
+    identically every time. Retrying it would burn the retry budget and, for
+    a batch containing an accumulating command, could double-apply it.
+    """
+
+
 def _as_builtin_transient(exc: BaseException) -> BaseException | None:
     """Translate a redis-py transient error into the builtin equivalent.
 
@@ -230,7 +241,30 @@ class RedisSink(BaseSink[RedisPayload]):
         pipe = self._client.pipeline(transaction=False)
         for command in commands:
             await command.queue(pipe)
-        await pipe.execute()
+
+        # raise_on_error=False returns a list positionally aligned with the
+        # queued commands, with per-command server errors present as
+        # exception OBJECTS rather than raised. redis-py guarantees the
+        # lengths match and disconnects if they do not. That alignment is
+        # what lets the failing payload be named WITHOUT re-sending the ones
+        # that succeeded — which is what makes a command that accumulates
+        # (INCRBY, LPUSH) safe to batch at all.
+        #
+        # A connection-level failure still raises out of execute() instead
+        # of returning a list. There we cannot know what was applied, so it
+        # propagates with the whole batch and nothing is replayed.
+        results = await pipe.execute(raise_on_error=False)
+
+        # strict: a short result list would silently drop the failures at
+        # the tail. redis-py guarantees one result per queued command, so a
+        # mismatch is a broken client, and a loud error beats an unreported
+        # write failure.
+        failed = [(cmd, res) for cmd, res in zip(commands, results, strict=True) if isinstance(res, Exception)]
+        if failed:
+            command, error = failed[0]
+            raise RedisCommandError(
+                f'{len(failed)} of {len(commands)} Redis commands failed; first failure on {command.label}: {error}'
+            ) from error
 
     async def _execute_single(self, command: _PlainCommand) -> None:
         """Run one command directly — the shape the pre-batching loop produced."""
