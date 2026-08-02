@@ -26,23 +26,28 @@ class _MongoDoc:
     document: dict
 
 
-def _group_docs_by_collection(docs: list[_MongoDoc]) -> list[list[_MongoDoc]]:
-    """Bucket documents by collection.
+def _group_into_runs(docs: list[_MongoDoc]) -> list[list[_MongoDoc]]:
+    """Bucket documents into consecutive runs sharing a collection.
 
-    Preserves first-appearance group order and payload order within each
-    group, so a batch reaches Mongo in the same sequence the per-payload
-    loop used.
+    A document merges only with its immediate neighbours, which guarantees
+    execution order equals payload order. Global bucketing would be a
+    slightly better batcher but reorders: payloads ``A(c1), B(c2), C(c1)``
+    would execute as A, C, B, deferring B past C. That is harmless for
+    inserts — and is what this sink used to do — but once updates and
+    deletes exist, an update to a document and a later delete of it must not
+    be reordered relative to each other.
+
+    Handlers overwhelmingly emit uniform payload lists, so runs are long in
+    practice and the batching cost is small. The Postgres sink groups the
+    same way, for the same reason.
     """
-    index: dict[str, int] = {}
-    groups: list[list[_MongoDoc]] = []
+    runs: list[list[_MongoDoc]] = []
     for doc in docs:
-        i = index.get(doc.collection)
-        if i is None:
-            i = len(groups)
-            index[doc.collection] = i
-            groups.append([])
-        groups[i].append(doc)
-    return groups
+        if runs and runs[-1][0].collection == doc.collection:
+            runs[-1].append(doc)
+        else:
+            runs.append([doc])
+    return runs
 
 
 def _build_doc(payload: MongoPayload) -> _MongoDoc:
@@ -126,7 +131,7 @@ class MongoSink(BaseSink[MongoPayload]):
                 for doc in docs[:bad_index]:
                     await self._insert_single(doc)
                 raise build_error
-            for group in _group_docs_by_collection(docs):
+            for group in _group_into_runs(docs):
                 await self._deliver_group(group)
 
             sink_payloads_delivered.labels(**labels).inc(len(payloads))
