@@ -6,6 +6,7 @@ serialized via model_dump() to get a dict suitable for MongoDB insertion.
 
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -15,19 +16,54 @@ from drakkar.models import MongoOp, MongoPayload
 from drakkar.sinks.base import BaseSink
 from drakkar.utils import redact_url
 
+if TYPE_CHECKING:
+    # Type-only: the runtime imports stay inside the functions that need
+    # them, so importing drakkar does not pull in pymongo for workers that
+    # never use this sink.
+    from pymongo.operations import DeleteMany, DeleteOne, InsertOne, UpdateMany, UpdateOne
+
+    _WriteModel = InsertOne | UpdateOne | UpdateMany | DeleteOne | DeleteMany
+
 logger = structlog.get_logger()
 
 
+class MongoWriteError(Exception):
+    """One or more operations in a bulk write were rejected by the server.
+
+    Deliberately NOT a subclass of the builtin ``ConnectionError`` or
+    ``TimeoutError``: ``SinkManager`` treats those as transient and
+    fast-retries them, and a write error such as a duplicate key fails
+    identically every time. Retrying it would burn the retry budget and, for
+    a batch containing an insert, could duplicate documents.
+    """
+
+
 @dataclass(frozen=True)
-class _MongoDoc:
-    """One payload reduced to its target collection and serialized document."""
+class _MongoUnit:
+    """One payload reduced to the write it performs.
 
+    Carries both shapes the sink needs: ``model`` for a bulk write, and the
+    driver method plus arguments for the direct call a single-payload run
+    uses. The two are the same operation through two APIs, so building them
+    together keeps them from drifting.
+    """
+
+    op: MongoOp
     collection: str
-    document: dict
+    label: str
+    """Human-readable identification for error messages, e.g.
+    ``update_one collection=jobs``. Never the document, which carries
+    message content, nor an operator's MQL."""
+    model: '_WriteModel'
+    """The pymongo write model: InsertOne, UpdateOne, DeleteMany, …"""
+    method: str
+    """The AsyncCollection method name for the direct path."""
+    args: tuple[object, ...]
+    kwargs: dict[str, object]
 
 
-def _group_into_runs(docs: list[_MongoDoc]) -> list[list[_MongoDoc]]:
-    """Bucket documents into consecutive runs sharing a collection.
+def _group_into_runs(units: list[_MongoUnit]) -> list[list[_MongoUnit]]:
+    """Bucket units into consecutive runs sharing a collection.
 
     A document merges only with its immediate neighbours, which guarantees
     execution order equals payload order. Global bucketing would be a
@@ -41,27 +77,38 @@ def _group_into_runs(docs: list[_MongoDoc]) -> list[list[_MongoDoc]]:
     practice and the batching cost is small. The Postgres sink groups the
     same way, for the same reason.
     """
-    runs: list[list[_MongoDoc]] = []
-    for doc in docs:
-        if runs and runs[-1][0].collection == doc.collection:
-            runs[-1].append(doc)
+    runs: list[list[_MongoUnit]] = []
+    for unit in units:
+        if runs and runs[-1][0].collection == unit.collection:
+            runs[-1].append(unit)
         else:
-            runs.append([doc])
+            runs.append([unit])
     return runs
 
 
-def _build_doc(payload: MongoPayload) -> _MongoDoc:
-    """Reduce one payload to the document its operation writes.
+def _build_unit(payload: MongoPayload) -> _MongoUnit:
+    """Reduce one payload to the write its operation performs.
 
     TEMPORARY guard: ``MongoPayload`` already carries every op, so an op
     the sink cannot yet execute must fail loudly rather than fall through
     to an insert of the wrong thing. Removed as each op lands.
     """
+    from pymongo import InsertOne
+
     if payload.op is not MongoOp.INSERT:
         raise ValueError(f'mongo op {payload.op.value!r} cannot be built yet')
     # The per-op field contract guarantees it for an insert.
     assert payload.data is not None
-    return _MongoDoc(collection=payload.collection, document=payload.data.model_dump())
+    document = payload.data.model_dump()
+    return _MongoUnit(
+        op=payload.op,
+        collection=payload.collection,
+        label=f'{payload.op.value} collection={payload.collection}',
+        model=InsertOne(document),
+        method='insert_one',
+        args=(document,),
+        kwargs={},
+    )
 
 
 class MongoSink(BaseSink[MongoPayload]):
@@ -106,15 +153,13 @@ class MongoSink(BaseSink[MongoPayload]):
         )
 
     async def deliver(self, payloads: list[MongoPayload]) -> None:
-        """Insert every payload as a document into its target collection.
+        """Write every payload, one operation each, in payload order.
 
-        Documents are grouped by collection and each group is sent as ONE
-        ``insert_many`` instead of one round-trip per payload. Failure
-        granularity is preserved: a batch that fails is retried
-        document-by-document so the error an operator sees names the
-        offending document, exactly as the per-payload loop did. See the Go
-        backend's ``internal/sinks/mongo.go`` — the two must stay observably
-        identical (divergence #18 in its migration notes).
+        Payloads are grouped into consecutive runs of the same collection
+        and each run is sent as ONE ordered bulk write instead of one
+        round-trip per payload. A run can carry heterogeneous operations —
+        an insert, an update and a delete against one collection travel
+        together, which ``insert_many`` could not express at all.
         """
         if not payloads or self._db is None:
             return
@@ -122,17 +167,17 @@ class MongoSink(BaseSink[MongoPayload]):
         start = time.monotonic()
         labels = {'sink_type': self.sink_type, 'sink_name': self._name}
         try:
-            docs, bad_index, build_error = self._build_docs(payloads)
+            units, bad_index, build_error = self._build_units(payloads)
             if build_error is not None:
-                # The per-payload loop inserted every document BEFORE the
-                # invalid payload, then raised. Reproduce those side effects
-                # (an insert failure on the way takes precedence, exactly as
-                # the sequential loop would have hit it first).
-                for doc in docs[:bad_index]:
-                    await self._insert_single(doc)
+                # The per-payload loop wrote everything BEFORE the invalid
+                # payload, then raised. Reproduce those side effects (a write
+                # failure on the way takes precedence, exactly as the
+                # sequential loop would have hit it first).
+                for unit in units[:bad_index]:
+                    await self._execute_single(unit)
                 raise build_error
-            for group in _group_into_runs(docs):
-                await self._deliver_group(group)
+            for run in _group_into_runs(units):
+                await self._deliver_run(run)
 
             sink_payloads_delivered.labels(**labels).inc(len(payloads))
             sink_deliver_duration.labels(**labels).observe(time.monotonic() - start)
@@ -141,66 +186,66 @@ class MongoSink(BaseSink[MongoPayload]):
             raise
 
     @staticmethod
-    def _build_docs(payloads: list[MongoPayload]) -> tuple[list[_MongoDoc], int, Exception | None]:
-        """Serialize every payload up front.
+    def _build_units(payloads: list[MongoPayload]) -> tuple[list[_MongoUnit], int, Exception | None]:
+        """Build the write for every payload up front.
 
-        On the first bad payload returns the documents built so far, the
-        failing index, and the error — the caller replays the legacy partial
-        side effects before raising it.
+        On the first bad payload returns the units built so far, the failing
+        index, and the error — the caller replays the legacy partial side
+        effects before raising it.
         """
-        docs: list[_MongoDoc] = []
+        units: list[_MongoUnit] = []
         for i, payload in enumerate(payloads):
             try:
-                docs.append(_build_doc(payload))
+                units.append(_build_unit(payload))
             except Exception as e:
-                return docs, i, e
-        return docs, len(docs), None
+                return units, i, e
+        return units, len(units), None
 
-    async def _deliver_group(self, group: list[_MongoDoc]) -> None:
-        """Insert one collection's documents, falling back per-document on failure.
+    async def _deliver_run(self, run: list[_MongoUnit]) -> None:
+        """Send one collection's writes as a single ordered bulk write.
 
-        On an ``insert_many`` failure, the fallback resends each document one
-        at a time so the error an operator sees names the document that
-        actually failed. A side effect: documents earlier in the group that
-        the failed batch already wrote get re-inserted as brand-new documents
-        (with a fresh, server-assigned ``_id``) — an accepted duplicate under
-        this framework's at-least-once delivery guarantee.
+        ``ordered=True`` is load-bearing three times over: execution order
+        equals payload order, execution stops at the first failure, and the
+        index in ``writeErrors`` is positionally aligned with the models we
+        submitted — which is what names the offending payload EXACTLY,
+        without re-sending anything.
+
+        Nothing is ever replayed. The previous fallback re-sent the run one
+        document at a time, which forced a workaround for PyMongo writing a
+        generated ``_id`` back into every document it was handed: a resent
+        document carrying that leftover id raised DuplicateKeyError on the
+        FIRST document rather than the guilty one, so the fallback stripped
+        the id and knowingly wrote duplicates. With no replay that whole
+        problem disappears — this is a strict improvement on the 1.3.0 fix,
+        not a regression of it.
         """
-        if len(group) == 1:
-            await self._insert_single(group[0])
+        from pymongo.errors import BulkWriteError
+
+        if len(run) == 1:
+            await self._execute_single(run[0])
             return
         assert self._db is not None
         try:
-            await self._db[group[0].collection].insert_many([d.document for d in group])
-            return
-        except Exception:
-            # Batch failed — fall back to per-document delivery so the error
-            # names the offending document (and to ride out a transient).
-            pass
-        for doc in group:
-            # PyMongo's insert_many mutates every document it is handed,
-            # writing a generated ``_id`` back into the caller's dict —
-            # even on documents whose insert never actually committed
-            # (e.g. the whole batch was rejected before the server was
-            # reached). If we resend a document that now carries that
-            # leftover ``_id``, Mongo treats it as an update-in-place
-            # against an existing document with that id and raises
-            # DuplicateKeyError on the FIRST document, no matter which one
-            # was genuinely bad — misnaming the culprit and aborting the
-            # fallback before it reaches the real offender. Stripping the
-            # injected id makes each retry insert as a brand-new document
-            # (get a fresh, server-assigned id), so the error correctly
-            # names the actual failure. The cost is accepted: documents
-            # already written by the failed batch get written again under
-            # a new id — an allowed duplicate under this framework's
-            # at-least-once delivery guarantee.
-            doc.document.pop('_id', None)
-            await self._insert_single(doc)
+            await self._db[run[0].collection].bulk_write([unit.model for unit in run], ordered=True)
+        except BulkWriteError as e:
+            errors = e.details.get('writeErrors') or []
+            if not errors:
+                raise
+            first = errors[0]
+            unit = run[first['index']]
+            raise MongoWriteError(
+                f'{len(errors)} of {len(run)} Mongo operations failed; '
+                f'first failure on {unit.label}: {first.get("errmsg", "")}'
+            ) from e
 
-    async def _insert_single(self, doc: _MongoDoc) -> None:
-        """Insert one document — the shape the pre-batching loop produced."""
+    async def _execute_single(self, unit: _MongoUnit) -> None:
+        """Run one write directly — the shape the pre-batching loop produced.
+
+        Avoids bulk-write overhead for a one-payload run, and attribution
+        comes from the raised error itself.
+        """
         assert self._db is not None
-        await self._db[doc.collection].insert_one(doc.document)
+        await getattr(self._db[unit.collection], unit.method)(*unit.args, **unit.kwargs)
 
     async def close(self) -> None:
         """Close the PyMongo async client.
