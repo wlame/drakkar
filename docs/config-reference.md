@@ -170,7 +170,14 @@ sinks:
       pool_min: 2                  # min connections in asyncpg pool. env: DK_SINKS__POSTGRES__MAIN_DB__POOL_MIN  · reasonable: 1–10
       pool_max: 10                 # max connections. env: DK_SINKS__POSTGRES__MAIN_DB__POOL_MAX  · reasonable: 5–50
       ui_url: ''                   # pgAdmin / Adminer URL. env: DK_SINKS__POSTGRES__MAIN_DB__UI_URL
+      statements:                  # optional. Operator-authored SQL by name
+        claim_job: |               # env: DK_SINKS__POSTGRES__MAIN_DB__STATEMENTS__CLAIM_JOB
+          UPDATE jobs SET status = :status WHERE id = :id AND status = 'pending'
 ```
+
+Statement names must match `^[a-z_][a-z0-9_]*$`; placeholders are written
+`:name`. Malformed SQL fails at startup, schema errors at delivery. See
+[Sink Write Operations](sink-write-operations.md).
 
 ### MongoDB sink
 

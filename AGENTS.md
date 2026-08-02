@@ -166,13 +166,17 @@ Design points every agent should know:
    early re-opens the duplicate-delivery window. The wait must stay
    bounded by `executor.drain_timeout_seconds` —
    `run_coroutine_threadsafe(...).result()` has no timeout of its own.
-8. **Sink deliveries are batched with per-payload fallback.** Postgres
-   groups by `(table, column-set)`, mongo by collection, redis pipelines;
-   each falls back to per-payload delivery when a batch fails so error
-   attribution stays identical to the Go backend (divergence #18). The
-   Kafka sink keeps its per-batch `flush()` — `AIOProducer` buffers to
-   `batch_size=1000` / `buffer_timeout=1.0s`, so dropping it would stall
-   every delivery on a one-second timer.
+8. **Sink deliveries are batched with per-payload fallback.** Payloads
+   batch only with ADJACENT same-shaped neighbours, so execution order
+   always equals payload order — global bucketing would reorder a payload
+   past its successor, which is a lost update for `UPDATE`. Postgres runs
+   group by op + shape (`insert`/`upsert` → one multi-row `VALUES`;
+   `update`/`statement` → one `executemany`), mongo by collection, redis
+   pipelines; each falls back to per-payload delivery when a batch fails
+   so error attribution stays identical to the Go backend (divergence
+   #18). The Kafka sink keeps its per-batch `flush()` — `AIOProducer`
+   buffers to `batch_size=1000` / `buffer_timeout=1.0s`, so dropping it
+   would stall every delivery on a one-second timer.
 
 ## Build / test / run (always via just)
 
