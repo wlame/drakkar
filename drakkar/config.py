@@ -42,9 +42,11 @@ _HTTP_BLOCKED_METADATA_HOSTS = frozenset(
     }
 )
 
-# Statement names appear in structured logs and error messages, so they are
-# constrained to lowercase snake_case rather than accepting arbitrary keys.
+# Statement and script names appear in structured logs and error messages, so
+# they are constrained to lowercase snake_case rather than accepting arbitrary
+# keys. One pattern serves both escape hatches — the constraint is the same.
 _PG_STATEMENT_NAME_RE = re.compile(r'^[a-z_][a-z0-9_]*$')
+_REDIS_SCRIPT_NAME_RE = _PG_STATEMENT_NAME_RE
 
 # --- Kafka source (consumer) config ---
 
@@ -267,12 +269,47 @@ class HttpSinkConfig(BaseModel):
 class RedisSinkConfig(BaseModel):
     """Configuration for a Redis output sink.
 
-    Each named instance connects to a Redis server and sets key-value pairs.
+    Each named instance connects to a Redis server and issues one write
+    command per payload, or runs an operator-authored Lua script by name.
     """
 
     url: str = 'redis://localhost:6379/0'
     key_prefix: str = ''
+    scripts: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            'Operator-authored Lua keyed by name. A RedisPayload with '
+            "op='script' and a matching `script` name runs the entry with its "
+            '`keys` and `args` passed as KEYS and ARGV. This is the escape '
+            'hatch for multi-step or conditional logic, and the only way to '
+            'get server-side atomicity — a pipeline is not a transaction. '
+            'Parameters are never interpolated into the body, so message '
+            'content cannot alter what runs.'
+        ),
+    )
     ui_url: str = ''
+
+    @field_validator('scripts')
+    @classmethod
+    def _validate_scripts(cls, value: dict[str, str]) -> dict[str, str]:
+        """Reject malformed script config at startup.
+
+        Checks only the name shape and a non-empty body. The Lua is NOT
+        parsed: there is no parser available without a server, and validating
+        against a live Redis would couple worker startup to Redis
+        availability — the same trade-off the Postgres sink settled by not
+        calling ``PREPARE``. A broken script fails at delivery and routes
+        through ``on_delivery_error``.
+        """
+        for name, body in value.items():
+            if not _REDIS_SCRIPT_NAME_RE.match(name):
+                raise ValueError(
+                    f'Invalid script name {name!r}: must match '
+                    f'{_REDIS_SCRIPT_NAME_RE.pattern} (used as a structured-log field)'
+                )
+            if not body.strip():
+                raise ValueError(f'Script {name!r} has an empty body')
+        return value
 
 
 class FileSinkConfig(BaseModel):
