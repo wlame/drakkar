@@ -826,6 +826,24 @@ Labels appear on:
 Labels are purely for display. Use `metadata` for data you need in
 `on_task_complete()`, `on_message_complete()`, or `on_error()`.
 
+Labels only carry short strings, and only on a task. When you want to expose
+*structured* diagnostics — the candidates a hook considered, the flag that
+explains a decision — and attach them to a message or a whole window as well
+as a task, use [annotations](annotations.md):
+
+```python
+self.annotate(msg, 'input_selection', {'candidates': paths, 'chosen': p})
+```
+
+---
+
+## Annotations
+
+`self.annotate(target, kind, data)` records structured diagnostics against a
+window, a source message, or a task, visible on that entity's trace in the
+debug UI and expiring with the flight recorder's normal retention. See
+[Annotations](annotations.md) for scopes, budgets, and the drop policy.
+
 ---
 
 ## Periodic Tasks

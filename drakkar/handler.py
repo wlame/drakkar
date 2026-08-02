@@ -19,6 +19,7 @@ from pydantic import BaseModel, ValidationError
 # annotations eagerly. ``protocol`` is side-effect-free and dependency-light;
 # importing it here does not pull in ``drakkar.cache.engine`` or any other
 # heavy module, so there is no circular-import risk.
+from drakkar.annotations import AnnotatorLike
 from drakkar.cache.protocol import CacheLike
 
 if TYPE_CHECKING:
@@ -223,6 +224,14 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # and ``webapp.enabled=True``.
     http_request_model: type[BaseModel] | None = None
     http_response_model: type[BaseModel] | None = None
+
+    # Backs :meth:`annotate`. Same lifecycle as ``cache`` above: a stateless
+    # no-op stub lives on the class so ``self.annotate(...)`` is callable in
+    # unit tests and before startup finishes, and the framework replaces it
+    # per-instance with a real ``Annotator`` when the recorder is running and
+    # ``ui.recorder.annotations_enabled`` is set. Private because users call
+    # the method, never the object.
+    _annotator: AnnotatorLike
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
@@ -436,6 +445,65 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         """Called when partitions are revoked from this worker."""
         pass
 
+    def annotate(
+        self,
+        target: SourceMessage | ExecutorTask | None,
+        kind: str,
+        data: Mapping[str, Any] | None = None,
+        *,
+        labels: dict[str, str] | None = None,
+    ) -> None:
+        """Attach structured diagnostic data to a pipeline entity.
+
+        Use this for the reasoning behind a decision — the inputs a hook
+        considered, the flag that explains why a task was built the way it
+        was, the alternative that was rejected. It is information not worth
+        writing to a sink and not worth logging on every run, but exactly
+        what someone needs when they open one message in the debug UI and
+        ask why it produced what it did.
+
+        The annotation is stored in the flight recorder and appears on the
+        trace of the entity it is attached to. Recorder rotation and
+        retention expire it like any other event, so nothing accumulates
+        indefinitely.
+
+        Scope comes from ``target``::
+
+            # this one message
+            self.annotate(msg, 'input_selection', {'candidates': paths, 'chosen': p})
+
+            # this one task
+            self.annotate(task, 'arg_derivation', {'template': tpl, 'flags': flags})
+
+            # the whole arrange() window
+            self.annotate(None, 'window_summary', {'deduplicated': 12})
+
+        Args:
+            target: A ``SourceMessage`` for message scope, an
+                ``ExecutorTask`` for task scope, or ``None`` for the whole
+                hook invocation's window.
+            kind: Short name identifying what this annotation describes.
+                Shown in the UI and useful for filtering; pick a stable
+                value per call site rather than an interpolated string.
+            data: JSON-serializable payload. Anything the encoder cannot
+                represent natively degrades to its ``str()``.
+            labels: Optional string labels stored on the row, indexed and
+                searchable the same way ``ExecutorTask.labels`` are.
+
+        Best-effort by design — this never raises and never affects
+        processing. An oversize payload is DROPPED WHOLE rather than
+        truncated, because a truncated structured document still parses and
+        misleads whoever reads it. Drops are counted in
+        ``drakkar_recorder_annotations_dropped_total`` and logged at warning
+        level; see ``docs/annotations.md`` for the budgets and how to tune
+        them.
+
+        Calling this outside a framework-invoked hook has no pipeline entity
+        to attach to, so the record is dropped and counted under
+        ``reason="no_context"``.
+        """
+        self._annotator.emit(target, kind, data, labels=labels)
+
     # ------------------------------------------------------------------
     # Webapp hooks (optional — only invoked when webapp.enabled=True).
     #
@@ -536,21 +604,23 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         return request_id
 
 
-# Attach the class-level default cache stub after class definition. We do this
+# Attach the class-level default stubs after class definition. We do this
 # outside the class body because ``NoOpCache`` is imported lazily (to avoid the
 # circular ``handler.py`` ↔ ``cache.py`` import at module load time). The
 # assignment runs once at import; every ``BaseDrakkarHandler`` subclass instance
-# reads the shared stub through the class attribute unless the framework
-# replaces it with a real ``Cache`` at runtime.
+# reads the shared stubs through the class attributes unless the framework
+# replaces them with real objects at runtime.
 def _install_default_cache() -> None:
-    """Attach the stateless NoOpCache stub as a class attribute.
+    """Attach the stateless NoOpCache and NoOpAnnotator stubs as class attributes.
 
-    Called once at module import. ``NoOpCache`` is stateless so sharing one
+    Called once at module import. Both stubs are stateless so sharing one
     instance across all handler classes is safe.
     """
+    from drakkar.annotations import NoOpAnnotator
     from drakkar.cache import NoOpCache
 
     BaseDrakkarHandler.cache = NoOpCache()
+    BaseDrakkarHandler._annotator = NoOpAnnotator()
 
 
 _install_default_cache()

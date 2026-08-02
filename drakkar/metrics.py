@@ -622,6 +622,40 @@ recorder_requeue_overflow = Counter(
 )
 
 
+# --- Handler annotations ---
+#
+# Annotations are diagnostic records a handler attaches to a window, a source
+# message, or a task from inside a hook (see ``drakkar.annotations``). They are
+# best-effort by design: an oversize or unencodable payload is DROPPED whole
+# rather than truncated, because a truncated structured document parses, looks
+# complete, and misleads whoever reads it.
+#
+# The dropped counter is the ONLY reliable signal that this happened. The
+# accompanying warning log suppresses itself after a handful of drops within
+# one hook invocation to protect the log pipeline, but this counter keeps
+# ticking, so alerting belongs here and not on log volume.
+#
+# Alert suggestion:
+#   rate(drakkar_recorder_annotations_dropped_total[5m]) > 0  — warn
+annotations_recorded = Counter(
+    'drakkar_recorder_annotations_total',
+    'Total handler annotations accepted and written to the flight recorder.',
+)
+
+annotations_dropped = Counter(
+    'drakkar_recorder_annotations_dropped_total',
+    (
+        'Total handler annotations discarded before reaching the flight '
+        'recorder, labeled by reason: oversize (payload exceeds '
+        'annotation_max_bytes), budget_exhausted (hook invocation reached '
+        'annotation_max_bytes_per_call), no_context (called outside a '
+        'framework-invoked hook), unserializable (payload failed JSON '
+        'encoding). Payloads are never truncated to fit — they are dropped.'
+    ),
+    ['reason'],
+)
+
+
 # --- Shutdown ---
 #
 # Operational visibility for the drain phase: when a worker stops, what

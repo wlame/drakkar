@@ -43,6 +43,7 @@ import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import __version__
+from drakkar.annotations import Annotator
 from drakkar.app_security import warn_if_ui_unauthenticated
 from drakkar.cache import Cache, CacheEngine
 from drakkar.consumer import KafkaConsumer
@@ -140,6 +141,7 @@ class AppLifecycle:
         await self._build_executor_pool()
         await self._start_observability()
         await self._start_ui_and_recorder()
+        self._wire_annotator()
         await self._start_cache()
         await self._connect_sinks()
         await self._start_webapp()
@@ -378,6 +380,32 @@ class AppLifecycle:
                 category='lifecycle',
                 reason='ui.enabled=false — /healthz and /readyz are not served; Kubernetes probes need the UI server',
             )
+
+    def _wire_annotator(self) -> None:
+        """Replace the handler's NoOpAnnotator stub with a live one.
+
+        Called right after the recorder starts, since annotations are stored
+        as recorder events and there is nowhere to put them otherwise. When
+        the recorder is absent, annotations are switched off, or the events
+        table is not being written, the class-level no-op stub stays in place
+        and ``self.annotate(...)`` remains a cheap call the handler can make
+        unconditionally.
+
+        ``store_events`` is part of the condition on purpose: with it false
+        the recorder never starts a flush loop, so annotations would fill the
+        bounded buffer and be evicted, spending memory and inflating
+        ``drakkar_recorder_dropped_events_total`` to no benefit.
+        """
+        app = self._app
+        recorder_config = app._config.ui.recorder
+        if app._recorder is None or not recorder_config.annotations_enabled or not recorder_config.store_events:
+            return
+        app._handler._annotator = Annotator(
+            app._recorder,
+            max_bytes=recorder_config.annotation_max_bytes,
+            max_bytes_per_call=recorder_config.annotation_max_bytes_per_call,
+            log_max_bytes=recorder_config.annotation_log_max_bytes,
+        )
 
     async def _start_cache(self) -> None:
         """Construct the cache engine and wire the handler-facing Cache.

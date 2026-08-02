@@ -66,6 +66,7 @@ import structlog
 
 from drakkar.config import WebAppConfig
 from drakkar.executor import ExecutorTaskError
+from drakkar.hookctx import bind_hook_context, clear_hook_context
 from drakkar.metrics import webapp_dropped_after_timeout, webapp_inflight
 from drakkar.models import (
     CollectResult,
@@ -245,6 +246,15 @@ class WebappRunner:
         # for cross-message dedup, which doesn't apply here.)
         pending_ctx = PendingContext(pending_tasks=[], pending_task_ids=set())
 
+        # ``partition=-1`` matches the synthetic SourceMessage above, so any
+        # annotation emitted from this hook lands on the same virtual
+        # partition its events do and stays out of the real partitions.
+        hook_token = bind_hook_context(
+            hook='arrange_http_request',
+            partition=-1,
+            offset=offset,
+            offsets=(offset,),
+        )
         try:
             tasks = await self._app._handler.arrange_http_request(ctx.request, pending_ctx)
         except Exception as exc:
@@ -266,6 +276,8 @@ class WebappRunner:
                 original_exc=exc,
                 traceback_str=tb,
             ) from exc
+        finally:
+            clear_hook_context(hook_token)
 
         # Stamp every task with the HTTP origin markers. The plan note
         # confirms ``ExecutorTask`` is a mutable Pydantic model (no
@@ -394,6 +406,12 @@ class WebappRunner:
             raise asyncio.CancelledError('webapp request cancelled before on_http_request_complete; T2 already 504d')
 
         complete_started = time.monotonic()
+        complete_token = bind_hook_context(
+            hook='on_http_request_complete',
+            partition=-1,
+            offset=offset,
+            offsets=(offset,),
+        )
         try:
             response = await self._app._handler.on_http_request_complete(group)
         except Exception as exc:
@@ -411,6 +429,8 @@ class WebappRunner:
                 original_exc=exc,
                 traceback_str=tb,
             ) from exc
+        finally:
+            clear_hook_context(complete_token)
         timeline.append(
             StageTiming(
                 stage='on_http_request_complete',

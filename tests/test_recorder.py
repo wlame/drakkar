@@ -414,6 +414,178 @@ async def test_get_trace(recorder):
     assert 'consumed' in event_types
 
 
+# --- handler annotations ---
+
+
+def annotation_envelope(offsets=(), window_id=1, scope='window', data=None) -> str:
+    """Build the metadata JSON the Annotator would have encoded."""
+    return json.dumps(
+        {
+            'kind': 'k',
+            'scope': scope,
+            'hook': 'arrange',
+            'window_id': window_id,
+            'offsets': list(offsets),
+            'data': data or {},
+        }
+    )
+
+
+async def test_record_annotation_message_scope_anchors_on_offset(recorder):
+    recorder.record_annotation(
+        kind='input_selection',
+        partition=3,
+        metadata_json=annotation_envelope(scope='message', data={'files': ['a']}),
+        offset=42,
+    )
+    await recorder._flush()
+
+    row = next(e for e in await recorder.get_events() if e['event'] == 'annotation')
+    assert row['partition'] == 3
+    assert row['offset'] == 42
+    assert row['task_id'] is None
+    assert json.loads(row['metadata'])['data'] == {'files': ['a']}
+
+
+async def test_record_annotation_task_scope_anchors_on_task_id(recorder):
+    recorder.record_annotation(
+        kind='arg_derivation',
+        partition=3,
+        metadata_json=annotation_envelope(scope='task'),
+        task_id='t-9',
+    )
+    await recorder._flush()
+
+    row = next(e for e in await recorder.get_events() if e['event'] == 'annotation')
+    assert row['offset'] is None
+    assert row['task_id'] == 't-9'
+
+
+async def test_record_annotation_window_scope_has_no_anchor_column(recorder):
+    recorder.record_annotation(
+        kind='window_summary',
+        partition=3,
+        metadata_json=annotation_envelope(offsets=[42, 43]),
+    )
+    await recorder._flush()
+
+    row = next(e for e in await recorder.get_events() if e['event'] == 'annotation')
+    assert row['offset'] is None
+    assert row['task_id'] is None
+    assert json.loads(row['metadata'])['offsets'] == [42, 43]
+
+
+async def test_record_annotation_encodes_labels(recorder):
+    recorder.record_annotation(
+        kind='k',
+        partition=0,
+        metadata_json=annotation_envelope(),
+        labels={'request_id': 'abc'},
+    )
+    await recorder._flush()
+
+    row = next(e for e in await recorder.get_events() if e['event'] == 'annotation')
+    assert json.loads(row['labels']) == {'request_id': 'abc'}
+
+
+async def test_record_annotation_without_labels_stores_null(recorder):
+    recorder.record_annotation(kind='k', partition=0, metadata_json=annotation_envelope())
+    await recorder._flush()
+
+    row = next(e for e in await recorder.get_events() if e['event'] == 'annotation')
+    assert row['labels'] is None
+
+
+async def test_get_trace_includes_message_scoped_annotation(recorder):
+    recorder.record_consumed(make_msg(partition=3, offset=42))
+    recorder.record_annotation(
+        kind='input_selection',
+        partition=3,
+        metadata_json=annotation_envelope(scope='message'),
+        offset=42,
+    )
+    await recorder._flush()
+
+    trace = await recorder.get_trace(partition=3, msg_offset=42)
+    assert 'annotation' in [e['event'] for e in trace]
+
+
+async def test_get_trace_includes_task_scoped_annotation(recorder):
+    task = make_task('t-42', offsets=[42])
+    recorder.record_task_started(task, partition=3)
+    recorder.record_annotation(
+        kind='arg_derivation',
+        partition=3,
+        metadata_json=annotation_envelope(scope='task'),
+        task_id='t-42',
+    )
+    await recorder._flush()
+
+    trace = await recorder.get_trace(partition=3, msg_offset=42)
+    assert 'annotation' in [e['event'] for e in trace]
+
+
+async def test_get_trace_includes_window_scoped_annotation_via_offsets(recorder):
+    # Window rows have no anchor column; the third query branch reaches them
+    # through the offsets list inside metadata.
+    recorder.record_consumed(make_msg(partition=3, offset=42))
+    recorder.record_annotation(
+        kind='window_summary',
+        partition=3,
+        metadata_json=annotation_envelope(offsets=[41, 42, 43]),
+    )
+    await recorder._flush()
+
+    trace = await recorder.get_trace(partition=3, msg_offset=42)
+    assert 'annotation' in [e['event'] for e in trace]
+
+
+async def test_get_trace_excludes_window_annotation_from_another_window(recorder):
+    recorder.record_consumed(make_msg(partition=3, offset=42))
+    recorder.record_annotation(
+        kind='window_summary',
+        partition=3,
+        metadata_json=annotation_envelope(offsets=[900, 901]),
+    )
+    await recorder._flush()
+
+    trace = await recorder.get_trace(partition=3, msg_offset=42)
+    assert 'annotation' not in [e['event'] for e in trace]
+
+
+async def test_get_trace_excludes_window_annotation_from_another_partition(recorder):
+    recorder.record_consumed(make_msg(partition=3, offset=42))
+    recorder.record_annotation(
+        kind='window_summary',
+        partition=7,
+        metadata_json=annotation_envelope(offsets=[42]),
+    )
+    await recorder._flush()
+
+    trace = await recorder.get_trace(partition=3, msg_offset=42)
+    assert 'annotation' not in [e['event'] for e in trace]
+
+
+async def test_get_trace_still_excludes_arranged_rows(recorder):
+    # ``arranged`` metadata carries an offsets array of the same shape as a
+    # window annotation's. Without the event filter on the new query branch
+    # it would start appearing in every trace.
+    recorder.record_arranged(3, [make_msg(partition=3, offset=42)], [], window_id=1)
+    recorder.record_consumed(make_msg(partition=3, offset=42))
+    await recorder._flush()
+
+    trace = await recorder.get_trace(partition=3, msg_offset=42)
+    assert 'arranged' not in [e['event'] for e in trace]
+
+
+async def test_record_arranged_metadata_includes_window_id(recorder):
+    recorder.record_arranged(0, [make_msg(offset=1)], [make_task('t1', offsets=[1])], window_id=17)
+    await recorder._flush()
+
+    row = next(e for e in await recorder.get_events() if e['event'] == 'arranged')
+    assert json.loads(row['metadata'])['window_id'] == 17
+
+
 async def test_get_partition_summary(recorder):
     recorder.record_consumed(make_msg(partition=0, offset=0))
     recorder.record_consumed(make_msg(partition=0, offset=1))
@@ -4677,3 +4849,32 @@ def test_scan_budget_reports_truncation_once(monkeypatch):
     assert len(logged) == 1
     assert logged[0][0] == 'cross_trace_scan_truncated'
     assert logged[0][1]['op'] == 'cross_trace'
+
+
+async def test_get_trace_does_not_leak_a_sibling_messages_annotation(recorder):
+    # Two messages arranged in one window, each with its own message-scoped
+    # annotation. Tracing one must not surface the other's — the whole point
+    # of the feature is attributing a diagnostic to the right entity.
+    for offset in (90, 91):
+        recorder.record_consumed(make_msg(partition=3, offset=offset))
+        recorder.record_annotation(
+            kind=f'note-{offset}',
+            partition=3,
+            metadata_json=json.dumps(
+                {
+                    'kind': f'note-{offset}',
+                    'scope': 'message',
+                    'hook': 'arrange',
+                    'window_id': 1,
+                    # Empty for message scope; the anchor column locates it.
+                    'offsets': [],
+                    'data': {},
+                }
+            ),
+            offset=offset,
+        )
+    await recorder._flush()
+
+    trace = await recorder.get_trace(partition=3, msg_offset=90)
+    kinds = [json.loads(e['metadata'])['kind'] for e in trace if e['event'] == 'annotation']
+    assert kinds == ['note-90']

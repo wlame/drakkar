@@ -45,6 +45,7 @@ from drakkar.config import (
     UIRecorderConfig,
 )
 from drakkar.recorder import EventRecorder, list_db_files
+from drakkar.recorder.helpers import encode_json_str
 from drakkar.webapp import WebRequestContext
 
 WORKER = 'py-fixture'
@@ -66,6 +67,27 @@ async def _generate(work_dir: Path) -> tuple[Path, Path]:
     )
     recorder.record_committed(0, 1)
     recorder.record_periodic_run('fixture-periodic', 0.25, 'success')
+    # One handler annotation so the Go side can prove it reads a
+    # Python-written annotation row (contract v1.3) — no new column, but the
+    # envelope inside metadata is part of the cross-backend contract.
+    recorder.record_annotation(
+        kind='fixture_annotation',
+        partition=0,
+        metadata_json=encode_json_str(
+            {
+                'kind': 'fixture_annotation',
+                'scope': 'message',
+                'hook': 'arrange',
+                'window_id': 1,
+                # Empty for message scope: only window rows, which have no
+                # anchor column, carry offsets for the trace query to match.
+                'offsets': [],
+                'data': {'source': 'python'},
+            }
+        ),
+        offset=1,
+        labels={'fixture': 'yes'},
+    )
     recorder.record_webapp_request_received(
         WebRequestContext(
             request_id='fx-req-1',
