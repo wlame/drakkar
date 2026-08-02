@@ -739,9 +739,16 @@ async def test_sink_collector_flatten_postgres_payload_without_data():
 
 
 async def test_sink_collector_flatten_redis_payload_without_data():
-    """A Redis payload with no data flattens with ``payload=None``."""
+    """A Redis payload with no data flattens with ``payload=None``.
+
+    This used to need ``model_construct`` to build a payload the model would
+    have rejected. Now that ``op`` exists, a data-less payload is an ordinary
+    ``delete`` — the case the probe has to handle in production.
+    """
+    from drakkar.models import RedisOp
+
     collector = DebugSinkCollector()
-    cr = CollectResult(redis=[RedisPayload.model_construct(key='session:42', data=None, ttl=None)])
+    cr = CollectResult(redis=[RedisPayload(op=RedisOp.DELETE, key='session:42')])
     await collector(cr, 0)
 
     flat = collector.flatten()

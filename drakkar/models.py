@@ -735,22 +735,231 @@ class HttpPayload(BaseModel):
     )
 
 
-class RedisPayload(BaseModel):
-    """Payload for a Redis sink — sets a key-value pair.
+class RedisOp(StrEnum):
+    """Which Redis command the sink issues for a payload.
 
-    The framework serializes `data` via `model_dump_json()` as the string value.
-    The full Redis key is `{config.key_prefix}{key}`. Optional TTL in seconds.
+    One write verb per data type, plus ``SCRIPT`` — the escape hatch that
+    invokes Lua the operator authored in configuration, by name, with
+    ``KEYS``/``ARGV`` bound rather than interpolated. Reads are deliberately
+    absent: a sink discards results, so a read-modify-write cycle belongs in
+    the handler.
+    """
+
+    SET = 'set'
+    DELETE = 'delete'
+    EXPIRE = 'expire'
+    INCRBY = 'incrby'
+    HSET = 'hset'
+    HDEL = 'hdel'
+    PUSH = 'push'
+    TRIM = 'trim'
+    SADD = 'sadd'
+    SREM = 'srem'
+    ZADD = 'zadd'
+    SCRIPT = 'script'
+
+
+# Per-op field contract: (required, must-be-unset). Enforced in BOTH
+# directions, for the same reason as _PG_OP_FIELDS — twelve operations in one
+# class with optional fields would otherwise silently drop a mis-set field.
+_REDIS_OP_FIELDS: dict[RedisOp, tuple[frozenset[str], frozenset[str]]] = {
+    RedisOp.SET: (frozenset({'key', 'data'}), frozenset({'fields', 'members', 'amount', 'side', 'start', 'stop'})),
+    RedisOp.DELETE: (
+        frozenset({'key'}),
+        frozenset({'data', 'ttl', 'fields', 'members', 'amount', 'side', 'start', 'stop'}),
+    ),
+    RedisOp.EXPIRE: (
+        frozenset({'key', 'ttl'}),
+        frozenset({'data', 'fields', 'members', 'amount', 'side', 'start', 'stop'}),
+    ),
+    RedisOp.INCRBY: (
+        frozenset({'key', 'amount'}),
+        frozenset({'data', 'ttl', 'fields', 'members', 'side', 'start', 'stop'}),
+    ),
+    RedisOp.HSET: (
+        frozenset({'key', 'fields'}),
+        frozenset({'data', 'ttl', 'members', 'amount', 'side', 'start', 'stop'}),
+    ),
+    RedisOp.HDEL: (
+        frozenset({'key', 'fields'}),
+        frozenset({'data', 'ttl', 'members', 'amount', 'side', 'start', 'stop'}),
+    ),
+    RedisOp.PUSH: (frozenset({'key', 'data'}), frozenset({'ttl', 'fields', 'members', 'amount', 'start', 'stop'})),
+    RedisOp.TRIM: (
+        frozenset({'key', 'start', 'stop'}),
+        frozenset({'data', 'ttl', 'fields', 'members', 'amount', 'side'}),
+    ),
+    RedisOp.SADD: (
+        frozenset({'key', 'members'}),
+        frozenset({'data', 'ttl', 'fields', 'amount', 'side', 'start', 'stop'}),
+    ),
+    RedisOp.SREM: (
+        frozenset({'key', 'members'}),
+        frozenset({'data', 'ttl', 'fields', 'amount', 'side', 'start', 'stop'}),
+    ),
+    RedisOp.ZADD: (
+        frozenset({'key', 'members'}),
+        frozenset({'data', 'ttl', 'fields', 'amount', 'side', 'start', 'stop'}),
+    ),
+    RedisOp.SCRIPT: (
+        frozenset({'script', 'keys'}),
+        frozenset({'key', 'data', 'ttl', 'fields', 'members', 'amount', 'side', 'start', 'stop'}),
+    ),
+}
+
+# The value each field holds when the user has not set it. Doubles as the
+# "is this required field missing?" test, so `fields={}` and `members=[]` fail
+# their requirement without a separate length check — both would render a
+# malformed Redis command.
+#
+# `amount`, `start` and `stop` are None rather than 0 precisely so this test
+# works: INCRBY 0 and LTRIM 0 -1 are legitimate, and a 0 default would make
+# "unset" indistinguishable from "explicitly zero".
+_REDIS_FIELD_UNSET: dict[str, object] = {
+    'key': '',
+    'data': None,
+    'ttl': None,
+    'fields': None,
+    'members': None,
+    'amount': None,
+    'side': None,
+    'start': None,
+    'stop': None,
+    'script': '',
+    'keys': [],
+    'args': [],
+}
+
+# Which ops need a mapping and which need a list. `fields` is the right word
+# for both HSET pairs and HDEL names, and `members` for both ZADD scores and
+# SADD/SREM names, so the type is narrowed per op instead of splitting each
+# into two fields that read worse for no gain.
+_REDIS_MAPPING_OPS = frozenset({RedisOp.HSET, RedisOp.ZADD})
+
+
+def _redis_field_is_unset(name: str, value: object) -> bool:
+    """Whether a field counts as not supplied.
+
+    An EMPTY collection counts as unset, so ``hset`` with ``fields={}`` and
+    ``sadd`` with ``members=[]`` fail their requirement — both would render a
+    malformed Redis command. The sentinel for those fields is ``None`` (they
+    are ``X | None``), so equality alone would let an empty one through.
+
+    Only dicts and lists get that treatment. A blanket falsiness test would
+    reject ``amount=0`` and ``start=0``, which are legitimate.
+    """
+    if isinstance(value, dict | list):
+        return not value
+    return value == _REDIS_FIELD_UNSET[name]
+
+
+class RedisPayload(BaseModel):
+    """Payload for a Redis sink — one write command, or a named Lua script.
+
+    ``op`` selects the command and defaults to ``SET``, so
+    ``RedisPayload(key=..., data=...)`` sets a key. The full Redis key is
+    always ``{config.key_prefix}{key}``; for a script, every entry of
+    ``keys`` is prefixed too.
+
+    Examples::
+
+        # SET drakkar:result:abc <json> EX 3600
+        RedisPayload(key='result:abc', data=summary, ttl=3600)
+
+        # INCRBY drakkar:hits:2026-08-02 1
+        RedisPayload(op=RedisOp.INCRBY, key='hits:2026-08-02', amount=1)
+
+        # HSET drakkar:session:42 last_seen ... ip ...
+        RedisPayload(op=RedisOp.HSET, key='session:42', fields={'ip': ip})
+
+        # ZADD drakkar:leaderboard <score> <member>
+        RedisPayload(op=RedisOp.ZADD, key='leaderboard', members={user: score})
+
+        # operator-authored Lua from sinks.redis.<instance>.scripts
+        RedisPayload(op=RedisOp.SCRIPT, script='push_and_cap',
+                     keys=['recent'], args=[body, 100])
+
+    Field order is a contract: it fixes the DLQ JSON byte order the Go
+    backend must reproduce.
     """
 
     sink: str = _SINK_FIELD
-    key: str = Field(description='Redis key suffix. The full Redis key is {config.key_prefix}{key}.')
-    data: SerializeAsAny[BaseModel] = Field(
-        description='Payload model. Serialized via model_dump_json() as the Redis string value.'
+    op: RedisOp = Field(
+        default=RedisOp.SET,
+        description='Which Redis command to issue. Defaults to SET.',
+    )
+    key: str = Field(
+        default='',
+        description=(
+            'Redis key suffix. The full Redis key is {config.key_prefix}{key}. '
+            'Required for every op except script, which names its keys instead.'
+        ),
+    )
+    data: SerializeAsAny[BaseModel] | None = Field(
+        default=None,
+        description='Set and push only. Serialized via model_dump_json() as the stored value.',
     )
     ttl: int | None = Field(
         default=None,
-        description='Optional expiry time in seconds. The key does not expire when None.',
+        description='Optional for set, required for expire. Expiry in seconds.',
     )
+    fields: dict[str, str | int | float] | list[str] | None = Field(
+        default=None,
+        description='Hset (field→value mapping) and hdel (field names). Must be non-empty.',
+    )
+    members: dict[str, float] | list[str] | None = Field(
+        default=None,
+        description='Zadd (member→score mapping) and sadd/srem (member names). Must be non-empty.',
+    )
+    amount: int | None = Field(
+        default=None,
+        description='Incrby only, required. The integer increment; may be negative or zero.',
+    )
+    side: Literal['left', 'right'] | None = Field(
+        default=None,
+        description='Push only. Which end to push onto; None means left (LPUSH).',
+    )
+    start: int | None = Field(default=None, description='Trim only, required. First index to keep.')
+    stop: int | None = Field(default=None, description='Trim only, required. Last index to keep.')
+    script: str = Field(
+        default='',
+        description='Script only, required. Key under sinks.redis.<instance>.scripts naming the Lua to run.',
+    )
+    keys: list[str] = Field(
+        default_factory=list,
+        description=(
+            'Script only, required and non-empty. Passed as KEYS, each prefixed. '
+            'Declared keys keep the script routable under Redis Cluster.'
+        ),
+    )
+    args: list[str | int | float] = Field(
+        default_factory=list,
+        description='Script only. Passed as ARGV in order.',
+    )
+
+    @model_validator(mode='after')
+    def _check_op_fields(self) -> 'RedisPayload':
+        """Enforce the per-op field contract in both directions."""
+        required, forbidden = _REDIS_OP_FIELDS[self.op]
+        for name in sorted(required):
+            if _redis_field_is_unset(name, getattr(self, name)):
+                raise ValueError(f'RedisPayload(op={self.op.value!r}) requires {name!r}')
+        for name in sorted(forbidden):
+            if getattr(self, name) != _REDIS_FIELD_UNSET[name]:
+                raise ValueError(f'RedisPayload(op={self.op.value!r}) does not use {name!r} — remove it or change op')
+        self._check_collection_shape('fields', self.fields)
+        self._check_collection_shape('members', self.members)
+        return self
+
+    def _check_collection_shape(self, name: str, value: object) -> None:
+        """Require a mapping for the pair-taking ops and a list for the rest."""
+        if value is None:
+            return
+        wants_mapping = self.op in _REDIS_MAPPING_OPS
+        if wants_mapping and not isinstance(value, dict):
+            raise ValueError(f'RedisPayload(op={self.op.value!r}) needs {name!r} as a mapping, got a list')
+        if not wants_mapping and isinstance(value, dict):
+            raise ValueError(f'RedisPayload(op={self.op.value!r}) needs {name!r} as a list, got a mapping')
 
 
 class FilePayload(BaseModel):

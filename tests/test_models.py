@@ -16,6 +16,7 @@ from drakkar.models import (
     PostgresOp,
     PostgresPayload,
     PrecomputedResult,
+    RedisOp,
     RedisPayload,
     SourceMessage,
     TaskOrigin,
@@ -475,6 +476,153 @@ def test_postgres_payload_upsert_accepts_disjoint_update_columns():
         update_columns=['value'],
     )
     assert payload.update_columns == ['value']
+
+
+# --- RedisPayload operations ---
+
+
+def test_redis_payload_defaults_to_set():
+    """Existing RedisPayload(key=…, data=…) call sites keep working."""
+    payload = RedisPayload(key='result:abc', data=SampleData())
+    assert payload.op is RedisOp.SET
+
+
+def test_redis_payload_op_serializes_as_a_plain_string():
+    """DLQ JSON byte-stability: op must serialize as its value, not 'RedisOp.INCRBY'."""
+    payload = RedisPayload(op=RedisOp.INCRBY, key='hits', amount=1)
+    assert '"op":"incrby"' in payload.model_dump_json().replace(' ', '')
+
+
+def test_redis_payload_field_order_is_the_dlq_contract():
+    """The Go backend must emit these fields in this order — byte-stability."""
+    assert list(RedisPayload.model_fields) == [
+        'sink',
+        'op',
+        'key',
+        'data',
+        'ttl',
+        'fields',
+        'members',
+        'amount',
+        'side',
+        'start',
+        'stop',
+        'script',
+        'keys',
+        'args',
+    ]
+
+
+@pytest.mark.parametrize(
+    ('op', 'kwargs', 'missing'),
+    [
+        ('set', {'key': 'k'}, 'data'),
+        ('set', {'data': SampleData()}, 'key'),
+        ('delete', {}, 'key'),
+        ('expire', {'key': 'k'}, 'ttl'),
+        ('incrby', {'key': 'k'}, 'amount'),
+        ('hset', {'key': 'k'}, 'fields'),
+        ('hdel', {'key': 'k'}, 'fields'),
+        ('push', {'key': 'k'}, 'data'),
+        ('trim', {'key': 'k', 'start': 0}, 'stop'),
+        ('trim', {'key': 'k', 'stop': -1}, 'start'),
+        ('sadd', {'key': 'k'}, 'members'),
+        ('srem', {'key': 'k'}, 'members'),
+        ('zadd', {'key': 'k'}, 'members'),
+        ('script', {'keys': ['recent']}, 'script'),
+        ('script', {'script': 'push_and_cap'}, 'keys'),
+    ],
+)
+def test_redis_payload_requires_the_fields_its_op_uses(op, kwargs, missing):
+    with pytest.raises(ValidationError, match=f"requires '{missing}'"):
+        RedisPayload(op=op, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ('op', 'kwargs', 'unused'),
+    [
+        ('set', {'key': 'k', 'data': SampleData(), 'amount': 5}, 'amount'),
+        ('delete', {'key': 'k', 'amount': 5}, 'amount'),
+        ('delete', {'key': 'k', 'ttl': 60}, 'ttl'),
+        ('expire', {'key': 'k', 'ttl': 60, 'data': SampleData()}, 'data'),
+        ('incrby', {'key': 'k', 'amount': 1, 'members': ['m']}, 'members'),
+        ('hset', {'key': 'k', 'fields': {'f': 'v'}, 'amount': 1}, 'amount'),
+        ('push', {'key': 'k', 'data': SampleData(), 'start': 0}, 'start'),
+        ('trim', {'key': 'k', 'start': 0, 'stop': -1, 'side': 'left'}, 'side'),
+        ('sadd', {'key': 'k', 'members': ['m'], 'ttl': 60}, 'ttl'),
+        ('zadd', {'key': 'k', 'members': {'m': 1.0}, 'side': 'left'}, 'side'),
+        ('script', {'script': 's', 'keys': ['k'], 'key': 'k'}, 'key'),
+        ('script', {'script': 's', 'keys': ['k'], 'amount': 1}, 'amount'),
+    ],
+)
+def test_redis_payload_rejects_fields_the_op_does_not_use(op, kwargs, unused):
+    """A mis-set field must be a loud error, not silently ignored.
+
+    Twelve operations in one class with optional fields would otherwise let
+    RedisPayload(op='delete', amount=5) quietly drop the amount.
+    """
+    with pytest.raises(ValidationError, match=f"does not use '{unused}'"):
+        RedisPayload(op=op, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ('op', 'kwargs'),
+    [
+        ('hset', {'key': 'k', 'fields': {}}),
+        ('hdel', {'key': 'k', 'fields': []}),
+        ('sadd', {'key': 'k', 'members': []}),
+        ('srem', {'key': 'k', 'members': []}),
+        ('zadd', {'key': 'k', 'members': {}}),
+        ('script', {'script': 's', 'keys': []}),
+    ],
+)
+def test_redis_payload_rejects_empty_collections(op, kwargs):
+    """An empty collection would render a malformed Redis command."""
+    with pytest.raises(ValidationError):
+        RedisPayload(op=op, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ('op', 'value'),
+    [
+        ('hset', ['f']),  # HSET needs pairs, not names
+        ('hdel', {'f': 'v'}),  # HDEL needs names, not pairs
+    ],
+)
+def test_redis_payload_narrows_fields_type_per_op(op, value):
+    with pytest.raises(ValidationError, match='fields'):
+        RedisPayload(op=op, key='k', fields=value)
+
+
+@pytest.mark.parametrize(
+    ('op', 'value'),
+    [
+        ('zadd', ['m']),  # ZADD needs member→score
+        ('sadd', {'m': 1.0}),  # SADD needs plain members
+        ('srem', {'m': 1.0}),
+    ],
+)
+def test_redis_payload_narrows_members_type_per_op(op, value):
+    with pytest.raises(ValidationError, match='members'):
+        RedisPayload(op=op, key='k', members=value)
+
+
+def test_redis_payload_zero_is_a_real_value_not_unset():
+    """INCRBY 0 and LTRIM 0 -1 are legitimate, so 0 must not read as missing."""
+    assert RedisPayload(op=RedisOp.INCRBY, key='k', amount=0).amount == 0
+    trim = RedisPayload(op=RedisOp.TRIM, key='k', start=0, stop=-1)
+    assert (trim.start, trim.stop) == (0, -1)
+
+
+def test_redis_payload_valid_forms_construct():
+    assert RedisPayload(key='k', data=SampleData(), ttl=60).ttl == 60
+    assert RedisPayload(op=RedisOp.DELETE, key='k').key == 'k'
+    assert RedisPayload(op=RedisOp.PUSH, key='k', data=SampleData(), side='right').side == 'right'
+    assert RedisPayload(op=RedisOp.PUSH, key='k', data=SampleData()).side is None
+    assert RedisPayload(op=RedisOp.HSET, key='k', fields={'a': 1}).fields == {'a': 1}
+    assert RedisPayload(op=RedisOp.ZADD, key='k', members={'m': 1.5}).members == {'m': 1.5}
+    script = RedisPayload(op=RedisOp.SCRIPT, script='cap', keys=['recent'], args=['x', 100])
+    assert (script.script, script.keys, script.args) == ('cap', ['recent'], ['x', 100])
 
 
 # --- payload data survives DLQ serialization ---
