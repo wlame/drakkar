@@ -1872,6 +1872,29 @@ async def test_redis_sink_renders_collection_commands(redis_sink_config, payload
     getattr(mock_client, method).assert_awaited_once_with(*args, **kwargs)
 
 
+async def test_redis_sink_sorts_mapping_arguments_but_not_lists(redis_sink_config):
+    """Mappings emit sorted; caller-supplied lists keep their order.
+
+    Argument order changes neither HSET's nor ZADD's end state, but it does
+    change the emitted command — and the Go backend decodes a mapping into
+    an unordered map, so sorting is the only rule both backends can honour.
+    A list is a sequence both can preserve, so it is left alone.
+    """
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+
+    await sink.deliver([RedisPayload(op='hset', key='s', fields={'zulu': 1, 'alpha': 2})])
+    assert list(mock_client.hset.call_args.kwargs['mapping']) == ['alpha', 'zulu']
+
+    await sink.deliver([RedisPayload(op='zadd', key='lb', members={'zoe': 1.0, 'amy': 2.0})])
+    assert list(mock_client.zadd.call_args.args[1]) == ['amy', 'zoe']
+
+    await sink.deliver([RedisPayload(op='sadd', key='seen', members=['zulu', 'alpha'])])
+    assert mock_client.sadd.call_args.args[1:] == ('zulu', 'alpha')
+
+    await sink.deliver([RedisPayload(op='hdel', key='s', fields=['zulu', 'alpha'])])
+    assert mock_client.hdel.call_args.args[1:] == ('zulu', 'alpha')
+
+
 async def test_redis_sink_passes_field_values_through_untouched(redis_sink_config):
     """redis-py's encoder handles str/int/float — the framework must not stringify."""
     sink, mock_client = _make_redis_sink(redis_sink_config)

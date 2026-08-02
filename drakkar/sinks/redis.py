@@ -102,6 +102,23 @@ _Rendered = tuple[str, tuple[object, ...], dict[str, object]]
 _CommandRenderer = Callable[[RedisPayload, str], _Rendered]
 
 
+def _sorted_mapping(value: object) -> dict[str, object]:
+    """Emit a payload MAPPING in sorted key order.
+
+    Argument order does not change what HSET or ZADD leave behind, but it
+    does change the emitted command — and the Go backend decodes these into
+    a map with no order to preserve, so sorting is the only rule both
+    backends can honour unconditionally. Postgres columns are sorted for
+    exactly this reason.
+
+    LISTS (hdel fields, sadd/srem members) are NOT sorted: those are the
+    caller's own order, like an explicit `update_columns` on the Postgres
+    side, and both backends can preserve a sequence.
+    """
+    mapping = value if isinstance(value, dict) else {}
+    return {name: mapping[name] for name in sorted(mapping)}
+
+
 def _render_set(payload: RedisPayload, key: str) -> _Rendered:
     """SET pk <json> [EX ttl]."""
     assert payload.data is not None  # the per-op contract guarantees it
@@ -135,7 +152,7 @@ _COMMAND_RENDERERS: dict[RedisOp, _CommandRenderer] = {
     #
     # dict()/unpacking are safe because the per-op contract already narrowed
     # the shape: hset and zadd require a mapping, hdel and sadd/srem a list.
-    RedisOp.HSET: lambda p, key: ('hset', (key,), {'mapping': dict(p.fields or {})}),
+    RedisOp.HSET: lambda p, key: ('hset', (key,), {'mapping': _sorted_mapping(p.fields)}),
     RedisOp.HDEL: lambda p, key: ('hdel', (key, *(p.fields or ())), {}),
     RedisOp.SADD: lambda p, key: ('sadd', (key, *(p.members or ())), {}),
     RedisOp.SREM: lambda p, key: ('srem', (key, *(p.members or ())), {}),
@@ -143,7 +160,7 @@ _COMMAND_RENDERERS: dict[RedisOp, _CommandRenderer] = {
     # zadd(name, mapping) signature, and it emits `ZADD key score member`
     # itself — the argument flip is the client's job, not ours. A backend
     # whose client takes (score, member) pairs has to flip explicitly.
-    RedisOp.ZADD: lambda p, key: ('zadd', (key, dict(p.members or {})), {}),
+    RedisOp.ZADD: lambda p, key: ('zadd', (key, _sorted_mapping(p.members)), {}),
 }
 
 
