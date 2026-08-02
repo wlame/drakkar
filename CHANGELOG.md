@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dead-lettered payloads lost their body.** Every sink payload declares
+  `data` as `BaseModel`, and pydantic serializes against the declared type
+  rather than the instance — so `model_dump_json()` emitted `"data": {}`.
+  `DLQSink` serializes payloads exactly that way, which meant every
+  dead-lettered record reached the DLQ topic without the data it exists to
+  preserve, and `scripts/replay_dlq.py` would have replayed blank rows. All
+  six payload types were affected, plus `PostgresPayload`'s `where` and
+  `params`. Nothing warned: a user's model genuinely is a `BaseModel`, so
+  pydantic considered it correctly serialized.
+
+  The bodies are now annotated `SerializeAsAny`, which restores duck-typed
+  serialization, and each payload type has a round-trip test plus one through
+  the real `DLQMessage.serialize()` path. The Go backend was never affected —
+  it marshals the concrete value — so this also closes an undocumented
+  divergence on a surface the parity contract calls byte-stable.
+
 ### Added
 
 - **The Postgres sink writes more than inserts.** `PostgresPayload.op`
