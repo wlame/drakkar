@@ -1,0 +1,210 @@
+{
+  "_comment": "Golden MQL template substitution vectors. Mirrored verbatim into drakkar-go so both backends bind operator-authored statements identically. Each 'ok' case compiles 'template', binds 'params', and must produce 'document' — including the TYPE of every bound value, which is the rule most likely to be broken silently: an MQL comparison against the string \"5\" does not match a numeric field 5, and the query is well-formed either way. 'params' pins the distinct parameter names in first-appearance order. Each 'error' case must be REJECTED, at compile time unless 'params' is present, in which case at bind time; 'error' is a token the message must contain, matched case-insensitively because Go requires lowercase error strings and Python capitalises. Four rules define the whole surface: a string value exactly equal to ':name' is replaced type-preserved; substitution applies to whole values only, never part of a longer string; keys are never substitutable, so a parameter cannot introduce an operator position such as $where or $out; and '::name' escapes a literal leading colon, mirroring the Postgres tokenizer's :: cast rule.",
+  "ok": [
+    {
+      "case": "a template without placeholders binds nothing",
+      "template": { "status": "done", "attempts": 1 },
+      "names": [],
+      "params": {},
+      "document": { "status": "done", "attempts": 1 }
+    },
+    {
+      "case": "distinct names are collected in first-appearance order",
+      "template": { "b": ":second", "a": ":first", "c": ":second" },
+      "names": ["second", "first"],
+      "params": { "first": 1, "second": 2 },
+      "document": { "b": 2, "a": 1, "c": 2 }
+    },
+    {
+      "case": "a string parameter stays a string",
+      "template": { "status": ":status" },
+      "names": ["status"],
+      "params": { "status": "done" },
+      "document": { "status": "done" }
+    },
+    {
+      "case": "an integer parameter stays an integer",
+      "template": { "count": ":count" },
+      "names": ["count"],
+      "params": { "count": 5 },
+      "document": { "count": 5 }
+    },
+    {
+      "case": "a zero parameter is bound like any other",
+      "template": { "count": ":count" },
+      "names": ["count"],
+      "params": { "count": 0 },
+      "document": { "count": 0 }
+    },
+    {
+      "case": "a float parameter stays a float",
+      "template": { "ratio": ":ratio" },
+      "names": ["ratio"],
+      "params": { "ratio": 1.5 },
+      "document": { "ratio": 1.5 }
+    },
+    {
+      "case": "a boolean parameter stays a boolean",
+      "template": { "active": ":active" },
+      "names": ["active"],
+      "params": { "active": true },
+      "document": { "active": true }
+    },
+    {
+      "case": "a null parameter binds as null",
+      "template": { "cleared_at": ":cleared_at" },
+      "names": ["cleared_at"],
+      "params": { "cleared_at": null },
+      "document": { "cleared_at": null }
+    },
+    {
+      "case": "a document parameter binds whole",
+      "template": { "$set": { "summary": ":summary" } },
+      "names": ["summary"],
+      "params": { "summary": { "ok": true, "n": 2 } },
+      "document": { "$set": { "summary": { "ok": true, "n": 2 } } }
+    },
+    {
+      "case": "an array parameter binds whole",
+      "template": { "$set": { "tags": ":tags" } },
+      "names": ["tags"],
+      "params": { "tags": ["a", "b"] },
+      "document": { "$set": { "tags": ["a", "b"] } }
+    },
+    {
+      "case": "a repeated name fills every position it appears in",
+      "template": { "filter": { "_id": ":id" }, "update": { "$set": { "ref": ":id" } } },
+      "names": ["id"],
+      "params": { "id": 42 },
+      "document": { "filter": { "_id": 42 }, "update": { "$set": { "ref": 42 } } }
+    },
+    {
+      "case": "a placeholder inside a longer string is left alone",
+      "template": { "note": "job-:id" },
+      "names": [],
+      "params": {},
+      "document": { "note": "job-:id" }
+    },
+    {
+      "case": "a colon that does not start the value is ordinary text",
+      "template": { "at": "12:30" },
+      "names": [],
+      "params": {},
+      "document": { "at": "12:30" }
+    },
+    {
+      "case": "the double-colon escape yields a literal leading colon",
+      "template": { "label": "::status" },
+      "names": [],
+      "params": {},
+      "document": { "label": ":status" }
+    },
+    {
+      "case": "an escaped value is not a placeholder even when the name is bound",
+      "template": { "a": "::id", "b": ":id" },
+      "names": ["id"],
+      "params": { "id": 7 },
+      "document": { "a": ":id", "b": 7 }
+    },
+    {
+      "case": "substitution reaches into nested documents and arrays",
+      "template": {
+        "$set": { "status": ":status", "tags": ["fixed", ":tag", { "deep": ":deep" }] },
+        "$inc": { "attempts": 1 }
+      },
+      "names": ["status", "tag", "deep"],
+      "params": { "status": "done", "tag": "x", "deep": 9 },
+      "document": {
+        "$set": { "status": "done", "tags": ["fixed", "x", { "deep": 9 }] },
+        "$inc": { "attempts": 1 }
+      }
+    },
+    {
+      "case": "a pipeline-form update is a list at the top level",
+      "template": [{ "$set": { "total": ":total" } }, { "$unset": "stale" }],
+      "names": ["total"],
+      "params": { "total": 12 },
+      "document": [{ "$set": { "total": 12 } }, { "$unset": "stale" }]
+    },
+    {
+      "case": "a whole statement binds its filter and update together",
+      "template": {
+        "filter": { "_id": ":id", "status": "pending" },
+        "update": { "$set": { "status": ":status", "claimed_at": ":now" }, "$inc": { "attempts": 1 } }
+      },
+      "names": ["id", "status", "now"],
+      "params": { "id": 3, "status": "running", "now": "2026-08-02T00:00:00Z" },
+      "document": {
+        "filter": { "_id": 3, "status": "pending" },
+        "update": {
+          "$set": { "status": "running", "claimed_at": "2026-08-02T00:00:00Z" },
+          "$inc": { "attempts": 1 }
+        }
+      }
+    }
+  ],
+  "errors": [
+    {
+      "case": "a bare colon is not a placeholder",
+      "template": { "field": ":" },
+      "error": "placeholder"
+    },
+    {
+      "case": "a placeholder name may not start with a digit",
+      "template": { "field": ":1abc" },
+      "error": "placeholder"
+    },
+    {
+      "case": "a placeholder name may not contain punctuation",
+      "template": { "field": ":-" },
+      "error": "placeholder"
+    },
+    {
+      "case": "a malformed placeholder is caught inside a list",
+      "template": { "$set": { "tags": ["ok", ":"] } },
+      "error": "placeholder"
+    },
+    {
+      "case": "a key shaped like a placeholder is rejected",
+      "template": { ":field": 1 },
+      "error": "key"
+    },
+    {
+      "case": "a placeholder-shaped key is rejected at depth",
+      "template": { "$set": { "nested": { ":field": 1 } } },
+      "error": "key"
+    },
+    {
+      "case": "$where executes server-side JavaScript",
+      "template": { "$where": "this.qty < 10" },
+      "error": "$where"
+    },
+    {
+      "case": "$function executes server-side JavaScript",
+      "template": { "$function": { "body": "function() {}" } },
+      "error": "$function"
+    },
+    {
+      "case": "$where is rejected at any depth",
+      "template": { "$and": [{ "ok": 1 }, { "nested": { "$where": "code" } }] },
+      "error": "$where"
+    },
+    {
+      "case": "$function is rejected inside a pipeline stage",
+      "template": [{ "$set": { "x": { "$function": { "body": "f" } } } }],
+      "error": "$function"
+    },
+    {
+      "case": "a missing parameter is rejected at bind time",
+      "template": { "id": ":id", "at": ":now" },
+      "params": { "id": 1 },
+      "error": "now"
+    },
+    {
+      "case": "an extra parameter is rejected at bind time",
+      "template": { "id": ":id" },
+      "params": { "id": 1, "nope": 2 },
+      "error": "nope"
+    }
+  ]
+}
