@@ -3459,3 +3459,57 @@ async def test_on_message_complete_sees_synthesized_failure_when_on_task_complet
     assert len(group.errors) == 1
     assert group.errors[0].task.task_id == 't-0'
     assert 'hook exploded but task succeeded' in (group.errors[0].exception or '')
+
+
+async def test_sink_collector_postgres_extras_carry_the_op():
+    """The probe must say WHICH operation a Postgres payload plans."""
+    from drakkar.models import PostgresOp
+
+    collector = DebugSinkCollector()
+    cr = CollectResult(
+        postgres=[
+            PostgresPayload(table='audit', data=_TinyOutput(id=1)),
+            PostgresPayload(
+                op=PostgresOp.UPDATE,
+                table='jobs',
+                data=_TinyOutput(id=2),
+                where=_TinyOutput(id=3),
+            ),
+        ],
+    )
+    await collector(cr, 0)
+
+    flat = collector.flatten()
+    assert [r.extras['op'] for r in flat] == ['insert', 'update']
+    assert flat[1].extras['where'] == {'id': 3, 'note': 'hello'}
+    assert 'where' not in flat[0].extras, 'an insert has no predicate to report'
+
+
+async def test_sink_collector_postgres_upsert_reports_conflict_columns():
+    from drakkar.models import PostgresOp
+
+    collector = DebugSinkCollector()
+    cr = CollectResult(
+        postgres=[
+            PostgresPayload(op=PostgresOp.UPSERT, table='totals', data=_TinyOutput(id=1), conflict=['id']),
+        ],
+    )
+    await collector(cr, 0)
+
+    flat = collector.flatten()
+    assert flat[0].extras['op'] == 'upsert'
+    assert flat[0].extras['conflict'] == ['id']
+
+
+async def test_sink_collector_postgres_statement_destination_is_the_statement_name():
+    """A statement payload has no table, so the statement name identifies it."""
+    from drakkar.models import PostgresOp
+
+    collector = DebugSinkCollector()
+    cr = CollectResult(postgres=[PostgresPayload(op=PostgresOp.STATEMENT, statement='claim_job')])
+    await collector(cr, 0)
+
+    flat = collector.flatten()
+    assert flat[0].destination == 'claim_job'
+    assert flat[0].extras['op'] == 'statement'
+    assert flat[0].payload is None

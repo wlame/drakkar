@@ -56,6 +56,7 @@ from drakkar.models import (
     ExecutorTask,
     MessageGroup,
     PendingContext,
+    PostgresOp,
     SourceMessage,
 )
 from drakkar.uiserver.runner_helpers import (
@@ -435,13 +436,22 @@ class DebugSinkCollector:
                     )
                 )
             for pp in cr.postgres:
+                # A named statement has no table, so its name is what
+                # identifies the write. ``where``/``conflict`` are reported
+                # only for the ops that carry them, which keeps the blob the
+                # UI renders free of fields that are structurally absent.
+                pg_extras: dict[str, Any] = {'sink_instance': pp.sink, 'op': pp.op.value}
+                if pp.where is not None:
+                    pg_extras['where'] = pp.where.model_dump(mode='json')
+                if pp.conflict:
+                    pg_extras['conflict'] = pp.conflict
                 records.append(
                     PlannedSinkRecord(
                         sink_type='postgres',
-                        destination=pp.table,
+                        destination=pp.statement if pp.op is PostgresOp.STATEMENT else pp.table,
                         origin_stage=stage,
                         payload=_dump_or_none(pp.data),
-                        extras={'sink_instance': pp.sink},
+                        extras=pg_extras,
                     )
                 )
             for mp in cr.mongo:
