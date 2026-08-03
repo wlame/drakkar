@@ -1,8 +1,10 @@
-"""PostgreSQL sink — inserts rows into database tables.
+"""PostgreSQL sink — writes rows to database tables.
 
-Wraps asyncpg connection pool. Each PostgresPayload's data field is
-serialized via model_dump() to get a column-name → value mapping,
-then inserted into the specified table.
+Wraps an asyncpg connection pool. A PostgresPayload's ``op`` selects what
+the sink builds: an INSERT, an UPDATE, or an upsert, each from the
+payload's own models serialized via ``model_dump()``. SQL construction
+itself lives in ``drakkar.pgsql``, which has no I/O and no drakkar
+imports, so every emitted statement is testable without a database.
 """
 
 import time
@@ -11,28 +13,92 @@ from typing import Protocol
 
 import asyncpg
 import structlog
+from pydantic import BaseModel
 
 from drakkar.config import PostgresSinkConfig
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
-from drakkar.models import PostgresPayload
-from drakkar.pgsql import MAX_INSERT_PARAMS, quote_ident, render_insert
+from drakkar.models import PostgresOp, PostgresPayload
+from drakkar.pgsql import MAX_INSERT_PARAMS, quote_ident, render_insert, render_update, render_upsert
 from drakkar.sinks.base import BaseSink
 
 logger = structlog.get_logger()
 
 
 @dataclass(frozen=True)
-class _PgRow:
-    """One payload reduced to its INSERT building blocks, identifiers quoted."""
+class _RowUnit:
+    """An insert or upsert — contributes one VALUES tuple to a shared statement.
 
+    These batch as ONE multi-row statement, so the SQL depends on how many
+    units end up in the run and is rendered per chunk rather than stored.
+    """
+
+    op: PostgresOp
     quoted_table: str
-    quoted_columns: list[str]
+    quoted_columns: tuple[str, ...]
+    quoted_conflict: tuple[str, ...]
+    quoted_update_columns: tuple[str, ...]
     values: list[object]
 
     @property
-    def group_key(self) -> tuple[str, tuple[str, ...]]:
-        """Rows sharing this key can go in one multi-row INSERT."""
-        return (self.quoted_table, tuple(self.quoted_columns))
+    def group_key(self) -> tuple:
+        """Units sharing this key can go in one multi-row statement."""
+        return (
+            self.op,
+            self.quoted_table,
+            self.quoted_columns,
+            self.quoted_conflict,
+            self.quoted_update_columns,
+        )
+
+    def render(self, row_count: int) -> str:
+        """Build the statement covering ``row_count`` units from this group."""
+        columns = list(self.quoted_columns)
+        if self.op is PostgresOp.INSERT:
+            return render_insert(self.quoted_table, columns, row_count)
+        return render_upsert(
+            self.quoted_table,
+            columns,
+            row_count,
+            list(self.quoted_conflict),
+            list(self.quoted_update_columns),
+        )
+
+
+@dataclass(frozen=True)
+class _StmtUnit:
+    """An update or named statement — one execution of a fixed SQL string.
+
+    The SQL does not vary with the number of units, so a run of these is sent
+    with ``executemany``: one prepared statement, N argument tuples. The
+    rendered SQL therefore IS the group key — it already encodes the table,
+    the SET columns, and which predicate columns are IS NULL.
+    """
+
+    op: PostgresOp
+    sql: str
+    values: list[object]
+    statement_name: str = ''
+
+    @property
+    def group_key(self) -> tuple:
+        return (self.op, self.sql)
+
+
+def _dump_required(model: BaseModel | None, field: str, op: PostgresOp) -> dict:
+    """Serialize a payload sub-model to a non-empty column→value mapping.
+
+    The non-empty check is the second of two guards on ``where``: the model
+    validator rejects ``where=None`` at construction, and this rejects a model
+    that *dumps* empty. Both are needed because a model mutated after the
+    payload was constructed would slip past the validator, and an empty
+    predicate renders an UPDATE with no WHERE — rewriting every row.
+    """
+    if model is None:
+        raise ValueError(f'PostgresPayload(op={op.value!r}) requires {field!r}')
+    dumped = model.model_dump()
+    if not dumped:
+        raise ValueError(f'PostgresPayload(op={op.value!r}) {field!r} serialized to an empty mapping')
+    return dumped
 
 
 class _HasGroupKey(Protocol):
@@ -66,21 +132,13 @@ def _group_into_runs[UnitT: _HasGroupKey](units: list[UnitT]) -> list[list[UnitT
     return runs
 
 
-def _build_multi_insert(rows: list[_PgRow]) -> tuple[str, list[object]]:
-    """Build one INSERT covering every row (all share a table + column set)."""
-    query = render_insert(rows[0].quoted_table, rows[0].quoted_columns, len(rows))
-    values: list[object] = []
-    for row in rows:
-        values.extend(row.values)
-    return query, values
-
-
 class PostgresSink(BaseSink[PostgresPayload]):
-    """Inserts rows into PostgreSQL tables.
+    """Writes rows to PostgreSQL tables.
 
     Each PostgresPayload is serialized:
         - table = payload.table (validated against SQL injection)
         - columns/values = payload.data.model_dump() dict
+        - predicate = payload.where.model_dump() dict, for an update
 
     Exposes the asyncpg pool via the `pool` property so users can
     access it in on_ready() for migrations or lookups.
@@ -147,18 +205,18 @@ class PostgresSink(BaseSink[PostgresPayload]):
         start = time.monotonic()
         labels = {'sink_type': self.sink_type, 'sink_name': self._name}
         try:
-            rows, bad_index, build_error = self._build_rows(payloads)
+            units, bad_index, build_error = self._build_units(payloads)
             async with self._pool.acquire() as conn:
                 if build_error is not None:
-                    # The per-payload loop executed every row BEFORE the
+                    # The per-payload loop executed every unit BEFORE the
                     # invalid payload, then raised. Reproduce those side
                     # effects (an exec failure on the way takes precedence,
                     # exactly as the sequential loop would have hit first).
-                    for row in rows[:bad_index]:
-                        await self._exec_single(conn, row)
+                    for unit in units[:bad_index]:
+                        await self._exec_single(conn, unit)
                     raise build_error
-                for group in _group_into_runs(rows):
-                    await self._deliver_group(conn, group)
+                for run in _group_into_runs(units):
+                    await self._deliver_run(conn, run)
 
             sink_payloads_delivered.labels(**labels).inc(len(payloads))
             sink_deliver_duration.labels(**labels).observe(time.monotonic() - start)
@@ -166,58 +224,111 @@ class PostgresSink(BaseSink[PostgresPayload]):
             sink_deliver_errors.labels(**labels).inc()
             raise
 
-    def _build_rows(self, payloads: list[PostgresPayload]) -> tuple[list[_PgRow], int, Exception | None]:
+    def _build_units(self, payloads: list[PostgresPayload]) -> tuple[list[_RowUnit | _StmtUnit], int, Exception | None]:
         """Validate and convert every payload up front.
 
-        On the first bad payload returns the rows built so far, the failing
-        index, and the error — the caller replays the legacy partial side
-        effects before raising it.
+        On the first bad payload returns the units built so far, the failing
+        index, and the error — the caller replays the partial side effects
+        before raising it.
         """
-        rows: list[_PgRow] = []
+        units: list[_RowUnit | _StmtUnit] = []
         for i, payload in enumerate(payloads):
             try:
-                if payload.data is None:
-                    raise ValueError(f'PostgresPayload(op={payload.op.value!r}) requires {"data"!r}')
-                data = payload.data.model_dump()
-                rows.append(
-                    _PgRow(
-                        quoted_table=quote_ident(payload.table),
-                        quoted_columns=[quote_ident(c) for c in data],
-                        values=list(data.values()),
-                    )
-                )
+                units.append(self._build_unit(payload))
             except Exception as e:
-                return rows, i, e
-        return rows, len(rows), None
+                return units, i, e
+        return units, len(units), None
 
-    async def _deliver_group(self, conn: asyncpg.Connection, group: list[_PgRow]) -> None:
-        """Insert one (table, column-set) group, chunked to the parameter cap."""
-        # A payload whose data serializes to an empty mapping has zero
-        # columns; dividing by zero would raise here instead of surfacing
-        # the graceful "INSERT INTO t () ..." SQL error the per-payload
-        # loop produced. Route those through the single-row path.
+    def _build_unit(self, payload: PostgresPayload) -> _RowUnit | _StmtUnit:
+        """Reduce one payload to its execution inputs, identifiers quoted."""
+        data = _dump_required(payload.data, 'data', payload.op)
+        quoted_table = quote_ident(payload.table)
+
+        if payload.op is PostgresOp.UPDATE:
+            where = _dump_required(payload.where, 'where', payload.op)
+            eq_columns = [c for c, v in where.items() if v is not None]
+            null_columns = [c for c, v in where.items() if v is None]
+            sql = render_update(
+                quoted_table,
+                [quote_ident(c) for c in data],
+                [quote_ident(c) for c in eq_columns],
+                [quote_ident(c) for c in null_columns],
+            )
+            return _StmtUnit(
+                op=payload.op,
+                sql=sql,
+                values=[*data.values(), *(where[c] for c in eq_columns)],
+            )
+
+        return _RowUnit(
+            op=payload.op,
+            quoted_table=quoted_table,
+            quoted_columns=tuple(quote_ident(c) for c in data),
+            quoted_conflict=tuple(quote_ident(c) for c in payload.conflict),
+            quoted_update_columns=tuple(quote_ident(c) for c in self._resolve_update_columns(payload, data)),
+            values=list(data.values()),
+        )
+
+    @staticmethod
+    def _resolve_update_columns(payload: PostgresPayload, data: dict) -> list[str]:
+        """Which columns an upsert overwrites on conflict (empty ⇒ DO NOTHING)."""
+        if payload.op is not PostgresOp.UPSERT:
+            return []
+        if payload.update_columns is None:
+            conflict = set(payload.conflict)
+            return [c for c in data if c not in conflict]
+        unknown = sorted(c for c in payload.update_columns if c not in data)
+        if unknown:
+            raise ValueError(f'update_columns not present in data: {unknown}')
+        return list(payload.update_columns)
+
+    async def _deliver_run(self, conn: asyncpg.Connection, run: list[_RowUnit | _StmtUnit]) -> None:
+        """Execute one run of same-shaped units."""
+        if len(run) == 1:
+            await self._exec_single(conn, run[0])
+            return
+        first = run[0]
+        if isinstance(first, _StmtUnit):
+            try:
+                await conn.executemany(first.sql, [u.values for u in run])
+            except Exception:
+                # ``executemany`` is atomic (asyncpg >= 0.22): either every
+                # execution succeeded or none did. Nothing was written, so
+                # re-running one at a time cannot double-write — unlike the
+                # multi-row INSERT fallback below. Retry per unit so the
+                # surfaced error names the offending payload.
+                for unit in run:
+                    await self._exec_single(conn, unit)
+            return
+        await self._deliver_row_group(conn, [u for u in run if isinstance(u, _RowUnit)])
+
+    async def _deliver_row_group(self, conn: asyncpg.Connection, group: list[_RowUnit]) -> None:
+        """Send one VALUES-family run, chunked to the bind-parameter cap."""
         columns = len(group[0].quoted_columns)
-        rows_per_statement = max(MAX_INSERT_PARAMS // columns, 1) if columns else 1
+        rows_per_statement = max(MAX_INSERT_PARAMS // columns, 1)
         for start in range(0, len(group), rows_per_statement):
             chunk = group[start : start + rows_per_statement]
             if len(chunk) == 1:
                 await self._exec_single(conn, chunk[0])
                 continue
-            query, values = _build_multi_insert(chunk)
+            query = chunk[0].render(len(chunk))
+            values = [v for unit in chunk for v in unit.values]
             try:
                 await conn.execute(query, *values)
             except Exception:
                 # Batch failed — fall back to per-row delivery so the error
                 # names the offending row (and to ride out a
                 # statement-level transient).
-                for row in chunk:
-                    await self._exec_single(conn, row)
+                for unit in chunk:
+                    await self._exec_single(conn, unit)
 
     @staticmethod
-    async def _exec_single(conn: asyncpg.Connection, row: _PgRow) -> None:
-        """Insert one row — the shape the pre-batching loop produced."""
-        query, values = _build_multi_insert([row])
-        await conn.execute(query, *values)
+    async def _exec_single(conn: asyncpg.Connection, unit: _RowUnit | _StmtUnit) -> None:
+        """Execute one unit as a single statement."""
+        if isinstance(unit, _StmtUnit):
+            await conn.execute(unit.sql, *unit.values)
+            return
+        await conn.execute(unit.render(1), *unit.values)
 
     async def close(self) -> None:
         """Close the connection pool."""

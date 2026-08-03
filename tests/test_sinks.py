@@ -542,6 +542,246 @@ async def test_postgres_sink_rejects_payload_without_data(pg_sink_config):
     mock_conn.execute.assert_not_called()
 
 
+class DBKeyModel(BaseModel):
+    id: int = 1
+
+
+class DBNullKeyModel(BaseModel):
+    id: int = 1
+    claimed_by: str | None = None
+
+
+class DBEmptyModel(BaseModel):
+    """A model that passes field-presence validation but dumps to {}."""
+
+
+async def test_postgres_sink_update_single(pg_sink_config):
+    from drakkar.models import PostgresOp
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    await sink.deliver(
+        [PostgresPayload(op=PostgresOp.UPDATE, table='jobs', data=DBKeyModel(id=7), where=DBKeyModel(id=42))]
+    )
+
+    mock_conn.execute.assert_called_once()
+    query, *values = mock_conn.execute.call_args[0]
+    assert query == 'UPDATE "jobs" SET "id" = $1 WHERE "id" = $2'
+    assert values == [7, 42]
+
+
+async def test_postgres_sink_update_batch_uses_executemany(pg_sink_config):
+    """Same-shaped updates go out as one prepared statement with N arg tuples."""
+    from drakkar.models import PostgresOp
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    payloads = [
+        PostgresPayload(op=PostgresOp.UPDATE, table='jobs', data=DBKeyModel(id=i), where=DBKeyModel(id=i))
+        for i in (1, 2, 3)
+    ]
+    await sink.deliver(payloads)
+
+    mock_conn.executemany.assert_called_once()
+    query, args = mock_conn.executemany.call_args[0]
+    assert query == 'UPDATE "jobs" SET "id" = $1 WHERE "id" = $2'
+    assert args == [[1, 1], [2, 2], [3, 3]]
+    mock_conn.execute.assert_not_called()
+
+
+async def test_postgres_sink_update_null_predicate_renders_is_null(pg_sink_config):
+    from drakkar.models import PostgresOp
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    await sink.deliver(
+        [
+            PostgresPayload(
+                op=PostgresOp.UPDATE,
+                table='jobs',
+                data=DBKeyModel(id=1),
+                where=DBNullKeyModel(id=5, claimed_by=None),
+            )
+        ]
+    )
+
+    query, *values = mock_conn.execute.call_args[0]
+    assert query == 'UPDATE "jobs" SET "id" = $1 WHERE "id" = $2 AND "claimed_by" IS NULL'
+    assert values == [1, 5], 'the IS NULL column must not consume a parameter'
+
+
+async def test_postgres_sink_update_batch_failure_falls_back_per_payload(pg_sink_config):
+    """executemany is atomic, so per-payload retry cannot double-write."""
+    from drakkar.models import PostgresOp
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+    mock_conn.executemany.side_effect = RuntimeError('batch rejected')
+
+    payloads = [
+        PostgresPayload(op=PostgresOp.UPDATE, table='jobs', data=DBKeyModel(id=i), where=DBKeyModel(id=i))
+        for i in (1, 2)
+    ]
+    await sink.deliver(payloads)
+
+    assert mock_conn.executemany.call_count == 1
+    assert mock_conn.execute.call_count == 2
+
+
+async def test_postgres_sink_update_rejects_empty_where_mapping(pg_sink_config):
+    """Second guard: a model that DUMPS empty would render UPDATE with no WHERE.
+
+    The model validator only checks that `where` is not None, and an empty
+    model satisfies that — so without this build-time check the statement
+    would rewrite every row in the table.
+    """
+    from drakkar.models import PostgresOp
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    with pytest.raises(ValueError, match='empty mapping'):
+        await sink.deliver(
+            [PostgresPayload(op=PostgresOp.UPDATE, table='jobs', data=DBKeyModel(), where=DBEmptyModel())]
+        )
+    mock_conn.execute.assert_not_called()
+
+
+async def test_postgres_sink_upsert_renders_on_conflict(pg_sink_config):
+    from drakkar.models import PostgresOp
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    await sink.deliver(
+        [PostgresPayload(op=PostgresOp.UPSERT, table='totals', data=DBResultModel(id=1), conflict=['id'])]
+    )
+
+    query = mock_conn.execute.call_args[0][0]
+    assert query.startswith('INSERT INTO "totals"')
+    assert 'ON CONFLICT ("id") DO UPDATE SET' in query
+    assert '"status" = EXCLUDED."status"' in query
+    assert '"id" = EXCLUDED."id"' not in query, 'conflict column must not be overwritten'
+
+
+async def test_postgres_sink_upsert_respects_update_columns(pg_sink_config):
+    from drakkar.models import PostgresOp
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    await sink.deliver(
+        [
+            PostgresPayload(
+                op=PostgresOp.UPSERT,
+                table='totals',
+                data=DBResultModel(id=1),
+                conflict=['id'],
+                update_columns=['status'],
+            )
+        ]
+    )
+
+    query = mock_conn.execute.call_args[0][0]
+    assert 'DO UPDATE SET "status" = EXCLUDED."status"' in query
+    assert 'score' not in query.split('DO UPDATE')[1]
+
+
+async def test_postgres_sink_upsert_rejects_unknown_update_columns(pg_sink_config):
+    from drakkar.models import PostgresOp
+
+    sink, _, _ = _make_pg_sink(pg_sink_config)
+
+    payload = PostgresPayload(
+        op=PostgresOp.UPSERT,
+        table='t',
+        data=DBResultModel(),
+        conflict=['id'],
+        update_columns=['nonexistent'],
+    )
+    with pytest.raises(ValueError, match='not present in data'):
+        await sink.deliver([payload])
+
+
+async def test_postgres_sink_upsert_batches_adjacent(pg_sink_config):
+    from drakkar.models import PostgresOp
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    payloads = [
+        PostgresPayload(op=PostgresOp.UPSERT, table='totals', data=DBResultModel(id=i), conflict=['id']) for i in (1, 2)
+    ]
+    await sink.deliver(payloads)
+
+    assert mock_conn.execute.call_count == 1
+    assert mock_conn.execute.call_args[0][0].count('), (') == 1
+
+
+async def test_postgres_sink_rejects_empty_data_mapping(pg_sink_config):
+    """Zero columns would render `INSERT INTO t () VALUES ()`."""
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    with pytest.raises(ValueError, match='empty mapping'):
+        await sink.deliver([PostgresPayload(table='t', data=DBEmptyModel())])
+    mock_conn.execute.assert_not_called()
+
+
+async def test_postgres_sink_upsert_conflict_column_need_not_be_in_data(pg_sink_config):
+    """Postgres allows a conflict target on a column the statement doesn't insert.
+
+    A unique index on a defaulted or generated column is legitimate, so
+    `conflict` entries are validated as identifiers only — never against the
+    data columns.
+    """
+    from drakkar.models import PostgresOp
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    await sink.deliver(
+        [PostgresPayload(op=PostgresOp.UPSERT, table='t', data=DBKeyModel(id=1), conflict=['generated_key'])]
+    )
+
+    query = mock_conn.execute.call_args[0][0]
+    assert 'ON CONFLICT ("generated_key") DO UPDATE SET "id" = EXCLUDED."id"' in query
+
+
+async def test_postgres_sink_upsert_chunks_at_the_bind_parameter_cap(pg_sink_config):
+    """A run too large for one statement splits, preserving order."""
+    from drakkar.models import PostgresOp
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    payloads = [
+        PostgresPayload(op=PostgresOp.UPSERT, table='totals', data=DBResultModel(id=i), conflict=['id'])
+        for i in range(5)
+    ]
+    # DBResultModel has 3 columns, so a cap of 6 parameters allows 2 rows per
+    # statement. Patching beats building 20k payloads.
+    with patch('drakkar.sinks.postgres.MAX_INSERT_PARAMS', 6):
+        await sink.deliver(payloads)
+
+    # 5 rows at 2 per statement => two multi-row statements plus one single row.
+    assert mock_conn.execute.call_count == 3
+    tuple_counts = [c[0][0].count('), (') for c in mock_conn.execute.call_args_list]
+    assert tuple_counts == [1, 1, 0]
+
+
+async def test_postgres_sink_mixed_ops_execute_in_payload_order(pg_sink_config):
+    """A window mixing ops must reach the DB in the order the handler returned."""
+    from drakkar.models import PostgresOp
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    order: list[str] = []
+    mock_conn.execute.side_effect = lambda q, *a: order.append(q.split()[0])
+
+    await sink.deliver(
+        [
+            PostgresPayload(op=PostgresOp.UPDATE, table='jobs', data=DBKeyModel(), where=DBKeyModel()),
+            PostgresPayload(table='audit', data=DBResultModel()),
+            PostgresPayload(op=PostgresOp.UPDATE, table='jobs', data=DBKeyModel(), where=DBKeyModel()),
+        ]
+    )
+
+    assert order == ['UPDATE', 'INSERT', 'UPDATE']
+
+
 async def test_postgres_sink_deliver_error_increments_metrics(pg_sink_config):
     from drakkar.metrics import sink_deliver_errors
 
