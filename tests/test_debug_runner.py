@@ -719,22 +719,23 @@ async def test_sink_collector_flatten_empty():
 # payloads the feature adds are the ones that break
 # ``POST /api/v1/debug/probe``.
 #
-# ``data`` is still a required field today, so these build the future shape
-# with ``model_construct`` (which skips validation). When the payload models
-# gain ``data: BaseModel | None``, these tests keep passing unchanged.
+# The Postgres payload already has a real dataless shape — a named statement.
+# Redis and Mongo have not gained theirs yet, so those two build the future
+# shape with ``model_construct``, which skips validation.
 
 
 async def test_sink_collector_flatten_postgres_payload_without_data():
     """A Postgres payload with no data flattens with ``payload=None``."""
+    from drakkar.models import PostgresOp
+
     collector = DebugSinkCollector()
-    cr = CollectResult(postgres=[PostgresPayload.model_construct(table='jobs', data=None)])
+    cr = CollectResult(postgres=[PostgresPayload(op=PostgresOp.STATEMENT, statement='claim_job')])
     await collector(cr, 0)
 
     flat = collector.flatten()
     assert len(flat) == 1
     assert flat[0].sink_type == 'postgres'
     assert flat[0].payload is None
-    assert flat[0].destination == 'jobs'
 
 
 async def test_sink_collector_flatten_redis_payload_without_data():
@@ -769,19 +770,19 @@ async def test_sink_collector_flatten_mixes_data_and_dataless_payloads():
     Pins that the guard is per payload rather than per batch — one dataless
     payload must not suppress serialization of its neighbours.
     """
+    from drakkar.models import PostgresOp
+
     collector = DebugSinkCollector()
     cr = CollectResult(
         postgres=[
             PostgresPayload(table='audit', data=_TinyOutput(id=7)),
-            PostgresPayload.model_construct(table='jobs', data=None),
+            PostgresPayload(op=PostgresOp.STATEMENT, statement='claim_job'),
         ],
     )
     await collector(cr, 0)
 
     flat = collector.flatten()
-    assert [r.destination for r in flat] == ['audit', 'jobs']
-    assert flat[0].payload == {'id': 7, 'note': 'hello'}
-    assert flat[1].payload is None
+    assert [r.payload for r in flat] == [{'id': 7, 'note': 'hello'}, None]
 
 
 async def test_sink_collector_flatten_preserves_entry_order():

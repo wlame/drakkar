@@ -510,6 +510,17 @@ async def test_postgres_sink_sql_injection_column():
         quote_ident('col; DROP TABLE x')
 
 
+async def test_postgres_sink_rejects_payload_without_data(pg_sink_config):
+    """``data`` is optional on the payload but required to build a row."""
+    from drakkar.models import PostgresOp
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    with pytest.raises(ValueError, match="requires 'data'"):
+        await sink.deliver([PostgresPayload(op=PostgresOp.STATEMENT, statement='claim_job')])
+    mock_conn.execute.assert_not_called()
+
+
 async def test_postgres_sink_deliver_error_increments_metrics(pg_sink_config):
     from drakkar.metrics import sink_deliver_errors
 

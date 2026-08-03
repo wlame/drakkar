@@ -1,7 +1,7 @@
 """Tests for Drakkar data models."""
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from drakkar.models import (
     CollectResult,
@@ -13,6 +13,7 @@ from drakkar.models import (
     KafkaPayload,
     MessageGroup,
     MongoPayload,
+    PostgresOp,
     PostgresPayload,
     PrecomputedResult,
     RedisPayload,
@@ -28,6 +29,12 @@ from drakkar.models import (
 class SampleData(BaseModel):
     request_id: str = 'abc'
     value: int = 42
+
+
+class SampleKey(BaseModel):
+    """Predicate model for the Postgres payload's ``where`` field."""
+
+    id: int = 1
 
 
 # --- CollectResult ---
@@ -381,3 +388,90 @@ def test_task_origin_alias_exposes_the_two_known_values():
     from typing import get_args
 
     assert set(get_args(TaskOrigin)) == {'kafka', 'http'}
+
+
+# --- PostgresPayload operations ---
+
+
+def test_postgres_payload_defaults_to_insert():
+    payload = PostgresPayload(table='results', data=SampleData())
+    assert payload.op is PostgresOp.INSERT
+
+
+def test_postgres_payload_op_serializes_as_a_plain_string():
+    """DLQ JSON byte-stability: op must serialize as its value, not 'PostgresOp.UPDATE'."""
+    payload = PostgresPayload(op=PostgresOp.UPDATE, table='jobs', data=SampleData(), where=SampleKey())
+    assert '"op":"update"' in payload.model_dump_json().replace(' ', '')
+
+
+def test_postgres_payload_update_requires_where():
+    """An absent predicate would render UPDATE with no WHERE — every row."""
+    with pytest.raises(ValidationError, match="requires 'where'"):
+        PostgresPayload(op=PostgresOp.UPDATE, table='jobs', data=SampleData())
+
+
+def test_postgres_payload_upsert_requires_non_empty_conflict():
+    with pytest.raises(ValidationError, match="requires 'conflict'"):
+        PostgresPayload(op=PostgresOp.UPSERT, table='t', data=SampleData(), conflict=[])
+
+
+def test_postgres_payload_statement_requires_a_name():
+    with pytest.raises(ValidationError, match="requires 'statement'"):
+        PostgresPayload(op=PostgresOp.STATEMENT)
+
+
+@pytest.mark.parametrize(
+    ('op', 'kwargs', 'unused'),
+    [
+        ('insert', {'table': 't', 'where': SampleKey()}, 'where'),
+        ('insert', {'table': 't', 'conflict': ['id']}, 'conflict'),
+        ('insert', {'table': 't', 'statement': 'claim'}, 'statement'),
+        ('update', {'table': 't', 'where': SampleKey(), 'conflict': ['id']}, 'conflict'),
+        ('upsert', {'table': 't', 'conflict': ['id'], 'where': SampleKey()}, 'where'),
+        ('statement', {'statement': 'claim', 'table': 't'}, 'table'),
+        ('statement', {'statement': 'claim', 'conflict': ['id']}, 'conflict'),
+    ],
+)
+def test_postgres_payload_rejects_fields_the_op_does_not_use(op, kwargs, unused):
+    """A mis-set field must be a loud error, not silently ignored.
+
+    This is what recovers the main weakness of one class with optional
+    fields — without it, PostgresPayload(op='insert', where=key) would
+    quietly drop the predicate.
+    """
+    kwargs.setdefault('data', SampleData())
+    if op == 'statement':
+        kwargs.pop('data', None)
+    with pytest.raises(ValidationError, match=f"does not use '{unused}'"):
+        PostgresPayload(op=op, **kwargs)
+
+
+def test_postgres_payload_update_columns_must_not_overlap_conflict():
+    with pytest.raises(ValidationError, match='overlaps conflict'):
+        PostgresPayload(
+            op=PostgresOp.UPSERT,
+            table='t',
+            data=SampleData(),
+            conflict=['id'],
+            update_columns=['id'],
+        )
+
+
+def test_postgres_payload_valid_forms_construct():
+    assert PostgresPayload(table='t', data=SampleData()).op is PostgresOp.INSERT
+    assert PostgresPayload(op=PostgresOp.UPDATE, table='t', data=SampleData(), where=SampleKey()).where is not None
+    assert PostgresPayload(op=PostgresOp.UPSERT, table='t', data=SampleData(), conflict=['id']).conflict == ['id']
+    assert PostgresPayload(op=PostgresOp.STATEMENT, statement='claim').params is None
+    assert PostgresPayload(op=PostgresOp.STATEMENT, statement='claim', params=SampleKey()).statement == 'claim'
+
+
+def test_postgres_payload_upsert_accepts_disjoint_update_columns():
+    """update_columns naming non-conflict columns is the ordinary upsert shape."""
+    payload = PostgresPayload(
+        op=PostgresOp.UPSERT,
+        table='sessions',
+        data=SampleData(),
+        conflict=['request_id'],
+        update_columns=['value'],
+    )
+    assert payload.update_columns == ['value']

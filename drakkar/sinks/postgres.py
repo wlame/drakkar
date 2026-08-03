@@ -162,6 +162,8 @@ class PostgresSink(BaseSink[PostgresPayload]):
         rows: list[_PgRow] = []
         for i, payload in enumerate(payloads):
             try:
+                if payload.data is None:
+                    raise ValueError(f'PostgresPayload(op={payload.op.value!r}) requires {"data"!r}')
                 data = payload.data.model_dump()
                 rows.append(
                     _PgRow(
