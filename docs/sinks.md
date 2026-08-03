@@ -69,31 +69,49 @@ KafkaPayload(
 
 ### PostgresPayload
 
-Inserts a row into a PostgreSQL table.
+Inserts, updates, or upserts a row, or runs an operator-authored statement. The
+`op` field selects which; it defaults to `insert`.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `sink` | `str` | Target sink instance name (empty string for default) |
-| `table` | `str` | Target table name |
-| `data` | `BaseModel` | Payload model |
+| Field | Type | Ops | Description |
+|-------|------|-----|-------------|
+| `sink` | `str` | all | Target sink instance name (empty string for default) |
+| `op` | `PostgresOp` | all | `insert` (default), `update`, `upsert`, or `statement` |
+| `table` | `str` | insert, update, upsert | Target table name |
+| `data` | `BaseModel` | insert, update, upsert | Column→value map; the SET assignments for `update` |
+| `where` | `BaseModel` | update | Equality predicate, ANDed. **Required** |
+| `conflict` | `list[str]` | upsert | `ON CONFLICT` target columns. **Required** |
+| `update_columns` | `list[str] \| None` | upsert | Columns to overwrite on conflict; defaults to every `data` column not in `conflict` |
+| `statement` | `str` | statement | Name of a statement declared in sink config |
+| `params` | `BaseModel` | statement | Values bound to the statement's `:name` placeholders |
 
-**Serialization:** `data.model_dump()` produces a `{column: value}` dict. The framework
-builds an `INSERT INTO <table> (<columns>) VALUES (<placeholders>)` query. Column and
-table names are validated against SQL injection.
+A field the chosen `op` does not use is a validation error, not a silently
+ignored value — `PostgresPayload(op='insert', where=key)` raises.
 
-**Batching:** rows in one delivery are grouped by `(table, column-set)` and each group
-is sent as a single multi-row `INSERT` (chunked at 65535 bind parameters), rather than
-one round-trip per payload. If a batch statement fails, the framework retries that
-chunk row-by-row so the surfaced error still names the offending row.
+**Serialization:** `data.model_dump()` produces a `{column: value}` dict. Column
+and table names are validated against SQL injection.
+
+**Batching:** payloads batch only with *adjacent* same-shaped neighbours, so
+execution order always matches payload order. `insert` and `upsert` runs go out
+as one multi-row `INSERT` (chunked at 65535 bind parameters); `update` and
+`statement` runs go out as one `executemany`. If a batch fails, the framework
+retries it payload-by-payload so the surfaced error still names the offending
+payload.
 
 ```python
-from drakkar import PostgresPayload
+from drakkar import PostgresOp, PostgresPayload
+
+PostgresPayload(table='search_results', data=search_summary)
 
 PostgresPayload(
-    table='search_results',
-    data=search_summary,
+    op=PostgresOp.UPDATE,
+    table='jobs',
+    data=JobStatus(status='done'),
+    where=JobKey(id=42),
 )
 ```
+
+See [Sink Write Operations](sink-write-operations.md) for every operation, the
+named-statement escape hatch, and the ordering and retry rules.
 
 ### MongoPayload
 
@@ -380,9 +398,22 @@ Keep the default when duplicate delivery has observable side effects:
 | `HttpSink` | `False` | HTTP POST may have side effects without an idempotency key. |
 | `FileSink` | `False` | Append mode duplicates records on retry. |
 | `DLQSink` | `False` | Same as `KafkaSink`; DLQ also uses its own `send()` path. |
-| `PostgresSink` | `False` | Plain `INSERT` duplicates on retry. |
+| `PostgresSink` | per batch | `UPDATE`/`UPSERT` converge on retry; plain `INSERT` duplicates. See below. |
 | `MongoSink` | `False` | `insert_*` without a stable `_id` duplicates on retry. |
 | `RedisSink` | `True` | `SET` on a fixed key is write-replace. |
+
+`PostgresSink` overrides `batch_idempotent()` rather than setting the flag: a
+batch of only `update` and `upsert` payloads is retry-safe, while any `insert`
+or `statement` payload makes it unsafe (`attempts = attempts + 1` is not
+idempotent, and the framework cannot inspect operator SQL to know). Any sink can
+do the same when retry-safety is a property of the payloads rather than of the
+sink:
+
+```python
+def batch_idempotent(self, payloads):
+    """Defaults to the class-level `idempotent` flag."""
+    return all(p.safe for p in payloads)
+```
 
 Custom sinks inherit the safe default (`False`). Set the attribute explicitly
 on your subclass when you know duplicates are safe:

@@ -54,6 +54,7 @@ nav:
   - Configuration: configuration.md
   - Features & Enable Order: features.md
   - Sinks: sinks.md
+  - Sink Write Operations: sink-write-operations.md
   - Webapp: webapp.md
   - Executor: executor.md
   - Observability: observability.md

@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The Postgres sink writes more than inserts.** `PostgresPayload.op`
+  selects `insert` (the default, so existing handlers are unaffected),
+  `update`, `upsert`, or `statement`. An `update` takes a `where` model
+  serialized to an ANDed equality predicate, where a `None` value renders
+  `IS NULL` rather than `= NULL`. An `upsert` takes `conflict` columns and
+  an optional `update_columns` subset, and renders `DO NOTHING` when every
+  inserted column belongs to the conflict target.
+
+- **Operator-authored SQL, invoked by name.** Statements declared under
+  `sinks.postgres.<instance>.statements` are compiled once at startup from
+  `:name` placeholders to positional parameters and invoked by a payload
+  with `op='statement'` and bound `params`. This is the escape hatch for
+  SQL the declarative fields cannot express — value-dependent expressions
+  and guarded predicates. Parameters are always bound, so message content
+  can never reach the statement text, and DLQ entries and logs carry the
+  statement name rather than SQL that could leak row data. New docs page:
+  `docs/sink-write-operations.md`.
+
+- The message probe now reports which operation a Postgres payload plans
+  (`extras.op`, plus `extras.where` and `extras.conflict` for the
+  operations that carry them); a named statement reports its name as the
+  record's `destination`.
+
+### Changed
+
+- **Postgres payloads now batch only with adjacent same-shaped
+  neighbours**, so the order statements reach the database always matches
+  the order the handler returned them. Payloads were previously bucketed
+  globally, which could execute a payload before its predecessor — harmless
+  for inserts, a silently lost write once updates exist.
+
+- `PostgresSink` decides retry-safety per batch: a batch of only `update`
+  and `upsert` payloads gets the transient fast-retry, while any `insert`
+  or `statement` payload vetoes it. Operator SQL is opaque to the
+  framework, so it is never assumed idempotent.
+
+- A `data` model that serializes to an empty mapping is now rejected when
+  the statement is built, instead of reaching the database as a syntax
+  error.
+
 ## [1.3.1] - 2026-08-02
 
 ### Fixed

@@ -80,10 +80,10 @@ from prometheus_client import Counter
 
 from drakkar import (
     BaseDrakkarHandler, CollectResult, DeliveryAction, DeliveryError,
-    ErrorAction, ExecutorTask, KafkaPayload, PostgresPayload,
+    ErrorAction, ExecutorTask, KafkaPayload, PostgresOp, PostgresPayload,
     RedisPayload, make_task_id,
 )
-from models import InputMessage, ProcessedResult, ResultSummary
+from models import InputMessage, ProcessedResult, RequestKey, ResultSummary, StatusUpdate
 
 logger = structlog.get_logger()
 
@@ -128,7 +128,16 @@ class MyHandler(BaseDrakkarHandler[InputMessage, ProcessedResult]):
         # route to sinks based on business logic
         sinks = CollectResult(
             kafka=[KafkaPayload(data=output, key=output.request_id.encode())],
-            postgres=[PostgresPayload(table="results", data=summary)],
+            postgres=[
+                PostgresPayload(table="results", data=summary),
+                # UPDATE "requests" SET "status" = $1 WHERE "request_id" = $2
+                PostgresPayload(
+                    op=PostgresOp.UPDATE,
+                    table="requests",
+                    data=StatusUpdate(status=summary.status),
+                    where=RequestKey(request_id=output.request_id),
+                ),
+            ],
         )
 
         # conditional: cache successful results in Redis
@@ -260,7 +269,7 @@ Configure any combination in the `sinks:` section. Each type supports multiple n
 | Sink | Payload | Serialization |
 |------|---------|---------------|
 | `KafkaPayload` | `data: BaseModel`, `key: bytes` | `data.model_dump_json().encode()` -> value |
-| `PostgresPayload` | `data: BaseModel`, `table: str` | `data.model_dump()` -> column mapping |
+| `PostgresPayload` | `op`, `table`, `data`, `where`, `conflict`, `statement`, `params` | INSERT / UPDATE / UPSERT, or operator-authored SQL by name |
 | `MongoPayload` | `data: BaseModel`, `collection: str` | `data.model_dump()` -> BSON document |
 | `HttpPayload` | `data: BaseModel` | POST body per `encoding` (`json`/`form`/`multipart`) |
 | `RedisPayload` | `data: BaseModel`, `key: str`, `ttl: int?` | `data.model_dump_json()` -> string value |
