@@ -62,7 +62,8 @@ PostgresPayload(
 )
 ```
 
-Renders `UPDATE "jobs" SET "status" = $1, "finished_at" = $2 WHERE "id" = $3`.
+Renders `UPDATE "jobs" SET "finished_at" = $1, "status" = $2 WHERE "id" = $3`
+(columns are sorted — see [Column order](#column-order)).
 
 `where` is required and may not serialize to an empty mapping — an empty
 predicate would rewrite every row in the table. A `None` value in `where`
@@ -158,6 +159,30 @@ validating there would couple worker startup to schema state.
 
 That last row is the same behaviour an `INSERT` naming a missing table has
 always had.
+
+## Column order
+
+Columns are emitted in **sorted** order, not in the order the payload model
+declares its fields:
+
+```python
+class Row(BaseModel):
+    request_id: str
+    answer: int
+
+PostgresPayload(table='results', data=Row(...))
+# INSERT INTO "results" ("answer", "request_id") VALUES ($1, $2)
+```
+
+Bound values follow the same sort, so columns and values always stay aligned.
+The rule exists for cross-backend identity: the Go backend decodes payload data
+into a map, which has no field order to preserve, so sorting is the only rule
+both backends can honour unconditionally. It also makes the emitted SQL
+independent of how a model happens to be written.
+
+Two lists are *not* sorted, because they are the operator's own: `conflict`, and
+an explicit `update_columns`. An `update_columns` left to default is derived from
+the data columns and is therefore sorted with them.
 
 ## Batching and ordering
 

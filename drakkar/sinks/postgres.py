@@ -283,31 +283,36 @@ class PostgresSink(BaseSink[PostgresPayload]):
         if payload.op is PostgresOp.STATEMENT:
             return self._build_statement_unit(payload)
         data = _dump_required(payload.data, 'data', payload.op)
+        # Sorted, not left in the model's declaration order: the Go backend
+        # decodes payload data into a map, which has no order to preserve, so
+        # sorting is the only rule both backends can honour unconditionally.
+        # Values are re-read by column so they stay aligned with the sort.
+        columns = sorted(data)
         quoted_table = quote_ident(payload.table)
 
         if payload.op is PostgresOp.UPDATE:
             where = _dump_required(payload.where, 'where', payload.op)
-            eq_columns = [c for c, v in where.items() if v is not None]
-            null_columns = [c for c, v in where.items() if v is None]
+            eq_columns = sorted(c for c, v in where.items() if v is not None)
+            null_columns = sorted(c for c, v in where.items() if v is None)
             sql = render_update(
                 quoted_table,
-                [quote_ident(c) for c in data],
+                [quote_ident(c) for c in columns],
                 [quote_ident(c) for c in eq_columns],
                 [quote_ident(c) for c in null_columns],
             )
             return _StmtUnit(
                 op=payload.op,
                 sql=sql,
-                values=[*data.values(), *(where[c] for c in eq_columns)],
+                values=[*(data[c] for c in columns), *(where[c] for c in eq_columns)],
             )
 
         return _RowUnit(
             op=payload.op,
             quoted_table=quoted_table,
-            quoted_columns=tuple(quote_ident(c) for c in data),
+            quoted_columns=tuple(quote_ident(c) for c in columns),
             quoted_conflict=tuple(quote_ident(c) for c in payload.conflict),
             quoted_update_columns=tuple(quote_ident(c) for c in self._resolve_update_columns(payload, data)),
-            values=list(data.values()),
+            values=[data[c] for c in columns],
         )
 
     def _build_statement_unit(self, payload: PostgresPayload) -> _StmtUnit:
@@ -343,8 +348,10 @@ class PostgresSink(BaseSink[PostgresPayload]):
         if payload.op is not PostgresOp.UPSERT:
             return []
         if payload.update_columns is None:
+            # Sorted for the same reason the data columns are — see _build_unit.
+            # An explicit list is the operator's own order and is preserved.
             conflict = set(payload.conflict)
-            return [c for c in data if c not in conflict]
+            return [c for c in sorted(data) if c not in conflict]
         unknown = sorted(c for c in payload.update_columns if c not in data)
         if unknown:
             raise ValueError(f'update_columns not present in data: {unknown}')

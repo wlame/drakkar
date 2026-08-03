@@ -88,7 +88,9 @@ A field the chosen `op` does not use is a validation error, not a silently
 ignored value — `PostgresPayload(op='insert', where=key)` raises.
 
 **Serialization:** `data.model_dump()` produces a `{column: value}` dict. Column
-and table names are validated against SQL injection.
+and table names are validated against SQL injection. Columns are emitted in
+sorted order — not model-declaration order — so both backends render identical
+SQL; see [Column order](sink-write-operations.md#column-order).
 
 **Batching:** payloads batch only with *adjacent* same-shaped neighbours, so
 execution order always matches payload order. `insert` and `upsert` runs go out
