@@ -5,6 +5,7 @@ Use DK_ prefix with __ for nesting (e.g., DK_KAFKA__BROKERS).
 """
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal, cast
 from urllib.parse import urlparse
@@ -15,6 +16,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from drakkar.kafka_security import KafkaSecurityConfig, validate_client_config
+
+# Safe because ``drakkar.pgsql`` imports nothing from ``drakkar``. Importing
+# the compiler from under ``drakkar/sinks/`` instead would execute
+# ``sinks/__init__.py``, which imports every sink, each of which imports this
+# module — a partially-initialized-module ImportError at config load.
+from drakkar.pgsql import compile_named_statement
 
 # Module-scope logger for config-time warnings (field/model validators).
 # These fire once per process at config load, so the sync structlog API
@@ -34,6 +41,10 @@ _HTTP_BLOCKED_METADATA_HOSTS = frozenset(
         'metadata.packet.net',
     }
 )
+
+# Statement names appear in structured logs and error messages, so they are
+# constrained to lowercase snake_case rather than accepting arbitrary keys.
+_PG_STATEMENT_NAME_RE = re.compile(r'^[a-z_][a-z0-9_]*$')
 
 # --- Kafka source (consumer) config ---
 
@@ -143,7 +154,43 @@ class PostgresSinkConfig(BaseModel):
     dsn: str
     pool_min: int = Field(default=2, ge=1)
     pool_max: int = Field(default=10, ge=1)
+    statements: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            'Operator-authored SQL keyed by name. A PostgresPayload with '
+            "op='statement' and a matching `statement` name executes the entry "
+            'with its `params` bound to the :name placeholders. This is the '
+            'escape hatch for SQL the declarative payload fields cannot express '
+            '— value-dependent expressions and guarded predicates. Keeping the '
+            'SQL here rather than in the payload means message content can never '
+            'reach the statement text.'
+        ),
+    )
     ui_url: str = ''
+
+    @field_validator('statements')
+    @classmethod
+    def _validate_statements(cls, value: dict[str, str]) -> dict[str, str]:
+        """Reject malformed statement config at startup.
+
+        Checks only what the framework owns: the name shape, non-empty SQL,
+        and that the placeholder syntax compiles. Deliberately does NOT
+        verify statements against the live database — ``PREPARE`` cannot
+        separate "your SQL is malformed" from "that column does not exist",
+        so validating there would couple worker startup to schema state.
+        Schema problems surface at delivery through ``on_delivery_error``,
+        exactly as they do for an INSERT naming a missing table today.
+        """
+        for name, sql in value.items():
+            if not _PG_STATEMENT_NAME_RE.match(name):
+                raise ValueError(
+                    f'Invalid statement name {name!r}: must match '
+                    f'{_PG_STATEMENT_NAME_RE.pattern} (used as a structured-log field)'
+                )
+            if not sql.strip():
+                raise ValueError(f'Statement {name!r} has empty SQL')
+            compile_named_statement(sql)
+        return value
 
 
 class MongoSinkConfig(BaseModel):

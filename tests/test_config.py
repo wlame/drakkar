@@ -791,3 +791,64 @@ def test_drakkar_config_webapp_env_override_client_token(
     monkeypatch.setenv('DK_WEBAPP__CLIENTS__0__TOKEN', 'tok-from-env')
     cfg = load_config(minimal_config_yaml_file)
     assert cfg.webapp.clients[0].token == 'tok-from-env'
+
+
+# --- Postgres operator-authored statements ---
+
+
+def test_postgres_sink_config_statements_default_empty():
+    assert PostgresSinkConfig(dsn='postgresql://localhost/db').statements == {}
+
+
+def test_postgres_sink_config_accepts_named_statements():
+    cfg = PostgresSinkConfig(
+        dsn='postgresql://localhost/db',
+        statements={'claim_job': 'UPDATE jobs SET status = :status WHERE id = :id'},
+    )
+    assert 'claim_job' in cfg.statements
+    # Raw SQL is preserved — the sink compiles it, not the config model.
+    assert ':status' in cfg.statements['claim_job']
+
+
+@pytest.mark.parametrize('name', ['Claim_Job', '1claim', 'claim-job', 'claim job', ''])
+def test_postgres_sink_config_rejects_bad_statement_names(name):
+    """Names are used as structured-log fields, so they stay lowercase snake_case."""
+    with pytest.raises(ValidationError, match='Invalid statement name'):
+        PostgresSinkConfig(dsn='postgresql://localhost/db', statements={name: 'SELECT 1'})
+
+
+@pytest.mark.parametrize('sql', ['', '   ', '\n'])
+def test_postgres_sink_config_rejects_empty_sql(sql):
+    with pytest.raises(ValidationError, match='empty SQL'):
+        PostgresSinkConfig(dsn='postgresql://localhost/db', statements={'s': sql})
+
+
+def test_postgres_sink_config_rejects_malformed_statement_sql():
+    """Malformed statement config is a startup failure, not a first-delivery one."""
+    with pytest.raises(ValidationError, match='positional'):
+        PostgresSinkConfig(dsn='postgresql://localhost/db', statements={'s': 'UPDATE t SET a = $1'})
+    with pytest.raises(ValidationError, match='Unterminated'):
+        PostgresSinkConfig(dsn='postgresql://localhost/db', statements={'s': "UPDATE t SET a = 'oops"})
+
+
+def test_postgres_sink_config_statements_from_yaml(minimal_config_dict, tmp_path):
+    """The operator-facing path: statements declared in YAML."""
+    import yaml
+
+    from drakkar.config import load_config
+
+    minimal_config_dict['sinks'] = {
+        'postgres': {
+            'main': {
+                'dsn': 'postgresql://localhost/db',
+                'statements': {
+                    'claim_job': "UPDATE jobs SET status = :status WHERE id = :id AND status = 'pending'",
+                },
+            }
+        }
+    }
+    cfg_file = tmp_path / 'drakkar.yaml'
+    cfg_file.write_text(yaml.dump(minimal_config_dict))
+
+    cfg = load_config(cfg_file)
+    assert cfg.sinks.postgres['main'].statements['claim_job'].startswith('UPDATE jobs')
