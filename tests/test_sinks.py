@@ -410,8 +410,15 @@ async def test_postgres_sink_deliver_batch(pg_sink_config):
     assert query.count('), (') == 1
 
 
-async def test_postgres_sink_groups_by_table_and_columns(pg_sink_config):
-    """Different tables — or different column sets — cannot share a statement."""
+async def test_postgres_sink_groups_only_consecutive_runs(pg_sink_config):
+    """Payloads batch only with adjacent same-shaped neighbours.
+
+    Global bucketing would merge the two 'results' rows into one statement
+    and run it before 'audit', reordering payload 2 past payload 3. That is
+    harmless for INSERT but a lost update once UPDATE exists, so grouping is
+    restricted to consecutive runs and execution order always equals payload
+    order.
+    """
     sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
 
     payloads = [
@@ -421,10 +428,24 @@ async def test_postgres_sink_groups_by_table_and_columns(pg_sink_config):
     ]
     await sink.deliver(payloads)
 
-    # Two groups: the two 'results' rows batch together, 'audit' goes alone.
-    assert mock_conn.execute.call_count == 2
+    assert mock_conn.execute.call_count == 3
     tables = [call[0][0].split()[2] for call in mock_conn.execute.call_args_list]
-    assert tables == ['"results"', '"audit"'], 'group order must follow first appearance'
+    assert tables == ['"results"', '"audit"', '"results"'], 'execution order must follow payload order'
+
+
+async def test_postgres_sink_batches_adjacent_same_shape_payloads(pg_sink_config):
+    """Adjacent same-shaped payloads still collapse into one statement."""
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+
+    payloads = [
+        PostgresPayload(table='results', data=DBResultModel(id=1)),
+        PostgresPayload(table='results', data=DBResultModel(id=2)),
+        PostgresPayload(table='audit', data=DBResultModel(id=3)),
+    ]
+    await sink.deliver(payloads)
+
+    assert mock_conn.execute.call_count == 2
+    assert mock_conn.execute.call_args_list[0][0][0].count('), (') == 1
 
 
 async def test_postgres_sink_batch_failure_falls_back_per_row(pg_sink_config):

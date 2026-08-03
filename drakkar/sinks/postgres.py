@@ -7,6 +7,7 @@ then inserted into the specified table.
 
 import time
 from dataclasses import dataclass
+from typing import Protocol
 
 import asyncpg
 import structlog
@@ -34,24 +35,35 @@ class _PgRow:
         return (self.quoted_table, tuple(self.quoted_columns))
 
 
-def _group_rows_by_key(rows: list[_PgRow]) -> list[list[_PgRow]]:
-    """Bucket rows by (table, column-set).
+class _HasGroupKey(Protocol):
+    """Anything groupable into runs — see ``_group_into_runs``."""
 
-    Preserves first-appearance group order and payload order within each
-    group, so the SQL a batch emits reaches the database in the same
-    sequence the per-payload loop used.
+    @property
+    def group_key(self) -> tuple: ...
+
+
+def _group_into_runs[UnitT: _HasGroupKey](units: list[UnitT]) -> list[list[UnitT]]:
+    """Bucket units into consecutive runs sharing a ``group_key``.
+
+    A unit merges only with its immediate neighbours, which guarantees
+    execution order equals payload order. Global bucketing would be a
+    slightly better batcher but reorders: payloads ``A(shape1), B(shape2),
+    C(shape1)`` would execute as A, C, B, deferring B past C. That is
+    harmless for INSERT — and is what this sink used to do — but for UPDATE
+    it silently loses a write when two payloads target the same row.
+    Restricting to runs also avoids reordering across ops, which mixing the
+    two rules would reintroduce.
+
+    Handlers overwhelmingly emit uniform payload lists, so runs are long in
+    practice and the batching cost is small.
     """
-    index: dict[tuple[str, tuple[str, ...]], int] = {}
-    groups: list[list[_PgRow]] = []
-    for row in rows:
-        key = row.group_key
-        i = index.get(key)
-        if i is None:
-            i = len(groups)
-            index[key] = i
-            groups.append([])
-        groups[i].append(row)
-    return groups
+    runs: list[list[UnitT]] = []
+    for unit in units:
+        if runs and runs[-1][0].group_key == unit.group_key:
+            runs[-1].append(unit)
+        else:
+            runs.append([unit])
+    return runs
 
 
 def _build_multi_insert(rows: list[_PgRow]) -> tuple[str, list[object]]:
@@ -119,13 +131,15 @@ class PostgresSink(BaseSink[PostgresPayload]):
         column-name → value mapping; the table and every column identifier
         are validated against SQL injection.
 
-        Rows are grouped by ``(table, column-set)`` and each group is sent
-        as ONE multi-row ``INSERT`` instead of one round-trip per payload.
-        Failure granularity is preserved: a batch that fails is retried
-        row-by-row so the error an operator sees names the offending row,
-        exactly as the per-payload loop did. See the Go backend's
-        ``internal/sinks/postgres.go`` — the two must stay observably
-        identical (divergence #18 in its migration notes).
+        Consecutive rows sharing a ``(table, column-set)`` are sent as ONE
+        multi-row ``INSERT`` instead of one round-trip per payload. Grouping
+        stops at the first differently-shaped neighbour, so what reaches the
+        database is always in payload order. Failure granularity is
+        preserved: a batch that fails is retried row-by-row so the error an
+        operator sees names the offending row, exactly as the per-payload
+        loop did. See the Go backend's ``internal/sinks/postgres.go`` — the
+        two must stay observably identical (divergence #18 in its migration
+        notes).
         """
         if not payloads or not self._pool:
             return
@@ -143,7 +157,7 @@ class PostgresSink(BaseSink[PostgresPayload]):
                     for row in rows[:bad_index]:
                         await self._exec_single(conn, row)
                     raise build_error
-                for group in _group_rows_by_key(rows):
+                for group in _group_into_runs(rows):
                     await self._deliver_group(conn, group)
 
             sink_payloads_delivered.labels(**labels).inc(len(payloads))
