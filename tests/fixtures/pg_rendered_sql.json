@@ -1,0 +1,146 @@
+{
+  "_comment": "Golden SQL per Postgres write operation. Mirrored verbatim into drakkar-go so both backends emit byte-identical statements and bind values in the same order. Column maps are [name, value] PAIR LISTS rather than JSON objects because object key order is not preserved by every JSON decoder, and column order is part of what this file pins. 'rows' carries one entry per batched row; insert and upsert cases with several rows pin the continuous parameter numbering of one multi-row statement.",
+  "identifiers": {
+    "valid": ["valid_name", "_leading_underscore", "a1", "T"],
+    "invalid": ["col; DROP TABLE x", "has space", "1leading_digit", "", "quote\"inside", "café"]
+  },
+  "cases": [
+    {
+      "case": "insert one row",
+      "op": "insert",
+      "table": "results",
+      "rows": [[["id", 1], ["status", "done"]]],
+      "expected_sql": "INSERT INTO \"results\" (\"id\", \"status\") VALUES ($1, $2)",
+      "expected_values": [1, "done"]
+    },
+    {
+      "case": "insert three rows numbers parameters continuously",
+      "op": "insert",
+      "table": "results",
+      "rows": [
+        [["id", 1], ["status", "a"]],
+        [["id", 2], ["status", "b"]],
+        [["id", 3], ["status", "c"]]
+      ],
+      "expected_sql": "INSERT INTO \"results\" (\"id\", \"status\") VALUES ($1, $2), ($3, $4), ($5, $6)",
+      "expected_values": [1, "a", 2, "b", 3, "c"]
+    },
+    {
+      "case": "insert two rows of a single column",
+      "op": "insert",
+      "table": "seen",
+      "rows": [[["key", "k1"]], [["key", "k2"]]],
+      "expected_sql": "INSERT INTO \"seen\" (\"key\") VALUES ($1), ($2)",
+      "expected_values": ["k1", "k2"]
+    },
+    {
+      "case": "update numbers SET values before WHERE values",
+      "op": "update",
+      "table": "jobs",
+      "rows": [[["status", "done"], ["finished_at", "2026-08-02T09:00:00Z"]]],
+      "where": [["id", 42]],
+      "expected_sql": "UPDATE \"jobs\" SET \"status\" = $1, \"finished_at\" = $2 WHERE \"id\" = $3",
+      "expected_values": ["done", "2026-08-02T09:00:00Z", 42]
+    },
+    {
+      "case": "update null predicate renders IS NULL and consumes no parameter",
+      "op": "update",
+      "table": "jobs",
+      "rows": [[["status", "running"]]],
+      "where": [["id", 5], ["claimed_by", null]],
+      "expected_sql": "UPDATE \"jobs\" SET \"status\" = $1 WHERE \"id\" = $2 AND \"claimed_by\" IS NULL",
+      "expected_values": ["running", 5]
+    },
+    {
+      "case": "update whose predicate is entirely IS NULL",
+      "op": "update",
+      "table": "jobs",
+      "rows": [[["status", "orphaned"]]],
+      "where": [["claimed_by", null]],
+      "expected_sql": "UPDATE \"jobs\" SET \"status\" = $1 WHERE \"claimed_by\" IS NULL",
+      "expected_values": ["orphaned"]
+    },
+    {
+      "case": "update hoists IS NULL predicates after the equalities regardless of mapping order",
+      "op": "update",
+      "table": "jobs",
+      "rows": [[["status", "claimed"]]],
+      "where": [["a", null], ["id", 7], ["b", null], ["owner", "worker-1"]],
+      "expected_sql": "UPDATE \"jobs\" SET \"status\" = $1 WHERE \"id\" = $2 AND \"owner\" = $3 AND \"a\" IS NULL AND \"b\" IS NULL",
+      "expected_values": ["claimed", 7, "worker-1"]
+    },
+    {
+      "case": "upsert defaults update_columns to every data column outside the conflict target",
+      "op": "upsert",
+      "table": "totals",
+      "rows": [[["day", "2026-08-02"], ["hits", 1]]],
+      "conflict": ["day"],
+      "update_columns": null,
+      "expected_sql": "INSERT INTO \"totals\" (\"day\", \"hits\") VALUES ($1, $2) ON CONFLICT (\"day\") DO UPDATE SET \"hits\" = EXCLUDED.\"hits\"",
+      "expected_values": ["2026-08-02", 1]
+    },
+    {
+      "case": "upsert with an explicit update_columns subset preserves the unnamed columns",
+      "op": "upsert",
+      "table": "sessions",
+      "rows": [[["id", 1], ["created_at", "t0"], ["last_seen", "t1"]]],
+      "conflict": ["id"],
+      "update_columns": ["last_seen"],
+      "expected_sql": "INSERT INTO \"sessions\" (\"id\", \"created_at\", \"last_seen\") VALUES ($1, $2, $3) ON CONFLICT (\"id\") DO UPDATE SET \"last_seen\" = EXCLUDED.\"last_seen\"",
+      "expected_values": [1, "t0", "t1"]
+    },
+    {
+      "case": "upsert where every data column is a conflict column becomes DO NOTHING",
+      "op": "upsert",
+      "table": "seen",
+      "rows": [[["key", "k"]]],
+      "conflict": ["key"],
+      "update_columns": null,
+      "expected_sql": "INSERT INTO \"seen\" (\"key\") VALUES ($1) ON CONFLICT (\"key\") DO NOTHING",
+      "expected_values": ["k"]
+    },
+    {
+      "case": "upsert with an explicitly empty update_columns is DO NOTHING even with overwritable columns",
+      "op": "upsert",
+      "table": "sessions",
+      "rows": [[["id", 1], ["last_seen", "t1"]]],
+      "conflict": ["id"],
+      "update_columns": [],
+      "expected_sql": "INSERT INTO \"sessions\" (\"id\", \"last_seen\") VALUES ($1, $2) ON CONFLICT (\"id\") DO NOTHING",
+      "expected_values": [1, "t1"]
+    },
+    {
+      "case": "upsert with a multi-column conflict target",
+      "op": "upsert",
+      "table": "m",
+      "rows": [[["a", 1], ["b", 2], ["c", 3]]],
+      "conflict": ["a", "b"],
+      "update_columns": null,
+      "expected_sql": "INSERT INTO \"m\" (\"a\", \"b\", \"c\") VALUES ($1, $2, $3) ON CONFLICT (\"a\", \"b\") DO UPDATE SET \"c\" = EXCLUDED.\"c\"",
+      "expected_values": [1, 2, 3]
+    },
+    {
+      "case": "upsert batching several rows into one statement",
+      "op": "upsert",
+      "table": "totals",
+      "rows": [
+        [["day", "2026-08-01"], ["hits", 1]],
+        [["day", "2026-08-02"], ["hits", 2]]
+      ],
+      "conflict": ["day"],
+      "update_columns": null,
+      "expected_sql": "INSERT INTO \"totals\" (\"day\", \"hits\") VALUES ($1, $2), ($3, $4) ON CONFLICT (\"day\") DO UPDATE SET \"hits\" = EXCLUDED.\"hits\"",
+      "expected_values": ["2026-08-01", 1, "2026-08-02", 2]
+    },
+    {
+      "case": "upsert conflict target need not be one of the inserted columns",
+      "op": "upsert",
+      "table": "t",
+      "rows": [[["id", 1]]],
+      "conflict": ["generated_key"],
+      "update_columns": null,
+      "expected_sql": "INSERT INTO \"t\" (\"id\") VALUES ($1) ON CONFLICT (\"generated_key\") DO UPDATE SET \"id\" = EXCLUDED.\"id\"",
+      "expected_values": [1]
+    }
+  ]
+}
