@@ -12,7 +12,7 @@ import structlog
 
 from drakkar.config import RedisSinkConfig
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
-from drakkar.models import RedisPayload
+from drakkar.models import RedisOp, RedisPayload
 from drakkar.sinks.base import BaseSink
 from drakkar.utils import redact_url
 
@@ -158,16 +158,29 @@ class RedisSink(BaseSink[RedisPayload]):
         items: list[_RedisItem] = []
         for i, payload in enumerate(payloads):
             try:
-                items.append(
-                    _RedisItem(
-                        key=self._config.key_prefix + payload.key,
-                        value=payload.data.model_dump_json(),
-                        ttl=payload.ttl,
-                    )
-                )
+                items.append(self._build_item(payload))
             except Exception as e:
                 return items, i, e
         return items, len(items), None
+
+    def _build_item(self, payload: RedisPayload) -> _RedisItem:
+        """Reduce one payload to its prefixed key, serialized value, and TTL.
+
+        The op guard is TEMPORARY. ``RedisOp`` declares every command the
+        design specifies, but this sink builds only ``SET`` so far; without
+        the guard a ``delete`` payload would reach the SET path and be
+        mis-executed rather than rejected. Each branch disappears as its op
+        lands.
+        """
+        if payload.op is not RedisOp.SET:
+            raise ValueError(f"RedisSink cannot yet build op {payload.op.value!r} — only 'set' is implemented")
+        if payload.data is None:  # pragma: no cover - the validator guarantees it for SET
+            raise ValueError(f'RedisPayload(op={payload.op.value!r}) requires data')
+        return _RedisItem(
+            key=self._config.key_prefix + payload.key,
+            value=payload.data.model_dump_json(),
+            ttl=payload.ttl,
+        )
 
     async def _set_batch(self, items: list[_RedisItem]) -> None:
         """Write every item through one pipeline, propagating any failure.

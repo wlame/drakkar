@@ -1497,6 +1497,22 @@ async def test_redis_sink_connect(redis_sink_config):
         assert sink._client is mock_client
 
 
+async def test_redis_sink_rejects_ops_it_cannot_yet_build(redis_sink_config):
+    """TEMPORARY guard — delete as each op lands.
+
+    RedisOp declares every command the design specifies before the sink can
+    build them. Without this, a `delete` payload would reach the SET path
+    and be mis-executed rather than rejected.
+    """
+    from drakkar.models import RedisOp
+
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+
+    with pytest.raises(ValueError, match='cannot yet build'):
+        await sink.deliver([RedisPayload(op=RedisOp.DELETE, key='doomed')])
+    mock_client.set.assert_not_called()
+
+
 async def test_redis_sink_deliver_without_ttl(redis_sink_config):
     sink, mock_client = _make_redis_sink(redis_sink_config)
 
