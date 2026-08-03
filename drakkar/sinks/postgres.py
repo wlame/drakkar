@@ -18,7 +18,14 @@ from pydantic import BaseModel
 from drakkar.config import PostgresSinkConfig
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
 from drakkar.models import PostgresOp, PostgresPayload
-from drakkar.pgsql import MAX_INSERT_PARAMS, quote_ident, render_insert, render_update, render_upsert
+from drakkar.pgsql import (
+    MAX_INSERT_PARAMS,
+    compile_named_statement,
+    quote_ident,
+    render_insert,
+    render_update,
+    render_upsert,
+)
 from drakkar.sinks.base import BaseSink
 
 logger = structlog.get_logger()
@@ -159,6 +166,9 @@ class PostgresSink(BaseSink[PostgresPayload]):
         super().__init__(name, ui_url=config.ui_url)
         self._config = config
         self._pool: asyncpg.Pool | None = None
+        # Operator-authored statements, compiled from :name to positional $n
+        # once at connect(). Never compiled on the delivery path.
+        self._statements: dict[str, tuple[str, list[str]]] = {}
 
     @property
     def pool(self) -> asyncpg.Pool | None:
@@ -169,7 +179,13 @@ class PostgresSink(BaseSink[PostgresPayload]):
         return self._pool
 
     async def connect(self) -> None:
-        """Create the asyncpg connection pool."""
+        """Compile configured statements, then create the asyncpg pool.
+
+        Compiling first means a malformed statement fails without leaving a
+        pool behind. Config validation already rejects one, so this is the
+        sink's own guard against a config built in code rather than YAML.
+        """
+        self._statements = {name: compile_named_statement(sql) for name, sql in self._config.statements.items()}
         self._pool = await asyncpg.create_pool(
             dsn=self._config.dsn,
             min_size=self._config.pool_min,
@@ -180,6 +196,7 @@ class PostgresSink(BaseSink[PostgresPayload]):
             category='sink',
             sink_name=self._name,
             host=self._config.dsn.split('@')[-1],
+            statements=len(self._statements),
         )
 
     async def deliver(self, payloads: list[PostgresPayload]) -> None:
@@ -220,8 +237,19 @@ class PostgresSink(BaseSink[PostgresPayload]):
 
             sink_payloads_delivered.labels(**labels).inc(len(payloads))
             sink_deliver_duration.labels(**labels).observe(time.monotonic() - start)
-        except Exception:
+        except Exception as e:
             sink_deliver_errors.labels(**labels).inc()
+            await logger.aerror(
+                'postgres_sink_deliver_failed',
+                category='sink',
+                sink_name=self._name,
+                error=str(e),
+                error_type=type(e).__name__,
+                ops=sorted({p.op.value for p in payloads}),
+                # Names only — statement TEXT would be high-cardinality and
+                # could leak row data into logs.
+                statements=sorted({p.statement for p in payloads if p.op is PostgresOp.STATEMENT}),
+            )
             raise
 
     def _build_units(self, payloads: list[PostgresPayload]) -> tuple[list[_RowUnit | _StmtUnit], int, Exception | None]:
@@ -241,6 +269,8 @@ class PostgresSink(BaseSink[PostgresPayload]):
 
     def _build_unit(self, payload: PostgresPayload) -> _RowUnit | _StmtUnit:
         """Reduce one payload to its execution inputs, identifiers quoted."""
+        if payload.op is PostgresOp.STATEMENT:
+            return self._build_statement_unit(payload)
         data = _dump_required(payload.data, 'data', payload.op)
         quoted_table = quote_ident(payload.table)
 
@@ -267,6 +297,33 @@ class PostgresSink(BaseSink[PostgresPayload]):
             quoted_conflict=tuple(quote_ident(c) for c in payload.conflict),
             quoted_update_columns=tuple(quote_ident(c) for c in self._resolve_update_columns(payload, data)),
             values=list(data.values()),
+        )
+
+    def _build_statement_unit(self, payload: PostgresPayload) -> _StmtUnit:
+        """Bind a payload's params to an operator-authored statement.
+
+        Both a missing and an unexpected key are errors: a silently-ignored
+        key is almost always a typo in the payload model or the config.
+        """
+        compiled = self._statements.get(payload.statement)
+        if compiled is None:
+            known = ', '.join(sorted(self._statements)) or '<none configured>'
+            raise ValueError(
+                f'Unknown postgres statement {payload.statement!r} on sink {self._name!r}; configured: {known}'
+            )
+        sql, names = compiled
+        supplied = payload.params.model_dump() if payload.params is not None else {}
+        missing = sorted(n for n in names if n not in supplied)
+        unexpected = sorted(n for n in supplied if n not in names)
+        if missing or unexpected:
+            raise ValueError(
+                f'Statement {payload.statement!r} params mismatch — missing: {missing}, unexpected: {unexpected}'
+            )
+        return _StmtUnit(
+            op=payload.op,
+            sql=sql,
+            values=[supplied[n] for n in names],
+            statement_name=payload.statement,
         )
 
     @staticmethod

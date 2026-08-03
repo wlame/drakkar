@@ -531,15 +531,138 @@ async def test_postgres_sink_sql_injection_column():
         quote_ident('col; DROP TABLE x')
 
 
-async def test_postgres_sink_rejects_payload_without_data(pg_sink_config):
-    """``data`` is optional on the payload but required to build a row."""
+async def test_postgres_sink_statement_without_any_configured_says_so(pg_sink_config):
+    """The error names the empty config, not just the unknown key.
+
+    An operator who forgot the ``statements:`` block entirely gets told that,
+    rather than a bare "unknown statement" that reads like a typo.
+    """
     from drakkar.models import PostgresOp
 
     sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
 
-    with pytest.raises(ValueError, match="requires 'data'"):
+    with pytest.raises(ValueError, match='<none configured>'):
         await sink.deliver([PostgresPayload(op=PostgresOp.STATEMENT, statement='claim_job')])
     mock_conn.execute.assert_not_called()
+
+
+@pytest.fixture
+def pg_stmt_config():
+    return PostgresSinkConfig(
+        dsn='postgresql://localhost/testdb',
+        statements={
+            'claim_job': 'UPDATE jobs SET status = :status, attempts = attempts + 1 WHERE id = :id',
+            'sweep': 'DELETE FROM jobs WHERE done',
+        },
+    )
+
+
+def _make_pg_sink_with_statements(config):
+    """Sink with mocked pool AND compiled statements, bypassing connect()."""
+    from drakkar.pgsql import compile_named_statement
+
+    sink, mock_conn, mock_pool = _make_pg_sink(config)
+    sink._statements = {name: compile_named_statement(sql) for name, sql in config.statements.items()}
+    return sink, mock_conn, mock_pool
+
+
+async def test_postgres_sink_connect_compiles_statements(pg_stmt_config):
+    from drakkar.sinks.postgres import PostgresSink
+
+    sink = PostgresSink('main', pg_stmt_config)
+
+    async def fake_create_pool(**kwargs):
+        return AsyncMock()
+
+    with patch('drakkar.sinks.postgres.asyncpg.create_pool', side_effect=fake_create_pool):
+        await sink.connect()
+
+    sql, names = sink._statements['claim_job']
+    assert sql == 'UPDATE jobs SET status = $1, attempts = attempts + 1 WHERE id = $2'
+    assert names == ['status', 'id']
+
+
+async def test_postgres_sink_statement_binds_params_in_declared_order(pg_stmt_config):
+    from drakkar.models import PostgresOp
+
+    class ClaimParams(BaseModel):
+        id: int = 42
+        status: str = 'running'
+
+    sink, mock_conn, _ = _make_pg_sink_with_statements(pg_stmt_config)
+
+    await sink.deliver([PostgresPayload(op=PostgresOp.STATEMENT, statement='claim_job', params=ClaimParams())])
+
+    query, *values = mock_conn.execute.call_args[0]
+    assert query == 'UPDATE jobs SET status = $1, attempts = attempts + 1 WHERE id = $2'
+    assert values == ['running', 42], 'values follow placeholder order, not field order'
+
+
+async def test_postgres_sink_statement_without_params(pg_stmt_config):
+    from drakkar.models import PostgresOp
+
+    sink, mock_conn, _ = _make_pg_sink_with_statements(pg_stmt_config)
+
+    await sink.deliver([PostgresPayload(op=PostgresOp.STATEMENT, statement='sweep')])
+
+    query, *values = mock_conn.execute.call_args[0]
+    assert query == 'DELETE FROM jobs WHERE done'
+    assert values == []
+
+
+async def test_postgres_sink_statement_batch_uses_executemany(pg_stmt_config):
+    from drakkar.models import PostgresOp
+
+    class ClaimParams(BaseModel):
+        id: int
+        status: str = 'running'
+
+    sink, mock_conn, _ = _make_pg_sink_with_statements(pg_stmt_config)
+
+    await sink.deliver(
+        [PostgresPayload(op=PostgresOp.STATEMENT, statement='claim_job', params=ClaimParams(id=i)) for i in (1, 2)]
+    )
+
+    mock_conn.executemany.assert_called_once()
+    _, args = mock_conn.executemany.call_args[0]
+    assert args == [['running', 1], ['running', 2]]
+
+
+async def test_postgres_sink_unknown_statement_names_configured_ones(pg_stmt_config):
+    from drakkar.models import PostgresOp
+
+    sink, _, _ = _make_pg_sink_with_statements(pg_stmt_config)
+
+    with pytest.raises(ValueError, match='Unknown postgres statement'):
+        await sink.deliver([PostgresPayload(op=PostgresOp.STATEMENT, statement='nope')])
+
+
+async def test_postgres_sink_statement_param_mismatch(pg_stmt_config):
+    from drakkar.models import PostgresOp
+
+    class Missing(BaseModel):
+        id: int = 1
+
+    class Extra(BaseModel):
+        id: int = 1
+        status: str = 'running'
+        bogus: int = 9
+
+    sink, _, _ = _make_pg_sink_with_statements(pg_stmt_config)
+
+    with pytest.raises(ValueError, match='missing'):
+        await sink.deliver([PostgresPayload(op=PostgresOp.STATEMENT, statement='claim_job', params=Missing())])
+    with pytest.raises(ValueError, match='unexpected'):
+        await sink.deliver([PostgresPayload(op=PostgresOp.STATEMENT, statement='claim_job', params=Extra())])
+
+
+async def test_postgres_sink_statement_requires_params_when_declared(pg_stmt_config):
+    from drakkar.models import PostgresOp
+
+    sink, _, _ = _make_pg_sink_with_statements(pg_stmt_config)
+
+    with pytest.raises(ValueError, match='missing'):
+        await sink.deliver([PostgresPayload(op=PostgresOp.STATEMENT, statement='claim_job')])
 
 
 class DBKeyModel(BaseModel):
