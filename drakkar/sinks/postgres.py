@@ -153,14 +153,25 @@ class PostgresSink(BaseSink[PostgresPayload]):
 
     sink_type = 'postgres'
 
-    # Plain ``INSERT`` is NOT idempotent — a retry after a partial batch
-    # or timeout can insert duplicate rows. We keep the safe default of
-    # ``False`` so transient DB errors route to ``on_delivery_error``
-    # instead of being auto-retried. Users whose schema has a unique
-    # constraint + ``ON CONFLICT DO NOTHING`` (or ``ON CONFLICT DO
-    # UPDATE`` for upsert semantics) can subclass and flip this to
-    # ``True`` to opt into automatic transient-error retry.
+    # Retry-safety is a property of the BATCH here, not of the sink, so the
+    # real decision lives in ``batch_idempotent`` below. This flag stays
+    # ``False`` as the conservative fallback for any code path that still
+    # reads it directly.
     idempotent = False
+
+    def batch_idempotent(self, payloads: list[PostgresPayload]) -> bool:
+        """Retry-safe only when every payload converges on re-delivery.
+
+        ``UPDATE`` with a literal ``SET`` against a fixed predicate, and
+        ``INSERT ... ON CONFLICT DO UPDATE``, both reach the same state when
+        applied twice. A plain ``INSERT`` duplicates rows. A named statement's
+        SQL is opaque to the framework — ``attempts = attempts + 1`` is not
+        idempotent and we cannot tell — so both veto the batch.
+
+        Marking individual statements idempotent in configuration is a natural
+        extension, deliberately left out for now.
+        """
+        return all(p.op in (PostgresOp.UPDATE, PostgresOp.UPSERT) for p in payloads)
 
     def __init__(self, name: str, config: PostgresSinkConfig) -> None:
         super().__init__(name, ui_url=config.ui_url)

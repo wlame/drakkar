@@ -2372,3 +2372,38 @@ async def test_read_dlq_entries_skips_partition_eof():
 
     assert len(yielded) == 1
     assert yielded[0]['_kafka_offset'] == 1
+
+
+@pytest.mark.parametrize(
+    ('ops', 'expected'),
+    [
+        (['update'], True),
+        (['upsert'], True),
+        (['update', 'upsert'], True),
+        (['insert'], False),
+        (['update', 'insert'], False),
+        (['statement'], False),
+        (['update', 'statement'], False),
+    ],
+)
+def test_postgres_sink_batch_idempotent(pg_sink_config, ops, expected):
+    """UPDATE/UPSERT converge on re-delivery; INSERT duplicates and statement SQL is opaque."""
+    from drakkar.models import PostgresOp
+
+    sink, _, _ = _make_pg_sink(pg_sink_config)
+
+    builders = {
+        'insert': lambda: PostgresPayload(table='t', data=DBResultModel()),
+        'update': lambda: PostgresPayload(op=PostgresOp.UPDATE, table='t', data=DBResultModel(), where=DBKeyModel()),
+        'upsert': lambda: PostgresPayload(op=PostgresOp.UPSERT, table='t', data=DBResultModel(), conflict=['id']),
+        'statement': lambda: PostgresPayload(op=PostgresOp.STATEMENT, statement='claim_job'),
+    }
+    payloads = [builders[op]() for op in ops]
+    assert sink.batch_idempotent(payloads) is expected
+
+
+def test_postgres_sink_batch_idempotent_empty_batch_is_safe(pg_sink_config):
+    """An empty batch has nothing to duplicate, so retrying it changes nothing."""
+    sink, _, _ = _make_pg_sink(pg_sink_config)
+
+    assert sink.batch_idempotent([]) is True
