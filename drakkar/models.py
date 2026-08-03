@@ -10,7 +10,7 @@ import time
 from enum import StrEnum
 from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SerializeAsAny, model_validator
 
 # Marks where a task / message-group originated. ``'kafka'`` is the historical
 # source path (consumer poll → arrange → executor). ``'http'`` is the webapp
@@ -509,6 +509,14 @@ class MessageGroup(BaseModel):
 #   - explicit name = route to that specific sink instance
 # The `data` field is always a Pydantic BaseModel; the framework serializes it
 # appropriately for each sink type (JSON for Kafka/HTTP/Redis/File, dict for Postgres/Mongo).
+#
+# Every payload BODY (`data`, and Postgres's `where`/`params`) is annotated
+# SerializeAsAny. Without it pydantic serializes against the DECLARED type —
+# BaseModel, which has no fields — so `model_dump_json()` emits `{}` and the
+# body is silently lost. The DLQ serializes payloads exactly that way, so the
+# records it exists to preserve would be dead-lettered empty and replay would
+# write blank rows. No warning fires, because a user's model genuinely IS a
+# BaseModel. Keep the annotation on any new payload body field.
 
 _SINK_FIELD = Field(
     default='',
@@ -532,7 +540,7 @@ class KafkaPayload(BaseModel):
         default=None,
         description='Optional Kafka message key. Passed through as-is to the Kafka producer.',
     )
-    data: BaseModel = Field(
+    data: SerializeAsAny[BaseModel] = Field(
         description='Payload model. Serialized via model_dump_json().encode() as the Kafka message value.'
     )
 
@@ -636,14 +644,14 @@ class PostgresPayload(BaseModel):
         default='',
         description='Target table. Required for insert/update/upsert, unused by statement.',
     )
-    data: BaseModel | None = Field(
+    data: SerializeAsAny[BaseModel] | None = Field(
         default=None,
         description=(
             'Payload model. Serialized via model_dump() to a column→value dict — '
             'the inserted row, or the SET assignments for an update.'
         ),
     )
-    where: BaseModel | None = Field(
+    where: SerializeAsAny[BaseModel] | None = Field(
         default=None,
         description=(
             'Update only, required. Serialized via model_dump() to an equality '
@@ -669,7 +677,7 @@ class PostgresPayload(BaseModel):
             'Statement only, required. Key under sinks.postgres.<instance>.statements naming the SQL to execute.'
         ),
     )
-    params: BaseModel | None = Field(
+    params: SerializeAsAny[BaseModel] | None = Field(
         default=None,
         description=(
             'Statement only. Serialized via model_dump() and bound to the '
@@ -706,7 +714,9 @@ class MongoPayload(BaseModel):
 
     sink: str = _SINK_FIELD
     collection: str = Field(description='Target MongoDB collection name.')
-    data: BaseModel = Field(description='Payload model. Serialized via model_dump() to a dict for document insertion.')
+    data: SerializeAsAny[BaseModel] = Field(
+        description='Payload model. Serialized via model_dump() to a dict for document insertion.'
+    )
 
 
 class HttpPayload(BaseModel):
@@ -719,7 +729,7 @@ class HttpPayload(BaseModel):
     """
 
     sink: str = _SINK_FIELD
-    data: BaseModel = Field(
+    data: SerializeAsAny[BaseModel] = Field(
         description='Payload model. Serialized into the request body per the sink encoding setting '
         "('json' by default, or 'form'/'multipart')."
     )
@@ -734,7 +744,9 @@ class RedisPayload(BaseModel):
 
     sink: str = _SINK_FIELD
     key: str = Field(description='Redis key suffix. The full Redis key is {config.key_prefix}{key}.')
-    data: BaseModel = Field(description='Payload model. Serialized via model_dump_json() as the Redis string value.')
+    data: SerializeAsAny[BaseModel] = Field(
+        description='Payload model. Serialized via model_dump_json() as the Redis string value.'
+    )
     ttl: int | None = Field(
         default=None,
         description='Optional expiry time in seconds. The key does not expire when None.',
@@ -751,7 +763,9 @@ class FilePayload(BaseModel):
 
     sink: str = _SINK_FIELD
     path: str = Field(description="File path relative to the sink's configured base_path.")
-    data: BaseModel = Field(description='Payload model. Appended as a JSON line (model_dump_json() + newline).')
+    data: SerializeAsAny[BaseModel] = Field(
+        description='Payload model. Appended as a JSON line (model_dump_json() + newline).'
+    )
 
 
 class CustomPayload(BaseModel):
@@ -777,7 +791,9 @@ class CustomPayload(BaseModel):
             'Must match a key under ``sinks.custom.<type>.<instance>`` in config.'
         ),
     )
-    data: BaseModel = Field(description="Payload model. Passed to the plugin sink's ``deliver()`` as-is.")
+    data: SerializeAsAny[BaseModel] = Field(
+        description="Payload model. Passed to the plugin sink's ``deliver()`` as-is."
+    )
 
 
 class CollectResult(BaseModel):

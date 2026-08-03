@@ -475,3 +475,73 @@ def test_postgres_payload_upsert_accepts_disjoint_update_columns():
         update_columns=['value'],
     )
     assert payload.update_columns == ['value']
+
+
+# --- payload data survives DLQ serialization ---
+
+
+class _DLQRow(BaseModel):
+    """A concrete payload body — the thing that must reach the DLQ intact."""
+
+    request_id: str = 'req-42'
+    amount: int = 999
+
+
+_DLQ_ROW_JSON = {'request_id': 'req-42', 'amount': 999}
+
+
+@pytest.mark.parametrize(
+    ('label', 'payload'),
+    [
+        ('kafka', KafkaPayload(data=_DLQRow())),
+        ('postgres', PostgresPayload(table='t', data=_DLQRow())),
+        ('mongo', MongoPayload(collection='c', data=_DLQRow())),
+        ('http', HttpPayload(data=_DLQRow())),
+        ('redis', RedisPayload(key='k', data=_DLQRow())),
+        ('file', FilePayload(path='/tmp/out.jsonl', data=_DLQRow())),
+    ],
+)
+def test_payload_data_survives_model_dump_json(label, payload):
+    """A payload's body must serialize as its ACTUAL fields.
+
+    ``data`` is declared as ``BaseModel``, and pydantic serializes against the
+    declared type by default — which has no fields, so the body would come out
+    as ``{}``. The DLQ serializes payloads exactly this way, so without
+    duck-typed serialization every dead-lettered record loses the data it
+    exists to preserve, silently and with no warning.
+    """
+    import json
+
+    assert json.loads(payload.model_dump_json())['data'] == _DLQ_ROW_JSON, label
+
+
+def test_postgres_payload_where_and_params_survive_serialization():
+    """The update predicate and statement params are bodies too."""
+    import json
+
+    from drakkar.models import PostgresOp
+
+    updated = json.loads(
+        PostgresPayload(op=PostgresOp.UPDATE, table='t', data=_DLQRow(), where=_DLQRow()).model_dump_json()
+    )
+    assert updated['where'] == _DLQ_ROW_JSON
+
+    stmt = json.loads(PostgresPayload(op=PostgresOp.STATEMENT, statement='s', params=_DLQRow()).model_dump_json())
+    assert stmt['params'] == _DLQ_ROW_JSON
+
+
+def test_dlq_message_preserves_payload_data():
+    """End to end through the real DLQ path, not just the payload model."""
+    import json
+
+    from drakkar.models import DeliveryError
+    from drakkar.sinks.dlq import DLQMessage
+
+    error = DeliveryError(
+        sink_name='main',
+        sink_type='postgres',
+        error='boom',
+        payloads=[PostgresPayload(table='results', data=_DLQRow())],
+    )
+    entry = json.loads(DLQMessage(error, partition_id=0).serialize())
+    assert json.loads(entry['original_payloads'][0])['data'] == _DLQ_ROW_JSON
