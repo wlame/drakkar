@@ -852,3 +852,77 @@ def test_postgres_sink_config_statements_from_yaml(minimal_config_dict, tmp_path
 
     cfg = load_config(cfg_file)
     assert cfg.sinks.postgres['main'].statements['claim_job'].startswith('UPDATE jobs')
+
+
+# --- Redis operator-authored scripts ---
+
+
+def test_redis_sink_config_scripts_default_empty():
+    assert RedisSinkConfig().scripts == {}
+
+
+def test_redis_sink_config_accepts_named_scripts():
+    cfg = RedisSinkConfig(scripts={'push_and_cap': "redis.call('LPUSH', KEYS[1], ARGV[1])"})
+    assert 'push_and_cap' in cfg.scripts
+    # The Lua body is preserved verbatim — the sink registers it, not the config model.
+    assert 'LPUSH' in cfg.scripts['push_and_cap']
+
+
+@pytest.mark.parametrize('name', ['Push_And_Cap', '1push', 'push-and-cap', 'push and cap', ''])
+def test_redis_sink_config_rejects_bad_script_names(name):
+    """Names are used as structured-log fields, so they stay lowercase snake_case."""
+    with pytest.raises(ValidationError, match='Invalid script name'):
+        RedisSinkConfig(scripts={name: 'return 1'})
+
+
+@pytest.mark.parametrize('body', ['', '   ', '\n'])
+def test_redis_sink_config_rejects_empty_script_bodies(body):
+    with pytest.raises(ValidationError, match='empty body'):
+        RedisSinkConfig(scripts={'s': body})
+
+
+def test_redis_sink_config_does_not_parse_lua():
+    """Deliberately unvalidated: there is no Lua parser without a server.
+
+    Validating against a live Redis would couple worker startup to Redis
+    availability — the same trade-off the Postgres sink settled by not
+    calling PREPARE. A broken script fails at delivery instead.
+    """
+    cfg = RedisSinkConfig(scripts={'nonsense': 'this is not valid lua ((('})
+    assert cfg.scripts['nonsense'] == 'this is not valid lua ((('
+
+
+def test_redis_sink_config_scripts_from_yaml(minimal_config_dict, tmp_path):
+    """The operator-facing path: scripts declared in YAML."""
+    import yaml
+
+    from drakkar.config import load_config
+
+    minimal_config_dict['sinks'] = {
+        'redis': {
+            'cache': {
+                'url': 'redis://localhost:6379/0',
+                'scripts': {'push_and_cap': "redis.call('LPUSH', KEYS[1], ARGV[1])\n"},
+            }
+        }
+    }
+    cfg_file = tmp_path / 'drakkar.yaml'
+    cfg_file.write_text(yaml.dump(minimal_config_dict))
+
+    cfg = load_config(cfg_file)
+    assert cfg.sinks.redis['cache'].scripts['push_and_cap'].startswith('redis.call')
+
+
+def test_redis_sink_config_scripts_from_env(minimal_config_dict, tmp_path, monkeypatch):
+    """Nested dict overrides are less exercised than scalar ones, so pin one."""
+    import yaml
+
+    from drakkar.config import load_config
+
+    minimal_config_dict['sinks'] = {'redis': {'cache': {'url': 'redis://localhost:6379/0'}}}
+    cfg_file = tmp_path / 'drakkar.yaml'
+    cfg_file.write_text(yaml.dump(minimal_config_dict))
+    monkeypatch.setenv('DK_SINKS__REDIS__CACHE__SCRIPTS__PUSH_AND_CAP', "redis.call('LPUSH', KEYS[1], ARGV[1])")
+
+    cfg = load_config(cfg_file)
+    assert cfg.sinks.redis['cache'].scripts == {'push_and_cap': "redis.call('LPUSH', KEYS[1], ARGV[1])"}
