@@ -738,6 +738,36 @@ async def test_sink_collector_flatten_postgres_payload_without_data():
     assert flat[0].payload is None
 
 
+@pytest.mark.parametrize(
+    ('payload_kwargs', 'destination', 'expected_op'),
+    [
+        ({'key': 'result:abc', 'data': None}, 'result:abc', 'set'),
+        ({'op': 'incrby', 'key': 'hits', 'amount': 1}, 'hits', 'incrby'),
+        ({'op': 'delete', 'key': 'session:42'}, 'session:42', 'delete'),
+        # A script has no key, so its NAME is what identifies the write.
+        ({'op': 'script', 'script': 'push_and_cap', 'keys': ['recent']}, 'push_and_cap', 'script'),
+    ],
+)
+async def test_sink_collector_reports_the_redis_operation(payload_kwargs, destination, expected_op):
+    """The probe has to say WHICH command a Redis payload plans.
+
+    An INCRBY and a SET against the same key read identically without it.
+    """
+    from drakkar.models import RedisOp
+
+    assert expected_op in {op.value for op in RedisOp}
+    if payload_kwargs.get('data') is None and 'data' in payload_kwargs:
+        payload_kwargs = {**payload_kwargs, 'data': _TinyOutput(id=1)}
+
+    collector = DebugSinkCollector()
+    await collector(CollectResult(redis=[RedisPayload(sink='rd', **payload_kwargs)]), 0)
+
+    record = collector.flatten()[0]
+    assert record.destination == destination
+    assert record.extras['op'] == expected_op
+    assert record.extras['sink_instance'] == 'rd'
+
+
 async def test_sink_collector_flatten_redis_payload_without_data():
     """A Redis payload with no data flattens with ``payload=None``.
 
