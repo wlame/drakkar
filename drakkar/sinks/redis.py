@@ -20,12 +20,37 @@ logger = structlog.get_logger()
 
 
 @dataclass(frozen=True)
-class _RedisItem:
-    """One payload reduced to its prefixed key, serialized value, and TTL."""
+class _PlainCommand:
+    """One payload reduced to a redis-py method call.
 
-    key: str
-    value: str
-    ttl: int | None
+    ``queue`` and ``execute`` are the same call through two different
+    objects, so the pipeline path and the single-payload path share one
+    shape and neither has to know which ops exist.
+    """
+
+    op: RedisOp
+    label: str
+    """Human-readable identification for error messages, e.g.
+    ``hset key=drakkar:session:42``. Never the stored value, which can
+    carry message content."""
+    method: str
+    """The redis-py method name: 'set', 'hset', 'incrby', …"""
+    args: tuple[object, ...]
+    kwargs: dict[str, object]
+
+    async def queue(self, pipe: object) -> None:
+        """Add this command to a pipeline.
+
+        Declared ``async`` even though plain pipeline command methods are
+        SYNCHRONOUS and return the pipeline. ``AsyncScript.__call__`` is
+        ``async def`` and must be awaited even when only queueing, so
+        making both queue methods awaitable keeps one uniform call site.
+        """
+        getattr(pipe, self.method)(*self.args, **self.kwargs)
+
+    async def execute(self, client: object) -> None:
+        """Run this command directly, outside a pipeline."""
+        await getattr(client, self.method)(*self.args, **self.kwargs)
 
 
 def _as_builtin_transient(exc: BaseException) -> BaseException | None:
@@ -125,19 +150,19 @@ class RedisSink(BaseSink[RedisPayload]):
         start = time.monotonic()
         labels = {'sink_type': self.sink_type, 'sink_name': self._name}
         try:
-            items, bad_index, build_error = self._build_items(payloads)
+            commands, bad_index, build_error = self._build_items(payloads)
             if build_error is not None:
                 # The per-payload loop SET every key BEFORE the
                 # unserializable payload, then raised. Reproduce those side
                 # effects (a set failure on the way takes precedence,
                 # exactly as the sequential loop would have hit it first).
-                for item in items[:bad_index]:
-                    await self._set_single(item)
+                for command in commands[:bad_index]:
+                    await self._execute_single(command)
                 raise build_error
-            if len(items) == 1:
-                await self._set_single(items[0])
+            if len(commands) == 1:
+                await self._execute_single(commands[0])
             else:
-                await self._set_batch(items)
+                await self._execute_batch(commands)
 
             sink_payloads_delivered.labels(**labels).inc(len(payloads))
             sink_deliver_duration.labels(**labels).observe(time.monotonic() - start)
@@ -148,23 +173,23 @@ class RedisSink(BaseSink[RedisPayload]):
                 raise transient from exc
             raise
 
-    def _build_items(self, payloads: list[RedisPayload]) -> tuple[list[_RedisItem], int, Exception | None]:
-        """Serialize every payload up front.
+    def _build_items(self, payloads: list[RedisPayload]) -> tuple[list[_PlainCommand], int, Exception | None]:
+        """Build a command for every payload up front.
 
-        On the first bad payload returns the items built so far, the failing
-        index, and the error — the caller replays the legacy partial side
-        effects before raising it.
+        On the first bad payload returns the commands built so far, the
+        failing index, and the error — the caller replays the legacy partial
+        side effects before raising it.
         """
-        items: list[_RedisItem] = []
+        commands: list[_PlainCommand] = []
         for i, payload in enumerate(payloads):
             try:
-                items.append(self._build_item(payload))
+                commands.append(self._build_command(payload))
             except Exception as e:
-                return items, i, e
-        return items, len(items), None
+                return commands, i, e
+        return commands, len(commands), None
 
-    def _build_item(self, payload: RedisPayload) -> _RedisItem:
-        """Reduce one payload to its prefixed key, serialized value, and TTL.
+    def _build_command(self, payload: RedisPayload) -> _PlainCommand:
+        """Reduce one payload to the redis-py call that carries it out.
 
         The op guard is TEMPORARY. ``RedisOp`` declares every command the
         design specifies, but this sink builds only ``SET`` so far; without
@@ -176,21 +201,26 @@ class RedisSink(BaseSink[RedisPayload]):
             raise ValueError(f"RedisSink cannot yet build op {payload.op.value!r} — only 'set' is implemented")
         if payload.data is None:  # pragma: no cover - the validator guarantees it for SET
             raise ValueError(f'RedisPayload(op={payload.op.value!r}) requires data')
-        return _RedisItem(
-            key=self._config.key_prefix + payload.key,
-            value=payload.data.model_dump_json(),
-            ttl=payload.ttl,
+        key = self._config.key_prefix + payload.key
+        kwargs: dict[str, object] = {}
+        if payload.ttl is not None:
+            kwargs['ex'] = payload.ttl
+        return _PlainCommand(
+            op=payload.op,
+            label=f'{payload.op.value} key={key}',
+            method='set',
+            args=(key, payload.data.model_dump_json()),
+            kwargs=kwargs,
         )
 
-    async def _set_batch(self, items: list[_RedisItem]) -> None:
-        """Write every item through one pipeline, propagating any failure.
+    async def _execute_batch(self, commands: list[_PlainCommand]) -> None:
+        """Send every command through one pipeline, propagating any failure.
 
-        A failure is NOT replayed key-by-key. The previous fallback caught
-        every exception, discarded it, and re-sent the whole batch as
-        individual ``SET``s — which hid real defects (including a broken
-        test mock that meant this path was never exercised at all) and
-        would double-apply any command that accumulates rather than
-        replaces.
+        A failure is NOT replayed. The original fallback caught every
+        exception, discarded it, and re-sent the whole batch one command at
+        a time — which hid real defects (including a broken test mock that
+        meant this path was never exercised at all) and would double-apply
+        any command that accumulates rather than replaces.
 
         Transient errors are handled one level up instead: ``deliver``
         remaps them to the builtins ``SinkManager`` recognises, so the
@@ -198,20 +228,14 @@ class RedisSink(BaseSink[RedisPayload]):
         """
         assert self._client is not None
         pipe = self._client.pipeline(transaction=False)
-        for item in items:
-            if item.ttl is not None:
-                pipe.set(item.key, item.value, ex=item.ttl)
-            else:
-                pipe.set(item.key, item.value)
+        for command in commands:
+            await command.queue(pipe)
         await pipe.execute()
 
-    async def _set_single(self, item: _RedisItem) -> None:
-        """Set one key — the shape the pre-batching loop produced."""
+    async def _execute_single(self, command: _PlainCommand) -> None:
+        """Run one command directly — the shape the pre-batching loop produced."""
         assert self._client is not None
-        if item.ttl is not None:
-            await self._client.set(item.key, item.value, ex=item.ttl)
-        else:
-            await self._client.set(item.key, item.value)
+        await command.execute(self._client)
 
     async def close(self) -> None:
         """Close the Redis client."""

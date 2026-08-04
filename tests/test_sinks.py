@@ -1497,6 +1497,33 @@ async def test_redis_sink_connect(redis_sink_config):
         assert sink._client is mock_client
 
 
+async def test_redis_plain_command_queues_and_executes_the_same_call():
+    """One command shape drives both paths, so neither knows which ops exist.
+
+    ``queue`` is async even though pipeline command methods are synchronous
+    — a script must be awaited to queue, and one uniform call site is worth
+    the harmless await.
+    """
+    from drakkar.models import RedisOp
+    from drakkar.sinks.redis import _PlainCommand
+
+    command = _PlainCommand(
+        op=RedisOp.SET,
+        label='set key=drakkar:k',
+        method='set',
+        args=('drakkar:k', '{}'),
+        kwargs={'ex': 60},
+    )
+
+    pipe = MagicMock()
+    await command.queue(pipe)
+    pipe.set.assert_called_once_with('drakkar:k', '{}', ex=60)
+
+    client = AsyncMock()
+    await command.execute(client)
+    client.set.assert_awaited_once_with('drakkar:k', '{}', ex=60)
+
+
 async def test_redis_sink_rejects_ops_it_cannot_yet_build(redis_sink_config):
     """TEMPORARY guard — delete as each op lands.
 
