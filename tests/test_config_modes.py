@@ -36,6 +36,7 @@ from drakkar.partition import PartitionProcessor
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.manager import SinkNotConfiguredError
 from tests.conftest import make_ui_config, wait_for
+from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 
 # --- Helpers ---
 
@@ -106,41 +107,6 @@ def make_config(**overrides) -> DrakkarConfig:
     }
     defaults.update(overrides)
     return DrakkarConfig(**defaults)
-
-
-def _setup_app_sinks(app: DrakkarApp) -> None:
-    """Replace real sinks with async mocks."""
-    from unittest.mock import MagicMock
-
-    app._build_sinks()
-    for key, sink in app._sink_manager._sinks.items():
-        mock_sink = AsyncMock()
-        mock_sink.sink_type = sink.sink_type
-        mock_sink.name = sink.name
-        mock_sink._name = sink.name
-        # Circuit breaker hooks are sync methods on BaseSink. AsyncMock
-        # makes every attribute an AsyncMock by default (returns truthy
-        # coroutines), so should_skip_delivery would look "open" to the
-        # manager and no delivery would ever happen. Force the defaults.
-        mock_sink.should_skip_delivery = MagicMock(return_value=False)
-        mock_sink.record_success = MagicMock()
-        mock_sink.record_failure = MagicMock()
-        # Read-only properties on the real BaseSink — pin to plain values so
-        # the manager's ``probe_claimed`` check treats the circuit as closed
-        # and non-probing in the default (non-breaker-specific) test paths.
-        mock_sink.circuit_state = 'closed'
-        mock_sink.probe_inflight = False
-        # ``mark_connected`` / ``mark_disconnected`` are sync helpers called
-        # by SinkManager around connect/close so the readiness probe signal
-        # flips cleanly. AsyncMock would return unawaited coroutines and
-        # surface warnings under shutdown — pin them to plain MagicMocks.
-        mock_sink.mark_connected = MagicMock()
-        mock_sink.mark_disconnected = MagicMock()
-        mock_sink.is_connected = False
-        app._sink_manager._sinks[key] = mock_sink
-        for i, s in enumerate(app._sink_manager._by_type[sink.sink_type]):
-            if s.name == sink.name:
-                app._sink_manager._by_type[sink.sink_type][i] = mock_sink
 
 
 # ============================================================================

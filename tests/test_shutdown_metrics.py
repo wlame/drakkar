@@ -15,7 +15,7 @@ share state because each one targets a distinct metric or a delta read.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -38,6 +38,7 @@ from drakkar.metrics import (
     uncommitted_offsets_at_stop,
 )
 from drakkar.models import ExecutorTask
+from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 
 
 class _StubHandler(BaseDrakkarHandler):
@@ -85,34 +86,6 @@ def shutdown_config() -> DrakkarConfig:
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
     )
-
-
-def _setup_app_sinks(app: DrakkarApp) -> None:
-    """Replace registered sinks with async mocks so close_all() is a no-op.
-
-    Lifted from ``tests/test_app.py``'s helper of the same name; reproduced
-    here to keep this test file independent. The sink-circuit-breaker
-    fields are pinned to plain values to avoid AsyncMock auto-coroutines
-    surprising the SinkManager.
-    """
-    app._build_sinks()
-    for key, sink in app._sink_manager._sinks.items():
-        mock_sink = AsyncMock()
-        mock_sink.sink_type = sink.sink_type
-        mock_sink.name = sink.name
-        mock_sink._name = sink.name
-        mock_sink.should_skip_delivery = MagicMock(return_value=False)
-        mock_sink.record_success = MagicMock()
-        mock_sink.record_failure = MagicMock()
-        mock_sink.circuit_state = 'closed'
-        mock_sink.probe_inflight = False
-        mock_sink.mark_connected = MagicMock()
-        mock_sink.mark_disconnected = MagicMock()
-        mock_sink.is_connected = False
-        app._sink_manager._sinks[key] = mock_sink
-        for i, s in enumerate(app._sink_manager._by_type[sink.sink_type]):
-            if s.name == sink.name:
-                app._sink_manager._by_type[sink.sink_type][i] = mock_sink
 
 
 # --- Gauge snapshots at shutdown ---

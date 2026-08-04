@@ -32,6 +32,7 @@ from drakkar.models import (
 )
 from drakkar.sinks.manager import CIRCUIT_OPEN_ERROR, SinkNotConfiguredError
 from tests.conftest import make_ui_config, wait_for
+from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
 
 
 class _D(BaseModel):
@@ -101,42 +102,6 @@ def test_config_no_sinks() -> DrakkarConfig:
         metrics=MetricsConfig(enabled=False),
         logging=LoggingConfig(level='WARNING', format='console'),
     )
-
-
-def _setup_app_sinks(app: DrakkarApp) -> None:
-    """Build and register fake sinks so _handle_collect works without real connections."""
-    app._build_sinks()
-    # replace all registered sinks with async mocks
-    for key, sink in app._sink_manager._sinks.items():
-        mock_sink = AsyncMock()
-        mock_sink.sink_type = sink.sink_type
-        mock_sink.name = sink.name
-        mock_sink._name = sink.name
-        # Circuit breaker hooks are sync, called by SinkManager per delivery.
-        # AsyncMock would return truthy coroutines for should_skip_delivery
-        # (treated as "skip me"), so override with plain MagicMocks that
-        # return sensible defaults for non-circuit-breaker tests.
-        mock_sink.should_skip_delivery = MagicMock(return_value=False)
-        mock_sink.record_success = MagicMock()
-        mock_sink.record_failure = MagicMock()
-        # ``circuit_state`` / ``probe_inflight`` are read-only properties on
-        # the real BaseSink; on the AsyncMock they'd be auto-created coroutines
-        # which make the SinkManager's ``probe_claimed`` check truthy. Pin to
-        # plain values so non-circuit-breaker tests behave like a closed circuit.
-        mock_sink.circuit_state = 'closed'
-        mock_sink.probe_inflight = False
-        # ``mark_connected`` / ``mark_disconnected`` are sync helpers called
-        # by SinkManager around connect/close so the readiness probe signal
-        # flips cleanly. AsyncMock would return unawaited coroutines and
-        # surface warnings under shutdown — pin them to plain MagicMocks.
-        mock_sink.mark_connected = MagicMock()
-        mock_sink.mark_disconnected = MagicMock()
-        mock_sink.is_connected = False
-        app._sink_manager._sinks[key] = mock_sink
-        # update _by_type
-        for i, s in enumerate(app._sink_manager._by_type[sink.sink_type]):
-            if s.name == sink.name:
-                app._sink_manager._by_type[sink.sink_type][i] = mock_sink
 
 
 # --- Creation ---

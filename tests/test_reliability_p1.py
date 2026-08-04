@@ -47,7 +47,8 @@ from drakkar.models import (
 from drakkar.partition import PartitionProcessor
 from drakkar.sinks.kafka import KafkaSink
 from tests.conftest import make_ui_config, wait_for
-from tests.test_app import SimpleHandler, _setup_app_sinks
+from tests.sink_mocks import setup_app_sinks as _setup_app_sinks
+from tests.test_app import SimpleHandler
 
 
 class _Out(BM):
