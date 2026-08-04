@@ -14,6 +14,71 @@
     }
     </script>
     <style>@keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.3}}.live-dot{animation:pulse-dot 2s ease-in-out infinite;}</style>
+    <script>
+    // === Shared polling helper ===
+    //
+    // Defined in <head> deliberately: page scripts live inside the `content`
+    // block, which renders BEFORE the script block at the end of <body>, so a
+    // helper defined down there would not exist yet when a page calls it.
+    //
+    // Every live page polled on a fixed interval regardless of whether anyone
+    // was looking. Ten background tabs kept fetching, parsing and re-rendering,
+    // and each poll also costs the backend a main-loop dispatch — so idle tabs
+    // were not free on the server either.
+    //
+    // Browsers throttle background timers, but throttling is not stopping: a 2s
+    // poll still fires roughly once a minute per hidden tab, and on return the
+    // page shows stale state until the next tick.
+    //
+    // A grace period keeps normal use unaffected: an operator who switches to
+    // another window for a few seconds and comes back should cost nothing at
+    // all, so nothing stops until the tab has been hidden continuously for
+    // VISIBILITY_GRACE_MS, and the catch-up call only fires if something
+    // actually stopped.
+    //
+    // (requestAnimationFrame loops need no gating — browsers already stop them
+    // in a hidden tab.)
+    var VISIBILITY_GRACE_MS = 15000;
+
+    // visibilityGate: onIdle fires once the tab has been hidden for the grace
+    // period; onActive fires on return, but only if onIdle fired first.
+    function visibilityGate(onIdle, onActive) {
+        var idle = false, graceTimer = null;
+        function clearGrace() {
+            if (graceTimer !== null) { clearTimeout(graceTimer); graceTimer = null; }
+        }
+        function onChange() {
+            if (document.hidden) {
+                if (idle || graceTimer !== null) return;
+                graceTimer = setTimeout(function() {
+                    graceTimer = null; idle = true; onIdle();
+                }, VISIBILITY_GRACE_MS);
+                return;
+            }
+            clearGrace();
+            if (!idle) return;   // came back inside the grace period
+            idle = false;
+            onActive();
+        }
+        document.addEventListener('visibilitychange', onChange);
+        return function() {
+            clearGrace();
+            document.removeEventListener('visibilitychange', onChange);
+        };
+    }
+
+    function pausableInterval(fn, ms) {
+        var timer = null;
+        function start() { if (timer === null) timer = setInterval(fn, ms); }
+        function stop() { if (timer !== null) { clearInterval(timer); timer = null; } }
+        var stopGate = visibilityGate(stop, function() {
+            fn();   // catch up: the tab may have been hidden for many intervals
+            start();
+        });
+        if (!document.hidden) start();
+        return function() { stop(); stopGate(); };
+    }
+    </script>
     {% block head %}{% endblock %}
 </head>
 <body class="text-ink-700 min-h-screen" style="background: linear-gradient(180deg, #e8e6e0 0%, #f0eee8 120px, #f5f3ee 300px, #f5f3ee 100%);">
@@ -258,7 +323,7 @@
             });
         }
         refresh();
-        setInterval(refresh, 10000);
+        pausableInterval(refresh, 10000);
         document.addEventListener('click', function(e) {
             if (!e.target.closest('#worker-switcher')) {
                 document.getElementById('worker-dropdown').classList.add('hidden');

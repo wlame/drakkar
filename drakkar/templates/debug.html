@@ -1465,7 +1465,7 @@
 
     loadStats();
     loadEntries();
-    setInterval(loadStats, 5000);
+    pausableInterval(loadStats, 5000);
 })();
 {% endif %}
 

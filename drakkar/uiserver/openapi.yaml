@@ -238,10 +238,17 @@ paths:
         Tasks from the last N minutes plus the computed lane count. Archived
         retry attempts use the `task_id:r<float-ts>` composite-key format;
         consumers must not rely on positional order.
+
+
+        The scan is capped at `ui.max_rows * 3` events, keeping the most
+        recent; `truncated` reports whether older tasks inside the window
+        were dropped. One source message can fan out to a thousand tasks,
+        so without the cap the query cannot complete inside the dispatch
+        budget and the endpoint degrades to an empty timeline.
       parameters:
         - name: minutes
           in: query
-          schema: {type: integer, default: 2}
+          schema: {type: integer, default: 2, minimum: 1, maximum: 60}
       responses:
         '200':
           description: Task entries and lane count.
@@ -1062,7 +1069,10 @@ components:
           type: array
           items: {$ref: '#/components/schemas/RecentTaskEntry'}
         lane_count: {type: integer}
-      required: [tasks, lane_count]
+        # true when the row cap was hit and older tasks inside the requested
+        # window are absent from `tasks`.
+        truncated: {type: boolean}
+      required: [tasks, lane_count, truncated]
 
     RecentTaskEntry:
       type: object

@@ -34,6 +34,7 @@ from drakkar.recorder import (
 )
 from drakkar.recorder.core import (
     CROSS_TRACE_MAX_FILES,
+    WSSubscriber,
     _ScanBudget,
 )
 from tests.conftest import make_ui_config, wait_for
@@ -1195,8 +1196,8 @@ async def test_broadcast_to_multiple_subscribers(tmp_path):
     await rec.stop()
 
 
-class _MutatingSubscriber:
-    """Subscriber that mutates the subscriber set from inside the fan-out.
+class _MutatingQueue:
+    """Queue stand-in that mutates the subscriber set from inside the fan-out.
 
     Reproduces the UI-thread/main-loop interleaving deterministically: the
     real hazard is a ``subscribe``/``unsubscribe`` landing between two
@@ -1206,11 +1207,16 @@ class _MutatingSubscriber:
 
     def __init__(self, action):
         self._action = action
-        self.events: list[dict] = []
+        self.events: list = []
 
-    def put_nowait(self, event: dict) -> None:
-        self.events.append(event)
+    def put_nowait(self, item) -> None:
+        self.events.append(item)
         self._action()
+
+
+def _mutating_subscriber(action) -> WSSubscriber:
+    """A real subscriber whose queue runs ``action`` on every delivery."""
+    return WSSubscriber(queue=_MutatingQueue(action))
 
 
 async def test_record_survives_subscriber_added_during_fanout(tmp_path):
@@ -1225,12 +1231,12 @@ async def test_record_survives_subscriber_added_during_fanout(tmp_path):
     await rec.start()
 
     opened: list = []
-    sub = _MutatingSubscriber(lambda: opened.append(rec.subscribe()))
+    sub = _mutating_subscriber(lambda: opened.append(rec.subscribe()))
     rec._ws_subscribers.add(sub)
 
     rec.record_committed(partition=1, offset=7)
 
-    assert len(sub.events) == 1, 'fan-out did not reach the subscriber'
+    assert len(sub.queue.events) == 1, 'fan-out did not reach the subscriber'
     assert len(opened) == 1, 'the mid-fan-out subscribe did not run'
     await rec.stop()
 
@@ -1242,12 +1248,12 @@ async def test_record_survives_subscriber_removed_during_fanout(tmp_path):
     await rec.start()
 
     victim = rec.subscribe()
-    sub = _MutatingSubscriber(lambda: rec.unsubscribe(victim))
+    sub = _mutating_subscriber(lambda: rec.unsubscribe(victim))
     rec._ws_subscribers.add(sub)
 
     rec.record_committed(partition=2, offset=11)
 
-    assert len(sub.events) == 1
+    assert len(sub.queue.events) == 1
     assert victim not in rec._ws_subscribers
     await rec.stop()
 
@@ -1260,8 +1266,8 @@ async def test_broadcast_drops_on_full_queue(tmp_path):
 
     import queue as queue_mod
 
-    q = queue_mod.Queue(maxsize=2)
-    rec._ws_subscribers.add(q)
+    sub = WSSubscriber(queue=queue_mod.Queue(maxsize=2))
+    rec._ws_subscribers.add(sub)
 
     # fill the queue
     rec.record_consumed(make_msg(offset=0))
@@ -1269,9 +1275,96 @@ async def test_broadcast_drops_on_full_queue(tmp_path):
     # this should be dropped, not raise
     rec.record_consumed(make_msg(offset=2))
 
-    assert q.qsize() == 2  # only 2 fit
+    assert sub.qsize() == 2  # only 2 fit
 
-    rec._ws_subscribers.discard(q)
+    rec._ws_subscribers.discard(sub)
+    await rec.stop()
+
+
+async def test_drop_count_is_reported_then_cleared(tmp_path):
+    """A full queue counts the loss so the client can be told to resync.
+
+    Silent drops were the mechanism behind live views drifting out of sync
+    with no signal: the browser had no way to distinguish "nothing happened"
+    from "I missed events".
+    """
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    import queue as queue_mod
+
+    sub = WSSubscriber(queue=queue_mod.Queue(maxsize=1))
+    rec._ws_subscribers.add(sub)
+
+    rec.record_consumed(make_msg(offset=0))  # fits
+    rec.record_consumed(make_msg(offset=1))  # dropped
+    rec.record_consumed(make_msg(offset=2))  # dropped
+
+    assert sub.dropped == 2
+    assert sub.take_dropped() == 2
+    assert sub.take_dropped() == 0, 'the count must clear once reported'
+
+    rec._ws_subscribers.discard(sub)
+    await rec.stop()
+
+
+async def test_subscriber_filter_skips_unwanted_events(tmp_path):
+    """An event-type allowlist keeps unrendered events off the wire.
+
+    A fan-out-heavy message emits one ``task_complete`` per task; a page
+    showing only the timeline should receive none of them.
+    """
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    picky = rec.subscribe(['committed'])
+    everything = rec.subscribe()
+
+    rec.record_consumed(make_msg(offset=0))
+    rec.record_committed(partition=0, offset=1)
+
+    assert picky.qsize() == 1
+    assert picky.get_nowait()['event'] == 'committed'
+    assert everything.qsize() == 2
+
+    rec.unsubscribe(picky)
+    rec.unsubscribe(everything)
+    await rec.stop()
+
+
+async def test_ws_event_omits_captured_output(tmp_path):
+    """Subprocess output is persisted but never streamed.
+
+    The live views show ``stdout_size``, not the text. Broadcasting the text
+    would cost ``len(output) x connected clients`` for data nothing renders.
+    """
+    config = make_debug_config(tmp_path, store_output=True)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    sub = rec.subscribe()
+    result = make_result('t1')
+    result.stdout = 'x' * 4096
+    result.stderr = 'boom'
+    rec.record_task_completed(result, partition=0)
+
+    event = sub.get_nowait()
+    assert 'stdout' not in event
+    assert 'stderr' not in event
+    assert event['stdout_size'] == 4096, 'the size must survive — the timeline shows it'
+
+    # The DB copy keeps the output for the task-detail page.
+    await rec._flush()
+    assert rec._db is not None
+    async with rec._db.execute("SELECT stdout, stderr FROM events WHERE event = 'task_completed'") as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] == 'x' * 4096
+    assert row[1] == 'boom'
+
+    rec.unsubscribe(sub)
     await rec.stop()
 
 
@@ -2721,6 +2814,67 @@ async def test_ws_deferred_cleanup_on_stop(tmp_path):
 
     await rec.stop()
     assert len(rec._deferred_ws) == 0
+    assert rec._deferred_sweep is None, 'the sweep timer must be disarmed on stop'
+
+
+async def test_deferred_starts_share_one_sweep_timer(tmp_path):
+    """Many pending tasks cost ONE timer, not one timer each.
+
+    This is the whole point of the shared sweep: a handler that fans one
+    message out to a thousand tasks would otherwise schedule a thousand
+    ``call_later`` callbacks on the main loop and cancel most of them, and
+    CPython leaves cancelled TimerHandles in the heap until they dominate it.
+    """
+    config = make_debug_config(tmp_path, ws_min_duration_ms=5000)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    for i in range(200):
+        rec.record_task_started(make_task(f't-{i}'), partition=0)
+
+    assert len(rec._deferred_ws) == 200
+    assert rec._deferred_sweep is not None
+    handle = rec._deferred_sweep
+
+    # More tasks must reuse the outstanding timer rather than arm a new one.
+    rec.record_task_started(make_task('t-extra'), partition=0)
+    assert rec._deferred_sweep is handle
+
+    await rec.stop()
+
+
+async def test_deferred_sweep_broadcasts_expired_starts(tmp_path):
+    """A task still running past the threshold gets its start event sent."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=10)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    sub = rec.subscribe()
+
+    rec.record_task_started(make_task('t-slow'), partition=0)
+    assert sub.empty(), 'the start event must not be sent before the threshold'
+
+    await wait_for(lambda: not sub.empty(), timeout=2.0)
+    event = sub.get_nowait()
+    assert event['event'] == 'task_started'
+    assert event['task_id'] == 't-slow'
+    assert not rec._deferred_ws, 'the expired entry must be removed'
+
+    rec.unsubscribe(sub)
+    await rec.stop()
+
+
+async def test_deferred_sweep_rearms_only_while_entries_remain(tmp_path):
+    """An idle recorder holds no timer at all."""
+    config = make_debug_config(tmp_path, ws_min_duration_ms=10)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+
+    rec.record_task_started(make_task('t-1'), partition=0)
+    await wait_for(lambda: not rec._deferred_ws, timeout=2.0)
+    # The sweep that drained the last entry must not re-arm itself.
+    await wait_for(lambda: rec._deferred_sweep is None, timeout=2.0)
+
+    await rec.stop()
 
 
 async def test_labels_stored_in_task_started_event(tmp_path):
