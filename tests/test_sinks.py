@@ -1599,6 +1599,64 @@ async def test_redis_sink_push_honours_side_and_defaults_to_left(redis_sink_conf
     assert '"request_id":"r1"' in call.call_args.args[1]
 
 
+@pytest.mark.parametrize(
+    ('payload_kwargs', 'method', 'args', 'kwargs'),
+    [
+        # HSET takes a mapping so several fields go in one command.
+        (
+            {'op': 'hset', 'key': 'session:42', 'fields': {'ip': '10.0.0.1', 'hits': 3}},
+            'hset',
+            ('drakkar:session:42',),
+            {'mapping': {'ip': '10.0.0.1', 'hits': 3}},
+        ),
+        (
+            {'op': 'hdel', 'key': 'session:42', 'fields': ['ip', 'hits']},
+            'hdel',
+            ('drakkar:session:42', 'ip', 'hits'),
+            {},
+        ),
+        (
+            {'op': 'sadd', 'key': 'seen', 'members': ['a', 'b']},
+            'sadd',
+            ('drakkar:seen', 'a', 'b'),
+            {},
+        ),
+        (
+            {'op': 'srem', 'key': 'seen', 'members': ['a']},
+            'srem',
+            ('drakkar:seen', 'a'),
+            {},
+        ),
+        # ZADD's mapping stays keyed by MEMBER — that is redis-py's own
+        # signature, and it flips to `score member` on the wire itself.
+        (
+            {'op': 'zadd', 'key': 'leaderboard', 'members': {'alice': 12.5}},
+            'zadd',
+            ('drakkar:leaderboard', {'alice': 12.5}),
+            {},
+        ),
+    ],
+)
+async def test_redis_sink_renders_collection_commands(redis_sink_config, payload_kwargs, method, args, kwargs):
+    """Command name and argument order per op — the parity surface."""
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+
+    await sink.deliver([RedisPayload(**payload_kwargs)])
+
+    getattr(mock_client, method).assert_awaited_once_with(*args, **kwargs)
+
+
+async def test_redis_sink_passes_field_values_through_untouched(redis_sink_config):
+    """redis-py's encoder handles str/int/float — the framework must not stringify."""
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+
+    await sink.deliver([RedisPayload(op='hset', key='s', fields={'a': 1, 'b': 2.5, 'c': 'three'})])
+
+    mapping = mock_client.hset.call_args.kwargs['mapping']
+    assert mapping == {'a': 1, 'b': 2.5, 'c': 'three'}
+    assert [type(v) for v in mapping.values()] == [int, float, str]
+
+
 async def test_redis_sink_rejects_ops_it_cannot_yet_build(redis_sink_config):
     """TEMPORARY guard — delete as each op lands.
 

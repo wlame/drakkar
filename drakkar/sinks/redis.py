@@ -87,6 +87,21 @@ _COMMAND_RENDERERS: dict[RedisOp, _CommandRenderer] = {
     RedisOp.INCRBY: lambda p, key: ('incrby', (key, p.amount), {}),
     RedisOp.PUSH: _render_push,
     RedisOp.TRIM: lambda p, key: ('ltrim', (key, p.start, p.stop), {}),
+    # A mapping so several fields go in one HSET. Values pass through as
+    # str/int/float — redis-py's encoder handles them, and stringifying here
+    # would silently change what is stored.
+    #
+    # dict()/unpacking are safe because the per-op contract already narrowed
+    # the shape: hset and zadd require a mapping, hdel and sadd/srem a list.
+    RedisOp.HSET: lambda p, key: ('hset', (key,), {'mapping': dict(p.fields or {})}),
+    RedisOp.HDEL: lambda p, key: ('hdel', (key, *(p.fields or ())), {}),
+    RedisOp.SADD: lambda p, key: ('sadd', (key, *(p.members or ())), {}),
+    RedisOp.SREM: lambda p, key: ('srem', (key, *(p.members or ())), {}),
+    # ZADD's mapping stays keyed by MEMBER. That is redis-py's own
+    # zadd(name, mapping) signature, and it emits `ZADD key score member`
+    # itself — the argument flip is the client's job, not ours. A backend
+    # whose client takes (score, member) pairs has to flip explicitly.
+    RedisOp.ZADD: lambda p, key: ('zadd', (key, dict(p.members or {})), {}),
 }
 
 
