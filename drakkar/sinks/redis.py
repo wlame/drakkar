@@ -6,7 +6,7 @@ key prefix + payload key, with optional TTL.
 """
 
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import structlog
@@ -53,6 +53,48 @@ class _PlainCommand:
         """Run this command directly, outside a pipeline."""
         await getattr(client, self.method)(*self.args, **self.kwargs)
 
+
+# redis-py's AsyncScript: awaitable, called with keys/args/client.
+_RegisteredScript = Callable[..., Awaitable[object]]
+
+
+@dataclass(frozen=True)
+class _ScriptCommand:
+    """One payload reduced to an invocation of a registered Lua script.
+
+    Same two methods as ``_PlainCommand``, so the delivery paths do not know
+    which kind they are driving.
+    """
+
+    op: RedisOp
+    label: str
+    """Identification for error messages — the script NAME, never its body,
+    which an operator may have written around row data."""
+    script: _RegisteredScript
+    """The ``AsyncScript`` returned by ``register_script``."""
+    keys: list[str]
+    args: list[object]
+
+    async def queue(self, pipe: object) -> None:
+        """Add this script invocation to a pipeline.
+
+        Genuinely awaited, unlike the plain-command version: this call is
+        ``async def`` in redis-py and must be awaited even to queue. It
+        works because ``Pipeline`` defines ``__await__``, so the script's
+        internal ``await client.evalsha(...)`` resolves to the pipeline
+        itself. The script also detects the Pipeline and registers itself,
+        so ``Pipeline.execute()`` runs SCRIPT EXISTS / SCRIPT LOAD first —
+        NOSCRIPT recovery is redis-py's job, not ours.
+        """
+        await self.script(keys=self.keys, args=self.args, client=pipe)
+
+    async def execute(self, client: object) -> None:
+        """Run this script directly, outside a pipeline."""
+        await self.script(keys=self.keys, args=self.args, client=client)
+
+
+# Either kind of command. Both expose queue() and execute().
+_Command = _PlainCommand | _ScriptCommand
 
 # One rendered redis-py call: method name, positional args, keyword args.
 _Rendered = tuple[str, tuple[object, ...], dict[str, object]]
@@ -178,18 +220,27 @@ class RedisSink(BaseSink[RedisPayload]):
         super().__init__(name, ui_url=config.ui_url)
         self._config = config
         self._client = None
+        # Operator-authored Lua, registered at connect(). Never registered on
+        # the delivery path.
+        self._scripts: dict[str, _RegisteredScript] = {}
 
     async def connect(self) -> None:
         """Create the Redis client from the configured URL."""
         import redis.asyncio as aioredis
 
         self._client = aioredis.from_url(self._config.url)
+        # register_script computes the SHA1 LOCALLY with no round trip, so
+        # this stays cheap and does not fail when Redis is briefly away. The
+        # script is not sent until first use, and redis-py handles the
+        # SCRIPT LOAD then.
+        self._scripts = {name: self._client.register_script(body) for name, body in self._config.scripts.items()}
         await logger.ainfo(
             'redis_sink_connected',
             category='sink',
             sink_name=self._name,
             url=redact_url(self._config.url),
             key_prefix=self._config.key_prefix,
+            scripts=len(self._scripts),
         )
 
     async def deliver(self, payloads: list[RedisPayload]) -> None:
@@ -236,14 +287,14 @@ class RedisSink(BaseSink[RedisPayload]):
                 raise transient from exc
             raise
 
-    def _build_items(self, payloads: list[RedisPayload]) -> tuple[list[_PlainCommand], int, Exception | None]:
+    def _build_items(self, payloads: list[RedisPayload]) -> tuple[list[_Command], int, Exception | None]:
         """Build a command for every payload up front.
 
         On the first bad payload returns the commands built so far, the
         failing index, and the error — the caller replays the legacy partial
         side effects before raising it.
         """
-        commands: list[_PlainCommand] = []
+        commands: list[_Command] = []
         for i, payload in enumerate(payloads):
             try:
                 commands.append(self._build_command(payload))
@@ -251,17 +302,15 @@ class RedisSink(BaseSink[RedisPayload]):
                 return commands, i, e
         return commands, len(commands), None
 
-    def _build_command(self, payload: RedisPayload) -> _PlainCommand:
+    def _build_command(self, payload: RedisPayload) -> _Command:
         """Reduce one payload to the redis-py call that carries it out.
 
-        The unknown-op guard is TEMPORARY: ``RedisOp`` declares every command
-        the design specifies before every renderer exists, and without the
-        guard a payload naming an unrendered op would fall through silently
-        rather than fail. It goes away once the table is complete.
+        A script is looked up by name; everything else goes through the
+        renderer table.
         """
-        renderer = _COMMAND_RENDERERS.get(payload.op)
-        if renderer is None:
-            raise ValueError(f'RedisSink cannot yet build op {payload.op.value!r}')
+        if payload.op is RedisOp.SCRIPT:
+            return self._build_script_command(payload)
+        renderer = _COMMAND_RENDERERS[payload.op]
         key = self._config.key_prefix + payload.key
         method, args, kwargs = renderer(payload, key)
         return _PlainCommand(
@@ -272,7 +321,27 @@ class RedisSink(BaseSink[RedisPayload]):
             kwargs=kwargs,
         )
 
-    async def _execute_batch(self, commands: list[_PlainCommand]) -> None:
+    def _build_script_command(self, payload: RedisPayload) -> _ScriptCommand:
+        """Look up an operator-authored script and bind its keys and args.
+
+        EVERY entry of ``keys`` is prefixed, not just the single-key ops'
+        ``key``: the prefix is this sink instance's namespace, and a script
+        given raw keys could write outside it.
+        """
+        script = self._scripts.get(payload.script)
+        if script is None:
+            known = ', '.join(sorted(self._scripts)) or '<none configured>'
+            raise ValueError(f'unknown redis script {payload.script!r} on sink {self._name!r}; configured: {known}')
+        keys = [self._config.key_prefix + key for key in payload.keys]
+        return _ScriptCommand(
+            op=payload.op,
+            label=f'script={payload.script} keys={keys}',
+            script=script,
+            keys=keys,
+            args=list(payload.args),
+        )
+
+    async def _execute_batch(self, commands: list[_Command]) -> None:
         """Send every command through one pipeline, propagating any failure.
 
         A failure is NOT replayed. The original fallback caught every
@@ -314,7 +383,7 @@ class RedisSink(BaseSink[RedisPayload]):
                 f'{len(failed)} of {len(commands)} Redis commands failed; first failure on {command.label}: {error}'
             ) from error
 
-    async def _execute_single(self, command: _PlainCommand) -> None:
+    async def _execute_single(self, command: _Command) -> None:
         """Run one command directly — the shape the pre-batching loop produced."""
         assert self._client is not None
         await command.execute(self._client)
