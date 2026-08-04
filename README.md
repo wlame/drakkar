@@ -81,7 +81,7 @@ from prometheus_client import Counter
 from drakkar import (
     BaseDrakkarHandler, CollectResult, DeliveryAction, DeliveryError,
     ErrorAction, ExecutorTask, KafkaPayload, PostgresOp, PostgresPayload,
-    RedisPayload, make_task_id,
+    RedisOp, RedisPayload, make_task_id,
 )
 from models import InputMessage, ProcessedResult, RequestKey, ResultSummary, StatusUpdate
 
@@ -142,9 +142,11 @@ class MyHandler(BaseDrakkarHandler[InputMessage, ProcessedResult]):
 
         # conditional: cache successful results in Redis
         if output.processed:
-            sinks.redis.append(
-                RedisPayload(key=f"result:{output.request_id}", data=summary, ttl=3600)
-            )
+            sinks.redis.extend([
+                RedisPayload(key=f"result:{output.request_id}", data=summary, ttl=3600),
+                # INCRBY drakkar:hits:<day> 1
+                RedisPayload(op=RedisOp.INCRBY, key=f"hits:{output.day}", amount=1),
+            ])
 
         return sinks
 
@@ -272,7 +274,7 @@ Configure any combination in the `sinks:` section. Each type supports multiple n
 | `PostgresPayload` | `op`, `table`, `data`, `where`, `conflict`, `statement`, `params` | INSERT / UPDATE / UPSERT, or operator-authored SQL by name |
 | `MongoPayload` | `data: BaseModel`, `collection: str` | `data.model_dump()` -> BSON document |
 | `HttpPayload` | `data: BaseModel` | POST body per `encoding` (`json`/`form`/`multipart`) |
-| `RedisPayload` | `data: BaseModel`, `key: str`, `ttl: int?` | `data.model_dump_json()` -> string value |
+| `RedisPayload` | `op`, `key`, `data`, `ttl`, `fields`, `members`, `amount`, `script`, `keys`, `args` | one write command per data type, or operator-authored Lua by name |
 | `FilePayload` | `data: BaseModel`, `path: str` | `data.model_dump_json() + "\n"` -> JSONL line |
 
 **Routing**: if you have multiple sinks of the same type, set `sink="name"` on the payload. With a single sink per type, the framework routes automatically.

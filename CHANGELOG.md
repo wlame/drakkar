@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The Redis sink issues more than SET.** `RedisPayload.op` selects one
+  write command per data type — `set` (the default, so existing handlers
+  are unaffected), `delete`, `expire`, `incrby`, `hset`, `hdel`, `push`,
+  `trim`, `sadd`, `srem`, `zadd` — with the fields each one needs. A field
+  the chosen op does not use is a validation error rather than a silently
+  ignored value, and a required collection may not be empty.
+
+- **Operator-authored Lua, invoked by name.** Scripts declared under
+  `sinks.redis.<instance>.scripts` are registered at startup and run by a
+  payload with `op='script'`, its `keys` and `args` passed as `KEYS` and
+  `ARGV`. This is the escape hatch for multi-step or conditional logic, and
+  the only way to get server-side atomicity — a pipeline is not a
+  transaction. Values are never interpolated into the body, so message
+  content cannot alter what runs, and DLQ entries and logs carry the script
+  name rather than Lua that could leak row data. Every entry of `keys` is
+  key-prefixed, so a script cannot reach outside its sink's namespace.
+
+- `RedisSink.client` exposes the `redis.asyncio` client after connect,
+  mirroring `PostgresSink.pool`. Reads stay out of the sink itself, so a
+  read-modify-write cycle goes through this.
+
+- The message probe now reports which command a Redis payload plans
+  (`extras.op`); a script reports its name as the record's `destination`.
+
+### Changed
+
+- **Redis pipeline failures are attributed positionally and nothing is
+  re-sent.** The pipeline now runs with `raise_on_error=False`, so a
+  per-command error names its own payload while the commands that
+  succeeded are left alone. The previous behaviour re-sent the batch, which
+  is what made a non-idempotent command unsafe to batch at all.
+
+- `RedisSink` decides retry-safety per batch: a batch containing `incrby`,
+  `push`, or `script` is not fast-retried, because those accumulate or are
+  opaque. Everything else converges and stays retry-safe.
+
+- Redis mapping arguments are emitted in sorted key order (`hset` fields,
+  `zadd` members) so both backends issue identical commands;
+  caller-supplied lists (`hdel` fields, `sadd`/`srem` members) keep their
+  order. New shared corpus: `tests/fixtures/redis_commands.json`.
+
 ### Fixed
 
 - **Dead-lettered payloads lost their body.** Every sink payload declares

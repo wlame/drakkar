@@ -222,7 +222,16 @@ sinks:
       url: redis://localhost:6379/0  # env: DK_SINKS__REDIS__CACHE__URL
       key_prefix: ''               # prepended to every key, e.g. "result:". env: DK_SINKS__REDIS__CACHE__KEY_PREFIX
       ui_url: ''                   # RedisInsight URL. env: DK_SINKS__REDIS__CACHE__UI_URL
+      scripts:                     # optional. Operator-authored Lua by name
+        push_and_cap: |            # env: DK_SINKS__REDIS__CACHE__SCRIPTS__PUSH_AND_CAP
+          redis.call('LPUSH', KEYS[1], ARGV[1])
+          redis.call('LTRIM', KEYS[1], 0, tonumber(ARGV[2]) - 1)
 ```
+
+Script names must match `^[a-z_][a-z0-9_]*$`; values reach the script as `KEYS`
+and `ARGV`, never interpolated. The Lua is not parsed at startup and not checked
+against a live server, so a broken script fails at delivery. See
+[Sink Write Operations](sink-write-operations.md).
 
 ### Filesystem sink
 
