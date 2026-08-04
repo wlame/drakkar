@@ -1475,7 +1475,19 @@ def _make_redis_sink(redis_sink_config):
 
     mock_client = AsyncMock()
     pipe = MagicMock()
-    pipe.execute = AsyncMock(return_value=[])
+
+    async def _execute(raise_on_error: bool = True) -> list[object]:
+        """Return one result per queued command, as the real pipeline does.
+
+        A fixed ``[]`` would be the same class of dishonesty as the
+        coroutine-returning ``pipeline()`` this helper was written to fix:
+        attribution zips results against commands, so a wrongly-sized list
+        would let the sink drop failures on the floor under test.
+        """
+        queued = [call for call in pipe.mock_calls if not call[0].startswith('execute')]
+        return [True] * len(queued)
+
+    pipe.execute = AsyncMock(side_effect=_execute)
     mock_client.pipeline = MagicMock(return_value=pipe)
 
     sink = RedisSink('cache', redis_sink_config)
@@ -1611,6 +1623,89 @@ async def test_redis_sink_pipeline_failure_propagates_without_replay(redis_sink_
     ]
     with pytest.raises(RuntimeError, match='pipeline exploded'):
         await sink.deliver(payloads)
+
+
+async def test_redis_sink_pipeline_is_executed_without_raising_on_error(redis_sink_config):
+    """``raise_on_error=False`` is what makes positional attribution possible.
+
+    It returns a list aligned with the queued commands, per-command errors
+    present as exception OBJECTS rather than raised — so the failing payload
+    can be named without re-sending the ones that succeeded.
+    """
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+    pipe = mock_client.pipeline.return_value
+    pipe.execute = AsyncMock(return_value=[True, True])
+
+    await sink.deliver(
+        [
+            RedisPayload(key='k1', data=SampleOutput(request_id='r1')),
+            RedisPayload(key='k2', data=SampleOutput(request_id='r2')),
+        ]
+    )
+    pipe.execute.assert_awaited_once_with(raise_on_error=False)
+
+
+async def test_redis_sink_names_the_failing_command_without_resending_anything(redis_sink_config):
+    """A per-command error names that payload and re-sends nothing.
+
+    This is what makes non-idempotent commands safe to batch at all: the
+    old fallback re-sent the whole batch, which would double-apply an
+    INCRBY that had already been applied.
+    """
+    from drakkar.sinks.redis import RedisCommandError
+
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+    pipe = mock_client.pipeline.return_value
+    wrongtype = Exception('WRONGTYPE Operation against a key holding the wrong kind of value')
+    pipe.execute = AsyncMock(return_value=[True, wrongtype, True])
+
+    payloads = [RedisPayload(key=f'k{i}', data=SampleOutput(request_id=f'r{i}')) for i in range(3)]
+    with pytest.raises(RedisCommandError) as excinfo:
+        await sink.deliver(payloads)
+
+    message = str(excinfo.value)
+    assert 'drakkar:k1' in message, 'the error must name the failing key'
+    assert '1 of 3' in message, 'the error must report how many failed'
+    assert excinfo.value.__cause__ is wrongtype
+    # Nothing was re-sent: no per-command path, one pipeline only.
+    mock_client.set.assert_not_called()
+    mock_client.pipeline.assert_called_once()
+
+
+async def test_redis_sink_reports_every_failure_but_names_the_first(redis_sink_config):
+    """Several failures are counted; the first is the one an operator chases."""
+    from drakkar.sinks.redis import RedisCommandError
+
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+    pipe = mock_client.pipeline.return_value
+    pipe.execute = AsyncMock(return_value=[Exception('first'), True, Exception('third')])
+
+    payloads = [RedisPayload(key=f'k{i}', data=SampleOutput(request_id=f'r{i}')) for i in range(3)]
+    with pytest.raises(RedisCommandError, match='2 of 3'):
+        await sink.deliver(payloads)
+
+
+async def test_redis_sink_rejects_a_result_list_that_does_not_match_the_batch(redis_sink_config):
+    """A short result list must be loud, not a silently dropped failure.
+
+    redis-py guarantees one result per queued command; if that ever stops
+    holding, zipping leniently would discard the failures at the tail.
+    """
+    sink, mock_client = _make_redis_sink(redis_sink_config)
+    pipe = mock_client.pipeline.return_value
+    pipe.execute = AsyncMock(return_value=[True])  # one result for two commands
+
+    payloads = [RedisPayload(key=f'k{i}', data=SampleOutput(request_id=f'r{i}')) for i in range(2)]
+    with pytest.raises(ValueError, match='argument 2 is shorter'):
+        await sink.deliver(payloads)
+
+
+async def test_redis_command_error_is_never_classified_as_transient():
+    """A WRONGTYPE must not be retried — it fails identically every time."""
+    from drakkar.sinks.redis import RedisCommandError
+
+    assert not issubclass(RedisCommandError, ConnectionError)
+    assert not issubclass(RedisCommandError, TimeoutError)
 
 
 @pytest.mark.parametrize(
