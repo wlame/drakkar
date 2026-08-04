@@ -1551,6 +1551,75 @@ def _script_config(**overrides):
     )
 
 
+# --- golden wire-level commands, shared with drakkar-go ---
+#
+# tests/fixtures/redis_commands.json is mirrored verbatim into the Go repo.
+# The cases run through the sink's OWN command builder into a REAL redis-py
+# client whose transport is intercepted, so what is pinned is the argument
+# vector redis-py actually sends — not a test-local idea of it. A divergence
+# between the two backends fails here instead of reaching an operator's Redis.
+
+_REDIS_COMMAND_CORPUS = json.loads((Path(__file__).parent / 'fixtures' / 'redis_commands.json').read_text())
+
+
+def _corpus_data_model(fields: dict):
+    """Build a model whose model_dump_json() yields the fixture's object."""
+    return create_model('CorpusData', **{name: (Any, value) for name, value in fields.items()})()
+
+
+async def _capture_wire_command(config, payload: RedisPayload) -> list:
+    """Deliver one payload and return the argv redis-py put on the wire.
+
+    The client is a real ``redis.asyncio.Redis`` that never connects: only
+    ``execute_command`` is replaced, and every method above it — argument
+    assembly, keyword expansion, the EVALSHA hashing — is redis-py's own.
+    That is what makes these vectors trustworthy as a cross-backend
+    contract rather than a restatement of this repo's code.
+    """
+    import redis.asyncio as aioredis
+
+    from drakkar.sinks.redis import RedisSink
+
+    client = aioredis.Redis(host='127.0.0.1', port=1)
+    captured: list[tuple] = []
+    client.execute_command = AsyncMock(side_effect=lambda *args, **kw: captured.append(args))
+
+    sink = RedisSink('cache', config)
+    with patch('redis.asyncio.from_url', return_value=client):
+        await sink.connect()
+    await sink.deliver([payload])
+
+    assert len(captured) == 1, f'expected exactly one command, got {captured}'
+    return list(captured[0])
+
+
+@pytest.mark.parametrize('case', _REDIS_COMMAND_CORPUS['cases'], ids=lambda c: c['case'])
+async def test_redis_command_corpus(case):
+    """Both backends must issue this command with these arguments, in this order."""
+    from drakkar.config import RedisSinkConfig
+
+    config = RedisSinkConfig(
+        url='redis://localhost:6379/0',
+        key_prefix=_REDIS_COMMAND_CORPUS['key_prefix'],
+        scripts=_REDIS_COMMAND_CORPUS['scripts'],
+    )
+    fields = dict(case['payload'])
+    if fields.get('data') is not None:
+        fields['data'] = _corpus_data_model(fields['data'])
+
+    command = await _capture_wire_command(config, RedisPayload(**fields))
+
+    assert command == case['command']
+
+
+def test_redis_command_corpus_covers_every_op():
+    """A new op without a vector must fail here, not be quietly unpinned."""
+    from drakkar.models import RedisOp
+
+    covered = {case['payload']['op'] for case in _REDIS_COMMAND_CORPUS['cases']}
+    assert covered == {op.value for op in RedisOp}
+
+
 # --- per-batch retry safety ---
 
 
