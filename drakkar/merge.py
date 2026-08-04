@@ -196,6 +196,11 @@ def scan_db(path: str) -> DbStats:
         filename=os.path.basename(path),
         size_bytes=os.path.getsize(path),
     )
+    # ``db`` is bound before the try so ``finally`` can close it on every
+    # path. Closing at the end of the try body instead leaked the handle
+    # whenever a file raised — and this runs per file on every poll of the
+    # databases endpoint, so an unreadable file leaked a descriptor a second.
+    db: sqlite3.Connection | None = None
     try:
         db = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
         db.row_factory = _dict_factory
@@ -219,10 +224,11 @@ def scan_db(path: str) -> DbStats:
 
         if _table_exists(db, 'worker_state'):
             stats.has_state = True
-
-        db.close()
     except Exception:
         pass
+    finally:
+        if db is not None:
+            db.close()
     return stats
 
 
@@ -281,6 +287,7 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
     for db_path in db_paths:
         basename = os.path.basename(db_path)
         result.source_files.append(basename)
+        src: sqlite3.Connection | None = None
         try:
             src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
             src.row_factory = _dict_factory
@@ -315,9 +322,11 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
 
             assert worker_id is not None
             worker_map[db_path] = worker_id
-            src.close()
         except Exception:
             continue
+        finally:
+            if src is not None:
+                src.close()
 
     # phase 2: collect all events into a temp list, sort by ts, then insert
     all_events: list[tuple] = []
@@ -326,6 +335,7 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
         if db_path not in worker_map:
             continue
         wid = worker_map[db_path]
+        src: sqlite3.Connection | None = None
         try:
             src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
             src.row_factory = _dict_factory
@@ -334,9 +344,11 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
                 for row in rows:
                     values = tuple(row.get(col) for col in _EVENT_COLUMNS)
                     all_events.append((wid, *values))
-            src.close()
         except Exception:
             continue
+        finally:
+            if src is not None:
+                src.close()
 
     # sort all events by ts (index 1 in the tuple: worker_id, ts, ...)
     all_events.sort(key=lambda r: r[1] or 0)
@@ -351,6 +363,7 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
         if db_path not in worker_map:
             continue
         wid = worker_map[db_path]
+        src: sqlite3.Connection | None = None
         try:
             src = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
             src.row_factory = _dict_factory
@@ -362,9 +375,11 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
                     values = [row.get(col) for col in _STATE_COLUMNS]
                     out.execute(f'INSERT INTO worker_states ({cols}) VALUES ({placeholders})', [wid, *values])
                     result.state_count += 1
-            src.close()
         except Exception:
             continue
+        finally:
+            if src is not None:
+                src.close()
 
     out.commit()
     out.close()
