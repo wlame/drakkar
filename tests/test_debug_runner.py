@@ -789,9 +789,20 @@ async def test_sink_collector_flatten_redis_payload_without_data():
 
 
 async def test_sink_collector_flatten_mongo_payload_without_data():
-    """A Mongo payload with no data flattens with ``payload=None``."""
+    """A Mongo payload with no data flattens with ``payload=None``.
+
+    A delete carries only a filter, which is why the collector must tolerate
+    a null body. This used to be spelled with ``model_construct`` because no
+    dataless Mongo op existed yet; it now uses the real one.
+    """
+    from drakkar.models import MongoOp
+
     collector = DebugSinkCollector()
-    cr = CollectResult(mongo=[MongoPayload.model_construct(collection='jobs', data=None)])
+    cr = CollectResult(
+        mongo=[
+            MongoPayload(op=MongoOp.DELETE_MANY, collection='jobs', filter=_TinyOutput(id=7)),
+        ]
+    )
     await collector(cr, 0)
 
     flat = collector.flatten()

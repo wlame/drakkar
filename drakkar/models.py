@@ -705,18 +705,130 @@ class PostgresPayload(BaseModel):
         return self
 
 
-class MongoPayload(BaseModel):
-    """Payload for a MongoDB sink — inserts a document into a collection.
+class MongoOp(StrEnum):
+    """Which operation the Mongo sink builds for a payload.
 
-    The framework serializes `data` via `model_dump()` to get a dict
-    suitable for MongoDB document insertion.
+    Six operations are built by the framework from the payload's own
+    fields; ``STATEMENT`` instead names MQL the operator authored in
+    configuration, which the framework fills bound parameters into — the
+    escape hatch for anything the declarative fields cannot express, such
+    as ``$inc``, ``$push``, or a computed pipeline update.
+
+    One and many stay explicit rather than hiding behind a ``multi`` flag:
+    the blast radius differs by orders of magnitude, the driver makes the
+    distinction primary, and a boolean that silently defaults one way is
+    exactly the footgun a delete deserves least.
+    """
+
+    INSERT = 'insert'
+    UPDATE_ONE = 'update_one'
+    UPDATE_MANY = 'update_many'
+    UPSERT = 'upsert'
+    DELETE_ONE = 'delete_one'
+    DELETE_MANY = 'delete_many'
+    STATEMENT = 'statement'
+
+
+# Per-op field contract: (required, must-be-unset). Enforced in BOTH
+# directions, for the same reason as _PG_OP_FIELDS and _REDIS_OP_FIELDS —
+# seven operations in one class with optional fields would otherwise let
+# MongoPayload(op='delete_one', data=doc) silently drop the document.
+_MONGO_OP_FIELDS: dict[MongoOp, tuple[frozenset[str], frozenset[str]]] = {
+    MongoOp.INSERT: (frozenset({'collection', 'data'}), frozenset({'filter', 'statement', 'params'})),
+    MongoOp.UPDATE_ONE: (frozenset({'collection', 'data', 'filter'}), frozenset({'statement', 'params'})),
+    MongoOp.UPDATE_MANY: (frozenset({'collection', 'data', 'filter'}), frozenset({'statement', 'params'})),
+    MongoOp.UPSERT: (frozenset({'collection', 'data', 'filter'}), frozenset({'statement', 'params'})),
+    MongoOp.DELETE_ONE: (frozenset({'collection', 'filter'}), frozenset({'data', 'statement', 'params'})),
+    MongoOp.DELETE_MANY: (frozenset({'collection', 'filter'}), frozenset({'data', 'statement', 'params'})),
+    MongoOp.STATEMENT: (frozenset({'statement'}), frozenset({'collection', 'data', 'filter'})),
+}
+
+# The value each field holds when the user has not set it.
+_MONGO_FIELD_UNSET: dict[str, object] = {
+    'collection': '',
+    'data': None,
+    'filter': None,
+    'statement': '',
+    'params': None,
+}
+
+
+class MongoPayload(BaseModel):
+    """Payload for a MongoDB sink — one write operation, or a named statement.
+
+    ``op`` selects the operation and defaults to ``INSERT``, so
+    ``MongoPayload(collection=..., data=...)`` inserts a document.
+
+    Examples::
+
+        # insert_one
+        MongoPayload(collection='audit', data=summary)
+
+        # update_one with $set, against an equality filter
+        MongoPayload(op=MongoOp.UPDATE_ONE, collection='jobs',
+                     data=JobStatus(status='done'), filter=JobKey(id=42))
+
+        # delete_many — filter is required and may not be empty
+        MongoPayload(op=MongoOp.DELETE_MANY, collection='staging',
+                     filter=StagingKey(batch=batch_id))
+
+        # operator-authored MQL from sinks.mongo.<instance>.statements
+        MongoPayload(op=MongoOp.STATEMENT, statement='record_attempt',
+                     params=AttemptParams(id=job_id, now=now))
+
+    ``data`` and ``filter`` stay ``BaseModel``s, unlike the Redis payload's
+    collections: a Mongo document is a record whose field names are
+    naturally static, and keeping ``filter`` a model is what holds the
+    declarative tier to equality-only predicates by construction. A
+    dynamic-key filter is a named statement.
+
+    Field order is a contract: it fixes the DLQ JSON byte order the Go
+    backend must reproduce.
     """
 
     sink: str = _SINK_FIELD
-    collection: str = Field(description='Target MongoDB collection name.')
-    data: SerializeAsAny[BaseModel] = Field(
-        description='Payload model. Serialized via model_dump() to a dict for document insertion.'
+    op: MongoOp = Field(
+        default=MongoOp.INSERT,
+        description='Which operation to perform. Defaults to insert.',
     )
+    collection: str = Field(
+        default='',
+        description='Target MongoDB collection. Required for every op except statement, which declares its own.',
+    )
+    data: SerializeAsAny[BaseModel] | None = Field(
+        default=None,
+        description=(
+            'Insert and update ops only. Serialized via model_dump() — the inserted '
+            'document, or the $set assignments for an update.'
+        ),
+    )
+    filter: SerializeAsAny[BaseModel] | None = Field(
+        default=None,
+        description=(
+            'Update, upsert and delete ops only, required. Serialized via model_dump() '
+            'to an equality predicate. Never optional: an empty filter matches every document.'
+        ),
+    )
+    statement: str = Field(
+        default='',
+        description='Statement only, required. Key under sinks.mongo.<instance>.statements naming the MQL to run.',
+    )
+    params: SerializeAsAny[BaseModel] | None = Field(
+        default=None,
+        description='Statement only. Serialized and bound to the template\'s ":name" placeholders.',
+    )
+
+    @model_validator(mode='after')
+    def _check_op_fields(self) -> 'MongoPayload':
+        """Enforce the per-op field contract in both directions."""
+        required, forbidden = _MONGO_OP_FIELDS[self.op]
+        for name in sorted(required):
+            if getattr(self, name) == _MONGO_FIELD_UNSET[name]:
+                raise ValueError(f'MongoPayload(op={self.op.value!r}) requires {name!r}')
+        for name in sorted(forbidden):
+            if getattr(self, name) != _MONGO_FIELD_UNSET[name]:
+                raise ValueError(f'MongoPayload(op={self.op.value!r}) does not use {name!r} — remove it or change op')
+        return self
 
 
 class HttpPayload(BaseModel):
