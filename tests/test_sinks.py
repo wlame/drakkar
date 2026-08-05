@@ -35,6 +35,16 @@ class SampleOutput(BaseModel):
     answer: str = '42'
 
 
+class _JobKey(BaseModel):
+    """A minimal equality filter for the Mongo operation tests."""
+
+    id: int = 7
+
+
+class _Empty(BaseModel):
+    """Dumps to {} — the shape both unbounded-write guards must refuse."""
+
+
 def _make_mock_message():
     """Create a mock confluent_kafka Message for resolved delivery futures."""
     msg = MagicMock()
@@ -3151,13 +3161,13 @@ async def test_postgres_sink_update_sorts_set_and_predicate_columns(pg_sink_conf
 
 async def test_mongo_sink_rejects_ops_it_cannot_yet_build(mongo_sink_config):
     """The guard exists only between the payload type gaining every op and
-    the sink learning to execute them. Delete it, and this test, once all
-    six declarative ops build."""
+    the sink learning to execute them. Every declarative op builds now;
+    delete the guard and this test once named statements land too."""
     sink, collections, _ = _make_mongo_sink(mongo_sink_config)
     mock_collection = _mongo_collection(collections)
 
     with pytest.raises(ValueError, match='cannot be built yet'):
-        await sink.deliver([MongoPayload(op='delete_many', collection='c', filter=SampleOutput(request_id='r'))])
+        await sink.deliver([MongoPayload(op='statement', statement='claim_job')])
 
     mock_collection.insert_one.assert_not_awaited()
 
@@ -3203,3 +3213,111 @@ async def test_mongo_sink_batches_an_uninterrupted_run(mongo_sink_config):
     models = collections['results'].bulk_write.await_args[0][0]
     assert [m._doc['request_id'] for m in models] == ['r1', 'r2']
     assert collections['audit'].insert_one.await_count == 1
+
+
+async def test_mongo_sink_builds_every_declarative_op(mongo_sink_config):
+    """Each op maps to its driver write model, with the arguments Mongo needs."""
+    from pymongo import DeleteMany, DeleteOne, UpdateMany, UpdateOne
+
+    cases = [
+        (
+            MongoPayload(op='update_one', collection='jobs', data=SampleOutput(request_id='r'), filter=_JobKey(id=7)),
+            UpdateOne,
+        ),
+        (
+            MongoPayload(op='update_many', collection='jobs', data=SampleOutput(request_id='r'), filter=_JobKey(id=7)),
+            UpdateMany,
+        ),
+        (
+            MongoPayload(op='upsert', collection='jobs', data=SampleOutput(request_id='r'), filter=_JobKey(id=7)),
+            UpdateOne,
+        ),
+        (MongoPayload(op='delete_one', collection='jobs', filter=_JobKey(id=7)), DeleteOne),
+        (MongoPayload(op='delete_many', collection='jobs', filter=_JobKey(id=7)), DeleteMany),
+    ]
+    for payload, want_model in cases:
+        sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+        # Two payloads so the run takes the bulk path, where the model is
+        # what actually goes to the driver.
+        await sink.deliver([payload, payload])
+
+        models = collections['jobs'].bulk_write.await_args[0][0]
+        assert all(isinstance(m, want_model) for m in models), payload.op
+
+
+async def test_mongo_sink_update_wraps_data_in_a_set_assignment(mongo_sink_config):
+    """The declarative tier assigns fields; anything richer is a statement."""
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+
+    await sink.deliver(
+        [MongoPayload(op='update_one', collection='jobs', data=SampleOutput(request_id='r1'), filter=_JobKey(id=7))]
+    )
+
+    predicate, update = collections['jobs'].update_one.await_args[0]
+    assert predicate == {'id': 7}
+    assert update == {'$set': {'request_id': 'r1', 'answer': '42'}}
+
+
+async def test_mongo_sink_upsert_passes_the_upsert_flag(mongo_sink_config):
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+
+    await sink.deliver(
+        [MongoPayload(op='upsert', collection='jobs', data=SampleOutput(request_id='r1'), filter=_JobKey(id=7))]
+    )
+
+    assert collections['jobs'].update_one.await_args[1] == {'upsert': True}
+
+
+async def test_mongo_sink_delete_sends_only_the_filter(mongo_sink_config):
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+
+    await sink.deliver([MongoPayload(op='delete_many', collection='staging', filter=_JobKey(id=7))])
+
+    assert collections['staging'].delete_many.await_args[0] == ({'id': 7},)
+
+
+async def test_mongo_sink_rejects_a_filter_that_dumps_empty(mongo_sink_config):
+    """The second guard: an empty dumped filter matches EVERY document.
+
+    The validator rejects a missing filter at construction; this catches a
+    model that dumps to nothing, which a payload mutated afterwards could
+    still produce.
+    """
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+
+    with pytest.raises(ValueError, match='matches every document'):
+        await sink.deliver([MongoPayload(op='delete_many', collection='staging', filter=_Empty())])
+
+    assert 'staging' not in collections, 'the guard must fire before the collection is reached'
+
+
+async def test_mongo_sink_rejects_data_that_dumps_empty(mongo_sink_config):
+    """An empty $set is a malformed update."""
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+
+    with pytest.raises(ValueError, match="empty 'data'"):
+        await sink.deliver([MongoPayload(op='update_one', collection='jobs', data=_Empty(), filter=_JobKey(id=7))])
+
+    assert 'jobs' not in collections, 'the guard must fire before the collection is reached'
+
+
+async def test_mongo_sink_mixes_operations_in_one_bulk_write(mongo_sink_config):
+    """One round trip can carry an insert, an update and a delete.
+
+    insert_many could not express this at all, which is the third reason the
+    execution path moved to bulk_write.
+    """
+    from pymongo import DeleteOne, InsertOne, UpdateOne
+
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+
+    await sink.deliver(
+        [
+            MongoPayload(collection='jobs', data=SampleOutput(request_id='r1')),
+            MongoPayload(op='update_one', collection='jobs', data=SampleOutput(request_id='r2'), filter=_JobKey(id=7)),
+            MongoPayload(op='delete_one', collection='jobs', filter=_JobKey(id=8)),
+        ]
+    )
+
+    models = collections['jobs'].bulk_write.await_args[0][0]
+    assert [type(m) for m in models] == [InsertOne, UpdateOne, DeleteOne]
