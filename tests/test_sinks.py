@@ -3469,3 +3469,49 @@ async def test_mongo_sink_does_not_remap_a_write_error(mongo_sink_config):
 
     with pytest.raises(DuplicateKeyError):
         await sink.deliver([MongoPayload(collection='results', data=SampleOutput())])
+
+
+@pytest.mark.parametrize(
+    ('payloads', 'expected'),
+    [
+        # $set against a fixed filter, and removal, both converge.
+        ([{'op': 'update_one'}], True),
+        ([{'op': 'update_many'}], True),
+        ([{'op': 'upsert'}], True),
+        ([{'op': 'delete_one'}], True),
+        ([{'op': 'delete_many'}], True),
+        ([{'op': 'update_one'}, {'op': 'delete_many'}], True),
+        # A plain insert duplicates documents.
+        ([{'op': 'insert'}], False),
+        # Operator MQL is opaque — $inc accumulates and we cannot tell.
+        ([{'op': 'statement'}], False),
+        # One unsafe payload vetoes an otherwise safe batch.
+        ([{'op': 'delete_one'}, {'op': 'insert'}], False),
+        # Vacuously safe — nothing to duplicate.
+        ([], True),
+    ],
+)
+async def test_mongo_sink_batch_idempotent(mongo_sink_config, payloads, expected):
+    sink, _, _ = await _make_mongo_sink(mongo_sink_config)
+
+    built = []
+    for spec in payloads:
+        op = spec['op']
+        if op == 'statement':
+            built.append(MongoPayload(op=op, statement='s'))
+        elif op == 'insert':
+            built.append(MongoPayload(op=op, collection='c', data=SampleOutput()))
+        elif op.startswith('delete'):
+            built.append(MongoPayload(op=op, collection='c', filter=_JobKey()))
+        else:
+            built.append(MongoPayload(op=op, collection='c', data=SampleOutput(), filter=_JobKey()))
+
+    assert sink.batch_idempotent(built) is expected
+
+
+async def test_mongo_sink_keeps_the_class_flag_as_the_conservative_fallback(mongo_sink_config):
+    """The type-level flag stays False; the per-batch hook widens it."""
+    sink, _, _ = await _make_mongo_sink(mongo_sink_config)
+
+    assert sink.idempotent is False
+    assert sink.batch_idempotent([MongoPayload(op='delete_many', collection='c', filter=_JobKey())]) is True
