@@ -20,10 +20,17 @@ def _compiled(document):
 # --- parameter collection ---------------------------------------------------
 
 
-def test_compile_collects_distinct_names_in_first_appearance_order():
+def test_compile_collects_distinct_names_sorted():
+    """Sorted, not in first-appearance order.
+
+    The Go backend decodes a template into a map with no insertion order to
+    recover, so sorting is the only rule both backends can honour — the same
+    reasoning behind sorted Postgres columns and Redis mapping arguments.
+    Binding is keyed by name, so the order changes nothing observable.
+    """
     compiled = _compiled({'b': ':second', 'a': ':first', 'c': ':second'})
 
-    assert compiled.params == ('second', 'first')
+    assert compiled.params == ('first', 'second')
 
 
 def test_compile_of_a_template_without_placeholders_binds_nothing():
@@ -134,7 +141,7 @@ def test_substitute_reaches_into_nested_documents_and_arrays():
         }
     )
 
-    assert compiled.params == ('status', 'tag', 'deep')
+    assert compiled.params == ('deep', 'status', 'tag')
     assert substitute(compiled, {'status': 'done', 'tag': 'x', 'deep': 9}) == {
         '$set': {'status': 'done', 'tags': ['fixed', 'x', {'deep': 9}]},
         '$inc': {'attempts': 1},

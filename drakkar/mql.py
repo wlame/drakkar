@@ -61,8 +61,15 @@ class CompiledTemplate:
 
     document: object
     params: tuple[str, ...]
-    """Distinct parameter names in first-appearance order. The caller
-    supplies exactly one value per name, however often it appears."""
+    """Distinct parameter names, SORTED. The caller supplies exactly one
+    value per name, however often it appears.
+
+    Sorted rather than in first-appearance order because the Go backend
+    decodes a template into a map with no insertion order to recover, so
+    sorting is the only rule both backends can honour unconditionally —
+    the same reasoning that sorts Postgres columns and Redis mapping
+    arguments. The order has no effect on binding, which is keyed by name;
+    it exists so the two backends can be compared."""
     plan: tuple[tuple[_Path, str], ...]
     """(path, parameter name) for every position to fill."""
 
@@ -83,7 +90,7 @@ def compile_template(document: object) -> CompiledTemplate:
     order: list[str] = []
     seen: set[str] = set()
     resolved = _walk(document, (), plan, order, seen)
-    return CompiledTemplate(document=resolved, params=tuple(order), plan=tuple(plan))
+    return CompiledTemplate(document=resolved, params=tuple(sorted(order)), plan=tuple(plan))
 
 
 def substitute(template: CompiledTemplate, params: Mapping[str, object]) -> object:
