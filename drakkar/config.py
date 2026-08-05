@@ -21,6 +21,8 @@ from drakkar.kafka_security import KafkaSecurityConfig, validate_client_config
 # the compiler from under ``drakkar/sinks/`` instead would execute
 # ``sinks/__init__.py``, which imports every sink, each of which imports this
 # module — a partially-initialized-module ImportError at config load.
+from drakkar.models import MongoOp
+from drakkar.mql import compile_template
 from drakkar.pgsql import compile_named_statement
 
 # Module-scope logger for config-time warnings (field/model validators).
@@ -46,6 +48,7 @@ _HTTP_BLOCKED_METADATA_HOSTS = frozenset(
 # they are constrained to lowercase snake_case rather than accepting arbitrary
 # keys. One pattern serves both escape hatches — the constraint is the same.
 _PG_STATEMENT_NAME_RE = re.compile(r'^[a-z_][a-z0-9_]*$')
+_MONGO_STATEMENT_NAME_RE = _PG_STATEMENT_NAME_RE
 _REDIS_SCRIPT_NAME_RE = _PG_STATEMENT_NAME_RE
 
 # --- Kafka source (consumer) config ---
@@ -195,6 +198,66 @@ class PostgresSinkConfig(BaseModel):
         return value
 
 
+# Which ops an operator-authored statement may declare. Deliberately NOT
+# every non-``statement`` op: the escape hatch exists for what the
+# declarative tier cannot express, and an insert is fully expressible as
+# ``MongoPayload(op='insert', collection=…, data=…)``. An insert template
+# would also need a DOCUMENT rather than the ``update`` this model carries,
+# so admitting it would ship a meaningless field combination.
+_MONGO_STATEMENT_OPS = frozenset(
+    {
+        MongoOp.UPDATE_ONE,
+        MongoOp.UPDATE_MANY,
+        MongoOp.UPSERT,
+        MongoOp.DELETE_ONE,
+        MongoOp.DELETE_MANY,
+    }
+)
+
+# The statement ops that write a document, and therefore need ``update``.
+_MONGO_UPDATE_OPS = frozenset({MongoOp.UPDATE_ONE, MongoOp.UPDATE_MANY, MongoOp.UPSERT})
+
+
+class MongoStatementConfig(BaseModel):
+    """One operator-authored MQL statement.
+
+    Unlike the Postgres and Redis escape hatches this is a MODEL rather than
+    a string, because MQL is structured data: a statement carries its own
+    collection, operation, filter, and update. Flattening that into a string
+    would mean embedding JSON in YAML, which is strictly worse to author and
+    to review.
+
+    Values reach the document through ``":name"`` placeholders bound from the
+    payload's ``params``, and never by interpolation — see ``drakkar.mql``
+    for the four substitution rules.
+    """
+
+    collection: str = Field(description='Target MongoDB collection.')
+    op: MongoOp = Field(description='Which write operation to perform.')
+    filter: dict[str, Any] = Field(
+        description='Equality-or-richer predicate selecting the documents to write. Must be non-empty.'
+    )
+    update: dict[str, Any] | list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            'Update document for the update ops, absent for the delete ops. A LIST is an '
+            "aggregation pipeline — MongoDB's own mechanism for computed updates."
+        ),
+    )
+
+    def template(self) -> dict[str, Any]:
+        """The whole statement as one document, for compilation.
+
+        Compiling filter and update together means one set of parameter
+        names spans both, which is what lets a payload bind ``:id`` once for
+        a statement that matches on it and writes it.
+        """
+        document: dict[str, Any] = {'filter': self.filter}
+        if self.update is not None:
+            document['update'] = self.update
+        return document
+
+
 class MongoSinkConfig(BaseModel):
     """Configuration for a MongoDB output sink.
 
@@ -203,7 +266,62 @@ class MongoSinkConfig(BaseModel):
 
     uri: str
     database: str
+    statements: dict[str, MongoStatementConfig] = Field(
+        default_factory=dict,
+        description=(
+            'Operator-authored MQL keyed by name. A MongoPayload with '
+            "op='statement' and a matching `statement` name runs the entry with "
+            'its `params` bound to the ":name" placeholders. This is the escape '
+            'hatch for anything the declarative fields cannot express — $inc, '
+            '$push, computed pipeline updates. Keeping the MQL here rather than '
+            'in the payload means message content can never reach an operator '
+            'position, where a value of {"$gt": ""} would match every document.'
+        ),
+    )
     ui_url: str = ''
+
+    @field_validator('statements')
+    @classmethod
+    def _validate_statements(cls, value: dict[str, MongoStatementConfig]) -> dict[str, MongoStatementConfig]:
+        """Reject malformed statement config at startup.
+
+        Checks only what the framework owns: the name shape, the op, a
+        non-empty collection and filter, update present exactly for the ops
+        that write one, and that the template compiles — which is also where
+        ``$where``/``$function`` are refused, at any depth including inside
+        aggregation-pipeline stages.
+
+        Deliberately does NOT verify statements against the live database.
+        Distinguishing "your MQL is malformed" from "that field does not
+        exist" would couple worker startup to database state, and
+        ``MongoPayload(collection='does_not_exist')`` already fails at
+        delivery rather than at startup.
+        """
+        for name, statement in value.items():
+            if not _MONGO_STATEMENT_NAME_RE.match(name):
+                raise ValueError(
+                    f'Invalid statement name {name!r}: must match '
+                    f'{_MONGO_STATEMENT_NAME_RE.pattern} (used as a structured-log field)'
+                )
+            if statement.op not in _MONGO_STATEMENT_OPS:
+                allowed = ', '.join(sorted(op.value for op in _MONGO_STATEMENT_OPS))
+                raise ValueError(f'Statement {name!r} has op {statement.op.value!r}; allowed ops are: {allowed}')
+            if not statement.collection:
+                raise ValueError(f'Statement {name!r} has an empty collection')
+            if not statement.filter:
+                raise ValueError(
+                    f'Statement {name!r} has an empty filter, which matches EVERY document in the collection'
+                )
+            wants_update = statement.op in _MONGO_UPDATE_OPS
+            if wants_update and statement.update is None:
+                raise ValueError(f'Statement {name!r} with op {statement.op.value!r} requires an update')
+            if not wants_update and statement.update is not None:
+                raise ValueError(f'Statement {name!r} with op {statement.op.value!r} does not use an update')
+            try:
+                compile_template(statement.template())
+            except ValueError as e:
+                raise ValueError(f'Statement {name!r}: {e}') from e
+        return value
 
 
 class HttpSinkConfig(BaseModel):
