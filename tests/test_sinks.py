@@ -957,14 +957,28 @@ def mongo_sink_config():
 
 
 def _make_mongo_sink(mongo_sink_config):
-    """Helper: create a MongoSink with a mocked PyMongo async client."""
+    """Helper: create a MongoSink with a mocked PyMongo async client.
+
+    ``db[name]`` returns a DISTINCT collection mock per name, recorded in
+    the returned registry. The previous helper handed back one shared mock
+    for every name, which made any assertion about WHICH collection received
+    a write vacuous — and grouping is precisely a per-collection dispatch
+    property. Every method the sink calls (``bulk_write``, ``insert_one``,
+    ``update_one``, …) is a coroutine on PyMongo's real ``AsyncCollection``,
+    so ``AsyncMock`` is the honest shape and a missing ``await`` fails
+    loudly.
+    """
     from unittest.mock import MagicMock
 
     from drakkar.sinks.mongo import MongoSink
 
-    mock_collection = AsyncMock()
+    collections: dict[str, AsyncMock] = {}
+
+    def _collection(name):
+        return collections.setdefault(name, AsyncMock())
+
     mock_db = MagicMock()
-    mock_db.__getitem__ = MagicMock(return_value=mock_collection)
+    mock_db.__getitem__ = MagicMock(side_effect=_collection)
     mock_client = MagicMock()
     mock_client.__getitem__ = MagicMock(return_value=mock_db)
     # close() is a coroutine on PyMongo's AsyncMongoClient (it was sync on
@@ -976,7 +990,12 @@ def _make_mongo_sink(mongo_sink_config):
     sink = MongoSink('analytics', mongo_sink_config)
     sink._client = mock_client
     sink._db = mock_db
-    return sink, mock_collection, mock_client
+    return sink, collections, mock_client
+
+
+def _mongo_collection(collections, name='results'):
+    """The recorded mock for one collection, created on demand."""
+    return collections.setdefault(name, AsyncMock())
 
 
 async def test_mongo_sink_connect(mongo_sink_config):
@@ -996,7 +1015,8 @@ async def test_mongo_sink_connect(mongo_sink_config):
 
 
 async def test_mongo_sink_deliver(mongo_sink_config):
-    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    mock_collection = _mongo_collection(collections)
 
     payload = MongoPayload(collection='results', data=SampleOutput(request_id='r1'))
     await sink.deliver([payload])
@@ -1009,7 +1029,8 @@ async def test_mongo_sink_deliver(mongo_sink_config):
 
 async def test_mongo_sink_deliver_batch(mongo_sink_config):
     """Documents sharing a collection go out as ONE insert_many."""
-    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    mock_collection = _mongo_collection(collections)
 
     payloads = [
         MongoPayload(collection='results', data=SampleOutput(request_id='r1')),
@@ -1025,7 +1046,8 @@ async def test_mongo_sink_deliver_batch(mongo_sink_config):
 
 async def test_mongo_sink_single_payload_uses_insert_one(mongo_sink_config):
     """A one-document group keeps the exact call the per-payload loop made."""
-    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    mock_collection = _mongo_collection(collections)
 
     await sink.deliver([MongoPayload(collection='results', data=SampleOutput(request_id='r1'))])
 
@@ -1035,7 +1057,8 @@ async def test_mongo_sink_single_payload_uses_insert_one(mongo_sink_config):
 
 async def test_mongo_sink_batch_failure_falls_back_per_document(mongo_sink_config):
     """A failed insert_many is retried per document so attribution survives."""
-    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    mock_collection = _mongo_collection(collections)
     mock_collection.insert_many.side_effect = RuntimeError('batch rejected')
 
     payloads = [
@@ -1067,7 +1090,8 @@ async def test_mongo_sink_batch_fallback_strips_injected_id(mongo_sink_config):
     """
     from pymongo.errors import DuplicateKeyError
 
-    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    mock_collection = _mongo_collection(collections)
 
     def fake_insert_many(documents):
         for i, doc in enumerate(documents):
@@ -1105,7 +1129,8 @@ async def test_mongo_sink_batch_fallback_strips_injected_id(mongo_sink_config):
 
 
 async def test_mongo_sink_deliver_empty(mongo_sink_config):
-    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    mock_collection = _mongo_collection(collections)
 
     await sink.deliver([])
     mock_collection.insert_one.assert_not_called()
@@ -1114,7 +1139,8 @@ async def test_mongo_sink_deliver_empty(mongo_sink_config):
 async def test_mongo_sink_deliver_error_increments_metrics(mongo_sink_config):
     from drakkar.metrics import sink_deliver_errors
 
-    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    mock_collection = _mongo_collection(collections, 'c')
     mock_collection.insert_one.side_effect = RuntimeError('connection refused')
 
     labels = {'sink_type': 'mongo', 'sink_name': 'analytics'}
@@ -3111,9 +3137,53 @@ async def test_mongo_sink_rejects_ops_it_cannot_yet_build(mongo_sink_config):
     """The guard exists only between the payload type gaining every op and
     the sink learning to execute them. Delete it, and this test, once all
     six declarative ops build."""
-    sink, mock_collection, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    mock_collection = _mongo_collection(collections)
 
     with pytest.raises(ValueError, match='cannot be built yet'):
         await sink.deliver([MongoPayload(op='delete_many', collection='c', filter=SampleOutput(request_id='r'))])
 
     mock_collection.insert_one.assert_not_awaited()
+
+
+async def test_mongo_sink_groups_into_consecutive_runs(mongo_sink_config):
+    """Execution order equals payload order, so grouping is run-based.
+
+    Global bucketing — what this sink used to do — would send both 'results'
+    documents in one insert_many and defer 'audit' past them. That is
+    harmless for inserts and a lost write once updates and deletes exist,
+    so the rule is uniform rather than per-op.
+    """
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+
+    await sink.deliver(
+        [
+            MongoPayload(collection='results', data=SampleOutput(request_id='r1')),
+            MongoPayload(collection='audit', data=SampleOutput(request_id='a1')),
+            MongoPayload(collection='results', data=SampleOutput(request_id='r2')),
+        ]
+    )
+
+    # Three runs of one document each, so every write is an insert_one and
+    # each lands on its OWN collection.
+    assert collections['results'].insert_one.await_count == 2
+    assert collections['audit'].insert_one.await_count == 1
+    assert collections['results'].insert_many.await_count == 0
+
+
+async def test_mongo_sink_batches_an_uninterrupted_run(mongo_sink_config):
+    """Adjacent same-collection documents still travel together."""
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+
+    await sink.deliver(
+        [
+            MongoPayload(collection='results', data=SampleOutput(request_id='r1')),
+            MongoPayload(collection='results', data=SampleOutput(request_id='r2')),
+            MongoPayload(collection='audit', data=SampleOutput(request_id='a1')),
+        ]
+    )
+
+    assert collections['results'].insert_many.await_count == 1
+    documents = collections['results'].insert_many.await_args[0][0]
+    assert [d['request_id'] for d in documents] == ['r1', 'r2']
+    assert collections['audit'].insert_one.await_count == 1
