@@ -272,7 +272,7 @@ Configure any combination in the `sinks:` section. Each type supports multiple n
 |------|---------|---------------|
 | `KafkaPayload` | `data: BaseModel`, `key: bytes` | `data.model_dump_json().encode()` -> value |
 | `PostgresPayload` | `op`, `table`, `data`, `where`, `conflict`, `statement`, `params` | INSERT / UPDATE / UPSERT, or operator-authored SQL by name |
-| `MongoPayload` | `data: BaseModel`, `collection: str` | `data.model_dump()` -> BSON document |
+| `MongoPayload` | `op: MongoOp`, `collection: str`, `data`, `filter`, + statement fields | one write operation per payload, or a named MQL statement |
 | `HttpPayload` | `data: BaseModel` | POST body per `encoding` (`json`/`form`/`multipart`) |
 | `RedisPayload` | `op`, `key`, `data`, `ttl`, `fields`, `members`, `amount`, `script`, `keys`, `args` | one write command per data type, or operator-authored Lua by name |
 | `FilePayload` | `data: BaseModel`, `path: str` | `data.model_dump_json() + "\n"` -> JSONL line |
