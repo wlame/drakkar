@@ -6,7 +6,7 @@ serialized via model_dump() to get a dict suitable for MongoDB insertion.
 
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 from pydantic import BaseModel
@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from drakkar.config import MongoSinkConfig
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
 from drakkar.models import MongoOp, MongoPayload
+from drakkar.mql import CompiledTemplate, compile_template, substitute
 from drakkar.sinks.base import BaseSink
 from drakkar.utils import redact_url
 
@@ -27,6 +28,9 @@ if TYPE_CHECKING:
     # What a per-op builder returns: the bulk-write model, plus the
     # driver method and arguments the single-payload path calls.
     _BuiltUnit = tuple[_WriteModel, str, tuple[object, ...], dict[str, object]]
+    # An update document is a mapping of operators, or an aggregation
+    # pipeline; a delete carries none at all.
+    _UpdateDocument = dict[str, Any] | list[dict[str, Any]] | None
 
 logger = structlog.get_logger()
 
@@ -125,27 +129,40 @@ def _build_insert(payload: MongoPayload) -> '_BuiltUnit':
     return InsertOne(document), 'insert_one', (document,), {}
 
 
-def _build_update(payload: MongoPayload) -> '_BuiltUnit':
-    """UpdateOne/UpdateMany/UpdateOne(upsert=True) with a $set assignment."""
-    from pymongo import UpdateMany, UpdateOne
+def _write_for(op: MongoOp, predicate: dict[str, Any], update: '_UpdateDocument') -> '_BuiltUnit':
+    """Map one mutating op to its driver write model and direct call.
 
-    predicate = _dumped(payload.filter, 'filter', payload.op)
-    update = {'$set': _dumped(payload.data, 'data', payload.op)}
-    if payload.op is MongoOp.UPDATE_MANY:
+    The single place op → driver write lives, so a declarative payload and
+    an operator-authored statement with the same op always issue the same
+    thing. ``update`` is a mapping for the declarative ops and may be an
+    aggregation pipeline for a statement; the driver accepts either.
+    """
+    from pymongo import DeleteMany, DeleteOne, UpdateMany, UpdateOne
+
+    if op is MongoOp.DELETE_ONE:
+        return DeleteOne(predicate), 'delete_one', (predicate,), {}
+    if op is MongoOp.DELETE_MANY:
+        return DeleteMany(predicate), 'delete_many', (predicate,), {}
+
+    # Everything else writes a document, guaranteed present by both the
+    # per-op payload contract and the statement config validation.
+    assert update is not None
+    if op is MongoOp.UPDATE_MANY:
         return UpdateMany(predicate, update), 'update_many', (predicate, update), {}
-    if payload.op is MongoOp.UPSERT:
+    if op is MongoOp.UPSERT:
         return UpdateOne(predicate, update, upsert=True), 'update_one', (predicate, update), {'upsert': True}
     return UpdateOne(predicate, update), 'update_one', (predicate, update), {}
 
 
+def _build_update(payload: MongoPayload) -> '_BuiltUnit':
+    """The declarative update ops assign fields; anything richer is a statement."""
+    predicate = _dumped(payload.filter, 'filter', payload.op)
+    return _write_for(payload.op, predicate, {'$set': _dumped(payload.data, 'data', payload.op)})
+
+
 def _build_delete(payload: MongoPayload) -> '_BuiltUnit':
     """DeleteOne/DeleteMany against a required, non-empty filter."""
-    from pymongo import DeleteMany, DeleteOne
-
-    predicate = _dumped(payload.filter, 'filter', payload.op)
-    if payload.op is MongoOp.DELETE_MANY:
-        return DeleteMany(predicate), 'delete_many', (predicate,), {}
-    return DeleteOne(predicate), 'delete_one', (predicate,), {}
+    return _write_for(payload.op, _dumped(payload.filter, 'filter', payload.op), None)
 
 
 # Which driver write each op builds. A table rather than a branch chain: the
@@ -165,17 +182,52 @@ _MONGO_UNIT_BUILDERS = {
 }
 
 
-def _build_unit(payload: MongoPayload) -> _MongoUnit:
-    """Reduce one payload to the write its operation performs.
+@dataclass(frozen=True)
+class _CompiledStatement:
+    """One operator-authored statement, ready to bind parameters into."""
 
-    TEMPORARY guard: ``MongoPayload`` already carries every op, so an op
-    without a builder must fail loudly rather than fall through to something
-    else. Only ``statement`` lacks one now.
+    collection: str
+    op: MongoOp
+    template: CompiledTemplate
+
+
+def _build_statement_unit(payload: MongoPayload, statements: dict[str, _CompiledStatement]) -> _MongoUnit:
+    """Look up an operator-authored statement and bind its parameters.
+
+    The statement supplies the collection and the operation; the payload
+    supplies only values, which are substituted into whole-value positions
+    and never into keys. That is what keeps message content out of operator
+    positions, where a value of ``{"$gt": ""}`` would match every document.
     """
-    builder = _MONGO_UNIT_BUILDERS.get(payload.op)
-    if builder is None:
-        raise ValueError(f'mongo op {payload.op.value!r} cannot be built yet')
-    model, method, args, kwargs = builder(payload)
+    statement = statements.get(payload.statement)
+    if statement is None:
+        known = ', '.join(sorted(statements)) or '<none configured>'
+        raise ValueError(f'unknown mongo statement {payload.statement!r}; configured: {known}')
+    params = payload.params.model_dump() if payload.params is not None else {}
+    try:
+        document = substitute(statement.template, params)
+    except ValueError as e:
+        raise ValueError(f'mongo statement {payload.statement!r}: {e}') from e
+    bound = cast(dict[str, Any], document)
+    model, method, args, kwargs = _write_for(statement.op, bound['filter'], bound.get('update'))
+    return _MongoUnit(
+        op=MongoOp.STATEMENT,
+        collection=statement.collection,
+        # The statement NAME, never its document — an operator may have
+        # written the template around row data.
+        label=f'statement={payload.statement} collection={statement.collection}',
+        model=model,
+        method=method,
+        args=args,
+        kwargs=kwargs,
+    )
+
+
+def _build_unit(payload: MongoPayload, statements: dict[str, _CompiledStatement]) -> _MongoUnit:
+    """Reduce one payload to the write its operation performs."""
+    if payload.op is MongoOp.STATEMENT:
+        return _build_statement_unit(payload, statements)
+    model, method, args, kwargs = _MONGO_UNIT_BUILDERS[payload.op](payload)
     return _MongoUnit(
         op=payload.op,
         collection=payload.collection,
@@ -213,6 +265,9 @@ class MongoSink(BaseSink[MongoPayload]):
         self._config = config
         self._client = None
         self._db = None
+        # Operator-authored MQL, compiled at connect(). Never compiled on
+        # the delivery path.
+        self._statements: dict[str, _CompiledStatement] = {}
 
     async def connect(self) -> None:
         """Create the PyMongo async client and get database reference."""
@@ -220,12 +275,25 @@ class MongoSink(BaseSink[MongoPayload]):
 
         self._client = AsyncMongoClient(self._config.uri)
         self._db = self._client[self._config.database]
+        # Compiling here rather than per delivery turns each write into a
+        # document copy plus N assignments. Config validation already
+        # compiled these once, so this is also the sink's own guard against
+        # a config assembled in code rather than loaded from YAML.
+        self._statements = {
+            name: _CompiledStatement(
+                collection=statement.collection,
+                op=statement.op,
+                template=compile_template(statement.template()),
+            )
+            for name, statement in self._config.statements.items()
+        }
         await logger.ainfo(
             'mongo_sink_connected',
             category='sink',
             sink_name=self._name,
             uri=redact_url(self._config.uri),
             database=self._config.database,
+            statements=len(self._statements),
         )
 
     async def deliver(self, payloads: list[MongoPayload]) -> None:
@@ -261,8 +329,7 @@ class MongoSink(BaseSink[MongoPayload]):
             sink_deliver_errors.labels(**labels).inc()
             raise
 
-    @staticmethod
-    def _build_units(payloads: list[MongoPayload]) -> tuple[list[_MongoUnit], int, Exception | None]:
+    def _build_units(self, payloads: list[MongoPayload]) -> tuple[list[_MongoUnit], int, Exception | None]:
         """Build the write for every payload up front.
 
         On the first bad payload returns the units built so far, the failing
@@ -272,7 +339,7 @@ class MongoSink(BaseSink[MongoPayload]):
         units: list[_MongoUnit] = []
         for i, payload in enumerate(payloads):
             try:
-                units.append(_build_unit(payload))
+                units.append(_build_unit(payload, self._statements))
             except Exception as e:
                 return units, i, e
         return units, len(units), None

@@ -967,8 +967,12 @@ def mongo_sink_config():
     return MongoSinkConfig(uri='mongodb://localhost:27017', database='testdb')
 
 
-def _make_mongo_sink(mongo_sink_config):
-    """Helper: create a MongoSink with a mocked PyMongo async client.
+async def _make_mongo_sink(mongo_sink_config):
+    """Helper: create a connected MongoSink with a mocked PyMongo client.
+
+    Goes through the real ``connect()`` rather than assigning ``_db``
+    directly, so operator-authored statements are compiled by the code that
+    ships instead of by a second copy living in the tests.
 
     ``db[name]`` returns a DISTINCT collection mock per name, recorded in
     the returned registry. The previous helper handed back one shared mock
@@ -999,8 +1003,8 @@ def _make_mongo_sink(mongo_sink_config):
     mock_client.close = AsyncMock()
 
     sink = MongoSink('analytics', mongo_sink_config)
-    sink._client = mock_client
-    sink._db = mock_db
+    with patch('pymongo.AsyncMongoClient', return_value=mock_client):
+        await sink.connect()
     return sink, collections, mock_client
 
 
@@ -1026,7 +1030,7 @@ async def test_mongo_sink_connect(mongo_sink_config):
 
 
 async def test_mongo_sink_deliver(mongo_sink_config):
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
     mock_collection = _mongo_collection(collections)
 
     payload = MongoPayload(collection='results', data=SampleOutput(request_id='r1'))
@@ -1042,7 +1046,7 @@ async def test_mongo_sink_deliver_batch(mongo_sink_config):
     """Payloads sharing a collection go out as ONE ordered bulk write."""
     from pymongo import InsertOne
 
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
     mock_collection = _mongo_collection(collections)
 
     payloads = [
@@ -1063,7 +1067,7 @@ async def test_mongo_sink_deliver_batch(mongo_sink_config):
 
 async def test_mongo_sink_single_payload_uses_insert_one(mongo_sink_config):
     """A one-document group keeps the exact call the per-payload loop made."""
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
     mock_collection = _mongo_collection(collections)
 
     await sink.deliver([MongoPayload(collection='results', data=SampleOutput(request_id='r1'))])
@@ -1081,7 +1085,7 @@ async def test_mongo_sink_attributes_the_failing_payload(mongo_sink_config):
     """
     from pymongo.errors import BulkWriteError
 
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
     mock_collection = _mongo_collection(collections)
     mock_collection.bulk_write.side_effect = BulkWriteError(
         {'writeErrors': [{'index': 1, 'code': 11000, 'errmsg': 'E11000 duplicate key'}], 'nInserted': 1}
@@ -1104,7 +1108,7 @@ async def test_mongo_sink_write_error_names_the_operation_not_the_document(mongo
     """The label carries the op and collection, never message content."""
     from pymongo.errors import BulkWriteError
 
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
     mock_collection = _mongo_collection(collections)
     mock_collection.bulk_write.side_effect = BulkWriteError({'writeErrors': [{'index': 0, 'errmsg': 'boom'}]})
 
@@ -1138,7 +1142,7 @@ async def test_mongo_sink_connection_failure_propagates_without_replay(mongo_sin
     """
     from pymongo.errors import ConnectionFailure
 
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
     mock_collection = _mongo_collection(collections)
     mock_collection.bulk_write.side_effect = ConnectionFailure('connection reset')
 
@@ -1155,7 +1159,7 @@ async def test_mongo_sink_connection_failure_propagates_without_replay(mongo_sin
 
 
 async def test_mongo_sink_deliver_empty(mongo_sink_config):
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
     mock_collection = _mongo_collection(collections)
 
     await sink.deliver([])
@@ -1165,7 +1169,7 @@ async def test_mongo_sink_deliver_empty(mongo_sink_config):
 async def test_mongo_sink_deliver_error_increments_metrics(mongo_sink_config):
     from drakkar.metrics import sink_deliver_errors
 
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
     mock_collection = _mongo_collection(collections, 'c')
     mock_collection.insert_one.side_effect = RuntimeError('connection refused')
 
@@ -1179,7 +1183,7 @@ async def test_mongo_sink_deliver_error_increments_metrics(mongo_sink_config):
 
 
 async def test_mongo_sink_close(mongo_sink_config):
-    sink, _, mock_client = _make_mongo_sink(mongo_sink_config)
+    sink, _, mock_client = await _make_mongo_sink(mongo_sink_config)
     await sink.close()
 
     # assert_awaited_once, not assert_called_once: a call is recorded even
@@ -2778,7 +2782,7 @@ async def test_postgres_sink_close_exception_is_caught(pg_sink_config):
 
 async def test_mongo_sink_close_exception_is_caught(mongo_sink_config):
     """Mongo close() catches exception from client.close() and still sets client to None."""
-    sink, _, mock_client = _make_mongo_sink(mongo_sink_config)
+    sink, _, mock_client = await _make_mongo_sink(mongo_sink_config)
     mock_client.close.side_effect = RuntimeError('network unreachable')
 
     await sink.close()  # should not raise
@@ -3159,19 +3163,6 @@ async def test_postgres_sink_update_sorts_set_and_predicate_columns(pg_sink_conf
     assert values == ['t1', 'done', 42, 'me']
 
 
-async def test_mongo_sink_rejects_ops_it_cannot_yet_build(mongo_sink_config):
-    """The guard exists only between the payload type gaining every op and
-    the sink learning to execute them. Every declarative op builds now;
-    delete the guard and this test once named statements land too."""
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
-    mock_collection = _mongo_collection(collections)
-
-    with pytest.raises(ValueError, match='cannot be built yet'):
-        await sink.deliver([MongoPayload(op='statement', statement='claim_job')])
-
-    mock_collection.insert_one.assert_not_awaited()
-
-
 async def test_mongo_sink_groups_into_consecutive_runs(mongo_sink_config):
     """Execution order equals payload order, so grouping is run-based.
 
@@ -3180,7 +3171,7 @@ async def test_mongo_sink_groups_into_consecutive_runs(mongo_sink_config):
     harmless for inserts and a lost write once updates and deletes exist,
     so the rule is uniform rather than per-op.
     """
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
 
     await sink.deliver(
         [
@@ -3199,7 +3190,7 @@ async def test_mongo_sink_groups_into_consecutive_runs(mongo_sink_config):
 
 async def test_mongo_sink_batches_an_uninterrupted_run(mongo_sink_config):
     """Adjacent same-collection documents still travel together."""
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
 
     await sink.deliver(
         [
@@ -3236,7 +3227,7 @@ async def test_mongo_sink_builds_every_declarative_op(mongo_sink_config):
         (MongoPayload(op='delete_many', collection='jobs', filter=_JobKey(id=7)), DeleteMany),
     ]
     for payload, want_model in cases:
-        sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+        sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
         # Two payloads so the run takes the bulk path, where the model is
         # what actually goes to the driver.
         await sink.deliver([payload, payload])
@@ -3247,7 +3238,7 @@ async def test_mongo_sink_builds_every_declarative_op(mongo_sink_config):
 
 async def test_mongo_sink_update_wraps_data_in_a_set_assignment(mongo_sink_config):
     """The declarative tier assigns fields; anything richer is a statement."""
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
 
     await sink.deliver(
         [MongoPayload(op='update_one', collection='jobs', data=SampleOutput(request_id='r1'), filter=_JobKey(id=7))]
@@ -3259,7 +3250,7 @@ async def test_mongo_sink_update_wraps_data_in_a_set_assignment(mongo_sink_confi
 
 
 async def test_mongo_sink_upsert_passes_the_upsert_flag(mongo_sink_config):
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
 
     await sink.deliver(
         [MongoPayload(op='upsert', collection='jobs', data=SampleOutput(request_id='r1'), filter=_JobKey(id=7))]
@@ -3269,7 +3260,7 @@ async def test_mongo_sink_upsert_passes_the_upsert_flag(mongo_sink_config):
 
 
 async def test_mongo_sink_delete_sends_only_the_filter(mongo_sink_config):
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
 
     await sink.deliver([MongoPayload(op='delete_many', collection='staging', filter=_JobKey(id=7))])
 
@@ -3283,7 +3274,7 @@ async def test_mongo_sink_rejects_a_filter_that_dumps_empty(mongo_sink_config):
     model that dumps to nothing, which a payload mutated afterwards could
     still produce.
     """
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
 
     with pytest.raises(ValueError, match='matches every document'):
         await sink.deliver([MongoPayload(op='delete_many', collection='staging', filter=_Empty())])
@@ -3293,7 +3284,7 @@ async def test_mongo_sink_rejects_a_filter_that_dumps_empty(mongo_sink_config):
 
 async def test_mongo_sink_rejects_data_that_dumps_empty(mongo_sink_config):
     """An empty $set is a malformed update."""
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
 
     with pytest.raises(ValueError, match="empty 'data'"):
         await sink.deliver([MongoPayload(op='update_one', collection='jobs', data=_Empty(), filter=_JobKey(id=7))])
@@ -3309,7 +3300,7 @@ async def test_mongo_sink_mixes_operations_in_one_bulk_write(mongo_sink_config):
     """
     from pymongo import DeleteOne, InsertOne, UpdateOne
 
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    sink, collections, _ = await _make_mongo_sink(mongo_sink_config)
 
     await sink.deliver(
         [
@@ -3321,3 +3312,120 @@ async def test_mongo_sink_mixes_operations_in_one_bulk_write(mongo_sink_config):
 
     models = collections['jobs'].bulk_write.await_args[0][0]
     assert [type(m) for m in models] == [InsertOne, UpdateOne, DeleteOne]
+
+
+def _statement_config(**overrides):
+    """A Mongo sink config carrying two operator-authored statements."""
+    statements = {
+        'record_attempt': {
+            'collection': 'jobs',
+            'op': 'update_one',
+            'filter': {'_id': ':id'},
+            'update': {'$set': {'last_seen': ':now'}, '$inc': {'attempts': 1}},
+        },
+        'sweep': {
+            'collection': 'staging',
+            'op': 'delete_many',
+            'filter': {'batch': ':batch'},
+        },
+    }
+    return MongoSinkConfig(uri='mongodb://localhost:27017', database='testdb', statements=statements, **overrides)
+
+
+class _AttemptParams(BaseModel):
+    id: int = 42
+    now: str = '2026-08-02T00:00:00Z'
+
+
+class _SweepParams(BaseModel):
+    batch: str = 'b-1'
+
+
+async def test_mongo_sink_runs_a_statement_by_name():
+    """The statement supplies collection, op and shape; the payload only values."""
+    sink, collections, _ = await _make_mongo_sink(_statement_config())
+
+    await sink.deliver([MongoPayload(op='statement', statement='record_attempt', params=_AttemptParams())])
+
+    predicate, update = collections['jobs'].update_one.await_args[0]
+    assert predicate == {'_id': 42}
+    # $inc survives untouched — it is exactly what the declarative tier
+    # cannot express, and the reason the escape hatch exists.
+    assert update == {'$set': {'last_seen': '2026-08-02T00:00:00Z'}, '$inc': {'attempts': 1}}
+
+
+async def test_mongo_sink_statement_preserves_bound_value_types():
+    """A comparison against "42" would silently match no numeric _id."""
+    sink, collections, _ = await _make_mongo_sink(_statement_config())
+
+    await sink.deliver([MongoPayload(op='statement', statement='record_attempt', params=_AttemptParams(id=7))])
+
+    predicate, _ = collections['jobs'].update_one.await_args[0]
+    assert predicate['_id'] == 7
+    assert isinstance(predicate['_id'], int)
+
+
+async def test_mongo_sink_statement_uses_its_own_collection_and_op():
+    sink, collections, _ = await _make_mongo_sink(_statement_config())
+
+    await sink.deliver([MongoPayload(op='statement', statement='sweep', params=_SweepParams())])
+
+    assert collections['staging'].delete_many.await_args[0] == ({'batch': 'b-1'},)
+
+
+async def test_mongo_sink_statements_are_compiled_once_at_connect():
+    """Compiled at connect, so a delivery is a copy plus N assignments."""
+    sink, _, _ = await _make_mongo_sink(_statement_config())
+
+    assert sorted(sink._statements) == ['record_attempt', 'sweep']
+    assert sink._statements['record_attempt'].template.params == ('id', 'now')
+
+
+async def test_mongo_sink_unknown_statement_names_the_configured_ones():
+    """The operator sees what IS available, not just the miss."""
+    sink, collections, _ = await _make_mongo_sink(_statement_config())
+
+    with pytest.raises(ValueError, match='record_attempt, sweep'):
+        await sink.deliver([MongoPayload(op='statement', statement='nope')])
+
+    assert collections == {}
+
+
+async def test_mongo_sink_unknown_statement_with_none_configured(mongo_sink_config):
+    sink, _, _ = await _make_mongo_sink(mongo_sink_config)
+
+    with pytest.raises(ValueError, match='<none configured>'):
+        await sink.deliver([MongoPayload(op='statement', statement='nope')])
+
+
+async def test_mongo_sink_statement_rejects_missing_params():
+    sink, _, _ = await _make_mongo_sink(_statement_config())
+
+    class _Partial(BaseModel):
+        id: int = 1
+
+    with pytest.raises(ValueError, match="'now'"):
+        await sink.deliver([MongoPayload(op='statement', statement='record_attempt', params=_Partial())])
+
+
+async def test_mongo_sink_statement_rejects_extra_params():
+    """A silently ignored key is almost always a typo in the payload model."""
+    sink, _, _ = await _make_mongo_sink(_statement_config())
+
+    class _Extra(BaseModel):
+        id: int = 1
+        now: str = 'x'
+        nope: int = 2
+
+    with pytest.raises(ValueError, match='typo'):
+        await sink.deliver([MongoPayload(op='statement', statement='record_attempt', params=_Extra())])
+
+
+async def test_mongo_sink_statement_error_names_the_statement_not_its_document():
+    sink, _, _ = await _make_mongo_sink(_statement_config())
+
+    class _Partial(BaseModel):
+        id: int = 1
+
+    with pytest.raises(ValueError, match="mongo statement 'record_attempt'"):
+        await sink.deliver([MongoPayload(op='statement', statement='record_attempt', params=_Partial())])
