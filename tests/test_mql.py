@@ -5,6 +5,9 @@ stay identical to the Go backend live in tests/fixtures/mongo_statements.json
 and are driven separately; these tests cover the rules themselves.
 """
 
+import json
+from pathlib import Path
+
 import pytest
 
 from drakkar.mql import compile_template, substitute
@@ -242,3 +245,53 @@ def test_a_non_string_key_is_rejected():
     never reach Mongo — failing at config load beats a driver error later."""
     with pytest.raises(ValueError, match='keys must be strings'):
         _compiled({1: 'x'})
+
+
+# --- golden vectors, shared with drakkar-go ---------------------------------
+#
+# tests/fixtures/mongo_statements.json is mirrored verbatim into the Go repo.
+# The cases run through THIS module's own compile and substitute functions —
+# not a test-local reimplementation — so what is pinned is the substitution
+# that ships. A divergence between the two backends fails here instead of
+# reaching an operator's database.
+
+_MONGO_STATEMENT_CORPUS = json.loads((Path(__file__).parent / 'fixtures' / 'mongo_statements.json').read_text())
+
+
+@pytest.mark.parametrize('case', _MONGO_STATEMENT_CORPUS['ok'], ids=lambda c: c['case'])
+def test_mongo_statement_corpus_binds(case):
+    """Both backends must produce this document from this template and params."""
+    compiled = compile_template(case['template'])
+
+    assert list(compiled.params) == case['names']
+    assert substitute(compiled, case['params']) == case['document']
+
+
+@pytest.mark.parametrize('case', _MONGO_STATEMENT_CORPUS['errors'], ids=lambda c: c['case'])
+def test_mongo_statement_corpus_rejects(case):
+    """Both backends must refuse these, compiling or binding."""
+    with pytest.raises(ValueError) as excinfo:
+        compiled = compile_template(case['template'])
+        # A vector carrying params is a BIND-time rejection: compiling it
+        # has to succeed first, or the vector would pass for the wrong
+        # reason.
+        substitute(compiled, case.get('params', {}))
+
+    # Case-insensitive: the corpus pins WHICH failure a vector produces, not
+    # its prose, because Go requires lowercase error strings and Python
+    # capitalises. The same allowance the shared Postgres corpus makes.
+    assert case['error'].lower() in str(excinfo.value).lower()
+
+
+def test_mongo_statement_corpus_error_vectors_fail_where_they_claim():
+    """A bind-time vector must COMPILE cleanly, or it proves nothing.
+
+    Without this, a typo in a params-carrying vector's template would make
+    it pass at compile time and never exercise binding at all — the vacuous
+    vector the Postgres and Redis corpora both shipped before mutation
+    testing found them.
+    """
+    for case in _MONGO_STATEMENT_CORPUS['errors']:
+        if 'params' not in case:
+            continue
+        compile_template(case['template'])
