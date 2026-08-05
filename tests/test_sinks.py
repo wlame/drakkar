@@ -27,6 +27,7 @@ from drakkar.models import (
     PostgresPayload,
     RedisPayload,
 )
+from drakkar.sinks.mongo import MongoWriteError
 
 
 class SampleOutput(BaseModel):
@@ -1028,7 +1029,9 @@ async def test_mongo_sink_deliver(mongo_sink_config):
 
 
 async def test_mongo_sink_deliver_batch(mongo_sink_config):
-    """Documents sharing a collection go out as ONE insert_many."""
+    """Payloads sharing a collection go out as ONE ordered bulk write."""
+    from pymongo import InsertOne
+
     sink, collections, _ = _make_mongo_sink(mongo_sink_config)
     mock_collection = _mongo_collection(collections)
 
@@ -1038,10 +1041,14 @@ async def test_mongo_sink_deliver_batch(mongo_sink_config):
     ]
     await sink.deliver(payloads)
 
-    assert mock_collection.insert_one.call_count == 0
-    assert mock_collection.insert_many.call_count == 1
-    documents = mock_collection.insert_many.call_args[0][0]
-    assert [d['request_id'] for d in documents] == ['r1', 'r2'], 'payload order must be preserved'
+    assert mock_collection.insert_one.await_count == 0
+    mock_collection.bulk_write.assert_awaited_once()
+    models, kwargs = mock_collection.bulk_write.await_args
+    assert all(isinstance(m, InsertOne) for m in models[0])
+    assert [m._doc['request_id'] for m in models[0]] == ['r1', 'r2'], 'payload order must be preserved'
+    # ordered=True is what makes the writeErrors index positionally
+    # meaningful, so it is passed explicitly rather than left to the default.
+    assert kwargs['ordered'] is True
 
 
 async def test_mongo_sink_single_payload_uses_insert_one(mongo_sink_config):
@@ -1051,62 +1058,24 @@ async def test_mongo_sink_single_payload_uses_insert_one(mongo_sink_config):
 
     await sink.deliver([MongoPayload(collection='results', data=SampleOutput(request_id='r1'))])
 
-    assert mock_collection.insert_one.call_count == 1
-    assert mock_collection.insert_many.call_count == 0
+    assert mock_collection.insert_one.await_count == 1
+    assert mock_collection.bulk_write.await_count == 0
 
 
-async def test_mongo_sink_batch_failure_falls_back_per_document(mongo_sink_config):
-    """A failed insert_many is retried per document so attribution survives."""
-    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
-    mock_collection = _mongo_collection(collections)
-    mock_collection.insert_many.side_effect = RuntimeError('batch rejected')
+async def test_mongo_sink_attributes_the_failing_payload(mongo_sink_config):
+    """A bulk write error names the payload that caused it, and re-sends nothing.
 
-    payloads = [
-        MongoPayload(collection='results', data=SampleOutput(request_id='r1')),
-        MongoPayload(collection='results', data=SampleOutput(request_id='r2')),
-    ]
-    await sink.deliver(payloads)
-
-    assert mock_collection.insert_many.call_count == 1
-    assert mock_collection.insert_one.call_count == 2
-
-
-async def test_mongo_sink_batch_fallback_strips_injected_id(mongo_sink_config):
-    """The per-document fallback must strip the `_id` PyMongo injects.
-
-    PyMongo's real ``insert_many`` mutates every document it is handed in
-    place, writing a generated ``_id`` into it, even when the batch as a
-    whole is rejected before anything is actually committed. An ``AsyncMock``
-    can't reproduce that on its own, so this test's fake ``insert_many``
-    performs the same mutation PyMongo does before raising — modeling the
-    verified real driver behavior rather than inventing one.
-
-    If the fallback resent a document still carrying that leftover ``_id``,
-    Mongo would treat it as colliding with a document already written and
-    raise DuplicateKeyError on the first document tried, regardless of which
-    one was actually bad — so the fake ``insert_one`` raises DuplicateKeyError
-    for any document that still has an ``_id``, and a distinct error for the
-    one genuinely-bad document (r3).
+    writeErrors[*].index is positionally aligned with the models submitted,
+    and ordered=True guarantees everything before the failure was applied
+    and everything after was not attempted — so the culprit is exact.
     """
-    from pymongo.errors import DuplicateKeyError
+    from pymongo.errors import BulkWriteError
 
     sink, collections, _ = _make_mongo_sink(mongo_sink_config)
     mock_collection = _mongo_collection(collections)
-
-    def fake_insert_many(documents):
-        for i, doc in enumerate(documents):
-            doc['_id'] = f'injected-{i}'
-        raise RuntimeError('batch rejected')
-
-    def fake_insert_one(document):
-        if '_id' in document:
-            raise DuplicateKeyError('E11000 duplicate key error collection: testdb.results index: _id_ dup key')
-        if document['request_id'] == 'r3':
-            raise RuntimeError('constraint violation for r3')
-        return None
-
-    mock_collection.insert_many.side_effect = fake_insert_many
-    mock_collection.insert_one.side_effect = fake_insert_one
+    mock_collection.bulk_write.side_effect = BulkWriteError(
+        {'writeErrors': [{'index': 1, 'code': 11000, 'errmsg': 'E11000 duplicate key'}], 'nInserted': 1}
+    )
 
     payloads = [
         MongoPayload(collection='results', data=SampleOutput(request_id='r1')),
@@ -1114,18 +1083,65 @@ async def test_mongo_sink_batch_fallback_strips_injected_id(mongo_sink_config):
         MongoPayload(collection='results', data=SampleOutput(request_id='r3')),
     ]
 
-    with pytest.raises(RuntimeError, match='r3'):
+    with pytest.raises(MongoWriteError, match='1 of 3'):
         await sink.deliver(payloads)
 
-    sent_docs = [call.args[0] for call in mock_collection.insert_one.call_args_list]
+    assert mock_collection.bulk_write.await_count == 1, 'nothing may be re-sent'
+    assert mock_collection.insert_one.await_count == 0
 
-    # Every document the fallback resent must be free of the leftover `_id`.
-    assert all('_id' not in d for d in sent_docs)
 
-    # The fallback reached, and attempted, every document up to and
-    # including the genuinely bad one (r1, r2 before it were not skipped),
-    # and the surfaced error names the real culprit (r3), not r1.
-    assert [d['request_id'] for d in sent_docs] == ['r1', 'r2', 'r3']
+async def test_mongo_sink_write_error_names_the_operation_not_the_document(mongo_sink_config):
+    """The label carries the op and collection, never message content."""
+    from pymongo.errors import BulkWriteError
+
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    mock_collection = _mongo_collection(collections)
+    mock_collection.bulk_write.side_effect = BulkWriteError({'writeErrors': [{'index': 0, 'errmsg': 'boom'}]})
+
+    with pytest.raises(MongoWriteError, match='insert collection=results') as excinfo:
+        await sink.deliver(
+            [
+                MongoPayload(collection='results', data=SampleOutput(request_id='secret-1')),
+                MongoPayload(collection='results', data=SampleOutput(request_id='secret-2')),
+            ]
+        )
+
+    assert 'secret-1' not in str(excinfo.value)
+
+
+async def test_mongo_sink_write_error_is_not_transient(mongo_sink_config):
+    """A duplicate key fails identically on every retry.
+
+    Subclassing the builtin ConnectionError would make SinkManager retry it,
+    burning the retry budget and — for a batch containing an insert —
+    duplicating documents.
+    """
+    assert not issubclass(MongoWriteError, ConnectionError)
+    assert not issubclass(MongoWriteError, TimeoutError)
+
+
+async def test_mongo_sink_connection_failure_propagates_without_replay(mongo_sink_config):
+    """A connection-level failure is not a BulkWriteError.
+
+    There the framework cannot know what was applied, so the error
+    propagates with the whole run and nothing is re-sent.
+    """
+    from pymongo.errors import ConnectionFailure
+
+    sink, collections, _ = _make_mongo_sink(mongo_sink_config)
+    mock_collection = _mongo_collection(collections)
+    mock_collection.bulk_write.side_effect = ConnectionFailure('connection reset')
+
+    with pytest.raises(Exception, match='connection reset'):
+        await sink.deliver(
+            [
+                MongoPayload(collection='results', data=SampleOutput(request_id='r1')),
+                MongoPayload(collection='results', data=SampleOutput(request_id='r2')),
+            ]
+        )
+
+    assert mock_collection.bulk_write.await_count == 1
+    assert mock_collection.insert_one.await_count == 0
 
 
 async def test_mongo_sink_deliver_empty(mongo_sink_config):
@@ -3168,7 +3184,7 @@ async def test_mongo_sink_groups_into_consecutive_runs(mongo_sink_config):
     # each lands on its OWN collection.
     assert collections['results'].insert_one.await_count == 2
     assert collections['audit'].insert_one.await_count == 1
-    assert collections['results'].insert_many.await_count == 0
+    assert collections['results'].bulk_write.await_count == 0
 
 
 async def test_mongo_sink_batches_an_uninterrupted_run(mongo_sink_config):
@@ -3183,7 +3199,7 @@ async def test_mongo_sink_batches_an_uninterrupted_run(mongo_sink_config):
         ]
     )
 
-    assert collections['results'].insert_many.await_count == 1
-    documents = collections['results'].insert_many.await_args[0][0]
-    assert [d['request_id'] for d in documents] == ['r1', 'r2']
+    assert collections['results'].bulk_write.await_count == 1
+    models = collections['results'].bulk_write.await_args[0][0]
+    assert [m._doc['request_id'] for m in models] == ['r1', 'r2']
     assert collections['audit'].insert_one.await_count == 1
