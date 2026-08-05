@@ -117,3 +117,56 @@ class SearchAggregate(BaseModel):
     total_matches: int
     max_matches: int
     duration_seconds: float
+
+
+# ---------------------------------------------------------------------
+# Models for the write-operation demo in on_message_complete.
+#
+# Each one exists because a sink operation needs a specific SHAPE: an
+# upsert needs the row, an update needs the columns to set AND a
+# predicate, a named statement needs its bound parameters.
+# ---------------------------------------------------------------------
+
+
+class RequestSummary(BaseModel):
+    """The upserted row in `request_summaries`, keyed on request_id.
+
+    At-least-once delivery means a redelivered request would duplicate this
+    row under a plain INSERT; the upsert converges instead.
+    """
+
+    request_id: str
+    total_matches: int
+    succeeded_tasks: int
+    failed_tasks: int
+    duration_seconds: float
+    # Only ever set by the INSERT half of the upsert — see the payload's
+    # update_columns, which deliberately omits it so a redelivery cannot
+    # un-send a webhook.
+    notified: bool = False
+
+
+class RequestNotified(BaseModel):
+    """The SET half of the UPDATE that records a webhook was sent."""
+
+    notified: bool = True
+
+
+class RequestKey(BaseModel):
+    """The WHERE half of that UPDATE.
+
+    An update's predicate is required and may never be empty — an empty
+    one would rewrite every row in the table.
+    """
+
+    request_id: str
+
+
+class PatternStatsParams(BaseModel):
+    """Bound parameters for the `bump_pattern_stats` named statement.
+
+    `:matches` appears twice in the SQL and binds one value.
+    """
+
+    pattern: str
+    matches: int

@@ -89,6 +89,23 @@ sinks:
       dsn: "postgresql://drakkar:drakkar@postgres:5432/drakkar"
       pool_min: 1
       pool_max: 5
+      # Operator-authored SQL, invoked by name from the handler with
+      # `op=statement` and bound `params`. This is the escape hatch for what
+      # the declarative operations cannot express — here, a new value that
+      # depends on the old one.
+      #
+      # Parameters are always BOUND, never interpolated, so message content
+      # can never reach the statement text. `:matches` appears twice and
+      # binds one value. Malformed SQL fails at startup, not at first
+      # delivery; a missing column surfaces through on_delivery_error.
+      statements:
+        bump_pattern_stats: |
+          INSERT INTO pattern_stats (pattern, total_matches, requests)
+          VALUES (:pattern, :matches, 1)
+          ON CONFLICT (pattern) DO UPDATE
+          SET total_matches = pattern_stats.total_matches + :matches,
+              requests      = pattern_stats.requests + 1,
+              last_seen     = NOW()
     # A second Postgres INSTANCE, pointing at a SEPARATE database server
     # ("postgres-hot" in docker-compose.yml, DB "drakkar_hot"). Only
     # high-match results are routed here — the handler decides which
@@ -117,6 +134,20 @@ sinks:
       url: "redis://redis:6379/0"
       key_prefix: "drakkar:"
       ui_url: "http://localhost:8087"
+      # Operator-authored Lua, invoked by name with `op=script`. Two reasons
+      # it exists: multi-step logic the declarative commands cannot express,
+      # and ATOMICITY — a pipeline is not a transaction, so an LPUSH and an
+      # LTRIM issued as two commands can interleave with another writer,
+      # while the same pair inside a script cannot.
+      #
+      # Values arrive as KEYS and ARGV and are never interpolated into the
+      # body. Every declared key is prefixed with key_prefix, so a script
+      # cannot reach outside this sink instance's namespace.
+      scripts:
+        push_and_cap: |
+          redis.call('LPUSH', KEYS[1], ARGV[1])
+          redis.call('LTRIM', KEYS[1], 0, tonumber(ARGV[2]) - 1)
+          return redis.call('LLEN', KEYS[1])
 
   http:
     webhook:
