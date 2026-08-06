@@ -26,20 +26,26 @@ from metrics import (
     search_match_count,
 )
 from models import (
+    CacheLookupRow,
+    MatchAnalysisRow,
+    PatternRankRow,
     PatternStatsParams,
     RankRequest,
     RankResponse,
     RequestKey,
     RequestNotified,
     RequestSummary,
+    RipgrepProbeDetails,
     SearchAggregate,
     SearchNotification,
     SearchRequest,
     SearchResult,
     SearchSummary,
+    SinkDecisionRow,
 )
 
 import drakkar as dk
+from drakkar import probe
 
 logger = structlog.get_logger()
 
@@ -106,6 +112,13 @@ class RipgrepHandler(
       - HTTP webhook: if total_matches > 20 (one alert per request)
       - Filesystem JSONL: if total_matches > 50
     """
+
+    # User-defined Message Probe tab — see docs/probe-user-details.md.
+    # The probe.set/append/update calls sprinkled through this handler
+    # are near-zero-cost no-ops outside a probe, so this example is
+    # wired straight into the real pipeline rather than gated behind a
+    # flag.
+    probe_details_model = RipgrepProbeDetails
 
     def message_label(self, msg: dk.SourceMessage) -> str:
         if msg.payload:
@@ -201,6 +214,21 @@ class RipgrepHandler(
         # than messages x patterns x files" answer, visible on every message
         # in the window rather than reconstructed from task counts.
         collapsed = sum(len(m) - 1 for m in by_key.values() if len(m) > 1)
+
+        # Probe-details example: the window-level shape, in the same
+        # words the fan_in_bucketing annotation above already carries —
+        # here it lands in the User-defined tab instead of an
+        # annotation, free outside a probe.
+        probe.set(
+            window_shape=(
+                f'{len(messages)} messages → {len(by_key)} distinct (pattern, file) pairs, '
+                f'{collapsed} duplicates collapsed'
+            )
+        )
+        probe.update(
+            'stage_counters', messages=len(messages), distinct_pairs=len(by_key), collapsed_duplicates=collapsed
+        )
+
         self.annotate(
             None,
             'fan_in_bucketing',
@@ -225,6 +253,16 @@ class RipgrepHandler(
                 self.annotate(msg, 'requested_pairs', {'pairs': mine})
 
         tasks = []
+        # Probe-details example: probe.update() merges keys rather than
+        # adding to them, so per-window totals are tallied locally and
+        # written once after the loop instead of once per pair.
+        cache_tally = {
+            'cache_hits_memory': 0,
+            'cache_hits_sqlite': 0,
+            'cache_misses': 0,
+            'subprocess_tasks': 0,
+            'precomputed_tasks': 0,
+        }
         for (pattern, file_path), contributing_msgs in by_key.items():
             task_id = dk.make_task_id('rg')
             if task_id in pending.pending_task_ids:
@@ -257,8 +295,31 @@ class RipgrepHandler(
             # AND values produced by peers — neither of which the
             # hand-rolled dict cache could do.
             cached_stdout = self.cache.peek(cache_key)
+            tier = 'memory'
             if cached_stdout is None:
                 cached_stdout = await self.cache.get(cache_key)
+                tier = 'sqlite' if cached_stdout is not None else 'miss'
+            hit = cached_stdout is not None
+
+            # Probe-details example: record what the two-tier lookup
+            # decided for this pair before branching on it.
+            probe.append(
+                'cache_lookups',
+                CacheLookupRow(
+                    cache_key=cache_key,
+                    tier=tier,
+                    decision='precomputed' if hit else 'subprocess',
+                    fan_in=len(contributing_msgs),
+                ),
+            )
+            if tier == 'memory':
+                cache_tally['cache_hits_memory'] += 1
+            elif tier == 'sqlite':
+                cache_tally['cache_hits_sqlite'] += 1
+            else:
+                cache_tally['cache_misses'] += 1
+            cache_tally['precomputed_tasks' if hit else 'subprocess_tasks'] += 1
+
             if cached_stdout is not None:
                 tasks.append(
                     dk.ExecutorTask(
@@ -345,6 +406,10 @@ class RipgrepHandler(
                     source_offsets=offsets,
                 )
             )
+
+        # Probe-details example: one merge with this window's totals,
+        # rather than one probe.update() call per pair.
+        probe.update('stage_counters', **cache_tally)
         return tasks
 
     async def on_task_complete(self, result: dk.ExecutorResult) -> dk.CollectResult | None:
@@ -368,6 +433,23 @@ class RipgrepHandler(
 
         matches = [line for line in result.stdout.strip().split('\n') if line]
         meta = result.task.metadata
+
+        # Probe-details example: cheap stats over the already-parsed
+        # matches list, free outside a probe.
+        unique_files = len({line.split(':', 1)[0] for line in matches if ':' in line})
+        longest_line = max((len(line) for line in matches), default=0)
+        probe.append(
+            'match_analysis',
+            MatchAnalysisRow(
+                pattern=meta['pattern'],
+                file=meta['file_path'],
+                matches=len(matches),
+                unique_files=unique_files,
+                longest_line=longest_line,
+                duration_ms=round(result.duration_seconds * 1000, 2),
+                source='cache' if result.pid is None else 'subprocess',
+            ),
+        )
 
         # Persist into the framework cache for subsequent fast-track
         # hits. ``scope=CLUSTER`` shares across all workers in the same
@@ -480,6 +562,26 @@ class RipgrepHandler(
         total_matches = sum(match_counts)
         max_matches = max(match_counts) if match_counts else 0
 
+        # Probe-details example: this request's matches, broken down by
+        # pattern and ranked — the same data total_matches rolls up,
+        # kept at the pattern granularity instead of collapsed to a sum.
+        pattern_totals: dict[str, int] = {}
+        for r in group.results:
+            pattern_totals[r.task.metadata['pattern']] = pattern_totals.get(
+                r.task.metadata['pattern'], 0
+            ) + _match_count(r)
+        ranked_patterns = sorted(pattern_totals.items(), key=lambda kv: kv[1], reverse=True)
+        for rank, (pattern, pattern_matches) in enumerate(ranked_patterns, start=1):
+            probe.append(
+                'pattern_ranking',
+                PatternRankRow(
+                    rank=rank,
+                    pattern=pattern,
+                    matches=pattern_matches,
+                    share_pct=round(100 * pattern_matches / total_matches, 1) if total_matches else 0.0,
+                ),
+            )
+
         aggregate = SearchAggregate(
             request_id=req.request_id,
             partition=group.source_message.partition,
@@ -516,6 +618,17 @@ class RipgrepHandler(
                 ),
             ],
         )
+        # Probe-details example: this one always fires, alongside the
+        # conditional decisions recorded further down.
+        probe.append(
+            'sink_decisions',
+            SinkDecisionRow(
+                sink='kafka',
+                destination='priority_match_notifications',
+                fired='yes',
+                reason='every request gets one aggregate record',
+            ),
+        )
 
         # ---- write operations beyond INSERT ------------------------------
         #
@@ -544,6 +657,15 @@ class RipgrepHandler(
                 conflict=['request_id'],
                 update_columns=['total_matches', 'succeeded_tasks', 'failed_tasks', 'duration_seconds'],
                 sink='archive_results_db',
+            ),
+        )
+        probe.append(
+            'sink_decisions',
+            SinkDecisionRow(
+                sink='postgres',
+                destination='request_summaries',
+                fired='yes',
+                reason='every request upserts its summary row',
             ),
         )
 
@@ -624,6 +746,15 @@ class RipgrepHandler(
                     sink='hot_recent_matches_db',
                 ),
             )
+            probe.append(
+                'sink_decisions',
+                SinkDecisionRow(
+                    sink='postgres',
+                    destination='hot_recent_matches_db',
+                    fired='yes',
+                    reason=f'total_matches {aggregate.total_matches} > 20',
+                ),
+            )
 
             # Fire a single webhook per HIGH-match REQUEST (previously was
             # per-task; the request-level threshold is a better signal).
@@ -634,6 +765,15 @@ class RipgrepHandler(
                 message=(f'Request matched {aggregate.total_matches} lines across {aggregate.succeeded_tasks} tasks'),
             )
             sinks.http.append(dk.HttpPayload(data=notification))
+            probe.append(
+                'sink_decisions',
+                SinkDecisionRow(
+                    sink='http',
+                    destination='webhook',
+                    fired='yes',
+                    reason=f'total_matches {aggregate.total_matches} > 20',
+                ),
+            )
 
             # UPDATE: record that the webhook went out. The predicate is
             # required and may never be empty — an empty one would rewrite
@@ -651,12 +791,64 @@ class RipgrepHandler(
                     sink='archive_results_db',
                 ),
             )
+        else:
+            # Probe-details example: the "no" half of the same decision,
+            # so the User-defined tab always shows both conditional
+            # sinks below the 20-match threshold, not just the fired ones.
+            probe.append(
+                'sink_decisions',
+                SinkDecisionRow(
+                    sink='postgres',
+                    destination='hot_recent_matches_db',
+                    fired='no',
+                    reason=f'total_matches {aggregate.total_matches} ≤ 20',
+                ),
+            )
+            probe.append(
+                'sink_decisions',
+                SinkDecisionRow(
+                    sink='http',
+                    destination='webhook',
+                    fired='no',
+                    reason=f'total_matches {aggregate.total_matches} ≤ 20',
+                ),
+            )
 
         # Conditional: JSONL file log for very high-match requests.
         if aggregate.total_matches > 50:
             sinks.files.append(
                 dk.FilePayload(path='/tmp/high-match-requests.jsonl', data=aggregate),
             )
+            probe.append(
+                'sink_decisions',
+                SinkDecisionRow(
+                    sink='files',
+                    destination='/tmp/high-match-requests.jsonl',
+                    fired='yes',
+                    reason=f'total_matches {aggregate.total_matches} > 50',
+                ),
+            )
+        else:
+            probe.append(
+                'sink_decisions',
+                SinkDecisionRow(
+                    sink='files',
+                    destination='/tmp/high-match-requests.jsonl',
+                    fired='no',
+                    reason=f'total_matches {aggregate.total_matches} ≤ 50',
+                ),
+            )
+
+        # Probe-details example: the thresholds this window's decisions
+        # were made against, next to what was actually observed.
+        probe.set(
+            thresholds={
+                'hot_row_and_webhook': 20,
+                'file_log': 50,
+                'observed_total_matches': total_matches,
+                'observed_max_matches': max_matches,
+            }
+        )
 
         return sinks
 

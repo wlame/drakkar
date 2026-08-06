@@ -13,6 +13,8 @@ MessageGroup — and emits the aggregated summary (single row per request).
 
 from pydantic import BaseModel, Field
 
+from drakkar import probe_field
+
 
 class RankRequest(BaseModel):
     """Webapp input model — synchronous HTTP rank request.
@@ -170,3 +172,74 @@ class PatternStatsParams(BaseModel):
 
     pattern: str
     matches: int
+
+
+# ---------------------------------------------------------------------
+# Probe user-details example (see docs/probe-user-details.md). These
+# row models and the details model below only fill in during a Message
+# Probe replay in the debug UI — probe.set/append/update are no-ops in
+# production, so wiring this into the handler costs nothing on the hot
+# path.
+# ---------------------------------------------------------------------
+
+
+class CacheLookupRow(BaseModel):
+    """One (pattern, file_path) cache decision made during arrange()."""
+
+    cache_key: str
+    tier: str  # 'memory' | 'sqlite' | 'miss'
+    decision: str  # 'precomputed' | 'subprocess'
+    fan_in: int
+
+
+class MatchAnalysisRow(BaseModel):
+    """Per-task match stats recorded in on_task_complete()."""
+
+    pattern: str
+    file: str
+    matches: int
+    unique_files: int
+    longest_line: int
+    duration_ms: float
+    source: str  # 'cache' | 'subprocess'
+
+
+class PatternRankRow(BaseModel):
+    """One pattern's share of a request's total matches."""
+
+    rank: int
+    pattern: str
+    matches: int
+    share_pct: float
+
+
+class SinkDecisionRow(BaseModel):
+    """One conditional-sink decision made in on_message_complete()."""
+
+    sink: str
+    destination: str
+    fired: str  # 'yes' | 'no'
+    reason: str
+
+
+class RipgrepProbeDetails(BaseModel):
+    """User-defined Message Probe tab for `RipgrepHandler`.
+
+    See docs/probe-user-details.md for the feature itself, and
+    drakkar/probe.py for the exact `probe_field()` / `probe.set()` /
+    `probe.append()` / `probe.update()` semantics.
+    """
+
+    # Arrange: how this window's messages collapsed into tasks, and
+    # what the two-tier cache decided for each (pattern, file_path) pair.
+    window_shape: str | None = probe_field(section='Arrange', view='string', default=None)
+    stage_counters: dict[str, int] = probe_field(section='Arrange', view='keyvalue', default_factory=dict)
+    cache_lookups: list[CacheLookupRow] = probe_field(section='Arrange', view='table', default_factory=list)
+
+    # Results: per-task match shape, and each request's per-pattern breakdown.
+    match_analysis: list[MatchAnalysisRow] = probe_field(section='Results', view='table', default_factory=list)
+    pattern_ranking: list[PatternRankRow] = probe_field(section='Results', view='table', default_factory=list)
+
+    # Routing: which conditional sinks fired for this request, and why.
+    sink_decisions: list[SinkDecisionRow] = probe_field(section='Routing', view='table', default_factory=list)
+    thresholds: dict = probe_field(section='Routing', view='dict', default_factory=dict)

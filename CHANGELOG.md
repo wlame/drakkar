@@ -15,7 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on your handler and describe each field with `probe_field(section=...,
   view=...)`; `probe.set` / `probe.append` / `probe.update` fill it in from
   any hook, and are no-ops outside a probe. The report gets a `user_details`
-  object, rendered as a new User-defined tab in the Message Probe.
+  object, rendered as a new User-defined tab in the Message Probe. The
+  `integration/worker` example handler now shows this in practice: cache
+  lookup tiers, per-task match analysis, pattern ranking, and sink-routing
+  decisions.
 
 ## [1.5.0] - 2026-08-04
 
