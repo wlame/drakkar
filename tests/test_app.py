@@ -114,6 +114,25 @@ def test_app_creation(test_config):
     assert app.processors == {}
 
 
+def test_app_init_fails_fast_on_invalid_probe_details_model(test_config):
+    """An invalid probe_details_model surfaces at construction, not first probe.
+
+    Mirrors the webapp-handler fail-fast check: a model with an unannotated
+    field (missing probe_field()) is a code-owned mistake, so DrakkarApp
+    must reject it at boot via ProbeDetailsConfigError.
+    """
+    from drakkar.probe import ProbeDetailsConfigError
+
+    class InvalidDetails(BaseModel):
+        plain: int = 0  # unannotated field → build_layout rejection
+
+    class WithInvalidDetails(SimpleHandler):
+        probe_details_model = InvalidDetails
+
+    with pytest.raises(ProbeDetailsConfigError):
+        DrakkarApp(handler=WithInvalidDetails(), config=test_config)
+
+
 def test_app_is_ready_starts_false(test_config):
     """is_ready is False until the first poll cycle completes.
 

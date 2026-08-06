@@ -32,6 +32,7 @@ from drakkar.logging import setup_logging
 from drakkar.metrics import dlq_dropped_payloads
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError, SinkDeliveryFailedError
 from drakkar.partition import PartitionProcessor
+from drakkar.probe import build_layout
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq import DLQSink
@@ -82,6 +83,13 @@ class DrakkarApp:
             from drakkar.webapp.server import validate_webapp_handler
 
             validate_webapp_handler(handler)
+        # Fail fast on an invalid probe-details model — same philosophy as
+        # the webapp handler check above: code-owned mistakes surface at
+        # boot, not at first probe. Read into a local so the type checker
+        # narrows `type[BaseModel] | None` to `type[BaseModel]` below.
+        probe_details_model = handler.probe_details_model
+        if probe_details_model is not None:
+            build_layout(probe_details_model)
         self._worker_id = worker_id or os.environ.get(self._config.worker_name_env, '') or f'drakkar-{id(self):x}'
         self._cluster_name = ''
         if self._config.cluster_name_env:

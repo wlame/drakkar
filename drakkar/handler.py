@@ -70,6 +70,9 @@ class DrakkarHandler(Protocol[InputT, OutputT, HttpRequestT, HttpResponseT]):
 
     input_model: type[BaseModel] | None
     output_model: type[BaseModel] | None
+    # One details model per handler; registering it is the opt-in for the
+    # probe's User-defined tab.
+    probe_details_model: type[BaseModel] | None
     # Handler-facing cache. Always non-None by the time user hooks are called:
     # either a real Cache (when cache.enabled=true) or a NoOpCache stub
     # (disabled path). Typed structurally as :class:`CacheLike` so test doubles
@@ -189,6 +192,9 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
 
     input_model: type[BaseModel] | None = None
     output_model: type[BaseModel] | None = None
+    # One details model per handler; registering it is the opt-in for the
+    # probe's User-defined tab.
+    probe_details_model: type[BaseModel] | None = None
 
     # Handler-facing cache attribute. The framework reassigns this to either
     # a real ``Cache`` (when ``config.cache.enabled=true``) or leaves the

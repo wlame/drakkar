@@ -36,6 +36,7 @@ from drakkar.models import (
     make_task_id,
 )
 from drakkar.periodic import periodic
+from drakkar.probe import probe_field
 from drakkar.timefmt import format_rfc3339_micro
 from drakkar.utils import make_request_id
 from drakkar.webapp import SinkDeliverySummary, WebReport, WebRequestContext
@@ -83,4 +84,5 @@ __all__ = [
     'make_stable_task_id',
     'make_task_id',
     'periodic',
+    'probe_field',
 ]
