@@ -196,6 +196,34 @@ class RipgrepHandler(
                 for file_path in req.file_paths:
                     by_key.setdefault((pattern, file_path), []).append(msg)
 
+        # Window-scoped annotation: what the bucketing decided for this whole
+        # arrange() call. This is the "why does this window have fewer tasks
+        # than messages x patterns x files" answer, visible on every message
+        # in the window rather than reconstructed from task counts.
+        collapsed = sum(len(m) - 1 for m in by_key.values() if len(m) > 1)
+        self.annotate(
+            None,
+            'fan_in_bucketing',
+            {
+                'messages': len(messages),
+                'distinct_pairs': len(by_key),
+                'collapsed_duplicates': collapsed,
+                'pairs': [f'{pattern}|{path}' for pattern, path in by_key],
+            },
+        )
+
+        # Message-scoped: which pairs each message contributed, and which of
+        # them it shares with a sibling. Answers "what did THIS message ask
+        # for, and did it get its own subprocess or someone else's".
+        for msg in messages:
+            mine = [
+                {'pair': f'{pattern}|{path}', 'shared_with': len(msgs) - 1}
+                for (pattern, path), msgs in by_key.items()
+                if msg in msgs
+            ]
+            if mine:
+                self.annotate(msg, 'requested_pairs', {'pairs': mine})
+
         tasks = []
         for (pattern, file_path), contributing_msgs in by_key.items():
             task_id = dk.make_task_id('rg')
@@ -268,6 +296,19 @@ class RipgrepHandler(
                             duration_seconds=0.0005,
                         ),
                     ),
+                )
+                # Task-scoped: the subprocess did NOT run, and the reason is
+                # not recoverable from the task's own fields — args is empty
+                # either way. This is what tells an operator the difference
+                # between a cache short-circuit and a misbuilt task.
+                self.annotate(
+                    tasks[-1],
+                    'precomputed_from_cache',
+                    {
+                        'cache_key': cache_key,
+                        'would_have_run': [str(merged_repeat), pattern, file_path],
+                        'fan_in_request_ids': request_ids,
+                    },
                 )
                 continue
 
