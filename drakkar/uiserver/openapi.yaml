@@ -43,6 +43,8 @@ tags:
     description: Operator debug tools (databases, trace, metrics, probe).
   - name: cache
     description: Read-only handler-cache browser.
+  - name: config
+    description: Every config field Drakkar accepts, joined with live values.
   - name: meta
     description: Self-description of this API surface.
 
@@ -705,6 +707,31 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Detail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/config-reference:
+    get:
+      tags: [config]
+      operationId: getConfigReference
+      summary: Every config field, joined with live values
+      description: >-
+        The static field catalogue (path, env var, description, type,
+        default, secret flag, docs anchor) joined against this worker's
+        actual live config. Dynamic per-instance fields (sinks.*.*.<field>,
+        including the doubly-nested sinks.mongo.*.statements.*.<field>) are
+        expanded into one entry per configured instance, PLUS the
+        unexpanded `*` template entry (value=null, is_default=true) so an
+        unconfigured sink type still shows the keys it would accept. Every
+        secret-flagged field with a non-empty live value is masked to
+        `••••••`; webapp.clients is masked per-element (its token field),
+        since it is one un-decomposed array leaf with no per-client path of
+        its own.
+      responses:
+        '200':
+          description: Config groups with live-joined entries.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConfigReferenceResponse'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
   /api/v1/openapi.json:
@@ -1483,3 +1510,51 @@ components:
         entries_in_db: {type: integer}
         bytes_in_db: {type: integer}
       required: [entries_in_memory, bytes_in_memory, entries_in_db, bytes_in_db]
+
+    ConfigReferenceEntry:
+      type: object
+      properties:
+        path:
+          type: string
+          description: >-
+            Dot-separated path. A dynamic-instance template entry keeps its
+            literal `*` segment (e.g. sinks.kafka.*.topic); expanded
+            per-instance entries carry the real instance name instead
+            (sinks.kafka.results.topic).
+        env: {type: [string, 'null']}
+        description: {type: string}
+        full_description: {type: string}
+        type: {type: string}
+        value:
+          description: >-
+            Live value at this path, secret-masked. Null for an unexpanded
+            `*` template entry.
+        default:
+          description: The field's default, secret-masked defensively.
+        is_default:
+          type: boolean
+          description: >-
+            value == default, computed before masking. Always true for an
+            unexpanded `*` template entry.
+        secret: {type: boolean}
+      required: [path, env, description, full_description, type, value,
+                 default, is_default, secret]
+
+    ConfigReferenceGroup:
+      type: object
+      properties:
+        key: {type: string}
+        title: {type: string}
+        doc_anchor: {type: string}
+        entries:
+          type: array
+          items: {$ref: '#/components/schemas/ConfigReferenceEntry'}
+      required: [key, title, doc_anchor, entries]
+
+    ConfigReferenceResponse:
+      type: object
+      properties:
+        groups:
+          type: array
+          items: {$ref: '#/components/schemas/ConfigReferenceGroup'}
+      required: [groups]

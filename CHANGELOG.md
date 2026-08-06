@@ -16,7 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drakkar-go to vendor. Credential-bearing fields (`ui.auth_token`, Kafka
   SASL/TLS-key passwords, Postgres DSN, Mongo URI, Redis URL, HTTP sink
   headers, webapp client tokens) are now marked `drakkar_secret` in their
-  field schema.
+  field schema. `GET /api/v1/config-reference` joins that catalogue with
+  the worker's live config values: dynamic per-instance fields (sink
+  instances, including the nested Mongo per-instance statements) expand
+  into one entry per configured instance plus the unexpanded template entry,
+  so an unconfigured sink type still shows its possible keys. Every
+  secret-flagged field with a non-empty live value is masked to `••••••`
+  before it leaves the process; `webapp.clients` tokens are masked
+  per-element since that field has no per-client path of its own.
 - The message probe reports each task's command-line arguments (`args`), and
   its `binary_path` only when the handler overrode the configured binary.
 - **Handlers can register a probe details model.** Set `probe_details_model`

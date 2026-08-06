@@ -10,6 +10,7 @@ factory thin:
   * ``routes_debug``  — ``/debug`` page + ``/api/debug/*`` (databases,
     trace, metrics, periodic, probe, download).
   * ``routes_cache``  — ``/api/debug/cache/*`` endpoints.
+  * ``routes_config_reference`` — ``/api/v1/config-reference`` (v1-only).
 
 Each routes module defines a ``create_*_router(deps)`` factory that
 returns an ``APIRouter`` and is mounted into the app via
@@ -536,6 +537,7 @@ def create_ui_app(
     # imports the route factories. Pulling them in at call time keeps the
     # module-import graph acyclic.
     from drakkar.uiserver.routes_cache import create_cache_router
+    from drakkar.uiserver.routes_config_reference import create_config_reference_router
     from drakkar.uiserver.routes_debug import create_debug_router
     from drakkar.uiserver.routes_live import create_live_router
     from drakkar.uiserver.routes_openapi import create_openapi_router
@@ -596,6 +598,7 @@ def create_ui_app(
         create_live_router(deps, include_html=include_html),
         create_debug_router(deps, include_html=include_html),
         create_cache_router(deps),
+        create_config_reference_router(deps),
         create_openapi_router(deps),
     )
     for router in routers:
