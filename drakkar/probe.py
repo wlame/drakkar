@@ -288,7 +288,12 @@ class _DetailsState:
         except ValidationError as exc:
             self._on_error(field, 'append', 'ValidationError', str(exc))
             return
-        getattr(self.instance, field).append(validated)
+        # Handle None (nullable container) by treating as empty list
+        current = getattr(self.instance, field)
+        if current is None:
+            type(self.instance).__pydantic_validator__.validate_assignment(self.instance, field, [])
+            current = getattr(self.instance, field)
+        current.append(validated)
         self._record(field, 'append', validated)
 
     def update_field(self, field: str, entries: dict[str, Any]) -> None:
@@ -300,7 +305,10 @@ class _DetailsState:
                 field, 'update', 'ProbeDetailsError', f"update targets keyvalue/dict; '{field}' is view '{entry.view}'"
             )
             return
-        merged = {**getattr(self.instance, field), **entries}
+        # Handle None (nullable container) by treating as empty dict
+        current = getattr(self.instance, field)
+        current_dict = current if current is not None else {}
+        merged = {**current_dict, **entries}
         try:
             type(self.instance).__pydantic_validator__.validate_assignment(self.instance, field, merged)
         except ValidationError as exc:
@@ -344,7 +352,7 @@ _active_state: contextvars.ContextVar[_DetailsState | None] = contextvars.Contex
 )
 
 
-def set(**fields: Any) -> None:  # noqa: A001 - deliberate logging-like module API
+def set(**fields: Any) -> None:  # shadowing builtin by design - logging-like module API
     """Set scalar / whole-value fields on the probe details model. No-op outside a probe."""
     state = _active_state.get()
     if state is None:

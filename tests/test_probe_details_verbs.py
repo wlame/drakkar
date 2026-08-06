@@ -17,6 +17,8 @@ class VerbDetails(BaseModel):
     counters: dict[str, int] = probe_field(section='Selection', view='keyvalue', default_factory=dict)
     context_blob: dict = probe_field(section='Selection', view='dict', default_factory=dict)
     picked_items: list[PickedRow] = probe_field(section='Rows', view='table', default_factory=list)
+    context_or_none: dict | None = probe_field(section='Optional', view='dict', default=None)
+    rows_or_none: list[PickedRow] | None = probe_field(section='Optional', view='table', default=None)
 
 
 @pytest.fixture
@@ -130,3 +132,22 @@ def test_to_user_details_replaces_unserializable_value_with_placeholder(bound):
     details = bound.to_user_details()
     assert isinstance(details.data['context_blob'], str)
     assert details.data['context_blob'].startswith('<unserializable')
+
+
+def test_update_on_nullable_dict_field_succeeds(bound):
+    # Nullable dict field starts as None; update should initialize it
+    assert bound.instance.context_or_none is None
+    probe.update('context_or_none', k=1)
+    assert bound.instance.context_or_none == {'k': 1}
+    assert len(bound.writes) == 1
+    assert bound.writes[0].op == 'update'
+
+
+def test_append_to_nullable_table_field_succeeds(bound):
+    # Nullable table field starts as None; append should initialize it
+    assert bound.instance.rows_or_none is None
+    probe.append('rows_or_none', {'item_id': 'a', 'score': 1.0})
+    assert len(bound.instance.rows_or_none) == 1
+    assert bound.instance.rows_or_none[0].item_id == 'a'
+    assert len(bound.writes) == 1
+    assert bound.writes[0].op == 'append'
