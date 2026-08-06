@@ -15,7 +15,7 @@ what makes a command that accumulates (INCRBY, LPUSH) safe to batch.
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
@@ -128,7 +128,12 @@ def _sorted_mapping(value: object) -> dict[str, object]:
     caller's own order, like an explicit `update_columns` on the Postgres
     side, and both backends can preserve a sequence.
     """
-    mapping = value if isinstance(value, dict) else {}
+    # The cast states an invariant the annotation cannot: ``value`` is typed
+    # ``object`` because every renderer takes the same payload, but the
+    # per-op field contract has already narrowed a mapping op's collection to
+    # ``dict[str, ...]``. Without it, ``sorted`` sees keys of type ``object``
+    # and cannot know they are comparable.
+    mapping = cast(dict[str, object], value) if isinstance(value, dict) else {}
     return {name: mapping[name] for name in sorted(mapping)}
 
 
