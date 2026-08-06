@@ -38,7 +38,12 @@ else is optional overrides: `on_task_complete`, `on_message_complete`,
 (`on_startup`, `on_ready`, `pre_shutdown`), periodic tasks, and the webapp
 hooks (`arrange_http_request` / `on_http_request_complete` — see
 `docs/webapp.md`). `self.cache` is an optional LWW key/value store with peer
-sync (`drakkar/cache/`).
+sync (`drakkar/cache/`). `self.annotate(target, kind, data)` attaches
+structured diagnostics to a window / message / task from inside any hook
+(`drakkar/annotations.py`); they land as `annotation` rows in the recorder's
+existing `events` table — no new column — anchored from an ambient
+`HookContext` (`drakkar/hookctx.py`) that every hook call site binds
+alongside its `bind_contextvars` call. See `docs/annotations.md`.
 
 ## HTTP surfaces (three separate servers, three ports)
 

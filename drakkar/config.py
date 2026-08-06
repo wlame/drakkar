@@ -793,6 +793,25 @@ class UIRecorderConfig(BaseModel):
     max_flush_retries: int = Field(default=3, ge=1)
     event_min_duration_ms: int = Field(default=0, ge=0)
     output_min_duration_ms: int = Field(default=500, ge=0)
+    # Handler annotations — diagnostic records a handler attaches to a window,
+    # message, or task from inside a hook (see drakkar.annotations). They are
+    # stored as ordinary rows in the events table, so recorder rotation and
+    # retention expire them with everything else.
+    #
+    # ``0`` disables each byte cap. The two caps guard different resources and
+    # are deliberately not one setting: annotation_max_bytes rejects a single
+    # unreasonable payload, while annotation_max_bytes_per_call bounds what one
+    # hook invocation can add to the DB in total — without the latter, a handler
+    # annotating every message of a wide window can exhaust
+    # retention_max_events and evict every other event.
+    annotations_enabled: bool = True
+    annotation_max_bytes: int = Field(default=16_384, ge=0)
+    annotation_max_bytes_per_call: int = Field(default=262_144, ge=0)
+    # Cap on the payload copy written to the warning log when a record is
+    # dropped. Higher than the row itself is pointless; lower is fine. Log
+    # lines usually ship to a metered aggregator, so an uncapped copy can cost
+    # more than the row it replaced.
+    annotation_log_max_bytes: int = Field(default=2048, ge=0)
 
 
 class UIReleaseConfig(BaseModel):

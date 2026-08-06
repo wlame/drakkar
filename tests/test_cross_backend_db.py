@@ -14,6 +14,7 @@ worker ``go-fixture`` / cluster ``main``; recorder events ``committed``
 ``fx:local`` / ``fx:expired``.
 """
 
+import json
 from pathlib import Path
 from shutil import copy
 
@@ -72,8 +73,38 @@ async def test_cross_trace_finds_events_in_go_written_db(shared_dir):
         await recorder.stop()
 
     assert events, 'expected the committed event from the Go fixture'
-    assert {e['event'] for e in events} == {'committed'}
+    # The annotation is anchored to the same (partition, offset), so a Python
+    # trace over a Go-written DB must surface both.
+    assert {e['event'] for e in events} == {'committed', 'annotation'}
     assert all(e['worker_name'] == GO_WORKER for e in events)
+
+
+async def test_go_written_annotation_row_reads_here(shared_dir):
+    # Annotations added no column, but the envelope inside ``metadata`` and
+    # the anchor convention are cross-backend contract (v1.3).
+    db = await open_reader(str(shared_dir / f'{GO_WORKER}-live.db'))
+    try:
+        async with db.execute("SELECT * FROM events WHERE event = 'annotation'") as cur:
+            columns = tuple(d[0] for d in cur.description)
+            rows = await cur.fetchall()
+    finally:
+        await db.close()
+
+    assert len(rows) == 1
+    row = dict(zip(columns, rows[0], strict=True))
+    assert row['partition'] == 0
+    assert row['offset'] == 1
+    assert row['task_id'] is None
+    assert json.loads(row['labels']) == {'fixture': 'yes'}
+    envelope = json.loads(row['metadata'])
+    assert envelope['kind'] == 'fixture_annotation'
+    assert envelope['scope'] == 'message'
+    assert envelope['hook'] == 'arrange'
+    assert envelope['window_id'] == 1
+    # Empty for message scope: the anchor column locates it, and carrying
+    # the window's offsets would match every sibling message's trace.
+    assert envelope['offsets'] == []
+    assert envelope['data'] == {'source': 'go'}
 
 
 async def test_go_event_rows_carry_the_pinned_column_shape(shared_dir):

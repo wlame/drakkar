@@ -676,6 +676,7 @@ class EventRecorder:
         tasks: list[ExecutorTask],
         duration: float = 0.0,
         message_labels: list[str] | None = None,
+        window_id: int | None = None,
     ) -> None:
         self._record(
             {
@@ -693,8 +694,46 @@ class EventRecorder:
                         'task_count': len(tasks),
                         'message_count': len(messages),
                         'message_labels': message_labels or [],
+                        # Lets the UI group an ``arranged`` row with the
+                        # window-scoped annotations emitted from the same
+                        # ``arrange()`` call. Per-partition monotonic and
+                        # reset on restart — never a global identifier.
+                        'window_id': window_id,
                     }
                 ),
+            }
+        )
+
+    def record_annotation(
+        self,
+        *,
+        kind: str,
+        partition: int,
+        metadata_json: str,
+        offset: int | None = None,
+        task_id: str | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> None:
+        """Append one handler-emitted annotation to the event log.
+
+        The envelope is already encoded by :class:`~drakkar.annotations.Annotator`,
+        which owns the size budgets — by the time a payload reaches here it has
+        been measured and accepted, so this method does no validation of its own.
+
+        Anchoring follows the annotation's scope: ``offset`` set for a message,
+        ``task_id`` set for a task, neither set for a window (those rows are
+        matched through the ``offsets`` list inside ``metadata_json``).
+        """
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'annotation',
+                'partition': partition,
+                'offset': offset,
+                'task_id': task_id,
+                'metadata': metadata_json,
+                'labels': encode_json_str(labels) if labels else None,
+                'kind': kind,
             }
         )
 
@@ -1452,7 +1491,9 @@ class EventRecorder:
         reader = self._reader_db or self._db
         if not reader or not self._store.store_events:
             return []
-        async with reader.execute(_TRACE_QUERY, [partition, msg_offset, partition, msg_offset]) as cursor:
+        async with reader.execute(
+            _TRACE_QUERY, [partition, msg_offset, partition, msg_offset, partition, msg_offset]
+        ) as cursor:
             columns = [d[0] for d in cursor.description]
             rows = await cursor.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]
@@ -1486,7 +1527,9 @@ class EventRecorder:
                     if not await cur.fetchone():
                         return []
 
-                async with db.execute(_TRACE_QUERY, [partition, msg_offset, partition, msg_offset]) as cur:
+                async with db.execute(
+                    _TRACE_QUERY, [partition, msg_offset, partition, msg_offset, partition, msg_offset]
+                ) as cur:
                     columns = [d[0] for d in cur.description]
                     rows = await cur.fetchall()
                     events = [dict(zip(columns, row, strict=False)) for row in rows]

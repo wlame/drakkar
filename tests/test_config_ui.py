@@ -45,6 +45,39 @@ def test_recorder_defaults_match_old_debug_defaults():
     assert rec.output_min_duration_ms == 500
 
 
+def test_annotation_defaults():
+    rec = UIRecorderConfig()
+    assert rec.annotations_enabled is True
+    assert rec.annotation_max_bytes == 16_384
+    assert rec.annotation_max_bytes_per_call == 262_144
+    assert rec.annotation_log_max_bytes == 2048
+
+
+@pytest.mark.parametrize(
+    'field',
+    ['annotation_max_bytes', 'annotation_max_bytes_per_call', 'annotation_log_max_bytes'],
+)
+def test_annotation_byte_caps_accept_zero_as_unlimited(field: str):
+    assert getattr(UIRecorderConfig(**{field: 0}), field) == 0
+
+
+@pytest.mark.parametrize(
+    'field',
+    ['annotation_max_bytes', 'annotation_max_bytes_per_call', 'annotation_log_max_bytes'],
+)
+def test_annotation_byte_caps_reject_negative(field: str):
+    with pytest.raises(ValidationError):
+        UIRecorderConfig(**{field: -1})
+
+
+def test_annotation_env_override(monkeypatch):
+    monkeypatch.setenv('DK_UI__RECORDER__ANNOTATIONS_ENABLED', 'false')
+    monkeypatch.setenv('DK_UI__RECORDER__ANNOTATION_MAX_BYTES', '4096')
+    cfg = DrakkarConfig()
+    assert cfg.ui.recorder.annotations_enabled is False
+    assert cfg.ui.recorder.annotation_max_bytes == 4096
+
+
 def test_release_defaults_match_old_flat_ui_defaults():
     rel = UIReleaseConfig()
     assert rel.enabled is True

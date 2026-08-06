@@ -2,6 +2,7 @@
 
 __version__ = '1.4.1'
 
+from drakkar.annotations import AnnotatorLike
 from drakkar.app import DrakkarApp
 from drakkar.cache import CacheLike, CacheScope
 from drakkar.config import DrakkarConfig, WebAppConfig, WebClientConfig, load_config
@@ -40,6 +41,7 @@ from drakkar.utils import make_request_id
 from drakkar.webapp import SinkDeliverySummary, WebReport, WebRequestContext
 
 __all__ = [
+    'AnnotatorLike',
     'BaseDrakkarHandler',
     'CacheLike',
     'CacheScope',

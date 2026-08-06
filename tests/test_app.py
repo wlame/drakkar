@@ -2108,3 +2108,66 @@ async def test_start_cache_wires_a_persisting_cache_when_enabled(test_config, tm
         assert app._handler.cache.peek('k') == 'v'
     finally:
         await app._cache_engine.stop()
+
+
+# --- annotator wiring ---
+
+
+def _wire_and_get_annotator(test_config, *, recorder, **recorder_overrides):
+    """Run the lifecycle's annotator wiring and return the installed object."""
+    from drakkar.lifecycle import AppLifecycle
+
+    for key, value in recorder_overrides.items():
+        setattr(test_config.ui.recorder, key, value)
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._recorder = recorder
+    AppLifecycle(app)._wire_annotator()
+    return app._handler._annotator
+
+
+def test_wire_annotator_installs_real_annotator_when_recorder_present(test_config):
+    from drakkar.annotations import Annotator
+
+    annotator = _wire_and_get_annotator(test_config, recorder=MagicMock())
+
+    assert isinstance(annotator, Annotator)
+
+
+def test_wire_annotator_keeps_stub_without_recorder(test_config):
+    from drakkar.annotations import NoOpAnnotator
+
+    annotator = _wire_and_get_annotator(test_config, recorder=None)
+
+    assert isinstance(annotator, NoOpAnnotator)
+
+
+def test_wire_annotator_keeps_stub_when_annotations_disabled(test_config):
+    from drakkar.annotations import NoOpAnnotator
+
+    annotator = _wire_and_get_annotator(test_config, recorder=MagicMock(), annotations_enabled=False)
+
+    assert isinstance(annotator, NoOpAnnotator)
+
+
+def test_wire_annotator_keeps_stub_when_events_are_not_stored(test_config):
+    # Without store_events the recorder never starts a flush loop, so
+    # annotations would only fill the bounded buffer and be evicted.
+    from drakkar.annotations import NoOpAnnotator
+
+    annotator = _wire_and_get_annotator(test_config, recorder=MagicMock(), store_events=False)
+
+    assert isinstance(annotator, NoOpAnnotator)
+
+
+def test_wire_annotator_passes_configured_budgets(test_config):
+    annotator = _wire_and_get_annotator(
+        test_config,
+        recorder=MagicMock(),
+        annotation_max_bytes=99,
+        annotation_max_bytes_per_call=999,
+        annotation_log_max_bytes=9,
+    )
+
+    assert annotator._max_bytes == 99
+    assert annotator._max_bytes_per_call == 999
+    assert annotator._log_max_bytes == 9

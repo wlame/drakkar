@@ -51,6 +51,7 @@ nav:
   - Handler: handler.md
   - Cache: cache.md
   - Fan-out (one message → many tasks): fan-out.md
+  - Annotations (your diagnostics in the UI): annotations.md
   - Configuration: configuration.md
   - Features & Enable Order: features.md
   - Sinks: sinks.md

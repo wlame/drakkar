@@ -10,6 +10,7 @@ from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler
+from drakkar.hookctx import bind_hook_context, clear_hook_context
 from drakkar.metrics import (
     batch_duration,
     delivery_stalled_offsets,
@@ -546,6 +547,12 @@ class PartitionProcessor:
             window_id=self._window_counter,
             offsets=offsets,
         )
+        hook_token = bind_hook_context(
+            hook='arrange',
+            partition=self._partition_id,
+            window_id=self._window_counter,
+            offsets=tuple(offsets),
+        )
         self._arranging = True
         self._arrange_start = time.monotonic()
         self._arrange_labels = [self._handler.message_label(msg) for msg in messages]
@@ -556,6 +563,7 @@ class PartitionProcessor:
             arrange_labels = self._arrange_labels
             self._arrange_labels = []
             unbind_contextvars('hook', 'window_id', 'offsets')
+            clear_hook_context(hook_token)
         arrange_duration = time.monotonic() - self._arrange_start
         handler_duration.labels(hook='arrange').observe(arrange_duration)
         if self._recorder:
@@ -565,6 +573,7 @@ class PartitionProcessor:
                 tasks,
                 duration=arrange_duration,
                 message_labels=arrange_labels,
+                window_id=window.window_id,
             )
         window.tasks = tasks
         window.total_tasks = len(tasks)
@@ -754,11 +763,24 @@ class PartitionProcessor:
                 )
 
             bind_contextvars(hook='on_task_complete', task_id=task.task_id)
+            hook_token = bind_hook_context(
+                hook='on_task_complete',
+                partition=self._partition_id,
+                window_id=window.window_id,
+                task_id=task.task_id,
+            )
             collect_start = time.monotonic()
-            collect_result = await self._handler.on_task_complete(result)
+            try:
+                collect_result = await self._handler.on_task_complete(result)
+            finally:
+                # Both releases belong in the ``finally``: this hook's
+                # exception propagates (the caller synthesizes a failure from
+                # it), so releasing after the ``try`` would leak ``hook`` and
+                # ``task_id`` into every later log line this coroutine emits.
+                unbind_contextvars('hook', 'task_id')
+                clear_hook_context(hook_token)
             collect_duration = time.monotonic() - collect_start
             handler_duration.labels(hook='on_task_complete').observe(collect_duration)
-            unbind_contextvars('hook', 'task_id')
             if self._recorder:
                 self._recorder.record_task_complete(
                     task_id=task.task_id,
@@ -843,6 +865,12 @@ class PartitionProcessor:
             log.warning('executor_task_failed', error=str(e))
 
             bind_contextvars(hook='on_error', task_id=task.task_id)
+            hook_token = bind_hook_context(
+                hook='on_error',
+                partition=self._partition_id,
+                window_id=window.window_id,
+                task_id=task.task_id,
+            )
             on_error_start = time.monotonic()
             try:
                 action = await self._handler.on_error(task, e.error)
@@ -878,6 +906,7 @@ class PartitionProcessor:
                 # line emitted by this coroutine.
                 handler_duration.labels(hook='on_error').observe(time.monotonic() - on_error_start)
                 unbind_contextvars('hook', 'task_id')
+                clear_hook_context(hook_token)
             if isinstance(action, list):
                 # Replacement: the original task is "replaced" (not a
                 # terminal failure of the group). Decrement its contribution
@@ -992,11 +1021,22 @@ class PartitionProcessor:
             batch_duration.observe(duration)
 
             bind_contextvars(hook='on_window_complete', window_id=window.window_id)
+            hook_token = bind_hook_context(
+                hook='on_window_complete',
+                partition=self._partition_id,
+                window_id=window.window_id,
+                offsets=tuple(m.offset for m in window.source_messages),
+            )
             wc_start = time.monotonic()
-            on_complete_result = await self._handler.on_window_complete(window.results, window.source_messages)
+            try:
+                on_complete_result = await self._handler.on_window_complete(window.results, window.source_messages)
+            finally:
+                # Released together in the ``finally`` — see on_task_complete
+                # above for why unbinding after the ``try`` leaks.
+                unbind_contextvars('hook', 'window_id')
+                clear_hook_context(hook_token)
             wc_duration = time.monotonic() - wc_start
             handler_duration.labels(hook='on_window_complete').observe(wc_duration)
-            unbind_contextvars('hook', 'window_id')
             if self._recorder:
                 self._recorder.record_window_complete(
                     partition=self._partition_id,
@@ -1071,6 +1111,15 @@ class PartitionProcessor:
             hook='on_message_complete',
             offset=tracker.source_message.offset,
         )
+        # No window_id: a message tracker outlives its arrange() window (the
+        # last task of a fan-out can settle long after the window closed), so
+        # there is no single window this hook belongs to.
+        hook_token = bind_hook_context(
+            hook='on_message_complete',
+            partition=self._partition_id,
+            offset=tracker.source_message.offset,
+            offsets=(tracker.source_message.offset,),
+        )
         mc_start = time.monotonic()
         try:
             on_complete_result = await self._handler.on_message_complete(group)
@@ -1086,9 +1135,15 @@ class PartitionProcessor:
                 exc_info=True,
             )
             on_complete_result = None
+        finally:
+            # The ``except`` above catches Exception, but NOT BaseException —
+            # a cancellation during the hook would skip an unbind placed after
+            # the block and leak ``hook``/``offset`` into every later log line
+            # this coroutine emits.
+            unbind_contextvars('hook', 'offset')
+            clear_hook_context(hook_token)
         mc_duration = time.monotonic() - mc_start
         handler_duration.labels(hook='on_message_complete').observe(mc_duration)
-        unbind_contextvars('hook', 'offset')
 
         if self._recorder:
             self._recorder.record_message_complete(

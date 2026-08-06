@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Handlers can expose their own diagnostics in the UI.** `self.annotate(target,
+  kind, data)` attaches a structured payload to a source message, an executor
+  task, or a whole `arrange()` window from inside any hook, and it shows up on
+  that entity's trace in the debug UI. It answers the question the framework's
+  own events cannot — not *what* happened, but *why the handler decided it*:
+  the candidates a hook considered, the flag that shaped a task's arguments,
+  the alternative it rejected.
+
+  The scope comes from the target, so no coordinates are ever passed: a
+  `SourceMessage` anchors to that message, an `ExecutorTask` to that task, and
+  `None` to the window. The framework resolves partition, window, and offsets
+  from an ambient hook context it binds around every hook call.
+
+  Annotations are ordinary rows in the flight recorder's `events` table under a
+  new `annotation` event type — no schema column was added, so the pinned
+  cross-backend event-row shape is unchanged. Recorder rotation and retention
+  expire them like every other event, which is what makes them suitable for
+  data that is worth keeping for a day and not worth keeping forever.
+
+  Emission is best-effort and can never affect processing: `annotate()` does
+  not raise, does not block, and only appends to the recorder's existing
+  buffer. A payload that exceeds a budget is **dropped whole rather than
+  truncated** — a half-written structured document still parses and still looks
+  complete, so it misleads whoever reads it more effectively than a missing
+  record does. Two budgets apply per hook invocation:
+  `ui.recorder.annotation_max_bytes` (16 KiB) bounds one payload, and
+  `ui.recorder.annotation_max_bytes_per_call` (256 KiB) bounds the total a
+  single hook call can add, so one handler annotating a wide window cannot
+  exhaust `retention_max_events` and evict every other event. Every drop
+  increments `drakkar_recorder_annotations_dropped_total{reason}` and is logged
+  with the payload attached; the log falls silent after five drops in one
+  invocation while the counter keeps going, so alerting belongs on the metric.
+  Set `ui.recorder.annotations_enabled: false` to turn the feature off and
+  leave `self.annotate(...)` a no-op.
+
+  See `docs/annotations.md`.
+
+- The `arranged` recorder event's metadata now carries `window_id`, so an
+  `arrange()` window can be correlated with the window-scoped annotations
+  emitted from the same call.
+
 ## [1.4.1] - 2026-08-02
 
 ### Changed

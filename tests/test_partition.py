@@ -5,9 +5,11 @@ import sys
 
 import pytest
 from pydantic import BaseModel as BM
+from structlog.contextvars import get_contextvars
 
 from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler
+from drakkar.hookctx import current_hook_context
 from drakkar.metrics import executor_timeouts
 from drakkar.models import (
     CollectResult,
@@ -2876,3 +2878,206 @@ async def test_crash_during_shutdown_drain_is_not_restarted(echo_pool):
     await proc.stop()
 
     assert handler.arrange_attempts <= 1, 'a shutdown-path crash must not be restarted'
+
+
+# --- handler annotations: hook context anchoring ---
+
+
+class _CapturedAnnotation(BM):
+    """One annotate() call plus the ambient anchors at the moment it fired."""
+
+    kind: str
+    hook: str
+    partition: int
+    window_id: int | None
+    offset: int | None
+    task_id: str | None
+    offsets: list[int]
+
+
+class RecordingAnnotator:
+    """Stands in for the real Annotator and snapshots the hook context."""
+
+    def __init__(self) -> None:
+        self.captured: list[_CapturedAnnotation] = []
+
+    def emit(self, target, kind, data=None, *, labels=None) -> None:
+        ctx = current_hook_context()
+        assert ctx is not None, f'annotate() from {kind!r} saw no hook context'
+        self.captured.append(
+            _CapturedAnnotation(
+                kind=kind,
+                hook=ctx.hook,
+                partition=ctx.partition,
+                window_id=ctx.window_id,
+                offset=ctx.offset,
+                task_id=ctx.task_id,
+                offsets=list(ctx.offsets),
+            )
+        )
+
+
+class AnnotatingHandler(EchoHandler):
+    """Annotates from every hook the partition processor invokes."""
+
+    async def arrange(self, messages, pending):
+        self.annotate(None, 'from_arrange')
+        tasks = await super().arrange(messages, pending)
+        for msg in messages:
+            self.annotate(msg, 'from_arrange_message')
+        for task in tasks:
+            self.annotate(task, 'from_arrange_task')
+        return tasks
+
+    async def on_task_complete(self, result):
+        self.annotate(result.task, 'from_task_complete')
+        return await super().on_task_complete(result)
+
+    async def on_window_complete(self, results, source_messages):
+        self.annotate(None, 'from_window_complete')
+        return await super().on_window_complete(results, source_messages)
+
+    async def on_message_complete(self, group):
+        self.annotate(group.source_message, 'from_message_complete')
+        return None
+
+
+class AnnotatingErrorHandler(ErrorHandler):
+    """Annotates from on_error, which runs inside an except clause."""
+
+    async def on_error(self, task, error):
+        self.annotate(task, 'from_on_error')
+        return ErrorAction.SKIP
+
+
+async def run_annotating_processor(handler, pool, partition_id=2, offsets=(0, 1)):
+    """Drive one window through the processor and return the annotator."""
+    annotator = RecordingAnnotator()
+    handler._annotator = annotator
+    proc = PartitionProcessor(
+        partition_id=partition_id,
+        handler=handler,
+        executor_pool=pool,
+        window_size=10,
+    )
+    for offset in offsets:
+        proc.enqueue(make_msg(partition=partition_id, offset=offset))
+    proc.start()
+    await wait_for(lambda: not proc.offset_tracker.has_pending() and proc.inflight_count == 0, timeout=5)
+    await proc.stop()
+    return annotator
+
+
+def captured_kind(annotator, kind: str) -> _CapturedAnnotation:
+    return next(c for c in annotator.captured if c.kind == kind)
+
+
+async def test_annotate_from_arrange_is_window_scoped(echo_pool):
+    annotator = await run_annotating_processor(AnnotatingHandler(), echo_pool)
+
+    entry = captured_kind(annotator, 'from_arrange')
+    assert entry.hook == 'arrange'
+    assert entry.partition == 2
+    assert entry.window_id is not None
+    assert entry.offsets == [0, 1]
+    assert entry.offset is None
+    assert entry.task_id is None
+
+
+async def test_annotate_from_on_task_complete_carries_task_anchor(echo_pool):
+    annotator = await run_annotating_processor(AnnotatingHandler(), echo_pool)
+
+    entry = captured_kind(annotator, 'from_task_complete')
+    assert entry.hook == 'on_task_complete'
+    assert entry.partition == 2
+    assert entry.task_id is not None
+    assert entry.window_id is not None
+
+
+async def test_annotate_from_on_window_complete_carries_window_offsets(echo_pool):
+    annotator = await run_annotating_processor(AnnotatingHandler(), echo_pool)
+
+    entry = captured_kind(annotator, 'from_window_complete')
+    assert entry.hook == 'on_window_complete'
+    assert entry.offsets == [0, 1]
+    assert entry.task_id is None
+
+
+async def test_annotate_from_on_message_complete_carries_message_offset(echo_pool):
+    annotator = await run_annotating_processor(AnnotatingHandler(), echo_pool)
+
+    entry = captured_kind(annotator, 'from_message_complete')
+    assert entry.hook == 'on_message_complete'
+    assert entry.offset in (0, 1)
+    assert entry.offsets == [entry.offset]
+    # A message tracker outlives its window, so there is no single window
+    # this hook belongs to.
+    assert entry.window_id is None
+
+
+async def test_annotate_from_on_error_carries_task_anchor(failing_pool):
+    handler = AnnotatingErrorHandler()
+    annotator = await run_annotating_processor(handler, failing_pool, offsets=(0,))
+
+    entry = captured_kind(annotator, 'from_on_error')
+    assert entry.hook == 'on_error'
+    assert entry.task_id == 'fail-0'
+    assert entry.partition == 2
+
+
+async def test_hook_context_is_cleared_after_the_window(echo_pool):
+    await run_annotating_processor(AnnotatingHandler(), echo_pool)
+
+    assert current_hook_context() is None
+
+
+# --- logging context hygiene ---
+
+
+class LeakProbeHandler(EchoHandler):
+    """on_task_complete raises; on_message_complete snapshots the log context.
+
+    Both hooks run in the SAME coroutine (_execute_and_track awaits the
+    tracker finalisation), so the snapshot sees whatever the earlier hook
+    left bound.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.snapshot: dict | None = None
+
+    async def on_task_complete(self, result):
+        raise RuntimeError('boom')
+
+    async def on_message_complete(self, group):
+        self.snapshot = dict(get_contextvars())
+        return None
+
+
+async def test_raising_on_task_complete_does_not_leak_its_context(echo_pool):
+    # The hook's exception is caught by _execute_and_track, which keeps running
+    # in the same coroutine. Releasing the binding after the try block left
+    # ``task_id`` attached to later work — including the message-level hook,
+    # which is not about that task at all.
+    #
+    # Asserted against the contextvars directly rather than captured logs:
+    # ``structlog.get_logger()`` caches its bound logger on first use, so a
+    # test-local ``configure`` silently does nothing once any earlier test has
+    # logged. Reading the contextvar has no such ordering dependency.
+    handler = LeakProbeHandler()
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=10,
+    )
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: handler.snapshot is not None, timeout=5)
+    await proc.stop()
+
+    assert handler.snapshot is not None
+    assert 'task_id' not in handler.snapshot, (
+        f'on_task_complete leaked task_id into the message-level hook: {handler.snapshot}'
+    )
+    assert handler.snapshot.get('hook') == 'on_message_complete'
