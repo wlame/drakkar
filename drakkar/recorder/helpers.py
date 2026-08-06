@@ -60,7 +60,11 @@ def _json_default(obj: Any) -> Any:
 
 
 try:
-    import orjson  # ty: ignore[unresolved-import]
+    # No ``ty: ignore`` here: ``just install`` syncs the ``perf`` extra, so the
+    # type-checking environment always resolves orjson and a suppression would
+    # be dead. The try/except still guards the RUNTIME case, where orjson is a
+    # genuinely optional dependency an installed py-drakkar may not have.
+    import orjson
 
     _HAS_ORJSON = True
 
