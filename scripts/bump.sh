@@ -141,7 +141,6 @@ echo "  git push origin $TAG"
 echo
 echo "  # The GitHub Release is what publishes to PyPI. Pushing the tag alone"
 echo "  # does not trigger release.yml."
-echo "  just release-notes ${NEW_VERSION} > /tmp/notes-${NEW_VERSION}.md"
-echo "  gh release create $TAG --title=\"$TAG\" --notes-file=/tmp/notes-${NEW_VERSION}.md"
+echo "  just release-notes ${NEW_VERSION} | gh release create $TAG --title=\"$TAG\" --notes-file=-"
 echo
 echo "  gh run watch   # follow lint -> test -> verify-tag -> publish"
