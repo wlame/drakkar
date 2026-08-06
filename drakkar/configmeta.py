@@ -181,18 +181,52 @@ def _dict_of_model_value_type(annotation: Any) -> type[BaseModel] | None:
     return None
 
 
-# Matches the end of a sentence: a `.`/`!`/`?` followed by whitespace (or
-# end of string, handled by the maxsplit=1 leaving no trailing chunk to
-# worry about). Good enough for hand-written Field descriptions; not a full
-# NLP sentence splitter, and doesn't need to be — see module tests for the
-# behavior this is expected to have on real descriptions.
-_SENTENCE_END_RE = re.compile(r'(?<=[.!?])\s+')
+# Candidate sentence-end punctuation: a run of `.`/`!`/`?` immediately
+# followed by whitespace or end of string. Not every candidate is a real
+# boundary — see `_first_sentence`.
+_CANDIDATE_SENTENCE_END_RE = re.compile(r'[.!?]+(?=\s|$)')
+
+# Abbreviations whose trailing period is not a sentence boundary. Checked
+# against the text immediately before a candidate boundary, case-
+# insensitively. Python's `re` module cannot express these as one
+# fixed-width lookbehind (they're different lengths), so `_first_sentence`
+# checks them in plain Python instead of pushing them into the regex.
+_ABBREVIATIONS = ('e.g', 'i.e', 'etc', 'vs')
+
+# Characters that plausibly start a new sentence: an uppercase letter, a
+# digit (e.g. a version number), an opening quote/backtick, or nothing
+# (end of string). A lowercase letter or symbol immediately after the
+# whitespace means the punctuation was inside the sentence (a decimal, an
+# abbreviation not in the list above, …), not a boundary.
+_SENTENCE_START_CHARS = '"\'`'
 
 
 def _first_sentence(text: str) -> str:
+    """First sentence of ``text``, guarding against abbreviations.
+
+    A plain "split on `. `" would cut ``'... this backend is built against
+    (e.g. "v1.2.0"); the contract is API-major compatible.'`` at ``'e.g.'``,
+    losing the rest of the (single) real sentence. Every candidate boundary
+    is checked two ways before it's accepted: the text right before it must
+    not end in a known abbreviation stem (``e.g``, ``i.e``, ``etc``, ``vs``),
+    and the text right after it must look like the start of a new sentence
+    (uppercase letter, digit, opening quote/backtick, or end of string).
+    Not a full NLP sentence splitter — hand-written Field descriptions don't
+    need one — but see module tests for the concrete cases it's proven
+    against, including that exact "(e.g. ...)" description.
+    """
     if not text:
         return ''
-    return _SENTENCE_END_RE.split(text.strip(), maxsplit=1)[0].strip()
+    stripped = text.strip()
+    for match in _CANDIDATE_SENTENCE_END_RE.finditer(stripped):
+        before = stripped[: match.start()].rstrip().lower()
+        if any(before.endswith(abbr) for abbr in _ABBREVIATIONS):
+            continue
+        after = stripped[match.end() :].lstrip()
+        if after and not (after[0].isupper() or after[0].isdigit() or after[0] in _SENTENCE_START_CHARS):
+            continue
+        return stripped[: match.end()].strip()
+    return stripped
 
 
 def _to_jsonable(value: Any) -> Any:
@@ -293,6 +327,15 @@ def _walk(model_cls: type[BaseModel], path_segments: list[str], group: str, out:
     ``list[SomeModel]`` fields (just ``webapp.clients``) are deliberately
     NOT decomposed the same way: a list has no stable per-element path, so
     it is reported as one ``array``-typed leaf instead.
+
+    CAVEAT for the eventual Configs-tab endpoint: because ``webapp.clients``
+    is one un-decomposed leaf, ``ConfigFieldMeta.secret`` is never set for
+    it, even though its elements are ``WebClientConfig`` and
+    ``WebClientConfig.token`` IS marked secret at the model level (see
+    ``drakkar/config.py``). A value-rendering endpoint must special-case
+    masking inside the ``webapp.clients`` array (mask each element's
+    ``token``) rather than trusting the top-level ``secret`` flag to cover
+    it — this module's tree has no per-list-element path to hang a flag on.
     """
     for name, info in model_cls.model_fields.items():
         annotation = info.annotation

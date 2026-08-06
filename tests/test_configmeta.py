@@ -266,6 +266,45 @@ def test_description_and_full_description_split_correctly_on_a_real_field():
     assert len(entry.full_description) > len(entry.description)
 
 
+def test_first_sentence_does_not_truncate_at_an_abbreviation():
+    """Regression: `ui.release.pinned_version`'s description is ONE sentence
+    containing '(e.g. "v1.2.0")' — a naive split-on-period would cut it
+    right after 'e.g.', losing everything past the abbreviation. The `;`
+    also does not end a sentence; only the final '.' after 'compatible' does.
+    """
+    metadata = build_config_metadata()
+    by_path = {entry.path: entry for group in metadata.groups for entry in group.entries}
+    entry = by_path['ui.release.pinned_version']
+    assert entry.description == (
+        'Known-good UI release tag this backend is built against (e.g. "v1.2.0"); the contract is API-major compatible.'
+    )
+    # The full description continues past the first sentence ('Empty means
+    # "no pinned version".'), so description is a strict prefix of it.
+    assert entry.full_description.startswith(entry.description)
+    assert entry.description != entry.full_description
+
+
+def test_no_generated_description_is_truncated_at_an_abbreviation_or_unbalanced():
+    """Tree-wide sweep: no `description` in the committed metadata should end
+    mid-abbreviation (a truncation bug would leave a dangling '(e.g.' or
+    similar) or with unbalanced parentheses (a symptom of cutting inside a
+    parenthetical)."""
+    abbreviation_endings = ('e.g.', 'i.e.', 'etc.', 'vs.')
+    metadata = build_config_metadata()
+    for group in metadata.groups:
+        for entry in group.entries:
+            description = entry.description
+            if not description:
+                continue
+            lowered = description.rstrip().lower()
+            assert not any(lowered.endswith(a) for a in abbreviation_endings), (
+                f'{entry.path}: description truncated at an abbreviation: {description!r}'
+            )
+            assert description.count('(') == description.count(')'), (
+                f'{entry.path}: description has unbalanced parentheses: {description!r}'
+            )
+
+
 # --- misc: type mapping sanity, since configmeta.py's _json_type has no dedicated test above ---
 
 
