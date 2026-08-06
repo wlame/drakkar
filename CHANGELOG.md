@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Configs tab groundwork.** `drakkar/configmeta.py` generates a canonical,
+  machine-readable description of every config field (path, env var,
+  description, type, default, secret flag, docs anchor) from the pydantic
+  config tree, committed as `drakkar/uiserver/config-metadata.json` for
+  drakkar-go to vendor. Credential-bearing fields (`ui.auth_token`, Kafka
+  SASL/TLS-key passwords, Postgres DSN, Mongo URI, Redis URL, HTTP sink
+  headers, webapp client tokens) are now marked `drakkar_secret` in their
+  field schema.
 - The message probe reports each task's command-line arguments (`args`), and
   its `binary_path` only when the handler overrode the configured binary.
 - **Handlers can register a probe details model.** Set `probe_details_model`

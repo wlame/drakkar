@@ -156,7 +156,10 @@ class PostgresSinkConfig(BaseModel):
     Each named instance connects to a database via asyncpg pool.
     """
 
-    dsn: str
+    dsn: str = Field(
+        description='PostgreSQL connection string (asyncpg-compatible), typically embedding user and password.',
+        json_schema_extra={'drakkar_secret': True},
+    )
     pool_min: int = Field(default=2, ge=1)
     pool_max: int = Field(default=10, ge=1)
     statements: dict[str, str] = Field(
@@ -264,7 +267,10 @@ class MongoSinkConfig(BaseModel):
     Each named instance connects to a database via PyMongo's AsyncMongoClient.
     """
 
-    uri: str
+    uri: str = Field(
+        description='MongoDB connection string, typically embedding user and password.',
+        json_schema_extra={'drakkar_secret': True},
+    )
     database: str
     statements: dict[str, MongoStatementConfig] = Field(
         default_factory=dict,
@@ -344,7 +350,11 @@ class HttpSinkConfig(BaseModel):
     url: str
     method: str = 'POST'
     timeout_seconds: int = Field(default=30, ge=1)
-    headers: dict[str, str] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description='Extra request headers. May carry an Authorization value, so treated as secret as a whole.',
+        json_schema_extra={'drakkar_secret': True},
+    )
     encoding: Literal['json', 'form', 'multipart'] = 'json'
     max_retries: int = Field(default=3, ge=0)
     ui_url: str = ''
@@ -391,7 +401,11 @@ class RedisSinkConfig(BaseModel):
     command per payload, or runs an operator-authored Lua script by name.
     """
 
-    url: str = 'redis://localhost:6379/0'
+    url: str = Field(
+        default='redis://localhost:6379/0',
+        description='Redis connection URL, which may embed a password (redis://:password@host:port/db).',
+        json_schema_extra={'drakkar_secret': True},
+    )
     key_prefix: str = ''
     scripts: dict[str, str] = Field(
         default_factory=dict,
@@ -930,6 +944,7 @@ class UIConfig(BaseModel):
             'side-channels. Trailing/leading whitespace is stripped on load to '
             'avoid silent mismatches when YAML accidentally quotes spaces.'
         ),
+        json_schema_extra={'drakkar_secret': True},
     )
     allowed_ws_origins: list[str] = Field(
         default_factory=list,
@@ -1155,7 +1170,11 @@ class WebClientConfig(BaseModel):
     """
 
     name: str
-    token: str = ''
+    token: str = Field(
+        default='',
+        description='Bearer token for this client; empty means the anonymous slot (no Authorization header required).',
+        json_schema_extra={'drakkar_secret': True},
+    )
     rpm: int = 4
 
     @field_validator('name')

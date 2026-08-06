@@ -117,6 +117,7 @@ class KafkaSecurityConfig(BaseModel):
             'override over a literal in YAML; DK_* variables are withheld from '
             'executor subprocesses by the default executor.env_inherit_deny list.'
         ),
+        json_schema_extra={'drakkar_secret': True},
     )
     ssl_ca_location: str = Field(
         default='',
@@ -132,7 +133,9 @@ class KafkaSecurityConfig(BaseModel):
         description='Path to the client private key (PEM) for mutual TLS. Requires ssl_certificate_location.',
     )
     ssl_key_password: SecretStr = Field(
-        default=SecretStr(''), description='Passphrase for an encrypted client private key.'
+        default=SecretStr(''),
+        description='Passphrase for an encrypted client private key.',
+        json_schema_extra={'drakkar_secret': True},
     )
     ssl_endpoint_identification_algorithm: Literal['https', 'none'] | None = Field(
         default=None,

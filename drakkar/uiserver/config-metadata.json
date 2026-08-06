@@ -1,0 +1,1660 @@
+{
+  "groups": [
+    {
+      "key": "root",
+      "title": "Worker identity",
+      "doc_anchor": "worker-identity",
+      "entries": [
+        {
+          "path": "worker_name_env",
+          "env": "DK_WORKER_NAME_ENV",
+          "description": "Environment variable that holds the worker name for logs, metrics, and UI",
+          "full_description": "Environment variable that holds the worker name for logs, metrics, and UI",
+          "type": "string",
+          "default": "WORKER_ID",
+          "secret": false,
+          "group": "root"
+        },
+        {
+          "path": "cluster_name",
+          "env": "DK_CLUSTER_NAME",
+          "description": "Logical cluster name for grouping workers in the debug UI",
+          "full_description": "Logical cluster name for grouping workers in the debug UI",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "root"
+        },
+        {
+          "path": "cluster_name_env",
+          "env": "DK_CLUSTER_NAME_ENV",
+          "description": "Environment variable that holds the cluster name (overrides cluster_name if set)",
+          "full_description": "Environment variable that holds the cluster name (overrides cluster_name if set)",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "root"
+        }
+      ]
+    },
+    {
+      "key": "kafka",
+      "title": "Kafka source (kafka:)",
+      "doc_anchor": "kafka-source-kafka",
+      "entries": [
+        {
+          "path": "kafka.brokers",
+          "env": "DK_KAFKA__BROKERS",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "localhost:9092",
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.source_topic",
+          "env": "DK_KAFKA__SOURCE_TOPIC",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "input-events",
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.consumer_group",
+          "env": "DK_KAFKA__CONSUMER_GROUP",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "drakkar-workers",
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.security.protocol",
+          "env": "DK_KAFKA__SECURITY__PROTOCOL",
+          "description": "Wire protocol.",
+          "full_description": "Wire protocol. PLAINTEXT (default) is unauthenticated and unencrypted. SSL adds TLS; SASL_PLAINTEXT adds authentication without encryption; SASL_SSL adds both and is what managed clusters normally require.",
+          "type": "string",
+          "default": "PLAINTEXT",
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.security.sasl_mechanism",
+          "env": "DK_KAFKA__SECURITY__SASL_MECHANISM",
+          "description": "SASL mechanism.",
+          "full_description": "SASL mechanism. Required when protocol is SASL_PLAINTEXT or SASL_SSL, and rejected otherwise so a mechanism that would be ignored is never left in the config. PLAIN and the SCRAM mechanisms additionally require sasl_username and sasl_password.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.security.sasl_username",
+          "env": "DK_KAFKA__SECURITY__SASL_USERNAME",
+          "description": "SASL username (PLAIN / SCRAM mechanisms).",
+          "full_description": "SASL username (PLAIN / SCRAM mechanisms).",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.security.sasl_password",
+          "env": "DK_KAFKA__SECURITY__SASL_PASSWORD",
+          "description": "SASL password.",
+          "full_description": "SASL password. Prefer the DK_KAFKA__SECURITY__SASL_PASSWORD environment override over a literal in YAML; DK_* variables are withheld from executor subprocesses by the default executor.env_inherit_deny list.",
+          "type": "string",
+          "default": "",
+          "secret": true,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.security.ssl_ca_location",
+          "env": "DK_KAFKA__SECURITY__SSL_CA_LOCATION",
+          "description": "Path to a PEM CA bundle used to verify the broker certificate.",
+          "full_description": "Path to a PEM CA bundle used to verify the broker certificate. Leave empty to use the system trust store.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.security.ssl_certificate_location",
+          "env": "DK_KAFKA__SECURITY__SSL_CERTIFICATE_LOCATION",
+          "description": "Path to the client certificate (PEM) for mutual TLS.",
+          "full_description": "Path to the client certificate (PEM) for mutual TLS.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.security.ssl_key_location",
+          "env": "DK_KAFKA__SECURITY__SSL_KEY_LOCATION",
+          "description": "Path to the client private key (PEM) for mutual TLS.",
+          "full_description": "Path to the client private key (PEM) for mutual TLS. Requires ssl_certificate_location.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.security.ssl_key_password",
+          "env": "DK_KAFKA__SECURITY__SSL_KEY_PASSWORD",
+          "description": "Passphrase for an encrypted client private key.",
+          "full_description": "Passphrase for an encrypted client private key.",
+          "type": "string",
+          "default": "",
+          "secret": true,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.security.ssl_endpoint_identification_algorithm",
+          "env": "DK_KAFKA__SECURITY__SSL_ENDPOINT_IDENTIFICATION_ALGORITHM",
+          "description": "Broker hostname verification.",
+          "full_description": "Broker hostname verification. Unset uses librdkafka's default (\"https\", verification on). Set to \"none\" only for internal CAs that issue certificates without matching SANs — it disables a real protection.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.client_config",
+          "env": "DK_KAFKA__CLIENT_CONFIG",
+          "description": "",
+          "full_description": "",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.max_poll_records",
+          "env": "DK_KAFKA__MAX_POLL_RECORDS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 100,
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.max_poll_interval_ms",
+          "env": "DK_KAFKA__MAX_POLL_INTERVAL_MS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 300000,
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.session_timeout_ms",
+          "env": "DK_KAFKA__SESSION_TIMEOUT_MS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 45000,
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.heartbeat_interval_ms",
+          "env": "DK_KAFKA__HEARTBEAT_INTERVAL_MS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 3000,
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.on_parse_error",
+          "env": "DK_KAFKA__ON_PARSE_ERROR",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "skip",
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.ui_url",
+          "env": "DK_KAFKA__UI_URL",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.ui_cluster_name",
+          "env": "DK_KAFKA__UI_CLUSTER_NAME",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.startup_align_enabled",
+          "env": "DK_KAFKA__STARTUP_ALIGN_ENABLED",
+          "description": "",
+          "full_description": "",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.startup_min_wait_seconds",
+          "env": "DK_KAFKA__STARTUP_MIN_WAIT_SECONDS",
+          "description": "",
+          "full_description": "",
+          "type": "number",
+          "default": 4.0,
+          "secret": false,
+          "group": "kafka"
+        },
+        {
+          "path": "kafka.startup_align_interval_seconds",
+          "env": "DK_KAFKA__STARTUP_ALIGN_INTERVAL_SECONDS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 10,
+          "secret": false,
+          "group": "kafka"
+        }
+      ]
+    },
+    {
+      "key": "executor",
+      "title": "Executor pool (executor:)",
+      "doc_anchor": "executor-pool-executor",
+      "entries": [
+        {
+          "path": "executor.binary_path",
+          "env": "DK_EXECUTOR__BINARY_PATH",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "executor"
+        },
+        {
+          "path": "executor.env",
+          "env": "DK_EXECUTOR__ENV",
+          "description": "Environment variables passed to all executor subprocesses.",
+          "full_description": "Environment variables passed to all executor subprocesses. Merged on top of the (filtered) parent process environment. Per-task env vars from ExecutorTask.env override these on conflict.",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "executor"
+        },
+        {
+          "path": "executor.env_inherit_parent",
+          "env": "DK_EXECUTOR__ENV_INHERIT_PARENT",
+          "description": "When True, the parent process env is passed to subprocesses (with deny patterns applied — see env_inherit_deny).",
+          "full_description": "When True, the parent process env is passed to subprocesses (with deny patterns applied — see env_inherit_deny). Set False to run subprocesses with ONLY ExecutorConfig.env + ExecutorTask.env — fully isolated from parent env.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "executor"
+        },
+        {
+          "path": "executor.env_inherit_deny",
+          "env": "DK_EXECUTOR__ENV_INHERIT_DENY",
+          "description": "Case-insensitive fnmatch patterns against parent env var names.",
+          "full_description": "Case-insensitive fnmatch patterns against parent env var names. Matching vars are NOT inherited by subprocesses, even when env_inherit_parent is True. Deliberately narrower than the recorder redaction list: a pattern here WITHHOLDS the variable from your binary, so names with common non-secret uses (AUTH_SERVICE_URL, CERT_PATH, PRIVATE_SUBNET) are excluded. Set to [] to fully trust the parent environment.",
+          "type": "array",
+          "default": [
+            "DK_*",
+            "*PASSWORD*",
+            "*PASSWD*",
+            "*SECRET*",
+            "*TOKEN*",
+            "*_KEY",
+            "*_DSN",
+            "*CREDENTIAL*",
+            "*SALT*"
+          ],
+          "secret": false,
+          "group": "executor"
+        },
+        {
+          "path": "executor.max_executors",
+          "env": "DK_EXECUTOR__MAX_EXECUTORS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 4,
+          "secret": false,
+          "group": "executor"
+        },
+        {
+          "path": "executor.task_timeout_seconds",
+          "env": "DK_EXECUTOR__TASK_TIMEOUT_SECONDS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 120,
+          "secret": false,
+          "group": "executor"
+        },
+        {
+          "path": "executor.max_stdout_bytes",
+          "env": "DK_EXECUTOR__MAX_STDOUT_BYTES",
+          "description": "Maximum bytes of stdout retained per task.",
+          "full_description": "Maximum bytes of stdout retained per task. 0 (the default) = unlimited. When a process writes more, the retained prefix is cut at a UTF-8 character boundary, the rest is read and discarded (the process is never blocked on a full pipe), and ExecutorResult.stdout_truncated is set. Useful when subprocesses can emit very large output.",
+          "type": "integer",
+          "default": 0,
+          "secret": false,
+          "group": "executor"
+        },
+        {
+          "path": "executor.max_stderr_bytes",
+          "env": "DK_EXECUTOR__MAX_STDERR_BYTES",
+          "description": "Maximum bytes of stderr retained per task.",
+          "full_description": "Maximum bytes of stderr retained per task. 0 (the default) = unlimited. Same semantics as max_stdout_bytes, applied to the stderr stream; sets ExecutorResult.stderr_truncated on cut.",
+          "type": "integer",
+          "default": 0,
+          "secret": false,
+          "group": "executor"
+        },
+        {
+          "path": "executor.window_size",
+          "env": "DK_EXECUTOR__WINDOW_SIZE",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 100,
+          "secret": false,
+          "group": "executor"
+        },
+        {
+          "path": "executor.max_retries",
+          "env": "DK_EXECUTOR__MAX_RETRIES",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 3,
+          "secret": false,
+          "group": "executor"
+        },
+        {
+          "path": "executor.drain_timeout_seconds",
+          "env": "DK_EXECUTOR__DRAIN_TIMEOUT_SECONDS",
+          "description": "Maximum seconds to wait for in-flight executor tasks to finish during graceful shutdown or partition revocation.",
+          "full_description": "Maximum seconds to wait for in-flight executor tasks to finish during graceful shutdown or partition revocation. Set lower to speed up shutdown; set at least as high as task_timeout_seconds if you rely on clean final commits for every in-flight task. When drain times out, offsets for in-flight tasks are NOT committed (those messages will replay on restart — at-least-once).",
+          "type": "integer",
+          "default": 30,
+          "secret": false,
+          "group": "executor"
+        },
+        {
+          "path": "executor.backpressure_high_multiplier",
+          "env": "DK_EXECUTOR__BACKPRESSURE_HIGH_MULTIPLIER",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 32,
+          "secret": false,
+          "group": "executor"
+        },
+        {
+          "path": "executor.backpressure_low_multiplier",
+          "env": "DK_EXECUTOR__BACKPRESSURE_LOW_MULTIPLIER",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 4,
+          "secret": false,
+          "group": "executor"
+        }
+      ]
+    },
+    {
+      "key": "sinks",
+      "title": "Sinks (sinks:)",
+      "doc_anchor": "sinks-sinks",
+      "entries": [
+        {
+          "path": "sinks.kafka.*.topic",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.brokers",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.ui_url",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.security.protocol",
+          "env": null,
+          "description": "Wire protocol.",
+          "full_description": "Wire protocol. PLAINTEXT (default) is unauthenticated and unencrypted. SSL adds TLS; SASL_PLAINTEXT adds authentication without encryption; SASL_SSL adds both and is what managed clusters normally require.",
+          "type": "string",
+          "default": "PLAINTEXT",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.security.sasl_mechanism",
+          "env": null,
+          "description": "SASL mechanism.",
+          "full_description": "SASL mechanism. Required when protocol is SASL_PLAINTEXT or SASL_SSL, and rejected otherwise so a mechanism that would be ignored is never left in the config. PLAIN and the SCRAM mechanisms additionally require sasl_username and sasl_password.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.security.sasl_username",
+          "env": null,
+          "description": "SASL username (PLAIN / SCRAM mechanisms).",
+          "full_description": "SASL username (PLAIN / SCRAM mechanisms).",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.security.sasl_password",
+          "env": null,
+          "description": "SASL password.",
+          "full_description": "SASL password. Prefer the DK_KAFKA__SECURITY__SASL_PASSWORD environment override over a literal in YAML; DK_* variables are withheld from executor subprocesses by the default executor.env_inherit_deny list.",
+          "type": "string",
+          "default": "",
+          "secret": true,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.security.ssl_ca_location",
+          "env": null,
+          "description": "Path to a PEM CA bundle used to verify the broker certificate.",
+          "full_description": "Path to a PEM CA bundle used to verify the broker certificate. Leave empty to use the system trust store.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.security.ssl_certificate_location",
+          "env": null,
+          "description": "Path to the client certificate (PEM) for mutual TLS.",
+          "full_description": "Path to the client certificate (PEM) for mutual TLS.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.security.ssl_key_location",
+          "env": null,
+          "description": "Path to the client private key (PEM) for mutual TLS.",
+          "full_description": "Path to the client private key (PEM) for mutual TLS. Requires ssl_certificate_location.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.security.ssl_key_password",
+          "env": null,
+          "description": "Passphrase for an encrypted client private key.",
+          "full_description": "Passphrase for an encrypted client private key.",
+          "type": "string",
+          "default": "",
+          "secret": true,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.security.ssl_endpoint_identification_algorithm",
+          "env": null,
+          "description": "Broker hostname verification.",
+          "full_description": "Broker hostname verification. Unset uses librdkafka's default (\"https\", verification on). Set to \"none\" only for internal CAs that issue certificates without matching SANs — it disables a real protection.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.kafka.*.client_config",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.postgres.*.dsn",
+          "env": null,
+          "description": "PostgreSQL connection string (asyncpg-compatible), typically embedding user and password.",
+          "full_description": "PostgreSQL connection string (asyncpg-compatible), typically embedding user and password.",
+          "type": "string",
+          "default": null,
+          "secret": true,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.postgres.*.pool_min",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 2,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.postgres.*.pool_max",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 10,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.postgres.*.statements",
+          "env": null,
+          "description": "Operator-authored SQL keyed by name.",
+          "full_description": "Operator-authored SQL keyed by name. A PostgresPayload with op='statement' and a matching `statement` name executes the entry with its `params` bound to the :name placeholders. This is the escape hatch for SQL the declarative payload fields cannot express — value-dependent expressions and guarded predicates. Keeping the SQL here rather than in the payload means message content can never reach the statement text.",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.postgres.*.ui_url",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.mongo.*.uri",
+          "env": null,
+          "description": "MongoDB connection string, typically embedding user and password.",
+          "full_description": "MongoDB connection string, typically embedding user and password.",
+          "type": "string",
+          "default": null,
+          "secret": true,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.mongo.*.database",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.mongo.*.statements.*.collection",
+          "env": null,
+          "description": "Target MongoDB collection.",
+          "full_description": "Target MongoDB collection.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.mongo.*.statements.*.op",
+          "env": null,
+          "description": "Which write operation to perform.",
+          "full_description": "Which write operation to perform.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.mongo.*.statements.*.filter",
+          "env": null,
+          "description": "Equality-or-richer predicate selecting the documents to write.",
+          "full_description": "Equality-or-richer predicate selecting the documents to write. Must be non-empty.",
+          "type": "object",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.mongo.*.statements.*.update",
+          "env": null,
+          "description": "Update document for the update ops, absent for the delete ops.",
+          "full_description": "Update document for the update ops, absent for the delete ops. A LIST is an aggregation pipeline — MongoDB's own mechanism for computed updates.",
+          "type": "object",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.mongo.*.ui_url",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.http.*.url",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.http.*.method",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "POST",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.http.*.timeout_seconds",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 30,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.http.*.headers",
+          "env": null,
+          "description": "Extra request headers.",
+          "full_description": "Extra request headers. May carry an Authorization value, so treated as secret as a whole.",
+          "type": "object",
+          "default": {},
+          "secret": true,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.http.*.encoding",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "json",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.http.*.max_retries",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 3,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.http.*.ui_url",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.url",
+          "env": null,
+          "description": "Redis connection URL, which may embed a password (redis://:password@host:port/db).",
+          "full_description": "Redis connection URL, which may embed a password (redis://:password@host:port/db).",
+          "type": "string",
+          "default": "redis://localhost:6379/0",
+          "secret": true,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.key_prefix",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.scripts",
+          "env": null,
+          "description": "Operator-authored Lua keyed by name.",
+          "full_description": "Operator-authored Lua keyed by name. A RedisPayload with op='script' and a matching `script` name runs the entry with its `keys` and `args` passed as KEYS and ARGV. This is the escape hatch for multi-step or conditional logic, and the only way to get server-side atomicity — a pipeline is not a transaction. Parameters are never interpolated into the body, so message content cannot alter what runs.",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.redis.*.ui_url",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.filesystem.*.base_path",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.filesystem.*.ui_url",
+          "env": null,
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.custom",
+          "env": "DK_SINKS__CUSTOM",
+          "description": "Plugin-discovered sink instances.",
+          "full_description": "Plugin-discovered sink instances. Top-level keys are sink type names registered via [project.entry-points.\"drakkar.sinks\"]; second-level keys are instance names; leaf dicts are plugin-defined config passed verbatim to the sink class constructor.",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.circuit_breaker.failure_threshold",
+          "env": "DK_SINKS__CIRCUIT_BREAKER__FAILURE_THRESHOLD",
+          "description": "Consecutive delivery failures before the circuit trips open.",
+          "full_description": "Consecutive delivery failures before the circuit trips open. 5 = trip on the 5th consecutive failure (4 prior failures did not trip, the 5th did). Intermittent failures with any success in between do not accumulate.",
+          "type": "integer",
+          "default": 5,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.circuit_breaker.cooldown_seconds",
+          "env": "DK_SINKS__CIRCUIT_BREAKER__COOLDOWN_SECONDS",
+          "description": "Time the circuit stays fully open before the next delivery is allowed through as a half-open probe.",
+          "full_description": "Time the circuit stays fully open before the next delivery is allowed through as a half-open probe. While open, all deliveries route directly to DLQ — no attempt is made on the sink.",
+          "type": "number",
+          "default": 30.0,
+          "secret": false,
+          "group": "sinks"
+        }
+      ]
+    },
+    {
+      "key": "dlq",
+      "title": "Dead letter queue (dlq:)",
+      "doc_anchor": "dead-letter-queue-dlq",
+      "entries": [
+        {
+          "path": "dlq.topic",
+          "env": "DK_DLQ__TOPIC",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "dlq"
+        },
+        {
+          "path": "dlq.brokers",
+          "env": "DK_DLQ__BROKERS",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "dlq"
+        },
+        {
+          "path": "dlq.security.protocol",
+          "env": "DK_DLQ__SECURITY__PROTOCOL",
+          "description": "Wire protocol.",
+          "full_description": "Wire protocol. PLAINTEXT (default) is unauthenticated and unencrypted. SSL adds TLS; SASL_PLAINTEXT adds authentication without encryption; SASL_SSL adds both and is what managed clusters normally require.",
+          "type": "string",
+          "default": "PLAINTEXT",
+          "secret": false,
+          "group": "dlq"
+        },
+        {
+          "path": "dlq.security.sasl_mechanism",
+          "env": "DK_DLQ__SECURITY__SASL_MECHANISM",
+          "description": "SASL mechanism.",
+          "full_description": "SASL mechanism. Required when protocol is SASL_PLAINTEXT or SASL_SSL, and rejected otherwise so a mechanism that would be ignored is never left in the config. PLAIN and the SCRAM mechanisms additionally require sasl_username and sasl_password.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "dlq"
+        },
+        {
+          "path": "dlq.security.sasl_username",
+          "env": "DK_DLQ__SECURITY__SASL_USERNAME",
+          "description": "SASL username (PLAIN / SCRAM mechanisms).",
+          "full_description": "SASL username (PLAIN / SCRAM mechanisms).",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "dlq"
+        },
+        {
+          "path": "dlq.security.sasl_password",
+          "env": "DK_DLQ__SECURITY__SASL_PASSWORD",
+          "description": "SASL password.",
+          "full_description": "SASL password. Prefer the DK_KAFKA__SECURITY__SASL_PASSWORD environment override over a literal in YAML; DK_* variables are withheld from executor subprocesses by the default executor.env_inherit_deny list.",
+          "type": "string",
+          "default": "",
+          "secret": true,
+          "group": "dlq"
+        },
+        {
+          "path": "dlq.security.ssl_ca_location",
+          "env": "DK_DLQ__SECURITY__SSL_CA_LOCATION",
+          "description": "Path to a PEM CA bundle used to verify the broker certificate.",
+          "full_description": "Path to a PEM CA bundle used to verify the broker certificate. Leave empty to use the system trust store.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "dlq"
+        },
+        {
+          "path": "dlq.security.ssl_certificate_location",
+          "env": "DK_DLQ__SECURITY__SSL_CERTIFICATE_LOCATION",
+          "description": "Path to the client certificate (PEM) for mutual TLS.",
+          "full_description": "Path to the client certificate (PEM) for mutual TLS.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "dlq"
+        },
+        {
+          "path": "dlq.security.ssl_key_location",
+          "env": "DK_DLQ__SECURITY__SSL_KEY_LOCATION",
+          "description": "Path to the client private key (PEM) for mutual TLS.",
+          "full_description": "Path to the client private key (PEM) for mutual TLS. Requires ssl_certificate_location.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "dlq"
+        },
+        {
+          "path": "dlq.security.ssl_key_password",
+          "env": "DK_DLQ__SECURITY__SSL_KEY_PASSWORD",
+          "description": "Passphrase for an encrypted client private key.",
+          "full_description": "Passphrase for an encrypted client private key.",
+          "type": "string",
+          "default": "",
+          "secret": true,
+          "group": "dlq"
+        },
+        {
+          "path": "dlq.security.ssl_endpoint_identification_algorithm",
+          "env": "DK_DLQ__SECURITY__SSL_ENDPOINT_IDENTIFICATION_ALGORITHM",
+          "description": "Broker hostname verification.",
+          "full_description": "Broker hostname verification. Unset uses librdkafka's default (\"https\", verification on). Set to \"none\" only for internal CAs that issue certificates without matching SANs — it disables a real protection.",
+          "type": "string",
+          "default": null,
+          "secret": false,
+          "group": "dlq"
+        },
+        {
+          "path": "dlq.client_config",
+          "env": "DK_DLQ__CLIENT_CONFIG",
+          "description": "",
+          "full_description": "",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "dlq"
+        },
+        {
+          "path": "dlq.on_send_failure",
+          "env": "DK_DLQ__ON_SEND_FAILURE",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "drop",
+          "secret": false,
+          "group": "dlq"
+        }
+      ]
+    },
+    {
+      "key": "metrics",
+      "title": "Metrics (metrics:)",
+      "doc_anchor": "metrics-metrics",
+      "entries": [
+        {
+          "path": "metrics.enabled",
+          "env": "DK_METRICS__ENABLED",
+          "description": "",
+          "full_description": "",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "metrics"
+        },
+        {
+          "path": "metrics.port",
+          "env": "DK_METRICS__PORT",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 9090,
+          "secret": false,
+          "group": "metrics"
+        }
+      ]
+    },
+    {
+      "key": "logging",
+      "title": "Logging (logging:)",
+      "doc_anchor": "logging-logging",
+      "entries": [
+        {
+          "path": "logging.level",
+          "env": "DK_LOGGING__LEVEL",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "INFO",
+          "secret": false,
+          "group": "logging"
+        },
+        {
+          "path": "logging.format",
+          "env": "DK_LOGGING__FORMAT",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "json",
+          "secret": false,
+          "group": "logging"
+        },
+        {
+          "path": "logging.output",
+          "env": "DK_LOGGING__OUTPUT",
+          "description": "Log output destination.",
+          "full_description": "Log output destination. \"stderr\" (default) or \"stdout\" for standard streams, or a file path for file output. File paths support template variables: {worker_id}, {cluster_name}. Example: \"/var/log/drakkar/{worker_id}.log\"",
+          "type": "string",
+          "default": "stderr",
+          "secret": false,
+          "group": "logging"
+        }
+      ]
+    },
+    {
+      "key": "ui",
+      "title": "UI / Flight Recorder (ui:)",
+      "doc_anchor": "ui-flight-recorder-ui",
+      "entries": [
+        {
+          "path": "ui.enabled",
+          "env": "DK_UI__ENABLED",
+          "description": "",
+          "full_description": "",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.host",
+          "env": "DK_UI__HOST",
+          "description": "Bind address for the UI server.",
+          "full_description": "Bind address for the UI server. Use 0.0.0.0 to expose on all interfaces.",
+          "type": "string",
+          "default": "127.0.0.1",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.port",
+          "env": "DK_UI__PORT",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 8080,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.auth_token",
+          "env": "DK_UI__AUTH_TOKEN",
+          "description": "Bearer token for the UI.",
+          "full_description": "Bearer token for the UI. **Empty (the default) disables auth** entirely — every endpoint (including database download, merge, and message-probe) is reachable without credentials and the WebSocket live-event stream skips both token and Origin checks. This is a deliberate opt-in design: no endpoint stops a worker, replays Kafka messages, mutates sinks, or commits offsets, and Drakkar is intended for deployment inside a private contour (VPC / internal cluster / operator-only ingress). Most endpoints are read-only, but the probe and merge routes are not — close those with ``probe_enabled`` / ``merge_enabled``, which act independently of this token. A startup warning fires whenever the UI is enabled without a token so the unauthenticated posture is visible in logs, naming whichever side-effecting endpoint is still enabled. When set to a non-empty value, protected HTTP endpoints require an ``Authorization: Bearer <token>`` header or ``?token=<token>`` query parameter; WebSocket connections without a valid token are closed with code 4401, and the Origin header is validated against ``allowed_ws_origins`` (or the request Host header if that list is empty). Comparison uses ``secrets.compare_digest`` to avoid timing side-channels. Trailing/leading whitespace is stripped on load to avoid silent mismatches when YAML accidentally quotes spaces.",
+          "type": "string",
+          "default": "",
+          "secret": true,
+          "group": "ui"
+        },
+        {
+          "path": "ui.allowed_ws_origins",
+          "env": "DK_UI__ALLOWED_WS_ORIGINS",
+          "description": "Explicit allowlist of WebSocket origins.",
+          "full_description": "Explicit allowlist of WebSocket origins. Empty list with non-empty auth_token defaults to same-origin only; empty list with empty auth_token = no origin check (dev workflow preserved).",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.probe_enabled",
+          "env": "DK_UI__PROBE_ENABLED",
+          "description": "Serve ``POST /api/debug/probe``.",
+          "full_description": "Serve ``POST /api/debug/probe``. This is the one UI endpoint that runs caller-supplied bytes through the live handler and the real executor subprocess pool, so it is neither read-only nor free: it competes with production traffic for executor slots. Set to false to serve 403 instead — independently of ``auth_token``, so a deployment that cannot set a token can still close the endpoint, and a deployment that has one can still close it as defence in depth. Probes never write sinks, recorder rows, cache entries, or offsets, so switching it off costs no pipeline behaviour.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.merge_enabled",
+          "env": "DK_UI__MERGE_ENABLED",
+          "description": "Serve ``POST /api/debug/merge``.",
+          "full_description": "Serve ``POST /api/debug/merge``. This is the one UI endpoint that writes to disk: each call creates a new ``merged-<ts>.db`` in ``ui.recorder.db_dir`` and nothing reclaims it, so repeated calls grow unbounded. Set to false to serve 403 instead — independently of ``auth_token``, per the reasoning on ``probe_enabled``.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.public_url",
+          "env": "DK_UI__PUBLIC_URL",
+          "description": "Externally reachable URL of this worker's UI, used for cross-worker links in the workers list.",
+          "full_description": "Externally reachable URL of this worker's UI, used for cross-worker links in the workers list. Empty derives http://<ip>:<port> from the bind address.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.expose_env_vars",
+          "env": "DK_UI__EXPOSE_ENV_VARS",
+          "description": "",
+          "full_description": "",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.max_rows",
+          "env": "DK_UI__MAX_ROWS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 5000,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.log_min_duration_ms",
+          "env": "DK_UI__LOG_MIN_DURATION_MS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 500,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.ws_min_duration_ms",
+          "env": "DK_UI__WS_MIN_DURATION_MS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 500,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.prometheus_url",
+          "env": "DK_UI__PROMETHEUS_URL",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.prometheus_rate_interval",
+          "env": "DK_UI__PROMETHEUS_RATE_INTERVAL",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "5m",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.prometheus_worker_label",
+          "env": "DK_UI__PROMETHEUS_WORKER_LABEL",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.prometheus_cluster_label",
+          "env": "DK_UI__PROMETHEUS_CLUSTER_LABEL",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.custom_links",
+          "env": "DK_UI__CUSTOM_LINKS",
+          "description": "",
+          "full_description": "",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.db_dir",
+          "env": "DK_UI__RECORDER__DB_DIR",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "/tmp",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.store_events",
+          "env": "DK_UI__RECORDER__STORE_EVENTS",
+          "description": "",
+          "full_description": "",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.store_config",
+          "env": "DK_UI__RECORDER__STORE_CONFIG",
+          "description": "",
+          "full_description": "",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.store_state",
+          "env": "DK_UI__RECORDER__STORE_STATE",
+          "description": "",
+          "full_description": "",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.state_sync_interval_seconds",
+          "env": "DK_UI__RECORDER__STATE_SYNC_INTERVAL_SECONDS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 10,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.rotation_interval_minutes",
+          "env": "DK_UI__RECORDER__ROTATION_INTERVAL_MINUTES",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 60,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.retention_hours",
+          "env": "DK_UI__RECORDER__RETENTION_HOURS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 24,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.retention_max_events",
+          "env": "DK_UI__RECORDER__RETENTION_MAX_EVENTS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 100000,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.store_output",
+          "env": "DK_UI__RECORDER__STORE_OUTPUT",
+          "description": "",
+          "full_description": "",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.flush_interval_seconds",
+          "env": "DK_UI__RECORDER__FLUSH_INTERVAL_SECONDS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 5,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.max_buffer",
+          "env": "DK_UI__RECORDER__MAX_BUFFER",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 50000,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.max_flush_retries",
+          "env": "DK_UI__RECORDER__MAX_FLUSH_RETRIES",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 3,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.event_min_duration_ms",
+          "env": "DK_UI__RECORDER__EVENT_MIN_DURATION_MS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 0,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.output_min_duration_ms",
+          "env": "DK_UI__RECORDER__OUTPUT_MIN_DURATION_MS",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 500,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.annotations_enabled",
+          "env": "DK_UI__RECORDER__ANNOTATIONS_ENABLED",
+          "description": "",
+          "full_description": "",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.annotation_max_bytes",
+          "env": "DK_UI__RECORDER__ANNOTATION_MAX_BYTES",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 16384,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.annotation_max_bytes_per_call",
+          "env": "DK_UI__RECORDER__ANNOTATION_MAX_BYTES_PER_CALL",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 262144,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.annotation_log_max_bytes",
+          "env": "DK_UI__RECORDER__ANNOTATION_LOG_MAX_BYTES",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 2048,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.release.enabled",
+          "env": "DK_UI__RELEASE__ENABLED",
+          "description": "Resolve and serve the drakkar-ui bundle.",
+          "full_description": "Resolve and serve the drakkar-ui bundle. Off pins the built-in server-rendered pages unconditionally (no fetch, no cache read).",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.release.repo",
+          "env": "DK_UI__RELEASE__REPO",
+          "description": "The \"owner/name\" GitHub repo that publishes UI bundles.",
+          "full_description": "The \"owner/name\" GitHub repo that publishes UI bundles. Empty disables fetching — only a cached bundle or the embedded fallback is served.",
+          "type": "string",
+          "default": "wlame/drakkar-ui",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.release.pinned_version",
+          "env": "DK_UI__RELEASE__PINNED_VERSION",
+          "description": "Known-good UI release tag this backend is built against (e.g.",
+          "full_description": "Known-good UI release tag this backend is built against (e.g. \"v1.2.0\"); the contract is API-major compatible. Empty means \"no pinned version\".",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.release.cache_dir",
+          "env": "DK_UI__RELEASE__CACHE_DIR",
+          "description": "Bundle cache root override.",
+          "full_description": "Bundle cache root override. Empty uses the per-user cache dir ($XDG_CACHE_HOME/drakkar/ui, falling back to ~/.cache/drakkar/ui — the same directory the Go backend's os.UserCacheDir produces on Linux, so both backends share one cache).",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.release.check_update",
+          "env": "DK_UI__RELEASE__CHECK_UPDATE",
+          "description": "Resolve the latest release tag on startup instead of only the pinned version (the \"check for a new version\" toggle).",
+          "full_description": "Resolve the latest release tag on startup instead of only the pinned version (the \"check for a new version\" toggle). Already-cached versions are never re-downloaded — release tags are immutable.",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "ui"
+        }
+      ]
+    },
+    {
+      "key": "cache",
+      "title": "Cache (cache:)",
+      "doc_anchor": "cache-cache",
+      "entries": [
+        {
+          "path": "cache.enabled",
+          "env": "DK_CACHE__ENABLED",
+          "description": "",
+          "full_description": "",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.db_dir",
+          "env": "DK_CACHE__DB_DIR",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.flush_interval_seconds",
+          "env": "DK_CACHE__FLUSH_INTERVAL_SECONDS",
+          "description": "",
+          "full_description": "",
+          "type": "number",
+          "default": 3.0,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.cleanup_interval_seconds",
+          "env": "DK_CACHE__CLEANUP_INTERVAL_SECONDS",
+          "description": "",
+          "full_description": "",
+          "type": "number",
+          "default": 60.0,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.max_memory_entries",
+          "env": "DK_CACHE__MAX_MEMORY_ENTRIES",
+          "description": "Cap for in-memory LRU entries.",
+          "full_description": "Cap for in-memory LRU entries. Default 10_000 prevents unbounded growth under write-heavy workloads. Set to None for explicitly unbounded cache.",
+          "type": "integer",
+          "default": 10000,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.peer_sync.enabled",
+          "env": "DK_CACHE__PEER_SYNC__ENABLED",
+          "description": "",
+          "full_description": "",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.peer_sync.interval_seconds",
+          "env": "DK_CACHE__PEER_SYNC__INTERVAL_SECONDS",
+          "description": "",
+          "full_description": "",
+          "type": "number",
+          "default": 30.0,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.peer_sync.batch_size",
+          "env": "DK_CACHE__PEER_SYNC__BATCH_SIZE",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 500,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.peer_sync.timeout_seconds",
+          "env": "DK_CACHE__PEER_SYNC__TIMEOUT_SECONDS",
+          "description": "",
+          "full_description": "",
+          "type": "number",
+          "default": 5.0,
+          "secret": false,
+          "group": "cache"
+        },
+        {
+          "path": "cache.peer_sync.cycle_deadline_seconds",
+          "env": "DK_CACHE__PEER_SYNC__CYCLE_DEADLINE_SECONDS",
+          "description": "Hard wall-clock cap on one peer-sync cycle.",
+          "full_description": "Hard wall-clock cap on one peer-sync cycle. When None, defaults to interval_seconds * 0.9. Prevents a single slow peer from starving the periodic task.",
+          "type": "number",
+          "default": null,
+          "secret": false,
+          "group": "cache"
+        }
+      ]
+    },
+    {
+      "key": "webapp",
+      "title": "Webapp (webapp:)",
+      "doc_anchor": "webapp-webapp",
+      "entries": [
+        {
+          "path": "webapp.enabled",
+          "env": "DK_WEBAPP__ENABLED",
+          "description": "",
+          "full_description": "",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "webapp"
+        },
+        {
+          "path": "webapp.host",
+          "env": "DK_WEBAPP__HOST",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "0.0.0.0",
+          "secret": false,
+          "group": "webapp"
+        },
+        {
+          "path": "webapp.port",
+          "env": "DK_WEBAPP__PORT",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 8090,
+          "secret": false,
+          "group": "webapp"
+        },
+        {
+          "path": "webapp.path",
+          "env": "DK_WEBAPP__PATH",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "/process",
+          "secret": false,
+          "group": "webapp"
+        },
+        {
+          "path": "webapp.sinks_enabled",
+          "env": "DK_WEBAPP__SINKS_ENABLED",
+          "description": "",
+          "full_description": "",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "webapp"
+        },
+        {
+          "path": "webapp.request_timeout_seconds",
+          "env": "DK_WEBAPP__REQUEST_TIMEOUT_SECONDS",
+          "description": "",
+          "full_description": "",
+          "type": "number",
+          "default": 30.0,
+          "secret": false,
+          "group": "webapp"
+        },
+        {
+          "path": "webapp.max_concurrent",
+          "env": "DK_WEBAPP__MAX_CONCURRENT",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 64,
+          "secret": false,
+          "group": "webapp"
+        },
+        {
+          "path": "webapp.max_body_bytes",
+          "env": "DK_WEBAPP__MAX_BODY_BYTES",
+          "description": "",
+          "full_description": "",
+          "type": "integer",
+          "default": 10485760,
+          "secret": false,
+          "group": "webapp"
+        },
+        {
+          "path": "webapp.clients",
+          "env": "DK_WEBAPP__CLIENTS",
+          "description": "List of webapp clients (tenants).",
+          "full_description": "List of webapp clients (tenants). Defaults to a single anonymous client with empty token and rpm=4 so the webapp works out of the box for development. Production deployments should configure named clients with non-empty tokens.",
+          "type": "array",
+          "default": [
+            {
+              "name": "anonymous",
+              "token": "",
+              "rpm": 4
+            }
+          ],
+          "secret": false,
+          "group": "webapp"
+        }
+      ]
+    }
+  ]
+}
