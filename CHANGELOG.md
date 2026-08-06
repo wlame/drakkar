@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Maintenance release: dependency and CI updates, no functional change.**
+  The locked versions the test suite and CI resolve move to `redis` 8.0.1,
+  `pymongo` 4.17.0, `fastapi` 0.141.1, `pytest-asyncio` 1.4.0, and `ty`
+  0.0.65. The declared floors in `[project.dependencies]` are unchanged, so
+  what an installed py-drakkar resolves is unaffected.
+
+  Two of those needed a change to absorb. FastAPI 0.141 includes routers
+  behind a lazy wrapper that resolves only when a request arrives, which the
+  OpenAPI route-parity test had to learn — the served surface is identical,
+  but the test walked `app.routes` and could no longer see routes reached
+  through an include. ty 0.0.65 additionally flags a narrowing gap in the
+  Redis sink's sorted-mapping helper, where an `isinstance(value, dict)`
+  check leaves the keys typed `object`; the invariant is now stated with an
+  explicit cast. Neither alters runtime behaviour.
+
+- The GitHub Actions used by the CI, docs and release workflows moved to
+  `checkout@v7`, `deploy-pages@v5`, `upload-pages-artifact@v5` and
+  `upload-artifact@v7`.
+
 ## [1.4.0] - 2026-08-02
 
 ### Added
