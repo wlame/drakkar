@@ -198,7 +198,7 @@ class MatchAnalysisRow(BaseModel):
     pattern: str
     file: str
     matches: int
-    unique_files: int
+    distinct_lines: int
     longest_line: int
     duration_ms: float
     source: str  # 'cache' | 'subprocess'

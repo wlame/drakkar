@@ -115,9 +115,10 @@ class RipgrepHandler(
 
     # User-defined Message Probe tab — see docs/probe-user-details.md.
     # The probe.set/append/update calls sprinkled through this handler
-    # are near-zero-cost no-ops outside a probe, so this example is
-    # wired straight into the real pipeline rather than gated behind a
-    # flag.
+    # are near-zero-cost no-ops outside a probe — but any computation
+    # feeding them (e.g. the derived stats in on_task_complete) still
+    # runs in production. It's wired straight into the real pipeline
+    # rather than gated behind a flag because that computation is cheap.
     probe_details_model = RipgrepProbeDetails
 
     def message_label(self, msg: dk.SourceMessage) -> str:
@@ -434,9 +435,13 @@ class RipgrepHandler(
         matches = [line for line in result.stdout.strip().split('\n') if line]
         meta = result.task.metadata
 
-        # Probe-details example: cheap stats over the already-parsed
-        # matches list, free outside a probe.
-        unique_files = len({line.split(':', 1)[0] for line in matches if ':' in line})
+        # Probe-details example: the recording (probe.append) is a no-op
+        # outside a probe; the derived stats themselves are one cheap
+        # pass over the already-materialized matches list. run-rg.sh
+        # invokes rg with --no-filename, so lines carry no path prefix —
+        # distinct_lines counts repeated content instead (the runner
+        # repeats searches, so duplicate lines are expected).
+        distinct_lines = len(set(matches))
         longest_line = max((len(line) for line in matches), default=0)
         probe.append(
             'match_analysis',
@@ -444,7 +449,7 @@ class RipgrepHandler(
                 pattern=meta['pattern'],
                 file=meta['file_path'],
                 matches=len(matches),
-                unique_files=unique_files,
+                distinct_lines=distinct_lines,
                 longest_line=longest_line,
                 duration_ms=round(result.duration_seconds * 1000, 2),
                 source='cache' if result.pid is None else 'subprocess',
@@ -565,11 +570,11 @@ class RipgrepHandler(
         # Probe-details example: this request's matches, broken down by
         # pattern and ranked — the same data total_matches rolls up,
         # kept at the pattern granularity instead of collapsed to a sum.
+        # Zipped against the match_counts just computed above rather
+        # than re-parsing each result's stdout a second time.
         pattern_totals: dict[str, int] = {}
-        for r in group.results:
-            pattern_totals[r.task.metadata['pattern']] = pattern_totals.get(
-                r.task.metadata['pattern'], 0
-            ) + _match_count(r)
+        for r, count in zip(group.results, match_counts, strict=True):
+            pattern_totals[r.task.metadata['pattern']] = pattern_totals.get(r.task.metadata['pattern'], 0) + count
         ranked_patterns = sorted(pattern_totals.items(), key=lambda kv: kv[1], reverse=True)
         for rank, (pattern, pattern_matches) in enumerate(ranked_patterns, start=1):
             probe.append(
