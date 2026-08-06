@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking.** `/ws` sends one message per batch, not one per event:
+  `{"dropped": N, "events": [...]}`. Clients that read a single event per
+  message must be updated.
+- `/ws` accepts `?events=a,b` and streams only those event types.
+- `/ws` never sends `stdout` or `stderr`. Read them from `/api/v1/task/{id}`.
+- `/api/v1/recent-tasks` returns `truncated`, and caps `minutes` at 60. The
+  scan is limited to `ui.max_rows * 3` events, newest first.
+- The built-in UI stops polling while the browser tab is hidden.
+
+### Fixed
+
+- A busy worker could lose its live connection with `1011 keepalive ping
+  timeout`. Captured output no longer travels on the socket, so the keepalive
+  ping is not queued behind it.
+- Dropped live events were silent. The server counts them and tells the client,
+  which then resyncs instead of drifting. New metric:
+  `drakkar_recorder_ws_dropped_events_total`.
+- Each event was encoded once per connected client. It is now encoded once and
+  shared.
+- Deferred start events used one timer per task. One sweep now serves them all.
+- Scanning a database file leaked a descriptor when the file could not be read.
+  The databases endpoint is polled, so the leak grew over time.
+
 ## [1.4.2] - 2026-08-02
 
 ### Added
