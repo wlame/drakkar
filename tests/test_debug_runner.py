@@ -1005,6 +1005,8 @@ def _make_precomputed_task(
     stdout: str = 'ok',
     labels: dict[str, str] | None = None,
     stdin: str | None = None,
+    args: list[str] | None = None,
+    binary_path: str | None = None,
 ) -> ExecutorTask:
     """Build an ExecutorTask whose outcome is supplied inline.
 
@@ -1017,6 +1019,8 @@ def _make_precomputed_task(
         source_offsets=[offset],
         labels=labels or {},
         stdin=stdin,
+        args=args or [],
+        binary_path=binary_path,
         precomputed=PrecomputedResult(
             stdout=stdout,
             stderr='',
@@ -3596,3 +3600,64 @@ async def test_sink_collector_identifies_a_mongo_statement_by_name():
     assert record.destination == 'record_attempt'
     assert record.extras['op'] == 'statement'
     assert record.payload is None
+
+
+class _ArgvHandler(BaseDrakkarHandler):
+    """Two tasks: one that overrides the binary, one that does not."""
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        offset = messages[0].offset
+        return [
+            _make_precomputed_task(
+                task_id='t-default',
+                offset=offset,
+                args=['--mode=fast', 'input.txt'],
+            ),
+            _make_precomputed_task(
+                task_id='t-override',
+                offset=offset,
+                args=['--mode=slow'],
+                binary_path='/opt/special/worker',
+            ),
+        ]
+
+
+async def test_probe_report_carries_task_argv_and_only_an_overridden_binary():
+    """``args`` round-trips, and ``binary_path`` is reported only when overridden.
+
+    The configured executor binary is identical for every task and already
+    visible in the config, so reporting it per task would be noise. A non-null
+    ``binary_path`` therefore means exactly one thing: this task ran something
+    other than the configured binary.
+    """
+    runner = DebugRunner(
+        handler=_ArgvHandler(),
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    report = await runner.run(ProbeInput(value='{"hello": "world"}', partition=0, offset=1, topic='in'))
+
+    by_id = {t.task_id: t for t in report.tasks}
+    assert by_id['t-default'].args == ['--mode=fast', 'input.txt']
+    assert by_id['t-default'].binary_path is None
+    assert by_id['t-override'].args == ['--mode=slow']
+    assert by_id['t-override'].binary_path == '/opt/special/worker'
+
+
+async def test_probe_report_argv_defaults_to_empty_for_a_task_without_args():
+    """A task that passes no arguments reports an empty list, never null."""
+    runner = DebugRunner(
+        handler=_HappyPathHandler(task_count=1),
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+
+    report = await runner.run(ProbeInput(value='{"hello": "world"}', partition=0, offset=1, topic='in'))
+
+    assert report.tasks[0].args == []
+    assert report.tasks[0].binary_path is None

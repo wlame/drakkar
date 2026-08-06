@@ -174,6 +174,22 @@ class ProbeTaskEntry(BaseModel):
     duration_seconds: float | None = Field(
         default=None, description='Wall-clock duration of the subprocess / precomputed fast path.'
     )
+    args: list[str] = Field(
+        default_factory=list,
+        description=(
+            'Command-line arguments the task appended to the binary, from '
+            'ExecutorTask.args. Empty for a precomputed task, which runs no subprocess.'
+        ),
+    )
+    binary_path: str | None = Field(
+        default=None,
+        description=(
+            "The task's binary override (ExecutorTask.binary_path), or None when the task "
+            'used the configured executor binary. Only the override is reported: the '
+            'configured path is the same for every task and already visible in the config, '
+            'so a non-null value here means exactly "this task ran something else".'
+        ),
+    )
     stdin: str = Field(default='', description='Raw stdin text written to the subprocess (from ExecutorTask.stdin).')
     stdout: str = Field(default='', description='Captured stdout. May be very large (multi-megabyte).')
     stderr: str = Field(default='', description='Captured stderr. May be very large.')

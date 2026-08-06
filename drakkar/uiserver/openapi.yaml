@@ -238,17 +238,10 @@ paths:
         Tasks from the last N minutes plus the computed lane count. Archived
         retry attempts use the `task_id:r<float-ts>` composite-key format;
         consumers must not rely on positional order.
-
-
-        The scan is capped at `ui.max_rows * 3` events, keeping the most
-        recent; `truncated` reports whether older tasks inside the window
-        were dropped. One source message can fan out to a thousand tasks,
-        so without the cap the query cannot complete inside the dispatch
-        budget and the endpoint degrades to an empty timeline.
       parameters:
         - name: minutes
           in: query
-          schema: {type: integer, default: 2, minimum: 1, maximum: 60}
+          schema: {type: integer, default: 2}
       responses:
         '200':
           description: Task entries and lane count.
@@ -1069,10 +1062,7 @@ components:
           type: array
           items: {$ref: '#/components/schemas/RecentTaskEntry'}
         lane_count: {type: integer}
-        # true when the row cap was hit and older tasks inside the requested
-        # window are absent from `tasks`.
-        truncated: {type: boolean}
-      required: [tasks, lane_count, truncated]
+      required: [tasks, lane_count]
 
     RecentTaskEntry:
       type: object
@@ -1277,6 +1267,14 @@ components:
         status: {type: string, enum: [done, failed, replaced]}
         exit_code: {type: [integer, 'null']}
         duration_seconds: {type: [number, 'null']}
+        # Arguments the task appended to the binary. Empty for a precomputed
+        # task, which runs no subprocess.
+        args: {type: array, items: {type: string}}
+        # The task's binary OVERRIDE, or null when it used the configured
+        # executor binary. Only the override is reported, so a non-null value
+        # means exactly "this task ran something other than the configured
+        # binary". Clients should render it only when present.
+        binary_path: {type: [string, 'null']}
         stdin: {type: [string, 'null']}
         stdout: {type: [string, 'null']}
         stderr: {type: [string, 'null']}

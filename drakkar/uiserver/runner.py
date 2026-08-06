@@ -1510,6 +1510,8 @@ class DebugRunner:
             status='done',
             exit_code=exec_result.exit_code,
             duration_seconds=exec_result.duration_seconds,
+            args=list(task.args),
+            binary_path=task.binary_path,
             stdin=task.stdin or '',
             stdout=exec_result.stdout,
             stderr=exec_result.stderr,

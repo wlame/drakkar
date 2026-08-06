@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The message probe reports each task's command-line arguments (`args`), and
+  its `binary_path` only when the handler overrode the configured binary.
+
 ## [1.5.0] - 2026-08-04
 
 ### Changed
