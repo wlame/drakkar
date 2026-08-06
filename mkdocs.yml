@@ -52,6 +52,7 @@ nav:
   - Cache: cache.md
   - Fan-out (one message → many tasks): fan-out.md
   - Annotations (your diagnostics in the UI): annotations.md
+  - Probe User Details (your own tab in the Message Probe): probe-user-details.md
   - Configuration: configuration.md
   - Features & Enable Order: features.md
   - Sinks: sinks.md

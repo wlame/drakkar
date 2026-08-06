@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The message probe reports each task's command-line arguments (`args`), and
   its `binary_path` only when the handler overrode the configured binary.
+- **Handlers can register a probe details model.** Set `probe_details_model`
+  on your handler and describe each field with `probe_field(section=...,
+  view=...)`; `probe.set` / `probe.append` / `probe.update` fill it in from
+  any hook, and are no-ops outside a probe. The report gets a `user_details`
+  object, rendered as a new User-defined tab in the Message Probe.
 
 ## [1.5.0] - 2026-08-04
 
