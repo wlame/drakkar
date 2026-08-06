@@ -14,10 +14,9 @@ config is a real (in-memory) ``DrakkarConfig`` built directly in each test.
 import time
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from httpx import ASGITransport, AsyncClient
 
-from drakkar.config import DrakkarConfig, KafkaSinkConfig, WebClientConfig
+from drakkar.config import DrakkarConfig, KafkaSinkConfig, PostgresSinkConfig, WebClientConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.routes_config_reference import SECRET_MASK
 from drakkar.uiserver.server import create_ui_app
@@ -26,15 +25,6 @@ from tests.conftest import make_ui_config
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def mock_recorder():
-    rec = AsyncMock(spec=EventRecorder)
-    rec._db = None
-    rec._reader_db = None
-    rec.reader_db = None
-    return rec
 
 
 def make_app(config: DrakkarConfig) -> MagicMock:
@@ -188,6 +178,28 @@ class TestMasking:
         entry = entries_by_path(body, 'sinks.kafka.results.security.sasl_password')[0]
         assert entry['value'] == SECRET_MASK
         assert 'kafka-sasl-secret' not in body_as_text(body)
+
+    async def test_configured_postgres_dsn_is_masked_and_never_leaks_raw(self):
+        """dsn is a plain ``str`` field (drakkar_secret), not a pydantic SecretStr.
+
+        Unlike ``sasl_password`` above — where pydantic's own SecretStr
+        serializer already masks the value before this endpoint's code ever
+        runs — a plain ``str`` secret field reaches
+        ``model_dump(mode='json')`` with the raw credential intact. This
+        endpoint's own masking is the ONLY thing standing between that raw
+        DSN and the response body, so this test asserts the real string
+        (not just the empty default) never appears anywhere in the full
+        serialized response, not merely in the one field we'd think to check.
+        """
+        raw_dsn = 'postgresql://svc_user:hunter2@db.internal:5432/main'
+        config = DrakkarConfig()
+        config.sinks.postgres['main-db'] = PostgresSinkConfig(dsn=raw_dsn)
+        body = await get_config_reference(config)
+        entry = entries_by_path(body, 'sinks.postgres.main-db.dsn')[0]
+        assert entry['value'] == SECRET_MASK
+        assert entry['secret'] is True
+        assert raw_dsn not in body_as_text(body)
+        assert 'hunter2' not in body_as_text(body)
 
 
 def body_as_text(body: dict) -> str:

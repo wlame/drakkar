@@ -148,7 +148,14 @@ def _build_entries(field_meta: ConfigFieldMeta, config_dump: dict[str, Any]) -> 
     """Join one metadata field against the live config, returning 1+ response entries."""
     segments = field_meta.path.split('.')
     is_dynamic = '*' in segments
-    masked_default = _mask(field_meta.default, field_meta.secret)
+    if field_meta.path == _WEBAPP_CLIENTS_PATH:
+        # Defense-in-depth: the default is an empty-token anonymous client
+        # today, so this is a no-op in practice — but route it through the
+        # same per-element masking as the live value so a future non-empty
+        # default token can't leak unmasked.
+        masked_default = _mask_webapp_clients(field_meta.default)
+    else:
+        masked_default = _mask(field_meta.default, field_meta.secret)
 
     entries: list[ConfigReferenceEntry] = []
 
