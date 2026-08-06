@@ -625,6 +625,26 @@ async def test_live_page(client):
     assert '2 / 8' in resp.text
 
 
+@pytest.mark.parametrize('path', ['/', '/partitions', '/sinks', '/live', '/history', '/debug'])
+@pytest.mark.parametrize('helper', ['pausableInterval', 'visibilityGate'])
+async def test_shared_helper_is_defined_before_it_is_called(client, path, helper):
+    """The shared visibility helpers must precede every call site in the markup.
+
+    Page scripts live in the ``content`` block, which renders BEFORE the
+    script block at the end of ``<body>``. A helper defined down there is
+    undefined when a page calls it, and the page's whole init IIFE dies. The
+    helpers therefore live in ``<head>``; this test pins that placement.
+    """
+    html = (await client.get(path)).text
+    definition = html.find(f'function {helper}(')
+    calls = [m.start() for m in re.finditer(rf'(?<!function )\b{helper}\(', html)]
+    if not calls:
+        pytest.skip(f'{path} does not use {helper}')
+    assert definition != -1, f'{path} calls {helper} but never defines it'
+    early = [c for c in calls if c < definition]
+    assert not early, f'{path} calls {helper} at {early} before its definition at {definition}'
+
+
 async def test_debug_trace_api(client):
     resp = await client.get('/api/debug/trace?partition=0&offset=42')
     assert resp.status_code == 200
@@ -699,6 +719,25 @@ async def test_live_page_has_tabs_and_ws(debug_config, mock_recorder, mock_app):
 # --- WebSocket tests ---
 
 
+def ws_recv_events(ws, count: int = 1) -> list[dict]:
+    """Read frames until at least ``count`` events have arrived.
+
+    Each frame is ``{"dropped": N, "events": [...]}`` — the server drains
+    whatever is queued into one frame, so how many events land per frame is
+    a timing detail. Tests assert on the event sequence, never on where the
+    frame boundaries fell.
+    """
+    out: list[dict] = []
+    while len(out) < count:
+        out.extend(json.loads(ws.receive_text())['events'])
+    return out
+
+
+def ws_recv_frame(ws) -> dict:
+    """Read exactly one frame envelope (for asserting on ``dropped``)."""
+    return json.loads(ws.receive_text())
+
+
 async def test_websocket_receives_events(debug_config, mock_recorder, mock_app):
     """WebSocket endpoint streams recorder events to connected clients."""
     real_recorder = EventRecorder(debug_config)
@@ -717,8 +756,7 @@ async def test_websocket_receives_events(debug_config, mock_recorder, mock_app):
             }
         )
 
-        data = ws.receive_text()
-        event = json.loads(data)
+        (event,) = ws_recv_events(ws)
         assert event['event'] == 'task_started'
         assert event['task_id'] == 'ws-test-1'
         assert event['partition'] == 3
@@ -742,11 +780,61 @@ async def test_websocket_multiple_events(debug_config, mock_recorder, mock_app):
                 }
             )
 
-        for i in range(3):
-            data = ws.receive_text()
-            event = json.loads(data)
-            assert event['event'] == 'consumed'
-            assert event['partition'] == i
+        events = ws_recv_events(ws, 3)
+        assert [e['partition'] for e in events] == [0, 1, 2], 'order must be preserved'
+        assert all(e['event'] == 'consumed' for e in events)
+
+
+async def test_websocket_event_filter_limits_the_stream(debug_config, mock_recorder, mock_app):
+    """``?events=`` keeps unrendered event types off the wire entirely.
+
+    A page showing only the executor timeline should not receive the
+    ``task_complete`` event a handler emits once per task — on a fan-out
+    workload that is the largest event class by count.
+    """
+    real_recorder = EventRecorder(debug_config)
+    real_recorder._running = True
+
+    fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
+
+    with TestClient(fastapi_app) as tc, tc.websocket_connect('/ws?events=task_started,arranged') as ws:
+        real_recorder._record({'ts': time.time(), 'event': 'task_complete', 'partition': 0})
+        real_recorder._record({'ts': time.time(), 'event': 'produced', 'partition': 0})
+        real_recorder._record({'ts': time.time(), 'event': 'task_started', 'partition': 7})
+
+        # Only the allowed type arrives; the filtered ones never queued, so
+        # the first frame carries task_started and nothing before it.
+        (event,) = ws_recv_events(ws)
+        assert event['event'] == 'task_started'
+        assert event['partition'] == 7
+
+
+async def test_websocket_reports_dropped_events(debug_config, mock_recorder, mock_app):
+    """A client that fell behind is told, so it can resync rather than drift.
+
+    Silent drops are why live counts could disagree with the database with
+    no visible cause.
+    """
+    import queue as queue_mod
+
+    real_recorder = EventRecorder(debug_config)
+    real_recorder._running = True
+
+    fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
+
+    with TestClient(fastapi_app) as tc, tc.websocket_connect('/ws') as ws:
+        # Shrink the connected subscriber's queue so overflow is deterministic
+        # rather than a matter of how fast the sender coroutine drains.
+        (sub,) = list(real_recorder._ws_subscribers)
+        sub.queue = queue_mod.Queue(maxsize=1)
+
+        real_recorder._record({'ts': time.time(), 'event': 'kept', 'partition': 0})
+        real_recorder._record({'ts': time.time(), 'event': 'lost', 'partition': 0})
+        real_recorder._record({'ts': time.time(), 'event': 'lost', 'partition': 0})
+
+        frame = ws_recv_frame(ws)
+        assert frame['dropped'] == 2
+        assert [e['event'] for e in frame['events']] == ['kept']
 
 
 async def test_websocket_cleanup_on_disconnect(debug_config, mock_recorder, mock_app):
@@ -3132,8 +3220,7 @@ class TestWebSocketAuth:
             ) as ws,
         ):
             real_recorder._record({'ts': time.time(), 'event': 'ws_auth_ok', 'partition': 0})
-            data = ws.receive_text()
-            event = json.loads(data)
+            (event,) = ws_recv_events(ws)
             assert event['event'] == 'ws_auth_ok'
 
     def test_ws_no_auth_configured_still_works(self, mock_recorder, mock_app):
@@ -3148,8 +3235,7 @@ class TestWebSocketAuth:
             tc.websocket_connect('/ws') as ws,
         ):
             real_recorder._record({'ts': time.time(), 'event': 'dev_mode_ok', 'partition': 0})
-            data = ws.receive_text()
-            event = json.loads(data)
+            (event,) = ws_recv_events(ws)
             assert event['event'] == 'dev_mode_ok'
 
     def test_ws_same_origin_fallback_accepted(self, mock_recorder, mock_app):
@@ -3175,8 +3261,7 @@ class TestWebSocketAuth:
             ) as ws,
         ):
             real_recorder._record({'ts': time.time(), 'event': 'same_origin_ok', 'partition': 0})
-            data = ws.receive_text()
-            event = json.loads(data)
+            (event,) = ws_recv_events(ws)
             assert event['event'] == 'same_origin_ok'
 
     def test_ws_same_origin_fallback_rejects_cross_origin(self, mock_recorder, mock_app):
@@ -3260,8 +3345,7 @@ class TestWebSocketAuth:
             ) as ws,
         ):
             real_recorder._record({'ts': time.time(), 'event': 'case_ok', 'partition': 0})
-            data = ws.receive_text()
-            event = json.loads(data)
+            (event,) = ws_recv_events(ws)
             assert event['event'] == 'case_ok'
 
 

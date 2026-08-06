@@ -38,6 +38,13 @@ if TYPE_CHECKING:
 # fires. Nested class definitions inside a route factory would not
 # trigger the same heuristic and would end up being treated as query
 # parameters (surfaces as 422 "Field required" responses).
+# Ceiling on the ``/api/recent-tasks`` window. The timeline renders ten
+# minutes; anything beyond an hour is a query against the whole retention
+# window dressed up as a live view, and on a high-fan-out worker that is
+# hundreds of thousands of rows.
+RECENT_TASKS_MAX_MINUTES = 60
+
+
 class _ArrangeTaskLookupRequest(BaseModel):
     task_ids: list[str] = Field(default_factory=list, max_length=5000)
 
@@ -231,20 +238,49 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         return JSONResponse([dict(zip(columns, row, strict=False)) for row in rows])
 
     @router.get('/api/recent-tasks')
-    async def api_recent_tasks(minutes: int = Query(default=2)):
-        """Get tasks from the last N minutes for timeline visualization."""
-        since = time.time() - (minutes * 60)
-        query = """
-            SELECT * FROM events
-            WHERE event IN ('task_started', 'task_completed', 'task_failed')
-            AND ts >= ?
-            ORDER BY ts ASC
+    async def api_recent_tasks(minutes: int = Query(default=2, ge=1, le=RECENT_TASKS_MAX_MINUTES)):
+        """Get tasks from the last N minutes for timeline visualization.
+
+        Three bounds keep this endpoint viable on a high-fan-out worker,
+        where one source message can produce a thousand tasks and a
+        ten-minute window can hold hundreds of thousands of rows:
+
+        * an explicit column list instead of ``SELECT *`` — the ``stdout``
+          and ``stderr`` columns hold captured subprocess output that the
+          timeline never displays, and pulling them made the response size
+          track total task output rather than task count;
+        * a row cap, taking the **most recent** events (hence the
+          descending inner query) and re-sorting ascending for the retry
+          grouping below, which depends on chronological order;
+        * a ceiling on ``minutes``.
+
+        Without these the query could not finish inside the main-loop
+        dispatch timeout, and the endpoint returned an empty timeline with
+        no indication that anything had gone wrong.
         """
-        result = await deps.flush_and_select(query, [since])
+        since = time.time() - (minutes * 60)
+        # Two events per task in the common case; the margin covers retries,
+        # which add a start event per attempt.
+        event_limit = config.max_rows * 3
+        query = """
+            SELECT * FROM (
+                SELECT ts, event, partition, task_id, args, duration, metadata,
+                       pid, labels, origin, client_name, request_id
+                FROM events
+                WHERE event IN ('task_started', 'task_completed', 'task_failed')
+                AND ts >= ?
+                ORDER BY ts DESC
+                LIMIT ?
+            ) ORDER BY ts ASC
+        """
+        result = await deps.flush_and_select(query, [since, event_limit])
         if result is None:
             return JSONResponse([])
         columns, rows = result
         events = [dict(zip(columns, row, strict=False)) for row in rows]
+        # Hitting the cap means older tasks in the window were dropped. Say
+        # so rather than letting the UI present a partial window as complete.
+        truncated = len(events) >= event_limit
 
         # group events into timeline entries — one entry per execution attempt.
         # retries (same task_id with multiple task_started) produce separate entries:
@@ -327,7 +363,7 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             if t['status'] == 'completed' and t['duration'] is not None and t['duration'] < ws_threshold_s:
                 continue
             tasks_result.append(t)
-        return JSONResponse({'tasks': tasks_result, 'lane_count': max_lanes})
+        return JSONResponse({'tasks': tasks_result, 'lane_count': max_lanes, 'truncated': truncated})
 
     # Lookup-by-task-ID endpoint for the Arrange tab. Unlike /api/recent-tasks
     # this does NOT filter by ``minutes`` and does NOT apply the

@@ -118,6 +118,31 @@ def encode_json_str(obj: Any) -> str:
     return encode_json(obj).decode('utf-8')
 
 
+# Event fields that are persisted but never streamed. Captured subprocess
+# output is stored so the task-detail page can show it on demand; pushing it
+# to every connected browser instead costs ``len(output) x clients`` bytes for
+# data no live view reads — the timeline shows ``stdout_size``, not the text.
+# With ``executor.max_stdout_bytes`` defaulting to unlimited, one chatty task
+# could otherwise saturate every open dashboard.
+WS_OMITTED_FIELDS = frozenset({'stdout', 'stderr'})
+
+
+def encode_ws_event(event: dict) -> str:
+    """Render one recorder event as the JSON text sent over ``/ws``.
+
+    The streamed view drops :data:`WS_OMITTED_FIELDS`; every other key is
+    passed through unchanged, so the wire shape stays the recorder event
+    shape documented in ``schema.EVENT_COLUMNS``.
+
+    The dict copy is skipped entirely when there is nothing to omit, which
+    is the common case — only ``task_completed`` / ``task_failed`` carry
+    captured output.
+    """
+    if not WS_OMITTED_FIELDS.isdisjoint(event):
+        event = {k: v for k, v in event.items() if k not in WS_OMITTED_FIELDS}
+    return encode_json_str(event)
+
+
 # Env var name patterns whose values get redacted before being written to the
 # recorder SQLite file. Applied case-insensitively. The recorder DB can be
 # downloaded via the debug UI, so writing raw secrets would effectively

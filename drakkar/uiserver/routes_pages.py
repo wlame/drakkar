@@ -38,7 +38,30 @@ from drakkar.uiserver.server_helpers import backend_version, origin_allowed
 if TYPE_CHECKING:
     from drakkar.uiserver.server import UIDeps
 
-WS_DRAIN_SLEEP = 0.02  # seconds to sleep when WebSocket event queue is empty
+# Idle backoff bounds for the WebSocket drain loop. The loop polls a
+# thread-safe queue (the recorder writes from the main loop, uvicorn runs on
+# its own thread), so it cannot simply await the queue.
+#
+# The sleep is adaptive rather than fixed. A fixed 20ms cost 50 wakeups per
+# second per connection even on a completely idle worker — ten open tabs
+# meant 500 pointless wakeups/s on the UI thread. Backing off to
+# WS_DRAIN_SLEEP_MAX while nothing arrives makes idle dashboards nearly free,
+# and resetting to WS_DRAIN_SLEEP_MIN on the first event keeps live latency
+# unchanged while events are actually flowing (under load the queue is never
+# empty and the loop never sleeps at all).
+#
+# The alternative — signalling the UI loop from the recorder with
+# ``call_soon_threadsafe`` — was rejected: it makes the cost scale with the
+# EVENT rate rather than the idle rate, which is backwards for a worker
+# emitting thousands of events per second.
+WS_DRAIN_SLEEP_MIN = 0.02
+WS_DRAIN_SLEEP_MAX = 0.25
+
+# Events drained into a single frame. The batch is sent as ONE JSON frame
+# rather than one frame per event: a fan-out-heavy worker produces events in
+# bursts, and per-event framing cost a WebSocket header, a syscall and a
+# separate browser-side parse + reactive update for each one.
+WS_BATCH_MAX = 100
 
 
 def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRouter, APIRouter]:
@@ -747,8 +770,6 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
         it). When ``auth_token`` is empty we skip both checks to preserve
         the dev workflow.
         """
-        import queue as queue_mod
-
         # --- Auth gate (WebSocket) ---
         # FastAPI's Depends() works on websocket endpoints, but keeping the
         # auth check inline lets us call ws.close() with a specific 4xxx
@@ -777,7 +798,15 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
                 return
 
         await ws.accept()
-        q = recorder.subscribe()
+
+        # Optional subscription filter: ``?events=task_started,task_completed``.
+        # A page that names the events it renders stops paying for the rest at
+        # the fan-out, before the event is ever encoded or queued. Omitting the
+        # parameter streams everything, which is what non-browser clients and
+        # older UI bundles expect.
+        events_param = ws.query_params.get('events')
+        event_types = [e.strip() for e in events_param.split(',') if e.strip()] if events_param else None
+        sub = recorder.subscribe(event_types)
 
         # Starlette only surfaces a client disconnect through receive(), and
         # this handler is send-only — so WebSocketDisconnect could never fire
@@ -800,6 +829,7 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
                 disconnected.set()
 
         watcher = asyncio.create_task(_watch_disconnect())
+        idle_sleep = WS_DRAIN_SLEEP_MIN
         try:
             while not disconnected.is_set():
                 # Drain what is already queued, without ever blocking. The
@@ -809,26 +839,31 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
                 # wait nothing else on this server could run: not other
                 # WebSocket clients, not /healthz, not /readyz. An idle
                 # dashboard tab was enough to trigger it, and the Kubernetes
-                # probes share the loop. Polling costs a wakeup every
-                # WS_DRAIN_SLEEP instead, and lowers idle latency besides.
-                batch = []
-                try:
-                    while len(batch) < 100:
-                        batch.append(q.get_nowait())
-                except queue_mod.Empty:
-                    pass
+                # probes share the loop.
+                #
+                # ``drain_encoded`` yields JSON text, and the encoding is
+                # memoized on an event object shared by every subscriber —
+                # so a tenth open tab does not cost a tenth serialization
+                # pass over the same events.
+                batch = sub.drain_encoded(WS_BATCH_MAX)
                 if not batch:
-                    await asyncio.sleep(WS_DRAIN_SLEEP)
+                    await asyncio.sleep(idle_sleep)
+                    idle_sleep = min(idle_sleep * 2, WS_DRAIN_SLEEP_MAX)
                     continue
+                idle_sleep = WS_DRAIN_SLEEP_MIN
+                # ``dropped`` tells the client it lost events, so it can
+                # resync deliberately instead of drifting. Reading it AFTER
+                # the drain means a drop is never reported before the events
+                # that preceded it.
+                frame = f'{{"dropped":{sub.take_dropped()},"events":[{",".join(batch)}]}}'
                 try:
-                    for event in batch:
-                        await ws.send_text(json.dumps(event, default=str))
+                    await ws.send_text(frame)
                 except Exception:
                     break
         except WebSocketDisconnect:
             pass
         finally:
             watcher.cancel()
-            recorder.unsubscribe(q)
+            recorder.unsubscribe(sub)
 
     return public, router

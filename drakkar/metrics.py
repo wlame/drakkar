@@ -547,6 +547,26 @@ recorder_dropped_events = Counter(
     ),
 )
 
+# Live-stream drops, which are a DIFFERENT failure from the buffer overflow
+# above: the DB write path is keeping up, but one WebSocket client is not
+# draining its queue fast enough (a throttled background tab, a slow link, a
+# page rendering more than it can). Only that client loses events; the
+# recorder and every other client are unaffected.
+#
+# Nonzero is not automatically a problem — it is the designed back-pressure
+# relief. It becomes one when it is sustained, which means live views are
+# persistently behind. The affected client is told its own drop count on the
+# next frame and resyncs from the DB, so the UI self-heals; this counter is
+# the operator-side view of how often that happens.
+recorder_ws_dropped_events = Counter(
+    'drakkar_recorder_ws_dropped_events_total',
+    (
+        'Total events dropped for a live WebSocket subscriber whose queue was '
+        'full. Affects only that subscriber, which is signalled to resync. '
+        'Sustained growth means live views cannot keep up with event volume.'
+    ),
+)
+
 recorder_flush_duration = Histogram(
     'drakkar_recorder_flush_duration_seconds',
     'Duration of the recorder flush body (executemany + commit) in seconds',

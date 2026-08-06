@@ -325,7 +325,14 @@ var TIMELINE_DELAY = 2; // seconds behind real time for smooth rendering
 var LANE_H = 22, LANE_GAP = 2, BASE_PX_PER_SEC = 8;
 var zoomLevel = 2;
 var hoveredTask = null;
+// Operator-driven pause: the Live/Frozen button and the Space bar.
 var frozen = false;
+// Set when nobody is looking at the tab. Deliberately separate from `frozen`:
+// the operator did not pause anything, so the button must keep reading "Live".
+// Browsers throttle rendering in a hidden tab but NOT WebSocket delivery, so
+// without this a hidden Live tab keeps parsing frames and rebuilding state at
+// the full event rate. State is rebuilt from the DB on return.
+var wsSuspended = false;
 
 function fmtStdin(t) {
     if (!t.stdin_size) return '-';
@@ -2217,10 +2224,15 @@ async function refreshArrangeTaskStates() {
     mergeArrangeTaskStates(states);
 }
 
+// Rebuilds recentArranges from the authoritative endpoint. Clears first so the
+// function is idempotent: it runs at boot AND on every full rebuild (reconnect,
+// reported drop, resume after the tab was idle), and appending on a second call
+// would duplicate every batch.
 async function loadArrangeHistory() {
     try {
         var r = await fetch('/api/events?event_types=arranged&limit=' + MAX_HISTORY);
         var events = await r.json();
+        recentArranges.length = 0;
         for (var i = 0; i < events.length; i++) {
             var e = events[i];
             var meta = {};
@@ -2244,6 +2256,27 @@ async function loadArrangeHistory() {
     } catch(ex) {}
 }
 
+// Rebuild everything the WebSocket feeds, not just the task timeline.
+//
+// Used whenever the live stream had a hole in it: a reconnect, a reported drop,
+// or a resume after the tab was idle. syncFromAPI alone is not enough — the
+// Arrange list is built purely from `arranged` frames, so any batch that
+// arrived during the gap would stay missing until the page was reloaded.
+async function fullResync() {
+    await Promise.all([
+        syncFromAPI().then(function() {
+            var ids = Object.keys(allTasks);
+            for (var i = 0; i < ids.length; i++) {
+                if (!taskBars[ids[i]]) ensureBar(allTasks[ids[i]]);
+            }
+            pruneOldBars();
+        }),
+        loadArrangeHistory(),
+    ]);
+    await refreshArrangeTaskStates();
+    renderArranges();
+}
+
 // Boot-time loader for all three completion-hook tabs. Each call is a
 // single SQL-backed GET — the feeds are independent, so we fire them in
 // parallel. Runs regardless of HOOK_FLAGS; the individual loaders
@@ -2253,25 +2286,31 @@ async function loadCompletionHookResults() {
 }
 
 // === WebSocket ===
+// The server sends one frame per BATCH — {"dropped": N, "events": [...]} —
+// rather than one frame per event, and applies an event-type filter declared
+// in the query string so it never encodes or queues types this page ignores.
+// On a high-fan-out worker that filter matters: the completion hooks emit one
+// event per task, and this page only wants them when the matching tab exists.
+function wsEventTypes() {
+    var types = ['task_started', 'task_completed', 'task_failed', 'arranged'];
+    if (HOOK_FLAGS.task_complete) types.push('task_complete');
+    if (HOOK_FLAGS.message_complete) types.push('message_complete');
+    if (HOOK_FLAGS.window_complete) types.push('window_complete');
+    return types;
+}
+
 function connectWS() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    var ws = new WebSocket(proto + '//' + location.host + '/ws');
+    var url = proto + '//' + location.host + '/ws?events=' + encodeURIComponent(wsEventTypes().join(','));
+    var ws = new WebSocket(url);
     ws.onopen = function() {
         var b = document.getElementById('ws-badge');
         if (b) { b.textContent = 'WS: connected'; b.style.background = '#d1fae5'; b.style.color = '#065f46'; b.style.border = '1px solid #6ee7b7'; }
         // Any events emitted during the disconnect window are not buffered
-        // for us — they were delivered to no-one. Pull fresh state from the
-        // DB so the reconcile loop can drop any tasks we think are still
-        // running that actually finished while we were offline.
-        if (!frozen) {
-            syncFromAPI().then(function() {
-                var ids = Object.keys(allTasks);
-                for (var i = 0; i < ids.length; i++) {
-                    if (!taskBars[ids[i]]) ensureBar(allTasks[ids[i]]);
-                }
-                pruneOldBars();
-            });
-        }
+        // for us — they were delivered to no-one. Rebuild from the DB so the
+        // reconcile loop can drop any tasks we think are still running that
+        // actually finished while we were offline.
+        if (!frozen) fullResync();
     };
     ws.onclose = function() {
         var b = document.getElementById('ws-badge');
@@ -2279,9 +2318,22 @@ function connectWS() {
         setTimeout(connectWS, 3000);
     };
     ws.onmessage = function(msg) {
-        if (frozen) return;
+        // Both checks precede JSON.parse: a frame can carry a hundred events,
+        // and parsing one only to discard it is the largest avoidable cost.
+        if (frozen || wsSuspended) return;
+        var frame;
+        try { frame = JSON.parse(msg.data); } catch(err) { return; }
+        // A non-zero drop count means the server discarded events for this
+        // client because it could not keep up. In-memory state now has a hole,
+        // so reconcile from the DB instead of drifting silently.
+        if (frame.dropped) fullResync();
+        var events = frame.events || [];
+        for (var i = 0; i < events.length; i++) handleWSEvent(events[i]);
+    };
+}
+
+function handleWSEvent(e) {
         try {
-            var e = JSON.parse(msg.data);
             if (e.event === 'task_started') {
                 // if this task_id already exists and finished (retry), keep the old bar
                 var prev = allTasks[e.task_id];
@@ -2430,7 +2482,6 @@ function connectWS() {
                 if (we) we.textContent = e.pool_waiting || 0;
             }
         } catch(err) {}
-    };
 }
 
 // === Boot ===
@@ -2461,7 +2512,7 @@ function initArrangeTab() {
     // the sidebar detail fresh for the currently-selected batch. Guarded
     // by a frozen check and runs only when the Arrange panel is visible to
     // avoid wasted work on other tabs.
-    setInterval(function() {
+    pausableInterval(function() {
         if (frozen) return;
         var panel = document.getElementById('panel-arrange');
         if (!panel || panel.style.display === 'none') return;
@@ -2541,15 +2592,22 @@ function initCompletionHookTabs() {
     initArrangeTab();
     initCompletionHookTabs();
     connectWS();
+    // Stop applying WebSocket frames once the tab has been idle for the grace
+    // period, and rebuild on return. `frozen` is deliberately untouched: the
+    // operator did not pause anything, so the button keeps reading "Live".
+    visibilityGate(
+        function() { wsSuspended = true; },
+        function() { wsSuspended = false; if (!frozen) fullResync(); }
+    );
     // rAF loop: updates bar positions/widths + scroll at 60fps
     requestAnimationFrame(animateTimeline);
     // task list tables (running/finished) — update every 500ms
-    setInterval(function() { if (!frozen) renderTaskLists(); }, 500);
+    pausableInterval(function() { if (!frozen) renderTaskLists(); }, 500);
     // prune old bars + API sync + axis ticks every 5s. Also refresh the
     // Arrange tab's task-state lookup AND the three completion-hook feeds
     // so their lists don't stale out if a handler emits at low rate and
     // we happen to miss a WS frame.
-    setInterval(function() {
+    pausableInterval(function() {
         if (frozen) return;
         rebuildAxis();
         syncFromAPI().then(function() {
@@ -2566,6 +2624,8 @@ function initCompletionHookTabs() {
         loadMessageResults().then(renderMessageResults);
         loadWindowResults().then(renderWindowResults);
     }, 5000);
+    // The 60fps animateTimeline loop needs no gating: browsers already stop
+    // requestAnimationFrame in a hidden tab.
 })();
 
 window.addEventListener('hashchange', initFromHash);
