@@ -1,5 +1,8 @@
 """Layout generation + startup validation for user-defined probe details."""
 
+import json
+import pathlib
+
 import pytest
 from pydantic import BaseModel
 
@@ -113,3 +116,20 @@ def test_build_layout_accepts_optional_scalar_string_view():
         v: int | None = probe_field(section='S', view='string', default=None)
 
     assert build_layout(OptScalar).sections[0].entries[0].view == 'string'
+
+
+class ParityRow(BaseModel):
+    item_id: str
+    score: float
+
+
+class ParityDetails(BaseModel):
+    strategy_note: str | None = probe_field(section='Arrange', view='string', default=None)
+    counters: dict[str, int] = probe_field(section='Arrange', view='keyvalue', default_factory=dict)
+    context_blob: dict = probe_field(section='Arrange', view='dict', default_factory=dict)
+    picked_items: list[ParityRow] = probe_field(section='Tasks', view='table', default_factory=list)
+
+
+def test_layout_matches_cross_backend_golden_fixture():
+    golden = json.loads(pathlib.Path('tests/fixtures/probe_user_details_layout.json').read_text())
+    assert build_layout(ParityDetails).model_dump() == golden

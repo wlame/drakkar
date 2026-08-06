@@ -1,0 +1,26 @@
+{
+  "sections": [
+    {
+      "title": "Arrange",
+      "entries": [
+        {"key": "strategy_note", "label": "Strategy note", "view": "string", "columns": null},
+        {"key": "counters", "label": "Counters", "view": "keyvalue", "columns": null},
+        {"key": "context_blob", "label": "Context blob", "view": "dict", "columns": null}
+      ]
+    },
+    {
+      "title": "Tasks",
+      "entries": [
+        {
+          "key": "picked_items",
+          "label": "Picked items",
+          "view": "table",
+          "columns": [
+            {"key": "item_id", "label": "Item id"},
+            {"key": "score", "label": "Score"}
+          ]
+        }
+      ]
+    }
+  ]
+}
