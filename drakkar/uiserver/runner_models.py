@@ -21,6 +21,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from drakkar.models import CollectResult
+from drakkar.probe import ProbeUserDetails
 
 # ---- probe-stage contextvar ------------------------------------------------
 #
@@ -319,4 +320,11 @@ class DebugReport(BaseModel):
     )
     truncated: bool = Field(
         default=False, description='True when the probe did not reach all stages (timeout or upstream failure).'
+    )
+    user_details: ProbeUserDetails | None = Field(
+        default=None,
+        description=(
+            'User-defined probe details: layout descriptor, serialized model data, and the '
+            'stage-attributed write log. None when the handler registers no probe_details_model.'
+        ),
     )

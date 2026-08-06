@@ -42,10 +42,12 @@ import asyncio
 import time
 import traceback
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel
 
+import drakkar.probe as probe_module
 from drakkar.cache import CacheScope
 from drakkar.executor import ExecutorTaskError
 from drakkar.models import (
@@ -61,6 +63,7 @@ from drakkar.models import (
     RedisOp,
     SourceMessage,
 )
+from drakkar.probe import _DetailsState, build_layout
 from drakkar.uiserver.runner_helpers import (
     _build_source_message,
     _failed_task_entry,
@@ -569,6 +572,7 @@ class RunState:
     on_window_complete: ProbeStageResult | None = None
     timing: dict[str, float] = field(default_factory=dict)
     errors: list[ProbeError] = field(default_factory=list)
+    details_state: _DetailsState | None = None
 
     def to_report(self, *, truncated: bool) -> DebugReport:
         """Snapshot this state into a ``DebugReport`` suitable for JSON.
@@ -601,7 +605,25 @@ class RunState:
             timing=dict(self.timing),
             errors=list(self.errors),
             truncated=truncated,
+            user_details=self.details_state.to_user_details() if self.details_state is not None else None,
         )
+
+
+def _record_details_error(state: RunState, field: str, op: str, exception_class: str, message: str) -> None:
+    """Adapt a details-write failure into the report's ProbeError shape.
+
+    Passed to ``_DetailsState`` as its ``on_error`` callback (see the
+    docstring on that class) so ``drakkar.probe`` never has to import the
+    uiserver-layer ``ProbeError`` model.
+    """
+    state.errors.append(
+        ProbeError(
+            stage=_probe_stage.get(),
+            exception_class=exception_class,
+            message=f'{op} {field}: {message}',
+            occurred_at_ms=(time.monotonic() - state.start_monotonic) * 1000,
+        )
+    )
 
 
 class DebugRunner:
@@ -772,9 +794,31 @@ class DebugRunner:
         # (handler.cache's declared type), so direct assignment is
         # type-safe.
         self._handler.cache = state.cache_proxy
+        # Bind the probe-details state (Task 3's `probe_details_model`, if the
+        # handler registered one) so `drakkar.probe.set/append/update` calls
+        # made from anywhere in handler code during this run land here
+        # instead of being silent no-ops. Left unbound (None) when the
+        # handler has no model — `probe.set()` etc. stay no-ops, matching
+        # production behaviour outside a probe.
+        details_token = None
+        model = getattr(self._handler, 'probe_details_model', None)
+        if model is not None:
+            state.details_state = _DetailsState(
+                model=model,
+                layout=build_layout(model),
+                stage=_probe_stage.get,
+                now_ms=lambda: (time.monotonic() - state.start_monotonic) * 1000,
+                on_error=partial(_record_details_error, state),
+            )
+            details_token = probe_module._active_state.set(state.details_state)
         try:
             await self._run_stages(state=state, msg=msg)
         finally:
+            # Reset the contextvar before restoring the cache so a probe
+            # that raises mid-run never leaves details state bound for
+            # whatever runs next on this task/thread.
+            if details_token is not None:
+                probe_module._active_state.reset(details_token)
             # Restore cache even if a hook raised or the task was
             # cancelled (wall-clock timeout path).
             self._handler.cache = original_cache
