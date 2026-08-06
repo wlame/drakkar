@@ -1313,6 +1313,77 @@ components:
         extras: {type: [object, 'null'], additionalProperties: true}
       required: [sink_type, destination, origin_stage]
 
+    ProbeDetailsColumn:
+      description: One table column of a "table"-view details entry.
+      type: object
+      properties:
+        key: {type: string}
+        label: {type: string}
+      required: [key, label]
+
+    ProbeDetailsEntry:
+      description: One registered details field, in declaration order.
+      type: object
+      properties:
+        key: {type: string}
+        label: {type: string}
+        view: {type: string, enum: [string, keyvalue, dict, table]}
+        columns:
+          description: Present (non-null) only when view=table.
+          type: [array, 'null']
+          items: {$ref: '#/components/schemas/ProbeDetailsColumn'}
+      required: [key, label, view, columns]
+
+    ProbeDetailsSection:
+      description: One section grouping, in first-appearance order.
+      type: object
+      properties:
+        title: {type: string}
+        entries:
+          type: array
+          items: {$ref: '#/components/schemas/ProbeDetailsEntry'}
+      required: [title, entries]
+
+    ProbeDetailsLayout:
+      description: >-
+        Startup-computed layout descriptor for a handler's registered
+        probe-details model; identical across every probe run.
+      type: object
+      properties:
+        sections:
+          type: array
+          items: {$ref: '#/components/schemas/ProbeDetailsSection'}
+      required: [sections]
+
+    ProbeDetailsWrite:
+      description: One successful ProbeSet/ProbeAppend/ProbeUpdate call, stage-attributed.
+      type: object
+      properties:
+        field: {type: string}
+        op: {type: string, enum: [set, append, update]}
+        origin_stage: {type: string}
+        ms_since_start: {type: number}
+      required: [field, op, origin_stage, ms_since_start]
+
+    ProbeUserDetails:
+      description: >-
+        The handler's user-defined probe-details object. Absent (null) on
+        DebugReport when the handler registered no model.
+      type: object
+      properties:
+        model:
+          type: string
+          description: The registered model's bare type name.
+        layout: {$ref: '#/components/schemas/ProbeDetailsLayout'}
+        data:
+          description: One decoded value per registered field, keyed by field name.
+          type: object
+          additionalProperties: true
+        writes:
+          type: array
+          items: {$ref: '#/components/schemas/ProbeDetailsWrite'}
+      required: [model, layout, data, writes]
+
     DebugReport:
       type: object
       properties:
@@ -1360,6 +1431,10 @@ components:
         errors:
           type: array
           items: {$ref: '#/components/schemas/ProbeError'}
+        user_details:
+          oneOf:
+            - {$ref: '#/components/schemas/ProbeUserDetails'}
+            - {type: 'null'}
         truncated: {type: boolean}
       required: [input, arrange, tasks, planned_sink_payloads, cache_calls,
                  cache_summary, timing, errors, truncated]
