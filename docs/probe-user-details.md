@@ -52,7 +52,7 @@ That is the whole opt-in. Leave `probe_details_model` at its default of
 `None` and the User-defined tab does not appear.
 
 !!! warning "Validated at startup, not at first probe"
-    `Drakkar(...)` calls `build_layout(handler.probe_details_model)` while
+    `DrakkarApp(...)` calls `build_layout(handler.probe_details_model)` while
     constructing the app, so a model that breaks the rules below raises
     `ProbeDetailsConfigError` immediately — a code-owned mistake surfaces at
     boot, not three weeks later when someone finally opens the probe tab.
@@ -168,13 +168,16 @@ the check itself. The cost in a production hot path is a single
 
 ## Stage badges
 
-Every successful write is stamped with the hook stage that made it —
-`arrange`, `task_complete:<id>`, `message_complete`, `window_complete` — the
-same stage tag the [cache-call log](observability.md#flight-recorder)
-already uses. The User-defined tab shows this as a small badge next to each
-field, so when a field ends up with a value you didn't expect, you can see
-at a glance which hook (and, for `task_complete`, which task) last touched
-it — without cross-referencing the timeline yourself.
+Every successful write is stamped with the hook stage that made it — one of
+`deserialize`, `message_label`, `arrange`, `task_complete:<id>`,
+`message_complete`, `window_complete`, or `on_error:<task_id>`, matching
+whichever handler-overridable hook was running when the verb was called.
+This is the same stage tag the
+[cache-call log](observability.md#flight-recorder) already uses. The
+User-defined tab shows this as a small badge next to each field, so when a
+field ends up with a value you didn't expect, you can see at a glance which
+hook (and, for `task_complete` / `on_error`, which task) last touched it —
+without cross-referencing the timeline yourself.
 
 ---
 
@@ -184,7 +187,7 @@ Two different kinds of mistake here fail very differently on purpose:
 
 | When | Example | What happens |
 |---|---|---|
-| **Startup** | missing `probe_field()` annotation, `view='table'` on `list[str]`, a field with no default | `ProbeDetailsConfigError` raised from `Drakkar(...)` construction — the app never starts. This is a code review problem, not a runtime one. |
+| **Startup** | missing `probe_field()` annotation, `view='table'` on `list[str]`, a field with no default | `ProbeDetailsConfigError` raised from `DrakkarApp(...)` construction — the app never starts. This is a code review problem, not a runtime one. |
 | **Probe time** | `probe.append('strategy_note', ...)` (wrong view), a row that fails the row model's own validation, the write cap exceeded | Never raises into your handler and never crashes the probe. The failed write is recorded as a `ProbeError` and shown in the report's **Errors** panel, exactly like an exception your handler itself raised. |
 
 The probe-time case matters most: a bad `probe.append()` call is a
