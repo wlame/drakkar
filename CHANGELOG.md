@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `task_completed` WebSocket frame now carries `stdout_lines` next to
+  `stdout_size`. The field travels on the socket only — the pinned events-table
+  row shape is unchanged. The Live page shows a Stdout column (lines and
+  bytes, green when not empty) next to Stdin.
 - New `tree` view for probe user details. A flat `list[RowModel]` field with
   `group_by=('file', 'section')` renders as a collapsible tree in the Message
   Probe's User-defined tab: one level per named row field (up to 4), a

@@ -310,6 +310,37 @@ async def test_record_task_completed_without_output(recorder):
     assert events[0]['stdout'] is None
 
 
+async def test_record_task_completed_carries_stdout_lines_on_ws_entry_only(recorder):
+    # stdout_lines is a WS-frame-only field (like task_started's
+    # stdin_lines): present on the recorded entry the WS fanout serializes,
+    # dropped at DB insert by the fixed column list.
+    result = make_result('t1')  # stdout is 'line1\nline2\n'
+    recorder.record_task_completed(result, partition=2)
+    entry = next(e for e in recorder._buffer if e['event'] == 'task_completed')
+    assert entry['stdout_lines'] == 2
+    assert entry['stdout_size'] == len(b'line1\nline2\n')
+
+    await recorder._flush()
+    events = await recorder.get_events(event_type='task_completed')
+    assert 'stdout_lines' not in events[0]
+
+
+@pytest.mark.parametrize(
+    ('text', 'expected'),
+    [
+        ('', 0),
+        ('one line no newline', 1),
+        ('terminated\n', 1),
+        ('a\nb\n', 2),
+        ('a\nb', 2),
+    ],
+)
+def test_line_count_counts_trailing_unterminated_line(text, expected):
+    from drakkar.recorder.core import _line_count
+
+    assert _line_count(text) == expected
+
+
 async def test_record_task_completed_with_output(tmp_path):
     config = make_debug_config(tmp_path, store_output=True)
     rec = EventRecorder(config, worker_name=WORKER_NAME)

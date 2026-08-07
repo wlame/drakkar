@@ -269,6 +269,13 @@ class _ScanBudget:
         )
 
 
+def _line_count(text: str) -> int:
+    """Logical lines in a stream capture: a trailing unterminated line counts."""
+    if not text:
+        return 0
+    return text.count('\n') + (0 if text.endswith('\n') else 1)
+
+
 class EventRecorder:
     """Records processing events to timestamped SQLite database files.
 
@@ -964,7 +971,7 @@ class EventRecorder:
         stdin_size = 0
         if task.stdin:
             stdin_size = len(task.stdin.encode())
-            stdin_lines = task.stdin.count('\n') + (1 if task.stdin and not task.stdin.endswith('\n') else 0)
+            stdin_lines = _line_count(task.stdin)
         metadata: dict = {
             'source_offsets': task.source_offsets,
             'slot': slot,
@@ -1057,6 +1064,10 @@ class EventRecorder:
             'exit_code': result.exit_code,
             'duration': result.duration_seconds,
             'stdout_size': len(result.stdout.encode()),
+            # WS-frame-only field, like task_started's stdin_lines/stdin_size:
+            # not in the pinned events-table column list, so the DB insert
+            # drops it and the row shape is unchanged.
+            'stdout_lines': _line_count(result.stdout),
             'pid': result.pid,
             'pool_active': pool_active,
             'pool_waiting': pool_waiting,
