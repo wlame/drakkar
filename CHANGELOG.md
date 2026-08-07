@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The periodic scheduler tests now wait for their condition instead of a
+  fixed wall-clock window. A slow CI runner could fail the suite when the
+  first timer tick did not arrive inside the window.
+
 ## [1.7.0] - 2026-08-07
 
 ### Added

@@ -142,6 +142,18 @@ def test_discover_returns_bound_methods():
 
 
 # --- Scheduler loop tests ---
+#
+# Tests that count invocations wait on the count itself (wait_for) instead of
+# sleeping a fixed wall-clock window: a stalled shared CI runner can delay
+# even the first 50ms tick past any fixed window, but a condition wait stays
+# correct on slow machines and fast on quick ones.
+
+
+async def _cancel_periodic(t: asyncio.Task) -> None:
+    """Cancel a run_periodic_task loop and wait for it to end."""
+    t.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await t
 
 
 async def test_run_periodic_task_executes_on_interval():
@@ -160,10 +172,8 @@ async def test_run_periodic_task_executes_on_interval():
         )
     )
 
-    await asyncio.sleep(0.18)
-    t.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await t
+    await wait_for(lambda: call_count >= 2)
+    await _cancel_periodic(t)
 
     assert call_count >= 2
 
@@ -212,12 +222,10 @@ async def test_run_periodic_task_on_error_continue():
         )
     )
 
-    await asyncio.sleep(0.18)
-    t.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await t
+    # a second call happening at all proves the loop survived the first error
+    await wait_for(lambda: call_count >= 2)
+    await _cancel_periodic(t)
 
-    # task kept running despite errors
     assert call_count >= 2
 
 
@@ -368,10 +376,8 @@ async def test_handler_periodic_methods_are_callable():
         )
     )
 
-    await asyncio.sleep(0.13)
-    t.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await t
+    await wait_for(lambda: len(results) >= 2)
+    await _cancel_periodic(t)
 
     assert len(results) >= 2
     assert all(r == 'tick' for r in results)
@@ -404,10 +410,8 @@ async def test_handler_periodic_accesses_self_state():
         )
     )
 
-    await asyncio.sleep(0.18)
-    t.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await t
+    await wait_for(lambda: handler.counter >= 2)
+    await _cancel_periodic(t)
 
     assert handler.counter >= 2
 
@@ -446,7 +450,7 @@ async def test_multiple_periodic_tasks_run_independently():
         )
         running.append(t)
 
-    await asyncio.sleep(0.35)
+    await wait_for(lambda: fast_count >= 4 and slow_count >= 1)
 
     for t in running:
         t.cancel()
@@ -500,7 +504,7 @@ async def test_periodic_run_increments_metrics():
     task = asyncio.create_task(
         run_periodic_task(name='test_metric_task', coro_fn=fast_task, seconds=0.05, on_error='continue')
     )
-    await asyncio.sleep(0.15)
+    await wait_for(lambda: call_count >= 2)
     task.cancel()
     try:
         await task
@@ -526,7 +530,9 @@ async def test_periodic_run_error_increments_error_metric():
     task = asyncio.create_task(
         run_periodic_task(name='test_err_metric', coro_fn=failing_task, seconds=0.05, on_error='continue')
     )
-    await asyncio.sleep(0.12)
+    await wait_for(
+        lambda: periodic_task_runs.labels(name='test_err_metric', status='error')._value.get() >= err_before + 1
+    )
     task.cancel()
     try:
         await task
@@ -554,7 +560,7 @@ async def test_periodic_run_records_to_recorder(tmp_path):
     task = asyncio.create_task(
         run_periodic_task(name='test_recorded', coro_fn=tracked_task, seconds=0.05, on_error='continue', recorder=rec)
     )
-    await asyncio.sleep(0.15)
+    await wait_for(lambda: call_count >= 2)
     task.cancel()
     try:
         await task
@@ -589,7 +595,7 @@ async def test_periodic_run_records_error_to_recorder(tmp_path):
             name='test_err_recorded', coro_fn=failing_task, seconds=0.05, on_error='continue', recorder=rec
         )
     )
-    await asyncio.sleep(0.12)
+    await wait_for(lambda: any(e['event'] == 'periodic_run' for e in rec._buffer))
     task.cancel()
     try:
         await task
@@ -632,7 +638,7 @@ async def test_run_periodic_task_system_flag_propagates_to_recorder(tmp_path):
             system=True,
         )
     )
-    await asyncio.sleep(0.12)
+    await wait_for(lambda: any(e['event'] == 'periodic_run' for e in rec._buffer))
     t.cancel()
     try:
         await t
@@ -673,7 +679,7 @@ async def test_run_periodic_task_system_flag_default_omitted(tmp_path):
             recorder=rec,
         )
     )
-    await asyncio.sleep(0.12)
+    await wait_for(lambda: any(e['event'] == 'periodic_run' for e in rec._buffer))
     t.cancel()
     try:
         await t
