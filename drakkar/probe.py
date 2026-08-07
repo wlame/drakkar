@@ -20,9 +20,14 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel, Field, ValidationError
 from pydantic.fields import FieldInfo
 
-ViewKind = Literal['string', 'keyvalue', 'dict', 'table', 'tables']
+ViewKind = Literal['string', 'keyvalue', 'dict', 'table', 'tables', 'tree']
 
-_VIEW_KINDS: tuple[str, ...] = ('string', 'keyvalue', 'dict', 'table', 'tables')
+_VIEW_KINDS: tuple[str, ...] = ('string', 'keyvalue', 'dict', 'table', 'tables', 'tree')
+
+# Maximum number of grouping levels a 'tree' field may declare. Enforced at
+# registration (startup), so a too-deep tree is a config error, never a
+# runtime surprise.
+TREE_MAX_DEPTH = 4
 _METADATA_KEY = 'drakkar_probe'
 _SCALARS = (str, int, float, bool)
 
@@ -41,6 +46,7 @@ def probe_field(
     section: str,
     view: ViewKind,
     label: str | None = None,
+    group_by: tuple[str, ...] | list[str] | None = None,
     default: Any = ...,
     default_factory: Callable[[], Any] | None = None,
 ) -> Any:
@@ -48,12 +54,40 @@ def probe_field(
 
     Thin wrapper over :func:`pydantic.Field` that stashes the layout
     metadata in ``json_schema_extra`` — one artifact, nothing to drift.
+
+    ``group_by`` is required for (and exclusive to) ``view='tree'``: the
+    ordered row-model field names the UI groups rows by, outermost level
+    first, at most :data:`TREE_MAX_DEPTH` deep. Membership in the row model
+    is checked later, in :func:`build_layout`, where the row type is known.
     """
     if view not in _VIEW_KINDS:
         raise ProbeDetailsConfigError(f"probe_field: unknown view '{view}' (expected one of {_VIEW_KINDS})")
     if not section:
         raise ProbeDetailsConfigError('probe_field: section must be a non-empty string')
-    extra = {_METADATA_KEY: {'section': section, 'view': view, 'label': label}}
+    if view == 'tree':
+        names = list(group_by or [])
+        if not names:
+            raise ProbeDetailsConfigError(
+                "probe_field: view 'tree' requires group_by=(...) naming 1-4 row-model fields"
+            )
+        if len(names) > TREE_MAX_DEPTH:
+            raise ProbeDetailsConfigError(f'probe_field: group_by allows at most {TREE_MAX_DEPTH} levels')
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ProbeDetailsConfigError('probe_field: group_by entries must be non-empty strings')
+        # dict.fromkeys, not set(): this module's `set` verb shadows the
+        # builtin (see the note above the logging-like API below).
+        if len(dict.fromkeys(names)) != len(names):
+            raise ProbeDetailsConfigError('probe_field: group_by entries must be unique')
+    elif group_by is not None:
+        raise ProbeDetailsConfigError("probe_field: group_by is only valid with view='tree'")
+    extra = {
+        _METADATA_KEY: {
+            'section': section,
+            'view': view,
+            'label': label,
+            'group_by': list(group_by) if group_by else None,
+        }
+    }
     if default_factory is not None:
         return Field(default_factory=default_factory, json_schema_extra=extra)
     return Field(default=default, json_schema_extra=extra)
@@ -76,6 +110,9 @@ class ProbeDetailsEntry(BaseModel):
     label: str
     view: ViewKind
     columns: list[ProbeDetailsColumn] | None = None
+    # Ordered grouping keys for view='tree' (outermost first); None for
+    # every other view. The named keys are a subset of ``columns``.
+    group_by: list[str] | None = None
 
 
 class ProbeDetailsSection(BaseModel):
@@ -142,8 +179,8 @@ def _probe_meta(model: type[BaseModel], name: str, info: FieldInfo) -> dict[str,
 def _row_model_of(annotation: Any, view: str) -> type[BaseModel] | None:
     """Extract the row model from a validated table/tables annotation.
 
-    ``table`` fields are ``list[RowModel]``; ``tables`` fields are
-    ``dict[str, list[RowModel]]`` (one sub-table per key). Returns None
+    ``table`` and ``tree`` fields are ``list[RowModel]``; ``tables`` fields
+    are ``dict[str, list[RowModel]]`` (one sub-table per key). Returns None
     when the annotation does not have that shape — callers turn that into
     a config error with the model/field context.
     """
@@ -178,6 +215,13 @@ def _validate_view(model: type[BaseModel], name: str, view: str, annotation: Any
             raise ProbeDetailsConfigError(
                 f"{model.__name__}.{name}: view 'tables' requires dict[str, list[RowModel]] "
                 'where RowModel is a BaseModel'
+            )
+        return row
+    if view == 'tree':
+        row = _row_model_of(annotation, view)
+        if row is None:
+            raise ProbeDetailsConfigError(
+                f"{model.__name__}.{name}: view 'tree' requires list[RowModel] where RowModel is a BaseModel"
             )
         return row
     if view == 'keyvalue':
@@ -222,7 +266,19 @@ def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
         columns = None
         if row_model is not None:
             columns = [ProbeDetailsColumn(key=rname, label=_prettify(rname)) for rname in row_model.model_fields]
-        entry = ProbeDetailsEntry(key=name, label=meta['label'] or _prettify(name), view=view, columns=columns)
+        group_by: list[str] | None = meta.get('group_by')
+        if view == 'tree' and row_model is not None and group_by:
+            # probe_field already validated shape (non-empty, <=TREE_MAX_DEPTH,
+            # unique); membership needs the row model, so it lives here.
+            for key_name in group_by:
+                if key_name not in row_model.model_fields:
+                    raise ProbeDetailsConfigError(
+                        f"{model.__name__}.{name}: group_by names '{key_name}', "
+                        f'which is not a field of {row_model.__name__}'
+                    )
+        entry = ProbeDetailsEntry(
+            key=name, label=meta['label'] or _prettify(name), view=view, columns=columns, group_by=group_by
+        )
         sections.setdefault(meta['section'], []).append(entry)
     layout = ProbeDetailsLayout(
         sections=[ProbeDetailsSection(title=title, entries=entries) for title, entries in sections.items()]
@@ -267,7 +323,7 @@ class _DetailsState:
         self._row_models = {
             name: row_model
             for name, info in model.model_fields.items()
-            if self._entries[name].view in ('table', 'tables')
+            if self._entries[name].view in ('table', 'tables', 'tree')
             and (row_model := _row_model_of(info.annotation, self._entries[name].view)) is not None
         }
         self._max_writes = max_writes
@@ -316,9 +372,12 @@ class _DetailsState:
         if not self._admit(field, 'append'):
             return
         entry = self._entries[field]
-        if entry.view not in ('table', 'tables'):
+        if entry.view not in ('table', 'tables', 'tree'):
             self._on_error(
-                field, 'append', 'ProbeDetailsError', f"append targets table/tables; '{field}' is view '{entry.view}'"
+                field,
+                'append',
+                'ProbeDetailsError',
+                f"append targets table/tables/tree; '{field}' is view '{entry.view}'",
             )
             return
         if entry.view == 'tables' and not group:
@@ -329,12 +388,14 @@ class _DetailsState:
                 f"'{field}' is view 'tables' — append needs a non-empty group (probe.append(field, row, group=...))",
             )
             return
-        if entry.view == 'table' and group is not None:
+        if entry.view != 'tables' and group is not None:
+            # A tree row carries its grouping keys as ordinary row fields,
+            # so `group` is meaningless there too.
             self._on_error(
                 field,
                 'append',
                 'ProbeDetailsError',
-                f"'{field}' is view 'table' — group targets grouped tables ('tables') only",
+                f"'{field}' is view '{entry.view}' — group targets grouped tables ('tables') only",
             )
             return
         row_model = self._row_models[field]
@@ -427,7 +488,8 @@ def append(field: str, row: Any, *, group: str | None = None) -> None:
 
     For a ``tables`` field (``dict[str, list[RowModel]]``) ``group`` names
     the sub-table the row lands in, creating it on first use; for a plain
-    ``table`` field it must stay ``None``.
+    ``table`` or a ``tree`` field it must stay ``None`` — a tree row
+    carries its grouping keys as ordinary row fields.
     """
     state = _active_state.get()
     if state is None:

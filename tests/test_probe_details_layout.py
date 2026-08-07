@@ -136,6 +136,69 @@ def test_build_layout_rejects_tables_with_non_string_keys():
         build_layout(BadKeys)
 
 
+class TreeRow(BaseModel):
+    file: str
+    section: str
+    score: float
+
+
+def test_build_layout_tree_carries_group_by_and_columns():
+    class Treed(BaseModel):
+        matches: list[TreeRow] = probe_field(
+            section='Files', view='tree', group_by=('file', 'section'), default_factory=list
+        )
+
+    entry = build_layout(Treed).sections[0].entries[0]
+    assert entry.view == 'tree'
+    assert entry.group_by == ['file', 'section']
+    assert [c.key for c in entry.columns] == ['file', 'section', 'score']
+
+
+def test_build_layout_non_tree_entries_have_null_group_by():
+    layout = build_layout(GoodDetails)
+    assert all(e.group_by is None for s in layout.sections for e in s.entries)
+
+
+def test_probe_field_rejects_tree_without_group_by():
+    with pytest.raises(ProbeDetailsConfigError, match='group_by'):
+        probe_field(section='S', view='tree')
+
+
+def test_probe_field_rejects_group_by_on_non_tree_view():
+    with pytest.raises(ProbeDetailsConfigError, match='group_by'):
+        probe_field(section='S', view='table', group_by=('file',))
+
+
+def test_probe_field_rejects_group_by_deeper_than_four_levels():
+    with pytest.raises(ProbeDetailsConfigError, match='at most 4'):
+        probe_field(section='S', view='tree', group_by=('a', 'b', 'c', 'd', 'e'))
+
+
+def test_probe_field_rejects_duplicate_group_by_entries():
+    with pytest.raises(ProbeDetailsConfigError, match='unique'):
+        probe_field(section='S', view='tree', group_by=('file', 'file'))
+
+
+def test_build_layout_rejects_group_by_naming_unknown_row_field():
+    class BadKeys(BaseModel):
+        matches: list[TreeRow] = probe_field(
+            section='S', view='tree', group_by=('no_such_field',), default_factory=list
+        )
+
+    with pytest.raises(ProbeDetailsConfigError, match='no_such_field'):
+        build_layout(BadKeys)
+
+
+def test_build_layout_rejects_tree_on_non_list_field():
+    class BadShape(BaseModel):
+        matches: dict[str, list[TreeRow]] = probe_field(
+            section='S', view='tree', group_by=('file',), default_factory=dict
+        )
+
+    with pytest.raises(ProbeDetailsConfigError, match='matches'):
+        build_layout(BadShape)
+
+
 def test_build_layout_rejects_keyvalue_with_non_scalar_values():
     class BadKV(BaseModel):
         kv: dict[str, list[int]] = probe_field(section='S', view='keyvalue', default_factory=dict)
@@ -164,12 +227,21 @@ class ParityRow(BaseModel):
     score: float
 
 
+class ParityTreeRow(BaseModel):
+    file: str
+    section: str
+    score: float
+
+
 class ParityDetails(BaseModel):
     strategy_note: str | None = probe_field(section='Arrange', view='string', default=None)
     counters: dict[str, int] = probe_field(section='Arrange', view='keyvalue', default_factory=dict)
     context_blob: dict = probe_field(section='Arrange', view='dict', default_factory=dict)
     picked_items: list[ParityRow] = probe_field(section='Tasks', view='table', default_factory=list)
     per_file_rows: dict[str, list[ParityRow]] = probe_field(section='Tasks', view='tables', default_factory=dict)
+    tree_matches: list[ParityTreeRow] = probe_field(
+        section='Tasks', view='tree', group_by=('file', 'section'), default_factory=list
+    )
 
 
 def test_layout_matches_cross_backend_golden_fixture():

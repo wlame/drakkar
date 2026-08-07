@@ -12,6 +12,12 @@ class PickedRow(BaseModel):
     score: float
 
 
+class TreeMatchRow(BaseModel):
+    file: str
+    section: str
+    score: float
+
+
 class VerbDetails(BaseModel):
     selection_note: str | None = probe_field(section='Selection', view='string', default=None)
     counters: dict[str, int] = probe_field(section='Selection', view='keyvalue', default_factory=dict)
@@ -21,6 +27,9 @@ class VerbDetails(BaseModel):
     context_or_none: dict | None = probe_field(section='Optional', view='dict', default=None)
     rows_or_none: list[PickedRow] | None = probe_field(section='Optional', view='table', default=None)
     groups_or_none: dict[str, list[PickedRow]] | None = probe_field(section='Optional', view='tables', default=None)
+    tree_matches: list[TreeMatchRow] = probe_field(
+        section='Rows', view='tree', group_by=('file', 'section'), default_factory=list
+    )
 
 
 @pytest.fixture
@@ -133,6 +142,26 @@ def test_append_to_nullable_tables_field_succeeds(bound):
     assert [r.item_id for r in bound.instance.groups_or_none['first_input_file.csv']] == ['a']
     assert len(bound.writes) == 1
     assert bound.writes[0].op == 'append'
+
+
+def test_append_to_tree_field_appends_flat_rows(bound):
+    probe.append('tree_matches', TreeMatchRow(file='first_input_file.csv', section='header', score=1.0))
+    probe.append('tree_matches', {'file': 'first_input_file.csv', 'section': 'body', 'score': 2.0})
+    assert [r.section for r in bound.instance.tree_matches] == ['header', 'body']
+    assert len(bound.writes) == 2
+    assert all(w.op == 'append' for w in bound.writes)
+
+
+def test_append_with_group_on_tree_field_records_error(bound, errors):
+    probe.append('tree_matches', TreeMatchRow(file='f', section='s', score=1.0), group='some_group')
+    assert errors[0][:3] == ('tree_matches', 'append', 'ProbeDetailsError')
+    assert bound.instance.tree_matches == []
+
+
+def test_to_user_details_serializes_tree_rows_flat(bound):
+    probe.append('tree_matches', TreeMatchRow(file='f.csv', section='s1', score=1.5))
+    details = bound.to_user_details()
+    assert details.data['tree_matches'] == [{'file': 'f.csv', 'section': 's1', 'score': 1.5}]
 
 
 def test_update_on_tables_field_records_error(bound, errors):

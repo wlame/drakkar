@@ -1357,11 +1357,21 @@ components:
         # "tables" renders one sub-table per key of a dict[str, rows[]] value,
         # in the emitted key order (Python preserves first-append order; Go
         # sorts keys); columns are shared by every sub-table.
-        view: {type: string, enum: [string, keyvalue, dict, table, tables]}
+        # "tree" renders flat rows grouped client-side by the group_by keys
+        # (row append order, identical on both backends), collapsible per
+        # level; leaf tables show the non-key columns.
+        view: {type: string, enum: [string, keyvalue, dict, table, tables, tree]}
         columns:
-          description: Present (non-null) only when view=table or view=tables.
+          description: Present (non-null) only when view=table, tables, or tree.
           type: [array, 'null']
           items: {$ref: '#/components/schemas/ProbeDetailsColumn'}
+        group_by:
+          description: >-
+            Ordered row-field keys the UI groups by (outermost first, max
+            depth 4), a subset of columns. Non-null only for view=tree;
+            absent entirely on backends that predate the tree view.
+          type: [array, 'null']
+          items: {type: string}
       required: [key, label, view, columns]
 
     ProbeDetailsSection:

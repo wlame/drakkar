@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- New `tree` view for probe user details. A flat `list[RowModel]` field with
+  `group_by=('file', 'section')` renders as a collapsible tree in the Message
+  Probe's User-defined tab: one level per named row field (up to 4), a
+  sortable table of the remaining columns at each leaf. Rows are added with
+  plain `probe.append(field, row)` — the grouping keys travel inside the row,
+  so group order is append order on every backend.
+
 ### Fixed
 
 - The periodic scheduler tests now wait for their condition instead of a

@@ -69,8 +69,9 @@ framework has no section or view to put it under.
 def probe_field(
     *,
     section: str,
-    view: Literal['string', 'keyvalue', 'dict', 'table', 'tables'],
+    view: Literal['string', 'keyvalue', 'dict', 'table', 'tables', 'tree'],
     label: str | None = None,
+    group_by: tuple[str, ...] | None = None,
     default: Any = ...,
     default_factory: Callable[[], Any] | None = None,
 ) -> Any
@@ -84,12 +85,15 @@ def probe_field(
   becomes "Counters" and `strategy_note` becomes "Strategy note" — the
   field name with underscores turned to spaces and the first letter
   capitalized.
+- **`group_by`** (required for and exclusive to `view='tree'`) is the
+  ordered tuple of row-model field names the UI groups by — outermost
+  level first, at most 4 levels.
 - One of **`default`** / **`default_factory`** is required — same as any
   Pydantic field with a mutable default (`dict`, `list`) — because the
   framework constructs the empty instance itself at the start of every
   probe. A field with no default is a startup error.
 
-### The five view kinds
+### The six view kinds
 
 | `view` | Field type | Renders as |
 |---|---|---|
@@ -98,6 +102,7 @@ def probe_field(
 | `dict` | `dict` | a JSON tree |
 | `table` | `list[RowModel]`, where `RowModel` is a `BaseModel` | a collapsible, sortable table — one column per row-model field |
 | `tables` | `dict[str, list[RowModel]]` | one sub-table per dict key, all sharing the row model's columns — for a *runtime-determined* number of tables (one per input file, one per external call, …) |
+| `tree` | `list[RowModel]` + `group_by=(...)` | a collapsible tree grouped by the named row fields (up to 4 levels), with a sortable table of the remaining columns at each leaf |
 
 `table` and `tables` columns come from the row model's own fields,
 prettified the same way labels are — no separate column declaration
@@ -139,6 +144,40 @@ A probe that processed three files renders three sub-tables titled by file
 name; a probe that processed one renders one. Every sub-table sorts
 independently.
 
+### Tree: multi-level grouping of flat rows
+
+When one grouping level is not enough — file → section → rule, say — declare
+a `tree` field. It stays a flat `list[RowModel]`; the `group_by` tuple names
+which row fields form the grouping path (outermost first, at most 4 levels):
+
+```python
+class MatchRow(BaseModel):
+    file: str          # level 1
+    section: str       # level 2
+    rule: str          # leaf column
+    score: float       # leaf column
+
+
+class MyDetails(BaseModel):
+    matches: list[MatchRow] = probe_field(
+        section='Files', view='tree', group_by=('file', 'section'), default_factory=list
+    )
+```
+
+```python
+probe.append('matches', MatchRow(file=f.name, section=sec, rule=r.name, score=r.score))
+```
+
+The grouping keys travel inside each row, so filling a tree is a plain
+`probe.append` — no group argument. The UI groups client-side in append
+order and renders one collapsible level per key; each leaf shows a sortable
+table of the columns that are **not** grouping keys. Because the tree is a
+projection of a flat list, group order is deterministic on both backends
+(unlike `tables`, whose Go backend sorts map keys).
+
+`group_by` must name existing row-model fields, without duplicates — both
+checked at startup, like every other layout rule.
+
 ---
 
 ## Filling it in: `probe.set` / `probe.append` / `probe.update`
@@ -179,7 +218,7 @@ class MyHandler(BaseDrakkarHandler[...]):
 | Verb | Targets | Behavior |
 |---|---|---|
 | `probe.set(**fields)` | any field | Assigns each keyword as the field's whole new value. Validated against the model like any Pydantic assignment. |
-| `probe.append(field, row)` | `table` fields | Appends one row — either an instance of the row model or a `dict` that validates against it. |
+| `probe.append(field, row)` | `table` / `tree` fields | Appends one row — either an instance of the row model or a `dict` that validates against it. A tree row carries its grouping keys as ordinary fields. |
 | `probe.append(field, row, group='...')` | `tables` fields | Same, but into the named sub-table, creating it on first use. `group` is required for a `tables` field and rejected for a plain `table`. |
 | `probe.update(field, **entries)` | `keyvalue` / `dict` fields only | Merges keys into the existing value rather than replacing it — repeated calls accumulate. |
 

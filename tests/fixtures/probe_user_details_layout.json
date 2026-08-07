@@ -7,19 +7,22 @@
           "key": "strategy_note",
           "label": "Strategy note",
           "view": "string",
-          "columns": null
+          "columns": null,
+          "group_by": null
         },
         {
           "key": "counters",
           "label": "Counters",
           "view": "keyvalue",
-          "columns": null
+          "columns": null,
+          "group_by": null
         },
         {
           "key": "context_blob",
           "label": "Context blob",
           "view": "dict",
-          "columns": null
+          "columns": null,
+          "group_by": null
         }
       ]
     },
@@ -39,7 +42,8 @@
               "key": "score",
               "label": "Score"
             }
-          ]
+          ],
+          "group_by": null
         },
         {
           "key": "per_file_rows",
@@ -54,6 +58,30 @@
               "key": "score",
               "label": "Score"
             }
+          ],
+          "group_by": null
+        },
+        {
+          "key": "tree_matches",
+          "label": "Tree matches",
+          "view": "tree",
+          "columns": [
+            {
+              "key": "file",
+              "label": "File"
+            },
+            {
+              "key": "section",
+              "label": "Section"
+            },
+            {
+              "key": "score",
+              "label": "Score"
+            }
+          ],
+          "group_by": [
+            "file",
+            "section"
           ]
         }
       ]
