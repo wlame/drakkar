@@ -169,6 +169,7 @@ class ParityDetails(BaseModel):
     counters: dict[str, int] = probe_field(section='Arrange', view='keyvalue', default_factory=dict)
     context_blob: dict = probe_field(section='Arrange', view='dict', default_factory=dict)
     picked_items: list[ParityRow] = probe_field(section='Tasks', view='table', default_factory=list)
+    per_file_rows: dict[str, list[ParityRow]] = probe_field(section='Tasks', view='tables', default_factory=dict)
 
 
 def test_layout_matches_cross_backend_golden_fixture():

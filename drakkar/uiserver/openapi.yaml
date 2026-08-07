@@ -1355,8 +1355,8 @@ components:
         key: {type: string}
         label: {type: string}
         # "tables" renders one sub-table per key of a dict[str, rows[]] value,
-        # in the dict's own (first-append) key order; columns are shared by
-        # every sub-table.
+        # in the emitted key order (Python preserves first-append order; Go
+        # sorts keys); columns are shared by every sub-table.
         view: {type: string, enum: [string, keyvalue, dict, table, tables]}
         columns:
           description: Present (non-null) only when view=table or view=tables.
