@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- New `tables` view for probe user details. A field typed
+  `dict[str, list[RowModel]]` renders one sub-table per key in the Message
+  Probe's User-defined tab. Use `probe.append(field, row, group='...')` to
+  add rows; each group becomes its own sortable table, in first-append
+  order. This supports a run-time number of tables — for example, one table
+  per input file.
+- The probe-details write caps are now settings: `ui.probe_details.max_writes`
+  (default 10,000) and `ui.probe_details.max_total_bytes` (default 5 MB).
+
 ## [1.6.0] - 2026-08-07
 
 ### Added

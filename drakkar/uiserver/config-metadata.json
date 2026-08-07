@@ -1443,6 +1443,26 @@
           "default": true,
           "secret": false,
           "group": "ui"
+        },
+        {
+          "path": "ui.probe_details.max_writes",
+          "env": "DK_UI__PROBE_DETAILS__MAX_WRITES",
+          "description": "Maximum probe.set/append/update calls recorded per probe run.",
+          "full_description": "Maximum probe.set/append/update calls recorded per probe run. The first write past the cap records one ProbeError; further writes are dropped silently.",
+          "type": "integer",
+          "default": 10000,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.probe_details.max_total_bytes",
+          "env": "DK_UI__PROBE_DETAILS__MAX_TOTAL_BYTES",
+          "description": "Maximum total serialized size (bytes) of all probe-details writes per probe run.",
+          "full_description": "Maximum total serialized size (bytes) of all probe-details writes per probe run. Past it, writes are dropped like the max_writes cap.",
+          "type": "integer",
+          "default": 5000000,
+          "secret": false,
+          "group": "ui"
         }
       ]
     },

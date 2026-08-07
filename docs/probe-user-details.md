@@ -69,7 +69,7 @@ framework has no section or view to put it under.
 def probe_field(
     *,
     section: str,
-    view: Literal['string', 'keyvalue', 'dict', 'table'],
+    view: Literal['string', 'keyvalue', 'dict', 'table', 'tables'],
     label: str | None = None,
     default: Any = ...,
     default_factory: Callable[[], Any] | None = None,
@@ -89,7 +89,7 @@ def probe_field(
   framework constructs the empty instance itself at the start of every
   probe. A field with no default is a startup error.
 
-### The four view kinds
+### The five view kinds
 
 | `view` | Field type | Renders as |
 |---|---|---|
@@ -97,11 +97,47 @@ def probe_field(
 | `keyvalue` | `dict[str, <scalar>]` | a flat key/value list |
 | `dict` | `dict` | a JSON tree |
 | `table` | `list[RowModel]`, where `RowModel` is a `BaseModel` | a collapsible, sortable table — one column per row-model field |
+| `tables` | `dict[str, list[RowModel]]` | one sub-table per dict key, all sharing the row model's columns — for a *runtime-determined* number of tables (one per input file, one per external call, …) |
 
-`table` columns come from the row model's own fields, prettified the same
-way labels are — no separate column declaration needed. Getting the view
-wrong for the field's type (a `table` over `list[str]`, a `keyvalue` over
-`dict[str, list[int]]`) is also a startup error, not a silent fallback.
+`table` and `tables` columns come from the row model's own fields,
+prettified the same way labels are — no separate column declaration
+needed. Getting the view wrong for the field's type (a `table` over
+`list[str]`, a `keyvalue` over `dict[str, list[int]]`) is also a startup
+error, not a silent fallback.
+
+### Grouped tables: one table per file
+
+The layout is computed once at startup, so the *fields* of your model are
+fixed — but a `tables` field lets the number of rendered tables follow the
+data. Each distinct `group` you append under becomes its own sub-table,
+shown under the field's heading in first-append order:
+
+```python
+class ImportedFileRow(BaseModel):
+    record_id: str
+    line_count: int
+    status: str
+
+
+class FileImportDetails(BaseModel):
+    per_file_records: dict[str, list[ImportedFileRow]] = probe_field(
+        section='Files', view='tables', default_factory=dict
+    )
+```
+
+```python
+for input_file in discovered_files:
+    for record in parse(input_file):
+        probe.append(
+            'per_file_records',
+            ImportedFileRow(record_id=record.id, line_count=record.lines, status=record.status),
+            group=input_file.name,
+        )
+```
+
+A probe that processed three files renders three sub-tables titled by file
+name; a probe that processed one renders one. Every sub-table sorts
+independently.
 
 ---
 
@@ -143,11 +179,13 @@ class MyHandler(BaseDrakkarHandler[...]):
 | Verb | Targets | Behavior |
 |---|---|---|
 | `probe.set(**fields)` | any field | Assigns each keyword as the field's whole new value. Validated against the model like any Pydantic assignment. |
-| `probe.append(field, row)` | `table` fields only | Appends one row — either an instance of the row model or a `dict` that validates against it. |
+| `probe.append(field, row)` | `table` fields | Appends one row — either an instance of the row model or a `dict` that validates against it. |
+| `probe.append(field, row, group='...')` | `tables` fields | Same, but into the named sub-table, creating it on first use. `group` is required for a `tables` field and rejected for a plain `table`. |
 | `probe.update(field, **entries)` | `keyvalue` / `dict` fields only | Merges keys into the existing value rather than replacing it — repeated calls accumulate. |
 
 Calling the wrong verb for a field's view (`probe.append` on a `string`
-field, `probe.update` on a `table`) does not raise into your handler — see
+field, `probe.update` on a `table`), or `probe.append` without a `group`
+on a `tables` field, does not raise into your handler — see
 [Error semantics](#error-semantics) below.
 
 ---
@@ -204,16 +242,25 @@ so an unserializable value in one field shows as
 Two limits guard against a handler that (accidentally or not) writes
 unbounded diagnostics during a single probe run:
 
-| Limit | Value | What happens past it |
-|---|---|---|
-| Writes per probe | 10,000 | Every further `set` / `append` / `update` call is dropped. |
-| Total serialized size per probe | 5 MB | Same — further writes are dropped. |
+| Limit | Default | Config key | What happens past it |
+|---|---|---|---|
+| Writes per probe | 10,000 | `ui.probe_details.max_writes` | Every further `set` / `append` / `update` call is dropped. |
+| Total serialized size per probe | 5 MB | `ui.probe_details.max_total_bytes` | Same — further writes are dropped. |
 
 The first write past either cap records one `ProbeError` ("write cap
 exceeded") so it's visible in the report; every write after that is
 silently dropped rather than raising a fresh error each time. A probe is a
-single replayed message — these numbers are generous headroom for real
-handler logic, not a budget you should expect to plan around.
+single replayed message — the defaults are generous headroom for real
+handler logic. Raise them in YAML (or via `DK_UI__PROBE_DETAILS__MAX_WRITES`
+and `DK_UI__PROBE_DETAILS__MAX_TOTAL_BYTES`) when a probe legitimately
+produces more — e.g. one `tables` row per record across many large inputs:
+
+```yaml
+ui:
+  probe_details:
+    max_writes: 50000
+    max_total_bytes: 20000000
+```
 
 ---
 

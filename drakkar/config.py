@@ -894,6 +894,35 @@ class UIReleaseConfig(BaseModel):
         return v
 
 
+class UIProbeDetailsConfig(BaseModel):
+    """Caps for the Message Probe's user-defined details writes.
+
+    Both limits guard a single probe run against a handler that writes
+    unbounded diagnostics. The defaults are generous headroom for typical
+    handler logic; raise them when a probe legitimately produces more
+    (e.g. one table row per record across many large inputs).
+    """
+
+    max_writes: int = Field(
+        default=10_000,
+        ge=1,
+        description=(
+            'Maximum probe.set/append/update calls recorded per probe run. '
+            'The first write past the cap records one ProbeError; further '
+            'writes are dropped silently.'
+        ),
+    )
+    max_total_bytes: int = Field(
+        default=5_000_000,
+        ge=1,
+        description=(
+            'Maximum total serialized size (bytes) of all probe-details '
+            'writes per probe run. Past it, writes are dropped like the '
+            'max_writes cap.'
+        ),
+    )
+
+
 class UIConfig(BaseModel):
     """The operator web UI: HTTP server, presentation, and sub-sections.
 
@@ -904,7 +933,9 @@ class UIConfig(BaseModel):
     - ``ui.recorder.*`` — the flight-recorder store that feeds the UI
       (:class:`UIRecorderConfig`);
     - ``ui.release.*`` — drakkar-ui bundle fetching
-      (:class:`UIReleaseConfig`).
+      (:class:`UIReleaseConfig`);
+    - ``ui.probe_details.*`` — write caps for the Message Probe's
+      user-defined details (:class:`UIProbeDetailsConfig`).
 
     Set ``enabled: false`` to disable the whole UI feature (server,
     recorder persistence, and bundle serving).
@@ -1030,6 +1061,7 @@ class UIConfig(BaseModel):
     custom_links: list[dict[str, str]] = Field(default_factory=list)
     recorder: UIRecorderConfig = Field(default_factory=UIRecorderConfig)
     release: UIReleaseConfig = Field(default_factory=UIReleaseConfig)
+    probe_details: UIProbeDetailsConfig = Field(default_factory=UIProbeDetailsConfig)
 
 
 # --- Cache config ---

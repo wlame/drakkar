@@ -809,6 +809,8 @@ class DebugRunner:
                 stage=_probe_stage.get,
                 now_ms=lambda: (time.monotonic() - state.start_monotonic) * 1000,
                 on_error=partial(_record_details_error, state),
+                max_writes=self._app_config.ui.probe_details.max_writes,
+                max_total_bytes=self._app_config.ui.probe_details.max_total_bytes,
             )
             details_token = probe_module._active_state.set(state.details_state)
         try:

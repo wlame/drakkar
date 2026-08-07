@@ -95,6 +95,47 @@ def test_build_layout_rejects_table_of_scalars():
         build_layout(BadTable)
 
 
+def test_build_layout_tables_columns_come_from_row_model():
+    class Grouped(BaseModel):
+        per_file_rows: dict[str, list[PickedRow]] = probe_field(section='Files', view='tables', default_factory=dict)
+
+    layout = build_layout(Grouped)
+    entry = layout.sections[0].entries[0]
+    assert entry.view == 'tables'
+    assert [(c.key, c.label) for c in entry.columns] == [('item_id', 'Item id'), ('score', 'Score')]
+
+
+def test_build_layout_accepts_nullable_tables_field():
+    class NullableGrouped(BaseModel):
+        groups: dict[str, list[PickedRow]] | None = probe_field(section='Files', view='tables', default=None)
+
+    assert build_layout(NullableGrouped).sections[0].entries[0].view == 'tables'
+
+
+def test_build_layout_rejects_tables_with_scalar_rows():
+    class BadRows(BaseModel):
+        groups: dict[str, list[str]] = probe_field(section='S', view='tables', default_factory=dict)
+
+    with pytest.raises(ProbeDetailsConfigError, match='groups'):
+        build_layout(BadRows)
+
+
+def test_build_layout_rejects_tables_on_plain_list():
+    class BadShape(BaseModel):
+        groups: list[PickedRow] = probe_field(section='S', view='tables', default_factory=list)
+
+    with pytest.raises(ProbeDetailsConfigError, match='groups'):
+        build_layout(BadShape)
+
+
+def test_build_layout_rejects_tables_with_non_string_keys():
+    class BadKeys(BaseModel):
+        groups: dict[int, list[PickedRow]] = probe_field(section='S', view='tables', default_factory=dict)
+
+    with pytest.raises(ProbeDetailsConfigError, match='groups'):
+        build_layout(BadKeys)
+
+
 def test_build_layout_rejects_keyvalue_with_non_scalar_values():
     class BadKV(BaseModel):
         kv: dict[str, list[int]] = probe_field(section='S', view='keyvalue', default_factory=dict)

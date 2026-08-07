@@ -17,8 +17,10 @@ class VerbDetails(BaseModel):
     counters: dict[str, int] = probe_field(section='Selection', view='keyvalue', default_factory=dict)
     context_blob: dict = probe_field(section='Selection', view='dict', default_factory=dict)
     picked_items: list[PickedRow] = probe_field(section='Rows', view='table', default_factory=list)
+    per_file_rows: dict[str, list[PickedRow]] = probe_field(section='Rows', view='tables', default_factory=dict)
     context_or_none: dict | None = probe_field(section='Optional', view='dict', default=None)
     rows_or_none: list[PickedRow] | None = probe_field(section='Optional', view='table', default=None)
+    groups_or_none: dict[str, list[PickedRow]] | None = probe_field(section='Optional', view='tables', default=None)
 
 
 @pytest.fixture
@@ -95,6 +97,55 @@ def test_append_invalid_row_records_validation_error(bound, errors):
     assert bound.instance.picked_items == []
 
 
+def test_append_with_group_creates_subtable_and_appends(bound):
+    probe.append('per_file_rows', PickedRow(item_id='a', score=1.0), group='first_input_file.csv')
+    probe.append('per_file_rows', {'item_id': 'b', 'score': 2.0}, group='first_input_file.csv')
+    probe.append('per_file_rows', {'item_id': 'c', 'score': 3.0}, group='second_input_file.csv')
+    assert list(bound.instance.per_file_rows) == ['first_input_file.csv', 'second_input_file.csv']
+    assert [r.item_id for r in bound.instance.per_file_rows['first_input_file.csv']] == ['a', 'b']
+    assert [r.item_id for r in bound.instance.per_file_rows['second_input_file.csv']] == ['c']
+    assert len(bound.writes) == 3
+    assert all(w.op == 'append' for w in bound.writes)
+
+
+def test_append_to_tables_without_group_records_error(bound, errors):
+    probe.append('per_file_rows', PickedRow(item_id='a', score=1.0))
+    assert errors[0][:3] == ('per_file_rows', 'append', 'ProbeDetailsError')
+    assert 'group' in errors[0][3]
+    assert bound.instance.per_file_rows == {}
+
+
+def test_append_with_group_on_plain_table_records_error(bound, errors):
+    probe.append('picked_items', PickedRow(item_id='a', score=1.0), group='some_group')
+    assert errors[0][:3] == ('picked_items', 'append', 'ProbeDetailsError')
+    assert bound.instance.picked_items == []
+
+
+def test_append_invalid_row_into_group_records_validation_error(bound, errors):
+    probe.append('per_file_rows', {'item_id': 'a'}, group='first_input_file.csv')
+    assert errors[0][:3] == ('per_file_rows', 'append', 'ValidationError')
+    assert bound.instance.per_file_rows == {}
+
+
+def test_append_to_nullable_tables_field_succeeds(bound):
+    assert bound.instance.groups_or_none is None
+    probe.append('groups_or_none', {'item_id': 'a', 'score': 1.0}, group='first_input_file.csv')
+    assert [r.item_id for r in bound.instance.groups_or_none['first_input_file.csv']] == ['a']
+    assert len(bound.writes) == 1
+    assert bound.writes[0].op == 'append'
+
+
+def test_update_on_tables_field_records_error(bound, errors):
+    probe.update('per_file_rows', k=1)
+    assert errors[0][:3] == ('per_file_rows', 'update', 'ProbeDetailsError')
+
+
+def test_to_user_details_serializes_grouped_tables(bound):
+    probe.append('per_file_rows', PickedRow(item_id='a', score=1.0), group='first_input_file.csv')
+    details = bound.to_user_details()
+    assert details.data['per_file_rows'] == {'first_input_file.csv': [{'item_id': 'a', 'score': 1.0}]}
+
+
 def test_update_merges_into_keyvalue(bound):
     probe.update('counters', matched=3)
     probe.update('counters', skipped=1, matched=4)
@@ -106,11 +157,41 @@ def test_update_on_scalar_field_records_error(bound, errors):
     assert errors[0][:3] == ('selection_note', 'update', 'ProbeDetailsError')
 
 
-def test_write_cap_records_one_error_then_drops(bound, errors, monkeypatch):
-    monkeypatch.setattr(probe, 'MAX_WRITES', 3)
-    for i in range(5):
-        probe.update('counters', **{f'k{i}': i})
-    assert len(bound.writes) == 3
+def _bound_state_with_caps(errors, **caps) -> _DetailsState:
+    """A bound state with explicit caps — the path ui.probe_details.* config takes."""
+    return _DetailsState(
+        model=VerbDetails,
+        layout=build_layout(VerbDetails),
+        stage=lambda: 'arrange',
+        now_ms=lambda: 12.5,
+        on_error=lambda field, op, cls, msg: errors.append((field, op, cls, msg)),
+        **caps,
+    )
+
+
+def test_write_cap_records_one_error_then_drops(errors):
+    state = _bound_state_with_caps(errors, max_writes=3)
+    token = probe._active_state.set(state)
+    try:
+        for i in range(5):
+            probe.update('counters', **{f'k{i}': i})
+    finally:
+        probe._active_state.reset(token)
+    assert len(state.writes) == 3
+    assert len(errors) == 1
+    assert 'cap' in errors[0][3]
+
+
+def test_byte_cap_records_one_error_then_drops(errors):
+    state = _bound_state_with_caps(errors, max_total_bytes=10)
+    token = probe._active_state.set(state)
+    try:
+        probe.set(selection_note='a value that serializes past ten bytes')
+        probe.set(selection_note='dropped')
+    finally:
+        probe._active_state.reset(token)
+    assert len(state.writes) == 1
+    assert state.instance.selection_note != 'dropped'
     assert len(errors) == 1
     assert 'cap' in errors[0][3]
 

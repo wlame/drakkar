@@ -1341,7 +1341,7 @@ components:
       required: [sink_type, destination, origin_stage]
 
     ProbeDetailsColumn:
-      description: One table column of a "table"-view details entry.
+      description: One table column of a "table"- or "tables"-view details entry.
       type: object
       properties:
         key: {type: string}
@@ -1354,9 +1354,12 @@ components:
       properties:
         key: {type: string}
         label: {type: string}
-        view: {type: string, enum: [string, keyvalue, dict, table]}
+        # "tables" renders one sub-table per key of a dict[str, rows[]] value,
+        # in the dict's own (first-append) key order; columns are shared by
+        # every sub-table.
+        view: {type: string, enum: [string, keyvalue, dict, table, tables]}
         columns:
-          description: Present (non-null) only when view=table.
+          description: Present (non-null) only when view=table or view=tables.
           type: [array, 'null']
           items: {$ref: '#/components/schemas/ProbeDetailsColumn'}
       required: [key, label, view, columns]

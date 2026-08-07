@@ -20,12 +20,14 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel, Field, ValidationError
 from pydantic.fields import FieldInfo
 
-ViewKind = Literal['string', 'keyvalue', 'dict', 'table']
+ViewKind = Literal['string', 'keyvalue', 'dict', 'table', 'tables']
 
-_VIEW_KINDS: tuple[str, ...] = ('string', 'keyvalue', 'dict', 'table')
+_VIEW_KINDS: tuple[str, ...] = ('string', 'keyvalue', 'dict', 'table', 'tables')
 _METADATA_KEY = 'drakkar_probe'
 _SCALARS = (str, int, float, bool)
 
+# Default write caps per probe run; the live values come from
+# ``ui.probe_details.*`` config and reach ``_DetailsState`` per instance.
 MAX_WRITES = 10_000
 MAX_TOTAL_BYTES = 5_000_000
 
@@ -137,15 +139,45 @@ def _probe_meta(model: type[BaseModel], name: str, info: FieldInfo) -> dict[str,
     return cast(dict[str, Any], extra_dict[_METADATA_KEY])
 
 
+def _row_model_of(annotation: Any, view: str) -> type[BaseModel] | None:
+    """Extract the row model from a validated table/tables annotation.
+
+    ``table`` fields are ``list[RowModel]``; ``tables`` fields are
+    ``dict[str, list[RowModel]]`` (one sub-table per key). Returns None
+    when the annotation does not have that shape — callers turn that into
+    a config error with the model/field context.
+    """
+    ann = _unwrap_optional(annotation)
+    if view == 'tables':
+        args = typing.get_args(ann)
+        if typing.get_origin(ann) is not dict or len(args) != 2 or args[0] is not str:
+            return None
+        ann = args[1]
+    if typing.get_origin(ann) is not list or not typing.get_args(ann):
+        return None
+    row = typing.get_args(ann)[0]
+    if isinstance(row, type) and issubclass(row, BaseModel):
+        return row
+    return None
+
+
 def _validate_view(model: type[BaseModel], name: str, view: str, annotation: Any) -> type[BaseModel] | None:
     """Check the field type fits the declared view. Returns the row model for tables."""
     ann = _unwrap_optional(annotation)
     origin = typing.get_origin(ann)
     if view == 'table':
-        row = typing.get_args(ann)[0] if origin is list and typing.get_args(ann) else None
-        if row is None or not (isinstance(row, type) and issubclass(row, BaseModel)):
+        row = _row_model_of(annotation, view)
+        if row is None:
             raise ProbeDetailsConfigError(
                 f"{model.__name__}.{name}: view 'table' requires list[RowModel] where RowModel is a BaseModel"
+            )
+        return row
+    if view == 'tables':
+        row = _row_model_of(annotation, view)
+        if row is None:
+            raise ProbeDetailsConfigError(
+                f"{model.__name__}.{name}: view 'tables' requires dict[str, list[RowModel]] "
+                'where RowModel is a BaseModel'
             )
         return row
     if view == 'keyvalue':
@@ -220,6 +252,8 @@ class _DetailsState:
         stage: Callable[[], str],
         now_ms: Callable[[], float],
         on_error: Callable[[str, str, str, str], None],
+        max_writes: int = MAX_WRITES,
+        max_total_bytes: int = MAX_TOTAL_BYTES,
     ) -> None:
         self.instance = model()
         self.layout = layout
@@ -228,11 +262,16 @@ class _DetailsState:
         self._now_ms = now_ms
         self._on_error = on_error
         self._entries = {e.key: e for s in layout.sections for e in s.entries}
+        # Row models are guaranteed present here: build_layout already
+        # validated every table/tables annotation at startup.
         self._row_models = {
-            name: typing.get_args(_unwrap_optional(info.annotation))[0]
+            name: row_model
             for name, info in model.model_fields.items()
-            if self._entries[name].view == 'table'
+            if self._entries[name].view in ('table', 'tables')
+            and (row_model := _row_model_of(info.annotation, self._entries[name].view)) is not None
         }
+        self._max_writes = max_writes
+        self._max_total_bytes = max_total_bytes
         self._bytes = 0
         self._capped = False
 
@@ -242,7 +281,7 @@ class _DetailsState:
         """Cap check + existence check. Emits at most one cap error per probe."""
         if self._capped:
             return False
-        if len(self.writes) >= MAX_WRITES or self._bytes >= MAX_TOTAL_BYTES:
+        if len(self.writes) >= self._max_writes or self._bytes >= self._max_total_bytes:
             self._capped = True
             self._on_error(field, op, 'ProbeDetailsError', 'write cap exceeded — further writes are dropped')
             return False
@@ -273,13 +312,29 @@ class _DetailsState:
                 continue
             self._record(name, 'set', value)
 
-    def append_row(self, field: str, row: Any) -> None:
+    def append_row(self, field: str, row: Any, group: str | None = None) -> None:
         if not self._admit(field, 'append'):
             return
         entry = self._entries[field]
-        if entry.view != 'table':
+        if entry.view not in ('table', 'tables'):
             self._on_error(
-                field, 'append', 'ProbeDetailsError', f"append targets tables; '{field}' is view '{entry.view}'"
+                field, 'append', 'ProbeDetailsError', f"append targets table/tables; '{field}' is view '{entry.view}'"
+            )
+            return
+        if entry.view == 'tables' and not group:
+            self._on_error(
+                field,
+                'append',
+                'ProbeDetailsError',
+                f"'{field}' is view 'tables' — append needs a non-empty group (probe.append(field, row, group=...))",
+            )
+            return
+        if entry.view == 'table' and group is not None:
+            self._on_error(
+                field,
+                'append',
+                'ProbeDetailsError',
+                f"'{field}' is view 'table' — group targets grouped tables ('tables') only",
             )
             return
         row_model = self._row_models[field]
@@ -288,12 +343,19 @@ class _DetailsState:
         except ValidationError as exc:
             self._on_error(field, 'append', 'ValidationError', str(exc))
             return
-        # Handle None (nullable container) by treating as empty list
+        # Handle None (nullable container) by treating as empty list/dict
         current = getattr(self.instance, field)
         if current is None:
-            type(self.instance).__pydantic_validator__.validate_assignment(self.instance, field, [])
+            empty: list[Any] | dict[str, Any] = {} if entry.view == 'tables' else []
+            type(self.instance).__pydantic_validator__.validate_assignment(self.instance, field, empty)
             current = getattr(self.instance, field)
-        current.append(validated)
+        if entry.view == 'tables':
+            # Group creation order is meaningful (dict preserves insertion
+            # order end-to-end through JSON), so the UI shows sub-tables in
+            # first-append order.
+            current.setdefault(group, []).append(validated)
+        else:
+            current.append(validated)
         self._record(field, 'append', validated)
 
     def update_field(self, field: str, entries: dict[str, Any]) -> None:
@@ -360,12 +422,17 @@ def set(**fields: Any) -> None:  # shadowing builtin by design - logging-like mo
     state.set_fields(fields)
 
 
-def append(field: str, row: Any) -> None:
-    """Add one row to a table field. Accepts the row model or a dict. No-op outside a probe."""
+def append(field: str, row: Any, *, group: str | None = None) -> None:
+    """Add one row to a table field. Accepts the row model or a dict. No-op outside a probe.
+
+    For a ``tables`` field (``dict[str, list[RowModel]]``) ``group`` names
+    the sub-table the row lands in, creating it on first use; for a plain
+    ``table`` field it must stay ``None``.
+    """
     state = _active_state.get()
     if state is None:
         return
-    state.append_row(field, row)
+    state.append_row(field, row, group)
 
 
 def update(field: str, **entries: Any) -> None:
