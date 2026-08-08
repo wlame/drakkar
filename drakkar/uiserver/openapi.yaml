@@ -896,6 +896,13 @@ components:
             Where the served UI comes from - a fetched/cached release, the
             release embedded in the backend binary/package, or the built-in
             fallback pages. (v1.2)
+        link_bases:
+          type: object
+          additionalProperties: {type: string}
+          description: >-
+            Named URL bases from ui.link_bases, keyed by base name; empty
+            object when unset (never absent). Probe-details link templates
+            resolve {<base>} tokens against this map. (v1.4)
       required: [worker_id, cluster, config_summary]
 
     Dashboard:
@@ -1387,12 +1394,65 @@ components:
         extras: {type: [object, 'null'], additionalProperties: true}
       required: [sink_type, destination, origin_stage]
 
+    ProbeDetailsLink:
+      description: >-
+        One external link inside a detail panel's "links" element (Phase-1
+        enrichment; v1.4). Absent entirely on backends that predate it.
+      type: object
+      properties:
+        label: {type: string}
+        template: {type: string}
+      required: [label, template]
+
+    ProbeDetailsElement:
+      description: >-
+        One block of a detail panel, rendered top to bottom (Phase-1
+        enrichment; v1.4). Every view but "links" carries field and leaves
+        links null; "links" carries links and leaves field null.
+      type: object
+      properties:
+        view: {type: string, enum: [string, keyvalue, table, links]}
+        field: {type: [string, 'null']}
+        label: {type: [string, 'null']}
+        links:
+          type: [array, 'null']
+          items: {$ref: '#/components/schemas/ProbeDetailsLink'}
+      required: [view, field, label, links]
+
+    ProbeDetailsDetail:
+      description: >-
+        A declared right-panel layout opened by clicking a row of a
+        table/tables/tree-view entry (Phase-1 enrichment; v1.4). Absent
+        entirely on backends that predate it.
+      type: object
+      properties:
+        title: {type: [string, 'null']}
+        elements:
+          type: array
+          items: {$ref: '#/components/schemas/ProbeDetailsElement'}
+      required: [title, elements]
+
     ProbeDetailsColumn:
       description: One table column of a "table"- or "tables"-view details entry.
       type: object
       properties:
         key: {type: string}
         label: {type: string}
+        # Phase-1 per-column enrichment (v1.4): absent entirely on backends
+        # that predate it, explicit null on every field that carries none.
+        link_template:
+          type: [string, 'null']
+          description: Link template ({value}/{row.<field>}/{<base>} grammar); see docs/ui-enrichment.md.
+        badge_colors:
+          type: [object, 'null']
+          additionalProperties: {type: string}
+          description: Value-to-color map, rendered only when the column's view is 'badge'.
+        format:
+          type: [string, 'null']
+          description: One of duration_ms, bytes, timestamp, number.
+        hint:
+          type: [string, 'null']
+          description: Hover tooltip text (same template grammar as link_template).
       required: [key, label]
 
     ProbeDetailsEntry:
@@ -1409,7 +1469,8 @@ components:
         # "tree" renders flat rows grouped client-side by the group_by keys
         # (row append order, identical on both backends), collapsible per
         # level; leaf tables show the non-key columns.
-        view: {type: string, enum: [string, keyvalue, dict, table, tables, tree]}
+        # "badge" (v1.4) renders a scalar as a colored pill via badge_colors.
+        view: {type: string, enum: [string, keyvalue, dict, table, tables, tree, badge]}
         columns:
           description: Present (non-null) only when view=table, tables, or tree.
           type: [array, 'null']
@@ -1421,6 +1482,29 @@ components:
             absent entirely on backends that predate the tree view.
           type: [array, 'null']
           items: {type: string}
+        # Phase-1 enrichment (v1.4): absent entirely on backends that
+        # predate it, explicit null on every field the entry doesn't use.
+        link_template:
+          type: [string, 'null']
+          description: >-
+            Link template for view='string' entries ({value}/{row.<field>}/
+            {<base>} grammar); see docs/ui-enrichment.md. Mutually exclusive
+            with detail.
+        badge_colors:
+          type: [object, 'null']
+          additionalProperties: {type: string}
+          description: Value-to-color map for view='badge' entries.
+        format:
+          type: [string, 'null']
+          description: One of duration_ms, bytes, timestamp, number (view='string' only).
+        hint:
+          type: [string, 'null']
+          description: Hover tooltip text (view='string' only; row-bearing views put hints on a column).
+        detail:
+          oneOf:
+            - {$ref: '#/components/schemas/ProbeDetailsDetail'}
+            - {type: 'null'}
+          description: Row-click detail-panel layout (table/tables/tree entries only).
       required: [key, label, view, columns]
 
     ProbeDetailsSection:

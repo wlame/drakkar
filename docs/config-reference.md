@@ -396,6 +396,11 @@ ui:
   custom_links: []                 # env: DK_UI__CUSTOM_LINKS (JSON list)
                                    # Each entry: {name: "...", url: "..."}; url supports {worker_id} etc.
 
+  # --- Named URL bases for probe-details link templates (see ui-enrichment.md) ---
+  link_bases: {}                   # env: DK_UI__LINK_BASES (JSON object)
+                                   # e.g. {jira: 'https://jira.internal.example.com'}; a template base
+                                   # missing here logs a startup warning and renders as plain text.
+
   # --- Flight recorder (persistence; all flags require non-empty db_dir) ---
   recorder:
     db_dir: /tmp                     # SQLite directory. Empty = no disk persistence. env: DK_UI__RECORDER__DB_DIR

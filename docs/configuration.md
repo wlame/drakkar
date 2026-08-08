@@ -630,6 +630,19 @@ These settings add clickable Prometheus graph links to the dashboard.
 |-------|------|---------|-------------|
 | `custom_links` | `list[dict[str, str]]` | `[]` | List of custom links displayed in the dashboard navigation. Each entry is a dict with `name` and `url` keys. URL values support template variables: `{worker_id}`, `{cluster_name}`, `{metrics_port}`, `{debug_port}`. |
 
+### Probe-Details Link Bases
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `link_bases` | `dict[str, str]` | `{}` | Named URL bases that [probe-details link templates](ui-enrichment.md#link-templates) resolve `{<base>}` tokens against — e.g. `{jira: 'https://jira.internal.example.com'}` resolves `{jira}` in a template like `{jira}/browse/{value}`. Base names are lower-case identifiers (`^[a-z][a-z0-9_]*$`); values must start with `http://` or `https://` and a trailing `/` is stripped. A base a registered layout references but this map omits logs one startup warning; the affected links render as plain text rather than failing. Reported on `GET /api/v1/identity` (empty object when unset). |
+
+```yaml
+ui:
+  link_bases:
+    jira: 'https://jira.internal.example.com'
+    jenkins: 'https://jenkins.internal.example.com'
+```
+
 ### Flight Recorder (`ui.recorder:`)
 
 Flight-recorder persistence — the UI's data store. All flags below require `db_dir` to be non-empty; any combination of the `store_*` flags is valid.
@@ -684,6 +697,9 @@ ui:
       url: http://grafana:3000/d/drakkar?var-worker={worker_id}
     - name: Kibana Logs
       url: http://kibana:5601/app/discover#/?_a=(query:(match_phrase:(worker_id:'{worker_id}')))
+  link_bases:
+    jira: 'https://jira.internal.example.com'
+    jenkins: 'https://jenkins.internal.example.com'
   recorder:
     db_dir: /shared/drakkar-recorder
     store_events: true

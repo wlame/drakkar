@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Declarative UI enrichment for probe-details fields and table columns:
+  `probe_field()` and `Column` gain `link_template` (clickable values, with
+  `{value}` / `{row.<field>}` / `{<base>}` template tokens), `badge_colors`
+  (a new `view='badge'` that renders a value as a colored pill), `format`
+  (`duration_ms` / `bytes` / `timestamp` / `number` display formatting), and
+  `hint` (a hover tooltip). Documented in docs/ui-enrichment.md.
+- `columns` on a `table` / `tables` / `tree` field: pick and order a subset
+  of the row model's columns, and attach per-column enrichment via
+  `Column(...)` instead of the row model's default full column set.
+- `detail` on a `table` / `tables` / `tree` field: a row-click side panel
+  (`Detail` / `Element` / `Link`) showing a richer view of one row —
+  string/keyvalue/table blocks plus external links.
 - `ui.link_bases` config: named URL bases (e.g. `{jira: 'https://jira.internal.example.com'}`)
   that probe-details link templates resolve against. `GET /api/v1/identity` now
   reports `link_bases` (empty object when unset).
