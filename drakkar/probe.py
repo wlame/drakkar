@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import contextvars
 import json
+import re
 import types
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field, ValidationError
@@ -36,9 +37,49 @@ _SCALARS = (str, int, float, bool)
 MAX_WRITES = 10_000
 MAX_TOTAL_BYTES = 5_000_000
 
+# Named badge colors the UI owns CSS for; '*' is the fallback map key.
+BADGE_COLOR_NAMES: tuple[str, ...] = ('green', 'red', 'yellow', 'blue', 'gray', 'purple')
+# Client-side value formatting hints.
+FORMAT_KINDS: tuple[str, ...] = ('duration_ms', 'bytes', 'timestamp', 'number')
+
+_TEMPLATE_TOKEN_RE = re.compile(r'\{([A-Za-z_][A-Za-z0-9_.]*)\}')
+_BASE_NAME_RE = re.compile(r'[a-z][a-z0-9_]*')
+
 
 class ProbeDetailsConfigError(ValueError):
     """A probe-details model violates the layout rules. Raised at startup."""
+
+
+def _validate_template(template: str, *, where: str, row_fields: Collection[str] | None) -> None:
+    """Validate one link/hint template at startup.
+
+    Grammar: ``{value}``, ``{row.<field>}`` (only when ``row_fields`` is
+    given), ``{<base>}`` for a named base. Base *membership* in config is
+    deliberately not checked here — config varies per environment; the app
+    startup emits a warning instead (see referenced_bases).
+    """
+    stripped = _TEMPLATE_TOKEN_RE.sub('', template)
+    if '{' in stripped or '}' in stripped:
+        raise ProbeDetailsConfigError(f'{where}: malformed template {template!r}')
+    for token in _TEMPLATE_TOKEN_RE.findall(template):
+        if token == 'value':
+            continue
+        if token.startswith('row.'):
+            if row_fields is None:
+                raise ProbeDetailsConfigError(
+                    f"{where}: template {template!r} uses '{{row.*}}', which is only valid on table columns"
+                )
+            name = token[4:]
+            if name not in row_fields:
+                raise ProbeDetailsConfigError(
+                    f"{where}: template {template!r} names '{name}', which is not a row-model field"
+                )
+            continue
+        if not _BASE_NAME_RE.fullmatch(token):
+            raise ProbeDetailsConfigError(
+                f"{where}: template {template!r} has invalid base name '{{{token}}}' "
+                '(bases are lower-case identifiers from ui.link_bases)'
+            )
 
 
 def probe_field(
@@ -144,6 +185,39 @@ class ProbeUserDetails(BaseModel):
     layout: ProbeDetailsLayout
     data: dict[str, Any]
     writes: list[ProbeDetailsWrite]
+
+
+class Link(BaseModel):
+    """One external link inside a detail panel's 'links' element."""
+
+    label: str
+    template: str
+
+
+class Element(BaseModel):
+    """One block of a detail panel, rendered top to bottom."""
+
+    view: Literal['string', 'keyvalue', 'table', 'links']
+    field: str | None = None
+    label: str | None = None
+    links: list[Link] | None = None
+
+
+class Detail(BaseModel):
+    """A declared right-panel layout opened by clicking a row."""
+
+    title: str | None = None
+    elements: list[Element]
+
+
+class Column(BaseModel):
+    """Per-column enrichment options for row-bearing probe views."""
+
+    label: str | None = None
+    link_template: str | None = None
+    badge_colors: dict[str, str] | None = None
+    format: Literal['duration_ms', 'bytes', 'timestamp', 'number'] | None = None
+    hint: str | None = None
 
 
 # ---- layout builder ---------------------------------------------------------
