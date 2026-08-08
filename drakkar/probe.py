@@ -19,7 +19,7 @@ import typing
 from collections.abc import Callable, Collection
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic.fields import FieldInfo
 
 ViewKind = Literal['string', 'keyvalue', 'dict', 'table', 'tables', 'tree', 'badge']
@@ -252,12 +252,19 @@ class ProbeUserDetails(BaseModel):
 class Link(BaseModel):
     """One external link inside a detail panel's 'links' element."""
 
+    # Author-facing model: an unknown kwarg (a typo, or Phase-1-shaped
+    # config drifted from the current fields) is a config-authoring
+    # mistake and must fail at boot, not degrade silently at render time.
+    model_config = ConfigDict(extra='forbid')
+
     label: str
     template: str
 
 
 class Element(BaseModel):
     """One block of a detail panel, rendered top to bottom."""
+
+    model_config = ConfigDict(extra='forbid')
 
     view: Literal['string', 'keyvalue', 'table', 'links']
     field: str | None = None
@@ -268,12 +275,16 @@ class Element(BaseModel):
 class Detail(BaseModel):
     """A declared right-panel layout opened by clicking a row."""
 
+    model_config = ConfigDict(extra='forbid')
+
     title: str | None = None
     elements: list[Element]
 
 
 class Column(BaseModel):
     """Per-column enrichment options for row-bearing probe views."""
+
+    model_config = ConfigDict(extra='forbid')
 
     label: str | None = None
     link_template: str | None = None

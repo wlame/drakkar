@@ -1,7 +1,7 @@
 """Tests for probe-details enrichment declarations (Phase 1)."""
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from structlog.testing import capture_logs
 
 from drakkar.app import DrakkarApp
@@ -60,6 +60,21 @@ def test_column_model_holds_enrichment_options():
 def test_column_rejects_unknown_format():
     with pytest.raises(ValueError):
         Column(format='fortnights')
+
+
+@pytest.mark.parametrize(
+    ('model', 'kwargs', 'stray_field'),
+    [
+        (Column, {'badge_color': {'x': 'green'}}, 'badge_color'),
+        (Link, {'label': 'Jira', 'template': '{jira}/{value}', 'labl': 'Jira'}, 'labl'),
+        (Element, {'view': 'string', 'fied': 'x'}, 'fied'),
+        (Detail, {'elements': [], 'titl': 'Order'}, 'titl'),
+    ],
+)
+def test_author_models_reject_typo_kwargs(model, kwargs, stray_field):
+    with pytest.raises(ValidationError) as exc_info:
+        model(**kwargs)
+    assert stray_field in str(exc_info.value)
 
 
 def test_detail_models_compose():

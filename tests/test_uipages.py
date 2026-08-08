@@ -86,6 +86,27 @@ def test_metrics_source_requires_metric():
         MetricsSource(metric='')
 
 
+@pytest.mark.parametrize(
+    ('model', 'kwargs', 'stray_field'),
+    [
+        (Page, {'slug': 'orders', 'title': 'Orders', 'widgets': [], 'titel': 'x'}, 'titel'),
+        (
+            Widget,
+            {'title': 'W', 'view': 'keyvalue', 'source': TasksSource(), 'colums': ['a']},
+            'colums',
+        ),
+        (EventsSource, {'event_types': ['task_failed'], 'limt': 5}, 'limt'),
+        (AnnotationsSource, {'kind_prefx': 'order.'}, 'kind_prefx'),
+        (TasksSource, {'limi': 5}, 'limi'),
+        (MetricsSource, {'metric': 'drakkar_tasks_total', 'metrc': 'x'}, 'metrc'),
+    ],
+)
+def test_author_models_reject_typo_kwargs(model, kwargs, stray_field):
+    with pytest.raises(ValidationError) as exc_info:
+        model(**kwargs)
+    assert stray_field in str(exc_info.value)
+
+
 def test_widget_cap_enforced():
     widget = Widget(title='W', view='keyvalue', source=TasksSource())
     with pytest.raises(UIPagesConfigError, match='widgets'):

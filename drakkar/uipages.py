@@ -14,7 +14,7 @@ import re
 from collections.abc import Collection
 from typing import Annotated, Any, Literal, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from drakkar.probe import (
     _TEMPLATE_TOKEN_RE,
@@ -43,6 +43,10 @@ class UIPagesConfigError(ValueError):
 class EventsSource(BaseModel):
     """A widget source reading the flight-recorder event stream."""
 
+    # Author-facing model: an unknown kwarg is a config-authoring typo and
+    # must fail at boot, not degrade silently at render time.
+    model_config = ConfigDict(extra='forbid')
+
     kind: Literal['events'] = 'events'
     event_types: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
     limit: int = Field(default=200, ge=1, le=1000)
@@ -50,6 +54,8 @@ class EventsSource(BaseModel):
 
 class AnnotationsSource(BaseModel):
     """A widget source reading probe annotations, optionally by kind prefix."""
+
+    model_config = ConfigDict(extra='forbid')
 
     kind: Literal['annotations'] = 'annotations'
     kind_prefix: str = ''
@@ -59,12 +65,16 @@ class AnnotationsSource(BaseModel):
 class TasksSource(BaseModel):
     """A widget source reading recent task records."""
 
+    model_config = ConfigDict(extra='forbid')
+
     kind: Literal['tasks'] = 'tasks'
     limit: int = Field(default=200, ge=1, le=1000)
 
 
 class MetricsSource(BaseModel):
     """A widget source reading one named metric's current value."""
+
+    model_config = ConfigDict(extra='forbid')
 
     kind: Literal['metrics'] = 'metrics'
     metric: str = Field(min_length=1)
@@ -75,6 +85,8 @@ Source = Annotated[EventsSource | AnnotationsSource | TasksSource | MetricsSourc
 
 class Widget(BaseModel):
     """One panel on a declared page: a source plus a presentation."""
+
+    model_config = ConfigDict(extra='forbid')
 
     title: str
     view: Literal['table', 'keyvalue', 'string', 'badge', 'stat']
@@ -87,6 +99,8 @@ class Widget(BaseModel):
 
 class Page(BaseModel):
     """One declared dashboard page: a slug, a title, and its widgets."""
+
+    model_config = ConfigDict(extra='forbid')
 
     slug: str
     title: str

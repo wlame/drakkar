@@ -41,8 +41,10 @@ class MyHandler(BaseDrakkarHandler[...]):
 
 That's the whole opt-in. `/p/orders` shows a table of recent `order.*`
 annotations — with a clickable order id and a colored status pill — next
-to a running total of a Prometheus metric, both refreshing on their own
-as new data arrives.
+to a running total of a Prometheus metric. The table refreshes over the
+live WebSocket as new annotations arrive; the stat tile polls on a flat
+30-second interval instead, since a metric sum has no single event that
+means "this changed."
 
 ---
 
@@ -96,6 +98,11 @@ debug UI already serves:
 | `AnnotationsSource` | `kind_prefix: str` (default `''`), `limit: int` (1-1000, default 200) | `GET /api/v1/events` filtered to `event_types=annotation`, then client-filtered to rows whose annotation `kind` starts with `kind_prefix` | one row per matching annotation: its JSON payload spread onto the row, plus `ts` and `kind` |
 | `TasksSource` | `limit: int` (1-1000, default 200) | `GET /api/v1/live/task-results` | one row per task result |
 | `MetricsSource` | `metric: str` (required, non-empty) | `GET /api/v1/debug/metrics`, summed over the named metric family's samples | no rows — scalar-only, for `view='stat'` widgets |
+
+The `ts` and `kind` stamped onto an annotation row always win over any
+`ts`/`kind` keys the JSON payload itself happens to carry, so a handler
+can't shadow the recorded event time or its own filtered-on kind by
+naming a payload field the same thing.
 
 `AnnotationsSource` and `EventsSource` read the same endpoint; the
 difference is `AnnotationsSource` fixes `event_types=['annotation']` for
