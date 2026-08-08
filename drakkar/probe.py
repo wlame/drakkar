@@ -22,9 +22,9 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic.fields import FieldInfo
 
-ViewKind = Literal['string', 'keyvalue', 'dict', 'table', 'tables', 'tree', 'badge']
+ViewKind = Literal['string', 'keyvalue', 'dict', 'table', 'tables', 'tree', 'badge', 'custom']
 
-_VIEW_KINDS: tuple[str, ...] = ('string', 'keyvalue', 'dict', 'table', 'tables', 'tree', 'badge')
+_VIEW_KINDS: tuple[str, ...] = ('string', 'keyvalue', 'dict', 'table', 'tables', 'tree', 'badge', 'custom')
 _ROW_VIEWS: tuple[str, ...] = ('table', 'tables', 'tree')
 
 # Maximum number of grouping levels a 'tree' field may declare. Enforced at
@@ -46,6 +46,8 @@ FORMAT_KINDS: tuple[str, ...] = ('duration_ms', 'bytes', 'timestamp', 'number')
 
 _TEMPLATE_TOKEN_RE = re.compile(r'\{([A-Za-z_][A-Za-z0-9_.]*)\}')
 _BASE_NAME_RE = re.compile(r'[a-z][a-z0-9_]*')
+# Names in the deployment-provided renderers module's default export map.
+_RENDERER_NAME_RE = re.compile(r'[a-zA-Z_][a-zA-Z0-9_]*')
 
 
 class ProbeDetailsConfigError(ValueError):
@@ -84,6 +86,23 @@ def _validate_template(template: str, *, where: str, row_fields: Collection[str]
             )
 
 
+def _validate_renderer_name(renderer: str, *, where: str) -> None:
+    """Check a renderer name against the deployment module's naming grammar."""
+    if not _RENDERER_NAME_RE.fullmatch(renderer):
+        raise ProbeDetailsConfigError(
+            f'{where}: invalid renderer name {renderer!r} (expected to match {_RENDERER_NAME_RE.pattern!r})'
+        )
+
+
+def _validate_column_renderer(col: ProbeDetailsColumn, *, where: str) -> None:
+    """Check a column's renderer name and its exclusivity with presentation options."""
+    if col.renderer is None:
+        return
+    _validate_renderer_name(col.renderer, where=where)
+    if col.link_template or col.badge_colors or col.format:
+        raise ProbeDetailsConfigError(f'{where}: renderer is exclusive with link_template/badge_colors/format')
+
+
 def probe_field(
     *,
     section: str,
@@ -94,6 +113,7 @@ def probe_field(
     badge_colors: dict[str, str] | None = None,
     format: str | None = None,
     hint: str | None = None,
+    renderer: str | None = None,
     columns: list[str] | dict[str, Column] | None = None,
     detail: Detail | None = None,
     default: Any = ...,
@@ -151,6 +171,13 @@ def probe_field(
         raise ProbeDetailsConfigError("probe_field: link_template is only valid with view 'string'")
     if link_template is not None:
         _validate_template(link_template, where='probe_field', row_fields=None)
+    if view == 'custom':
+        if not renderer:
+            raise ProbeDetailsConfigError("probe_field: view 'custom' requires renderer='name'")
+    elif renderer is not None:
+        raise ProbeDetailsConfigError("probe_field: renderer is only valid with view='custom'")
+    if renderer is not None:
+        _validate_renderer_name(renderer, where='probe_field')
     if hint is not None and view in _ROW_VIEWS:
         raise ProbeDetailsConfigError('probe_field: hint on row-bearing views belongs on a Column')
     if columns is not None and view not in _ROW_VIEWS:
@@ -178,6 +205,7 @@ def probe_field(
             'badge_colors': dict(badge_colors) if badge_colors else None,
             'format': format,
             'hint': hint,
+            'renderer': renderer,
             'columns': columns_map,
             'detail': detail,
         }
@@ -199,6 +227,9 @@ class ProbeDetailsColumn(BaseModel):
     badge_colors: dict[str, str] | None = None
     format: str | None = None
     hint: str | None = None
+    # Name in the deployment-provided renderers module (view='custom'
+    # columns only); mutually exclusive with link_template/badge_colors/format.
+    renderer: str | None = None
 
 
 class ProbeDetailsEntry(BaseModel):
@@ -216,6 +247,9 @@ class ProbeDetailsEntry(BaseModel):
     format: str | None = None
     hint: str | None = None
     detail: Detail | None = None
+    # Name in the deployment-provided renderers module; non-null only for
+    # view='custom'.
+    renderer: str | None = None
 
 
 class ProbeDetailsSection(BaseModel):
@@ -266,10 +300,13 @@ class Element(BaseModel):
 
     model_config = ConfigDict(extra='forbid')
 
-    view: Literal['string', 'keyvalue', 'table', 'links']
+    view: Literal['string', 'keyvalue', 'table', 'links', 'custom']
     field: str | None = None
     label: str | None = None
     links: list[Link] | None = None
+    # Name in the deployment-provided renderers module; required for and
+    # exclusive to view='custom'.
+    renderer: str | None = None
 
 
 class Detail(BaseModel):
@@ -291,6 +328,12 @@ class Column(BaseModel):
     badge_colors: dict[str, str] | None = None
     format: Literal['duration_ms', 'bytes', 'timestamp', 'number'] | None = None
     hint: str | None = None
+    # Name in the deployment-provided renderers module; exclusive with
+    # link_template/badge_colors/format. Checked in build_layout, not here —
+    # a pydantic validator would wrap ProbeDetailsConfigError in a
+    # ValidationError, same reason badge_colors' color-name check lives
+    # there too (see _validate_column_renderer).
+    renderer: str | None = None
 
 
 # ---- layout builder ---------------------------------------------------------
@@ -383,6 +426,10 @@ def _validate_view(model: type[BaseModel], name: str, view: str, annotation: Any
         if not (ann is dict or origin is dict):
             raise ProbeDetailsConfigError(f"{model.__name__}.{name}: view 'dict' requires a dict field")
         return None
+    if view == 'custom':
+        # No type constraint: the renderer receives the raw JSON value,
+        # whatever shape the field is.
+        return None
     # view in ('string', 'badge')
     if ann not in _SCALARS:
         raise ProbeDetailsConfigError(
@@ -427,6 +474,7 @@ def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
         badge_colors = meta.get('badge_colors')
         fmt = meta.get('format')
         hint = meta.get('hint')
+        renderer = meta.get('renderer')
         columns_map: dict[str, Column] | None = meta.get('columns')
         detail: Detail | None = meta.get('detail')
         where = f'{model.__name__}.{name}'
@@ -446,6 +494,7 @@ def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
                         badge_colors=opts.badge_colors,
                         format=opts.format,
                         hint=opts.hint,
+                        renderer=opts.renderer,
                     )
                     for col_name, opts in columns_map.items()
                 ]
@@ -462,6 +511,7 @@ def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
                                     f"{where}.{col.key}: unknown color '{color}' for badge value "
                                     f"'{value_name}' (expected one of {BADGE_COLOR_NAMES})"
                                 )
+                    _validate_column_renderer(col, where=f'{where}.{col.key}')
             if detail is not None:
                 if not detail.elements:
                     raise ProbeDetailsConfigError(f'{where}: detail requires at least one element')
@@ -474,6 +524,8 @@ def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
                             raise ProbeDetailsConfigError(
                                 f"{el_where}: view 'links' requires links=[Link(...)] and no field"
                             )
+                        if element.renderer is not None:
+                            raise ProbeDetailsConfigError(f"{el_where}: renderer is only valid with view='custom'")
                         for link in element.links:
                             _validate_template(link.template, where=el_where, row_fields=row_fields)
                     else:
@@ -485,6 +537,12 @@ def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
                             raise ProbeDetailsConfigError(
                                 f"{el_where}: names '{element.field}', which is not a field of {row_model.__name__}"
                             )
+                        if element.view == 'custom':
+                            if not element.renderer:
+                                raise ProbeDetailsConfigError(f"{el_where}: view 'custom' requires renderer='name'")
+                            _validate_renderer_name(element.renderer, where=el_where)
+                        elif element.renderer is not None:
+                            raise ProbeDetailsConfigError(f"{el_where}: renderer is only valid with view='custom'")
         if link_template:
             _validate_template(link_template, where=where, row_fields=None)
         if hint and row_model is None:
@@ -500,6 +558,7 @@ def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
             format=fmt,
             hint=hint,
             detail=detail,
+            renderer=renderer,
         )
         sections.setdefault(meta['section'], []).append(entry)
     layout = ProbeDetailsLayout(

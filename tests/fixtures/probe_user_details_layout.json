@@ -13,7 +13,8 @@
           "badge_colors": null,
           "format": null,
           "hint": null,
-          "detail": null
+          "detail": null,
+          "renderer": null
         },
         {
           "key": "counters",
@@ -25,7 +26,8 @@
           "badge_colors": null,
           "format": null,
           "hint": null,
-          "detail": null
+          "detail": null,
+          "renderer": null
         },
         {
           "key": "context_blob",
@@ -37,7 +39,8 @@
           "badge_colors": null,
           "format": null,
           "hint": null,
-          "detail": null
+          "detail": null,
+          "renderer": null
         }
       ]
     },
@@ -55,7 +58,8 @@
               "link_template": null,
               "badge_colors": null,
               "format": null,
-              "hint": null
+              "hint": null,
+              "renderer": null
             },
             {
               "key": "score",
@@ -63,7 +67,8 @@
               "link_template": null,
               "badge_colors": null,
               "format": null,
-              "hint": null
+              "hint": null,
+              "renderer": null
             }
           ],
           "group_by": null,
@@ -71,7 +76,8 @@
           "badge_colors": null,
           "format": null,
           "hint": null,
-          "detail": null
+          "detail": null,
+          "renderer": null
         },
         {
           "key": "per_file_rows",
@@ -84,7 +90,8 @@
               "link_template": null,
               "badge_colors": null,
               "format": null,
-              "hint": null
+              "hint": null,
+              "renderer": null
             },
             {
               "key": "score",
@@ -92,7 +99,8 @@
               "link_template": null,
               "badge_colors": null,
               "format": null,
-              "hint": null
+              "hint": null,
+              "renderer": null
             }
           ],
           "group_by": null,
@@ -100,7 +108,8 @@
           "badge_colors": null,
           "format": null,
           "hint": null,
-          "detail": null
+          "detail": null,
+          "renderer": null
         },
         {
           "key": "tree_matches",
@@ -113,7 +122,8 @@
               "link_template": null,
               "badge_colors": null,
               "format": null,
-              "hint": null
+              "hint": null,
+              "renderer": null
             },
             {
               "key": "section",
@@ -121,7 +131,8 @@
               "link_template": null,
               "badge_colors": null,
               "format": null,
-              "hint": null
+              "hint": null,
+              "renderer": null
             },
             {
               "key": "score",
@@ -129,7 +140,8 @@
               "link_template": null,
               "badge_colors": null,
               "format": null,
-              "hint": null
+              "hint": null,
+              "renderer": null
             }
           ],
           "group_by": [
@@ -140,7 +152,8 @@
           "badge_colors": null,
           "format": null,
           "hint": null,
-          "detail": null
+          "detail": null,
+          "renderer": null
         }
       ]
     },
@@ -161,7 +174,8 @@
           },
           "format": null,
           "hint": null,
-          "detail": null
+          "detail": null,
+          "renderer": null
         },
         {
           "key": "build_rows",
@@ -174,7 +188,8 @@
               "link_template": "{jenkins}/job/{row.job_name}/{value}",
               "badge_colors": null,
               "format": null,
-              "hint": "Open build {value}"
+              "hint": "Open build {value}",
+              "renderer": null
             },
             {
               "key": "duration_ms",
@@ -182,7 +197,8 @@
               "link_template": null,
               "badge_colors": null,
               "format": "duration_ms",
-              "hint": null
+              "hint": null,
+              "renderer": null
             },
             {
               "key": "outcome",
@@ -194,7 +210,8 @@
                 "*": "gray"
               },
               "format": null,
-              "hint": null
+              "hint": null,
+              "renderer": null
             }
           ],
           "group_by": null,
@@ -209,19 +226,22 @@
                 "view": "string",
                 "field": "job_name",
                 "label": null,
-                "links": null
+                "links": null,
+                "renderer": null
               },
               {
                 "view": "keyvalue",
                 "field": "labels",
                 "label": null,
-                "links": null
+                "links": null,
+                "renderer": null
               },
               {
                 "view": "table",
                 "field": "steps",
                 "label": null,
-                "links": null
+                "links": null,
+                "renderer": null
               },
               {
                 "view": "links",
@@ -232,10 +252,48 @@
                     "label": "Jenkins job",
                     "template": "{jenkins}/job/{row.job_name}"
                   }
-                ]
+                ],
+                "renderer": null
               }
             ]
-          }
+          },
+          "renderer": null
+        },
+        {
+          "key": "render_payload",
+          "label": "Render payload",
+          "view": "custom",
+          "columns": null,
+          "group_by": null,
+          "link_template": null,
+          "badge_colors": null,
+          "format": null,
+          "hint": null,
+          "detail": null,
+          "renderer": "orderCard"
+        },
+        {
+          "key": "card_rows",
+          "label": "Card rows",
+          "view": "table",
+          "columns": [
+            {
+              "key": "build_id",
+              "label": "Build id",
+              "link_template": null,
+              "badge_colors": null,
+              "format": null,
+              "hint": null,
+              "renderer": "buildChip"
+            }
+          ],
+          "group_by": null,
+          "link_template": null,
+          "badge_colors": null,
+          "format": null,
+          "hint": null,
+          "detail": null,
+          "renderer": null
         }
       ]
     }

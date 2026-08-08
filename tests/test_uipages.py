@@ -168,6 +168,23 @@ def test_column_templates_allow_unknown_row_refs_but_reject_bad_syntax():
         build_pages([_page(widgets=[bad])])
 
 
+def test_column_renderer_reaches_wire_on_page_columns():
+    widget = Widget(title='W', view='table', source=TasksSource(), columns={'task_id': Column(renderer='taskChip')})
+    wire = build_pages([_page(widgets=[widget])])
+    assert wire[0].widgets[0].columns[0].renderer == 'taskChip'
+
+
+def test_column_renderer_exclusive_with_link_template_on_page_columns():
+    widget = Widget(
+        title='W',
+        view='table',
+        source=TasksSource(),
+        columns={'task_id': Column(renderer='taskChip', link_template='{tracing}/task/{value}')},
+    )
+    with pytest.raises(UIPagesConfigError, match='renderer'):
+        build_pages([_page(widgets=[widget])])
+
+
 def test_pages_referenced_bases_collects_column_templates():
     wire = build_pages([_page()])
     assert pages_referenced_bases(wire) == {'shop_admin'}

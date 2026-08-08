@@ -1467,12 +1467,18 @@ components:
         links null; "links" carries links and leaves field null.
       type: object
       properties:
-        view: {type: string, enum: [string, keyvalue, table, links]}
+        view: {type: string, enum: [string, keyvalue, table, links, custom]}
         field: {type: [string, 'null']}
         label: {type: [string, 'null']}
         links:
           type: [array, 'null']
           items: {$ref: '#/components/schemas/ProbeDetailsLink'}
+        renderer:
+          type: [string, 'null']
+          description: >-
+            Name in the module served at GET /api/v1/ui/renderers.js;
+            non-null only for view='custom'. Absent entirely on backends
+            that predate custom cell renderers.
       required: [view, field, label, links]
 
     ProbeDetailsDetail:
@@ -1510,6 +1516,12 @@ components:
         hint:
           type: [string, 'null']
           description: Hover tooltip text (same template grammar as link_template).
+        renderer:
+          type: [string, 'null']
+          description: >-
+            Name in the module served at GET /api/v1/ui/renderers.js;
+            mutually exclusive with link_template/badge_colors/format.
+            Absent entirely on backends that predate custom cell renderers.
       required: [key, label]
 
     ProbeDetailsEntry:
@@ -1527,7 +1539,9 @@ components:
         # (row append order, identical on both backends), collapsible per
         # level; leaf tables show the non-key columns.
         # "badge" (v1.4) renders a scalar as a colored pill via badge_colors.
-        view: {type: string, enum: [string, keyvalue, dict, table, tables, tree, badge]}
+        # "custom" hands the raw value to the named renderer (see renderer
+        # below); absent on backends that predate custom cell renderers.
+        view: {type: string, enum: [string, keyvalue, dict, table, tables, tree, badge, custom]}
         columns:
           description: Present (non-null) only when view=table, tables, or tree.
           type: [array, 'null']
@@ -1562,6 +1576,12 @@ components:
             - {$ref: '#/components/schemas/ProbeDetailsDetail'}
             - {type: 'null'}
           description: Row-click detail-panel layout (table/tables/tree entries only).
+        renderer:
+          type: [string, 'null']
+          description: >-
+            Name in the module served at GET /api/v1/ui/renderers.js;
+            non-null only for view='custom'. Absent entirely on backends
+            that predate custom cell renderers.
       required: [key, label, view, columns]
 
     ProbeDetailsSection:

@@ -24,6 +24,7 @@ from drakkar.probe import (
     ProbeDetailsColumn,
     ProbeDetailsConfigError,
     _prettify,
+    _validate_column_renderer,
     _validate_template,
 )
 
@@ -188,6 +189,7 @@ def _build_wire_columns(
             badge_colors=opts.badge_colors,
             format=opts.format,
             hint=opts.hint,
+            renderer=opts.renderer,
         )
         for name, opts in columns_map.items()
     ]
@@ -204,6 +206,13 @@ def _build_wire_columns(
                         f"{where}.{col.key}: unknown color '{color}' for badge value "
                         f"'{value_name}' (expected one of {BADGE_COLOR_NAMES})"
                     )
+        # _validate_column_renderer is shape-only (no row model needed), so
+        # it's reused as-is here — same renderer-name and exclusivity rules
+        # as probe-details table columns.
+        try:
+            _validate_column_renderer(col, where=f'{where}.{col.key}')
+        except ProbeDetailsConfigError as exc:
+            raise UIPagesConfigError(str(exc)) from exc
     return wire_columns
 
 

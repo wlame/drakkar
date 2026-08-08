@@ -246,6 +246,10 @@ class GoldenBuildRow(BaseModel):
     steps: list[dict]
 
 
+class GoldenCardRow(BaseModel):
+    build_id: str
+
+
 class ParityDetails(BaseModel):
     strategy_note: str | None = probe_field(section='Arrange', view='string', default=None)
     counters: dict[str, int] = probe_field(section='Arrange', view='keyvalue', default_factory=dict)
@@ -287,6 +291,13 @@ class ParityDetails(BaseModel):
                 ),
             ],
         ),
+    )
+    render_payload: dict = probe_field(section='Enrichment', view='custom', renderer='orderCard', default_factory=dict)
+    card_rows: list[GoldenCardRow] = probe_field(
+        section='Enrichment',
+        view='table',
+        default_factory=list,
+        columns={'build_id': Column(renderer='buildChip')},
     )
 
 

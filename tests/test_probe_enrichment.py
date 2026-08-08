@@ -145,6 +145,7 @@ class _BuildRow(BaseModel):
     build_id: str
     job_name: str
     duration_ms: int
+    steps: list[dict]
 
 
 def _table_model(**field_kwargs):
@@ -296,6 +297,46 @@ def test_startup_silent_when_all_referenced_bases_are_configured():
         DrakkarApp(handler=_MissingBaseHandler(), config=config)
 
     assert not [r for r in cap if r.get('event') == 'probe_details_link_bases_missing']
+
+
+def test_custom_view_requires_renderer():
+    with pytest.raises(ProbeDetailsConfigError, match='renderer'):
+        probe_field(section='S', view='custom', default=None)
+
+
+def test_renderer_forbidden_outside_custom_view():
+    with pytest.raises(ProbeDetailsConfigError, match='renderer'):
+        probe_field(section='S', view='string', renderer='orderCard', default='')
+
+
+def test_custom_view_rejects_invalid_renderer_name():
+    with pytest.raises(ProbeDetailsConfigError, match='renderer'):
+        probe_field(section='S', view='custom', renderer='order-card!', default=None)
+
+
+def test_custom_view_accepts_any_field_type_and_reaches_wire():
+    class M(BaseModel):
+        payload: dict = probe_field(section='S', view='custom', renderer='orderCard', default_factory=dict)
+
+    entry = build_layout(M).sections[0].entries[0]
+    assert entry.view == 'custom' and entry.renderer == 'orderCard'
+
+
+def test_column_renderer_exclusive_with_presentation_options():
+    M = _table_model(columns={'build_id': Column(renderer='buildChip', link_template='{x}/{value}')})
+    with pytest.raises(ProbeDetailsConfigError, match='renderer'):
+        build_layout(M)
+
+
+def test_column_renderer_reaches_wire():
+    M = _table_model(columns={'build_id': Column(renderer='buildChip', hint='Build {value}')})
+    col = build_layout(M).sections[0].entries[0].columns[0]
+    assert col.renderer == 'buildChip' and col.hint == 'Build {value}'
+
+
+def test_detail_element_custom_requires_field_and_renderer():
+    with pytest.raises(ProbeDetailsConfigError, match='renderer'):
+        build_layout(_table_model(detail=Detail(elements=[Element(field='steps', view='custom')])))
 
 
 def test_startup_silent_when_ui_disabled_even_with_missing_link_bases():
