@@ -1134,9 +1134,30 @@ class UIConfig(BaseModel):
     prometheus_worker_label: str = ''
     prometheus_cluster_label: str = ''
     custom_links: list[dict[str, str]] = Field(default_factory=list)
+    link_bases: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            'Named URL bases for probe-details link templates, e.g. '
+            "``{jira: 'https://jira.internal.example.com'}``. A template such as "
+            '``{jira}/browse/{value}`` resolves ``{jira}`` from this map, so code '
+            'declares the link shape once and each environment supplies its own '
+            'hosts. A base referenced by a registered layout but missing here '
+            'logs one startup warning and the UI renders plain text for it.'
+        ),
+    )
     recorder: UIRecorderConfig = Field(default_factory=UIRecorderConfig)
     release: UIReleaseConfig = Field(default_factory=UIReleaseConfig)
     probe_details: UIProbeDetailsConfig = Field(default_factory=UIProbeDetailsConfig)
+
+    @field_validator('link_bases')
+    @classmethod
+    def _validate_link_bases(cls, value: dict[str, str]) -> dict[str, str]:
+        for name, base in value.items():
+            if not re.fullmatch(r'[a-z][a-z0-9_]*', name):
+                raise ValueError(f"link_bases name '{name}' must be a lower-case identifier ([a-z][a-z0-9_]*)")
+            if not base.startswith(('http://', 'https://')):
+                raise ValueError(f"link_bases['{name}'] must start with http:// or https://")
+        return {name: base.rstrip('/') for name, base in value.items()}
 
 
 # --- Cache config ---

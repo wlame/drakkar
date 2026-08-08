@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ui.link_bases` config: named URL bases (e.g. `{jira: 'https://jira.internal.example.com'}`)
+  that probe-details link templates resolve against. `GET /api/v1/identity` now
+  reports `link_bases` (empty object when unset).
+
 ## [1.9.0] - 2026-08-08
 
 ### Added

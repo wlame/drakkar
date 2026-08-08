@@ -96,6 +96,17 @@ async def client(debug_config, mock_recorder, mock_app):
         yield c
 
 
+@pytest.fixture
+async def client_with_link_bases(tmp_path, mock_recorder, mock_app):
+    cfg = make_ui_config(
+        enabled=True, port=8080, db_dir=str(tmp_path), link_bases={'jira': 'https://jira.internal.example.com'}
+    )
+    mock_app.config_summary = '[test-worker]'
+    mock_recorder.config = cfg
+    async with make_client(cfg, mock_recorder, mock_app) as c:
+        yield c
+
+
 # ---------------------------------------------------------------------------
 # Work package A: /api/v1 aliases
 # ---------------------------------------------------------------------------
@@ -750,10 +761,12 @@ class TestApiV1Identity:
             'backend_version',
             'ui_version',
             'ui_source',
+            'link_bases',
         }
         assert data['worker_id'] == 'test-worker'
         assert data['cluster'] is None  # empty cluster name serializes as null
         assert data['config_summary'] == '[test-worker] topic=input-events group=drakkar-workers'
+        assert data['link_bases'] == {}  # unset link_bases still reports as an empty object
         # v1.2: backend flavor + versions. Built-in pages serve in this
         # fixture, so the UI fields report the builtin fallback.
         assert data['backend'] == 'python'
@@ -822,6 +835,11 @@ class TestApiV1Identity:
             assert (await c.get('/api/v1/identity')).status_code == 401
             ok = await c.get('/api/v1/identity', headers={'Authorization': 'Bearer secret-123'})
             assert ok.status_code == 200
+
+    async def test_identity_includes_link_bases(self, client_with_link_bases):
+        res = await client_with_link_bases.get('/api/v1/identity')
+        assert res.status_code == 200
+        assert res.json()['link_bases'] == {'jira': 'https://jira.internal.example.com'}
 
 
 # ---------------------------------------------------------------------------

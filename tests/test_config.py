@@ -20,6 +20,7 @@ from drakkar.config import (
     PostgresSinkConfig,
     RedisSinkConfig,
     SinksConfig,
+    UIConfig,
     WebAppConfig,
     WebClientConfig,
     load_config,
@@ -393,6 +394,21 @@ def test_ui_config_defaults():
     assert cfg.max_rows == 5000
     assert cfg.recorder.flush_interval_seconds == 5
     assert cfg.recorder.retention_hours == 24
+
+
+def test_link_bases_strips_trailing_slash_and_validates_scheme():
+    cfg = UIConfig(link_bases={'jira': 'https://jira.internal.example.com/'})
+    assert cfg.link_bases == {'jira': 'https://jira.internal.example.com'}
+
+
+def test_link_bases_rejects_non_http_scheme():
+    with pytest.raises(ValidationError, match='http'):
+        UIConfig(link_bases={'jira': 'ftp://jira.internal.example.com'})
+
+
+def test_link_bases_rejects_invalid_base_name():
+    with pytest.raises(ValidationError, match='identifier'):
+        UIConfig(link_bases={'Jira Prod': 'https://jira.internal.example.com'})
 
 
 def test_logging_config_defaults():

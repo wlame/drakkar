@@ -1292,6 +1292,16 @@
           "group": "ui"
         },
         {
+          "path": "ui.link_bases",
+          "env": "DK_UI__LINK_BASES",
+          "description": "Named URL bases for probe-details link templates, e.g. ``{jira: 'https://jira.internal.example.com'}``.",
+          "full_description": "Named URL bases for probe-details link templates, e.g. ``{jira: 'https://jira.internal.example.com'}``. A template such as ``{jira}/browse/{value}`` resolves ``{jira}`` from this map, so code declares the link shape once and each environment supplies its own hosts. A base referenced by a registered layout but missing here logs one startup warning and the UI renders plain text for it.",
+          "type": "object",
+          "default": {},
+          "secret": false,
+          "group": "ui"
+        },
+        {
           "path": "ui.recorder.db_dir",
           "env": "DK_UI__RECORDER__DB_DIR",
           "description": "",

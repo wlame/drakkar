@@ -604,6 +604,7 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
                 'backend_version': backend_version(),
                 'ui_version': deps.ui_version,
                 'ui_source': deps.ui_source,
+                'link_bases': config.link_bases,
             }
         )
 
