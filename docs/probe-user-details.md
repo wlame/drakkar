@@ -144,6 +144,13 @@ A probe that processed three files renders three sub-tables titled by file
 name; a probe that processed one renders one. Every sub-table sorts
 independently.
 
+On the wire the field travels as an ordered array of `[group, rows]` pairs
+(not a JSON object keyed by group), so first-append order survives on every
+backend and in every client — including group names that look like numbers,
+which a JavaScript client would otherwise re-enumerate numerically. `group`
+must be a non-empty `str`; anything else is rejected as a `ProbeError`, since
+an int group and its string form would collide as JSON keys.
+
 ### Tree: multi-level grouping of flat rows
 
 When one grouping level is not enough — file → section → rule, say — declare
@@ -172,8 +179,8 @@ The grouping keys travel inside each row, so filling a tree is a plain
 `probe.append` — no group argument. The UI groups client-side in append
 order and renders one collapsible level per key; each leaf shows a sortable
 table of the columns that are **not** grouping keys. Because the tree is a
-projection of a flat list, group order is deterministic on both backends
-(unlike `tables`, whose Go backend sorts map keys).
+projection of a flat list, group order is append order on both backends,
+same as `tables`.
 
 `group_by` must name existing row-model fields, without duplicates — both
 checked at startup, like every other layout rule.

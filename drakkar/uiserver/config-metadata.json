@@ -1003,6 +1003,83 @@
       ]
     },
     {
+      "key": "runtime_health",
+      "title": "Runtime health (runtime_health:)",
+      "doc_anchor": "runtime-health-runtime-health",
+      "entries": [
+        {
+          "path": "runtime_health.enabled",
+          "env": "DK_RUNTIME_HEALTH__ENABLED",
+          "description": "",
+          "full_description": "",
+          "type": "boolean",
+          "default": true,
+          "secret": false,
+          "group": "runtime_health"
+        },
+        {
+          "path": "runtime_health.tick_seconds",
+          "env": "DK_RUNTIME_HEALTH__TICK_SECONDS",
+          "description": "Heartbeat interval.",
+          "full_description": "Heartbeat interval. Lag is measured as how late each tick fires; the sampler thread also checks heartbeat age at this interval. Smaller values narrow the attribution blind spot for short blocks at slightly more (still negligible) wakeups.",
+          "type": "number",
+          "default": 0.25,
+          "secret": false,
+          "group": "runtime_health"
+        },
+        {
+          "path": "runtime_health.warn_lag_seconds",
+          "env": "DK_RUNTIME_HEALTH__WARN_LAG_SECONDS",
+          "description": "Lag above this marks the runtime 'degraded'.",
+          "full_description": "Lag above this marks the runtime 'degraded'. Recovery to 'healthy' needs several consecutive clean ticks (hysteresis), so a flapping loop does not spam state transitions.",
+          "type": "number",
+          "default": 0.1,
+          "secret": false,
+          "group": "runtime_health"
+        },
+        {
+          "path": "runtime_health.stall_seconds",
+          "env": "DK_RUNTIME_HEALTH__STALL_SECONDS",
+          "description": "Heartbeat age above this marks the runtime 'stalled' and starts stack sampling: the sampler thread captures what the runtime thread is executing until the heartbeat resumes.",
+          "full_description": "Heartbeat age above this marks the runtime 'stalled' and starts stack sampling: the sampler thread captures what the runtime thread is executing until the heartbeat resumes. Each stall becomes one runtime_stall recorder event with the stacks.",
+          "type": "number",
+          "default": 1.0,
+          "secret": false,
+          "group": "runtime_health"
+        },
+        {
+          "path": "runtime_health.max_stall_stacks",
+          "env": "DK_RUNTIME_HEALTH__MAX_STALL_STACKS",
+          "description": "Maximum distinct stack traces captured per stall.",
+          "full_description": "Maximum distinct stack traces captured per stall. Repeated samples of the same location collapse into one entry with a count; further distinct stacks past the cap are dropped.",
+          "type": "integer",
+          "default": 10,
+          "secret": false,
+          "group": "runtime_health"
+        },
+        {
+          "path": "runtime_health.sample_interval_seconds",
+          "env": "DK_RUNTIME_HEALTH__SAMPLE_INTERVAL_SECONDS",
+          "description": "Interval between runtime_health sample events written to the flight recorder for cross-restart history.",
+          "full_description": "Interval between runtime_health sample events written to the flight recorder for cross-restart history. The fine-grained lag sparkline comes from an in-memory ring buffer instead and costs no database writes.",
+          "type": "number",
+          "default": 10.0,
+          "secret": false,
+          "group": "runtime_health"
+        },
+        {
+          "path": "runtime_health.history_window_seconds",
+          "env": "DK_RUNTIME_HEALTH__HISTORY_WINDOW_SECONDS",
+          "description": "Length of the in-memory lag history ring buffer (one max/avg aggregate per second) served to the debug UI sparkline.",
+          "full_description": "Length of the in-memory lag history ring buffer (one max/avg aggregate per second) served to the debug UI sparkline.",
+          "type": "integer",
+          "default": 900,
+          "secret": false,
+          "group": "runtime_health"
+        }
+      ]
+    },
+    {
       "key": "logging",
       "title": "Logging (logging:)",
       "doc_anchor": "logging-logging",

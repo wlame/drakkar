@@ -108,6 +108,12 @@ class DrakkarApp:
         self._dlq_sink: DLQSink | None = None
         self._recorder: EventRecorder | None = None
         self._ui_server = None
+        # Runtime health monitor (event-loop lag + stall introspection) —
+        # constructed in lifecycle._async_run when runtime_health.enabled.
+        # Forward-declared as ``Any`` for the same import-cost reason as
+        # ``_webapp`` below; the uiserver routes read it for the
+        # /runtime/health snapshot.
+        self._runtime_health: Any = None
         # Webapp HTTP server — constructed in lifecycle._async_run when
         # webapp.enabled=true. ``None`` otherwise (the lifecycle never
         # touches the field on the disabled path). Held here so the

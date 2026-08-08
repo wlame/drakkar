@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Runtime health monitor: continuous event-loop lag tracking with stall
+  introspection. A heartbeat task measures lag every `tick_seconds`; a
+  sampler thread captures stack traces of the code blocking the loop when
+  the heartbeat goes silent past `stall_seconds`. State transitions and
+  10-second samples persist as `runtime_health` flight-recorder events;
+  each stall persists as a `runtime_stall` event with the captured
+  stacks. New endpoints `GET /api/v1/runtime/health` (snapshot + lag
+  history; answers even during a stall) and
+  `GET /api/v1/debug/runtime/units` (task census grouped by suspension
+  point). New metrics `drakkar_loop_lag_seconds`,
+  `drakkar_runtime_health_state`, `drakkar_runtime_stalls_total`. New
+  `runtime_health:` config section, documented in docs/runtime-health.md.
+  Near-zero overhead when healthy: one clock read, one comparison, and
+  one ring-buffer write per tick.
+
+### Changed
+
+- **Breaking (wire format):** `tables` probe-details fields now travel as an
+  ordered array of `[group, rows]` pairs instead of a JSON object keyed by
+  group. A JSON object cannot pin group order: JavaScript clients enumerate
+  integer-like keys numerically first, and the Go backend sorted map keys.
+  The pair array shows sub-tables in first-append order on every backend.
+  The handler-side API (`probe.append(field, row, group=...)`) is unchanged.
+
+### Fixed
+
+- `probe.append` on a `tables` field now rejects a non-string `group` with a
+  `ProbeError`. Before, an int group and its string form (`123` / `'123'`)
+  collided as JSON keys at serialization time and one sub-table's rows
+  silently replaced the other's.
+
 ## [1.8.0] - 2026-08-07
 
 ### Added

@@ -380,12 +380,16 @@ class _DetailsState:
                 f"append targets table/tables/tree; '{field}' is view '{entry.view}'",
             )
             return
-        if entry.view == 'tables' and not group:
+        if entry.view == 'tables' and (not isinstance(group, str) or not group):
+            # Non-str groups (an int id, say) must not reach the dict: two
+            # keys like 123 and '123' would coerce to the same JSON key at
+            # serialization time and silently merge their sub-tables.
             self._on_error(
                 field,
                 'append',
                 'ProbeDetailsError',
-                f"'{field}' is view 'tables' — append needs a non-empty group (probe.append(field, row, group=...))",
+                f"'{field}' is view 'tables' — append needs a non-empty string group "
+                '(probe.append(field, row, group=...))',
             )
             return
         if entry.view != 'tables' and group is not None:
@@ -411,9 +415,9 @@ class _DetailsState:
             type(self.instance).__pydantic_validator__.validate_assignment(self.instance, field, empty)
             current = getattr(self.instance, field)
         if entry.view == 'tables':
-            # Group creation order is meaningful (dict preserves insertion
-            # order end-to-end through JSON), so the UI shows sub-tables in
-            # first-append order.
+            # Group creation order is meaningful: to_user_details renders
+            # the dict as an ordered [group, rows] pair array, so the UI
+            # shows sub-tables in first-append order.
             current.setdefault(group, []).append(validated)
         else:
             current.append(validated)
@@ -446,6 +450,12 @@ class _DetailsState:
         data: dict[str, Any] = {}
         for name in type(self.instance).model_fields:
             value = getattr(self.instance, name)
+            if self._entries[name].view == 'tables' and isinstance(value, dict):
+                # Tables travel as an ordered [group, rows] pair array, not
+                # as a JSON object: a JS client would enumerate integer-like
+                # object keys ("0", "12") numerically first, breaking the
+                # first-append order the pair array pins on every backend.
+                value = [[group_name, rows] for group_name, rows in value.items()]
             try:
                 data[name] = json.loads(json.dumps(value, default=_json_default))
             except (TypeError, ValueError) as exc:

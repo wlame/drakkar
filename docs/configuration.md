@@ -522,6 +522,23 @@ metrics:
 
 ---
 
+## Runtime health (`runtime_health:`)
+
+Event-loop lag monitoring and stall introspection — see the dedicated
+[Runtime Health](runtime-health.md) page for how the monitor works and
+how to read its output.
+
+```yaml
+runtime_health:
+  enabled: true
+  tick_seconds: 0.25
+  warn_lag_seconds: 0.1
+  stall_seconds: 1.0
+  max_stall_stacks: 10
+  sample_interval_seconds: 10.0
+  history_window_seconds: 900
+```
+
 ## Logging (`logging:`)
 
 Structured logging configuration via structlog.

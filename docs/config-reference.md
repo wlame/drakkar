@@ -310,6 +310,26 @@ metrics:
 
 ---
 
+## Runtime health (`runtime_health:`)
+
+📚 [Runtime health](runtime-health.md) · [Observability](observability.md)
+
+Event-loop lag monitoring and stall introspection.
+
+```yaml
+runtime_health:
+  enabled: true                    # env: DK_RUNTIME_HEALTH__ENABLED
+  tick_seconds: 0.25               # heartbeat interval. env: DK_RUNTIME_HEALTH__TICK_SECONDS
+  warn_lag_seconds: 0.1            # lag above this = degraded. env: DK_RUNTIME_HEALTH__WARN_LAG_SECONDS
+  stall_seconds: 1.0               # heartbeat silence above this = stalled + stack capture.
+                                   # env: DK_RUNTIME_HEALTH__STALL_SECONDS
+  max_stall_stacks: 10             # distinct stacks kept per stall. env: DK_RUNTIME_HEALTH__MAX_STALL_STACKS
+  sample_interval_seconds: 10.0    # recorder history sample cadence. env: DK_RUNTIME_HEALTH__SAMPLE_INTERVAL_SECONDS
+  history_window_seconds: 900      # in-memory sparkline window. env: DK_RUNTIME_HEALTH__HISTORY_WINDOW_SECONDS
+```
+
+---
+
 ## Logging (`logging:`)
 
 📚 [Deep details](configuration.md#logging-logging)

@@ -711,6 +711,81 @@ class MetricsConfig(BaseModel):
     port: int = Field(default=9090, ge=1, le=65535)
 
 
+class RuntimeHealthConfig(BaseModel):
+    """Runtime health monitor: event-loop lag tracking and stall introspection.
+
+    A heartbeat task measures how late the runtime wakes it (event-loop
+    lag on this backend); a sampler thread captures stack traces of the
+    code blocking the loop whenever the heartbeat goes silent for longer
+    than ``stall_seconds``. Current state and lag history surface on the
+    debug UI's Runtime tab, as Prometheus metrics, and as flight-recorder
+    events (``runtime_health`` transitions/samples, ``runtime_stall``
+    with captured stacks).
+
+    The healthy-path cost per tick is one clock read, one comparison and
+    one ring-buffer write — introspection (stack capture, task census)
+    only runs during a stall or on an explicit debug-UI request.
+    """
+
+    enabled: bool = True
+    tick_seconds: float = Field(
+        default=0.25,
+        gt=0.01,
+        description=(
+            'Heartbeat interval. Lag is measured as how late each tick '
+            'fires; the sampler thread also checks heartbeat age at this '
+            'interval. Smaller values narrow the attribution blind spot '
+            'for short blocks at slightly more (still negligible) wakeups.'
+        ),
+    )
+    warn_lag_seconds: float = Field(
+        default=0.1,
+        gt=0,
+        description=(
+            "Lag above this marks the runtime 'degraded'. Recovery to "
+            "'healthy' needs several consecutive clean ticks (hysteresis), "
+            'so a flapping loop does not spam state transitions.'
+        ),
+    )
+    stall_seconds: float = Field(
+        default=1.0,
+        gt=0,
+        description=(
+            "Heartbeat age above this marks the runtime 'stalled' and starts "
+            'stack sampling: the sampler thread captures what the runtime '
+            'thread is executing until the heartbeat resumes. Each stall '
+            'becomes one runtime_stall recorder event with the stacks.'
+        ),
+    )
+    max_stall_stacks: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            'Maximum distinct stack traces captured per stall. Repeated '
+            'samples of the same location collapse into one entry with a '
+            'count; further distinct stacks past the cap are dropped.'
+        ),
+    )
+    sample_interval_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        description=(
+            'Interval between runtime_health sample events written to the '
+            'flight recorder for cross-restart history. The fine-grained '
+            'lag sparkline comes from an in-memory ring buffer instead and '
+            'costs no database writes.'
+        ),
+    )
+    history_window_seconds: int = Field(
+        default=900,
+        ge=60,
+        description=(
+            'Length of the in-memory lag history ring buffer (one max/avg '
+            'aggregate per second) served to the debug UI sparkline.'
+        ),
+    )
+
+
 class LoggingConfig(BaseModel):
     """Structured logging settings."""
 
@@ -1380,6 +1455,7 @@ class DrakkarConfig(BaseSettings):
     sinks: SinksConfig = Field(default_factory=SinksConfig)
     dlq: DLQConfig = Field(default_factory=DLQConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    runtime_health: RuntimeHealthConfig = Field(default_factory=RuntimeHealthConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)

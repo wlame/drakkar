@@ -1260,6 +1260,65 @@ class EventRecorder:
             }
         )
 
+    def record_runtime_health(
+        self,
+        kind: str,
+        state: str,
+        lag_ms: float,
+        unit_count: int,
+    ) -> None:
+        """Record one runtime-health transition or periodic sample.
+
+        ``kind`` is ``'transition'`` (state changed) or ``'sample'`` (the
+        low-frequency history point). Wire fields are backend-neutral —
+        ``unit_count`` counts asyncio tasks here, goroutines on the Go
+        backend.
+        """
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'runtime_health',
+                'metadata': encode_json_str(
+                    {
+                        'kind': kind,
+                        'state': state,
+                        'lag_ms': lag_ms,
+                        'unit_count': unit_count,
+                    }
+                ),
+            }
+        )
+
+    def record_runtime_stall(
+        self,
+        duration_ms: float,
+        stacks: list[dict],
+        dropped_stacks: int,
+        unit_count: int,
+    ) -> None:
+        """Record one runtime stall with the stacks captured while it lasted.
+
+        ``stacks`` entries are ``{stack, location, count}`` — distinct
+        blocking sites the sampler thread saw, with how often each was
+        sampled. ``dropped_stacks`` counts distinct sites past the
+        ``runtime_health.max_stall_stacks`` cap.
+        """
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'runtime_stall',
+                'duration': round(duration_ms / 1000, 4),
+                'metadata': encode_json_str(
+                    {
+                        'duration_ms': duration_ms,
+                        'stacks': stacks,
+                        'dropped_stacks': dropped_stacks,
+                        'unit_count': unit_count,
+                    }
+                ),
+            }
+        )
+
     def record_produced(
         self,
         payload: BaseModel,

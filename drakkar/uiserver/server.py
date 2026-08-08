@@ -542,6 +542,7 @@ def create_ui_app(
     from drakkar.uiserver.routes_live import create_live_router
     from drakkar.uiserver.routes_openapi import create_openapi_router
     from drakkar.uiserver.routes_pages import create_pages_router
+    from drakkar.uiserver.routes_runtime import create_runtime_router
     from drakkar.uiserver.routes_spa import create_spa_router
 
     # ``openapi_url=None`` disables FastAPI's auto-generated schema route.
@@ -598,6 +599,7 @@ def create_ui_app(
         create_live_router(deps, include_html=include_html),
         create_debug_router(deps, include_html=include_html),
         create_cache_router(deps),
+        create_runtime_router(deps),
         create_config_reference_router(deps),
         create_openapi_router(deps),
     )

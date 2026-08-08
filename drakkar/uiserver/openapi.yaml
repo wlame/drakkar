@@ -391,6 +391,32 @@ paths:
         '422': {$ref: '#/components/responses/ValidationError'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
+  /api/v1/runtime/health:
+    get:
+      tags: [live]
+      operationId: getRuntimeHealth
+      summary: Runtime health snapshot
+      description: >-
+        Current runtime health state plus the in-memory lag history window
+        (one max/avg aggregate per second) and recent stall summaries.
+        Field names are backend-neutral: lag is event-loop lag on the
+        Python backend and scheduler latency on the Go backend;
+        `unit_label` says what `unit_count` counts ("tasks" /
+        "goroutines"). Served from monitor memory without touching the
+        runtime being measured, so it answers even during a stall.
+      responses:
+        '200':
+          description: Snapshot with history window.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RuntimeHealthSnapshot'}
+        '404':
+          description: >-
+            No monitor on this worker: runtime_health.enabled=false, or a
+            backend that does not implement the monitor (the body's
+            `reason` says which).
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
   /api/v1/debug/processors:
     get:
       tags: [debug-tools]
@@ -592,6 +618,27 @@ paths:
               schema:
                 type: array
                 items: {$ref: '#/components/schemas/PeriodicGroup'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/runtime/units:
+    get:
+      tags: [debug-tools]
+      operationId: getRuntimeUnits
+      summary: Concurrency-unit census
+      description: >-
+        Live concurrency units grouped by (name, suspension point) —
+        asyncio tasks on the Python backend, goroutines on the Go backend.
+        Runs on the measured runtime itself; 503 means the dispatch timed
+        out because the runtime is not serving work (stalled), which is
+        itself a diagnostic answer.
+      responses:
+        '200':
+          description: Census grouped by suspension point, largest first.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RuntimeUnitCensus'}
+        '503':
+          description: Census dispatch timed out — the runtime is stalled.
         '401': {$ref: '#/components/responses/Unauthorized'}
 
   /api/v1/debug/probe:
@@ -1354,9 +1401,11 @@ components:
       properties:
         key: {type: string}
         label: {type: string}
-        # "tables" renders one sub-table per key of a dict[str, rows[]] value,
-        # in the emitted key order (Python preserves first-append order; Go
-        # sorts keys); columns are shared by every sub-table.
+        # "tables" values travel as an ordered array of [group, rows[]] pairs
+        # (NOT an object: JS enumerates integer-like object keys numerically,
+        # which would break group order for numeric group names), one
+        # sub-table per pair in first-append order on every backend; columns
+        # are shared by every sub-table.
         # "tree" renders flat rows grouped client-side by the group_by keys
         # (row append order, identical on both backends), collapsible per
         # level; leaf tables show the non-key columns.
@@ -1571,3 +1620,62 @@ components:
           type: array
           items: {$ref: '#/components/schemas/ConfigReferenceGroup'}
       required: [groups]
+
+    RuntimeLagBucket:
+      description: One second of lag history — max and average over the ticks in it.
+      type: object
+      properties:
+        t: {type: number, description: Epoch second the bucket covers.}
+        max_lag_ms: {type: number}
+        avg_lag_ms: {type: number}
+      required: [t, max_lag_ms, avg_lag_ms]
+
+    RuntimeStallSummary:
+      description: >-
+        One recent stall, without the full stacks — those live in the
+        stall's runtime_stall flight-recorder event.
+      type: object
+      properties:
+        t: {type: number, description: Epoch seconds when the runtime resumed.}
+        duration_ms: {type: number}
+        stack_count: {type: integer}
+        top_location: {type: [string, 'null'], description: file:line of the first captured blocking site.}
+      required: [t, duration_ms, stack_count, top_location]
+
+    RuntimeHealthSnapshot:
+      type: object
+      properties:
+        enabled: {type: boolean}
+        state: {type: string, enum: [healthy, degraded, stalled]}
+        # What unit_count counts on this backend: "tasks" (Python asyncio)
+        # or "goroutines" (Go). The UI takes wording from this field.
+        unit_label: {type: string}
+        current_lag_ms: {type: number}
+        heartbeat_age_ms: {type: number}
+        window:
+          type: array
+          items: {$ref: '#/components/schemas/RuntimeLagBucket'}
+        recent_stalls:
+          type: array
+          items: {$ref: '#/components/schemas/RuntimeStallSummary'}
+      required: [enabled, state, unit_label, current_lag_ms, heartbeat_age_ms, window, recent_stalls]
+
+    RuntimeUnitGroup:
+      description: Units sharing one (name, suspension point) pair.
+      type: object
+      properties:
+        name: {type: string, description: Coroutine / function qualname.}
+        location: {type: string, description: file:line of the suspension point ("" when unknown).}
+        count: {type: integer}
+        example: {type: string, description: Name of one representative unit.}
+      required: [name, location, count, example]
+
+    RuntimeUnitCensus:
+      type: object
+      properties:
+        unit_label: {type: string}
+        total: {type: integer}
+        units:
+          type: array
+          items: {$ref: '#/components/schemas/RuntimeUnitGroup'}
+      required: [unit_label, total, units]

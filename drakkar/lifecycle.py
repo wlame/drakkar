@@ -141,6 +141,7 @@ class AppLifecycle:
         await self._build_executor_pool()
         await self._start_observability()
         await self._start_ui_and_recorder()
+        self._start_runtime_health()
         self._wire_annotator()
         await self._start_cache()
         await self._connect_sinks()
@@ -380,6 +381,25 @@ class AppLifecycle:
                 category='lifecycle',
                 reason='ui.enabled=false — /healthz and /readyz are not served; Kubernetes probes need the UI server',
             )
+
+    def _start_runtime_health(self) -> None:
+        """Start the event-loop health monitor when enabled.
+
+        Runs after the recorder so transitions/stalls persist as events;
+        the recorder handle may still be ``None`` (ui.enabled=false), in
+        which case the monitor feeds only Prometheus and the in-memory
+        history — deliberately still worth running.
+        """
+        app = self._app
+        if not app._config.runtime_health.enabled:
+            return
+        from drakkar.runtimehealth import RuntimeHealthMonitor
+
+        app._runtime_health = RuntimeHealthMonitor(
+            app._config.runtime_health,
+            recorder=app._recorder,
+        )
+        app._runtime_health.start()
 
     def _wire_annotator(self) -> None:
         """Replace the handler's NoOpAnnotator stub with a live one.
@@ -1094,6 +1114,21 @@ class AppLifecycle:
                         category='lifecycle',
                         count=len(bg_snapshot),
                     )
+
+            # Stop the runtime-health monitor before the recorder for the
+            # same reason as the cache engine below: its final transition
+            # or stall event still needs a live recorder to land in.
+            if app._runtime_health is not None:
+                try:
+                    await app._runtime_health.stop()
+                except Exception as exc:
+                    await log.awarning(
+                        'runtime_health_stop_failed',
+                        category='lifecycle',
+                        error=str(exc),
+                        exc_info=True,
+                    )
+                app._runtime_health = None
 
             # Stop the cache engine BEFORE the recorder so the engine's
             # final flush (``_flush_once`` called inside

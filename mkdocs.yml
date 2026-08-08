@@ -60,6 +60,7 @@ nav:
   - Webapp: webapp.md
   - Executor: executor.md
   - Observability: observability.md
+  - Runtime Health (event-loop lag watchdog): runtime-health.md
   - Local Databases: local-databases.md
   - Performance: performance.md
   - Deployment: deployment.md

@@ -831,6 +831,33 @@ periodic_task_duration = Histogram(
 )
 
 
+# --- Runtime health ---
+
+loop_lag_seconds = Histogram(
+    'drakkar_loop_lag_seconds',
+    (
+        'Event-loop lag per heartbeat tick: how late the runtime woke the '
+        'monitor. Sustained values near runtime_health.warn_lag_seconds '
+        'mean synchronous work is starving coroutines.'
+    ),
+    buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
+)
+
+runtime_health_state = Gauge(
+    'drakkar_runtime_health_state',
+    'Current runtime health state: 0=healthy, 1=degraded, 2=stalled',
+)
+
+runtime_stalls = Counter(
+    'drakkar_runtime_stalls_total',
+    (
+        'Stalls detected: the event loop went silent for longer than '
+        'runtime_health.stall_seconds. Each one carries captured stacks '
+        'in its runtime_stall flight-recorder event.'
+    ),
+)
+
+
 def start_metrics_server(config: MetricsConfig) -> None:
     """Start the Prometheus metrics HTTP server if enabled."""
     if config.enabled:

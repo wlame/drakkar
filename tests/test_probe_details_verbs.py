@@ -169,10 +169,30 @@ def test_update_on_tables_field_records_error(bound, errors):
     assert errors[0][:3] == ('per_file_rows', 'update', 'ProbeDetailsError')
 
 
-def test_to_user_details_serializes_grouped_tables(bound):
+def test_to_user_details_serializes_grouped_tables_as_ordered_pairs(bound):
     probe.append('per_file_rows', PickedRow(item_id='a', score=1.0), group='first_input_file.csv')
     details = bound.to_user_details()
-    assert details.data['per_file_rows'] == {'first_input_file.csv': [{'item_id': 'a', 'score': 1.0}]}
+    assert details.data['per_file_rows'] == [['first_input_file.csv', [{'item_id': 'a', 'score': 1.0}]]]
+
+
+def test_to_user_details_keeps_first_append_order_for_numeric_groups(bound):
+    # Integer-like group names are the reason tables travel as pairs: a JSON
+    # object would let JS clients re-enumerate "12"/"3" numerically.
+    probe.append('per_file_rows', PickedRow(item_id='a', score=1.0), group='12')
+    probe.append('per_file_rows', PickedRow(item_id='b', score=2.0), group='3')
+    details = bound.to_user_details()
+    assert [pair[0] for pair in details.data['per_file_rows']] == ['12', '3']
+
+
+def test_to_user_details_serializes_empty_tables_field_as_empty_list(bound):
+    assert bound.to_user_details().data['per_file_rows'] == []
+
+
+def test_append_with_non_string_group_records_error(bound, errors):
+    probe.append('per_file_rows', PickedRow(item_id='a', score=1.0), group=123)  # type: ignore[arg-type]
+    assert errors[0][:3] == ('per_file_rows', 'append', 'ProbeDetailsError')
+    assert 'string group' in errors[0][3]
+    assert bound.instance.per_file_rows == {}
 
 
 def test_update_merges_into_keyvalue(bound):

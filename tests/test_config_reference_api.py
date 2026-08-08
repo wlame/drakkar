@@ -95,6 +95,7 @@ class TestShape:
             'sinks',
             'dlq',
             'metrics',
+            'runtime_health',
             'logging',
             'ui',
             'cache',
