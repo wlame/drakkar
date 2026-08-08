@@ -21,9 +21,10 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel, Field, ValidationError
 from pydantic.fields import FieldInfo
 
-ViewKind = Literal['string', 'keyvalue', 'dict', 'table', 'tables', 'tree']
+ViewKind = Literal['string', 'keyvalue', 'dict', 'table', 'tables', 'tree', 'badge']
 
-_VIEW_KINDS: tuple[str, ...] = ('string', 'keyvalue', 'dict', 'table', 'tables', 'tree')
+_VIEW_KINDS: tuple[str, ...] = ('string', 'keyvalue', 'dict', 'table', 'tables', 'tree', 'badge')
+_ROW_VIEWS: tuple[str, ...] = ('table', 'tables', 'tree')
 
 # Maximum number of grouping levels a 'tree' field may declare. Enforced at
 # registration (startup), so a too-deep tree is a config error, never a
@@ -88,6 +89,12 @@ def probe_field(
     view: ViewKind,
     label: str | None = None,
     group_by: tuple[str, ...] | list[str] | None = None,
+    link_template: str | None = None,
+    badge_colors: dict[str, str] | None = None,
+    format: str | None = None,
+    hint: str | None = None,
+    columns: list[str] | dict[str, Column] | None = None,
+    detail: Detail | None = None,
     default: Any = ...,
     default_factory: Callable[[], Any] | None = None,
 ) -> Any:
@@ -121,12 +128,53 @@ def probe_field(
             raise ProbeDetailsConfigError('probe_field: group_by entries must be unique')
     elif group_by is not None:
         raise ProbeDetailsConfigError("probe_field: group_by is only valid with view='tree'")
+    if view == 'badge':
+        if not badge_colors:
+            raise ProbeDetailsConfigError("probe_field: view 'badge' requires badge_colors={value: color}")
+        if link_template is not None:
+            raise ProbeDetailsConfigError("probe_field: link_template is not valid with view 'badge'")
+    elif badge_colors is not None:
+        raise ProbeDetailsConfigError("probe_field: badge_colors requires view 'badge' (or a Column option)")
+    if badge_colors:
+        for value_name, color in badge_colors.items():
+            if color not in BADGE_COLOR_NAMES:
+                raise ProbeDetailsConfigError(
+                    f"probe_field: unknown color '{color}' for badge value '{value_name}' "
+                    f'(expected one of {BADGE_COLOR_NAMES})'
+                )
+    if format is not None and format not in FORMAT_KINDS:
+        raise ProbeDetailsConfigError(f"probe_field: unknown format '{format}' (expected one of {FORMAT_KINDS})")
+    if format is not None and view not in ('string',):
+        raise ProbeDetailsConfigError("probe_field: format is only valid with view 'string'")
+    if link_template is not None and view not in ('string',):
+        raise ProbeDetailsConfigError("probe_field: link_template is only valid with view 'string'")
+    if link_template is not None:
+        _validate_template(link_template, where='probe_field', row_fields=None)
+    if hint is not None and view in _ROW_VIEWS:
+        raise ProbeDetailsConfigError('probe_field: hint on row-bearing views belongs on a Column')
+    if columns is not None and view not in _ROW_VIEWS:
+        raise ProbeDetailsConfigError("probe_field: columns is only valid with views 'table', 'tables', 'tree'")
+    if detail is not None and view not in _ROW_VIEWS:
+        raise ProbeDetailsConfigError("probe_field: detail is only valid with views 'table', 'tables', 'tree'")
+    if link_template is not None and detail is not None:
+        raise ProbeDetailsConfigError('probe_field: link_template and detail are mutually exclusive')
+    columns_map: dict[str, Column] | None = None
+    if columns is not None:
+        columns_map = dict(columns) if isinstance(columns, dict) else {name: Column() for name in columns}
+        if not columns_map:
+            raise ProbeDetailsConfigError('probe_field: columns must not be empty')
     extra = {
         _METADATA_KEY: {
             'section': section,
             'view': view,
             'label': label,
             'group_by': list(group_by) if group_by else None,
+            'link_template': link_template,
+            'badge_colors': dict(badge_colors) if badge_colors else None,
+            'format': format,
+            'hint': hint,
+            'columns': columns_map,
+            'detail': detail,
         }
     }
     if default_factory is not None:
