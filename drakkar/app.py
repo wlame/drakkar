@@ -32,7 +32,7 @@ from drakkar.logging import setup_logging
 from drakkar.metrics import dlq_dropped_payloads
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError, SinkDeliveryFailedError
 from drakkar.partition import PartitionProcessor
-from drakkar.probe import build_layout
+from drakkar.probe import build_layout, referenced_bases
 from drakkar.recorder import EventRecorder
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq import DLQSink
@@ -89,7 +89,27 @@ class DrakkarApp:
         # narrows `type[BaseModel] | None` to `type[BaseModel]` below.
         probe_details_model = handler.probe_details_model
         if probe_details_model is not None:
-            build_layout(probe_details_model)
+            layout = build_layout(probe_details_model)
+            # Templates may reference a base (e.g. {jira}) that the deployment
+            # never configured in ui.link_bases — not a startup error, since
+            # the UI degrades gracefully to plain text, but worth flagging so
+            # the gap doesn't go unnoticed until someone clicks a dead link.
+            # Layout validation itself stays unconditional (fail-fast even with
+            # the UI off); the warning is skipped when ui.enabled is False,
+            # since no link is ever rendered for anyone to click — same guard
+            # warn_if_ui_unauthenticated uses in drakkar/app_security.py.
+            if self._config.ui.enabled:
+                missing_bases = sorted(referenced_bases(layout) - set(self._config.ui.link_bases))
+                if missing_bases:
+                    logger.warning(
+                        'probe_details_link_bases_missing',
+                        category='probe',
+                        missing_bases=missing_bases,
+                        message=(
+                            'probe-details templates reference ui.link_bases entries that are not '
+                            f'configured: {", ".join(missing_bases)}; affected links render as plain text'
+                        ),
+                    )
         self._worker_id = worker_id or os.environ.get(self._config.worker_name_env, '') or f'drakkar-{id(self):x}'
         self._cluster_name = ''
         if self._config.cluster_name_env:

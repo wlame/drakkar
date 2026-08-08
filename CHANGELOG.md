@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ui.link_bases` config: named URL bases (e.g. `{jira: 'https://jira.internal.example.com'}`)
   that probe-details link templates resolve against. `GET /api/v1/identity` now
   reports `link_bases` (empty object when unset).
+- Startup warning when a probe-details template references a link base that
+  `ui.link_bases` does not configure. Not a startup error — the affected
+  links just render as plain text — but now visible in logs instead of
+  discovered by clicking a dead link.
 
 ## [1.9.0] - 2026-08-08
 

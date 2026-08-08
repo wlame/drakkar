@@ -2,7 +2,19 @@
 
 import pytest
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
+from drakkar.app import DrakkarApp
+from drakkar.config import (
+    DrakkarConfig,
+    ExecutorConfig,
+    KafkaConfig,
+    LoggingConfig,
+    MetricsConfig,
+    SinksConfig,
+    UIConfig,
+)
+from drakkar.handler import BaseDrakkarHandler
 from drakkar.probe import (
     Column,
     Detail,
@@ -185,3 +197,86 @@ def test_referenced_bases_walks_columns_details_and_links():
         ),
     )
     assert referenced_bases(build_layout(M)) == {'jenkins', 'jira'}
+
+
+# --- Startup warning for unconfigured link_bases -----------------------------
+#
+# DrakkarApp.__init__ builds the probe-details layout right after validating
+# the handler (see the build_layout() call site), then diffs the templates'
+# referenced bases against ui.link_bases. A missing base is not a startup
+# error — the UI degrades to plain text — but it should be visible in logs
+# rather than silently discovered by an operator clicking a dead link.
+
+
+class _MissingBaseRow(BaseModel):
+    ticket: str
+
+
+class _MissingBaseDetails(BaseModel):
+    rows: list[_MissingBaseRow] = probe_field(
+        section='S',
+        view='table',
+        default_factory=list,
+        columns={'ticket': Column(link_template='{jira}/browse/{value}')},
+    )
+
+
+class _MissingBaseHandler(BaseDrakkarHandler):
+    probe_details_model = _MissingBaseDetails
+
+    async def arrange(self, messages, pending):
+        return []
+
+
+def _minimal_config(ui: UIConfig | None = None) -> DrakkarConfig:
+    """Smallest DrakkarConfig that satisfies DrakkarApp.__init__.
+
+    Mirrors ``test_config_no_sinks`` in tests/test_app.py — construction is
+    synchronous and never touches Kafka, so no mocking is needed to exercise
+    the __init__-time warning.
+    """
+    return DrakkarConfig(
+        kafka=KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
+        executor=ExecutorConfig(binary_path='/bin/echo'),
+        sinks=SinksConfig(),
+        metrics=MetricsConfig(enabled=False),
+        logging=LoggingConfig(level='WARNING', format='console'),
+        ui=ui or UIConfig(),
+    )
+
+
+def test_startup_warns_about_missing_link_bases():
+    """A template base absent from ui.link_bases logs one warning naming it."""
+    with capture_logs() as cap:
+        DrakkarApp(handler=_MissingBaseHandler(), config=_minimal_config())
+
+    warnings = [r for r in cap if r['log_level'] == 'warning' and r.get('event') == 'probe_details_link_bases_missing']
+    assert len(warnings) == 1
+    assert warnings[0]['missing_bases'] == ['jira']
+    assert 'jira' in warnings[0]['message']
+
+
+def test_startup_silent_when_all_referenced_bases_are_configured():
+    """No warning is logged once the referenced base is present in ui.link_bases."""
+    config = _minimal_config(ui=UIConfig(link_bases={'jira': 'https://jira.internal.example.com'}))
+
+    with capture_logs() as cap:
+        DrakkarApp(handler=_MissingBaseHandler(), config=config)
+
+    assert not [r for r in cap if r.get('event') == 'probe_details_link_bases_missing']
+
+
+def test_startup_silent_when_ui_disabled_even_with_missing_link_bases():
+    """No warning when ui.enabled=False — no UI means no link is ever rendered.
+
+    Mirrors the guard in warn_if_ui_unauthenticated (drakkar/app_security.py):
+    the layout build itself still runs (fail-fast validation stays unconditional),
+    but the operational warning about unresolved bases would be a false positive
+    with the UI off.
+    """
+    config = _minimal_config(ui=UIConfig(enabled=False))
+
+    with capture_logs() as cap:
+        DrakkarApp(handler=_MissingBaseHandler(), config=config)
+
+    assert not [r for r in cap if r.get('event') == 'probe_details_link_bases_missing']
