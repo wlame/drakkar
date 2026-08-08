@@ -43,6 +43,7 @@ from drakkar.sinks.manager import SinkManager
 from drakkar.sinks.mongo import MongoSink
 from drakkar.sinks.postgres import PostgresSink
 from drakkar.sinks.redis import RedisSink
+from drakkar.uipages import UIPage, build_pages, pages_referenced_bases
 
 logger = structlog.get_logger()
 
@@ -88,28 +89,37 @@ class DrakkarApp:
         # boot, not at first probe. Read into a local so the type checker
         # narrows `type[BaseModel] | None` to `type[BaseModel]` below.
         probe_details_model = handler.probe_details_model
-        if probe_details_model is not None:
-            layout = build_layout(probe_details_model)
-            # Templates may reference a base (e.g. {jira}) that the deployment
-            # never configured in ui.link_bases — not a startup error, since
-            # the UI degrades gracefully to plain text, but worth flagging so
-            # the gap doesn't go unnoticed until someone clicks a dead link.
-            # Layout validation itself stays unconditional (fail-fast even with
-            # the UI off); the warning is skipped when ui.enabled is False,
-            # since no link is ever rendered for anyone to click — same guard
-            # warn_if_ui_unauthenticated uses in drakkar/app_security.py.
-            if self._config.ui.enabled:
-                missing_bases = sorted(referenced_bases(layout) - set(self._config.ui.link_bases))
-                if missing_bases:
-                    logger.warning(
-                        'probe_details_link_bases_missing',
-                        category='probe',
-                        missing_bases=missing_bases,
-                        message=(
-                            'probe-details templates reference ui.link_bases entries that are not '
-                            f'configured: {", ".join(missing_bases)}; affected links render as plain text'
-                        ),
-                    )
+        layout = build_layout(probe_details_model) if probe_details_model is not None else None
+        # Fail fast on invalid declared UI pages (Phase 2) too — same
+        # philosophy, and unconditional (not gated on a probe model being
+        # registered): a page/widget declaration mistake is a deploy-time
+        # bug regardless of whether the User-defined probe tab is in use.
+        self._ui_pages: list[UIPage] = build_pages(getattr(handler, 'ui_pages', None))
+        # Templates — both the probe-details layout and declared pages —
+        # may reference a base (e.g. {jira}) that the deployment never
+        # configured in ui.link_bases — not a startup error, since the UI
+        # degrades gracefully to plain text, but worth flagging in one
+        # warning so the gap doesn't go unnoticed until someone clicks a
+        # dead link. Layout/page validation itself stays unconditional
+        # (fail-fast even with the UI off); the warning is skipped when
+        # ui.enabled is False, since no link is ever rendered for anyone
+        # to click — same guard warn_if_ui_unauthenticated uses in
+        # drakkar/app_security.py.
+        if self._config.ui.enabled:
+            referenced = pages_referenced_bases(self._ui_pages)
+            if layout is not None:
+                referenced = referenced | referenced_bases(layout)
+            missing_bases = sorted(referenced - set(self._config.ui.link_bases))
+            if missing_bases:
+                logger.warning(
+                    'probe_details_link_bases_missing',
+                    category='probe',
+                    missing_bases=missing_bases,
+                    message=(
+                        'templates reference ui.link_bases entries that are not '
+                        f'configured: {", ".join(missing_bases)}; affected links render as plain text'
+                    ),
+                )
         self._worker_id = worker_id or os.environ.get(self._config.worker_name_env, '') or f'drakkar-{id(self):x}'
         self._cluster_name = ''
         if self._config.cluster_name_env:
@@ -200,6 +210,15 @@ class DrakkarApp:
         into private state. Read-only.
         """
         return self._handler
+
+    @property
+    def ui_pages(self) -> list[UIPage]:
+        """Return the validated declared UI pages (Phase 2), wire form.
+
+        Empty list when the handler declares none. Read by the debug/API
+        server for ``GET /api/v1/pages``.
+        """
+        return self._ui_pages
 
     @property
     def processors(self) -> dict[int, PartitionProcessor]:

@@ -24,6 +24,7 @@ from drakkar.cache.protocol import CacheLike
 
 if TYPE_CHECKING:
     from drakkar.config import DrakkarConfig
+    from drakkar.uipages import Page
 
 from drakkar.metrics import message_parse_failures
 from drakkar.models import (
@@ -73,6 +74,11 @@ class DrakkarHandler(Protocol[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # One details model per handler; registering it is the opt-in for the
     # probe's User-defined tab.
     probe_details_model: type[BaseModel] | None
+    # Declared UI pages (Phase 2): a deployment's custom dashboard pages,
+    # each a list of widgets reading from a built-in source. Registering
+    # these is the opt-in for the extra nav entries; validated at startup
+    # via drakkar.uipages.build_pages.
+    ui_pages: list[Page] | None
     # Handler-facing cache. Always non-None by the time user hooks are called:
     # either a real Cache (when cache.enabled=true) or a NoOpCache stub
     # (disabled path). Typed structurally as :class:`CacheLike` so test doubles
@@ -195,6 +201,8 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # One details model per handler; registering it is the opt-in for the
     # probe's User-defined tab.
     probe_details_model: type[BaseModel] | None = None
+    # Declared UI pages (Phase 2); see the Protocol attribute above.
+    ui_pages: list[Page] | None = None
 
     # Handler-facing cache attribute. The framework reassigns this to either
     # a real ``Cache`` (when ``config.cache.enabled=true``) or leaves the

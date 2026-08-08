@@ -544,6 +544,7 @@ def create_ui_app(
     from drakkar.uiserver.routes_pages import create_pages_router
     from drakkar.uiserver.routes_runtime import create_runtime_router
     from drakkar.uiserver.routes_spa import create_spa_router
+    from drakkar.uiserver.routes_uipages import create_uipages_router
 
     # ``openapi_url=None`` disables FastAPI's auto-generated schema route.
     # Disabling docs_url/redoc_url alone still leaves ``GET /openapi.json``
@@ -601,6 +602,7 @@ def create_ui_app(
         create_cache_router(deps),
         create_runtime_router(deps),
         create_config_reference_router(deps),
+        create_uipages_router(deps),
         create_openapi_router(deps),
     )
     for router in routers:

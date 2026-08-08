@@ -781,6 +781,27 @@ paths:
               schema: {$ref: '#/components/schemas/ConfigReferenceResponse'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
+  /api/v1/pages:
+    get:
+      tags: [core]
+      operationId: getPages
+      summary: Declared UI pages
+      description: >-
+        Deployment-declared dashboard pages (Phase 2): a handler opts in by
+        registering `ui_pages`, each a list of widgets reading from a
+        built-in source (events, annotations, tasks, metrics). Validated at
+        startup; empty array when the handler declares none. v1-only — no
+        legacy unprefixed alias.
+      responses:
+        '200':
+          description: Declared pages, in declaration order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/UIPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
   /api/v1/openapi.json:
     get:
       tags: [meta]
@@ -1763,3 +1784,41 @@ components:
           type: array
           items: {$ref: '#/components/schemas/RuntimeUnitGroup'}
       required: [unit_label, total, units]
+
+    UIPageWidget:
+      description: One panel on a declared UI page (Phase 2 dashboards).
+      type: object
+      properties:
+        title: {type: string}
+        view: {type: string, enum: [table, keyvalue, string, badge, stat]}
+        source:
+          type: object
+          additionalProperties: true
+          description: >-
+            Widget data source. Discriminated by `kind`; remaining keys vary
+            by kind — `events` carries event_types+limit, `annotations`
+            carries kind_prefix+limit, `tasks` carries limit, `metrics`
+            carries metric.
+          properties:
+            kind: {type: string, enum: [events, annotations, tasks, metrics]}
+          required: [kind]
+        columns:
+          type: [array, 'null']
+          items: {$ref: '#/components/schemas/ProbeDetailsColumn'}
+        field: {type: [string, 'null']}
+        badge_colors:
+          type: [object, 'null']
+          additionalProperties: {type: string}
+        format: {type: [string, 'null']}
+      required: [title, view, source]
+
+    UIPage:
+      description: One declared dashboard page (Phase 2), in declaration order.
+      type: object
+      properties:
+        slug: {type: string}
+        title: {type: string}
+        widgets:
+          type: array
+          items: {$ref: '#/components/schemas/UIPageWidget'}
+      required: [slug, title, widgets]

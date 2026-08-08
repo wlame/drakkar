@@ -65,6 +65,8 @@ def mock_app():
     # ``handler=None`` pins hook_flags to the deterministic all-False branch.
     app.handler = None
     app._consumer = None
+    # No declared UI pages (Phase 2) by default; client_with_pages overrides.
+    app.ui_pages = []
 
     pool = MagicMock()
     pool.active_count = 2
@@ -102,6 +104,31 @@ async def client_with_link_bases(tmp_path, mock_recorder, mock_app):
         enabled=True, port=8080, db_dir=str(tmp_path), link_bases={'jira': 'https://jira.internal.example.com'}
     )
     mock_app.config_summary = '[test-worker]'
+    mock_recorder.config = cfg
+    async with make_client(cfg, mock_recorder, mock_app) as c:
+        yield c
+
+
+@pytest.fixture
+async def client_with_pages(tmp_path, mock_recorder, mock_app):
+    """A client whose app declares one page (Phase 2), mirroring the uipages golden fixture."""
+    from drakkar.probe import Column
+    from drakkar.uipages import AnnotationsSource, Page, Widget, build_pages
+
+    page = Page(
+        slug='orders',
+        title='Orders',
+        widgets=[
+            Widget(
+                title='Recent orders',
+                view='table',
+                source=AnnotationsSource(kind_prefix='order.', limit=100),
+                columns={'order_id': Column(link_template='{shop_admin}/orders/{value}')},
+            )
+        ],
+    )
+    mock_app.ui_pages = build_pages([page])
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
     mock_recorder.config = cfg
     async with make_client(cfg, mock_recorder, mock_app) as c:
         yield c
@@ -840,6 +867,36 @@ class TestApiV1Identity:
         res = await client_with_link_bases.get('/api/v1/identity')
         assert res.status_code == 200
         assert res.json()['link_bases'] == {'jira': 'https://jira.internal.example.com'}
+
+
+# ---------------------------------------------------------------------------
+# Declared UI pages (Phase 2): GET /api/v1/pages (v1-only)
+# ---------------------------------------------------------------------------
+
+
+class TestApiV1Pages:
+    async def test_pages_endpoint_returns_declared_pages(self, client_with_pages):
+        res = await client_with_pages.get('/api/v1/pages')
+        assert res.status_code == 200
+        body = res.json()
+        assert [p['slug'] for p in body] == ['orders']
+        assert body[0]['widgets'][0]['source']['kind'] == 'annotations'
+
+    async def test_pages_endpoint_empty_without_declarations(self, client):
+        res = await client.get('/api/v1/pages')
+        assert res.status_code == 200
+        assert res.json() == []
+
+    async def test_pages_endpoint_requires_auth_when_token_set(self, tmp_path, mock_recorder, mock_app):
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
+        mock_recorder.config = cfg
+        async with make_client(cfg, mock_recorder, mock_app) as c:
+            assert (await c.get('/api/v1/pages')).status_code == 401
+            ok = await c.get('/api/v1/pages', headers={'Authorization': 'Bearer secret-123'})
+            assert ok.status_code == 200
+
+    async def test_pages_endpoint_has_no_legacy_alias(self, client):
+        assert (await client.get('/api/pages')).status_code == 404
 
 
 # ---------------------------------------------------------------------------
