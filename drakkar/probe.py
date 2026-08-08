@@ -490,15 +490,16 @@ def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
     return layout
 
 
-def referenced_bases(layout: ProbeDetailsLayout) -> set[str]:
+def referenced_bases(layout: ProbeDetailsLayout) -> builtins.set[str]:
     """Collect every named base a layout's templates reference.
 
     App startup compares this against ``ui.link_bases`` and warns about
     missing entries — a warning, not an error, because environments may
     deliberately omit a base (the UI then renders plain text).
     """
-    # builtins.set(), not set(): this module's `set` verb shadows the builtin.
-    bases: set[str] = builtins.set()
+    # builtins.set, not set: this module's `set` verb shadows the builtin,
+    # both in call position (set()) and in the set[str] type annotation.
+    bases: builtins.set[str] = builtins.set()
 
     def _scan(template: str | None) -> None:
         if not template:
