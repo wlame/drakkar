@@ -1,6 +1,7 @@
 """Tests for probe-details enrichment declarations (Phase 1)."""
 
 import pytest
+from pydantic import BaseModel
 
 from drakkar.probe import (
     Column,
@@ -9,7 +10,9 @@ from drakkar.probe import (
     Link,
     ProbeDetailsConfigError,
     _validate_template,
+    build_layout,
     probe_field,
+    referenced_bases,
 )
 
 
@@ -109,3 +112,76 @@ def test_columns_list_normalized_to_metadata():
     meta = field_info.json_schema_extra['drakkar_probe']
     assert list(meta['columns']) == ['a', 'b']
     assert all(isinstance(c, Column) for c in meta['columns'].values())
+
+
+class _BuildRow(BaseModel):
+    build_id: str
+    job_name: str
+    duration_ms: int
+
+
+def _table_model(**field_kwargs):
+    class M(BaseModel):
+        builds: list[_BuildRow] = probe_field(section='Builds', view='table', default_factory=list, **field_kwargs)
+
+    return M
+
+
+def test_layout_carries_column_options_in_declared_order():
+    M = _table_model(
+        columns={
+            'build_id': Column(link_template='{jenkins}/job/{row.job_name}/{value}'),
+            'duration_ms': Column(format='duration_ms'),
+        }
+    )
+    entry = build_layout(M).sections[0].entries[0]
+    assert [c.key for c in entry.columns] == ['build_id', 'duration_ms']
+    assert entry.columns[0].link_template == '{jenkins}/job/{row.job_name}/{value}'
+    assert entry.columns[1].format == 'duration_ms'
+
+
+def test_columns_subset_must_be_row_model_fields():
+    M = _table_model(columns=['build_id', 'nope'])
+    with pytest.raises(ProbeDetailsConfigError, match="'nope'"):
+        build_layout(M)
+
+
+def test_column_templates_validate_row_references():
+    M = _table_model(columns={'build_id': Column(link_template='{x}/{row.missing}')})
+    with pytest.raises(ProbeDetailsConfigError, match="'missing'"):
+        build_layout(M)
+
+
+def test_column_badge_colors_rejects_unknown_color_name():
+    M = _table_model(columns={'build_id': Column(badge_colors={'ok': 'chartreuse'})})
+    with pytest.raises(ProbeDetailsConfigError, match='chartreuse'):
+        build_layout(M)
+
+
+def test_detail_element_fields_must_exist_on_row_model():
+    M = _table_model(detail=Detail(elements=[Element(field='nope', view='string')]))
+    with pytest.raises(ProbeDetailsConfigError, match="'nope'"):
+        build_layout(M)
+
+
+def test_detail_links_element_requires_links_and_no_field():
+    with pytest.raises(ProbeDetailsConfigError, match='links'):
+        build_layout(_table_model(detail=Detail(elements=[Element(view='links')])))
+
+
+def test_badge_scalar_entry_reaches_wire():
+    class M(BaseModel):
+        status: str = probe_field(section='S', view='badge', badge_colors={'ok': 'green', '*': 'gray'}, default='')
+
+    entry = build_layout(M).sections[0].entries[0]
+    assert entry.view == 'badge' and entry.badge_colors == {'ok': 'green', '*': 'gray'}
+
+
+def test_referenced_bases_walks_columns_details_and_links():
+    M = _table_model(
+        columns={'build_id': Column(link_template='{jenkins}/x/{value}')},
+        detail=Detail(
+            elements=[Element(view='links', links=[Link(label='Ticket', template='{jira}/browse/{row.build_id}')])]
+        ),
+    )
+    assert referenced_bases(build_layout(M)) == {'jenkins', 'jira'}

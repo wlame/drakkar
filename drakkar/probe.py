@@ -10,6 +10,7 @@ pattern, so business logic needs no ``if probing:`` guards.
 
 from __future__ import annotations
 
+import builtins
 import contextvars
 import json
 import re
@@ -190,6 +191,10 @@ class ProbeDetailsColumn(BaseModel):
 
     key: str
     label: str
+    link_template: str | None = None
+    badge_colors: dict[str, str] | None = None
+    format: str | None = None
+    hint: str | None = None
 
 
 class ProbeDetailsEntry(BaseModel):
@@ -202,6 +207,11 @@ class ProbeDetailsEntry(BaseModel):
     # Ordered grouping keys for view='tree' (outermost first); None for
     # every other view. The named keys are a subset of ``columns``.
     group_by: list[str] | None = None
+    link_template: str | None = None
+    badge_colors: dict[str, str] | None = None
+    format: str | None = None
+    hint: str | None = None
+    detail: Detail | None = None
 
 
 class ProbeDetailsSection(BaseModel):
@@ -358,10 +368,10 @@ def _validate_view(model: type[BaseModel], name: str, view: str, annotation: Any
         if not (ann is dict or origin is dict):
             raise ProbeDetailsConfigError(f"{model.__name__}.{name}: view 'dict' requires a dict field")
         return None
-    # view == 'string'
+    # view in ('string', 'badge')
     if ann not in _SCALARS:
         raise ProbeDetailsConfigError(
-            f"{model.__name__}.{name}: view 'string' requires a scalar field (str/int/float/bool)"
+            f"{model.__name__}.{name}: view '{view}' requires a scalar field (str/int/float/bool)"
         )
     return None
 
@@ -398,8 +408,79 @@ def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
                         f"{model.__name__}.{name}: group_by names '{key_name}', "
                         f'which is not a field of {row_model.__name__}'
                     )
+        link_template = meta.get('link_template')
+        badge_colors = meta.get('badge_colors')
+        fmt = meta.get('format')
+        hint = meta.get('hint')
+        columns_map: dict[str, Column] | None = meta.get('columns')
+        detail: Detail | None = meta.get('detail')
+        where = f'{model.__name__}.{name}'
+        if row_model is not None:
+            row_fields = row_model.model_fields
+            if columns_map is not None:
+                for col_name in columns_map:
+                    if col_name not in row_fields:
+                        raise ProbeDetailsConfigError(
+                            f"{where}: columns names '{col_name}', which is not a field of {row_model.__name__}"
+                        )
+                columns = [
+                    ProbeDetailsColumn(
+                        key=col_name,
+                        label=opts.label or _prettify(col_name),
+                        link_template=opts.link_template,
+                        badge_colors=opts.badge_colors,
+                        format=opts.format,
+                        hint=opts.hint,
+                    )
+                    for col_name, opts in columns_map.items()
+                ]
+                for col in columns:
+                    for template in (col.link_template, col.hint):
+                        if template:
+                            _validate_template(template, where=f'{where}.{col.key}', row_fields=row_fields)
+                    if col.badge_colors:
+                        for value_name, color in col.badge_colors.items():
+                            if color not in BADGE_COLOR_NAMES:
+                                raise ProbeDetailsConfigError(
+                                    f"{where}.{col.key}: unknown color '{color}' for badge value "
+                                    f"'{value_name}' (expected one of {BADGE_COLOR_NAMES})"
+                                )
+            if detail is not None:
+                if detail.title:
+                    _validate_template(detail.title, where=where, row_fields=row_fields)
+                for i, element in enumerate(detail.elements):
+                    el_where = f'{where}.detail[{i}]'
+                    if element.view == 'links':
+                        if element.field is not None or not element.links:
+                            raise ProbeDetailsConfigError(
+                                f"{el_where}: view 'links' requires links=[Link(...)] and no field"
+                            )
+                        for link in element.links:
+                            _validate_template(link.template, where=el_where, row_fields=row_fields)
+                    else:
+                        if element.field is None or element.links is not None:
+                            raise ProbeDetailsConfigError(
+                                f'{el_where}: element requires field= (links= is only for view=links)'
+                            )
+                        if element.field not in row_fields:
+                            raise ProbeDetailsConfigError(
+                                f"{el_where}: names '{element.field}', which is not a field of {row_model.__name__}"
+                            )
+        if link_template:
+            _validate_template(link_template, where=where, row_fields=None)
+        if hint and row_model is None:
+            _validate_template(hint, where=where, row_fields=None)
         entry = ProbeDetailsEntry(
-            key=name, label=meta['label'] or _prettify(name), view=view, columns=columns, group_by=group_by
+            key=name,
+            label=meta['label'] or _prettify(name),
+            view=view,
+            columns=columns,
+            group_by=group_by,
+            link_template=link_template,
+            badge_colors=badge_colors,
+            format=fmt,
+            hint=hint,
+            detail=detail,
         )
         sections.setdefault(meta['section'], []).append(entry)
     layout = ProbeDetailsLayout(
@@ -407,6 +488,38 @@ def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
     )
     _layout_cache[model] = layout
     return layout
+
+
+def referenced_bases(layout: ProbeDetailsLayout) -> set[str]:
+    """Collect every named base a layout's templates reference.
+
+    App startup compares this against ``ui.link_bases`` and warns about
+    missing entries — a warning, not an error, because environments may
+    deliberately omit a base (the UI then renders plain text).
+    """
+    # builtins.set(), not set(): this module's `set` verb shadows the builtin.
+    bases: set[str] = builtins.set()
+
+    def _scan(template: str | None) -> None:
+        if not template:
+            return
+        for token in _TEMPLATE_TOKEN_RE.findall(template):
+            if token != 'value' and not token.startswith('row.'):
+                bases.add(token)
+
+    for section in layout.sections:
+        for entry in section.entries:
+            _scan(entry.link_template)
+            _scan(entry.hint)
+            for col in entry.columns or []:
+                _scan(col.link_template)
+                _scan(col.hint)
+            if entry.detail:
+                _scan(entry.detail.title)
+                for element in entry.detail.elements:
+                    for link in element.links or []:
+                        _scan(link.template)
+    return bases
 
 
 # ---- per-probe state --------------------------------------------------------
