@@ -1,4 +1,4 @@
-"""Declared UI pages (Phase 2): author models, validation, and wire schema.
+"""Declared UI pages: author models, validation, and wire schema.
 
 A deployment may declare a handful of custom dashboard pages in config —
 each a list of widgets reading from one of a fixed set of built-in sources
@@ -197,7 +197,14 @@ def _validate_widget(widget: Widget, *, where: str) -> UIPageWidget:
     """Validate one widget's view/source/field/columns pairing and build its wire form."""
     if not widget.title:
         raise UIPagesConfigError(f'{where}: title must not be empty')
-    if widget.columns is not None and widget.view != 'table':
+    if widget.view == 'table':
+        # Page rows are dynamic dicts (event/annotation/task payloads), not a
+        # fixed model — unlike probe-details' table view, there is no row
+        # model to derive a default column set from, so an omitted `columns`
+        # cannot fall back to "every field" the way probe-details does.
+        if not widget.columns:
+            raise UIPagesConfigError(f"{where}: view 'table' requires columns=[...] or columns={{...}}")
+    elif widget.columns is not None:
         raise UIPagesConfigError(f"{where}: columns is only valid with view='table'")
     if widget.view in ('string', 'badge') and not widget.field:
         raise UIPagesConfigError(f"{where}: view '{widget.view}' requires field")

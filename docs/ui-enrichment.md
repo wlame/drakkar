@@ -318,6 +318,9 @@ with one addition specific to enrichment:
 - [Probe User Details](probe-user-details.md) — registering the model these
   options attach to, the six view kinds, and the `probe.set` / `probe.append`
   / `probe.update` fill API
+- [Declared UI Pages](ui-pages.md) — a `table` widget's `columns` reuses
+  this same `Column` verbatim, addressed by a declared page instead of a
+  probe run
 - [Configuration](configuration.md#ui-flight-recorder-ui) — the full `ui.*`
   config section, including `ui.link_bases`
 - [Annotations](annotations.md) — the message/task/window-scoped sibling of

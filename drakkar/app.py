@@ -90,8 +90,8 @@ class DrakkarApp:
         # narrows `type[BaseModel] | None` to `type[BaseModel]` below.
         probe_details_model = handler.probe_details_model
         layout = build_layout(probe_details_model) if probe_details_model is not None else None
-        # Fail fast on invalid declared UI pages (Phase 2) too — same
-        # philosophy, and unconditional (not gated on a probe model being
+        # Fail fast on invalid declared UI pages too — same philosophy,
+        # and unconditional (not gated on a probe model being
         # registered): a page/widget declaration mistake is a deploy-time
         # bug regardless of whether the User-defined probe tab is in use.
         self._ui_pages: list[UIPage] = build_pages(getattr(handler, 'ui_pages', None))
@@ -213,7 +213,7 @@ class DrakkarApp:
 
     @property
     def ui_pages(self) -> list[UIPage]:
-        """Return the validated declared UI pages (Phase 2), wire form.
+        """Return the validated declared UI pages, wire form.
 
         Empty list when the handler declares none. Read by the debug/API
         server for ``GET /api/v1/pages``.

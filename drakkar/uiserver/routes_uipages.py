@@ -1,4 +1,4 @@
-"""Declared UI pages (Phase 2): ``GET /api/v1/pages``.
+"""Declared UI pages: ``GET /api/v1/pages``.
 
 Serves the handler's validated page declarations (see
 :mod:`drakkar.uipages`) verbatim — an empty list when the handler declares

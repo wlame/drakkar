@@ -74,10 +74,10 @@ class DrakkarHandler(Protocol[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # One details model per handler; registering it is the opt-in for the
     # probe's User-defined tab.
     probe_details_model: type[BaseModel] | None
-    # Declared UI pages (Phase 2): a deployment's custom dashboard pages,
-    # each a list of widgets reading from a built-in source. Registering
-    # these is the opt-in for the extra nav entries; validated at startup
-    # via drakkar.uipages.build_pages.
+    # Declared UI pages: a deployment's custom dashboard pages, each a
+    # list of widgets reading from a built-in source. Registering these
+    # is the opt-in for the extra nav entries; validated at startup via
+    # drakkar.uipages.build_pages.
     ui_pages: list[Page] | None
     # Handler-facing cache. Always non-None by the time user hooks are called:
     # either a real Cache (when cache.enabled=true) or a NoOpCache stub
@@ -201,7 +201,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # One details model per handler; registering it is the opt-in for the
     # probe's User-defined tab.
     probe_details_model: type[BaseModel] | None = None
-    # Declared UI pages (Phase 2); see the Protocol attribute above.
+    # Declared UI pages; see the Protocol attribute above.
     ui_pages: list[Page] | None = None
 
     # Handler-facing cache attribute. The framework reassigns this to either

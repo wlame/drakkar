@@ -65,7 +65,7 @@ def mock_app():
     # ``handler=None`` pins hook_flags to the deterministic all-False branch.
     app.handler = None
     app._consumer = None
-    # No declared UI pages (Phase 2) by default; client_with_pages overrides.
+    # No declared UI pages by default; client_with_pages overrides.
     app.ui_pages = []
 
     pool = MagicMock()
@@ -111,7 +111,7 @@ async def client_with_link_bases(tmp_path, mock_recorder, mock_app):
 
 @pytest.fixture
 async def client_with_pages(tmp_path, mock_recorder, mock_app):
-    """A client whose app declares one page (Phase 2), mirroring the uipages golden fixture."""
+    """A client whose app declares one page, mirroring the uipages golden fixture."""
     from drakkar.probe import Column
     from drakkar.uipages import AnnotationsSource, Page, Widget, build_pages
 
@@ -870,7 +870,7 @@ class TestApiV1Identity:
 
 
 # ---------------------------------------------------------------------------
-# Declared UI pages (Phase 2): GET /api/v1/pages (v1-only)
+# Declared UI pages: GET /api/v1/pages (v1-only)
 # ---------------------------------------------------------------------------
 
 

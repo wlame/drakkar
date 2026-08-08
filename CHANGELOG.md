@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ui.link_bases` does not configure. Not a startup error — the affected
   links just render as plain text — but now visible in logs instead of
   discovered by clicking a dead link.
+- Declared UI pages: a handler lists custom dashboard pages on a new
+  `ui_pages` attribute, each a set of widgets reading from a built-in data
+  source (events, annotations, tasks, metrics) with no new data endpoint
+  and no client-side code. Validated at startup like probe-details, served
+  on `GET /api/v1/pages`, and rendered by the UI at `/p/<slug>` with one
+  nav entry per page. Documented in docs/ui-pages.md.
 
 ### Fixed
 

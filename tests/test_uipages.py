@@ -1,4 +1,4 @@
-"""Tests for declared UI pages (Phase 2): models, validation, wire schema."""
+"""Tests for declared UI pages: models, validation, wire schema."""
 
 import pytest
 from pydantic import ValidationError
@@ -96,6 +96,18 @@ def test_columns_only_valid_on_table_view():
     widget = Widget(title='W', view='keyvalue', source=TasksSource(), columns=['a'])
     with pytest.raises(UIPagesConfigError, match='columns'):
         build_pages([_page(widgets=[widget])])
+
+
+def test_table_view_requires_columns():
+    """Page rows are dynamic dicts, so an omitted `columns` cannot fall back to
+    "every field" the way probe-details' fixed-row-model table view does — an
+    omitted columns produces a blank table on the wire, not a full one."""
+    widget = Widget(title='W', view='table', source=TasksSource())
+    with pytest.raises(UIPagesConfigError, match='requires columns'):
+        build_pages([_page(widgets=[widget])])
+    empty_list = Widget(title='W', view='table', source=TasksSource(), columns=[])
+    with pytest.raises(UIPagesConfigError, match='requires columns'):
+        build_pages([_page(widgets=[empty_list])])
 
 
 def test_badge_view_requires_field_and_colors():

@@ -54,6 +54,7 @@ nav:
   - Annotations (your diagnostics in the UI): annotations.md
   - Probe User Details (your own tab in the Message Probe): probe-user-details.md
   - UI Enrichment (links, badges, formats, detail panels): ui-enrichment.md
+  - Declared UI Pages (your own dashboard pages): ui-pages.md
   - Configuration: configuration.md
   - Features & Enable Order: features.md
   - Sinks: sinks.md
