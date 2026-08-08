@@ -8,21 +8,36 @@
           "label": "Strategy note",
           "view": "string",
           "columns": null,
-          "group_by": null
+          "group_by": null,
+          "link_template": null,
+          "badge_colors": null,
+          "format": null,
+          "hint": null,
+          "detail": null
         },
         {
           "key": "counters",
           "label": "Counters",
           "view": "keyvalue",
           "columns": null,
-          "group_by": null
+          "group_by": null,
+          "link_template": null,
+          "badge_colors": null,
+          "format": null,
+          "hint": null,
+          "detail": null
         },
         {
           "key": "context_blob",
           "label": "Context blob",
           "view": "dict",
           "columns": null,
-          "group_by": null
+          "group_by": null,
+          "link_template": null,
+          "badge_colors": null,
+          "format": null,
+          "hint": null,
+          "detail": null
         }
       ]
     },
@@ -36,14 +51,27 @@
           "columns": [
             {
               "key": "item_id",
-              "label": "Item id"
+              "label": "Item id",
+              "link_template": null,
+              "badge_colors": null,
+              "format": null,
+              "hint": null
             },
             {
               "key": "score",
-              "label": "Score"
+              "label": "Score",
+              "link_template": null,
+              "badge_colors": null,
+              "format": null,
+              "hint": null
             }
           ],
-          "group_by": null
+          "group_by": null,
+          "link_template": null,
+          "badge_colors": null,
+          "format": null,
+          "hint": null,
+          "detail": null
         },
         {
           "key": "per_file_rows",
@@ -52,14 +80,27 @@
           "columns": [
             {
               "key": "item_id",
-              "label": "Item id"
+              "label": "Item id",
+              "link_template": null,
+              "badge_colors": null,
+              "format": null,
+              "hint": null
             },
             {
               "key": "score",
-              "label": "Score"
+              "label": "Score",
+              "link_template": null,
+              "badge_colors": null,
+              "format": null,
+              "hint": null
             }
           ],
-          "group_by": null
+          "group_by": null,
+          "link_template": null,
+          "badge_colors": null,
+          "format": null,
+          "hint": null,
+          "detail": null
         },
         {
           "key": "tree_matches",
@@ -68,21 +109,133 @@
           "columns": [
             {
               "key": "file",
-              "label": "File"
+              "label": "File",
+              "link_template": null,
+              "badge_colors": null,
+              "format": null,
+              "hint": null
             },
             {
               "key": "section",
-              "label": "Section"
+              "label": "Section",
+              "link_template": null,
+              "badge_colors": null,
+              "format": null,
+              "hint": null
             },
             {
               "key": "score",
-              "label": "Score"
+              "label": "Score",
+              "link_template": null,
+              "badge_colors": null,
+              "format": null,
+              "hint": null
             }
           ],
           "group_by": [
             "file",
             "section"
-          ]
+          ],
+          "link_template": null,
+          "badge_colors": null,
+          "format": null,
+          "hint": null,
+          "detail": null
+        }
+      ]
+    },
+    {
+      "title": "Enrichment",
+      "entries": [
+        {
+          "key": "release_state",
+          "label": "Release state",
+          "view": "badge",
+          "columns": null,
+          "group_by": null,
+          "link_template": null,
+          "badge_colors": {
+            "shipped": "green",
+            "blocked": "red",
+            "*": "gray"
+          },
+          "format": null,
+          "hint": null,
+          "detail": null
+        },
+        {
+          "key": "build_rows",
+          "label": "Build rows",
+          "view": "table",
+          "columns": [
+            {
+              "key": "build_id",
+              "label": "Build id",
+              "link_template": "{jenkins}/job/{row.job_name}/{value}",
+              "badge_colors": null,
+              "format": null,
+              "hint": "Open build {value}"
+            },
+            {
+              "key": "duration_ms",
+              "label": "Duration ms",
+              "link_template": null,
+              "badge_colors": null,
+              "format": "duration_ms",
+              "hint": null
+            },
+            {
+              "key": "outcome",
+              "label": "Outcome",
+              "link_template": null,
+              "badge_colors": {
+                "passed": "green",
+                "failed": "red",
+                "*": "gray"
+              },
+              "format": null,
+              "hint": null
+            }
+          ],
+          "group_by": null,
+          "link_template": null,
+          "badge_colors": null,
+          "format": null,
+          "hint": null,
+          "detail": {
+            "title": "Build {row.build_id}",
+            "elements": [
+              {
+                "view": "string",
+                "field": "job_name",
+                "label": null,
+                "links": null
+              },
+              {
+                "view": "keyvalue",
+                "field": "labels",
+                "label": null,
+                "links": null
+              },
+              {
+                "view": "table",
+                "field": "steps",
+                "label": null,
+                "links": null
+              },
+              {
+                "view": "links",
+                "field": null,
+                "label": null,
+                "links": [
+                  {
+                    "label": "Jenkins job",
+                    "template": "{jenkins}/job/{row.job_name}"
+                  }
+                ]
+              }
+            ]
+          }
         }
       ]
     }

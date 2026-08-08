@@ -7,6 +7,10 @@ import pytest
 from pydantic import BaseModel
 
 from drakkar.probe import (
+    Column,
+    Detail,
+    Element,
+    Link,
     ProbeDetailsConfigError,
     build_layout,
     probe_field,
@@ -233,6 +237,15 @@ class ParityTreeRow(BaseModel):
     score: float
 
 
+class GoldenBuildRow(BaseModel):
+    build_id: str
+    job_name: str
+    duration_ms: int
+    outcome: str
+    labels: dict[str, str]
+    steps: list[dict]
+
+
 class ParityDetails(BaseModel):
     strategy_note: str | None = probe_field(section='Arrange', view='string', default=None)
     counters: dict[str, int] = probe_field(section='Arrange', view='keyvalue', default_factory=dict)
@@ -241,6 +254,39 @@ class ParityDetails(BaseModel):
     per_file_rows: dict[str, list[ParityRow]] = probe_field(section='Tasks', view='tables', default_factory=dict)
     tree_matches: list[ParityTreeRow] = probe_field(
         section='Tasks', view='tree', group_by=('file', 'section'), default_factory=list
+    )
+    release_state: str = probe_field(
+        section='Enrichment',
+        view='badge',
+        badge_colors={'shipped': 'green', 'blocked': 'red', '*': 'gray'},
+        default='',
+    )
+    build_rows: list[GoldenBuildRow] = probe_field(
+        section='Enrichment',
+        view='table',
+        default_factory=list,
+        columns={
+            'build_id': Column(
+                link_template='{jenkins}/job/{row.job_name}/{value}',
+                hint='Open build {value}',
+            ),
+            'duration_ms': Column(format='duration_ms'),
+            'outcome': Column(badge_colors={'passed': 'green', 'failed': 'red', '*': 'gray'}),
+        },
+        detail=Detail(
+            title='Build {row.build_id}',
+            elements=[
+                Element(field='job_name', view='string'),
+                Element(field='labels', view='keyvalue'),
+                Element(field='steps', view='table'),
+                Element(
+                    view='links',
+                    links=[
+                        Link(label='Jenkins job', template='{jenkins}/job/{row.job_name}'),
+                    ],
+                ),
+            ],
+        ),
     )
 
 
