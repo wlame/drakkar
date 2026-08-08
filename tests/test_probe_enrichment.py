@@ -170,6 +170,23 @@ def test_column_badge_colors_rejects_unknown_color_name():
         build_layout(M)
 
 
+def test_column_badge_colors_rejects_empty_dict():
+    M = _table_model(columns={'build_id': Column(badge_colors={})})
+    with pytest.raises(ProbeDetailsConfigError, match='badge_colors must not be empty'):
+        build_layout(M)
+
+
+def test_columns_list_rejects_duplicate_names():
+    with pytest.raises(ProbeDetailsConfigError, match='duplicate column name'):
+        probe_field(section='S', view='table', columns=['build_id', 'build_id'], default_factory=list)
+
+
+def test_detail_rejects_empty_elements():
+    M = _table_model(detail=Detail(elements=[]))
+    with pytest.raises(ProbeDetailsConfigError, match='detail requires at least one element'):
+        build_layout(M)
+
+
 def test_detail_element_fields_must_exist_on_row_model():
     M = _table_model(detail=Detail(elements=[Element(field='nope', view='string')]))
     with pytest.raises(ProbeDetailsConfigError, match="'nope'"):

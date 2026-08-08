@@ -161,6 +161,10 @@ def probe_field(
         raise ProbeDetailsConfigError('probe_field: link_template and detail are mutually exclusive')
     columns_map: dict[str, Column] | None = None
     if columns is not None:
+        # dict.fromkeys, not set(): this module's `set` verb shadows the
+        # builtin (see the note above the logging-like API below).
+        if not isinstance(columns, dict) and len(dict.fromkeys(columns)) != len(columns):
+            raise ProbeDetailsConfigError('probe_field: duplicate column name in columns')
         columns_map = dict(columns) if isinstance(columns, dict) else {name: Column() for name in columns}
         if not columns_map:
             raise ProbeDetailsConfigError('probe_field: columns must not be empty')
@@ -438,6 +442,8 @@ def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
                     for template in (col.link_template, col.hint):
                         if template:
                             _validate_template(template, where=f'{where}.{col.key}', row_fields=row_fields)
+                    if col.badge_colors is not None and not col.badge_colors:
+                        raise ProbeDetailsConfigError(f'{where}.{col.key}: badge_colors must not be empty')
                     if col.badge_colors:
                         for value_name, color in col.badge_colors.items():
                             if color not in BADGE_COLOR_NAMES:
@@ -446,6 +452,8 @@ def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
                                     f"'{value_name}' (expected one of {BADGE_COLOR_NAMES})"
                                 )
             if detail is not None:
+                if not detail.elements:
+                    raise ProbeDetailsConfigError(f'{where}: detail requires at least one element')
                 if detail.title:
                     _validate_template(detail.title, where=where, row_fields=row_fields)
                 for i, element in enumerate(detail.elements):

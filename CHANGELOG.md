@@ -29,6 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   links just render as plain text — but now visible in logs instead of
   discovered by clicking a dead link.
 
+### Fixed
+
+- UI enrichment now rejects three previously-silent boot-time mistakes:
+  a duplicate column name in `columns=[...]`, an empty `badge_colors={}`
+  on a `Column`, and an empty `elements=[]` on a `Detail` all raise
+  `ProbeDetailsConfigError` instead of passing through to a degraded UI.
+- Corrected docs/ui-enrichment.md: percent-encoding applies only to the
+  `{value}`/`{row.*}` substitutions in a link template, not the base
+  itself (inserted verbatim); an unmapped badge value with no `'*'`
+  fallback renders as a neutral pill, not plain text.
+
 ## [1.9.0] - 2026-08-08
 
 ### Added

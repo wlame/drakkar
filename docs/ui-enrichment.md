@@ -96,10 +96,13 @@ subsets of `ui.link_bases`. Instead:
   text** for anything it can't — a value with an unresolved link never
   becomes a dead anchor.
 
-Percent-encoding applies to every token substituted into a URL (`{value}`,
-`{row.*}`, and the base itself), so a value containing `/` or spaces can't
-break the link's path structure. Display text — hints and detail titles —
-substitutes the same tokens unencoded, since it's read, not navigated.
+Percent-encoding applies to the `{value}` and `{row.*}` substitutions in a
+URL, so a value containing `/` or spaces can't break the link's path
+structure. The base itself is inserted verbatim — it's a trusted URL prefix
+from config, not row or user data, and encoding it would break every link
+that relies on its own `/` structure. Display text — hints and detail
+titles — substitutes the same tokens unencoded, since it's read, not
+navigated.
 
 ---
 
@@ -127,9 +130,9 @@ release_state: str = probe_field(
 )
 ```
 
-A value that matches no key and has no `'*'` fallback renders as plain text
-— badges degrade the same way unresolved links do, never as a broken or
-blank pill.
+A value that matches no key and has no `'*'` fallback still renders as a
+badge — a neutral pill in the base (uncolored) badge style, never plain
+text and never a broken or blank pill.
 
 Table columns get badges the same way, via `Column(badge_colors=...)`
 instead of a top-level `view='badge'` field — see
@@ -301,8 +304,12 @@ with one addition specific to enrichment:
 | When | Example | What happens |
 |---|---|---|
 | **Startup** | `badge_colors` on a non-`badge` view, an unknown badge color name, a malformed template, `columns` naming a field the row model doesn't have, a `detail` element's `field` not on the row model, `link_template` and `detail` both set | `ProbeDetailsConfigError` — the app never starts. |
+| **Startup** | A duplicate column name in `columns=[...]` | `ProbeDetailsConfigError` — the app never starts. |
+| **Startup** | An empty `badge_colors={}` on a `Column` | `ProbeDetailsConfigError` — the app never starts. |
+| **Startup** | An empty `elements=[]` on a `Detail` | `ProbeDetailsConfigError` — the app never starts. |
 | **Startup (warning only)** | A template references a base (`{jenkins}`) that `ui.link_bases` doesn't configure | One `probe_details_link_bases_missing` warning naming every missing base; the app still starts. |
-| **Render time** | The warned-about missing base, a badge value with no matching color and no `'*'` fallback | The UI renders plain text (or an un-colored value) instead of a broken link or blank badge — never a dead anchor. |
+| **Render time** | The warned-about missing base | The UI renders plain text instead of a broken link — never a dead anchor. |
+| **Render time** | A badge value with no matching color and no `'*'` fallback | The UI renders a neutral (uncolored) pill instead of a colored one — never plain text or a blank/broken pill. |
 
 ---
 
