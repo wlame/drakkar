@@ -1145,6 +1145,18 @@ class UIConfig(BaseModel):
             'logs one startup warning and the UI renders plain text for it.'
         ),
     )
+    custom_renderers_path: str = Field(
+        default='',
+        description=(
+            'Path to a deployment-provided JS module of custom cell '
+            'renderers, served as-is at ``GET /api/v1/ui/renderers.js``. '
+            'Empty (the default) disables the feature — the route then '
+            '404s and identity reports ``custom_renderers: false``. When '
+            'set, the file must exist at startup or the worker fails to '
+            'boot; its content is trusted the same as any other backend '
+            'config (it runs same-origin in the operator UI).'
+        ),
+    )
     recorder: UIRecorderConfig = Field(default_factory=UIRecorderConfig)
     release: UIReleaseConfig = Field(default_factory=UIReleaseConfig)
     probe_details: UIProbeDetailsConfig = Field(default_factory=UIProbeDetailsConfig)

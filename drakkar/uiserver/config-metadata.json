@@ -1302,6 +1302,16 @@
           "group": "ui"
         },
         {
+          "path": "ui.custom_renderers_path",
+          "env": "DK_UI__CUSTOM_RENDERERS_PATH",
+          "description": "Path to a deployment-provided JS module of custom cell renderers, served as-is at ``GET /api/v1/ui/renderers.js``.",
+          "full_description": "Path to a deployment-provided JS module of custom cell renderers, served as-is at ``GET /api/v1/ui/renderers.js``. Empty (the default) disables the feature — the route then 404s and identity reports ``custom_renderers: false``. When set, the file must exist at startup or the worker fails to boot; its content is trusted the same as any other backend config (it runs same-origin in the operator UI).",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
           "path": "ui.recorder.db_dir",
           "env": "DK_UI__RECORDER__DB_DIR",
           "description": "",

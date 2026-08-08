@@ -95,6 +95,16 @@ class DrakkarApp:
         # registered): a page/widget declaration mistake is a deploy-time
         # bug regardless of whether the User-defined probe tab is in use.
         self._ui_pages: list[UIPage] = build_pages(getattr(handler, 'ui_pages', None))
+        # Fail fast when a configured custom-renderers module does not
+        # exist — same philosophy as the checks above (a deploy-time typo
+        # should break at boot, not silently 404 the first cell that tries
+        # to use it) and unconditional on ui.enabled for the same reason
+        # build_layout/build_pages are. The router factory reads the
+        # file's CONTENT later; this only confirms the path resolves.
+        if self._config.ui.custom_renderers_path:
+            renderers_path = Path(self._config.ui.custom_renderers_path)
+            if not renderers_path.is_file():
+                raise ValueError(f'ui.custom_renderers_path does not exist or is not a file: {renderers_path}')
         # Templates — both the probe-details layout and declared pages —
         # may reference a base (e.g. {jira}) that the deployment never
         # configured in ui.link_bases — not a startup error, since the UI

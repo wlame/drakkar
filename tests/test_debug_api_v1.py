@@ -789,11 +789,13 @@ class TestApiV1Identity:
             'ui_version',
             'ui_source',
             'link_bases',
+            'custom_renderers',
         }
         assert data['worker_id'] == 'test-worker'
         assert data['cluster'] is None  # empty cluster name serializes as null
         assert data['config_summary'] == '[test-worker] topic=input-events group=drakkar-workers'
         assert data['link_bases'] == {}  # unset link_bases still reports as an empty object
+        assert data['custom_renderers'] is False  # unset custom_renderers_path reports as False
         # v1.2: backend flavor + versions. Built-in pages serve in this
         # fixture, so the UI fields report the builtin fallback.
         assert data['backend'] == 'python'
@@ -867,6 +869,16 @@ class TestApiV1Identity:
         res = await client_with_link_bases.get('/api/v1/identity')
         assert res.status_code == 200
         assert res.json()['link_bases'] == {'jira': 'https://jira.internal.example.com'}
+
+    async def test_identity_reports_custom_renderers_when_configured(self, tmp_path, mock_recorder, mock_app):
+        renderers_path = tmp_path / 'custom-renderers.js'
+        renderers_path.write_text('export default {}\n')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), custom_renderers_path=str(renderers_path))
+        mock_app.config_summary = '[test-worker]'
+        mock_recorder.config = cfg
+        async with make_client(cfg, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/identity')
+        assert resp.json()['custom_renderers'] is True
 
 
 # ---------------------------------------------------------------------------

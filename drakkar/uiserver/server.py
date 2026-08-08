@@ -542,6 +542,7 @@ def create_ui_app(
     from drakkar.uiserver.routes_live import create_live_router
     from drakkar.uiserver.routes_openapi import create_openapi_router
     from drakkar.uiserver.routes_pages import create_pages_router
+    from drakkar.uiserver.routes_renderers import create_renderers_router
     from drakkar.uiserver.routes_runtime import create_runtime_router
     from drakkar.uiserver.routes_spa import create_spa_router
     from drakkar.uiserver.routes_uipages import create_uipages_router
@@ -603,6 +604,7 @@ def create_ui_app(
         create_runtime_router(deps),
         create_config_reference_router(deps),
         create_uipages_router(deps),
+        create_renderers_router(deps),
         create_openapi_router(deps),
     )
     for router in routers:
