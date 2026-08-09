@@ -12,6 +12,9 @@ arguments that add exactly that presentation, without changing what the
 field *is* — a `table` field enriched with a link template is still a
 `table` field; the enrichment only changes how one column renders.
 
+For a guided end-to-end walkthrough that builds one example through every
+option below, see the [UI customization cookbook](ui-customization-cookbook.md).
+
 ```python
 class BuildRow(BaseModel):
     build_id: str

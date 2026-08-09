@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/ui-pages.md` shows the `ui.link_bases` config its opening example
   relies on; `docs/probe-user-details.md`'s "See also" links forward to
   both.
+- Documentation: `docs/ui-customization-cookbook.md`, a five-step worked
+  example building one handler from a plain probe-details tab through
+  links/badges/formats, a detail popup, a declared page, and a custom
+  renderer. Linked from `docs/ui-enrichment.md` and `docs/ui-pages.md`.
 
 ### Fixed
 

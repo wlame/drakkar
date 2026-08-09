@@ -46,6 +46,10 @@ live WebSocket as new annotations arrive; the stat tile polls on a flat
 30-second interval instead, since a metric sum has no single event that
 means "this changed."
 
+For a guided end-to-end walkthrough that builds one example through every
+enrichment option and a declared page, see the
+[UI customization cookbook](ui-customization-cookbook.md).
+
 The `{shop_admin}` token above resolves the same way it would in a
 probe-details `link_template` — from `ui.link_bases`:
 
