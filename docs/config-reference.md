@@ -401,6 +401,11 @@ ui:
                                    # e.g. {jira: 'https://jira.internal.example.com'}; a template base
                                    # missing here logs a startup warning and renders as plain text.
 
+  # --- Deployment-provided custom cell renderers module (see ui-enrichment.md) ---
+  custom_renderers_path: ''        # path to a JS module served at /api/v1/ui/renderers.js. env: DK_UI__CUSTOM_RENDERERS_PATH
+                                   # '' = off. Must exist at boot when set. Referenced from
+                                   # probe_field(view='custom', renderer=...) / Column(renderer=...).
+
   # --- Flight recorder (persistence; all flags require non-empty db_dir) ---
   recorder:
     db_dir: /tmp                     # SQLite directory. Empty = no disk persistence. env: DK_UI__RECORDER__DB_DIR

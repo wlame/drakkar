@@ -156,10 +156,13 @@ for `stat` to show.
 
 A `table` widget's `columns` is the exact same `Column` used by
 [probe-details table columns](ui-enrichment.md#column-subsets-and-per-column-options)
-— `link_template`, `badge_colors`, `format`, `hint`, and `label` all mean
-what they mean there, with the same template grammar (`{value}` /
-`{row.<field>}` / `{<base>}`) and the same `ui.link_bases` resolution.
-Nothing about enrichment is reinvented for pages; a page widget just
+— `link_template`, `badge_colors`, `format`, `hint`, `renderer`, and
+`label` all mean what they mean there, with the same template grammar
+(`{value}` / `{row.<field>}` / `{<base>}`) and the same `ui.link_bases`
+resolution. That includes
+[custom cell renderers](ui-enrichment.md#custom-cell-renderers) — a page
+table column can name a `renderer` the same way a probe-details column
+does. Nothing about enrichment is reinvented for pages; a page widget just
 addresses that machinery from a declared page instead of a probe run.
 
 ---

@@ -204,6 +204,7 @@ class Column(BaseModel):
     badge_colors: dict[str, str] | None = None
     format: Literal['duration_ms', 'bytes', 'timestamp', 'number'] | None = None
     hint: str | None = None
+    renderer: str | None = None
 ```
 
 `Column.label` overrides that one column's auto-generated heading, the same
@@ -226,10 +227,11 @@ class Link(BaseModel):
 
 
 class Element(BaseModel):
-    view: Literal['string', 'keyvalue', 'table', 'links']
+    view: Literal['string', 'keyvalue', 'table', 'links', 'custom']
     field: str | None = None      # required for every view except 'links'
     label: str | None = None
     links: list[Link] | None = None  # required for view='links', forbidden otherwise
+    renderer: str | None = None      # required for and exclusive to view='custom'
 
 
 class Detail(BaseModel):
@@ -296,6 +298,130 @@ Rules, enforced at startup:
 
 ---
 
+## Custom cell renderers
+
+Links, badges, and formats cover the common cases; a **custom renderer** is
+the escape hatch for presentation none of them can express — a mini chart,
+a composite card, a copy-to-clipboard chip. Instead of a built-in
+transform, `renderer` names a JavaScript function from a deployment-owned
+module that builds the cell's DOM directly.
+
+### Config: `ui.custom_renderers_path`
+
+```yaml
+ui:
+  custom_renderers_path: /etc/drakkar/renderers.js
+```
+
+The file must exist at boot — a missing or unreadable path is a startup
+error, the same fail-fast posture as every other UI config mistake. Leave
+it at the default `''` to keep the feature off: `GET /api/v1/identity`
+reports `custom_renderers: false`, and the UI never fetches or imports
+anything.
+
+### The module contract
+
+The module's `default` export is a plain object mapping renderer names to
+functions:
+
+```javascript
+function orderCard(value, row, cell) {
+  const el = document.createElement('div');
+  el.className = 'order-card';
+  el.textContent = `${row.order_id} — ${value}`;
+  return el;
+}
+
+export default {
+  orderCard,
+  // ... more renderers
+};
+```
+
+Each function has the signature `(value, row, cell) => HTMLElement`:
+
+- **`value`** — the cell's raw decoded value, the same value the built-in
+  link/badge/format path would have received.
+- **`row`** — the full row object for a table/tables/tree column;
+  `undefined` for a scalar field or a detail-panel element (there is no
+  sibling row to hand over).
+- **`cell`** — a small context object, `{key}`: the column key, the
+  field name, or the detail element's field, whichever declared the
+  renderer.
+- The function **must return a real `HTMLElement` synchronously**. A
+  string, a Promise, or `undefined` is treated as a failure — see
+  [Fallback](#fallback-never-blank-never-a-crash) below.
+
+A renderer name is a plain identifier: `^[a-zA-Z_][a-zA-Z0-9_]*$`.
+
+### Where `renderer` is legal
+
+| Where | How |
+|---|---|
+| `probe_field(view='custom', renderer='name')` | Any field type — the renderer receives the raw JSON value, whatever shape it is. `link_template`, `badge_colors`, and `format` are forbidden alongside it. |
+| `Column(renderer='name')` | A table/tables/tree column. `Column` has no `view` field, so a column opts in with bare `renderer=` rather than a `view='custom'` concept — same authoring power as the scalar and detail-element forms. Exclusive with `link_template`, `badge_colors`, and `format` on that column. |
+| `Element(view='custom', field=..., renderer='name')` | A detail-panel element. |
+
+```python
+render_payload: dict = probe_field(
+    section='Enrichment', view='custom', renderer='orderCard', default_factory=dict,
+)
+```
+
+```python
+columns={'build_id': Column(renderer='buildChip', hint='Open build {value}')}
+```
+
+!!! note "`hint` is not in the exclusion list"
+    A `Column` (or top-level field) may declare `renderer` **and** `hint`
+    together — `hint`'s tooltip still resolves and lands on the cell, next
+    to whatever the renderer mounts inside it. `link_template`,
+    `badge_colors`, and `format` are the only options `renderer` excludes.
+
+Page table columns ([Declared UI Pages](ui-pages.md#column-enrichment-reuse))
+accept `renderer` too — they reuse this same `Column`.
+
+### Fallback: never blank, never a crash
+
+A custom renderer runs deployment code the framework doesn't control, so
+every way it can go wrong degrades to the cell's normal default content
+plus one `console.warn` — never a blank cell, never a broken page:
+
+1. The module 404s, or the fetch/dynamic-import fails (network error,
+   syntax error in the module).
+2. The module's default export is not a plain object.
+3. No entry exists under the declared `renderer` name.
+4. The named entry is not a function.
+5. The function throws.
+6. The function returns something other than an `HTMLElement`.
+
+### Serving and caching
+
+`GET /api/v1/ui/renderers.js` serves the configured module byte-for-byte,
+same-origin, `Content-Type: text/javascript`, behind the same auth as every
+other `/api/v1/*` route (`Authorization: Bearer <token>` or `?token=<token>`
+— the dynamic `import()` the UI uses to load it can't carry a header, so
+the token rides as a query parameter). Cached with a content-hash `ETag`; a
+matching `If-None-Match` gets a `304`. The route is always registered, on
+or off — `404` with `{"enabled": false, "reason": "..."}` in the body when
+`ui.custom_renderers_path` is unset.
+
+The UI loads the module once at boot, via a dynamic `import()`, only when
+`GET /api/v1/identity` reports `custom_renderers: true`.
+
+### Trust model
+
+The module is **deployment-owned code**, not content Drakkar generates —
+it runs with the same trust as the rest of your `ui.*` config (link
+templates, badge colors) and with full DOM access to whatever element it
+returns. Ship it with your worker the same way you ship its YAML config
+file. Serving it same-origin is deliberate: configuring
+`ui.custom_renderers_path` means choosing to run your own JS in the debug
+UI's origin, the same way a link template already chooses the URL it
+points to.
+
+---
+
 ## Validation: what fails at boot vs what degrades at render
 
 The same two-tier error model as the rest of probe-details applies here,
@@ -307,9 +433,12 @@ with one addition specific to enrichment:
 | **Startup** | A duplicate column name in `columns=[...]` | `ProbeDetailsConfigError` — the app never starts. |
 | **Startup** | An empty `badge_colors={}` on a `Column` | `ProbeDetailsConfigError` — the app never starts. |
 | **Startup** | An empty `elements=[]` on a `Detail` | `ProbeDetailsConfigError` — the app never starts. |
+| **Startup** | `renderer` set outside `view='custom'`, `view='custom'` without `renderer`, an invalid renderer name, or `renderer` combined with `link_template`/`badge_colors`/`format` on the same field or `Column` | `ProbeDetailsConfigError` — the app never starts. |
+| **Startup** | `ui.custom_renderers_path` set to a path that doesn't exist or isn't a file | The app never starts. |
 | **Startup (warning only)** | A template references a base (`{jenkins}`) that `ui.link_bases` doesn't configure | One `probe_details_link_bases_missing` warning naming every missing base; the app still starts. |
 | **Render time** | The warned-about missing base | The UI renders plain text instead of a broken link — never a dead anchor. |
 | **Render time** | A badge value with no matching color and no `'*'` fallback | The UI renders a neutral (uncolored) pill instead of a colored one — never plain text or a blank/broken pill. |
+| **Render time** | Any of the [custom-renderer failure modes](#fallback-never-blank-never-a-crash) | The cell falls back to its plain-text default plus one `console.warn` — never a blank cell or a crashed page. |
 
 ---
 
@@ -322,6 +451,6 @@ with one addition specific to enrichment:
   this same `Column` verbatim, addressed by a declared page instead of a
   probe run
 - [Configuration](configuration.md#ui-flight-recorder-ui) — the full `ui.*`
-  config section, including `ui.link_bases`
+  config section, including `ui.link_bases` and `ui.custom_renderers_path`
 - [Annotations](annotations.md) — the message/task/window-scoped sibling of
   probe details

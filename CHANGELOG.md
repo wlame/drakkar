@@ -34,6 +34,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and no client-side code. Validated at startup like probe-details, served
   on `GET /api/v1/pages`, and rendered by the UI at `/p/<slug>` with one
   nav entry per page. Documented in docs/ui-pages.md.
+- Custom cell renderers: `ui.custom_renderers_path` points to a
+  deployment-provided JavaScript module, served at `GET
+  /api/v1/ui/renderers.js` and loaded once by the UI at startup. The
+  module maps names to functions that build a cell's content directly, for
+  presentation the built-in links/badges/formats can't express. New
+  `view='custom'` plus `renderer='name'` on `probe_field()` and `Element`,
+  and a `renderer='name'` option on `Column` (also usable on page table
+  columns), name which function renders that field, column, or
+  detail-panel element. A broken or missing renderer never blanks a cell
+  or crashes the page — it falls back to the field's normal text. `GET
+  /api/v1/identity` now reports `custom_renderers` (true when the module is
+  configured). Documented in docs/ui-enrichment.md.
 
 ### Fixed
 

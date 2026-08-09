@@ -643,6 +643,17 @@ ui:
     jenkins: 'https://jenkins.internal.example.com'
 ```
 
+### Custom Cell Renderers
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `custom_renderers_path` | `str` | `''` | Path to a deployment-provided JavaScript module (see [Custom cell renderers](ui-enrichment.md#custom-cell-renderers)) served at `GET /api/v1/ui/renderers.js` and dynamically imported by the UI. The module's default export maps renderer names to `(value, row, cell) => HTMLElement` functions, referenced from `probe_field(view='custom', renderer=...)`, `Column(renderer=...)`, or `Element(view='custom', renderer=...)`. The file must exist at boot -- a missing or unreadable path fails startup. Empty (the default) turns the feature off; reported as `custom_renderers: false` on `GET /api/v1/identity`. |
+
+```yaml
+ui:
+  custom_renderers_path: /etc/drakkar/renderers.js
+```
+
 ### Flight Recorder (`ui.recorder:`)
 
 Flight-recorder persistence — the UI's data store. All flags below require `db_dir` to be non-empty; any combination of the `store_*` flags is valid.
@@ -700,6 +711,7 @@ ui:
   link_bases:
     jira: 'https://jira.internal.example.com'
     jenkins: 'https://jenkins.internal.example.com'
+  custom_renderers_path: /etc/drakkar/renderers.js
   recorder:
     db_dir: /shared/drakkar-recorder
     store_events: true
