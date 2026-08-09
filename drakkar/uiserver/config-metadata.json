@@ -1560,6 +1560,86 @@
           "default": 5000000,
           "secret": false,
           "group": "ui"
+        },
+        {
+          "path": "ui.timeline.history_factor",
+          "env": "DK_UI__TIMELINE__HISTORY_FACTOR",
+          "description": "Timeline keeps the newest history_factor x executor.max_executors tasks.",
+          "full_description": "Timeline keeps the newest history_factor x executor.max_executors tasks.",
+          "type": "integer",
+          "default": 100,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.max_age_minutes",
+          "env": "DK_UI__TIMELINE__MAX_AGE_MINUTES",
+          "description": "Oldest task age the timeline shows, in minutes.",
+          "full_description": "Oldest task age the timeline shows, in minutes.",
+          "type": "integer",
+          "default": 60,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.color_rules",
+          "env": "DK_UI__TIMELINE__COLOR_RULES",
+          "description": "First-match-wins rules coloring timeline task bars from labels and task fields.",
+          "full_description": "First-match-wins rules coloring timeline task bars from labels and task fields.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.labels.tag",
+          "env": "DK_UI__TIMELINE__LABELS__TAG",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.labels.caption",
+          "env": "DK_UI__TIMELINE__LABELS__CAPTION",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.labels.highlight",
+          "env": "DK_UI__TIMELINE__LABELS__HIGHLIGHT",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.labels.filter",
+          "env": "DK_UI__TIMELINE__LABELS__FILTER",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.timeline.labels.marker",
+          "env": "DK_UI__TIMELINE__LABELS__MARKER",
+          "description": "",
+          "full_description": "",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "ui"
         }
       ]
     },

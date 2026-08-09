@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ui.timeline` config: `history_factor` and `max_age_minutes` control how
+  much task history the timeline keeps, `color_rules` map task labels and
+  fields to bar colors (first match wins), and `labels` name which task
+  label fills the tag, caption, highlight, filter, and marker roles.
 - Declarative UI enrichment for probe-details fields and table columns:
   `probe_field()` and `Column` gain `link_template` (clickable values, with
   `{value}` / `{row.<field>}` / `{<base>}` template tokens), `badge_colors`

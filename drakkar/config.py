@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import structlog
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from drakkar.kafka_security import KafkaSecurityConfig, validate_client_config
@@ -998,6 +998,115 @@ class UIProbeDetailsConfig(BaseModel):
     )
 
 
+# --- Timeline tuning: color rules, label roles, history depth -----------
+#
+# Rule conditions and colors are validated against fixed vocabularies rather
+# than left as free-form strings, so a typo in a YAML rule (an unknown op, a
+# misspelled field) fails config load instead of silently never matching at
+# render time.
+TIMELINE_COLOR_NAMES = frozenset({'green', 'red', 'yellow', 'blue', 'gray', 'lightgray', 'purple', 'orange'})
+TIMELINE_STRING_FIELDS = frozenset({'status', 'origin', 'client_name'})
+TIMELINE_NUMERIC_FIELDS = frozenset(
+    {'exit_code', 'duration', 'stdout_size', 'stdout_lines', 'stdin_size', 'stdin_lines', 'partition'}
+)
+TIMELINE_OPS = frozenset({'eq', 'ne', 'contains', 'prefix', 'gt', 'ge', 'lt', 'le', 'exists', 'missing'})
+_TIMELINE_NO_VALUE_OPS = frozenset({'exists', 'missing'})
+_TIMELINE_STRING_OPS = frozenset({'contains', 'prefix'})
+_TIMELINE_NUMERIC_OPS = frozenset({'gt', 'ge', 'lt', 'le'})
+_TIMELINE_HEX_RE = re.compile(r'#[0-9a-fA-F]{6}')
+
+
+class TimelineRuleCondition(BaseModel):
+    """One condition of a timeline color rule: a label or task field compared with an operator."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    label: str = ''
+    field: str = ''
+    op: str
+    value: str | int | float | None = None
+
+    @model_validator(mode='after')
+    def _validate_condition(self) -> 'TimelineRuleCondition':
+        if bool(self.label) == bool(self.field):
+            raise ValueError('timeline condition must set exactly one of label/field')
+        if self.op not in TIMELINE_OPS:
+            raise ValueError(f"timeline condition op '{self.op}' is not one of {sorted(TIMELINE_OPS)}")
+        if self.op in _TIMELINE_NO_VALUE_OPS and self.value is not None:
+            raise ValueError(f"timeline condition op '{self.op}' takes no value")
+        if self.op not in _TIMELINE_NO_VALUE_OPS and self.value is None:
+            raise ValueError(f"timeline condition op '{self.op}' requires a value")
+        if self.field:
+            if self.field not in TIMELINE_STRING_FIELDS | TIMELINE_NUMERIC_FIELDS:
+                raise ValueError(f"timeline condition field '{self.field}' is not a known task field")
+            if self.op in _TIMELINE_STRING_OPS and self.field in TIMELINE_NUMERIC_FIELDS:
+                raise ValueError(f"op '{self.op}' cannot apply to numeric field '{self.field}'")
+            if self.op in _TIMELINE_NUMERIC_OPS and self.field in TIMELINE_STRING_FIELDS:
+                raise ValueError(f"op '{self.op}' cannot apply to string field '{self.field}'")
+        return self
+
+
+class TimelineColorRule(BaseModel):
+    """A first-match-wins bar-coloring rule: all conditions in `when` must hold."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    name: str = ''
+    when: list[TimelineRuleCondition] = Field(min_length=1)
+    color: str
+
+    @field_validator('when', mode='before')
+    @classmethod
+    def _wrap_single_condition(cls, value: object) -> object:
+        return [value] if isinstance(value, dict) else value
+
+    @field_validator('color')
+    @classmethod
+    def _validate_color(cls, value: str) -> str:
+        if value in TIMELINE_COLOR_NAMES or _TIMELINE_HEX_RE.fullmatch(value):
+            return value
+        raise ValueError(f"timeline color '{value}' must be one of {sorted(TIMELINE_COLOR_NAMES)} or '#rrggbb'")
+
+
+class TimelineLabels(BaseModel):
+    """Which task label the UI uses for each special timeline role; empty = role unbound."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    tag: str = ''
+    caption: str = ''
+    highlight: str = ''
+    filter: str = ''
+    marker: str = ''
+
+
+class UITimelineConfig(BaseModel):
+    """Timeline history depth, bar color rules, and special label roles."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    history_factor: int = Field(
+        default=100,
+        ge=1,
+        description='Timeline keeps the newest history_factor x executor.max_executors tasks.',
+    )
+    max_age_minutes: int = Field(
+        default=60,
+        ge=1,
+        le=1440,
+        description='Oldest task age the timeline shows, in minutes.',
+    )
+    color_rules: list[TimelineColorRule] = Field(
+        default_factory=list,
+        max_length=50,
+        description='First-match-wins rules coloring timeline task bars from labels and task fields.',
+    )
+    labels: TimelineLabels = Field(
+        default_factory=TimelineLabels,
+        description='Task label keys the UI uses for the tag, caption, highlight, filter, and marker roles.',
+    )
+
+
 class UIConfig(BaseModel):
     """The operator web UI: HTTP server, presentation, and sub-sections.
 
@@ -1010,7 +1119,9 @@ class UIConfig(BaseModel):
     - ``ui.release.*`` — drakkar-ui bundle fetching
       (:class:`UIReleaseConfig`);
     - ``ui.probe_details.*`` — write caps for the Message Probe's
-      user-defined details (:class:`UIProbeDetailsConfig`).
+      user-defined details (:class:`UIProbeDetailsConfig`);
+    - ``ui.timeline.*`` — timeline history depth, bar color rules, and
+      label roles (:class:`UITimelineConfig`).
 
     Set ``enabled: false`` to disable the whole UI feature (server,
     recorder persistence, and bundle serving).
@@ -1160,6 +1271,7 @@ class UIConfig(BaseModel):
     recorder: UIRecorderConfig = Field(default_factory=UIRecorderConfig)
     release: UIReleaseConfig = Field(default_factory=UIReleaseConfig)
     probe_details: UIProbeDetailsConfig = Field(default_factory=UIProbeDetailsConfig)
+    timeline: UITimelineConfig = Field(default_factory=UITimelineConfig)
 
     @field_validator('link_bases')
     @classmethod
