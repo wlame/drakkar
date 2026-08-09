@@ -237,13 +237,20 @@ paths:
       operationId: getRecentTasks
       summary: Recent task entries for the timeline
       description: >-
-        Tasks from the last N minutes plus the computed lane count. Archived
-        retry attempts use the `task_id:r<float-ts>` composite-key format;
-        consumers must not rely on positional order.
+        Tasks from the last N minutes plus the computed lane count. `minutes`
+        is clamped further down to `ui.timeline.max_age_minutes` when that
+        config is smaller. `limit` caps the number of tasks returned, newest
+        by start time; it defaults to `ui.timeline.history_factor` times the
+        executor pool's `max_executors` (or times 8 when no pool is
+        attached). Archived retry attempts use the `task_id:r<float-ts>`
+        composite-key format; consumers must not rely on positional order.
       parameters:
         - name: minutes
           in: query
-          schema: {type: integer, default: 2}
+          schema: {type: integer, default: 2, minimum: 1, maximum: 1440}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100000}
       responses:
         '200':
           description: Task entries and lane count.
@@ -959,7 +966,56 @@ components:
           description: >-
             True when ui.custom_renderers_path is configured; the UI only
             fetches GET /api/v1/ui/renderers.js when this is true.
-      required: [worker_id, cluster, config_summary]
+        timeline:
+          $ref: '#/components/schemas/TimelineSettings'
+      required: [worker_id, cluster, config_summary, timeline]
+
+    TimelineRuleCondition:
+      description: >-
+        One condition of a timeline color rule from ui.timeline.color_rules
+        (v1.7): a task label or a task field compared with op/value. Exactly
+        one of label/field is present; value is absent for the value-less
+        ops exists/missing.
+      type: object
+      properties:
+        label: {type: string}
+        field: {type: string}
+        op: {type: string, enum: [eq, ne, contains, prefix, gt, ge, lt, le, exists, missing]}
+        value: {}
+      required: [op]
+
+    TimelineColorRule:
+      description: >-
+        A first-match-wins bar-coloring rule from ui.timeline.color_rules
+        (v1.7). `when` always arrives as an array, even when the source
+        config wrote a single condition.
+      type: object
+      properties:
+        name: {type: string}
+        when:
+          type: array
+          items: {$ref: '#/components/schemas/TimelineRuleCondition'}
+        color: {type: string}
+      required: [name, when, color]
+
+    TimelineSettings:
+      description: >-
+        Timeline history depth, bar-color rules, and label-role bindings
+        from ui.timeline (v1.7).
+      type: object
+      properties:
+        history_factor: {type: integer}
+        max_age_minutes: {type: integer}
+        color_rules:
+          type: array
+          items: {$ref: '#/components/schemas/TimelineColorRule'}
+        labels:
+          type: object
+          additionalProperties: {type: string}
+          description: >-
+            Only the bound label roles (tag, caption, highlight, filter,
+            marker); unbound roles are absent, never an empty string.
+      required: [history_factor, max_age_minutes, color_rules, labels]
 
     Dashboard:
       type: object
@@ -1199,7 +1255,12 @@ components:
           type: array
           items: {$ref: '#/components/schemas/RecentTaskEntry'}
         lane_count: {type: integer}
-      required: [tasks, lane_count]
+        truncated:
+          type: boolean
+          description: >-
+            True when the row cap dropped older events from the query
+            window, or when the result was trimmed down to `limit` tasks.
+      required: [tasks, lane_count, truncated]
 
     RecentTaskEntry:
       type: object
@@ -1212,6 +1273,9 @@ components:
         status: {type: string}
         args: {}
         pid: {type: [integer, 'null']}
+        stdout_size:
+          type: [integer, 'null']
+          description: Captured stdout byte count; null until the task completes.
         slot: {type: [integer, 'null']}
         labels: {type: [object, 'null'], additionalProperties: true}
         env: {type: [object, 'null'], additionalProperties: true}

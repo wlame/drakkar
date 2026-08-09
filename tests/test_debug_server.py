@@ -13,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 from starlette.testclient import TestClient
 
-from drakkar.config import DrakkarConfig
+from drakkar.config import DrakkarConfig, UITimelineConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.server import (
     create_ui_app,
@@ -2224,8 +2224,8 @@ class TestApiRecentTasks:
             (now - 30, '2026-04-02', json.dumps({'slot': 1})),
         )
         await db.execute(
-            'INSERT INTO events (ts, dt, event, partition, task_id, duration, pid) '
-            "VALUES (?, ?, 'task_completed', 0, 'task-1', 1.5, 100)",
+            'INSERT INTO events (ts, dt, event, partition, task_id, duration, pid, stdout_size) '
+            "VALUES (?, ?, 'task_completed', 0, 'task-1', 1.5, 100, 2048)",
             (now - 28, '2026-04-02'),
         )
         # task-2: started but not completed (running)
@@ -2354,6 +2354,147 @@ class TestApiRecentTasks:
         data = resp.json()
         tasks_by_id = {t['task_id']: t for t in data['tasks']}
         assert tasks_by_id['task-1']['slot'] == 1
+        await db.close()
+
+    async def test_recent_tasks_stdout_size_present_on_completion(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=5')
+        data = resp.json()
+        tasks_by_id = {t['task_id']: t for t in data['tasks']}
+        assert tasks_by_id['task-1']['stdout_size'] == 2048
+        assert tasks_by_id['task-2']['stdout_size'] is None
+        await db.close()
+
+
+class TestApiRecentTasksDepthAndWindow:
+    """Cover the ui.timeline-driven `limit`/`minutes` behavior of /api/recent-tasks."""
+
+    async def _make_client(self, tmp_path, mock_recorder, mock_app, *, timeline=None, pool_present=True):
+        import aiosqlite
+
+        from drakkar.recorder import SCHEMA_EVENTS
+
+        db_path = str(tmp_path / 'live.db')
+        db = await aiosqlite.connect(db_path)
+        await db.executescript(SCHEMA_EVENTS)
+
+        kwargs = {'enabled': True, 'port': 8080, 'db_dir': str(tmp_path)}
+        if timeline is not None:
+            kwargs['timeline'] = timeline
+        cfg = make_ui_config(**kwargs)
+
+        mock_recorder._db = db
+        mock_recorder._reader_db = db
+        mock_recorder.reader_db = db
+        mock_recorder.flush = AsyncMock()
+        mock_recorder.config = cfg
+        mock_recorder._buffer = []
+        if not pool_present:
+            mock_app._executor_pool = None
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        client = AsyncClient(transport=transport, base_url='http://test')
+        return client, db
+
+    async def _seed_sequential_tasks(self, db, count, *, gap=10.0, duration=1.0):
+        # Tasks spaced ``gap`` seconds apart, each a clean start+complete
+        # pair, so chronological event order matches task order exactly —
+        # no interleaving to reason about when a test wants a specific
+        # "newest N" subset.
+        now = time.time()
+        for i in range(1, count + 1):
+            start_ts = now - (count - i + 1) * gap
+            await db.execute(
+                'INSERT INTO events (ts, dt, event, partition, task_id, args, pid) '
+                "VALUES (?, ?, 'task_started', 0, ?, '[]', 100)",
+                (start_ts, '2026-04-02', f'task-{i}'),
+            )
+            await db.execute(
+                'INSERT INTO events (ts, dt, event, partition, task_id, duration, pid, stdout_size) '
+                "VALUES (?, ?, 'task_completed', 0, ?, ?, 100, ?)",
+                (start_ts + duration, '2026-04-02', f'task-{i}', duration, i * 10),
+            )
+        await db.commit()
+
+    async def test_limit_trims_to_newest_tasks_by_start_ts(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client(tmp_path, mock_recorder, mock_app)
+        await self._seed_sequential_tasks(db, 12)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=60&limit=5')
+        data = resp.json()
+        assert {t['task_id'] for t in data['tasks']} == {f'task-{i}' for i in range(8, 13)}
+        assert data['truncated'] is True
+        await db.close()
+
+    async def test_limit_not_reached_reports_untruncated(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client(tmp_path, mock_recorder, mock_app)
+        await self._seed_sequential_tasks(db, 3)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=60&limit=5')
+        data = resp.json()
+        assert len(data['tasks']) == 3
+        assert data['truncated'] is False
+        await db.close()
+
+    async def test_default_limit_derives_from_history_factor_and_pool(self, tmp_path, mock_recorder, mock_app):
+        timeline = UITimelineConfig(history_factor=1)
+        client, db = await self._make_client(tmp_path, mock_recorder, mock_app, timeline=timeline, pool_present=False)
+        await self._seed_sequential_tasks(db, 10)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=60')
+        data = resp.json()
+        assert len(data['tasks']) == 8
+        assert {t['task_id'] for t in data['tasks']} == {f'task-{i}' for i in range(3, 11)}
+        await db.close()
+
+    async def test_minutes_1440_is_accepted(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=1440')
+        assert resp.status_code == 200
+        await db.close()
+
+    async def test_minutes_above_1440_rejected(self, tmp_path, mock_recorder, mock_app):
+        client, db = await self._make_client(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=99999')
+        assert resp.status_code == 422
+        await db.close()
+
+    async def test_minutes_clamped_to_configured_max_age(self, tmp_path, mock_recorder, mock_app):
+        timeline = UITimelineConfig(max_age_minutes=60)
+        client, db = await self._make_client(tmp_path, mock_recorder, mock_app, timeline=timeline)
+        now = time.time()
+        # Inside the 60-minute clamp.
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, args, pid) '
+            "VALUES (?, ?, 'task_started', 0, 'recent-task', '[]', 100)",
+            (now - 10 * 60, '2026-04-02'),
+        )
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, duration, pid) '
+            "VALUES (?, ?, 'task_completed', 0, 'recent-task', 1.0, 100)",
+            (now - 9 * 60, '2026-04-02'),
+        )
+        # Outside the 60-minute clamp but inside the requested 120-minute window.
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, args, pid) '
+            "VALUES (?, ?, 'task_started', 0, 'old-task', '[]', 200)",
+            (now - 70 * 60, '2026-04-02'),
+        )
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, duration, pid) '
+            "VALUES (?, ?, 'task_completed', 0, 'old-task', 1.0, 200)",
+            (now - 69 * 60, '2026-04-02'),
+        )
+        await db.commit()
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=120')
+        data = resp.json()
+        task_ids = {t['task_id'] for t in data['tasks']}
+        assert 'recent-task' in task_ids
+        assert 'old-task' not in task_ids
         await db.close()
 
 

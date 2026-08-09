@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisc
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from drakkar.concurrency import dispatch_to_loop
+from drakkar.config import UITimelineConfig
 from drakkar.uiserver.server_helpers import backend_version, origin_allowed
 
 if TYPE_CHECKING:
@@ -62,6 +63,30 @@ WS_DRAIN_SLEEP_MAX = 0.25
 # bursts, and per-event framing cost a WebSocket header, a syscall and a
 # separate browser-side parse + reactive update for each one.
 WS_BATCH_MAX = 100
+
+
+def _timeline_wire(cfg: UITimelineConfig) -> dict[str, object]:
+    """Serialize the timeline config for /api/v1/identity (when always a list, only bound roles)."""
+    rules = []
+    for rule in cfg.color_rules:
+        conditions = []
+        for c in rule.when:
+            entry: dict[str, object] = {'op': c.op}
+            if c.label:
+                entry['label'] = c.label
+            else:
+                entry['field'] = c.field
+            if c.value is not None:
+                entry['value'] = c.value
+            conditions.append(entry)
+        rules.append({'name': rule.name, 'when': conditions, 'color': rule.color})
+    labels = {role: key for role, key in cfg.labels.model_dump().items() if key}
+    return {
+        'history_factor': cfg.history_factor,
+        'max_age_minutes': cfg.max_age_minutes,
+        'color_rules': rules,
+        'labels': labels,
+    }
 
 
 def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRouter, APIRouter]:
@@ -606,6 +631,7 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
                 'ui_source': deps.ui_source,
                 'link_bases': config.link_bases,
                 'custom_renderers': bool(config.custom_renderers_path),
+                'timeline': _timeline_wire(config.timeline),
             }
         )
 

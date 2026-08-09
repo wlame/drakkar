@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   much task history the timeline keeps, `color_rules` map task labels and
   fields to bar colors (first match wins), and `labels` name which task
   label fills the tag, caption, highlight, filter, and marker roles.
+  `GET /api/recent-tasks` now accepts a `limit` query parameter (default:
+  `history_factor` times the executor pool size), clamps `minutes` down to
+  `max_age_minutes`, and reports a `stdout_size` per task and a formal
+  `truncated` flag. `GET /api/v1/identity` now reports the full `timeline`
+  config.
 - Declarative UI enrichment for probe-details fields and table columns:
   `probe_field()` and `Column` gain `link_template` (clickable values, with
   `{value}` / `{row.<field>}` / `{<base>}` template tokens), `badge_colors`

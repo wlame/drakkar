@@ -18,7 +18,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
-from drakkar.config import DrakkarConfig
+from drakkar.config import DrakkarConfig, TimelineColorRule, TimelineLabels, TimelineRuleCondition, UITimelineConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.server import create_ui_app
 from tests.conftest import make_ui_config
@@ -790,6 +790,7 @@ class TestApiV1Identity:
             'ui_source',
             'link_bases',
             'custom_renderers',
+            'timeline',
         }
         assert data['worker_id'] == 'test-worker'
         assert data['cluster'] is None  # empty cluster name serializes as null
@@ -879,6 +880,47 @@ class TestApiV1Identity:
         async with make_client(cfg, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/identity')
         assert resp.json()['custom_renderers'] is True
+
+    async def test_identity_reports_default_timeline(self, debug_config, mock_recorder, mock_app):
+        mock_app.config_summary = '[test-worker]'
+        mock_recorder.config = debug_config
+        async with make_client(debug_config, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/identity')
+        timeline = resp.json()['timeline']
+        assert timeline['color_rules'] == []
+        assert timeline['labels'] == {}
+
+    async def test_identity_reports_configured_timeline(self, tmp_path, mock_recorder, mock_app):
+        timeline_cfg = UITimelineConfig(
+            history_factor=3,
+            max_age_minutes=45,
+            color_rules=[
+                # A single-condition rule constructed from a bare dict, to
+                # pin that ``when`` always serializes as a list even though
+                # config-loading coerces one condition into a one-item list.
+                TimelineColorRule(when={'label': 'priority', 'op': 'eq', 'value': 'high'}, color='red'),
+                TimelineColorRule(
+                    name='slow',
+                    when=[TimelineRuleCondition(field='duration', op='gt', value=5)],
+                    color='#336699',
+                ),
+            ],
+            labels=TimelineLabels(tag='env', marker='urgent'),
+        )
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), timeline=timeline_cfg)
+        mock_app.config_summary = '[test-worker]'
+        mock_recorder.config = cfg
+        async with make_client(cfg, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/identity')
+        assert resp.json()['timeline'] == {
+            'history_factor': 3,
+            'max_age_minutes': 45,
+            'color_rules': [
+                {'name': '', 'when': [{'label': 'priority', 'op': 'eq', 'value': 'high'}], 'color': 'red'},
+                {'name': 'slow', 'when': [{'field': 'duration', 'op': 'gt', 'value': 5}], 'color': '#336699'},
+            ],
+            'labels': {'tag': 'env', 'marker': 'urgent'},
+        }
 
 
 # ---------------------------------------------------------------------------

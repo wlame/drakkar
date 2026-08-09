@@ -38,11 +38,14 @@ if TYPE_CHECKING:
 # fires. Nested class definitions inside a route factory would not
 # trigger the same heuristic and would end up being treated as query
 # parameters (surfaces as 422 "Field required" responses).
-# Ceiling on the ``/api/recent-tasks`` window. The timeline renders ten
-# minutes; anything beyond an hour is a query against the whole retention
-# window dressed up as a live view, and on a high-fan-out worker that is
-# hundreds of thousands of rows.
-RECENT_TASKS_MAX_MINUTES = 60
+# Ceiling on the ``/api/recent-tasks?minutes=`` query parameter — kept in
+# sync with ``UITimelineConfig.max_age_minutes``'s own ceiling (24h) so a
+# caller sees FastAPI's validation error rather than a silent downstream
+# clamp. The handler clamps further down to ``config.timeline.max_age_minutes``
+# (a per-worker override, tighter by default at 60 minutes), and the row
+# and event caps derived from ``config.timeline.history_factor`` keep the
+# query viable on a high-fan-out worker even at the full window.
+RECENT_TASKS_MAX_MINUTES = 1440
 
 
 class _ArrangeTaskLookupRequest(BaseModel):
@@ -238,34 +241,55 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         return JSONResponse([dict(zip(columns, row, strict=False)) for row in rows])
 
     @router.get('/api/recent-tasks')
-    async def api_recent_tasks(minutes: int = Query(default=2, ge=1, le=RECENT_TASKS_MAX_MINUTES)):
+    async def api_recent_tasks(
+        minutes: int = Query(default=2, ge=1, le=RECENT_TASKS_MAX_MINUTES),
+        limit: int | None = Query(
+            default=None,
+            ge=1,
+            le=100_000,
+            description=(
+                'Max tasks returned, newest by start time. Defaults to '
+                'ui.timeline.history_factor x the executor pool max_executors '
+                '(x8 when no pool is attached).'
+            ),
+        ),
+    ):
         """Get tasks from the last N minutes for timeline visualization.
 
-        Three bounds keep this endpoint viable on a high-fan-out worker,
-        where one source message can produce a thousand tasks and a
-        ten-minute window can hold hundreds of thousands of rows:
+        Bounds keep this endpoint viable on a high-fan-out worker, where one
+        source message can produce a thousand tasks and a ten-minute window
+        can hold hundreds of thousands of rows:
 
         * an explicit column list instead of ``SELECT *`` — the ``stdout``
           and ``stderr`` columns hold captured subprocess output that the
           timeline never displays, and pulling them made the response size
           track total task output rather than task count;
-        * a row cap, taking the **most recent** events (hence the
-          descending inner query) and re-sorting ascending for the retry
+        * a row cap derived from ``limit`` (or ``ui.timeline.history_factor``
+          when ``limit`` is unset), taking the **most recent** events (hence
+          the descending inner query) and re-sorting ascending for the retry
           grouping below, which depends on chronological order;
-        * a ceiling on ``minutes``.
+        * a ceiling on ``minutes``, clamped further down to
+          ``ui.timeline.max_age_minutes``.
 
         Without these the query could not finish inside the main-loop
         dispatch timeout, and the endpoint returned an empty timeline with
         no indication that anything had gone wrong.
         """
-        since = time.time() - (minutes * 60)
+        timeline_cfg = config.timeline
+        minutes = min(minutes, timeline_cfg.max_age_minutes)
+        pool = drakkar_app._executor_pool
+        max_lanes = pool.max_executors if pool else 8
+        if limit is None:
+            limit = timeline_cfg.history_factor * max_lanes
         # Two events per task in the common case; the margin covers retries,
         # which add a start event per attempt.
-        event_limit = config.max_rows * 3
+        event_limit = limit * 3
+
+        since = time.time() - (minutes * 60)
         query = """
             SELECT * FROM (
                 SELECT ts, event, partition, task_id, args, duration, metadata,
-                       pid, labels, origin, client_name, request_id
+                       pid, labels, origin, client_name, request_id, stdout_size
                 FROM events
                 WHERE event IN ('task_started', 'task_completed', 'task_failed')
                 AND ts >= ?
@@ -327,6 +351,9 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
                     'status': 'running',
                     'args': e.get('args'),
                     'pid': e.get('pid'),
+                    # Populated from the task_completed event below; stays
+                    # null for running/failed tasks.
+                    'stdout_size': None,
                     'slot': slot,
                     'labels': labels,
                     'env': task_env,
@@ -348,9 +375,8 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
                     t['duration'] = e.get('duration')
                     if e.get('pid'):
                         t['pid'] = e['pid']
-
-        pool = drakkar_app._executor_pool
-        max_lanes = pool.max_executors if pool else 8
+                    if e['event'] == 'task_completed':
+                        t['stdout_size'] = e.get('stdout_size')
 
         # Apply ws_min_duration_ms filtering: hide fast completed tasks
         # from the live UI, same as the WebSocket path. Running tasks
@@ -363,7 +389,23 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             if t['status'] == 'completed' and t['duration'] is not None and t['duration'] < ws_threshold_s:
                 continue
             tasks_result.append(t)
-        return JSONResponse({'tasks': tasks_result, 'lane_count': max_lanes, 'truncated': truncated})
+
+        # ``limit`` bounds the response to the newest tasks by start time,
+        # independent of the row-count-based ``event_limit`` cap above (that
+        # one can drop an OLDER task's matching event out of the query
+        # window entirely; this one trims the grouped, filtered result).
+        trimmed = len(tasks_result) > limit
+        if trimmed:
+            tasks_result.sort(key=lambda t: t['start_ts'])
+            tasks_result = tasks_result[-limit:]
+
+        return JSONResponse(
+            {
+                'tasks': tasks_result,
+                'lane_count': max_lanes,
+                'truncated': truncated or trimmed,
+            }
+        )
 
     # Lookup-by-task-ID endpoint for the Arrange tab. Unlike /api/recent-tasks
     # this does NOT filter by ``minutes`` and does NOT apply the
