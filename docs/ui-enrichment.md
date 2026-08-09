@@ -162,6 +162,16 @@ or table column, without changing the underlying value:
 duration_ms: int = probe_field(section='Builds', view='string', format='duration_ms', default=0)
 ```
 
+The other three formats follow the same shape — one `probe_field()` keyword
+each:
+
+```python
+class ResourceUsage(BaseModel):
+    payload_size: int = probe_field(section='Usage', view='string', format='bytes', default=0)
+    started_at: str = probe_field(section='Usage', view='string', format='timestamp', default='')
+    retry_count: int = probe_field(section='Usage', view='string', format='number', default=0)
+```
+
 Hovering a formatted value shows the raw underlying value in a tooltip, so
 the exact number is always one hover away — formatting never hides data,
 only presents it more readably.
@@ -370,6 +380,10 @@ render_payload: dict = probe_field(
 
 ```python
 columns={'build_id': Column(renderer='buildChip', hint='Open build {value}')}
+```
+
+```python
+Element(view='custom', field='render_payload', renderer='orderCard')
 ```
 
 !!! note "`hint` is not in the exclusion list"

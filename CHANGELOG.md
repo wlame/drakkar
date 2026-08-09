@@ -54,6 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TasksSource` table, a `MetricsSource` stat tile, an `EventsSource`
   table, and an `AnnotationsSource` table. `ui.link_bases` and
   `ui.custom_renderers_path` are configured in `drakkar.yaml` accordingly.
+- Documentation: the Documentation table and Key Features list on the docs
+  home page now list Annotations, Probe User Details, UI Enrichment,
+  Declared UI Pages, Runtime Health, and Sink Write Operations, all of
+  which already had a nav entry but no table row. The FAQ's Message Probe
+  entry now mentions the User-defined tab, plus a new "Can I customize the
+  debug UI?" entry. `docs/ui-enrichment.md` gains a `bytes`/`timestamp`/`number`
+  format example and a custom-renderer detail-element example;
+  `docs/ui-pages.md` shows the `ui.link_bases` config its opening example
+  relies on; `docs/probe-user-details.md`'s "See also" links forward to
+  both.
 
 ### Fixed
 

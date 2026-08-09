@@ -315,3 +315,5 @@ ui:
 - [Annotations](annotations.md) — the message/task/window-scoped sibling of this feature
 - [Observability](observability.md) — the Message Probe's other panels (timeline, cache calls, sink payloads)
 - [Handler](handler.md) — the hooks you can call `probe.set` / `probe.append` / `probe.update` from
+- [UI Enrichment](ui-enrichment.md) — links, badges, formats, hints, detail panels, and custom cell renderers for your `probe_field()` declarations
+- [Declared UI Pages](ui-pages.md) — the sibling opt-in surface for a handler's own dashboard page, reusing the same `Column` enrichment

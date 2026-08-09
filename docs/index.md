@@ -107,6 +107,7 @@ Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execut
 - **[Typed messages](handler.md#typed-messages)** -- Pydantic models for input/output with auto-deserialization
 - **[Cache (optional)](cache.md)** -- `self.cache` key/value store with memory + write-behind SQLite + eventually-consistent peer sync across workers
 - **[Operator UI](observability.md#operator-ui)** -- the versioned [drakkar-ui](https://github.com/wlame/drakkar-ui) SPA (fetched from GitHub Releases at startup, one shared cache for Python and Go workers) with executor timeline, partition lag, message tracing; built-in fallback pages when offline
+- **[UI customization](ui-enrichment.md)** -- a handler-defined [Message Probe tab](probe-user-details.md), [links/badges/formats/detail panels](ui-enrichment.md) on any probe field or table column, and [declared dashboard pages](ui-pages.md) -- all opt-in, no client-side code
 - **[Prometheus metrics](observability.md#prometheus-metrics)** -- pipeline, executor, and per-sink counters/histograms
 - **[Structured logging](observability.md#structured-logging)** -- JSON/ECS-compatible via structlog, ready for Elastic
 - **[Periodic tasks](handler.md#periodic-tasks)** -- `@periodic` decorator for recurring background coroutines
@@ -212,12 +213,18 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 | [Handler](handler.md) | `BaseDrakkarHandler` hooks: `arrange`, `on_task_complete`, `on_message_complete`, `on_window_complete`, `on_error`, lifecycle hooks |
 | [Cache](cache.md) | `self.cache` API, scope rules, peer sync, LWW semantics, "delete is local-only" sharp edge |
 | [Fan-out](fan-out.md) | One message → many tasks → one aggregate. `MessageGroup`, `on_message_complete`, replacement-chain tracing. |
+| [Annotations](annotations.md) | `self.annotate(...)` — handler-authored diagnostics surfaced per message/task/window in the UI |
+| [Probe User Details](probe-user-details.md) | `probe_details_model` — a handler-defined tab in the Message Probe, `probe_field()` views and write caps |
+| [UI Enrichment](ui-enrichment.md) | Links, badges, formats, hints, and detail panels for probe-details fields and table columns; custom cell renderers |
+| [Declared UI Pages](ui-pages.md) | `ui_pages` — a handler's own dashboard page built from built-in data sources, no client-side code |
 | [Configuration](configuration.md) | Full YAML reference, env var overrides, `DrakkarConfig` model |
 | [Features & Enable Order](features.md) | Which switch enables what, dependency rules, tiered rollout order |
 | [Sinks](sinks.md) | Sink types, payload models, routing, multi-instance setup |
+| [Sink Write Operations](sink-write-operations.md) | Declarative write operations plus the raw-SQL/command escape hatch, per sink type |
 | [Executor](executor.md) | Subprocess pool, concurrency, timeouts, retries, binary resolution |
 | [Webapp](webapp.md) | Synchronous HTTP pipeline, auth, rate limits, status codes |
 | [Observability](observability.md) | Operator UI pages, Prometheus metrics, structured logging setup |
+| [Runtime Health](runtime-health.md) | Event-loop lag monitor: heartbeat, stall sampler, state badge, Prometheus metrics |
 | [Local Databases](local-databases.md) | SQLite spec: schemas, discovery, peer sync, mixed-fleet support |
 | [Performance](performance.md) | Per-task overhead, bottleneck analysis, tuning recommendations |
 | [Config Calculator](calculator.md) | Interactive calculator for recommended config values |

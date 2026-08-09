@@ -46,6 +46,15 @@ live WebSocket as new annotations arrive; the stat tile polls on a flat
 30-second interval instead, since a metric sum has no single event that
 means "this changed."
 
+The `{shop_admin}` token above resolves the same way it would in a
+probe-details `link_template` — from `ui.link_bases`:
+
+```yaml
+ui:
+  link_bases:
+    shop_admin: 'https://admin.shop.example.com'
+```
+
 ---
 
 ## Declaring pages

@@ -280,6 +280,8 @@ See [Authentication](configuration.md#authentication) for the field semantics an
 
 Paste a raw Kafka message value; the framework runs it end-to-end through your handler (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with zero intentional footprint: no sink writes, no offset commits, no recorder rows, no cache writes. Shows every task's stdin/stdout/stderr/exit code/duration plus the sink payloads that *would* have been produced. The full contract (headers, cache proxy behavior, concurrent-probe serialization) is documented on the [Operator UI page](observability.md#operator-ui).
 
+If your handler registers a `probe_details_model`, the probe also gets a **User-defined** tab showing your own fields — see [Probe User Details](probe-user-details.md).
+
 ### How do I trace a specific message through the pipeline?
 
 Use `/debug` → **Message Trace** tab, search by `partition:offset` or by label value. The flight recorder stores every lifecycle event per message. See [Observability — Operator UI](observability.md#operator-ui).
@@ -287,6 +289,16 @@ Use `/debug` → **Message Trace** tab, search by `partition:offset` or by label
 ### Do UI readers slow down the pipeline?
 
 Mildly. Heavy read traffic increases SQLite WAL checkpoint frequency and burns a little Python GIL time. Under normal operator use (a few tabs refreshing) the effect is negligible. See [Bottleneck: Recorder and UI](performance.md#bottleneck-recorder-and-ui).
+
+### Can I customize the debug UI?
+
+Yes, without writing any client-side code:
+
+- **[Probe User Details](probe-user-details.md)** — a handler-defined `probe_details_model` adds a **User-defined** tab to the Message Probe.
+- **[UI Enrichment](ui-enrichment.md)** — links, badges, formats, hints, and detail panels on any probe field or table column.
+- **[Declared UI Pages](ui-pages.md)** — a handler's own dashboard page and nav entry, built from built-in data sources (events, annotations, tasks, metrics).
+
+For presentation none of those built-ins can express, [custom cell renderers](ui-enrichment.md#custom-cell-renderers) let a deployment-owned JavaScript module take over one cell's rendering.
 
 ---
 
