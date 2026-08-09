@@ -46,6 +46,8 @@ from models import (
 
 import drakkar as dk
 from drakkar import probe
+from drakkar.probe import Column
+from drakkar.uipages import AnnotationsSource, EventsSource, MetricsSource, Page, TasksSource, Widget
 
 logger = structlog.get_logger()
 
@@ -120,6 +122,54 @@ class RipgrepHandler(
     # runs in production. It's wired straight into the real pipeline
     # rather than gated behind a flag because that computation is cheap.
     probe_details_model = RipgrepProbeDetails
+
+    # Declared dashboard page — see docs/ui-pages.md. Adds a "Scan
+    # activity" nav entry at /p/scan-activity, reading data the framework
+    # already records (no new endpoint, no extra handler bookkeeping).
+    ui_pages = [
+        Page(
+            slug='scan-activity',
+            title='Scan activity',
+            widgets=[
+                Widget(
+                    title='Recent tasks',
+                    view='table',
+                    source=TasksSource(limit=100),
+                    columns={
+                        'task_id': Column(),
+                        'status': Column(
+                            badge_colors={'completed': 'green', 'failed': 'red', 'running': 'blue', '*': 'gray'}
+                        ),
+                        'exec_duration': Column(hint='Execution time in seconds'),
+                        'exit_code': Column(),
+                    },
+                ),
+                Widget(
+                    title='Executor tasks total',
+                    view='stat',
+                    source=MetricsSource(metric='drakkar_executor_tasks_total'),
+                    format='number',
+                ),
+                Widget(
+                    title='Task failures',
+                    view='table',
+                    source=EventsSource(event_types=['task_failed'], limit=100),
+                    columns={
+                        'task_id': Column(hint='Failed task {value}'),
+                        'exit_code': Column(),
+                        'partition': Column(),
+                        'origin': Column(),
+                    },
+                ),
+                Widget(
+                    title='Fan-in bucketing',
+                    view='table',
+                    source=AnnotationsSource(kind_prefix='fan_in_bucketing', limit=100),
+                    columns=['messages', 'distinct_pairs', 'collapsed_duplicates'],
+                ),
+            ],
+        ),
+    ]
 
     def message_label(self, msg: dk.SourceMessage) -> str:
         if msg.payload:
@@ -311,6 +361,7 @@ class RipgrepHandler(
                     tier=tier,
                     decision='precomputed' if hit else 'subprocess',
                     fan_in=len(contributing_msgs),
+                    outcome='hit' if hit else 'miss',
                 ),
             )
             if tier == 'memory':
@@ -443,6 +494,20 @@ class RipgrepHandler(
         # repeats searches, so duplicate lines are expected).
         distinct_lines = len(set(matches))
         longest_line = max((len(line) for line in matches), default=0)
+        # Synthetic-but-plausible popup-only fields (see docs/ui-enrichment.md
+        # detail panels): scan_meta is invented diagnostic junk derived from
+        # real values where convenient, sample_lines is a small preview of
+        # the real matches list.
+        scan_meta = {
+            'encoding': 'utf-8',
+            'shard': len(meta['file_path']) % 4,
+            'attempt': 1,
+            'worker_note': f'handled by {os.environ.get("WORKER_ID", "worker-?")}',
+        }
+        sample_lines = [
+            {'line_no': i + 1, 'text': line[:80], 'score': round(len(line) / (longest_line or 1), 2)}
+            for i, line in enumerate(matches[:3])
+        ]
         probe.append(
             'match_analysis',
             MatchAnalysisRow(
@@ -453,6 +518,9 @@ class RipgrepHandler(
                 longest_line=longest_line,
                 duration_ms=round(result.duration_seconds * 1000, 2),
                 source='cache' if result.pid is None else 'subprocess',
+                bytes_scanned=len(result.stdout.encode('utf-8')),
+                scan_meta=scan_meta,
+                sample_lines=sample_lines,
             ),
         )
 
@@ -586,6 +654,24 @@ class RipgrepHandler(
                     share_pct=round(100 * pattern_matches / total_matches, 1) if total_matches else 0.0,
                 ),
             )
+
+        # Probe-details example: a request-level verdict badge, using the
+        # same thresholds already computed below for the hot-row/webhook
+        # and file-log sink decisions.
+        if total_matches == 0:
+            verdict = 'clean'
+        elif total_matches > 50:
+            verdict = 'noisy'
+        else:
+            verdict = 'matched'
+        probe.set(scan_verdict=verdict)
+
+        # Probe-details example: a custom-renderer scalar. patternChip() in
+        # custom-renderers.js turns this small JSON payload into a styled
+        # chip instead of any built-in view.
+        if ranked_patterns:
+            top_pattern, top_matches = ranked_patterns[0]
+            probe.set(top_pattern_chip={'pattern': top_pattern, 'matches': top_matches})
 
         aggregate = SearchAggregate(
             request_id=req.request_id,

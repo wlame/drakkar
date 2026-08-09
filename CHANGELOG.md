@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or crashes the page — it falls back to the field's normal text. `GET
   /api/v1/identity` now reports `custom_renderers` (true when the module is
   configured). Documented in docs/ui-enrichment.md.
+- The Python integration test harness (`integration/worker/`) now
+  exercises the full UI customization surface end to end: link templates,
+  badges, formats, hints, a `columns` subset, a `detail` panel using every
+  element kind, a `matchBar` and a `patternChip` custom renderer
+  (`custom-renderers.js`), and a declared `scan-activity` page combining a
+  `TasksSource` table, a `MetricsSource` stat tile, an `EventsSource`
+  table, and an `AnnotationsSource` table. `ui.link_bases` and
+  `ui.custom_renderers_path` are configured in `drakkar.yaml` accordingly.
 
 ### Fixed
 

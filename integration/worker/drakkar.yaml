@@ -186,6 +186,17 @@ ui:
   custom_links:
     - name: "Drakkar GitHub"
       url: "https://github.com/wlame/drakkar?from={worker_id}"
+  # Named URL bases the probe-details layout's link templates resolve
+  # against (see docs/ui-enrichment.md). Fake hostnames — this is an
+  # integration demo, not a real deployment.
+  link_bases:
+    code_review: "https://code-review.integration.example.com"
+    file_browser: "https://files.integration.example.com"
+    build_farm: "https://builds.integration.example.com"
+  # Deployment-owned JS module implementing the matchBar/patternChip
+  # custom cell renderers (see docs/ui-enrichment.md#custom-cell-renderers).
+  # Path matches the Dockerfile's COPY target under WORKDIR /app.
+  custom_renderers_path: "/app/custom-renderers.js"
   recorder:
     db_dir: "/shared"
     store_events: true

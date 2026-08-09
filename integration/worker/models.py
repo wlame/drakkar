@@ -11,9 +11,12 @@ fires ONCE after all the per-request tasks complete, receiving a
 MessageGroup — and emits the aggregated summary (single row per request).
 """
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from drakkar import probe_field
+from drakkar.probe import Column, Detail, Element, Link
 
 
 class RankRequest(BaseModel):
@@ -190,6 +193,7 @@ class CacheLookupRow(BaseModel):
     tier: str  # 'memory' | 'sqlite' | 'miss'
     decision: str  # 'precomputed' | 'subprocess'
     fan_in: int
+    outcome: str  # 'hit' | 'miss' — same decision as `decision`, in badge-friendly words
 
 
 class MatchAnalysisRow(BaseModel):
@@ -202,6 +206,12 @@ class MatchAnalysisRow(BaseModel):
     longest_line: int
     duration_ms: float
     source: str  # 'cache' | 'subprocess'
+    bytes_scanned: int  # len(subprocess stdout), UTF-8 encoded
+    # Detail-panel-only fields (not shown as table columns): synthetic but
+    # plausible-looking diagnostic junk, to exercise the popup's keyvalue
+    # and table elements without inventing a second real data source.
+    scan_meta: dict[str, Any]
+    sample_lines: list[dict[str, Any]]
 
 
 class PatternRankRow(BaseModel):
@@ -232,13 +242,73 @@ class RipgrepProbeDetails(BaseModel):
 
     # Arrange: how this window's messages collapsed into tasks, and
     # what the two-tier cache decided for each (pattern, file_path) pair.
-    window_shape: str | None = probe_field(section='Arrange', view='string', default=None)
+    window_shape: str | None = probe_field(
+        section='Arrange',
+        view='string',
+        default=None,
+        hint='How this arrange() window collapsed messages into distinct (pattern, file) pairs.',
+    )
     stage_counters: dict[str, int] = probe_field(section='Arrange', view='keyvalue', default_factory=dict)
-    cache_lookups: list[CacheLookupRow] = probe_field(section='Arrange', view='table', default_factory=list)
+    cache_lookups: list[CacheLookupRow] = probe_field(
+        section='Arrange',
+        view='table',
+        default_factory=list,
+        # A subset of CacheLookupRow's fields — 'decision' is dropped since
+        # 'outcome' already carries the same information in badge-friendly form.
+        columns={
+            'cache_key': Column(link_template='{file_browser}/cache/{value}', hint='Cache key {value}'),
+            'tier': Column(),
+            'outcome': Column(badge_colors={'hit': 'green', 'miss': 'yellow', '*': 'gray'}),
+            'fan_in': Column(),
+        },
+    )
 
     # Results: per-task match shape, and each request's per-pattern breakdown.
-    match_analysis: list[MatchAnalysisRow] = probe_field(section='Results', view='table', default_factory=list)
+    match_analysis: list[MatchAnalysisRow] = probe_field(
+        section='Results',
+        view='table',
+        default_factory=list,
+        columns={
+            'pattern': Column(),
+            'file': Column(link_template='{code_review}/blob/main/{value}'),
+            'matches': Column(renderer='matchBar', hint='{value} matches found'),
+            'duration_ms': Column(format='duration_ms'),
+            'bytes_scanned': Column(format='bytes'),
+            'source': Column(),
+        },
+        detail=Detail(
+            title='Match analysis: {row.pattern} in {row.file}',
+            elements=[
+                Element(field='source', view='string', label='Result source'),
+                Element(field='scan_meta', view='keyvalue', label='Scan metadata'),
+                Element(field='sample_lines', view='table', label='Sample lines'),
+                Element(
+                    view='links',
+                    links=[
+                        Link(label='Code review', template='{code_review}/blob/main/{row.file}'),
+                        Link(label='Build farm job', template='{build_farm}/jobs/{row.pattern}'),
+                    ],
+                ),
+            ],
+        ),
+    )
     pattern_ranking: list[PatternRankRow] = probe_field(section='Results', view='table', default_factory=list)
+    # A per-request verdict, at a glance — filled in on_message_complete()
+    # from the same total_matches the pattern ranking above rolls up.
+    scan_verdict: str = probe_field(
+        section='Results',
+        view='badge',
+        badge_colors={'clean': 'green', 'matched': 'blue', 'noisy': 'yellow', '*': 'gray'},
+        default='',
+    )
+    # Custom-renderer scalar: a small JSON payload rendered by patternChip()
+    # in custom-renderers.js rather than any built-in view.
+    top_pattern_chip: dict = probe_field(
+        section='Results',
+        view='custom',
+        renderer='patternChip',
+        default_factory=dict,
+    )
 
     # Routing: which conditional sinks fired for this request, and why.
     sink_decisions: list[SinkDecisionRow] = probe_field(section='Routing', view='table', default_factory=list)
