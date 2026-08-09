@@ -120,6 +120,7 @@ async def test_renderers_route_serves_content_with_etag(client_with_renderers):
     assert res.status_code == 200
     assert res.headers['content-type'].startswith('text/javascript')
     assert res.headers['etag'].startswith('"')
+    assert res.headers['cache-control'] == 'no-cache'
     assert 'orderCard' in res.text
 
 
@@ -127,6 +128,7 @@ async def test_renderers_route_returns_304_on_matching_etag(client_with_renderer
     first = await client_with_renderers.get('/api/v1/ui/renderers.js')
     res = await client_with_renderers.get('/api/v1/ui/renderers.js', headers={'If-None-Match': first.headers['etag']})
     assert res.status_code == 304
+    assert res.headers['etag'] == first.headers['etag']
     assert res.text == ''
 
 

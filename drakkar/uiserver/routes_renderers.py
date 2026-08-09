@@ -47,7 +47,15 @@ def create_renderers_router(deps: UIDeps) -> APIRouter:
                 status_code=404,
             )
         if request.headers.get('if-none-match') == etag:
-            return Response(status_code=304)
-        return Response(content=content, media_type='text/javascript', headers={'ETag': etag})
+            # RFC 9110 requires a 304 to carry the ETag it validated against.
+            return Response(status_code=304, headers={'ETag': etag})
+        return Response(
+            content=content,
+            media_type='text/javascript',
+            # Explicit revalidation rather than the framework's implicit default:
+            # the module is only invalidated by a redeploy (a new ETag), so every
+            # request must revalidate rather than trust a client-side freshness window.
+            headers={'ETag': etag, 'Cache-Control': 'no-cache'},
+        )
 
     return router
