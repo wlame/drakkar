@@ -51,10 +51,11 @@ across restarts**.
 
 ## Rotation
 
-- **Recorder**: rotates automatically. Files older than `retention_hours`
-  (default 24h) are deleted; file count is capped based on
-  `retention_max_events`. A new file is created on each startup and
-  periodic rotation.
+- **Recorder**: rotates automatically. Raw files rotate hourly; once a 24h
+  window's data is old enough (roughly a day after the window closes), one
+  worker merges it into a compressed `<cluster>-<from>__<to>.db.gz` archive
+  and removes the merged raw files. Archives appear in the Debug →
+  Databases tab for download.
 - **Cache**: does not rotate. Entries are pruned inline by the cache's
   periodic cleanup loop (expired rows removed every `cleanup_interval_seconds`,
   default 60s). A full reset is a manual `rm` (see Cleanup below).

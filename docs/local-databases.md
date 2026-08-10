@@ -304,6 +304,9 @@ Losers skip the tick and lose nothing — any window still due is picked up
 on the next tick. Ownership is decided by holding the OS lock, not by the
 lock file's existence, so a crashed worker never leaves a stale election
 behind; the kernel drops the lock the moment the holder's process dies.
+Election relies on `flock` semantics being honored by the filesystem — on
+a network filesystem (NFS/EFS) shared across hosts, verify the mount
+supports `flock` before pointing multiple hosts' workers at one `db_dir`.
 
 ### Merge, compress, publish, then delete
 
