@@ -1261,6 +1261,15 @@ components:
           description: >-
             True when the row cap dropped older events from the query
             window, or when the result was trimmed down to `limit` tasks.
+        unavailable:
+          type: boolean
+          description: >-
+            Optional; absent means the payload is live data. True when the
+            recorder data could not be read — the reader connection is
+            absent, or the bounded main-loop dispatch timed out. The rest of
+            the payload is then an empty placeholder, not a measurement:
+            clients should keep the previously shown tasks and surface a
+            notice that the timeline is stale.
       required: [tasks, lane_count, truncated]
 
     RecentTaskEntry:

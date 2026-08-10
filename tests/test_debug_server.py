@@ -2336,7 +2336,13 @@ class TestApiRecentTasks:
         assert len(retry_entries) >= 1
         await db.close()
 
-    async def test_recent_tasks_no_db_returns_empty(self, debug_config, mock_recorder, mock_app):
+    async def test_recent_tasks_no_db_returns_empty_flagged_payload(self, debug_config, mock_recorder, mock_app):
+        """No reader connection is a degraded read, not an empty timeline.
+
+        The response keeps the documented object shape and says so with
+        ``unavailable``; a bare ``[]`` broke every client reading
+        ``payload.tasks``.
+        """
         mock_recorder._db = None
         mock_recorder._reader_db = None
         mock_recorder.reader_db = None
@@ -2347,7 +2353,12 @@ class TestApiRecentTasks:
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/recent-tasks')
         assert resp.status_code == 200
-        assert resp.json() == []
+        assert resp.json() == {
+            'tasks': [],
+            'lane_count': mock_app._executor_pool.max_executors,
+            'truncated': False,
+            'unavailable': True,
+        }
 
     async def test_recent_tasks_slot_extracted_from_metadata(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
@@ -4758,6 +4769,72 @@ async def test_flush_and_select_helper_returns_none_when_db_missing(debug_config
     # Flush still runs — only the SELECT is skipped. Matches the helper's
     # original per-site behaviour (flush is unconditional).
     assert flush_calls == 1
+
+
+async def test_flush_and_select_logs_the_missing_reader_once_per_interval(
+    debug_config, mock_recorder, mock_app, monkeypatch
+):
+    """A degraded read must name its cause in the log, without flooding it.
+
+    Every open page re-polls, so the warning is rate-limited per cause —
+    but silence is what left the last incident undiagnosed.
+    """
+    from structlog.testing import capture_logs
+
+    from drakkar.uiserver import server as server_module
+
+    monkeypatch.setattr(server_module, '_degraded_read_last_logged', {})
+
+    mock_recorder._db = None
+    mock_recorder._reader_db = None
+    mock_recorder.reader_db = None
+    mock_recorder.flush = AsyncMock()
+    mock_recorder.config = debug_config
+    mock_recorder._buffer = []
+
+    fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    with capture_logs() as cap:
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            first = await c.get('/api/events')
+            second = await c.get('/api/events')
+
+    assert first.status_code == second.status_code == 200
+    warnings = [e for e in cap if e['event'] == 'ui_read_reader_db_absent']
+    assert len(warnings) == 1
+    assert warnings[0]['log_level'] == 'warning'
+
+
+async def test_flush_and_select_logs_a_dispatch_failure_as_its_own_cause(
+    debug_config, mock_recorder, mock_app, monkeypatch
+):
+    """Reader-absent and dispatch-timeout are different problems; the log says which."""
+    from structlog.testing import capture_logs
+
+    from drakkar.uiserver import server as server_module
+
+    monkeypatch.setattr(server_module, '_degraded_read_last_logged', {})
+
+    async def never_answers(self, coro, default=None):
+        coro.close()  # the dispatch never ran it; don't leave it un-awaited
+        return default
+
+    monkeypatch.setattr(UIDeps, 'dispatch_bounded', never_answers)
+
+    mock_recorder.config = debug_config
+    mock_recorder._buffer = []
+
+    fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
+    transport = ASGITransport(app=fastapi_app)
+    with capture_logs() as cap:
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/events')
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+    events = [e['event'] for e in cap]
+    assert 'ui_read_dispatch_unavailable' in events
+    assert 'ui_read_reader_db_absent' not in events
 
 
 async def test_flush_and_select_helper_prefers_reader_db_over_writer(tmp_path, mock_recorder, debug_config, mock_app):

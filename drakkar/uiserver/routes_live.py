@@ -316,7 +316,12 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         """
         result = await deps.flush_and_select(query, [since, event_limit])
         if result is None:
-            return JSONResponse([])
+            # Degraded read (no reader connection, or the bounded main-loop
+            # dispatch timed out). Keep the documented object shape — a bare
+            # ``[]`` here made every client's ``payload.tasks`` iteration
+            # throw — and flag it so the UI can hold the last good timeline
+            # instead of drawing an empty one.
+            return JSONResponse({'tasks': [], 'lane_count': max_lanes, 'truncated': False, 'unavailable': True})
         columns, rows = result
         events = [dict(zip(columns, row, strict=False)) for row in rows]
         # Hitting the cap means older tasks in the window were dropped. Say

@@ -263,3 +263,42 @@ async def test_identity_and_recent_tasks_payloads_match_schemas():
 
     jsonschema.validate(identity, _resolve_schema(schemas, 'Identity'), cls=jsonschema.Draft202012Validator)
     jsonschema.validate(recent_tasks, _resolve_schema(schemas, 'RecentTasks'), cls=jsonschema.Draft202012Validator)
+    # Live data carries no degradation flag at all.
+    assert 'unavailable' not in recent_tasks
+
+
+async def test_recent_tasks_degraded_read_keeps_the_documented_shape(monkeypatch):
+    """A recorder read that cannot answer must still return a RecentTasks object.
+
+    It used to return a bare ``[]``, so every client iterating
+    ``payload.tasks`` threw instead of degrading — the page froze with no
+    visible cause.
+    """
+    from drakkar.uiserver.server import UIDeps
+
+    schemas = yaml.safe_load(SPEC_PATH.read_text())['components']['schemas']
+
+    async def unavailable_read(self, query, params=()):
+        return None
+
+    monkeypatch.setattr(UIDeps, 'flush_and_select', unavailable_read)
+
+    cfg = make_ui_config()
+    recorder = AsyncMock(spec=EventRecorder)
+    recorder.config = cfg
+    app = MagicMock()
+    app._worker_id = 'degraded-worker'
+    app._cluster_name = ''
+    app._start_time = time.monotonic()
+    app._config = DrakkarConfig()
+    app.config_summary = '[degraded-worker]'
+    app._executor_pool.max_executors = 4
+
+    transport = ASGITransport(app=create_ui_app(cfg, recorder, app))
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get('/api/v1/recent-tasks?minutes=5')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload == {'tasks': [], 'lane_count': 4, 'truncated': False, 'unavailable': True}
+    jsonschema.validate(payload, _resolve_schema(schemas, 'RecentTasks'), cls=jsonschema.Draft202012Validator)

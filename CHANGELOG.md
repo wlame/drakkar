@@ -102,6 +102,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{value}`/`{row.*}` substitutions in a link template, not the base
   itself (inserted verbatim); an unmapped badge value with no `'*'`
   fallback renders as a neutral pill, not plain text.
+- The recorder now survives an unexpected error in its flush or rotation
+  loop. Before, one error ended the loop for the life of the process: the
+  worker stopped writing events, stopped rotating its database, and wrote
+  no log line about it. Each loop now logs the error and continues on the
+  next tick. A loop that ends anyway logs
+  `recorder_background_task_died`.
+- `GET /api/recent-tasks` now reports a degraded read instead of freezing
+  the page. When the recorder data cannot be read, the endpoint returns
+  the normal object with an extra `unavailable: true` flag, not a bare
+  array that made clients fail on `payload.tasks`. The UI server also logs
+  why the read failed — no reader connection, or the main loop did not
+  answer in time.
 
 ## [1.9.0] - 2026-08-08
 

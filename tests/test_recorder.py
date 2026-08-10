@@ -1,6 +1,7 @@
 """Tests for Drakkar flight recorder."""
 
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -10,6 +11,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
 from drakkar.config import UIConfig
 from drakkar.models import (
@@ -5063,3 +5065,118 @@ async def test_get_trace_does_not_leak_a_sibling_messages_annotation(recorder):
     trace = await recorder.get_trace(partition=3, msg_offset=90)
     kinds = [json.loads(e['metadata'])['kind'] for e in trace if e['event'] == 'annotation']
     assert kinds == ['note-90']
+
+
+class TestBackgroundLoopResilience:
+    """The flush and retention loops must outlive an unexpected error.
+
+    A single raise used to end the loop task for the whole process life:
+    events stopped being persisted, DBs stopped rotating, and nothing said
+    so in the log.
+    """
+
+    async def test_flush_loop_keeps_running_after_an_iteration_raises(self, tmp_path):
+        config = make_debug_config(tmp_path)
+        rec = EventRecorder(config, worker_name=WORKER_NAME)
+        # model_copy skips validation, so the loop can tick fast without
+        # the config's own ``ge=1`` floor on the interval.
+        rec._store = rec._store.model_copy(update={'flush_interval_seconds': 0.01})
+        rec._running = True
+
+        calls = 0
+
+        async def flaky_flush() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError('flush blew up')
+
+        rec._flush = flaky_flush  # type: ignore[method-assign]
+
+        with capture_logs() as cap:
+            loop_task = asyncio.create_task(rec._flush_loop())
+            try:
+                await wait_for(lambda: calls >= 3)
+            finally:
+                rec._running = False
+                loop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await loop_task
+
+        # The loop survived the raise and flushed again on later ticks.
+        assert calls >= 3
+        failures = [e for e in cap if e['event'] == 'recorder_flush_loop_iteration_failed']
+        assert len(failures) == 1
+        assert failures[0]['log_level'] == 'error'
+        assert failures[0]['error_type'] == 'ValueError'
+
+    async def test_retention_loop_keeps_running_after_an_iteration_raises(self, tmp_path):
+        config = make_debug_config(tmp_path)
+        rec = EventRecorder(config, worker_name=WORKER_NAME)
+        rec._store = rec._store.model_copy(update={'rotation_interval_minutes': 0.01 / 60})
+        rec._running = True
+
+        calls = 0
+
+        async def flaky_rotate() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError('rotation blew up')
+
+        rec._rotate = flaky_rotate  # type: ignore[method-assign]
+
+        with capture_logs() as cap:
+            loop_task = asyncio.create_task(rec._retention_loop())
+            try:
+                await wait_for(lambda: calls >= 3)
+            finally:
+                rec._running = False
+                loop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await loop_task
+
+        assert calls >= 3
+        failures = [e for e in cap if e['event'] == 'recorder_retention_loop_iteration_failed']
+        assert len(failures) == 1
+        assert failures[0]['error_type'] == 'OSError'
+
+    async def test_background_task_death_while_running_is_logged(self, tmp_path):
+        """Last-resort tripwire: a loop that ends anyway must say so."""
+        config = make_debug_config(tmp_path)
+        rec = EventRecorder(config, worker_name=WORKER_NAME)
+        rec._running = True
+
+        async def dies() -> None:
+            raise RuntimeError('loop gone')
+
+        with capture_logs() as cap:
+            task = asyncio.create_task(dies())
+            rec._watch_background_task(task, 'flush')
+            with pytest.raises(RuntimeError):
+                await task
+            await asyncio.sleep(0)  # let the done callback run
+
+        deaths = [e for e in cap if e['event'] == 'recorder_background_task_died']
+        assert len(deaths) == 1
+        assert deaths[0]['task'] == 'flush'
+        assert deaths[0]['log_level'] == 'error'
+        assert deaths[0]['error_type'] == 'RuntimeError'
+
+    async def test_background_task_end_after_stop_is_silent(self, tmp_path):
+        """Shutdown ends the loops on purpose — that is not an incident."""
+        config = make_debug_config(tmp_path)
+        rec = EventRecorder(config, worker_name=WORKER_NAME)
+        rec._running = False
+
+        async def dies() -> None:
+            raise RuntimeError('shutdown race')
+
+        with capture_logs() as cap:
+            task = asyncio.create_task(dies())
+            rec._watch_background_task(task, 'retention')
+            with pytest.raises(RuntimeError):
+                await task
+            await asyncio.sleep(0)
+
+        assert [e for e in cap if e['event'] == 'recorder_background_task_died'] == []

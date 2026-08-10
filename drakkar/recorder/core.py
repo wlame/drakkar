@@ -543,7 +543,9 @@ class EventRecorder:
             self._update_live_link()
             if self._store.store_events:
                 self._flush_task = asyncio.create_task(self._flush_loop())
+                self._watch_background_task(self._flush_task, 'flush')
             self._retention_task = asyncio.create_task(self._retention_loop())
+            self._watch_background_task(self._retention_task, 'retention')
             if self._store.store_state:
                 self._state_task = asyncio.create_task(self._state_sync_loop())
         await logger.ainfo(
@@ -551,6 +553,35 @@ class EventRecorder:
             category='recorder',
             db_path=self._db_path or '(memory only)',
         )
+
+    def _watch_background_task(self, task: asyncio.Task, name: str) -> None:
+        """Log when a recorder background loop ends while still running.
+
+        Last-resort tripwire. The loops guard each iteration, so reaching
+        this callback means something outside the guarded work ended the
+        task — and a dead loop is invisible otherwise: events stop being
+        persisted, DBs stop rotating, and no log line says why. Cancelled
+        tasks and deaths after ``stop`` (``self._running`` false) are the
+        normal shutdown path and stay silent.
+        """
+
+        def on_done(finished: asyncio.Task) -> None:
+            if finished.cancelled() or not self._running:
+                return
+            exc = finished.exception()
+            if exc is None:
+                return
+            # Sync logger: done callbacks run on the loop and cannot await.
+            logger.error(
+                'recorder_background_task_died',
+                category='recorder',
+                task=name,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                exc_info=exc,
+            )
+
+        task.add_done_callback(on_done)
 
     async def _warn_if_db_dir_world_writable(self) -> None:
         """Warn when the recorder DB directory is world-writable (e.g. /tmp).
@@ -2001,7 +2032,22 @@ class EventRecorder:
     async def _flush_loop(self) -> None:
         while self._running:
             await asyncio.sleep(self._store.flush_interval_seconds)
-            await self._flush()
+            # Per-iteration guard: an unexpected raise here used to end the
+            # task, so the recorder stopped persisting events for the rest
+            # of the process lifetime with nothing in the log. Cancellation
+            # must still propagate — that is how ``stop`` ends the loop.
+            try:
+                await self._flush()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await logger.aerror(
+                    'recorder_flush_loop_iteration_failed',
+                    category='recorder',
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    exc_info=exc,
+                )
 
     async def _flush(self) -> None:
         # The lock serializes concurrent flushes. Without it, the periodic
@@ -2179,7 +2225,20 @@ class EventRecorder:
     async def _retention_loop(self) -> None:
         while self._running:
             await asyncio.sleep(self._store.rotation_interval_minutes * 60)
-            await self._rotate()
+            # Same guard as ``_flush_loop``: one failed rotation must cost a
+            # single interval, not every rotation from here on.
+            try:
+                await self._rotate()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await logger.aerror(
+                    'recorder_retention_loop_iteration_failed',
+                    category='recorder',
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    exc_info=exc,
+                )
 
     async def _rotate(self) -> None:
         """Rotate: open new DB, initialize it fully, then swap — no schemaless window.

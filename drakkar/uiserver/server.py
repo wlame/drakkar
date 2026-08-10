@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import threading
+import time
 from collections.abc import Coroutine, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -77,6 +78,27 @@ logger = structlog.get_logger()
 MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS = 5.0
 
 TEMPLATES_DIR = Path(__file__).parent.parent / 'templates'
+
+# A degraded recorder read repeats on every poll of every open page, so the
+# cause is logged at most once per interval per cause rather than per
+# request — enough for an operator to see WHY the UI is empty without the
+# log turning into the flood that made the previous silence tempting.
+DEGRADED_READ_LOG_INTERVAL_SECONDS = 60.0
+_degraded_read_last_logged: dict[str, float] = {}
+
+# Distinguishes "the dispatch never produced a value" from a legitimate
+# ``None`` returned by the read itself, which the reader-absent branch uses.
+_DISPATCH_FAILED = object()
+
+
+def _warn_degraded_read(event: str, hint: str) -> None:
+    """Log a degraded-read cause, at most once per interval per cause."""
+    now = time.monotonic()
+    last = _degraded_read_last_logged.get(event)
+    if last is not None and now - last < DEGRADED_READ_LOG_INTERVAL_SECONDS:
+        return
+    _degraded_read_last_logged[event] = now
+    logger.warning(event, category='debug', hint=hint)
 
 
 class UIDeps:
@@ -224,6 +246,11 @@ class UIDeps:
         defeat the dedicated-reader-pool design. Callers map ``None`` onto
         whatever empty response shape their endpoint uses
         (``JSONResponse([])``, ``{}``, etc.).
+
+        Both ``None`` causes — reader absent and dispatch timeout — are
+        logged (rate-limited), because they look identical from the browser
+        and an operator staring at a degraded page needs to know which one
+        they have.
         """
         recorder = self.recorder
 
@@ -231,6 +258,11 @@ class UIDeps:
             await recorder.flush()
             db = recorder.reader_db
             if not db:
+                _warn_degraded_read(
+                    'ui_read_reader_db_absent',
+                    hint='recorder has no reader connection — not started yet, '
+                    'or started without event storage (ui.recorder.db_dir / store_events)',
+                )
                 return None
             async with db.execute(query, params) as cur:
                 columns: list[str] = [desc[0] for desc in cur.description or []]
@@ -242,7 +274,18 @@ class UIDeps:
         # pages an operator opens precisely because the worker is misbehaving.
         # On timeout the caller sees the same ``None`` it already handles for
         # "no reader connection", so no endpoint needs a new branch.
-        return await self.dispatch_bounded(_inner(), default=None)
+        result = await self.dispatch_bounded(_inner(), default=_DISPATCH_FAILED)
+        if result is _DISPATCH_FAILED:
+            # ``dispatch_bounded`` already logged the timeout itself; this
+            # line names the consequence, so the degraded UI response and its
+            # cause sit together in the log.
+            _warn_degraded_read(
+                'ui_read_dispatch_unavailable',
+                hint='main loop did not answer the recorder read in time — '
+                'the pipeline may be stalled; UI data is degraded',
+            )
+            return None
+        return result
 
     async def dispatch_bounded(self, coro: Coroutine[Any, Any, Any], default: Any = None) -> Any:
         """Run ``coro`` on the main loop, giving up after a bounded wait.
