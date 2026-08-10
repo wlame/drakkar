@@ -242,7 +242,8 @@ paths:
         config is smaller. `limit` caps the number of tasks returned, newest
         by start time; it defaults to `ui.timeline.history_factor` times the
         executor pool's `max_executors` (or times 8 when no pool is
-        attached). Archived retry attempts use the `task_id:r<float-ts>`
+        attached), itself clamped to 100000 since neither config value has
+        its own ceiling. Archived retry attempts use the `task_id:r<float-ts>`
         composite-key format; consumers must not rely on positional order.
       parameters:
         - name: minutes
@@ -972,23 +973,23 @@ components:
 
     TimelineRuleCondition:
       description: >-
-        One condition of a timeline color rule from ui.timeline.color_rules
-        (v1.7): a task label or a task field compared with op/value. Exactly
-        one of label/field is present; value is absent for the value-less
-        ops exists/missing.
+        One condition of a timeline color rule from ui.timeline.color_rules:
+        a task label or a task field compared with op/value. Exactly one of
+        label/field is present; value is absent for the value-less ops
+        exists/missing.
       type: object
       properties:
         label: {type: string}
         field: {type: string}
         op: {type: string, enum: [eq, ne, contains, prefix, gt, ge, lt, le, exists, missing]}
-        value: {}
+        value: {type: [string, number]}
       required: [op]
 
     TimelineColorRule:
       description: >-
-        A first-match-wins bar-coloring rule from ui.timeline.color_rules
-        (v1.7). `when` always arrives as an array, even when the source
-        config wrote a single condition.
+        A first-match-wins bar-coloring rule from ui.timeline.color_rules.
+        `when` always arrives as an array, even when the source config wrote
+        a single condition.
       type: object
       properties:
         name: {type: string}
@@ -1001,7 +1002,7 @@ components:
     TimelineSettings:
       description: >-
         Timeline history depth, bar-color rules, and label-role bindings
-        from ui.timeline (v1.7).
+        from ui.timeline.
       type: object
       properties:
         history_factor: {type: integer}

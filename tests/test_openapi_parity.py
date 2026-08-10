@@ -13,6 +13,7 @@ the pinned surface.
 import time
 from unittest.mock import AsyncMock, MagicMock
 
+import jsonschema
 import yaml
 from httpx import ASGITransport, AsyncClient
 
@@ -28,6 +29,27 @@ _HTTP_METHODS = {'get', 'post', 'put', 'delete', 'patch'}
 def _spec_routes() -> set[tuple[str, str]]:
     doc = yaml.safe_load(SPEC_PATH.read_text())
     return {(method.upper(), path) for path, item in doc['paths'].items() for method in item if method in _HTTP_METHODS}
+
+
+def _resolve_schema(schemas: dict, name: str) -> dict:
+    """Inline local ``$ref`` pointers in a vendored component schema.
+
+    Deliberately simple: every ``$ref`` in this file is a bare
+    ``{'$ref': '#/components/schemas/Name'}`` with no sibling keywords (no
+    ``oneOf``/``allOf`` merging needed for the schemas this module
+    exercises), so a plain recursive substitution is enough.
+    """
+
+    def resolve(node):
+        if isinstance(node, dict):
+            if set(node) == {'$ref'}:
+                return resolve(schemas[node['$ref'].rsplit('/', 1)[-1]])
+            return {key: resolve(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [resolve(item) for item in node]
+        return node
+
+    return resolve(schemas[name])
 
 
 def _walk_routes(routes, seen=None):
@@ -178,3 +200,66 @@ async def test_docs_page_escapes_reflected_token():
         page = await client.get('/docs', params={'token': '"><script>alert(1)</script>'})
     assert '<script>alert(1)</script>' not in page.text
     assert 'token=%22%3E%3Cscript%3Ealert%281%29%3C%2Fscript%3E' in page.text
+
+
+async def test_identity_and_recent_tasks_payloads_match_schemas():
+    """Route-parity above only compares path *sets*; this validates actual response
+    bodies against the vendored openapi.yaml component schemas (local $ref resolved),
+    catching drift the path-set check can't — a field renamed or dropped on one side
+    without the other."""
+    import aiosqlite
+
+    from drakkar.config import TimelineColorRule, UITimelineConfig
+    from drakkar.recorder import SCHEMA_EVENTS
+
+    schemas = yaml.safe_load(SPEC_PATH.read_text())['components']['schemas']
+
+    # A non-default timeline config so color_rules/labels aren't validated
+    # as trivially-empty.
+    timeline_cfg = UITimelineConfig(
+        color_rules=[TimelineColorRule(when={'field': 'status', 'op': 'eq', 'value': 'failed'}, color='red')],
+    )
+    cfg = make_ui_config(timeline=timeline_cfg)
+
+    # A single shared in-memory connection standing in for both the writer
+    # and reader handles, same pattern as the debug-server route tests —
+    # one real completed task exercises stdout_size/truncated for real,
+    # rather than the early-return empty-list shape a missing DB produces.
+    db = await aiosqlite.connect(':memory:')
+    await db.executescript(SCHEMA_EVENTS)
+    now = time.time()
+    await db.execute(
+        'INSERT INTO events (ts, dt, event, partition, task_id, args, pid) '
+        "VALUES (?, ?, 'task_started', 0, 'task-1', '[]', 100)",
+        (now - 10, '2026-04-02'),
+    )
+    await db.execute(
+        'INSERT INTO events (ts, dt, event, partition, task_id, duration, pid, stdout_size) '
+        "VALUES (?, ?, 'task_completed', 0, 'task-1', 1.0, 100, 512)",
+        (now - 9, '2026-04-02'),
+    )
+    await db.commit()
+
+    recorder = AsyncMock(spec=EventRecorder)
+    recorder._db = db
+    recorder._reader_db = db
+    recorder.reader_db = db
+    recorder.flush = AsyncMock()
+    recorder._buffer = []
+    recorder.config = cfg
+    app = MagicMock()
+    app._worker_id = 'schema-worker'
+    app._cluster_name = ''
+    app._start_time = time.monotonic()
+    app._config = DrakkarConfig()
+    app.config_summary = '[schema-worker]'
+    app._executor_pool = None
+
+    transport = ASGITransport(app=create_ui_app(cfg, recorder, app))
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        identity = (await client.get('/api/v1/identity')).json()
+        recent_tasks = (await client.get('/api/v1/recent-tasks?minutes=5')).json()
+    await db.close()
+
+    jsonschema.validate(identity, _resolve_schema(schemas, 'Identity'), cls=jsonschema.Draft202012Validator)
+    jsonschema.validate(recent_tasks, _resolve_schema(schemas, 'RecentTasks'), cls=jsonschema.Draft202012Validator)

@@ -15,7 +15,9 @@ from starlette.testclient import TestClient
 
 from drakkar.config import DrakkarConfig, UITimelineConfig
 from drakkar.recorder import EventRecorder
+from drakkar.uiserver import routes_live
 from drakkar.uiserver.server import (
+    UIDeps,
     create_ui_app,
     format_ts,
     format_ts_full,
@@ -2366,6 +2368,18 @@ class TestApiRecentTasks:
         assert tasks_by_id['task-2']['stdout_size'] is None
         await db.close()
 
+    async def test_recent_tasks_failed_task_stdout_size_is_null(self, tmp_path, mock_recorder, mock_app):
+        """A task_failed row's stdout_size column defaults to 0 at the schema level — the
+        handler must not surface that as a real byte count."""
+        client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=5')
+        data = resp.json()
+        tasks_by_id = {t['task_id']: t for t in data['tasks']}
+        assert tasks_by_id['task-4']['status'] == 'failed'
+        assert tasks_by_id['task-4']['stdout_size'] is None
+        await db.close()
+
 
 class TestApiRecentTasksDepthAndWindow:
     """Cover the ui.timeline-driven `limit`/`minutes` behavior of /api/recent-tasks."""
@@ -2437,7 +2451,8 @@ class TestApiRecentTasksDepthAndWindow:
         assert data['truncated'] is False
         await db.close()
 
-    async def test_default_limit_derives_from_history_factor_and_pool(self, tmp_path, mock_recorder, mock_app):
+    async def test_default_limit_pool_absent_falls_back_to_8(self, tmp_path, mock_recorder, mock_app):
+        """No executor pool attached: default limit is history_factor x DEFAULT_LANE_COUNT (8)."""
         timeline = UITimelineConfig(history_factor=1)
         client, db = await self._make_client(tmp_path, mock_recorder, mock_app, timeline=timeline, pool_present=False)
         await self._seed_sequential_tasks(db, 10)
@@ -2446,6 +2461,47 @@ class TestApiRecentTasksDepthAndWindow:
         data = resp.json()
         assert len(data['tasks']) == 8
         assert {t['task_id'] for t in data['tasks']} == {f'task-{i}' for i in range(3, 11)}
+        await db.close()
+
+    async def test_default_limit_uses_pool_max_executors_when_present(self, tmp_path, mock_recorder, mock_app):
+        """Pool attached: default limit is history_factor x pool.max_executors, distinct from the
+        pool-absent fallback of 8 — uses max_executors=3 so the two paths can't be confused."""
+        timeline = UITimelineConfig(history_factor=2)
+        mock_app._executor_pool.max_executors = 3
+        client, db = await self._make_client(tmp_path, mock_recorder, mock_app, timeline=timeline)
+        await self._seed_sequential_tasks(db, 10)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=60')
+        data = resp.json()
+        assert len(data['tasks']) == 6
+        assert {t['task_id'] for t in data['tasks']} == {f'task-{i}' for i in range(5, 11)}
+        await db.close()
+
+    async def test_default_limit_clamped_when_history_factor_is_absurd(
+        self, tmp_path, mock_recorder, mock_app, monkeypatch
+    ):
+        """An unbounded history_factor x pool size must not reach the DB query unclamped."""
+        captured: dict[str, object] = {}
+        original = UIDeps.flush_and_select
+
+        async def spy(self, query, params=()):
+            captured['params'] = params
+            return await original(self, query, params)
+
+        monkeypatch.setattr(UIDeps, 'flush_and_select', spy)
+
+        timeline = UITimelineConfig(history_factor=1_000_000)
+        client, db = await self._make_client(tmp_path, mock_recorder, mock_app, timeline=timeline, pool_present=False)
+        await self._seed_sequential_tasks(db, 3)
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=60')
+        assert resp.status_code == 200
+        # The derived limit (1_000_000 x 8) must have been clamped to
+        # RECENT_TASKS_MAX_LIMIT before becoming the query's row cap.
+        assert captured['params'][1] == routes_live.RECENT_TASKS_MAX_LIMIT * 3
+        data = resp.json()
+        assert len(data['tasks']) == 3
+        assert data['truncated'] is False
         await db.close()
 
     async def test_minutes_1440_is_accepted(self, tmp_path, mock_recorder, mock_app):

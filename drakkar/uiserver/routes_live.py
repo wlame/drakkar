@@ -38,16 +38,6 @@ if TYPE_CHECKING:
 # fires. Nested class definitions inside a route factory would not
 # trigger the same heuristic and would end up being treated as query
 # parameters (surfaces as 422 "Field required" responses).
-# Ceiling on the ``/api/recent-tasks?minutes=`` query parameter — kept in
-# sync with ``UITimelineConfig.max_age_minutes``'s own ceiling (24h) so a
-# caller sees FastAPI's validation error rather than a silent downstream
-# clamp. The handler clamps further down to ``config.timeline.max_age_minutes``
-# (a per-worker override, tighter by default at 60 minutes), and the row
-# and event caps derived from ``config.timeline.history_factor`` keep the
-# query viable on a high-fan-out worker even at the full window.
-RECENT_TASKS_MAX_MINUTES = 1440
-
-
 class _ArrangeTaskLookupRequest(BaseModel):
     task_ids: list[str] = Field(default_factory=list, max_length=5000)
 
@@ -58,6 +48,29 @@ class _ArrangeTaskLookupRequest(BaseModel):
 class _SinkBreakdownRequest(BaseModel):
     partition: int
     offsets: list[int] = Field(default_factory=list, max_length=5000)
+
+
+# Ceiling on the ``/api/recent-tasks?minutes=`` query parameter — kept in
+# sync with ``UITimelineConfig.max_age_minutes``'s own ceiling (24h) so a
+# caller sees FastAPI's validation error rather than a silent downstream
+# clamp. The handler clamps further down to ``config.timeline.max_age_minutes``
+# (a per-worker override, tighter by default at 60 minutes), and the row
+# and event caps derived from ``config.timeline.history_factor`` keep the
+# query viable on a high-fan-out worker even at the full window.
+RECENT_TASKS_MAX_MINUTES = 1440
+
+# Ceiling on ``/api/recent-tasks?limit=`` — shared with the *derived*
+# default (``history_factor x max_executors``), which has no ceiling of its
+# own at the config layer (both factors are operator-set positive ints with
+# no upper bound). Without this shared cap a misconfigured
+# ``history_factor`` flows straight into ``event_limit`` and a main-loop
+# SQLite query, defeating the whole point of bounding the query.
+RECENT_TASKS_MAX_LIMIT = 100_000
+
+# Lane count (and history-factor multiplier) fallback when no executor pool
+# is attached — a contract value the SPA/Go backend also assume, not just a
+# local default.
+DEFAULT_LANE_COUNT = 8
 
 
 def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
@@ -246,11 +259,12 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         limit: int | None = Query(
             default=None,
             ge=1,
-            le=100_000,
+            le=RECENT_TASKS_MAX_LIMIT,
             description=(
                 'Max tasks returned, newest by start time. Defaults to '
                 'ui.timeline.history_factor x the executor pool max_executors '
-                '(x8 when no pool is attached).'
+                f'(x{DEFAULT_LANE_COUNT} when no pool is attached), capped at '
+                f'{RECENT_TASKS_MAX_LIMIT}.'
             ),
         ),
     ):
@@ -278,9 +292,12 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         timeline_cfg = config.timeline
         minutes = min(minutes, timeline_cfg.max_age_minutes)
         pool = drakkar_app._executor_pool
-        max_lanes = pool.max_executors if pool else 8
+        max_lanes = pool.max_executors if pool else DEFAULT_LANE_COUNT
         if limit is None:
-            limit = timeline_cfg.history_factor * max_lanes
+            # ``history_factor`` and ``max_executors`` are both operator-set
+            # positive ints with no config-layer ceiling; clamp their
+            # product so a misconfigured value can't blow up the query below.
+            limit = min(timeline_cfg.history_factor * max_lanes, RECENT_TASKS_MAX_LIMIT)
         # Two events per task in the common case; the margin covers retries,
         # which add a start event per attempt.
         event_limit = limit * 3

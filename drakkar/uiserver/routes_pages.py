@@ -33,10 +33,10 @@ from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisc
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from drakkar.concurrency import dispatch_to_loop
-from drakkar.config import UITimelineConfig
 from drakkar.uiserver.server_helpers import backend_version, origin_allowed
 
 if TYPE_CHECKING:
+    from drakkar.config import UITimelineConfig
     from drakkar.uiserver.server import UIDeps
 
 # Idle backoff bounds for the WebSocket drain loop. The loop polls a
