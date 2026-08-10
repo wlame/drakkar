@@ -62,6 +62,55 @@ FAIL_RATE = '0.05'
 HTTP_PATTERNS = ['main', 'config']
 HTTP_FILE_PATH = '/tmp/search-corpus'
 
+# ui.timeline demo: byte thresholds for the human-readable file_size label,
+# largest first so the first unit the count clears wins the suffix.
+_TIMELINE_SIZE_UNITS = (('M', 1024 * 1024), ('K', 1024))
+
+
+def _human_file_size(num_bytes: int) -> str:
+    """Render a byte count as a short human string: plain bytes below 1024,
+    one decimal with a K/M suffix at or above it (e.g. '512', '12.4K')."""
+    for suffix, unit in _TIMELINE_SIZE_UNITS:
+        if num_bytes >= unit:
+            return f'{num_bytes / unit:.1f}{suffix}'
+    return str(num_bytes)
+
+
+def _scan_target_stats(file_path: str) -> tuple[int, int]:
+    """Best-effort (size_bytes, line_count) for a scan target. A directory
+    or any other unreadable path returns (0, 0) rather than raising —
+    arrange() must not fail a whole window over one label input."""
+    try:
+        with open(file_path, 'rb') as f:
+            content = f.read()
+    except OSError:
+        return 0, 0
+    return len(content), content.count(b'\n')
+
+
+def _scan_target_module(file_path: str) -> str:
+    """Directory owning the scan target: its own name when the target IS a
+    directory (e.g. '/project/drakkar' scanned recursively), otherwise its
+    parent directory's name (e.g. '/project/drakkar/app.py' -> 'drakkar')."""
+    if os.path.isdir(file_path):
+        return os.path.basename(file_path.rstrip('/')) or file_path
+    return os.path.basename(os.path.dirname(file_path)) or os.path.basename(file_path)
+
+
+def _scan_target_labels(file_path: str) -> dict[str, str]:
+    """The five ui.timeline demo labels describing the scan target itself —
+    base name, owning directory, size (human + exact bytes), and line
+    count — feeding the color_rules and tag/caption/highlight/filter roles
+    in drakkar.yaml's ui.timeline block."""
+    size_bytes, lines = _scan_target_stats(file_path)
+    return {
+        'file_name': os.path.basename(file_path),
+        'module': _scan_target_module(file_path),
+        'file_size': _human_file_size(size_bytes),
+        'file_size_bytes': str(size_bytes),
+        'lines': str(lines),
+    }
+
 
 class RipgrepHandler(
     dk.BaseDrakkarHandler[SearchRequest, SearchResult, RankRequest, RankResponse],
@@ -248,6 +297,12 @@ class RipgrepHandler(
         # simulate slow IO-bound preparation (e.g. DB lookup, HTTP call)
         await asyncio.sleep(random.uniform(0.05, 0.5))
 
+        # ui.timeline demo: every task built in this arrange() window shares
+        # one "request" label — <partition>:<first-offset> of the window's
+        # first message — so the timeline's marker role draws one pin per
+        # Kafka batch boundary rather than one per task.
+        request_label = f'{messages[0].partition}:{messages[0].offset}'
+
         # Bucket every (pattern, file_path) pair across ALL messages in the
         # window. Key = (pattern, file_path); value = list of contributing
         # messages (with their request_ids for metadata).
@@ -323,6 +378,7 @@ class RipgrepHandler(
             merged_repeat = max((m.payload.repeat for m in contributing_msgs), default=1)
             request_ids = [m.payload.request_id for m in contributing_msgs]
             offsets = [m.offset for m in contributing_msgs]
+            scan_labels = _scan_target_labels(file_path)
 
             # PRECOMPUTED FAST-TRACK — consult the framework cache before
             # scheduling a subprocess. A cache hit becomes a PrecomputedResult
@@ -399,6 +455,8 @@ class RipgrepHandler(
                             'fan_in_count': str(len(contributing_msgs)),
                             'pattern': pattern,
                             'file': file_path,
+                            'request': request_label,
+                            **scan_labels,
                         },
                         source_offsets=offsets,
                         precomputed=dk.PrecomputedResult(
@@ -447,6 +505,8 @@ class RipgrepHandler(
                         'fan_in_count': str(len(contributing_msgs)),
                         'pattern': pattern,
                         'file': file_path,
+                        'request': request_label,
+                        **scan_labels,
                     },
                     env={
                         'REQUEST_ID': request_ids[0],

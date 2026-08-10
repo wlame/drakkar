@@ -208,6 +208,31 @@ ui:
     store_output: true
     flush_interval_seconds: 3
     max_buffer: 50000
+  # Timeline tuning: history depth, first-match-wins bar color rules, and
+  # which task label feeds each special role. tag=file_size shows the
+  # human size on the bar; caption=file_name names it; highlight=lines
+  # flags line count on hover; filter=module lets the UI filter by
+  # scanned directory; marker=request draws one pin per Kafka batch
+  # boundary (see handler.py's arrange()).
+  timeline:
+    history_factor: 100
+    max_age_minutes: 60
+    color_rules:
+      - name: empty output
+        when: {field: stdout_size, op: eq, value: 0}
+        color: lightgray
+      - name: big file
+        when: {label: file_size_bytes, op: gt, value: 10240}
+        color: blue
+      - name: vendored code
+        when: {label: module, op: contains, value: vendor}
+        color: purple
+    labels:
+      tag: file_size
+      caption: file_name
+      highlight: lines
+      filter: module
+      marker: request
 
 # --- Framework cache ---
 #

@@ -64,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TasksSource` table, a `MetricsSource` stat tile, an `EventsSource`
   table, and an `AnnotationsSource` table. `ui.link_bases` and
   `ui.custom_renderers_path` are configured in `drakkar.yaml` accordingly.
+  Every scan task now also carries six labels (`file_name`, `module`,
+  `file_size`, `file_size_bytes`, `lines`, `request`) feeding a worked
+  `ui.timeline` block: color rules on empty output, big files, and
+  vendored paths, plus all five tag/caption/highlight/filter/marker roles
+  bound to those labels.
 - Documentation: the Documentation table and Key Features list on the docs
   home page now list Annotations, Probe User Details, UI Enrichment,
   Declared UI Pages, Runtime Health, and Sink Write Operations, all of
