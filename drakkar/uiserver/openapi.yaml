@@ -530,6 +530,52 @@ paths:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
+  /api/v1/debug/archives:
+    get:
+      tags: [debug-tools]
+      operationId: getArchives
+      summary: Compressed recorder archives
+      description: >-
+        One row per archive file in db_dir (name
+        `<cluster>-<from>__<to>.db.gz`), all fields parsed from the file
+        name — no file is opened. Sorted newest-first by to_ts.
+      responses:
+        '200':
+          description: Archive list.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ArchiveList'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/archives/{name}:
+    get:
+      tags: [debug-tools]
+      operationId: getArchiveDownload
+      summary: Download a compressed recorder archive
+      description: >-
+        Gzip file attachment (Content-Type application/gzip, Cache-Control
+        no-store). name must match the archive naming pattern and resolve
+        inside db_dir; a rejected name, a path escaping db_dir, or a
+        missing file all answer 404. The bearer token may ride as ?token=
+        because plain <a> downloads cannot set headers.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: The archive file.
+          content:
+            application/gzip:
+              schema: {type: string, format: binary}
+        '404':
+          description: Rejected, escaping, or missing archive name.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
   /api/v1/debug/trace:
     get:
       tags: [debug-tools]
@@ -1374,6 +1420,24 @@ components:
         has_state: {type: boolean}
         size_bytes: {type: integer}
       required: [filename, path, event_count, size_bytes]
+
+    ArchiveEntry:
+      type: object
+      properties:
+        name: {type: string}
+        cluster: {type: string}
+        from_ts: {type: number}
+        to_ts: {type: number}
+        size_bytes: {type: integer}
+      required: [name, cluster, from_ts, to_ts, size_bytes]
+
+    ArchiveList:
+      type: object
+      properties:
+        archives:
+          type: array
+          items: {$ref: '#/components/schemas/ArchiveEntry'}
+      required: [archives]
 
     MergeResult:
       type: object

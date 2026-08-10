@@ -106,7 +106,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to delete old archives too — it must cover at least two archive windows,
   or the worker refuses to start. `archive_enabled: false` turns the whole
   pass off, and the worker then logs at startup that it deletes no
-  recorder files.
+  recorder files. `GET /api/v1/debug/archives` lists archive files
+  (name/cluster/window bounds/size, parsed from the file name — no file is
+  opened) and `GET /api/v1/debug/archives/{name}` downloads one, mirroring
+  the existing database listing and download routes.
 
 ### Changed
 

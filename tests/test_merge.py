@@ -235,6 +235,23 @@ def test_scan_directory_empty(tmp_path):
     assert results == []
 
 
+def test_scan_directory_skips_dot_prefixed_db_files(tmp_path):
+    """Dot-prefixed ``*.db`` names are pass-internal state, not finished databases.
+
+    Archiving writes in-flight merge temporaries as
+    ``.<name>.<pid>.merge.db`` — these end in ``.db`` and would otherwise
+    show up mid-merge in the Debug -> Databases list. ``*.db.unreadable``
+    quarantine files already fail the ``.endswith('.db')`` check, but a
+    dot-temp does not, so it needs its own exclusion.
+    """
+    _create_source_db(tmp_path / 'w1.db', worker_name='w1')
+    (tmp_path / '.search-fleet-2026-08-08_00-00__2026-08-09_00-00.db.gz.4242.merge.db').write_bytes(b'partial')
+
+    results = scan_directory(str(tmp_path))
+
+    assert [r.filename for r in results] == ['w1.db']
+
+
 def test_scan_directory_nonexistent():
     results = scan_directory('/no/such/dir')
     assert results == []

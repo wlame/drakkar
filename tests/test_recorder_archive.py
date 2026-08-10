@@ -21,6 +21,7 @@ from drakkar.recorder.archive import (
     LOCK_STALE_SECONDS,
     archive_file_name,
     assign_windows,
+    list_archives,
     parse_db_start_ts,
     run_archive_pass,
     sanitize_cluster,
@@ -144,6 +145,78 @@ def test_archive_file_name_uses_utc_minute_precision():
     end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
 
     assert archive_file_name('search fleet', start, end) == 'search_fleet-2026-08-08_00-00__2026-08-09_00-00.db.gz'
+
+
+# --- list_archives --------------------------------------------------
+
+
+def test_list_archives_empty_when_db_dir_unset():
+    assert list_archives('') == []
+
+
+def test_list_archives_empty_when_db_dir_has_nothing(tmp_path):
+    assert list_archives(str(tmp_path)) == []
+
+
+def test_list_archives_parses_name_into_fields(tmp_path):
+    start = datetime(2026, 8, 8, 0, 0, 0, tzinfo=UTC).timestamp()
+    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
+    path = _make_archive(tmp_path, CLUSTER, end)
+    path.write_bytes(b'x' * 37)
+
+    [entry] = list_archives(str(tmp_path))
+
+    assert entry.name == archive_file_name(CLUSTER, start, end)
+    assert entry.cluster == sanitize_cluster(CLUSTER)
+    assert entry.from_ts == start
+    assert entry.to_ts == end
+    assert entry.size_bytes == 37
+
+
+def test_list_archives_sorts_newest_first_by_to_ts(tmp_path):
+    day0 = datetime(2026, 8, 6, 0, 0, 0, tzinfo=UTC).timestamp()
+    day1 = day0 + DAY
+    day2 = day0 + 2 * DAY
+    oldest = _make_archive(tmp_path, CLUSTER, day1)
+    newest = _make_archive(tmp_path, CLUSTER, day2)
+    middle = _make_archive(tmp_path, OTHER_CLUSTER, day1 + HOUR)  # unused window end, still < day2
+
+    names = [entry.name for entry in list_archives(str(tmp_path))]
+
+    assert names == [newest.name, middle.name, oldest.name]
+
+
+def test_list_archives_excludes_dot_prefixed_files(tmp_path):
+    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
+    real = _make_archive(tmp_path, CLUSTER, end)
+    # A compress-temp for the same window: dot-prefixed, pid-stamped.
+    (tmp_path / f'.{real.name}.4242.tmp').write_bytes(b'partial')
+    # A stale lock file left behind by a dead pass.
+    (tmp_path / f'.archive-{CLUSTER}.lock').write_bytes(b'{}')
+
+    [entry] = list_archives(str(tmp_path))
+
+    assert entry.name == real.name
+
+
+def test_list_archives_excludes_unreadable_quarantine_files(tmp_path):
+    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
+    real = _make_archive(tmp_path, CLUSTER, end)
+    (tmp_path / f'{real.name}.unreadable').write_bytes(b'quarantined')
+
+    [entry] = list_archives(str(tmp_path))
+
+    assert entry.name == real.name
+
+
+def test_list_archives_excludes_raw_db_files(tmp_path):
+    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
+    real = _make_archive(tmp_path, CLUSTER, end)
+    _make_db(tmp_path, 'worker-1', end - HOUR)
+
+    [entry] = list_archives(str(tmp_path))
+
+    assert entry.name == real.name
 
 
 # --- window assignment --------------------------------------------------

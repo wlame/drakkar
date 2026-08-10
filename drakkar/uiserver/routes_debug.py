@@ -5,6 +5,8 @@ Routes:
   * ``/api/debug/databases``         — list of debug DB files.
   * ``/api/debug/merge``             — merge multiple DB files.
   * ``/debug/download/{filename}``   — download a single DB file.
+  * ``/api/debug/archives``          — list of compressed archive files.
+  * ``/api/debug/archives/{name}``   — download a single archive file.
   * ``/api/debug/trace``             — cross-worker trace for one (partition, offset).
   * ``/api/debug/label-keys``        — distinct label keys across events.
   * ``/api/debug/trace-by-label``    — cross-worker trace by (key, value).
@@ -356,6 +358,53 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             # The download URL may carry ?token= (browsers can't set headers
             # on <a> navigations); no-store keeps token-bearing responses
             # out of shared proxy/CDN caches.
+            headers={'Cache-Control': 'no-store, private'},
+        )
+
+    @router.get('/api/debug/archives', dependencies=[Depends(deps.require_auth)])
+    async def api_debug_archives():
+        """List compressed archive files in db_dir."""
+        from drakkar.recorder.archive import list_archives
+
+        # Offloaded for the same reason as api_debug_databases above: this
+        # is one listdir + one stat per archive, cheap today, but db_dir is
+        # shared and unbounded, so it must never run inline on the loop
+        # that also serves /healthz and /readyz.
+        archives = await asyncio.to_thread(list_archives, config.recorder.db_dir)
+        return JSONResponse(
+            {
+                'archives': [
+                    {
+                        'name': archive.name,
+                        'cluster': archive.cluster,
+                        'from_ts': archive.from_ts,
+                        'to_ts': archive.to_ts,
+                        'size_bytes': archive.size_bytes,
+                    }
+                    for archive in archives
+                ]
+            }
+        )
+
+    @router.get('/api/debug/archives/{name}', dependencies=[Depends(deps.require_auth)])
+    async def debug_download_archive(name: str):
+        """Download one compressed archive file from db_dir."""
+        from drakkar.recorder.archive import ARCHIVE_NAME_RE
+
+        # The naming pattern alone already rules out path separators and a
+        # leading dot, but the realpath check stays as defense-in-depth —
+        # same belt-and-braces shape as debug_download above.
+        if not ARCHIVE_NAME_RE.fullmatch(name):
+            return JSONResponse({'error': 'Invalid archive name'}, status_code=404)
+        full = os.path.join(config.recorder.db_dir, name)
+        if not os.path.realpath(full).startswith(os.path.realpath(config.recorder.db_dir) + os.sep):
+            return JSONResponse({'error': 'Invalid path'}, status_code=404)
+        if not os.path.isfile(full):
+            return JSONResponse({'error': 'File not found'}, status_code=404)
+        return FileResponse(
+            path=full,
+            filename=name,
+            media_type='application/gzip',
             headers={'Cache-Control': 'no-store, private'},
         )
 

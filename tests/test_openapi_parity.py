@@ -267,6 +267,56 @@ async def test_identity_and_recent_tasks_payloads_match_schemas():
     assert 'unavailable' not in recent_tasks
 
 
+async def test_archives_payload_matches_schema(tmp_path):
+    """Validates the archive-list payload shape against the vendored ArchiveList schema.
+
+    Builds one real gzip archive on disk with the naming pattern the
+    archive engine writes, so this exercises the actual name-parsing path
+    (``list_archives``) rather than a hand-built fixture.
+    """
+    import gzip
+    from datetime import UTC, datetime
+
+    from drakkar.recorder.archive import archive_file_name
+
+    schemas = yaml.safe_load(SPEC_PATH.read_text())['components']['schemas']
+
+    # Archive names carry minute precision (ARCHIVE_TS_FORMAT), so the
+    # bounds must land on a whole minute for the round-trip through the
+    # name to reproduce the exact float below.
+    from_ts = datetime(2023, 11, 14, 0, 0, 0, tzinfo=UTC).timestamp()
+    to_ts = datetime(2023, 11, 15, 0, 0, 0, tzinfo=UTC).timestamp()
+    name = archive_file_name('search-fleet', from_ts, to_ts)
+    with gzip.open(tmp_path / name, 'wb') as f:
+        f.write(b'archived-bytes')
+
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+    recorder = AsyncMock(spec=EventRecorder)
+    recorder.config = cfg
+    app = MagicMock()
+    app._worker_id = 'schema-worker'
+    app._cluster_name = ''
+    app._start_time = time.monotonic()
+    app._config = DrakkarConfig()
+
+    transport = ASGITransport(app=create_ui_app(cfg, recorder, app))
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        payload = (await client.get('/api/v1/debug/archives')).json()
+
+    jsonschema.validate(payload, _resolve_schema(schemas, 'ArchiveList'), cls=jsonschema.Draft202012Validator)
+    assert payload == {
+        'archives': [
+            {
+                'name': name,
+                'cluster': 'search-fleet',
+                'from_ts': from_ts,
+                'to_ts': to_ts,
+                'size_bytes': (tmp_path / name).stat().st_size,
+            }
+        ]
+    }
+
+
 async def test_recent_tasks_degraded_read_keeps_the_documented_shape(monkeypatch):
     """A recorder read that cannot answer must still return a RecentTasks object.
 

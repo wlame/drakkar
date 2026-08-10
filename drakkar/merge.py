@@ -251,6 +251,12 @@ def scan_directory(db_dir: str) -> list[DbStats]:
     if not db_dir or not os.path.isdir(db_dir):
         return results
     for entry in sorted(os.listdir(db_dir)):
+        # Dot-prefixed names are pass-internal state, never a finished
+        # database — archiving's in-flight merge temporaries
+        # (``.<name>.<pid>.merge.db``) end in ``.db`` and would otherwise
+        # show up here mid-merge.
+        if entry.startswith('.'):
+            continue
         if not entry.endswith('.db'):
             continue
         full = os.path.join(db_dir, entry)

@@ -152,6 +152,7 @@ LEGACY_TO_V1 = [
     ('/api/debug/databases', '/api/v1/debug/databases'),
     ('/api/debug/label-keys', '/api/v1/debug/label-keys'),
     ('/api/debug/periodic', '/api/v1/debug/periodic'),
+    ('/api/debug/archives', '/api/v1/debug/archives'),
 ]
 
 
@@ -181,6 +182,22 @@ class TestV1Aliases:
         assert v1.status_code == 200
         assert legacy.content == v1.content == b'sqlite-bytes'
         assert v1.headers['content-type'] == 'application/x-sqlite3'
+        assert v1.headers['cache-control'] == 'no-store, private'
+
+    async def test_archive_download_alias_serves_file(self, tmp_path, mock_recorder, mock_app):
+        from drakkar.recorder.archive import archive_file_name
+
+        name = archive_file_name('search-fleet', 0.0, 86400.0)
+        (tmp_path / name).write_bytes(b'gzip-bytes')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        mock_recorder.config = cfg
+        async with make_client(cfg, mock_recorder, mock_app) as c:
+            legacy = await c.get(f'/api/debug/archives/{name}')
+            v1 = await c.get(f'/api/v1/debug/archives/{name}')
+        assert legacy.status_code == 200
+        assert v1.status_code == 200
+        assert legacy.content == v1.content == b'gzip-bytes'
+        assert v1.headers['content-type'] == 'application/gzip'
         assert v1.headers['cache-control'] == 'no-store, private'
 
     async def test_merge_alias_validates_body(self, client):
@@ -216,6 +233,8 @@ class TestV1Auth:
         '/api/v1/debug/databases',
         '/api/v1/debug/download/test.db',
         '/api/v1/debug/cache/stats',
+        '/api/v1/debug/archives',
+        '/api/v1/debug/archives/test-2026-08-08_00-00__2026-08-09_00-00.db.gz',
     ]
 
     def _make_authed_client(self, tmp_path, mock_recorder, mock_app):

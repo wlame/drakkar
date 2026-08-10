@@ -6,6 +6,7 @@ import os
 import re
 import time
 import typing
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -15,6 +16,7 @@ from starlette.testclient import TestClient
 
 from drakkar.config import DrakkarConfig, UITimelineConfig
 from drakkar.recorder import EventRecorder
+from drakkar.recorder.archive import archive_file_name
 from drakkar.uiserver import routes_live
 from drakkar.uiserver.server import (
     UIDeps,
@@ -580,6 +582,131 @@ class TestDebugDownload:
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/debug/download/nonexistent.db')
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 4b. Archive list + download endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestDebugArchivesList:
+    async def test_list_empty_db_dir(self, tmp_path, mock_recorder, mock_app):
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/archives')
+        assert resp.status_code == 200
+        assert resp.json() == {'archives': []}
+
+    async def test_list_happy_path_shape_and_sort_order(self, tmp_path, mock_recorder, mock_app):
+        day0 = datetime(2026, 8, 6, 0, 0, 0, tzinfo=UTC).timestamp()
+        day1 = day0 + 86400
+        day2 = day0 + 2 * 86400
+        older_name = archive_file_name('search-fleet', day0, day1)
+        newer_name = archive_file_name('search-fleet', day1, day2)
+        (tmp_path / older_name).write_bytes(b'a' * 11)
+        (tmp_path / newer_name).write_bytes(b'b' * 22)
+
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/archives')
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert list(body.keys()) == ['archives']
+        assert body['archives'] == [
+            {
+                'name': newer_name,
+                'cluster': 'search-fleet',
+                'from_ts': day1,
+                'to_ts': day2,
+                'size_bytes': 22,
+            },
+            {
+                'name': older_name,
+                'cluster': 'search-fleet',
+                'from_ts': day0,
+                'to_ts': day1,
+                'size_bytes': 11,
+            },
+        ]
+
+    async def test_list_excludes_dot_temp_unreadable_and_raw_db(self, tmp_path, mock_recorder, mock_app):
+        end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
+        start = end - 86400
+        real_name = archive_file_name('search-fleet', start, end)
+        (tmp_path / real_name).write_bytes(b'real')
+        # in-flight compress temp for the same window
+        (tmp_path / f'.{real_name}.4242.tmp').write_bytes(b'partial')
+        # quarantined raw source, never matches the archive suffix
+        (tmp_path / 'worker-1-2026-08-08__00_00_00.db.unreadable').write_bytes(b'bad')
+        # a plain raw recorder db, never archived
+        (tmp_path / 'worker-1-2026-08-08__00_00_00.db').write_bytes(b'raw')
+
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/archives')
+
+        assert resp.status_code == 200
+        names = [entry['name'] for entry in resp.json()['archives']]
+        assert names == [real_name]
+
+
+class TestDebugArchivesDownload:
+    async def test_download_happy_path_round_trips_bytes(self, tmp_path, mock_recorder, mock_app):
+        end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
+        name = archive_file_name('search-fleet', end - 86400, end)
+        (tmp_path / name).write_bytes(b'gzip-bytes')
+
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get(f'/api/debug/archives/{name}')
+
+        assert resp.status_code == 200
+        assert resp.content == b'gzip-bytes'
+        assert resp.headers['content-type'] == 'application/gzip'
+        assert 'attachment' in resp.headers['content-disposition']
+
+    async def test_download_bad_name_returns_404(self, tmp_path, mock_recorder, mock_app):
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/archives/not-a-valid-archive-name.db.gz')
+        assert resp.status_code == 404
+
+    async def test_download_traversal_attempt_returns_404(self, tmp_path, mock_recorder, mock_app):
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        secret = outside / 'x.db.gz'
+        secret.write_bytes(b'secret')
+        db_dir = tmp_path / 'db'
+        db_dir.mkdir()
+
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(db_dir))
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/archives/../db.gz')
+        assert resp.status_code == 404
+
+    async def test_download_missing_file_returns_404(self, tmp_path, mock_recorder, mock_app):
+        end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
+        name = archive_file_name('search-fleet', end - 86400, end)
+
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get(f'/api/debug/archives/{name}')
         assert resp.status_code == 404
 
 
@@ -3040,6 +3167,8 @@ class TestAuthToken:
     PROTECTED_ROUTES: typing.ClassVar[list[tuple[str, str]]] = [
         ('GET', '/api/debug/databases'),
         ('GET', '/debug/download/test.db'),
+        ('GET', '/api/debug/archives'),
+        ('GET', '/api/debug/archives/test-2026-08-08_00-00__2026-08-09_00-00.db.gz'),
     ]
 
     async def test_protected_routes_require_token(self, mock_recorder, mock_app):
@@ -3069,6 +3198,24 @@ class TestAuthToken:
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/debug/databases?token=secret-123')
+            assert resp.status_code == 200
+
+    async def test_archives_list_accepts_bearer_header(self, mock_recorder, mock_app):
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        mock_recorder.config = cfg
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/archives', headers={'Authorization': 'Bearer secret-123'})
+            assert resp.status_code == 200
+
+    async def test_archives_list_accepts_query_param(self, mock_recorder, mock_app):
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
+        mock_recorder.config = cfg
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/archives?token=secret-123')
             assert resp.status_code == 200
 
     async def test_wrong_token_returns_401(self, mock_recorder, mock_app):

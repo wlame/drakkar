@@ -153,6 +153,72 @@ def _format_bound(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=UTC).strftime(ARCHIVE_TS_FORMAT)
 
 
+def _parse_bound(text: str) -> float:
+    """Inverse of :func:`_format_bound`: one window bound back to Unix time."""
+    return datetime.strptime(text, ARCHIVE_TS_FORMAT).replace(tzinfo=UTC).timestamp()
+
+
+# Matches exactly what :func:`archive_file_name` writes. Anchored at both
+# ends so a dot-prefixed temporary (in-flight compress/merge work) or a
+# ``*.unreadable`` quarantine file can never match — the UI archive-list and
+# archive-download routes reuse this pattern to identify and parse archives
+# by name alone, without opening the file.
+ARCHIVE_NAME_RE = re.compile(
+    r'^(?P<cluster>[a-zA-Z0-9_-]+)-'
+    r'(?P<from_ts>\d{4}-\d{2}-\d{2}_\d{2}-\d{2})__'
+    r'(?P<to_ts>\d{4}-\d{2}-\d{2}_\d{2}-\d{2})'
+    r'\.db\.gz$'
+)
+
+
+@dataclass(frozen=True)
+class ArchiveInfo:
+    """One archive file's identity and size, parsed entirely from its name."""
+
+    name: str
+    cluster: str
+    from_ts: float
+    to_ts: float
+    size_bytes: int
+
+
+def list_archives(db_dir: str) -> list[ArchiveInfo]:
+    """Return every archive file in ``db_dir``, newest-first by ``to_ts``.
+
+    Name-only, like :func:`parse_db_start_ts`: cluster and window bounds
+    come from the file name :func:`archive_file_name` wrote, never from
+    opening the file, so a directory with many archives costs one
+    ``listdir`` and one ``stat`` per match — cheap enough to call from a
+    request handler. :data:`ARCHIVE_NAME_RE` is anchored against the whole
+    name, so dot-prefixed temporaries, ``*.unreadable`` quarantine files
+    and raw ``*.db`` files never match.
+    """
+    results: list[ArchiveInfo] = []
+    if not db_dir or not os.path.isdir(db_dir):
+        return results
+    for entry in os.listdir(db_dir):
+        match = ARCHIVE_NAME_RE.fullmatch(entry)
+        if not match:
+            continue
+        try:
+            size_bytes = os.stat(os.path.join(db_dir, entry)).st_size
+        except OSError:
+            # Raced with a delete/rename between listdir and stat — drop it
+            # rather than fail the whole listing.
+            continue
+        results.append(
+            ArchiveInfo(
+                name=entry,
+                cluster=match['cluster'],
+                from_ts=_parse_bound(match['from_ts']),
+                to_ts=_parse_bound(match['to_ts']),
+                size_bytes=size_bytes,
+            )
+        )
+    results.sort(key=lambda info: info.to_ts, reverse=True)
+    return results
+
+
 def assign_windows(
     paths: list[str],
     window_seconds: float,
