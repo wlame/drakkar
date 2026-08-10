@@ -102,9 +102,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{value}`/`{row.*}` substitutions in a link template, not the base
   itself (inserted verbatim); an unmapped badge value with no `'*'`
   fallback renders as a neutral pill, not plain text.
-- The recorder now survives an unexpected error in its flush or rotation
-  loop. Before, one error ended the loop for the life of the process: the
-  worker stopped writing events, stopped rotating its database, and wrote
+- The recorder now survives an unexpected error in its background loops:
+  flush, database rotation, and worker-state sync. Before, one error ended
+  the loop for the life of the process: the worker stopped writing events,
+  stopped rotating its database, or stopped recording its state, and wrote
   no log line about it. Each loop now logs the error and continues on the
   next tick. A loop that ends anyway logs
   `recorder_background_task_died`.

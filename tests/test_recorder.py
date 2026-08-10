@@ -5141,6 +5141,38 @@ class TestBackgroundLoopResilience:
         assert len(failures) == 1
         assert failures[0]['error_type'] == 'OSError'
 
+    async def test_state_sync_loop_keeps_running_after_an_iteration_raises(self, tmp_path):
+        config = make_debug_config(tmp_path)
+        rec = EventRecorder(config, worker_name=WORKER_NAME)
+        rec._store = rec._store.model_copy(update={'state_sync_interval_seconds': 0.01})
+        rec._running = True
+
+        calls = 0
+
+        async def flaky_sync() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                # What a raising ``state_provider`` looks like from the loop.
+                raise KeyError('state provider blew up')
+
+        rec._sync_state = flaky_sync  # type: ignore[method-assign]
+
+        with capture_logs() as cap:
+            loop_task = asyncio.create_task(rec._state_sync_loop())
+            try:
+                await wait_for(lambda: calls >= 3)
+            finally:
+                rec._running = False
+                loop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await loop_task
+
+        assert calls >= 3
+        failures = [e for e in cap if e['event'] == 'recorder_state_sync_loop_iteration_failed']
+        assert len(failures) == 1
+        assert failures[0]['error_type'] == 'KeyError'
+
     async def test_background_task_death_while_running_is_logged(self, tmp_path):
         """Last-resort tripwire: a loop that ends anyway must say so."""
         config = make_debug_config(tmp_path)

@@ -548,6 +548,7 @@ class EventRecorder:
             self._watch_background_task(self._retention_task, 'retention')
             if self._store.store_state:
                 self._state_task = asyncio.create_task(self._state_sync_loop())
+                self._watch_background_task(self._state_task, 'state_sync')
         await logger.ainfo(
             'recorder_started',
             category='recorder',
@@ -814,7 +815,21 @@ class EventRecorder:
     async def _state_sync_loop(self) -> None:
         while self._running:
             await asyncio.sleep(self._store.state_sync_interval_seconds)
-            await self._sync_state()
+            # Same per-iteration guard as ``_flush_loop``: one bad snapshot
+            # (a state provider that raises, a locked DB) must not end the
+            # loop and freeze ``worker_state`` for the rest of the run.
+            try:
+                await self._sync_state()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await logger.aerror(
+                    'recorder_state_sync_loop_iteration_failed',
+                    category='recorder',
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    exc_info=exc,
+                )
 
     async def _sync_state(self) -> None:
         if not self._db or not self._store.store_state:
