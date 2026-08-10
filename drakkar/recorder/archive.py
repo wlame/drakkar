@@ -388,7 +388,9 @@ def _archive_window(db_dir: str, cluster: str, window: ArchiveWindow) -> None:
       overwritten. It happens when an earlier pass died between publishing
       the archive and finishing the deletion of its sources; the surviving
       sources are already inside it, so the file must never be replaced by
-      a merge of what is left.
+      a merge of what is left. Those sources are deleted rather than
+      merged again — their events would otherwise land in the archive
+      twice.
     """
     final_name = archive_file_name(cluster, window.start, window.end)
     final_path = os.path.join(db_dir, final_name)
@@ -398,15 +400,22 @@ def _archive_window(db_dir: str, cluster: str, window: ArchiveWindow) -> None:
     previous_path = prefix + _PREVIOUS_TEMP_SUFFIX
     sources = [candidate.path for candidate in window.files]
 
+    # Sources the published archive already contains. They skip the merge
+    # (re-merging them would duplicate their events) but are still deleted
+    # at the end — their data is provably inside the archive.
+    already_covered: list[str] = []
+
     try:
         merge_sources = list(sources)
         if os.path.exists(final_path):
             _decompress(final_path, previous_path)
             already_archived = _archived_source_files(previous_path)
-            merge_sources = [path for path in sources if os.path.basename(path) not in already_archived]
+            already_covered = [path for path in sources if os.path.basename(path) in already_archived]
+            merge_sources = [path for path in sources if path not in already_covered]
             if not merge_sources:
                 # The whole window is already inside the published archive.
                 # Nothing to rewrite — just finish the interrupted cleanup.
+                _remove_with_sidecars(previous_path)
                 _delete_sources(db_dir, sources)
                 logger.info(
                     'recorder_archive_sources_reclaimed',
@@ -454,9 +463,10 @@ def _archive_window(db_dir: str, cluster: str, window: ArchiveWindow) -> None:
 
     _remove_with_sidecars(merged_path)
     _remove_with_sidecars(previous_path)
-    deleted = _delete_sources(db_dir, [path for path in sources if path in merged])
+    covered = merged.union(already_covered)
+    deleted = _delete_sources(db_dir, [path for path in sources if path in covered])
     for path in sources:
-        if path in merged:
+        if path in covered:
             continue
         _set_aside(path, cluster)
     logger.info(
@@ -486,7 +496,12 @@ def _delete_sources(db_dir: str, sources: list[str]) -> int:
 
 
 def _set_aside(path: str, cluster: str) -> None:
-    """Move a source the merge could not read out of the candidate set."""
+    """Move a source the merge could not read out of the candidate set.
+
+    The ``-wal``/``-shm`` sidecars move with it: they can hold rows not yet
+    checkpointed into the main file, and a preserved database separated
+    from its write-ahead log is a database missing its newest data.
+    """
     target = path + UNREADABLE_SUFFIX
     try:
         os.rename(path, target)
@@ -500,6 +515,11 @@ def _set_aside(path: str, cluster: str) -> None:
             error=str(exc),
         )
         return
+    for suffix in _SIDECAR_SUFFIXES:
+        # A missing sidecar is the normal case (SQLite removes both on a
+        # clean close), so a failed rename is nothing to report.
+        with contextlib.suppress(OSError):
+            os.rename(path + suffix, target + suffix)
     logger.error(
         'recorder_archive_source_skipped',
         category='recorder',

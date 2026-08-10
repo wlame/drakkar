@@ -903,11 +903,15 @@ class UIRecorderConfig(BaseModel):
     def _validate_archive_retention_vs_window(self) -> 'UIRecorderConfig':
         """Retention must outlive the window an archive is born into.
 
-        A window is archived only once it ended a full window ago, so a
-        brand-new archive already describes data one window old. Retention
-        shorter than two windows would therefore delete an archive in the
-        very pass that created it — the data would be gone with no file to
-        show for it.
+        A window is archived only once it ended a full window ago, so an
+        archive of a just-due window already describes data one window old.
+        Retention shorter than two windows would delete such an archive in
+        the very pass that created it.
+
+        This does not (and cannot) stop a backlog window from being
+        archived and expired in one pass: a window whose data predates the
+        retention horizon is past due for both. That is retention working
+        as asked.
         """
         if self.archive_retention_days and self.archive_retention_days * 24 < 2 * self.archive_window_hours:
             raise ValueError(

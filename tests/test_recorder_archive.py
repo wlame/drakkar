@@ -347,6 +347,8 @@ def test_run_archive_pass_sets_aside_a_source_the_merge_cannot_read(tmp_path):
     healthy = _make_db(tmp_path, 'worker-1', start, cluster=None, event_count=2)
     corrupt = tmp_path / _db_name('worker-2', start + HOUR)
     corrupt.write_bytes(b'this file is not a SQLite database at all' * 8)
+    for suffix in ('-wal', '-shm'):
+        (tmp_path / (corrupt.name + suffix)).write_bytes(b'sidecar')
     os.utime(corrupt, (start, start))
 
     with capture_logs() as cap:
@@ -357,6 +359,10 @@ def test_run_archive_pass_sets_aside_a_source_the_merge_cannot_read(tmp_path):
     set_aside = tmp_path / (corrupt.name + '.unreadable')
     assert set_aside.exists()
     assert set_aside.read_bytes().startswith(b'this file is not a SQLite database')
+    # The write-ahead log moves with it — it may hold the newest rows.
+    for suffix in ('-wal', '-shm'):
+        assert not (tmp_path / (corrupt.name + suffix)).exists()
+        assert (tmp_path / (set_aside.name + suffix)).exists()
     # The healthy source was archived and only then deleted.
     assert not Path(healthy).exists()
     assert len(_archives(tmp_path)) == 1
@@ -411,6 +417,47 @@ def test_run_archive_pass_adds_new_sources_to_a_published_archive(tmp_path):
     assert not Path(late).exists()
     assert _archives(tmp_path) == [name]
     assert _events_in_archive(tmp_path / name) == 6
+
+
+def test_run_archive_pass_deletes_already_archived_sources_when_folding(tmp_path):
+    """Sources skipped as already-archived are healthy — delete, never quarantine."""
+    now = time.time()
+    start = _due_start(now)
+    first = _make_db(tmp_path, 'worker-1', start, event_count=2)
+    second = _make_db(tmp_path, 'worker-2', start + HOUR, event_count=3)
+
+    _run(tmp_path)
+    name = _archives(tmp_path)[0]
+
+    # A pass died after the rename: both sources are back, and a new file
+    # for the same window has settled since.
+    _make_db(tmp_path, 'worker-1', start, event_count=2)
+    _make_db(tmp_path, 'worker-2', start + HOUR, event_count=3)
+    late = _make_db(tmp_path, 'worker-3', start + 2 * HOUR, event_count=4)
+
+    with capture_logs() as cap:
+        _run(tmp_path)
+
+    assert not Path(first).exists()
+    assert not Path(second).exists()
+    assert not Path(late).exists()
+    assert list(tmp_path.glob('*.unreadable')) == []
+    assert [e for e in cap if e['event'] == 'recorder_archive_source_skipped'] == []
+    assert _archives(tmp_path) == [name]
+    # Both already-archived sources kept their single copy of each event.
+    assert _events_in_archive(tmp_path / name) == 9
+
+
+def test_run_archive_pass_leaves_no_temporaries_on_the_reclaim_path(tmp_path):
+    now = time.time()
+    start = _due_start(now)
+    _make_db(tmp_path, 'worker-1', start, event_count=2)
+
+    _run(tmp_path)
+    _make_db(tmp_path, 'worker-1', start, event_count=2)
+    _run(tmp_path)
+
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith('.')] == []
 
 
 def _events_in_archive(path: Path) -> int:
