@@ -219,6 +219,19 @@ def test_list_archives_excludes_raw_db_files(tmp_path):
     assert entry.name == real.name
 
 
+def test_list_archives_skips_a_name_with_an_impossible_date(tmp_path):
+    # The name regex only checks digit counts, so month 13 matches it but
+    # is not a date. One stray file must not fail the whole listing.
+    end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
+    real = _make_archive(tmp_path, CLUSTER, end)
+    bogus = tmp_path / f'{CLUSTER}-2026-13-08_00-00__2026-13-09_00-00.db.gz'
+    bogus.write_bytes(b'not a real window')
+
+    [entry] = list_archives(str(tmp_path))
+
+    assert entry.name == real.name
+
+
 # --- window assignment --------------------------------------------------
 
 

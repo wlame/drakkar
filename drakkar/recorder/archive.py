@@ -206,12 +206,21 @@ def list_archives(db_dir: str) -> list[ArchiveInfo]:
             # Raced with a delete/rename between listdir and stat — drop it
             # rather than fail the whole listing.
             continue
+        try:
+            # The name regex only checks digit counts, not calendar
+            # validity — a hand-crafted "…-2026-13-08_00-00__….db.gz"
+            # matches it but is not a date. Skip such a file instead of
+            # letting one stray name fail the whole listing.
+            from_ts = _parse_bound(match['from_ts'])
+            to_ts = _parse_bound(match['to_ts'])
+        except ValueError:
+            continue
         results.append(
             ArchiveInfo(
                 name=entry,
                 cluster=match['cluster'],
-                from_ts=_parse_bound(match['from_ts']),
-                to_ts=_parse_bound(match['to_ts']),
+                from_ts=from_ts,
+                to_ts=to_ts,
                 size_bytes=size_bytes,
             )
         )
