@@ -29,8 +29,8 @@ top of it, not the other way around.
 **Worked numbers.** With the framework defaults (`history_factor: 100`,
 `executor.max_executors: 4`), the timeline keeps at most 100 &times; 4 = **400 tasks**,
 going back at most **60 minutes**. This is deliberately smaller than the old fixed
-event-based ceiling (~7500 events) — the timeline is now sized for what an operator can
-actually scroll through, and depth is a config knob rather than a hardcoded constant. Raise
+event-based ceiling — the timeline is now sized for what an operator can actually scroll
+through, and depth is a config knob rather than a hardcoded constant. Raise
 `history_factor` for a worker with a small pool that still handles bursty traffic; raise
 `max_age_minutes` (up to the 1440 ceiling) to look further back in time.
 
@@ -44,7 +44,9 @@ ui:
 ## Color rules
 
 `color_rules` is a first-match-wins list: the first rule whose `when` conditions all match
-(logical AND) colors the bar. No match falls through to an implicit default (below).
+(logical AND) colors the bar. No match falls through to an implicit default (below). At
+most 50 rules are allowed — more than that fails config load with a boot error rather than
+silently accepting a list no operator can realistically reason through.
 
 ### Condition grammar
 
@@ -120,10 +122,12 @@ task — tasks without the bound label simply skip that role.
 
 - **`tag`** — a short chip drawn at the bar's **right edge**, truncated to 16 characters
   with an ellipsis. Tried first when both `tag` and `caption` are bound: if the bar is too
-  narrow for the tag, neither draws.
+  narrow for the tag, **neither** the tag nor the caption draws — a bound tag that doesn't
+  fit blocks the caption too, it doesn't fall back to caption-only.
 - **`caption`** — text drawn at the bar's **left edge**, in whatever space is left over
-  after the tag (if any), truncated to 32 characters. Second priority — a caption alone
-  (no tag bound, or the tag didn't fit) still draws on its own if there's room.
+  after the tag (if any), truncated to 32 characters. Second priority — a caption draws on
+  its own only when no `tag` role is bound, or the task lacks the tag's label entirely (so
+  there's no tag text to try fitting in the first place).
 - **`highlight`** — adds a numeric input to the toolbar (`<key> >`). Typing a threshold
   emphasizes every task whose bound label, parsed as a number, exceeds it (a solid outline,
   full opacity) and dims every other task to low opacity. A task whose label doesn't parse
@@ -226,9 +230,13 @@ And the five label roles:
 ## Gotchas
 
 - **Labels are strings, even when they look numeric.** `file_size_bytes` and `lines` are
-  ordinary label values (Python `str`, Go `string`) — `gt`/`ge`/`lt`/`le`/`eq`/`ne` parse
-  them as numbers before comparing. A label value that doesn't parse as a number makes the
-  condition false rather than raising an error; it just never matches a numeric op.
+  ordinary label values (Python `str`, Go `string`). `gt`/`ge`/`lt`/`le` require *both*
+  sides to parse as numbers — a label value that doesn't parse makes the condition false
+  rather than raising an error; it just never matches. `eq`/`ne` are more forgiving: they
+  compare numerically when both sides parse, but fall back to a plain string comparison
+  when either side doesn't — so `{label: env, op: eq, value: staging}` still matches a
+  non-numeric label value like `"staging"` by comparing text, not silently failing the way
+  `gt`/`ge`/`lt`/`le` would.
 - **`stdout_size` is `null` while a task is running, and stays `null` if it fails.** Only a
   `task_completed` event populates it — a `task_failed` task never gets one, so it stays
   `null` rather than reporting a stale or default value. `{field: stdout_size, op: eq,

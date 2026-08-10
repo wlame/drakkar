@@ -440,7 +440,7 @@ ui:
   timeline:
     history_factor: 100              # depth = history_factor x executor.max_executors (x8 if no pool), capped at 100000. env: DK_UI__TIMELINE__HISTORY_FACTOR
     max_age_minutes: 60              # 1-1440; oldest task age the timeline shows. env: DK_UI__TIMELINE__MAX_AGE_MINUTES
-    color_rules: []                  # first-match-wins bar-coloring rules. env: DK_UI__TIMELINE__COLOR_RULES (JSON list)
+    color_rules: []                  # first-match-wins bar-coloring rules; max 50. env: DK_UI__TIMELINE__COLOR_RULES (JSON list)
                                      # e.g. [{name: failed, when: {field: status, op: eq, value: failed}, color: red}]
     labels:                          # which task label fills each special role; '' = unbound
       tag: ''                        # env: DK_UI__TIMELINE__LABELS__TAG
