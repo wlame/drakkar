@@ -161,6 +161,7 @@ services:
         condition: service_healthy
     environment:
       WORKER_ID: worker-1
+      CLUSTER_ID: analytics-prod
       DK_CONFIG: /app/drakkar.yaml
       DK_METRICS__PORT: "9090"
       DK_UI__PORT: "8081"
@@ -211,6 +212,7 @@ services:
         condition: service_healthy
     environment:
       WORKER_ID: worker-2
+      CLUSTER_ID: analytics-prod
       DK_CONFIG: /app/drakkar.yaml
       DK_METRICS__PORT: "9091"
       DK_UI__PORT: "8082"

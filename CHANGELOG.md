@@ -116,6 +116,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking (config):** `ui.recorder.rotation_interval_minutes` is renamed
   to `rotation_interval_hours`. The unit also changes: `1` now means 1 hour,
   not 1 minute. Update any config that sets this field.
+- Integration harness: both workers now declare the same `CLUSTER_ID`, so
+  cluster features of the debug UI (worker switcher groups, the timeline
+  cluster view) are testable in the compose setup.
 
 ### Removed
 
