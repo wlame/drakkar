@@ -378,7 +378,11 @@ class RipgrepHandler(
             merged_repeat = max((m.payload.repeat for m in contributing_msgs), default=1)
             request_ids = [m.payload.request_id for m in contributing_msgs]
             offsets = [m.offset for m in contributing_msgs]
-            scan_labels = _scan_target_labels(file_path)
+            # _scan_target_labels does synchronous stat/read syscalls; run it
+            # off the main loop so a slow or stale mount under /project
+            # stalls a worker thread instead of Kafka polling for the whole
+            # window (same idiom as recorder/core.py's directory walks).
+            scan_labels = await asyncio.to_thread(_scan_target_labels, file_path)
 
             # PRECOMPUTED FAST-TRACK — consult the framework cache before
             # scheduling a subprocess. A cache hit becomes a PrecomputedResult
