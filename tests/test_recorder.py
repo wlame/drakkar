@@ -53,8 +53,6 @@ def make_debug_config(tmp_path, **overrides) -> UIConfig:
     defaults = {
         'enabled': True,
         'db_dir': str(tmp_path),
-        'retention_hours': 24,
-        'retention_max_events': 1000,
         'store_output': False,
         'flush_interval_seconds': 60,
     }
@@ -679,7 +677,7 @@ async def test_get_events_no_db():
 
 
 async def test_rotate_creates_new_db_and_flushes(tmp_path):
-    config = make_debug_config(tmp_path, retention_hours=24)
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -698,13 +696,7 @@ async def test_rotate_creates_new_db_and_flushes(tmp_path):
 
 
 async def test_rotate_flushes_buffer_to_old_db(tmp_path):
-    # retention_max_events must leave room for BOTH files: rotation prunes
-    # to max(1, retention_max_events // 10_000) files, so the suite default
-    # of 1000 (= 1 file) deletes the old DB before this test can read it.
-    # The test then re-created it by connecting, and asserted against an
-    # empty database — it only passed when start and rotate happened to land
-    # in the same wall-clock second and reused one filename.
-    config = make_debug_config(tmp_path, retention_hours=24, retention_max_events=20_000)
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -727,45 +719,6 @@ async def test_rotate_flushes_buffer_to_old_db(tmp_path):
     await rec.stop()
 
 
-async def test_rotate_deletes_old_files(tmp_path):
-    config = make_debug_config(tmp_path, retention_hours=1)  # short retention
-
-    # create an "old" DB file manually with ancient mtime
-    old_file = tmp_path / f'{WORKER_NAME}-2025-01-01__00_00_00.db'
-    old_file.write_text('')
-    os.utime(old_file, (0, 0))
-
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
-    await rec.start()
-
-    await rec._rotate()
-
-    assert not os.path.exists(old_file)  # deleted because retention_hours=0
-    assert os.path.exists(rec.db_path)  # current file exists
-    await rec.stop()
-
-
-async def test_rotate_enforces_max_file_count(tmp_path):
-    config = make_debug_config(
-        tmp_path,
-        retention_hours=999,
-        retention_max_events=10_000,  # max_files = 10000/10000 = 1
-    )
-    # create several old DB files manually
-    for i in range(5):
-        p = tmp_path / f'{WORKER_NAME}-2026-03-{10 + i:02d}__00_00_00.db'
-        p.write_text('')
-
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
-    await rec.start()
-    await rec._rotate()
-
-    remaining = list_db_files(str(tmp_path), WORKER_NAME)
-    # should keep at most 1 old file + the new one
-    assert len(remaining) <= 2
-    await rec.stop()
-
-
 async def test_rotate_creates_schema_before_swap(tmp_path):
     """_create_schema(new_db) must run BEFORE self._db is swapped.
 
@@ -775,7 +728,7 @@ async def test_rotate_creates_schema_before_swap(tmp_path):
     ``self._db`` at the moment ``_create_schema`` is called — it must still
     point at the OLD connection.
     """
-    config = make_debug_config(tmp_path, retention_hours=24)
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -818,10 +771,10 @@ async def test_concurrent_flush_during_rotate_no_missing_table(tmp_path):
     iterations = 20
     for i in range(iterations):
         # Isolate each iteration in a subdirectory so DB filenames don't
-        # collide and old files don't influence retention checks.
+        # collide across iterations.
         iter_dir = tmp_path / f'iter-{i}'
         iter_dir.mkdir()
-        config = make_debug_config(iter_dir, retention_hours=999, retention_max_events=100_000)
+        config = make_debug_config(iter_dir)
         rec = EventRecorder(config, worker_name=WORKER_NAME)
         await rec.start()
 
@@ -847,7 +800,7 @@ async def test_concurrent_flush_during_rotate_no_missing_table(tmp_path):
 
 async def test_rotate_schema_creation_failure_does_not_swap(tmp_path):
     """If _create_schema raises on the new DB, self._db stays unchanged."""
-    config = make_debug_config(tmp_path, retention_hours=24)
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -960,7 +913,7 @@ async def test_reader_sees_writer_writes(tmp_path):
 
 async def test_rotate_rotates_reader_too(tmp_path):
     """_rotate() must swap both writer AND reader to the new DB path."""
-    config = make_debug_config(tmp_path, retention_hours=24)
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -1080,7 +1033,7 @@ async def test_rotate_new_reader_open_failure_rolls_back(tmp_path, monkeypatch):
     """
     from drakkar.recorder import core as recorder_module
 
-    config = make_debug_config(tmp_path, retention_hours=24)
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -1114,7 +1067,7 @@ async def test_rotate_old_reader_close_failure_does_not_abort_rotation(tmp_path)
     """_rotate logs a warning on old reader/writer close failure but still
     completes. Post-rotation the new writer/reader are live.
     """
-    config = make_debug_config(tmp_path, retention_hours=24)
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -1535,7 +1488,7 @@ async def test_window_complete_persisted(recorder):
 
 async def test_rotation_no_event_loss(tmp_path):
     """Events recorded before, during, and after rotation are all queryable."""
-    config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -1582,7 +1535,7 @@ async def test_rotation_no_event_loss(tmp_path):
 
 async def test_rotation_queries_work_on_new_db(tmp_path):
     """After rotation, all query methods work on the new DB."""
-    config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -1621,7 +1574,7 @@ async def test_rotation_queries_work_on_new_db(tmp_path):
 
 async def test_rotation_new_db_has_schema(tmp_path):
     """The new DB file after rotation has the full schema (tables + indexes)."""
-    config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -1639,42 +1592,6 @@ async def test_rotation_new_db_has_schema(tmp_path):
             indexes = await cur.fetchall()
             # partition_offset, ts, dt, task_id, type, labels, origin, request_id
             assert len(indexes) == 8
-
-    await rec.stop()
-
-
-async def test_multiple_rotations_keep_recent_files(tmp_path):
-    """Multiple rotations keep only files within retention limits."""
-    config = make_debug_config(
-        tmp_path,
-        retention_hours=1,
-        retention_max_events=10_000,
-    )
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
-    await rec.start()
-
-    # create several "old" files with ancient mtime
-    old_files = []
-    for i in range(5):
-        p = tmp_path / f'{WORKER_NAME}-2024-01-{10 + i:02d}__00_00_00.db'
-        p.write_text('')
-        os.utime(p, (0, 0))
-        old_files.append(p)
-
-    # rotate twice with different timestamps
-    import asyncio
-
-    await rec._rotate()
-    await asyncio.sleep(1.1)
-    await rec._rotate()
-    path_after_second = rec.db_path
-
-    # old files should be deleted (ancient mtime < retention cutoff)
-    for p in old_files:
-        assert not p.exists(), f'{p.name} should have been deleted'
-
-    # current DB should exist
-    assert os.path.exists(path_after_second)
 
     await rec.stop()
 
@@ -2404,7 +2321,7 @@ async def test_rotation_recreates_all_tables(tmp_path):
     """After rotation, all configured tables exist in the new DB."""
     import asyncio
 
-    config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -2421,7 +2338,7 @@ async def test_rotation_auto_rewrites_config(tmp_path):
     """Rotation automatically re-writes worker_config to the new DB."""
     import asyncio
 
-    config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -2445,7 +2362,7 @@ async def test_rotation_state_sync_uses_new_db(tmp_path):
     """_sync_state after rotation writes to the new DB."""
     import asyncio
 
-    config = make_debug_config(tmp_path, retention_hours=999, retention_max_events=100_000)
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
     rec.set_state_provider(lambda: {'uptime_seconds': 99.0})
@@ -2471,8 +2388,6 @@ async def test_rotation_respects_granular_flags(tmp_path):
         store_events=False,
         store_config=True,
         store_state=True,
-        retention_hours=999,
-        retention_max_events=100_000,
     )
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
@@ -3858,10 +3773,9 @@ async def test_recorder_flush_rotation_between_failures_reroutes_to_new_db(tmp_p
     level window association shifts. This is strictly better than silent
     data loss, which would be the alternative "drop on rotation" policy.
     """
-    # ``retention_max_events=50_000`` keeps the old DB file around after
-    # rotation (``max_files = retention_max_events // 10_000 = 5``), so we
-    # can open the old file read-only and prove nothing was committed.
-    config = make_debug_config(tmp_path, retention_max_events=50_000)
+    # Rotation no longer deletes rotated-out files, so we can open the old
+    # file read-only afterward and prove nothing was committed to it.
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
     try:
@@ -4824,7 +4738,7 @@ async def test_rotate_logs_warning_on_old_writer_close_failure(tmp_path):
 
     import structlog.testing
 
-    config = make_debug_config(tmp_path, retention_hours=24)
+    config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
@@ -4854,69 +4768,6 @@ async def test_rotate_logs_warning_on_old_writer_close_failure(tmp_path):
     await rec.stop()
 
 
-async def test_rotate_swallows_oserror_when_deleting_old_files(tmp_path, monkeypatch):
-    """If retention deletion fails (e.g. EACCES) ``_rotate`` continues —
-    failing to GC one stale file is not a reason to abort the whole
-    rotation cycle."""
-    config = make_debug_config(tmp_path, retention_hours=1)
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
-    await rec.start()
-
-    # Plant a fake stale rotated file so retention has something to try
-    # to delete. Backdate the mtime well past the 1-hour cutoff.
-    stale = tmp_path / f'{WORKER_NAME}-2020-01-01__00_00_00.db'
-    stale.touch()
-    old_mtime = 1.0  # 1970-01-01, definitely past the cutoff
-    os.utime(stale, (old_mtime, old_mtime))
-
-    real_remove = os.remove
-
-    def failing_remove(path):
-        if str(path) == str(stale):
-            raise OSError('simulated EACCES on retention delete')
-        real_remove(path)
-
-    monkeypatch.setattr(os, 'remove', failing_remove)
-
-    # Rotation must complete without raising even though os.remove fails.
-    await rec._rotate()
-    assert rec._db is not None
-    await rec.stop()
-
-
-async def test_rotate_swallows_oserror_when_enforcing_max_files(tmp_path, monkeypatch):
-    """The max-file-count enforcement loop also wraps ``os.remove`` in a
-    try/except — it's the second tier of cleanup after retention-by-mtime,
-    and one failed delete must not stop the rotation."""
-    # retention_max_events=10000 → max_files = 10000 // 10000 = 1
-    config = make_debug_config(
-        tmp_path,
-        retention_hours=24 * 365,  # nothing expires by mtime
-        retention_max_events=10000,
-    )
-    rec = EventRecorder(config, worker_name=WORKER_NAME)
-    await rec.start()
-
-    # Plant several historical rotated DB files so we exceed max_files=1.
-    for ts in ('2026-03-20__08_00_00', '2026-03-21__08_00_00', '2026-03-22__08_00_00'):
-        (tmp_path / f'{WORKER_NAME}-{ts}.db').touch()
-
-    real_remove = os.remove
-
-    def failing_remove(path):
-        # Fail only on the historical files (not the new rotated DB).
-        if 'WORKER_NAME' in str(path) or '-2026-03-2' in str(path):
-            raise OSError('simulated EACCES on max-file enforcement')
-        real_remove(path)
-
-    monkeypatch.setattr(os, 'remove', failing_remove)
-
-    # Rotation must complete without raising.
-    await rec._rotate()
-    assert rec._db is not None
-    await rec.stop()
-
-
 # --- Trivial getters / aliases ----------------------------------------------
 
 
@@ -4924,10 +4775,10 @@ async def test_config_property_returns_underlying_config(tmp_path):
     """The ``config`` property exposes the UIConfig the recorder was
     constructed with — used by the debug server to inspect settings
     without reaching into ``_config``."""
-    config = make_debug_config(tmp_path, retention_hours=12)
+    config = make_debug_config(tmp_path, rotation_interval_hours=12)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     assert rec.config is config
-    assert rec.config.recorder.retention_hours == 12
+    assert rec.config.recorder.rotation_interval_hours == 12
 
 
 async def test_flush_public_alias_drains_buffer(recorder):
@@ -5113,7 +4964,7 @@ class TestBackgroundLoopResilience:
     async def test_retention_loop_keeps_running_after_an_iteration_raises(self, tmp_path):
         config = make_debug_config(tmp_path)
         rec = EventRecorder(config, worker_name=WORKER_NAME)
-        rec._store = rec._store.model_copy(update={'rotation_interval_minutes': 0.01 / 60})
+        rec._store = rec._store.model_copy(update={'rotation_interval_hours': 0.01 / 3600})
         rec._running = True
 
         calls = 0

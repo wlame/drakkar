@@ -157,7 +157,7 @@ async def test_recorder_rotation_keeps_the_new_db_owner_only(tmp_path, monkeypat
         lambda db_dir, worker_name: real_make_db_path(db_dir, f'{worker_name}-r{next(counter)}'),
     )
 
-    rec = EventRecorder(make_recorder_config(tmp_path, retention_hours=24), worker_name=WORKER_NAME)
+    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME)
     await rec.start()
     try:
         original_path = rec.db_path

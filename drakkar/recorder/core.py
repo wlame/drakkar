@@ -80,7 +80,6 @@ from drakkar.recorder.helpers import (
     encode_json_str,
     encode_ws_event,
     format_dt,
-    list_db_files,
     live_link_path,
     make_db_path,
     open_reader,
@@ -279,9 +278,9 @@ def _line_count(text: str) -> int:
 class EventRecorder:
     """Records processing events to timestamped SQLite database files.
 
-    Events are buffered in memory and flushed periodically. On retention
-    check, the current DB is finalized and a new timestamped file is
-    created. Old DB files beyond retention_hours are deleted.
+    Events are buffered in memory and flushed periodically. On each
+    rotation tick, the current DB is finalized and a new timestamped file
+    is created.
 
     A ``{worker_name}-live.db`` symlink points to the current database
     while the worker is running and is removed on graceful shutdown.
@@ -2239,7 +2238,7 @@ class EventRecorder:
 
     async def _retention_loop(self) -> None:
         while self._running:
-            await asyncio.sleep(self._store.rotation_interval_minutes * 60)
+            await asyncio.sleep(self._store.rotation_interval_hours * 3600)
             # Same guard as ``_flush_loop``: one failed rotation must cost a
             # single interval, not every rotation from here on.
             try:
@@ -2342,29 +2341,5 @@ class EventRecorder:
                     category='recorder',
                     error=str(exc),
                 )
-
-        # delete DB files older than retention
-        cutoff = time.time() - (self._store.retention_hours * 3600)
-        for db_file in list_db_files(self._store.db_dir, self._worker_name):
-            if db_file == new_path:
-                continue
-            try:
-                mtime = os.path.getmtime(db_file)
-                if mtime < cutoff:
-                    os.remove(db_file)
-                    await logger.ainfo('recorder_deleted_old_db', category='recorder', path=db_file)
-            except OSError:
-                pass
-
-        # enforce max file count
-        remaining = list_db_files(self._store.db_dir, self._worker_name)
-        max_files = max(1, self._store.retention_max_events // 10_000)
-        if len(remaining) > max_files:
-            for old_file in remaining[:-max_files]:
-                if old_file != new_path:
-                    try:
-                        os.remove(old_file)
-                    except OSError:
-                        pass
 
         await logger.ainfo('recorder_rotated', category='recorder', new_db=self._db_path)

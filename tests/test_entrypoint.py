@@ -18,8 +18,7 @@ def _make_config(tmp_path, **overrides) -> UIConfig:
     defaults = {
         'enabled': True,
         'db_dir': str(tmp_path),
-        'retention_hours': 24,
-        'retention_max_events': 100_000,
+        'rotation_interval_hours': 1,
         'flush_interval_seconds': 60,
     }
     defaults.update(overrides)

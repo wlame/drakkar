@@ -826,9 +826,7 @@ _DEBUG_KEY_MAP: dict[str, str] = {
     'store_config': 'ui.recorder.store_config',
     'store_state': 'ui.recorder.store_state',
     'state_sync_interval_seconds': 'ui.recorder.state_sync_interval_seconds',
-    'rotation_interval_minutes': 'ui.recorder.rotation_interval_minutes',
-    'retention_hours': 'ui.recorder.retention_hours',
-    'retention_max_events': 'ui.recorder.retention_max_events',
+    'rotation_interval_minutes': 'ui.recorder.rotation_interval_hours',
     'store_output': 'ui.recorder.store_output',
     'flush_interval_seconds': 'ui.recorder.flush_interval_seconds',
     'max_buffer': 'ui.recorder.max_buffer',
@@ -861,14 +859,66 @@ class UIRecorderConfig(BaseModel):
     else ``false`` gives autodiscovery without event or state logging.
     """
 
+    @model_validator(mode='before')
+    @classmethod
+    def _reject_removed_recorder_keys(cls, values: object) -> object:
+        """Hard break: rotation's unit changed and pruning was replaced by archiving.
+
+        Detecting the old keys here (instead of letting them vanish as
+        ignored extras) prevents a config that still says
+        ``rotation_interval_minutes: 60`` from silently rotating hourly
+        instead of every minute, and a config that still sets
+        ``retention_hours``/``retention_max_events`` from silently losing
+        the pruning it thought it had configured.
+        """
+        if isinstance(values, dict):
+            if 'rotation_interval_minutes' in values:
+                raise ValueError(
+                    'ui.recorder.rotation_interval_minutes was renamed to rotation_interval_hours (1 = 1 hour)'
+                )
+            removed = sorted(key for key in ('retention_hours', 'retention_max_events') if key in values)
+            if removed:
+                names = ', '.join(f'ui.recorder.{key}' for key in removed)
+                raise ValueError(
+                    f'{names} removed — archiving replaces deletion; see archive_enabled/archive_window_hours'
+                )
+        return values
+
+    @model_validator(mode='after')
+    def _validate_archive_window_vs_rotation(self) -> 'UIRecorderConfig':
+        """The archive pass must see every rotated file before it ages out.
+
+        If ``archive_window_hours`` were shorter than ``rotation_interval_hours``,
+        a file could rotate out and be gone before the next archive pass ever
+        looked at it.
+        """
+        if self.archive_window_hours < self.rotation_interval_hours:
+            raise ValueError(
+                f'ui.recorder.archive_window_hours ({self.archive_window_hours}) must be >= '
+                f'ui.recorder.rotation_interval_hours ({self.rotation_interval_hours})'
+            )
+        return self
+
     db_dir: str = '/tmp'
     store_events: bool = True
     store_config: bool = True
     store_state: bool = True
     state_sync_interval_seconds: int = Field(default=10, ge=1)
-    rotation_interval_minutes: int = Field(default=60, ge=1)
-    retention_hours: int = Field(default=24, ge=1)
-    retention_max_events: int = Field(default=100_000, ge=100)
+    rotation_interval_hours: int = Field(default=1, ge=1, description='How often to roll over to a new SQLite file.')
+    archive_enabled: bool = Field(
+        default=True,
+        description='Archive rotated-out DB files instead of deleting them outright.',
+    )
+    archive_window_hours: int = Field(
+        default=24,
+        ge=1,
+        description='How much recent history the archive pass keeps queryable; must be >= rotation_interval_hours.',
+    )
+    archive_retention_days: int = Field(
+        default=0,
+        ge=0,
+        description='How long archived files are kept before deletion. 0 = keep archives forever.',
+    )
     store_output: bool = True
     flush_interval_seconds: int = Field(default=5, ge=1)
     max_buffer: int = Field(default=50_000, ge=1000)
@@ -884,15 +934,15 @@ class UIRecorderConfig(BaseModel):
     output_min_duration_ms: int = Field(default=500, ge=0)
     # Handler annotations — diagnostic records a handler attaches to a window,
     # message, or task from inside a hook (see drakkar.annotations). They are
-    # stored as ordinary rows in the events table, so recorder rotation and
-    # retention expire them with everything else.
+    # stored as ordinary rows in the events table, alongside everything else
+    # recorder rotation carries into the next file.
     #
     # ``0`` disables each byte cap. The two caps guard different resources and
     # are deliberately not one setting: annotation_max_bytes rejects a single
     # unreasonable payload, while annotation_max_bytes_per_call bounds what one
     # hook invocation can add to the DB in total — without the latter, a handler
-    # annotating every message of a wide window can exhaust
-    # retention_max_events and evict every other event.
+    # annotating every message of a wide window can flood the events table
+    # with low-value rows.
     annotations_enabled: bool = True
     annotation_max_bytes: int = Field(default=16_384, ge=0)
     annotation_max_bytes_per_call: int = Field(default=262_144, ge=0)

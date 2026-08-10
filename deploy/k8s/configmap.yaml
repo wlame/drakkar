@@ -89,8 +89,7 @@ data:
         store_events: true
         store_config: true
         store_state: true
-        retention_hours: 24
-        retention_max_events: 100000
+        rotation_interval_hours: 1
 
     cache:
       # Off by default — flip to true if your handler uses

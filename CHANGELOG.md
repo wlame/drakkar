@@ -92,6 +92,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeline?"); `docs/config-reference.md`'s `ui:` block now includes the
   `timeline` fields.
 
+### Changed
+
+- **Breaking (config):** `ui.recorder.rotation_interval_minutes` is renamed
+  to `rotation_interval_hours`. The unit also changes: `1` now means 1 hour,
+  not 1 minute. Update any config that sets this field.
+
+### Removed
+
+- **Breaking (config):** `ui.recorder.retention_hours` and
+  `ui.recorder.retention_max_events` are removed. The recorder no longer
+  deletes rotated database files on its own — archiving replaces deletion.
+  New fields `archive_enabled`, `archive_window_hours`, and
+  `archive_retention_days` prepare for that; the archive pass itself lands
+  in a later change.
+
 ### Fixed
 
 - UI enrichment now rejects three previously-silent boot-time mistakes:

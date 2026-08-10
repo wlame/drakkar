@@ -203,8 +203,7 @@ ui:
     store_config: true
     store_state: true
     state_sync_interval_seconds: 10
-    retention_hours: 24
-    retention_max_events: 100000
+    rotation_interval_hours: 1
     store_output: true
     flush_interval_seconds: 3
     max_buffer: 50000

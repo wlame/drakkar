@@ -45,8 +45,8 @@ invocation (see :mod:`drakkar.hookctx` for why the unit is an invocation):
 
 * ``max_bytes_per_call`` bounds **accepted** bytes, protecting the recorder
   DB. Without it a handler annotating every message of a wide window can
-  exhaust ``ui.recorder.retention_max_events`` and evict every other event,
-  destroying the debug value of the whole database.
+  flood the events table with low-value rows, destroying the debug value
+  of the whole database.
 * :data:`MAX_DROP_LOGS_PER_CALL` bounds **rejected** records' log lines,
   protecting the log pipeline. It deliberately counts drops only, never
   accepted records, so one bad payload can never cost a well-formed one its

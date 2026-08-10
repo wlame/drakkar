@@ -34,15 +34,67 @@ def test_recorder_defaults_match_old_debug_defaults():
     assert rec.store_config is True
     assert rec.store_state is True
     assert rec.state_sync_interval_seconds == 10
-    assert rec.rotation_interval_minutes == 60
-    assert rec.retention_hours == 24
-    assert rec.retention_max_events == 100_000
+    assert rec.rotation_interval_hours == 1
+    assert rec.archive_enabled is True
+    assert rec.archive_window_hours == 24
+    assert rec.archive_retention_days == 0
     assert rec.store_output is True
     assert rec.flush_interval_seconds == 5
     assert rec.max_buffer == 50_000
     assert rec.max_flush_retries == 3
     assert rec.event_min_duration_ms == 0
     assert rec.output_min_duration_ms == 500
+
+
+def test_recorder_rotation_interval_hours_rejects_below_one():
+    with pytest.raises(ValidationError):
+        UIRecorderConfig(rotation_interval_hours=0)
+
+
+def test_recorder_archive_window_hours_rejects_below_one():
+    with pytest.raises(ValidationError):
+        UIRecorderConfig(archive_window_hours=0)
+
+
+def test_recorder_archive_retention_days_accepts_zero():
+    assert UIRecorderConfig(archive_retention_days=0).archive_retention_days == 0
+
+
+def test_recorder_archive_retention_days_rejects_negative():
+    with pytest.raises(ValidationError):
+        UIRecorderConfig(archive_retention_days=-1)
+
+
+def test_recorder_archive_window_shorter_than_rotation_is_fatal():
+    with pytest.raises(ValidationError, match=r'archive_window_hours \(1\).*rotation_interval_hours \(2\)'):
+        UIRecorderConfig(archive_window_hours=1, rotation_interval_hours=2)
+
+
+def test_recorder_rotation_interval_minutes_is_fatal():
+    with pytest.raises(ValidationError, match='renamed to rotation_interval_hours \\(1 = 1 hour\\)'):
+        UIRecorderConfig(rotation_interval_minutes=60)
+
+
+def test_recorder_retention_hours_is_fatal():
+    with pytest.raises(
+        ValidationError, match='removed — archiving replaces deletion; see archive_enabled/archive_window_hours'
+    ):
+        UIRecorderConfig(retention_hours=24)
+
+
+def test_recorder_retention_max_events_is_fatal():
+    with pytest.raises(
+        ValidationError, match='removed — archiving replaces deletion; see archive_enabled/archive_window_hours'
+    ):
+        UIRecorderConfig(retention_max_events=100_000)
+
+
+def test_recorder_both_removed_retention_keys_named_together():
+    with pytest.raises(ValidationError) as excinfo:
+        UIRecorderConfig(retention_hours=24, retention_max_events=100_000)
+    message = str(excinfo.value)
+    assert 'ui.recorder.retention_hours' in message
+    assert 'ui.recorder.retention_max_events' in message
 
 
 def test_annotation_defaults():
