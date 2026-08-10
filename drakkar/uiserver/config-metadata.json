@@ -1395,7 +1395,7 @@
           "path": "ui.recorder.archive_retention_days",
           "env": "DK_UI__RECORDER__ARCHIVE_RETENTION_DAYS",
           "description": "How long archived files are kept before deletion.",
-          "full_description": "How long archived files are kept before deletion. 0 = keep archives forever.",
+          "full_description": "How long archived files are kept before deletion. 0 = keep archives forever; any other value must cover at least two archive windows (archive_retention_days * 24 >= 2 * archive_window_hours).",
           "type": "integer",
           "default": 0,
           "secret": false,

@@ -98,11 +98,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per day), and a window is only archived once it ended a full window ago
   and none of its files were written in the last rotation interval.
   Workers that share a `db_dir` elect one archiver per cluster with a lock
-  file, and each worker archives only its own cluster. The merge, the
-  compression and the file deletion run in a thread, so the pipeline never
-  waits for them. Set `ui.recorder.archive_retention_days` to delete old
-  archives too; `archive_enabled: false` turns the whole pass off, and the
-  worker then logs at startup that it deletes no recorder files.
+  file, and each worker archives only its own cluster. A raw file is
+  deleted only after the archive that contains it is on disk; a file the
+  merge cannot read keeps its data and is renamed to `<name>.unreadable`.
+  The merge, the compression and the file deletion run in a thread, so the
+  pipeline never waits for them. Set `ui.recorder.archive_retention_days`
+  to delete old archives too — it must cover at least two archive windows,
+  or the worker refuses to start. `archive_enabled: false` turns the whole
+  pass off, and the worker then logs at startup that it deletes no
+  recorder files.
 
 ### Changed
 

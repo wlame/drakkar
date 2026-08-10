@@ -264,6 +264,37 @@ def test_merge_creates_output_file(tmp_path):
     assert result.output_path == output
 
 
+def test_merge_reports_the_sources_that_contributed(tmp_path):
+    db1 = tmp_path / 'w1.db'
+    db2 = tmp_path / 'w2.db'
+    _create_source_db(db1, worker_name='worker-1')
+    _create_source_db(db2, worker_name='worker-2')
+    output = str(tmp_path / 'merged.db')
+
+    result = merge_databases([str(db1), str(db2)], output)
+
+    assert result.merged_files == [str(db1), str(db2)]
+
+
+def test_merge_omits_an_unreadable_source_from_merged_files(tmp_path):
+    """A source the engine skips must not look merged to the caller.
+
+    The archive pass deletes what it merged, so a file counted here by
+    mistake would be deleted without its events ever reaching an archive.
+    """
+    db1 = tmp_path / 'w1.db'
+    _create_source_db(db1, worker_name='worker-1', events=[{'ts': 1000.0, 'event': 'consumed'}])
+    corrupt = tmp_path / 'w2.db'
+    corrupt.write_bytes(b'definitely not a SQLite database' * 8)
+    output = str(tmp_path / 'merged.db')
+
+    result = merge_databases([str(db1), str(corrupt)], output)
+
+    assert result.merged_files == [str(db1)]
+    assert result.source_files == ['w1.db', 'w2.db']
+    assert result.event_count == 1
+
+
 def test_merge_single_db_workers_table(tmp_path):
     db1 = tmp_path / 'w1.db'
     _create_source_db(db1, worker_name='worker-1', cluster_name='main')

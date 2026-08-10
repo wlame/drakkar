@@ -65,6 +65,20 @@ def test_recorder_archive_retention_days_rejects_negative():
         UIRecorderConfig(archive_retention_days=-1)
 
 
+def test_recorder_archive_retention_shorter_than_two_windows_is_fatal():
+    with pytest.raises(ValidationError, match=r'archive_retention_days \(1\).*archive_window_hours \(24\)'):
+        UIRecorderConfig(archive_retention_days=1, archive_window_hours=24)
+
+
+def test_recorder_archive_retention_of_two_windows_is_accepted():
+    rec = UIRecorderConfig(archive_retention_days=2, archive_window_hours=24)
+    assert rec.archive_retention_days == 2
+
+
+def test_recorder_archive_retention_zero_is_accepted_for_any_window():
+    assert UIRecorderConfig(archive_retention_days=0, archive_window_hours=168).archive_retention_days == 0
+
+
 def test_recorder_archive_window_shorter_than_rotation_is_fatal():
     with pytest.raises(ValidationError, match=r'archive_window_hours \(1\).*rotation_interval_hours \(2\)'):
         UIRecorderConfig(archive_window_hours=1, rotation_interval_hours=2)

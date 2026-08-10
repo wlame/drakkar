@@ -899,6 +899,24 @@ class UIRecorderConfig(BaseModel):
             )
         return self
 
+    @model_validator(mode='after')
+    def _validate_archive_retention_vs_window(self) -> 'UIRecorderConfig':
+        """Retention must outlive the window an archive is born into.
+
+        A window is archived only once it ended a full window ago, so a
+        brand-new archive already describes data one window old. Retention
+        shorter than two windows would therefore delete an archive in the
+        very pass that created it — the data would be gone with no file to
+        show for it.
+        """
+        if self.archive_retention_days and self.archive_retention_days * 24 < 2 * self.archive_window_hours:
+            raise ValueError(
+                f'ui.recorder.archive_retention_days ({self.archive_retention_days}) must cover at least two '
+                f'archive windows, or be 0 to keep archives forever: archive_retention_days * 24 must be >= '
+                f'2 * ui.recorder.archive_window_hours ({self.archive_window_hours})'
+            )
+        return self
+
     db_dir: str = '/tmp'
     store_events: bool = True
     store_config: bool = True
@@ -917,7 +935,11 @@ class UIRecorderConfig(BaseModel):
     archive_retention_days: int = Field(
         default=0,
         ge=0,
-        description='How long archived files are kept before deletion. 0 = keep archives forever.',
+        description=(
+            'How long archived files are kept before deletion. 0 = keep archives forever; '
+            'any other value must cover at least two archive windows '
+            '(archive_retention_days * 24 >= 2 * archive_window_hours).'
+        ),
     )
     store_output: bool = True
     flush_interval_seconds: int = Field(default=5, ge=1)

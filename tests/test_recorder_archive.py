@@ -1,5 +1,6 @@
 """Tests for the recorder archive engine (window math + archive pass)."""
 
+import fcntl
 import gzip
 import json
 import os
@@ -340,26 +341,117 @@ def test_run_archive_pass_groups_a_file_without_worker_config_under_default(tmp_
     assert _archives(tmp_path)[0].startswith('default-')
 
 
+def test_run_archive_pass_sets_aside_a_source_the_merge_cannot_read(tmp_path):
+    now = time.time()
+    start = _due_start(now)
+    healthy = _make_db(tmp_path, 'worker-1', start, cluster=None, event_count=2)
+    corrupt = tmp_path / _db_name('worker-2', start + HOUR)
+    corrupt.write_bytes(b'this file is not a SQLite database at all' * 8)
+    os.utime(corrupt, (start, start))
+
+    with capture_logs() as cap:
+        _run(tmp_path, cluster='')
+
+    # The unreadable file survives under a name that leaves the candidate set.
+    assert not corrupt.exists()
+    set_aside = tmp_path / (corrupt.name + '.unreadable')
+    assert set_aside.exists()
+    assert set_aside.read_bytes().startswith(b'this file is not a SQLite database')
+    # The healthy source was archived and only then deleted.
+    assert not Path(healthy).exists()
+    assert len(_archives(tmp_path)) == 1
+    skipped = [e for e in cap if e['event'] == 'recorder_archive_source_skipped']
+    assert [e['name'] for e in skipped] == [corrupt.name]
+    assert skipped[0]['renamed_to'] == set_aside.name
+    created = [e for e in cap if e['event'] == 'recorder_archive_created']
+    assert created[0]['file_count'] == 1
+
+
+def test_run_archive_pass_folds_a_published_archive_into_the_next_one(tmp_path):
+    """A source that outlived its archive must not overwrite it."""
+    now = time.time()
+    start = _due_start(now)
+    first = _make_db(tmp_path, 'worker-1', start, event_count=2)
+    _make_db(tmp_path, 'worker-2', start + HOUR, event_count=3)
+
+    _run(tmp_path)
+    name = _archives(tmp_path)[0]
+    published = (tmp_path / name).read_bytes()
+
+    # A pass that died between publishing and deleting leaves a source behind.
+    _make_db(tmp_path, 'worker-1', start, event_count=2)
+    assert Path(first).exists()
+
+    with capture_logs() as cap:
+        _run(tmp_path)
+
+    assert not Path(first).exists()
+    assert _archives(tmp_path) == [name]
+    # Already covered by the archive, so the file is reclaimed, not remerged.
+    assert (tmp_path / name).read_bytes() == published
+    assert [e['event'] for e in cap if e['event'].startswith('recorder_archive_')] == [
+        'recorder_archive_sources_reclaimed'
+    ]
+    assert _events_in_archive(tmp_path / name) == 5
+
+
+def test_run_archive_pass_adds_new_sources_to_a_published_archive(tmp_path):
+    now = time.time()
+    start = _due_start(now)
+    _make_db(tmp_path, 'worker-1', start, event_count=2)
+
+    _run(tmp_path)
+    name = _archives(tmp_path)[0]
+
+    # A third worker's file for the same window settles only afterwards.
+    late = _make_db(tmp_path, 'worker-3', start + 2 * HOUR, event_count=4)
+
+    _run(tmp_path)
+
+    assert not Path(late).exists()
+    assert _archives(tmp_path) == [name]
+    assert _events_in_archive(tmp_path / name) == 6
+
+
+def _events_in_archive(path: Path) -> int:
+    """Unpack an archive and count the events it carries."""
+    unpacked = path.parent / f'unpacked-{path.name}.db'
+    with gzip.open(path, 'rb') as gz:
+        unpacked.write_bytes(gz.read())
+    db = sqlite3.connect(str(unpacked))
+    try:
+        return db.execute('SELECT COUNT(*) FROM events').fetchone()[0]
+    finally:
+        db.close()
+        unpacked.unlink()
+
+
 # --- election -----------------------------------------------------------
 
 
-def test_run_archive_pass_skips_when_another_worker_holds_a_fresh_lock(tmp_path):
+def test_run_archive_pass_skips_while_another_worker_holds_the_lock(tmp_path):
     now = time.time()
     source = _make_db(tmp_path, 'worker-1', _due_start(now))
     lock = _lock_path(tmp_path)
-    lock.write_text(json.dumps({'pid': 999, 'worker': 'worker-2', 'ts': now}))
-
-    _run(tmp_path)
+    # A live holder: the lock is an flock, not the file's existence, so the
+    # test takes the real thing on its own descriptor.
+    holder = os.open(str(lock), os.O_CREAT | os.O_WRONLY, 0o600)
+    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        _run(tmp_path)
+    finally:
+        os.close(holder)
 
     assert Path(source).exists()
     assert _archives(tmp_path) == []
     assert lock.exists()
 
 
-def test_run_archive_pass_takes_over_a_stale_lock(tmp_path):
+def test_run_archive_pass_takes_over_a_lock_file_left_by_a_dead_worker(tmp_path):
     now = time.time()
     source = _make_db(tmp_path, 'worker-1', _due_start(now))
     lock = _lock_path(tmp_path)
+    # No process holds the flock — a dead worker's file, whatever its age.
     lock.write_text(json.dumps({'pid': 999, 'worker': 'worker-2', 'ts': 0}))
     stale = now - LOCK_STALE_SECONDS - 1
     os.utime(lock, (stale, stale))
@@ -369,6 +461,90 @@ def test_run_archive_pass_takes_over_a_stale_lock(tmp_path):
     assert not Path(source).exists()
     assert len(_archives(tmp_path)) == 1
     assert not lock.exists()
+
+
+def test_run_archive_pass_stamps_its_pid_on_the_temporary_files(tmp_path, monkeypatch):
+    now = time.time()
+    _make_db(tmp_path, 'worker-1', _due_start(now))
+    seen: dict = {}
+    real_merge = archive_mod.merge_databases
+
+    def spy(paths, output_path):
+        seen['output'] = os.path.basename(output_path)
+        return real_merge(paths, output_path)
+
+    monkeypatch.setattr(archive_mod, 'merge_databases', spy)
+
+    _run(tmp_path)
+
+    assert seen['output'].endswith(f'.{os.getpid()}.merge.db')
+
+
+def test_run_archive_pass_keeps_the_merge_temp_owner_only(tmp_path, monkeypatch):
+    now = time.time()
+    _make_db(tmp_path, 'worker-1', _due_start(now))
+    seen: dict = {}
+    real_compress = archive_mod._compress
+
+    def spy(source_path, dest_path):
+        seen['merge_mode'] = os.stat(source_path).st_mode & 0o777
+        seen['archive_mode'] = os.stat(dest_path).st_mode & 0o777
+        return real_compress(source_path, dest_path)
+
+    monkeypatch.setattr(archive_mod, '_compress', spy)
+
+    _run(tmp_path)
+
+    assert seen['merge_mode'] == 0o600
+    assert seen['archive_mode'] == 0o600
+    assert os.stat(tmp_path / _archives(tmp_path)[0]).st_mode & 0o777 == 0o600
+
+
+def test_run_archive_pass_sweeps_temporaries_left_by_a_dead_pass(tmp_path):
+    now = time.time()
+    _make_db(tmp_path, 'worker-1', _due_start(now))
+    orphan = tmp_path / f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.4242.merge.db'
+    orphan.write_bytes(b'leftover')
+    fresh = tmp_path / f'.{CLUSTER}-2020-01-01_00-00__2020-01-02_00-00.db.gz.4243.merge.db'
+    fresh.write_bytes(b'still warm')
+    stale = now - LOCK_STALE_SECONDS - 1
+    os.utime(orphan, (stale, stale))
+
+    with capture_logs() as cap:
+        _run(tmp_path)
+
+    assert not orphan.exists()
+    assert fresh.exists()
+    swept = [e for e in cap if e['event'] == 'recorder_archive_temp_swept']
+    assert [e['name'] for e in swept] == [orphan.name]
+
+
+def test_run_archive_pass_keeps_earlier_windows_when_a_later_one_fails(tmp_path):
+    now = time.time()
+    first_start = _due_start(now, days_back=4)
+    second_start = _due_start(now, days_back=3)
+    first_source = _make_db(tmp_path, 'worker-1', first_start)
+    second_source = _make_db(tmp_path, 'worker-1', second_start)
+    real_merge = archive_mod.merge_databases
+    calls = 0
+
+    def flaky(paths, output_path):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError('second window blew up')
+        return real_merge(paths, output_path)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(archive_mod, 'merge_databases', flaky)
+        _run(tmp_path)
+
+    # First window: archived and cleaned up. Second: untouched, retried next tick.
+    assert not Path(first_source).exists()
+    assert Path(second_source).exists()
+    window_start = (first_start // DAY) * DAY
+    assert _archives(tmp_path) == [archive_file_name(CLUSTER, window_start, window_start + DAY)]
+    assert not _lock_path(tmp_path).exists()
 
 
 def test_run_archive_pass_writes_owner_identity_into_the_lock(tmp_path, monkeypatch):

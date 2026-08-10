@@ -166,7 +166,15 @@ class DbStats:
 
 @dataclass
 class MergeResult:
-    """Result of a merge operation."""
+    """Result of a merge operation.
+
+    ``source_files`` lists every basename the caller asked for;
+    ``merged_files`` lists the full paths whose contents actually reached
+    the output. The two differ when a source could not be read — the merge
+    tolerates that and continues — so a caller that deletes what it merged
+    (the recorder's archive pass) must consult ``merged_files``, never the
+    input list.
+    """
 
     output_path: str
     worker_count: int = 0
@@ -174,6 +182,7 @@ class MergeResult:
     state_count: int = 0
     cluster_name: str = ''
     source_files: list[str] = field(default_factory=list)
+    merged_files: list[str] = field(default_factory=list)
 
 
 def _dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
@@ -263,12 +272,16 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
     If all source DBs share the same ``cluster_name``, the result
     inherits that cluster.
 
+    A source that cannot be opened or read is skipped rather than failing
+    the whole merge; ``MergeResult.merged_files`` reports which paths
+    actually contributed.
+
     Args:
         db_paths: Paths to source .db files.
         output_path: Where to write the merged database.
 
     Returns:
-        MergeResult with counts and metadata.
+        MergeResult with counts, metadata and the merged source paths.
     """
     if os.path.exists(output_path):
         os.remove(output_path)
@@ -328,6 +341,11 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
             if src is not None:
                 src.close()
 
+    # Sources that opened in phase 1 but failed to hand over their rows
+    # later. Tracked so ``merged_files`` never claims a partially-read
+    # file: the archive pass deletes exactly what that list names.
+    incomplete: set[str] = set()
+
     # phase 2: collect all events into a temp list, sort by ts, then insert
     all_events: list[tuple] = []
 
@@ -345,6 +363,7 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
                     values = tuple(row.get(col) for col in _EVENT_COLUMNS)
                     all_events.append((wid, *values))
         except Exception:
+            incomplete.add(db_path)
             continue
         finally:
             if src is not None:
@@ -376,10 +395,13 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
                     out.execute(f'INSERT INTO worker_states ({cols}) VALUES ({placeholders})', [wid, *values])
                     result.state_count += 1
         except Exception:
+            incomplete.add(db_path)
             continue
         finally:
             if src is not None:
                 src.close()
+
+    result.merged_files = [path for path in db_paths if path in worker_map and path not in incomplete]
 
     out.commit()
     out.close()
