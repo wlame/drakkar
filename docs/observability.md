@@ -518,9 +518,10 @@ ui:
     store_state: true                 # Periodic state snapshots
     flush_interval_seconds: 5         # Buffer flush interval
     max_buffer: 50000                 # In-memory event buffer size
-    rotation_interval_minutes: 60     # Rotate to a new DB file every N minutes
-    retention_hours: 24               # Delete DB files older than this
-    retention_max_events: 100000      # Cap total events across DB files
+    rotation_interval_hours: 1        # Rotate to a new DB file every N hours (1 = 1 hour)
+    archive_enabled: true             # Merge rotated-out files into windowed .db.gz archives (see Archiving below)
+    archive_window_hours: 24          # One archive per cluster per window; must be >= rotation_interval_hours
+    archive_retention_days: 0         # 0 = keep archives forever; else must be >= 2x the window, in days
     store_output: true                # Include stdout/stderr in event records
     annotations_enabled: true         # Accept handler-emitted annotations
     annotation_max_bytes: 16384       # Largest single annotation; 0 = unlimited
@@ -531,7 +532,8 @@ ui:
 The four `annotation_*` settings govern
 [handler annotations](annotations.md) — diagnostic records your handler
 attaches to a window, message, or task. They are stored as ordinary
-`events` rows, so rotation and retention expire them with everything else.
+`events` rows, so they rotate, archive, and (optionally) expire with
+everything else — see [Archiving](#archiving) below.
 
 ### Database Schema
 
@@ -664,9 +666,77 @@ A symlink `{worker_name}-live.db` always points to the currently active database
 
 The symlink is removed on graceful shutdown.
 
-**Rotation**: every `rotation_interval_minutes` (default: 60), the recorder opens a new timestamped DB file before closing the old one (no query gap). The worker config is re-written to the new file and the live symlink is updated.
+**Rotation**: every `rotation_interval_hours` (default: 1), the recorder opens a new timestamped DB file before closing the old one (no query gap). The worker config is re-written to the new file and the live symlink is updated. Rotation itself deletes nothing — see [Archiving](#archiving), next.
 
-**Retention**: after rotation, files older than `retention_hours` (default: 24) are deleted. An additional cap limits the total number of files based on `retention_max_events / 10,000`.
+### Archiving
+
+Age- and count-based retention (the old `retention_hours` /
+`retention_max_events` keys) are gone. In their place, a periodic
+**archive pass** folds each finished UTC time window's rotated-out raw
+files into one compressed, merged database per cluster
+(`<cluster>-<from>__<to>.db.gz`), and deletes only the raw files it
+successfully merged — see [Local Databases → Archiving](local-databases.md#archiving)
+for the full byte-level spec shared with the Go backend. The short
+version:
+
+- **Defaults** (`rotation_interval_hours: 1`, `archive_enabled: true`,
+  `archive_window_hours: 24`, `archive_retention_days: 0`): raw files
+  rotate hourly; once a UTC day's window has ended and a full extra day
+  has passed with no writes to its files, that window's raw files are
+  merged into one `.db.gz` per cluster and deleted. That safety margin
+  means raw files linger for 24-48h even with archiving fully on. With
+  `archive_retention_days: 0`, archives themselves are kept forever.
+- **Windows key on file start time, not event time.** A raw file belongs
+  to the window holding its own start timestamp; an archive can carry a
+  handful of events timestamped slightly past its own window end.
+- **One archiver per cluster.** Workers sharing a `db_dir` elect a single
+  archiver per cluster per tick via a `flock`-based lock file; the losers
+  skip the tick and lose nothing.
+- **Sources die last.** A raw file is deleted only once its archive is
+  durably on disk. A file the merge cannot read is renamed to
+  `<name>.unreadable` instead of being deleted, and a pre-existing
+  archive at the final name is folded into the new one rather than
+  overwritten.
+- **Opting out** (`archive_enabled: false`) disables the pass entirely —
+  nothing then deletes raw recorder files automatically, and a startup
+  log line (`recorder_archiving_disabled`) says so.
+- **Renamed key:** `rotation_interval_minutes` is now
+  `rotation_interval_hours`, with a unit change (`1` = 1 hour, not 1
+  minute). A config still setting `rotation_interval_minutes`,
+  `retention_hours`, or `retention_max_events` fails to load, naming the
+  replacement.
+
+```yaml
+ui:
+  recorder:
+    db_dir: /shared/drakkar-recorder
+    rotation_interval_hours: 1       # 1 = every hour (was rotation_interval_minutes)
+    archive_enabled: true            # merge rotated-out files into windowed .db.gz archives
+    archive_window_hours: 24         # one archive per cluster per UTC day; must be >= rotation_interval_hours
+    archive_retention_days: 0        # 0 = keep archives forever; else must be >= 2x the window, in days
+```
+
+Archives are downloaded from the same place as raw databases — **Debug →
+Databases tab → Archives** section, backed by
+`GET /api/v1/debug/archives` and `GET /api/v1/debug/archives/{name}` —
+see [Merging Databases](#merging-databases) below for why archives never
+appear as merge candidates. A downloaded archive is a plain gzip file:
+`gunzip` it and the result is an ordinary merged recorder SQLite
+database, readable with the `sqlite3` CLI or any tool that already reads
+a merged `.db`.
+
+Two operational gotchas worth knowing:
+
+- **Retention only runs when a new window becomes due.** An idle or
+  retired cluster that stops producing raw files never triggers another
+  archive pass, so its existing archives are kept forever regardless of
+  `archive_retention_days`, until some other window in that cluster
+  becomes due again.
+- **A corrupt file at an archive's own final name stalls that window.**
+  Every pass that considers the window fails to decompress it, logs
+  `recorder_archive_failed`, and retries next tick — indefinitely,
+  without touching the (safe, undeleted) raw sources. Recovery is manual:
+  remove or rename the bad file.
 
 ### Buffer Mechanics
 
@@ -708,6 +778,16 @@ timestamped file (`merged-{timestamp}.db`), deduplicates by
 `(ts, event, partition, offset, task_id)`, and creates a combined
 `worker_config` table listing all source workers. The merged file
 appears in the database list and can be downloaded.
+
+**Archives are never merge candidates.** The Databases tab's Archives
+section (see [Archiving](#archiving) above) is read-only — no selection
+checkboxes, no path into `/api/debug/merge`. `POST /api/debug/merge`
+itself does not specifically reject an archive filename passed to it by
+hand (filename hardening only checks for path traversal and unsafe
+characters), but the merge engine cannot open gzip bytes as SQLite, so it
+silently drops that source from the result rather than failing the whole
+request — the same "an unreadable source is skipped, not fatal" behavior
+it already has for any bad input.
 
 ---
 

@@ -835,9 +835,10 @@ Each sink type is a dict mapping instance names to their config:
 | `recorder.store_config` | bool | `True` | Write worker config (enables autodiscovery) |
 | `recorder.store_state` | bool | `True` | Periodic state snapshots |
 | `recorder.state_sync_interval_seconds` | int | `10` | Seconds between state snapshots |
-| `recorder.rotation_interval_minutes` | int | `60` | When to roll over DB files |
-| `recorder.retention_hours` | int | `24` | Delete DBs older than this |
-| `recorder.retention_max_events` | int | `100000` | Max total events across DB files |
+| `recorder.rotation_interval_hours` | int | `1` | When to roll over DB files (1 = 1 hour) |
+| `recorder.archive_enabled` | bool | `True` | Merge rotated-out files into windowed `.db.gz` archives instead of leaking them |
+| `recorder.archive_window_hours` | int | `24` | Width of one archive window; one archive per cluster per window |
+| `recorder.archive_retention_days` | int | `0` | Delete archives older than this; `0` = keep forever |
 | `recorder.store_output` | bool | `True` | Include stdout/stderr in event records |
 | `recorder.flush_interval_seconds` | int | `5` | Buffer flush interval |
 | `recorder.max_buffer` | int | `50000` | In-memory event buffer size |

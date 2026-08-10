@@ -290,6 +290,10 @@ Use `/debug` → **Message Trace** tab, search by `partition:offset` or by label
 
 Mildly. Heavy read traffic increases SQLite WAL checkpoint frequency and burns a little Python GIL time. Under normal operator use (a few tabs refreshing) the effect is negligible. See [Bottleneck: Recorder and UI](performance.md#bottleneck-recorder-and-ui).
 
+### What happens to old recorder database files? Where did `retention_hours` go?
+
+They get archived, not deleted outright. `ui.recorder.retention_hours` and `ui.recorder.retention_max_events` are gone — a config that still sets either fails to load, naming the replacement. In their place, a periodic pass merges each finished UTC time window's rotated-out raw files into one compressed `<cluster>-<from>__<to>.db.gz` per cluster and deletes only the raw files it merged; with the defaults, that lands 24-48h after the data was recorded. `ui.recorder.archive_retention_days` (default `0` = forever) optionally expires old archives too. Download them from **Debug → Databases tab → Archives**, or `gunzip` one directly into an ordinary merged recorder SQLite database. See [Archiving](local-databases.md#archiving) for the full mechanics, and set `ui.recorder.archive_enabled: false` if you'd rather prune `db_dir` yourself.
+
 ### Can I customize the debug UI?
 
 Yes, without writing any client-side code:

@@ -415,10 +415,11 @@ ui:
     store_state: true                # periodic worker-state snapshots. env: DK_UI__RECORDER__STORE_STATE
     state_sync_interval_seconds: 10  # snapshot frequency. env: DK_UI__RECORDER__STATE_SYNC_INTERVAL_SECONDS
 
-    # --- Database rotation & retention ---
-    rotation_interval_minutes: 60    # how often to rotate the SQLite file. env: DK_UI__RECORDER__ROTATION_INTERVAL_MINUTES
-    retention_hours: 24              # delete rotated files older than this. env: DK_UI__RECORDER__RETENTION_HOURS
-    retention_max_events: 100000     # cap on total events across all files. env: DK_UI__RECORDER__RETENTION_MAX_EVENTS
+    # --- Database rotation & archiving (see docs/local-databases.md#archiving) ---
+    rotation_interval_hours: 1       # how often to rotate the SQLite file; 1 = 1 hour. env: DK_UI__RECORDER__ROTATION_INTERVAL_HOURS
+    archive_enabled: true            # merge rotated-out files into windowed .db.gz archives instead of leaking them. env: DK_UI__RECORDER__ARCHIVE_ENABLED
+    archive_window_hours: 24         # one archive per cluster per window; must be >= rotation_interval_hours. env: DK_UI__RECORDER__ARCHIVE_WINDOW_HOURS
+    archive_retention_days: 0        # 0 = keep archives forever; else must be >= 2x the window, in days. env: DK_UI__RECORDER__ARCHIVE_RETENTION_DAYS
 
     # --- Output (stdout/stderr) capture ---
     store_output: true               # include subprocess output in events. env: DK_UI__RECORDER__STORE_OUTPUT

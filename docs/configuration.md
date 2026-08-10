@@ -665,9 +665,10 @@ Flight-recorder persistence — the UI's data store. All flags below require `db
 | `store_config` | `bool` | `true` | | Write worker configuration to the `worker_config` table. This enables autodiscovery -- other workers sharing the same `db_dir` can find and link to this worker. |
 | `store_state` | `bool` | `true` | | Periodically snapshot worker state (uptime, partitions, pool utilization, queue depth, counters) to the `worker_state` table. |
 | `state_sync_interval_seconds` | `int` | `10` | >= 1 | Interval (seconds) between worker state snapshots. |
-| `rotation_interval_minutes` | `int` | `60` | >= 1 | How often (minutes) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is finalized. A `-live.db` symlink always points to the current file. |
-| `retention_hours` | `int` | `24` | >= 1 | Delete rotated database files older than this many hours. |
-| `retention_max_events` | `int` | `100000` | >= 100 | Upper bound on total events across all DB files. Also controls the maximum number of retained DB files (`max_files = retention_max_events / 10000`). |
+| `rotation_interval_hours` | `int` | `1` | >= 1 | How often (hours) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is finalized. A `-live.db` symlink always points to the current file. Rotation itself deletes nothing — see [Archiving](local-databases.md#archiving). Renamed from `rotation_interval_minutes`, with a unit change (`1` = 1 hour, not 1 minute); a config that still sets the old key fails to load. |
+| `archive_enabled` | `bool` | `true` | | Fold rotated-out files into compressed per-cluster, per-window archives and delete the raw files a pass successfully merged. `false` disables the pass entirely — no raw file is ever deleted automatically. See [Archiving](local-databases.md#archiving). |
+| `archive_window_hours` | `int` | `24` | >= 1, and >= `rotation_interval_hours` | Width of one archive window in hours (UTC epoch-aligned); a window is archived once it ended a full window ago and none of its files were written in the last rotation interval. |
+| `archive_retention_days` | `int` | `0` | >= 0, and `>= 2 * archive_window_hours / 24` when non-zero | How long archived `.db.gz` files are kept before deletion. `0` keeps archives forever. |
 | `store_output` | `bool` | `true` | | Include subprocess stdout/stderr in event records. Disable to save disk space when output is large or not needed for debugging. |
 | `flush_interval_seconds` | `int` | `5` | >= 1 | How often (seconds) the in-memory event buffer is flushed to SQLite. |
 | `max_buffer` | `int` | `50000` | >= 1000 | Maximum number of events held in the in-memory buffer. When full, oldest events are dropped (ring buffer). |
@@ -718,9 +719,10 @@ ui:
     store_config: true
     store_state: true
     state_sync_interval_seconds: 10
-    rotation_interval_minutes: 60
-    retention_hours: 48
-    retention_max_events: 200000
+    rotation_interval_hours: 1
+    archive_enabled: true
+    archive_window_hours: 24
+    archive_retention_days: 0
     store_output: true
     flush_interval_seconds: 5
     max_buffer: 50000

@@ -97,11 +97,17 @@ pull up every annotation carrying a given `request_id`.
 Annotations are rows in the flight recorder's `events` table, under the
 `annotation` event type. That has three consequences worth knowing:
 
-**They expire on their own.** Recorder rotation and retention
-(`ui.recorder.retention_hours`, default 24h;
-`ui.recorder.retention_max_events`, default 100 000) apply to annotations
-like any other event. Nothing accumulates forever, and there is no cleanup
-job to run.
+**They live and expire like any other event.** An annotation rotates into
+a new raw file every `ui.recorder.rotation_interval_hours` along with
+everything else, and once that file's window is archived
+(`ui.recorder.archive_enabled`, default true — see
+[Archiving](local-databases.md#archiving)) the raw file is deleted but
+the annotation survives, compressed, inside the archive.
+`ui.recorder.archive_retention_days` (default `0` = keep forever) is the
+only thing that expires archives, so by default annotations are kept
+indefinitely rather than aged out. With `archive_enabled: false`, raw
+files — and the annotations inside them — are never deleted
+automatically at all.
 
 **They are debug data, not durable data.** Recorder DBs are disposable by
 design — operators delete them, rotation replaces them. Never annotate
@@ -131,9 +137,10 @@ Two limits, both per hook invocation:
 | `ui.recorder.annotation_max_bytes_per_call` | 256 KiB | total DB pressure from one hook call |
 
 Set either to `0` to disable it. The second one matters more than it looks:
-without it, a handler annotating every message of a wide window can burn
-through `retention_max_events` and evict every other event in the database,
-which costs you the debug value of everything else.
+without it, a handler annotating every message of a wide window can flood
+the in-memory buffer (`ui.recorder.max_buffer`) with low-value rows and
+evict genuinely important events that have not been flushed yet, which
+costs you the debug value of everything else.
 
 Every drop increments
 `drakkar_recorder_annotations_dropped_total{reason=...}` and is logged at
