@@ -119,6 +119,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Integration harness: both workers now declare the same `CLUSTER_ID`, so
   cluster features of the debug UI (worker switcher groups, the timeline
   cluster view) are testable in the compose setup.
+- Locked dependency versions moved up: redis 8.1.0 and structlog 26.1.0
+  (runtime), ruff 0.16.1 and mkdocs-material 9.7.7 (development only). The
+  declared version floors in `pyproject.toml` are unchanged.
 
 ### Removed
 
