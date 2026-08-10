@@ -260,24 +260,30 @@ defaults):
 
 - Every hour, rotation opens a new raw `<worker>-<timestamp>.db` file.
 - Windows are UTC calendar days, `[00:00, 24:00)`. A window is **due**
-  only once (a) a full extra window has passed since it ended, and (b)
-  every file assigned to it has gone untouched for at least one rotation
-  interval — belt-and-braces against a writer that is still holding an
-  old file open. With the defaults this means a day's window is not
-  archived until somewhere between 24h and 48h after it closed: that lag
-  is the safety margin, not a bug, and it is why raw `.db` files linger
-  on disk for up to two days even with archiving fully on.
+  only once (a) a full extra window (24h) has passed since it ended, and
+  (b) every file assigned to it has gone untouched for at least one
+  rotation interval — belt-and-braces against a writer that is still
+  holding an old file open. With the defaults this means a window
+  becomes due exactly 24h after it closes and is archived on the next
+  rotation tick after that (up to 1h later, at the default hourly
+  cadence) — that delay is the safety margin, not a bug.
+- Because of that delay, a single raw file's lifespan on disk — counted
+  from when it was *created*, not from when its window closed — can
+  reach up to ~48h: up to 24h as part of the window it belongs to (a
+  file created at the window's own start closes the window out 24h
+  later), plus the ~24h due-delay after the window closes before
+  archiving actually runs.
 - Once due, whichever worker wins that tick's lock election merges the
   window's raw files into one `<cluster>-<from>__<to>.db.gz` and deletes
   the raw files it merged.
 - `archive_retention_days: 0` keeps every archive forever — nothing ever
   deletes a `.db.gz` file.
 
-Steady state: at most `archive_window_hours / rotation_interval_hours + 1`
-raw `.db` files per worker at any time (the live file plus the
-window-and-margin backlog), and one `<cluster>-<from>__<to>.db.gz` per
-cluster per window reaching back as far as retention allows — forever, by
-default.
+Steady state: up to twice a window's worth of raw `.db` files per worker
+at any time — the window currently being written plus the most recently
+closed one, until the window before those finishes archiving — and one
+`<cluster>-<from>__<to>.db.gz` per cluster per window reaching back as
+far as retention allows — forever, by default.
 
 ### Windows are keyed by file start time, not event time
 
@@ -333,6 +339,13 @@ job against them).
 | `rotation_interval_minutes` | `rotation_interval_hours` | Renamed **and** the unit changed: `1` now means 1 hour, not 1 minute. A config still setting the old key fails to load, naming the replacement. |
 | `retention_hours` | `archive_enabled`, `archive_window_hours`, `archive_retention_days` | Age-based deletion is gone; archiving replaces it. A config still setting the old key fails to load, naming the replacement fields. |
 | `retention_max_events` | *(no replacement)* | Count-based deletion is gone entirely. A config still setting the old key fails to load. |
+
+The two backends catch a removed key differently: Python rejects the
+key's mere *presence*, any value included, while Go's catcher fires only
+on a *non-zero* value — a contrived `retention_hours: 0` loads silently
+on Go instead of failing. This is not a real gap: the old schema required
+`>= 1` on both backends, so no config that ever validated could have
+carried a zero there.
 
 ### Copy-pasteable config
 

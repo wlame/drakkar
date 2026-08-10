@@ -681,10 +681,13 @@ version:
 
 - **Defaults** (`rotation_interval_hours: 1`, `archive_enabled: true`,
   `archive_window_hours: 24`, `archive_retention_days: 0`): raw files
-  rotate hourly; once a UTC day's window has ended and a full extra day
-  has passed with no writes to its files, that window's raw files are
-  merged into one `.db.gz` per cluster and deleted. That safety margin
-  means raw files linger for 24-48h even with archiving fully on. With
+  rotate hourly; a UTC day's window becomes due exactly 24h after it
+  closes and is archived on the next hourly tick after that, merging its
+  raw files into one `.db.gz` per cluster and deleting them. That 24h
+  due-delay is the safety margin, not a bug — but it means a single raw
+  file's lifespan, counted from when it was *created* rather than from
+  window close, can reach up to ~48h (up to 24h as part of its own
+  window, plus the ~24h due-delay after that window closes). With
   `archive_retention_days: 0`, archives themselves are kept forever.
 - **Windows key on file start time, not event time.** A raw file belongs
   to the window holding its own start timestamp; an archive can carry a
