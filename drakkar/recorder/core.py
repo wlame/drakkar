@@ -1,15 +1,18 @@
 """Flight recorder — event log to timestamped SQLite files.
 
 The schemas + standalone helpers (JSON encoding, env-secret sanitization,
-DB-file path management, IP detection) live in two sibling modules:
+DB-file path management, IP detection) and the archive engine live in
+three sibling modules:
 
 - :mod:`drakkar.recorder.schema`  — DDL constants + canned trace queries.
 - :mod:`drakkar.recorder.helpers` — orjson-or-stdlib codec, secret patterns,
-  ``format_dt``, ``make_db_path``, ``live_link_path``, ``list_db_files``,
-  ``open_reader``, ``detect_worker_ip``.
+  ``format_dt``, ``make_db_path``, ``live_link_path``, ``open_reader``,
+  ``detect_worker_ip``.
+- :mod:`drakkar.recorder.archive` — window math + the archive pass that
+  folds rotated-out DB files into compressed per-cluster archives.
 
-This module re-imports them so external code (and ``mock.patch`` test sites)
-can keep using ``drakkar.recorder.X`` paths.
+This module re-imports the helpers it uses so external code (and
+``mock.patch`` test sites) can keep using ``drakkar.recorder.X`` paths.
 """
 
 from __future__ import annotations
@@ -71,6 +74,7 @@ from drakkar.peer_discovery import discover_peer_dbs
 # imported by tests; the ``noqa: F401`` markers silence the unused-import
 # warning while preserving the public attribute path on
 # ``drakkar.recorder``.
+from drakkar.recorder.archive import run_archive_pass
 from drakkar.recorder.helpers import (
     _HAS_ORJSON,  # noqa: F401  (re-exported for tests)
     _SECRET_ENV_PATTERNS,  # noqa: F401  (re-exported for tests)
@@ -314,7 +318,7 @@ class EventRecorder:
         self._reader_db: aiosqlite.Connection | None = None
         self._db_path: str = ''
         self._flush_task: asyncio.Task | None = None
-        self._retention_task: asyncio.Task | None = None
+        self._rotation_task: asyncio.Task | None = None
         self._state_task: asyncio.Task | None = None
         self._running = False
         self._ws_subscribers: set[WSSubscriber] = set()
@@ -543,11 +547,21 @@ class EventRecorder:
             if self._store.store_events:
                 self._flush_task = asyncio.create_task(self._flush_loop())
                 self._watch_background_task(self._flush_task, 'flush')
-            self._retention_task = asyncio.create_task(self._retention_loop())
-            self._watch_background_task(self._retention_task, 'retention')
+            self._rotation_task = asyncio.create_task(self._rotation_loop())
+            self._watch_background_task(self._rotation_task, 'rotation')
             if self._store.store_state:
                 self._state_task = asyncio.create_task(self._state_sync_loop())
                 self._watch_background_task(self._state_task, 'state_sync')
+            if not self._store.archive_enabled:
+                # Archiving is the only thing that removes rotated files, so
+                # opting out means db_dir grows until the operator prunes it.
+                await logger.ainfo(
+                    'recorder_archiving_disabled',
+                    category='recorder',
+                    db_dir=self._store.db_dir,
+                    hint='raw recorder database files are never deleted automatically; '
+                    'prune db_dir yourself or set ui.recorder.archive_enabled: true',
+                )
         await logger.ainfo(
             'recorder_started',
             category='recorder',
@@ -869,10 +883,10 @@ class EventRecorder:
                 await self._flush_task
             except asyncio.CancelledError:
                 pass
-        if self._retention_task:
-            self._retention_task.cancel()
+        if self._rotation_task:
+            self._rotation_task.cancel()
             try:
-                await self._retention_task
+                await self._rotation_task
             except asyncio.CancelledError:
                 pass
         if self._state_task:
@@ -2236,23 +2250,46 @@ class EventRecorder:
             # appended in between — reading len(self._buffer) is the correct value.
             recorder_buffer_size.set(len(self._buffer))
 
-    async def _retention_loop(self) -> None:
+    async def _rotation_loop(self) -> None:
         while self._running:
             await asyncio.sleep(self._store.rotation_interval_hours * 3600)
             # Same guard as ``_flush_loop``: one failed rotation must cost a
-            # single interval, not every rotation from here on.
+            # single interval, not every rotation from here on. The archive
+            # pass shares the guard — it runs on the freshly rotated-out
+            # files, so a failure there is equally per-tick recoverable.
             try:
                 await self._rotate()
+                await self._archive_pass()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 await logger.aerror(
-                    'recorder_retention_loop_iteration_failed',
+                    'recorder_rotation_loop_iteration_failed',
                     category='recorder',
                     error=str(exc),
                     error_type=type(exc).__name__,
                     exc_info=exc,
                 )
+
+    async def _archive_pass(self) -> None:
+        """Fold due windows of rotated-out DB files into compressed archives.
+
+        The whole pass — directory scan, per-file SQLite reads, merge and
+        gzip — is blocking work measured in seconds, so it goes to a
+        thread. The event loop only ever sees this await.
+        """
+        if not self._store.archive_enabled or not self._store.db_dir:
+            return
+        await asyncio.to_thread(
+            run_archive_pass,
+            db_dir=self._store.db_dir,
+            worker_name=self._worker_name,
+            cluster=self._cluster_name,
+            cfg=self._store,
+            # The live DB is the file we are writing right now; the pass
+            # must never merge it away underneath us.
+            exclude_path=self._db_path,
+        )
 
     async def _rotate(self) -> None:
         """Rotate: open new DB, initialize it fully, then swap — no schemaless window.

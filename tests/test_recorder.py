@@ -4961,7 +4961,7 @@ class TestBackgroundLoopResilience:
         assert failures[0]['log_level'] == 'error'
         assert failures[0]['error_type'] == 'ValueError'
 
-    async def test_retention_loop_keeps_running_after_an_iteration_raises(self, tmp_path):
+    async def test_rotation_loop_keeps_running_after_an_iteration_raises(self, tmp_path):
         config = make_debug_config(tmp_path)
         rec = EventRecorder(config, worker_name=WORKER_NAME)
         rec._store = rec._store.model_copy(update={'rotation_interval_hours': 0.01 / 3600})
@@ -4978,7 +4978,7 @@ class TestBackgroundLoopResilience:
         rec._rotate = flaky_rotate  # type: ignore[method-assign]
 
         with capture_logs() as cap:
-            loop_task = asyncio.create_task(rec._retention_loop())
+            loop_task = asyncio.create_task(rec._rotation_loop())
             try:
                 await wait_for(lambda: calls >= 3)
             finally:
@@ -4988,9 +4988,38 @@ class TestBackgroundLoopResilience:
                     await loop_task
 
         assert calls >= 3
-        failures = [e for e in cap if e['event'] == 'recorder_retention_loop_iteration_failed']
+        failures = [e for e in cap if e['event'] == 'recorder_rotation_loop_iteration_failed']
         assert len(failures) == 1
         assert failures[0]['error_type'] == 'OSError'
+
+    async def test_rotation_loop_archives_after_every_rotation(self, tmp_path):
+        """The archive pass rides the rotation tick, after the swap."""
+        config = make_debug_config(tmp_path)
+        rec = EventRecorder(config, worker_name=WORKER_NAME)
+        rec._store = rec._store.model_copy(update={'rotation_interval_hours': 0.01 / 3600})
+        rec._running = True
+
+        order: list[str] = []
+
+        async def fake_rotate() -> None:
+            order.append('rotate')
+
+        async def fake_archive() -> None:
+            order.append('archive')
+
+        rec._rotate = fake_rotate  # type: ignore[method-assign]
+        rec._archive_pass = fake_archive  # type: ignore[method-assign]
+
+        loop_task = asyncio.create_task(rec._rotation_loop())
+        try:
+            await wait_for(lambda: order.count('archive') >= 2)
+        finally:
+            rec._running = False
+            loop_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await loop_task
+
+        assert order[:4] == ['rotate', 'archive', 'rotate', 'archive']
 
     async def test_state_sync_loop_keeps_running_after_an_iteration_raises(self, tmp_path):
         config = make_debug_config(tmp_path)

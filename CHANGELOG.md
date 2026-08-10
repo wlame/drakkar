@@ -91,6 +91,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   FAQ entry ("Can I change task colors or keep more history on the
   timeline?"); `docs/config-reference.md`'s `ui:` block now includes the
   `timeline` fields.
+- Automatic recorder archiving: rotated-out database files are merged per
+  time window into one compressed archive, `<cluster>-<from>__<to>.db.gz`
+  in `db_dir`, and the merged raw files are then deleted. Windows are UTC
+  and `archive_window_hours` wide (default 24, so one archive per cluster
+  per day), and a window is only archived once it ended a full window ago
+  and none of its files were written in the last rotation interval.
+  Workers that share a `db_dir` elect one archiver per cluster with a lock
+  file, and each worker archives only its own cluster. The merge, the
+  compression and the file deletion run in a thread, so the pipeline never
+  waits for them. Set `ui.recorder.archive_retention_days` to delete old
+  archives too; `archive_enabled: false` turns the whole pass off, and the
+  worker then logs at startup that it deletes no recorder files.
 
 ### Changed
 
@@ -101,11 +113,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 - **Breaking (config):** `ui.recorder.retention_hours` and
-  `ui.recorder.retention_max_events` are removed. The recorder no longer
-  deletes rotated database files on its own — archiving replaces deletion.
-  New fields `archive_enabled`, `archive_window_hours`, and
-  `archive_retention_days` prepare for that; the archive pass itself lands
-  in a later change.
+  `ui.recorder.retention_max_events` are removed. Age-based and count-based
+  pruning of rotated database files is gone — archiving replaces deletion,
+  and a raw file is now removed only after it is merged into an archive.
+  The new `archive_enabled`, `archive_window_hours` and
+  `archive_retention_days` fields control that behavior.
 
 ### Fixed
 
