@@ -300,6 +300,23 @@ Yes, without writing any client-side code:
 
 For presentation none of those built-ins can express, [custom cell renderers](ui-enrichment.md#custom-cell-renderers) let a deployment-owned JavaScript module take over one cell's rendering.
 
+### Can I change task colors or keep more history on the timeline?
+
+Yes, via `ui.timeline` config — no client-side code needed:
+
+- **History depth**: `history_factor` (times the executor pool size) governs how many
+  tasks are kept; `max_age_minutes` (up to 24h) caps how far back in time.
+- **Bar colors**: `color_rules`, a first-match-wins list of conditions on task labels or
+  built-in fields (status, duration, exit code, ...), each mapped to a named color or a
+  `#rrggbb` hex.
+- **Label roles**: `labels` binds up to five task labels to on-screen roles — a tag, a
+  caption, a numeric highlight threshold, a substring filter, and vertical batch markers.
+  A viewer can also override any role for their own browser via the timeline's gear icon,
+  independent of the backend config.
+
+See [Timeline Tuning](ui-timeline.md) for the full grammar, the color palette, and a worked
+example.
+
 ---
 
 ## Failure modes

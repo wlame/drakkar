@@ -56,6 +56,7 @@ nav:
   - UI Enrichment (links, badges, formats, detail panels): ui-enrichment.md
   - Declared UI Pages (your own dashboard pages): ui-pages.md
   - UI Customization Cookbook (a worked example): ui-customization-cookbook.md
+  - Timeline Tuning (history depth, color rules, label roles): ui-timeline.md
   - Configuration: configuration.md
   - Features & Enable Order: features.md
   - Sinks: sinks.md

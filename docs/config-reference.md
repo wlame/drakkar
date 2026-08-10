@@ -435,6 +435,19 @@ ui:
     pinned_version: ''               # known-good UI release tag (e.g. v1.2.0); '' = unpinned. env: DK_UI__RELEASE__PINNED_VERSION
     cache_dir: ''                    # bundle cache root; '' = $XDG_CACHE_HOME/drakkar/ui. env: DK_UI__RELEASE__CACHE_DIR
     check_update: true               # resolve the latest release tag on startup. env: DK_UI__RELEASE__CHECK_UPDATE
+
+  # --- Live timeline tuning: history depth, bar color rules, label roles (see ui-timeline.md) ---
+  timeline:
+    history_factor: 100              # depth = history_factor x executor.max_executors (x8 if no pool), capped at 100000. env: DK_UI__TIMELINE__HISTORY_FACTOR
+    max_age_minutes: 60              # 1-1440; oldest task age the timeline shows. env: DK_UI__TIMELINE__MAX_AGE_MINUTES
+    color_rules: []                  # first-match-wins bar-coloring rules. env: DK_UI__TIMELINE__COLOR_RULES (JSON list)
+                                     # e.g. [{name: failed, when: {field: status, op: eq, value: failed}, color: red}]
+    labels:                          # which task label fills each special role; '' = unbound
+      tag: ''                        # env: DK_UI__TIMELINE__LABELS__TAG
+      caption: ''                    # env: DK_UI__TIMELINE__LABELS__CAPTION
+      highlight: ''                  # env: DK_UI__TIMELINE__LABELS__HIGHLIGHT
+      filter: ''                     # env: DK_UI__TIMELINE__LABELS__FILTER
+      marker: ''                     # env: DK_UI__TIMELINE__LABELS__MARKER
 ```
 
 ---

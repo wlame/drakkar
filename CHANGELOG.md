@@ -83,6 +83,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example building one handler from a plain probe-details tab through
   links/badges/formats, a detail popup, a declared page, and a custom
   renderer. Linked from `docs/ui-enrichment.md` and `docs/ui-pages.md`.
+- Documentation: `docs/ui-timeline.md` covers the new `ui.timeline` config
+  end to end — the history-depth model, the color-rule condition grammar
+  and palette, the five label roles, per-browser role overrides, and a
+  walkthrough of the integration harness's worked example. Linked from the
+  docs home page's Documentation table and Key Features list, with a new
+  FAQ entry ("Can I change task colors or keep more history on the
+  timeline?"); `docs/config-reference.md`'s `ui:` block now includes the
+  `timeline` fields.
 
 ### Fixed
 
