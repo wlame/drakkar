@@ -232,16 +232,27 @@ And the five label roles:
 - **Labels are strings, even when they look numeric.** `file_size_bytes` and `lines` are
   ordinary label values (Python `str`, Go `string`). `gt`/`ge`/`lt`/`le` require *both*
   sides to parse as numbers — a label value that doesn't parse makes the condition false
-  rather than raising an error; it just never matches. `eq`/`ne` are more forgiving: they
-  compare numerically when both sides parse, but fall back to a plain string comparison
-  when either side doesn't — so `{label: env, op: eq, value: staging}` still matches a
-  non-numeric label value like `"staging"` by comparing text, not silently failing the way
-  `gt`/`ge`/`lt`/`le` would.
+  rather than raising an error; it just never matches. Parsing uses JavaScript's
+  `parseFloat`, which reads only a *prefix* of the string rather than validating the whole
+  thing — `"12.4K"` parses as `12.4` and compares as such, which can be surprising; store a
+  clean decimal string like `file_size_bytes` for reliable numeric rules. `eq`/`ne` are more
+  forgiving: they compare numerically when both sides parse, but fall back to a plain string
+  comparison when either side doesn't — so `{label: env, op: eq, value: staging}` still
+  matches a non-numeric label value like `"staging"` by comparing text, not silently failing
+  the way `gt`/`ge`/`lt`/`le` would.
 - **`stdout_size` is `null` while a task is running, and stays `null` if it fails.** Only a
   `task_completed` event populates it — a `task_failed` task never gets one, so it stays
   `null` rather than reporting a stale or default value. `{field: stdout_size, op: eq,
   value: 0}` therefore matches only *completed, empty-output* tasks, never a running or a
   failed one.
+- **Rules on WS-only fields color a task only once the page has observed it live.**
+  `exit_code`, `stdout_lines`, `stdin_lines`, and `stdin_size` are delivered on WebSocket
+  frames only — the `/recent-tasks` resync that (re)populates the timeline does not carry
+  them, so a task loaded purely from a resync (e.g. one that finished before the page
+  connected) has these fields `null` until a live WS event for it arrives. A rule keyed on
+  one of them, like `{field: exit_code, op: eq, value: 1}`, therefore won't color such a
+  task. `stdout_size` is the exception: the resync row carries it too, so a rule keyed on
+  `stdout_size` works even for a task the page never saw live.
 - **A task can change color when it completes.** While running, a task typically has no
   `exit_code`/`duration`/`stdout_size` yet, so it usually draws under the implicit status
   fallback (yellow). The moment it completes and those fields populate, a rule that reads
