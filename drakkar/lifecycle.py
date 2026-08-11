@@ -48,6 +48,7 @@ from drakkar.app_security import warn_if_ui_unauthenticated
 from drakkar.cache import Cache, CacheEngine
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
+from drakkar.hostinfo import effective_cpu_count
 from drakkar.kafka_security import KafkaSecurityConfig, describe_mixed_security
 from drakkar.logging import close_logging
 from drakkar.metrics import (
@@ -57,6 +58,8 @@ from drakkar.metrics import (
     discover_handler_metrics,
     drain_timeout_hit,
     executor_idle_waste,
+    executor_pool_max,
+    host_effective_cpus,
     inflight_at_stop,
     messages_unassigned_dropped,
     start_metrics_server,
@@ -328,6 +331,27 @@ class AppLifecycle:
                 'consumer_group': app._config.kafka.consumer_group,
             }
         )
+
+        # Host-capacity check: a pool larger than the CPUs the process can
+        # really use makes every subprocess time-share — task wall times
+        # stretch and converge with no visible cause. Say so once, loudly, at
+        # the moment the operator can still change the config.
+        pool_size = app._config.executor.max_executors
+        effective_cpus = effective_cpu_count()
+        executor_pool_max.set(pool_size)
+        host_effective_cpus.set(effective_cpus)
+        if pool_size > effective_cpus:
+            await log.awarning(
+                'executor_pool_exceeds_cpus',
+                category='executor',
+                pool_size=pool_size,
+                effective_cpus=effective_cpus,
+                hint=(
+                    'executor.max_executors exceeds the CPUs this process can use '
+                    '(affinity mask capped by any cgroup quota); concurrent tasks '
+                    'will time-share cores and their wall times will stretch'
+                ),
+            )
 
         user_metrics = discover_handler_metrics(app._handler)
         if user_metrics:

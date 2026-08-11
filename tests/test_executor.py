@@ -53,6 +53,18 @@ async def test_execute_echo(echo_pool: ExecutorPool):
     assert result.task.task_id == 't1'
 
 
+async def test_execute_measures_spawn_time(echo_pool: ExecutorPool):
+    task = make_task(args=['hi'])
+    started_at = time.monotonic()
+    result = await echo_pool.execute(task)
+    observed_elapsed = time.monotonic() - started_at
+    # Same bounded-measurement idea as duration_seconds above: spawn is a
+    # real slice of the observed wall time, never negative, never larger
+    # than the whole call.
+    assert result.spawn_seconds is not None
+    assert 0 <= result.spawn_seconds <= observed_elapsed + 0.05
+
+
 async def test_execute_captures_stderr():
     pool = ExecutorPool(
         binary_path=sys.executable,

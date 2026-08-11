@@ -1135,11 +1135,18 @@ class EventRecorder:
             'client_name': resolved_client_name,
             'request_id': resolved_request_id,
         }
+        completed_meta: dict = {}
         if precomputed:
             # Mirrored on the completion event so downstream queries /
             # dashboards can filter precomputed outcomes without joining
             # to task_started.
-            entry['metadata'] = encode_json_str({'precomputed': True})
+            completed_meta['precomputed'] = True
+        if result.spawn_seconds is not None:
+            # Parent-side share of the duration (see ExecutorResult.spawn_seconds);
+            # the live UI shows it in the timeline hover detail.
+            completed_meta['spawn_ms'] = round(result.spawn_seconds * 1000, 1)
+        if completed_meta:
+            entry['metadata'] = encode_json_str(completed_meta)
         if include_output:
             entry['args'] = encode_json_str(result.task.args)
         if include_output and self._store.store_output:

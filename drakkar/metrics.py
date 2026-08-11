@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any
 
 from prometheus_client import Counter, Gauge, Histogram, Info, start_http_server
@@ -9,6 +10,8 @@ from prometheus_client.metrics import MetricWrapperBase
 from prometheus_client.registry import REGISTRY
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from drakkar.config import MetricsConfig
 
 # --- Worker identity ---
@@ -92,15 +95,88 @@ executor_tasks = Counter(
     ['status'],
 )
 
+# Sub-second buckets down to 10ms: production tasks commonly run 20-700ms,
+# and the old 100ms floor collapsed p50 into one bucket, making
+# histogram_quantile useless exactly where most tasks live.
 executor_duration = Histogram(
     'drakkar_executor_duration_seconds',
     'Executor task duration in seconds',
-    buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300),
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300),
+)
+
+# Numeric task-label distributions (metrics.task_label_histograms). One
+# histogram time series per configured label key — the operator names the
+# keys, so cardinality stays under their control. Buckets are log-spaced and
+# unitless because a label can hold anything numeric: bytes, line counts,
+# ratios.
+task_label_value = Histogram(
+    'drakkar_task_label_value',
+    'Numeric task-label values observed at task completion, by label key',
+    ['label'],
+    buckets=(0.001, 0.01, 0.1, 1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9),
+)
+
+# Set once at startup from MetricsConfig; empty tuple = feature off, and the
+# per-task observe loop below is then a no-op.
+_task_label_histogram_keys: tuple[str, ...] = ()
+
+
+def configure_task_label_histograms(keys: Sequence[str]) -> None:
+    """Choose which task-label keys feed ``drakkar_task_label_value``."""
+    global _task_label_histogram_keys
+    _task_label_histogram_keys = tuple(keys)
+
+
+def observe_task_labels(labels: Mapping[str, str]) -> None:
+    """Observe the configured labels of one finished task.
+
+    Values that do not parse as finite numbers are skipped silently — labels
+    are free-form user data, and a task whose ``file_size`` label reads
+    "unknown" must not poison the histogram with zeros or NaN.
+    """
+    for key in _task_label_histogram_keys:
+        raw = labels.get(key)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        if math.isfinite(value):
+            task_label_value.labels(label=key).observe(value)
+
+
+# Millisecond-scale buckets: spawn cost is normally single-digit ms, and the
+# interesting signal is it drifting toward the task duration itself — the
+# parent process (fork/exec on the event loop) becoming the bottleneck.
+executor_spawn_duration = Histogram(
+    'drakkar_executor_spawn_seconds',
+    (
+        'Time to start the task subprocess: fork/exec plus event-loop '
+        'scheduling delay around it. Compare against '
+        'drakkar_executor_duration_seconds — spawn approaching duration '
+        'means the worker process, not the task binary, is the bottleneck.'
+    ),
+    buckets=(0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
 )
 
 executor_pool_active = Gauge(
     'drakkar_executor_pool_active',
     'Currently active executor tasks',
+)
+
+executor_pool_max = Gauge(
+    'drakkar_executor_pool_max',
+    'Configured executor pool size (executor.max_executors)',
+)
+
+# Read once at startup (drakkar.hostinfo): the affinity mask capped by the
+# cgroup CPU quota. Together with executor_pool_max this makes
+# oversubscription a first-class, alertable signal — pool_max > this value
+# means subprocesses time-share cores and task wall times stretch.
+host_effective_cpus = Gauge(
+    'drakkar_host_effective_cpus',
+    'CPUs this worker process can actually use (affinity mask capped by cgroup quota)',
 )
 
 executor_timeouts = Counter(
@@ -860,6 +936,9 @@ runtime_stalls = Counter(
 
 def start_metrics_server(config: MetricsConfig) -> None:
     """Start the Prometheus metrics HTTP server if enabled."""
+    # Configured even with the server off: the histogram still feeds the
+    # debug UI's metrics tab through the in-process registry.
+    configure_task_label_histograms(config.task_label_histograms)
     if config.enabled:
         start_http_server(config.port)
 

@@ -709,6 +709,15 @@ class MetricsConfig(BaseModel):
 
     enabled: bool = True
     port: int = Field(default=9090, ge=1, le=65535)
+    task_label_histograms: list[str] = Field(
+        default_factory=list,
+        description=(
+            'Task label keys whose numeric values are observed into the '
+            'drakkar_task_label_value histogram at task completion, one time '
+            'series per key (e.g. a file-size or line-count label). Values '
+            'that do not parse as finite numbers are skipped.'
+        ),
+    )
 
 
 class RuntimeHealthConfig(BaseModel):

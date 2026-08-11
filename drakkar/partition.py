@@ -17,11 +17,13 @@ from drakkar.metrics import (
     dlq_dropped_payloads,
     executor_duration,
     executor_pool_active,
+    executor_spawn_duration,
     executor_tasks,
     executor_timeouts,
     handler_duration,
     handler_hook_errors,
     messages_consumed,
+    observe_task_labels,
     offset_lag,
     partition_processor_deaths,
     partition_queue_size,
@@ -754,6 +756,9 @@ class PartitionProcessor:
             result = await self._executor_pool.execute(task, self._recorder, self._partition_id)
             executor_tasks.labels(status='completed').inc()
             executor_duration.observe(result.duration_seconds)
+            if result.spawn_seconds is not None:
+                executor_spawn_duration.observe(result.spawn_seconds)
+            observe_task_labels(task.labels)
             if self._recorder:
                 self._recorder.record_task_completed(
                     result,

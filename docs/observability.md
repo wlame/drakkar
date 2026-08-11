@@ -37,11 +37,37 @@ metrics:
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `drakkar_executor_tasks_total` | Counter | `status` (`started`, `completed`, `failed`) | Total executor tasks by outcome |
-| `drakkar_executor_duration_seconds` | Histogram | -- | Task execution duration. Buckets: 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300 |
+| `drakkar_executor_duration_seconds` | Histogram | -- | Task execution duration. Buckets: 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300 |
+| `drakkar_executor_spawn_seconds` | Histogram | -- | Time to start the task subprocess: fork/exec plus event-loop scheduling delay around it. Normally single-digit milliseconds; spawn approaching the task duration means the worker process — not the task binary — is the bottleneck. The same figure rides per task as `spawn_ms` in `task_completed` event metadata and shows in the timeline hover. |
+| `drakkar_executor_pool_max` | Gauge | -- | Configured executor pool size (`executor.max_executors`) |
+| `drakkar_host_effective_cpus` | Gauge | -- | CPUs this worker process can actually use: the affinity mask capped by any cgroup CPU quota, read once at startup. `drakkar_executor_pool_max` above this value means concurrent tasks time-share cores; startup also logs an `executor_pool_exceeds_cpus` warning then. |
+| `drakkar_task_label_value` | Histogram | `label` | Numeric values of the task labels named in `metrics.task_label_histograms`, observed once per completed task. Log-spaced buckets from 0.001 to 1e9 (unitless — a label can hold bytes, line counts, ratios). Values that do not parse as finite numbers are skipped. |
 | `drakkar_executor_pool_active` | Gauge | -- | Number of tasks currently running in the executor pool |
 | `drakkar_executor_timeouts_total` | Counter | -- | Total tasks that exceeded `task_timeout_seconds` and were killed |
 | `drakkar_executor_output_truncated_total` | Counter | `stream` (`stdout`, `stderr`) | Output streams truncated to `executor.max_stdout_bytes` / `executor.max_stderr_bytes`. One increment per truncated stream per task. Divide by the `drakkar_executor_tasks_total` rate for the fraction of tasks being truncated. |
 | `drakkar_task_retries_total` | Counter | -- | Total tasks retried after failure (via [on_error](handler.md#on_error) returning RETRY) |
+
+Average and percentiles come from the histograms with standard PromQL —
+task duration shown here, and the same shapes work for
+`drakkar_task_label_value` by adding its `label` selector:
+
+```promql
+# average task duration over 5 minutes
+rate(drakkar_executor_duration_seconds_sum[5m])
+  / rate(drakkar_executor_duration_seconds_count[5m])
+
+# p50 / p90 / p99 task duration
+histogram_quantile(0.99,
+  rate(drakkar_executor_duration_seconds_bucket[5m]))
+
+# p90 of a configured task label (metrics.task_label_histograms)
+histogram_quantile(0.90,
+  rate(drakkar_task_label_value_bucket{label="file_size_bytes"}[5m]))
+```
+
+The Live page's timeline tab and the Dashboard show the same avg/p50/p90/p99
+figures computed browser-side over the tasks currently in memory — no
+Prometheus needed for a quick read.
 
 #### Batches
 

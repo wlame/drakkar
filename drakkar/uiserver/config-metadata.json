@@ -999,6 +999,16 @@
           "default": 9090,
           "secret": false,
           "group": "metrics"
+        },
+        {
+          "path": "metrics.task_label_histograms",
+          "env": "DK_METRICS__TASK_LABEL_HISTOGRAMS",
+          "description": "Task label keys whose numeric values are observed into the drakkar_task_label_value histogram at task completion, one time series per key (e.g. a file-size or line-count label).",
+          "full_description": "Task label keys whose numeric values are observed into the drakkar_task_label_value histogram at task completion, one time series per key (e.g. a file-size or line-count label). Values that do not parse as finite numbers are skipped.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "metrics"
         }
       ]
     },

@@ -308,6 +308,16 @@ class ExecutorResult(BaseModel):
     duration_seconds: float = Field(
         description='Wall-clock time from process start to completion, rounded to 3 decimal places.'
     )
+    spawn_seconds: float | None = Field(
+        default=None,
+        description=(
+            'Wall-clock time creating the subprocess took (fork/exec plus any '
+            'event-loop scheduling delay around it) — the parent-side share of '
+            'duration_seconds. On a healthy host this is single-digit '
+            'milliseconds; it grows when the worker process itself is the '
+            'bottleneck. None for precomputed results.'
+        ),
+    )
     task: ExecutorTask = Field(
         description='The originating ExecutorTask, available for context in on_task_complete() and on_error().'
     )

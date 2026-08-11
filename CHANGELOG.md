@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `metrics.task_label_histograms` config: a list of task label keys whose
+  numeric values feed a new `drakkar_task_label_value` Prometheus histogram
+  (one time series per key). Use it to track distributions of things your
+  tasks label themselves with, such as an input file size. Values that do
+  not parse as finite numbers are skipped.
+- Subprocess spawn timing: each task now measures how long starting its
+  subprocess took (fork/exec plus the event-loop scheduling delay around
+  it). The figure is on `ExecutorResult.spawn_seconds`, in a new
+  `drakkar_executor_spawn_seconds` histogram, and rides as `spawn_ms` in
+  the `task_completed` event metadata for the live UI. Spawn time growing
+  toward the task duration means the worker process — not the task binary —
+  is the bottleneck.
+- Host-capacity check at startup: the worker reads how many CPUs it can
+  actually use (affinity mask capped by any cgroup CPU quota) and logs an
+  `executor_pool_exceeds_cpus` warning when `executor.max_executors` is
+  larger. New `drakkar_host_effective_cpus` and `drakkar_executor_pool_max`
+  gauges make the same comparison alertable.
+
+### Changed
+
+- `drakkar_executor_duration_seconds` gains sub-second buckets down to
+  10 ms. The old 100 ms floor put most real tasks in one bucket, which made
+  percentile queries useless.
+
 ## [1.10.0] - 2026-08-11
 
 ### Added

@@ -28,16 +28,19 @@ from drakkar.handler import BaseDrakkarHandler
 from drakkar.metrics import (
     assigned_partitions,
     batch_duration,
+    configure_task_label_histograms,
     consumer_errors,
     executor_duration,
     executor_tasks,
     handler_duration,
     messages_consumed,
+    observe_task_labels,
     offset_lag,
     offsets_committed,
     partition_queue_size,
     rebalance_events,
     start_metrics_server,
+    task_label_value,
     task_retries,
 )
 from drakkar.models import (
@@ -556,6 +559,57 @@ def test_start_metrics_server_disabled():
     with patch('drakkar.metrics.start_http_server') as mock_start:
         start_metrics_server(config)
         mock_start.assert_not_called()
+
+
+# === Task-label histograms (metrics.task_label_histograms) ===
+
+
+@pytest.fixture
+def label_histograms():
+    """Configure two label keys for a test and always deconfigure after.
+
+    The configured keys are module state (set once at startup in
+    production); leaking them between tests would make observation
+    assertions order-dependent.
+    """
+    configure_task_label_histograms(['file_size_bytes', 'lines'])
+    yield
+    configure_task_label_histograms([])
+
+
+def test_observe_task_labels_records_configured_numeric_labels(label_histograms):
+    before = histogram_sum(task_label_value, label='file_size_bytes')
+    observe_task_labels({'file_size_bytes': '20480', 'lines': '900', 'module': 'importer'})
+    assert histogram_sum(task_label_value, label='file_size_bytes') == before + 20480
+    assert histogram_sum(task_label_value, label='lines') >= 900
+
+
+def test_observe_task_labels_skips_non_numeric_and_non_finite_values(label_histograms):
+    before = histogram_sum(task_label_value, label='file_size_bytes')
+    observe_task_labels({'file_size_bytes': 'unknown'})
+    observe_task_labels({'file_size_bytes': 'nan'})
+    observe_task_labels({'file_size_bytes': 'inf'})
+    observe_task_labels({'lines': '5'})  # different key — must not touch this one
+    assert histogram_sum(task_label_value, label='file_size_bytes') == before
+
+
+def test_observe_task_labels_is_a_noop_with_nothing_configured():
+    configure_task_label_histograms([])
+    before = histogram_sum(task_label_value, label='file_size_bytes')
+    observe_task_labels({'file_size_bytes': '123'})
+    assert histogram_sum(task_label_value, label='file_size_bytes') == before
+
+
+def test_start_metrics_server_configures_label_histograms():
+    config = MetricsConfig(enabled=False, port=19090, task_label_histograms=['lines'])
+    with patch('drakkar.metrics.start_http_server'):
+        start_metrics_server(config)
+    try:
+        before = histogram_sum(task_label_value, label='lines')
+        observe_task_labels({'lines': '7'})
+        assert histogram_sum(task_label_value, label='lines') == before + 7
+    finally:
+        configure_task_label_histograms([])
 
 
 # --- Handler metrics discovery ---

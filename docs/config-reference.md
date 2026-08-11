@@ -306,6 +306,10 @@ Prometheus scrape endpoint.
 metrics:
   enabled: true                    # env: DK_METRICS__ENABLED
   port: 9090                       # 1–65535. env: DK_METRICS__PORT
+  task_label_histograms: []        # task label keys observed into the
+                                   # drakkar_task_label_value histogram, one
+                                   # time series per key, e.g. [file_size_bytes]
+                                   # env: DK_METRICS__TASK_LABEL_HISTOGRAMS
 ```
 
 ---

@@ -610,6 +610,11 @@ class ExecutorPool:
             # doesn't try to widen ``bool`` to ``int`` to match
             # ``create_subprocess_exec``'s positional-arg signature.
             platform_kwargs: dict[str, Any] = {'start_new_session': True} if _IS_POSIX else {}
+            # Timed separately from the task body: fork/exec runs on the event
+            # loop, so on a congested worker this measures the parent's own
+            # contribution to task wall time — the number that tells "slow
+            # child" apart from "slow orchestrator".
+            spawn_started = time.monotonic()
             proc = await asyncio.create_subprocess_exec(
                 binary,
                 *task.args,
@@ -619,6 +624,7 @@ class ExecutorPool:
                 env=subprocess_env,
                 **platform_kwargs,
             )
+            spawn_seconds = time.monotonic() - spawn_started
             stdin_bytes = task.stdin.encode() if task.stdin is not None else None
             if self._max_stdout_bytes == 0 and self._max_stderr_bytes == 0:
                 # Unlimited capture: communicate() handles stdin write,
@@ -668,6 +674,7 @@ class ExecutorPool:
                 stdout=stdout_bytes.decode(errors='replace') if stdout_bytes else '',
                 stderr=stderr_bytes.decode(errors='replace') if stderr_bytes else '',
                 duration_seconds=round(duration, 3),
+                spawn_seconds=round(spawn_seconds, 4),
                 task=task,
                 pid=pid,
                 stdout_truncated=stdout_truncated,
