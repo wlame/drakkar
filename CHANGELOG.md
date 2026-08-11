@@ -46,6 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `drakkar_executor_duration_seconds` gains sub-second buckets down to
   10 ms. The old 100 ms floor put most real tasks in one bucket, which made
   percentile queries useless.
+- Locked dependency versions moved up: prometheus-client 0.26.0 (runtime)
+  and ruff 0.16.2 (development only). The declared version floors in
+  `pyproject.toml` are unchanged.
 
 ## [1.10.0] - 2026-08-11
 
