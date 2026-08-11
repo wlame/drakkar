@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-08-11
+
 ### Added
 
 - `metrics.task_label_histograms` config: a list of task label keys whose
