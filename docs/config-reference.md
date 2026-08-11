@@ -427,6 +427,10 @@ ui:
 
     # --- Output (stdout/stderr) capture ---
     store_output: true               # include subprocess output in events. env: DK_UI__RECORDER__STORE_OUTPUT
+    store_stdin: false               # store each task's stdin (capped) in task_started
+                                     # metadata; failures always store it. env: DK_UI__RECORDER__STORE_STDIN
+    stdin_max_bytes: 65536           # byte cap for stored stdin, 0 = unlimited.
+                                     # env: DK_UI__RECORDER__STDIN_MAX_BYTES
     flush_interval_seconds: 5        # in-memory buffer → SQLite cadence. env: DK_UI__RECORDER__FLUSH_INTERVAL_SECONDS
     max_buffer: 50000                # ring-buffer capacity. env: DK_UI__RECORDER__MAX_BUFFER
     max_flush_retries: 3             # retries on transient SQLite errors. env: DK_UI__RECORDER__MAX_FLUSH_RETRIES

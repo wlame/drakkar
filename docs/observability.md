@@ -38,6 +38,7 @@ metrics:
 |--------|------|--------|-------------|
 | `drakkar_executor_tasks_total` | Counter | `status` (`started`, `completed`, `failed`) | Total executor tasks by outcome |
 | `drakkar_executor_duration_seconds` | Histogram | -- | Task execution duration. Buckets: 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300 |
+| `drakkar_executor_queue_wait_seconds` | Histogram | -- | Time a task waited for a free executor slot before its subprocess could start. Long waits with a busy pool = the pool (or the CPUs behind it) is the bottleneck; long waits with an idle pool = the worker process itself is too slow to start work. Also rides per task as `queue_wait_ms` in `task_started` metadata (timeline hover). |
 | `drakkar_executor_spawn_seconds` | Histogram | -- | Time to start the task subprocess: fork/exec plus event-loop scheduling delay around it. Normally single-digit milliseconds; spawn approaching the task duration means the worker process — not the task binary — is the bottleneck. The same figure rides per task as `spawn_ms` in `task_completed` event metadata and shows in the timeline hover. |
 | `drakkar_executor_pool_max` | Gauge | -- | Configured executor pool size (`executor.max_executors`) |
 | `drakkar_host_effective_cpus` | Gauge | -- | CPUs this worker process can actually use: the affinity mask capped by any cgroup CPU quota, read once at startup. `drakkar_executor_pool_max` above this value means concurrent tasks time-share cores; startup also logs an `executor_pool_exceeds_cpus` warning then. |

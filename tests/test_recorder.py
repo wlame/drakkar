@@ -366,6 +366,52 @@ async def test_record_task_failed(recorder):
     assert events[0]['exit_code'] == 1
 
 
+async def test_record_task_started_includes_queue_wait(recorder):
+    recorder.record_task_started(make_task(), partition=0, queue_wait_ms=12.5)
+    await recorder._flush()
+    events = await recorder.get_events(event_type='task_started')
+    assert json.loads(events[0]['metadata'])['queue_wait_ms'] == 12.5
+
+
+async def test_record_task_started_omits_stdin_by_default(recorder):
+    task = make_task()
+    task.stdin = 'payload line\n'
+    recorder.record_task_started(task, partition=0)
+    await recorder._flush()
+    events = await recorder.get_events(event_type='task_started')
+    assert 'stdin' not in json.loads(events[0]['metadata'])
+
+
+async def test_record_task_started_stores_capped_stdin_when_enabled(tmp_path):
+    config = make_debug_config(tmp_path, store_stdin=True, stdin_max_bytes=10)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    try:
+        task = make_task()
+        task.stdin = 'x' * 20
+        rec.record_task_started(task, partition=0)
+        await rec._flush()
+        events = await rec.get_events(event_type='task_started')
+        meta = json.loads(events[0]['metadata'])
+        assert meta['stdin'] == 'x' * 10
+        assert meta['stdin_truncated'] is True
+    finally:
+        await rec.stop()
+
+
+async def test_record_task_failed_always_stores_stdin(recorder):
+    # store_stdin is OFF in the fixture config — failures capture it anyway.
+    task = make_task()
+    task.stdin = 'payload line\n'
+    error = ExecutorError(task=task, exit_code=1, stderr='bad input')
+    recorder.record_task_failed(task, error, partition=0)
+    await recorder._flush()
+    events = await recorder.get_events(event_type='task_failed')
+    meta = json.loads(events[0]['metadata'])
+    assert meta['stdin'] == 'payload line\n'
+    assert 'stdin_truncated' not in meta
+
+
 async def test_record_produced(recorder):
     msg = KafkaPayload(key=b'k', data=_RecData())
     recorder.record_produced(msg, source_partition=3, source_offset=42)

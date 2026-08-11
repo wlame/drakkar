@@ -21,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `task_completed` event metadata for the live UI. Spawn time growing
   toward the task duration means the worker process — not the task binary —
   is the bottleneck.
+- Queue-wait timing: each task records how long it waited for a free
+  executor slot before any work began — a new
+  `drakkar_executor_queue_wait_seconds` histogram, plus `queue_wait_ms` in
+  the `task_started` event metadata for the live UI. Long waits with a
+  busy pool mean the pool (or the CPUs behind it) is the bottleneck.
+- Stdin capture: `ui.recorder.store_stdin` (default off) stores each
+  task's stdin content, capped at `ui.recorder.stdin_max_bytes`, in the
+  `task_started` event metadata. Failed tasks always store their stdin
+  (capped) on the `task_failed` event, regardless of the flag — a failure
+  without its input is half a fingerprint. No events-table schema change:
+  the content rides the existing metadata JSON.
+- Documentation: `docs/debugging-bottlenecks.md`, a runbook for hunting
+  down a worker that periodically looks stuck — which signals to read in
+  which order, and what each combination means.
 - Host-capacity check at startup: the worker reads how many CPUs it can
   actually use (affinity mask capped by any cgroup CPU quota) and logs an
   `executor_pool_exceeds_cpus` warning when `executor.max_executors` is

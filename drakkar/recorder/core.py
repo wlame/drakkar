@@ -279,6 +279,34 @@ def _line_count(text: str) -> int:
     return text.count('\n') + (0 if text.endswith('\n') else 1)
 
 
+def _capped_stdin(stdin: str, max_bytes: int) -> tuple[str, bool]:
+    """Cap stored stdin at ``max_bytes`` (0 = unlimited), UTF-8 safe.
+
+    The cut happens on the encoded bytes, then decodes with errors ignored so
+    a multi-byte character split by the cap is dropped rather than mangled.
+    """
+    encoded = stdin.encode()
+    if max_bytes <= 0 or len(encoded) <= max_bytes:
+        return stdin, False
+    return encoded[:max_bytes].decode(errors='ignore'), True
+
+
+def _failed_metadata(task: ExecutorTask, error: ExecutorError, stdin_max_bytes: int) -> dict:
+    """Metadata for a task_failed event: the exception, plus the task's stdin.
+
+    stdin is stored on EVERY failure (capped), independent of the opt-in
+    ``store_stdin`` flag — a failure without its input is half a fingerprint,
+    and failures are rare enough that the write cost does not matter.
+    """
+    metadata: dict = {'exception': error.exception}
+    if task.stdin:
+        stored_stdin, truncated = _capped_stdin(task.stdin, stdin_max_bytes)
+        metadata['stdin'] = stored_stdin
+        if truncated:
+            metadata['stdin_truncated'] = True
+    return metadata
+
+
 class EventRecorder:
     """Records processing events to timestamped SQLite database files.
 
@@ -1025,6 +1053,7 @@ class EventRecorder:
         origin: str | None = None,
         client_name: str | None = None,
         request_id: str | None = None,
+        queue_wait_ms: float | None = None,
     ) -> None:
         stdin_lines = 0
         stdin_size = 0
@@ -1035,6 +1064,19 @@ class EventRecorder:
             'source_offsets': task.source_offsets,
             'slot': slot,
         }
+        if queue_wait_ms is not None:
+            # How long the task waited for a pool slot before any work began —
+            # the live UI shows it in the timeline hover so wall time splits
+            # into waiting vs running.
+            metadata['queue_wait_ms'] = queue_wait_ms
+        if task.stdin and self._store.store_stdin:
+            # Opt-in stdin capture (ui.recorder.store_stdin): the exact input
+            # the task consumed, capped at stdin_max_bytes. Rides the existing
+            # metadata JSON, so no events-table schema change is involved.
+            stored_stdin, stdin_truncated = _capped_stdin(task.stdin, self._store.stdin_max_bytes)
+            metadata['stdin'] = stored_stdin
+            if stdin_truncated:
+                metadata['stdin_truncated'] = True
         if task.env:
             # Sanitize per-task env values before storing in the recorder DB.
             # The raw task.env stays untouched on the task object (subprocess
@@ -1208,11 +1250,7 @@ class EventRecorder:
             'pid': error.pid,
             'pool_active': pool_active,
             'pool_waiting': pool_waiting,
-            'metadata': encode_json_str(
-                {
-                    'exception': error.exception,
-                }
-            ),
+            'metadata': encode_json_str(_failed_metadata(task, error, self._store.stdin_max_bytes)),
             'labels': encode_json_str(task.labels) if task.labels else None,
             'origin': resolved_origin,
             'client_name': resolved_client_name,

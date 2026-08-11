@@ -1422,6 +1422,26 @@
           "group": "ui"
         },
         {
+          "path": "ui.recorder.store_stdin",
+          "env": "DK_UI__RECORDER__STORE_STDIN",
+          "description": "Store each task's stdin content (capped at stdin_max_bytes) in the task_started event metadata, so the debug UI can show exactly what a task consumed.",
+          "full_description": "Store each task's stdin content (capped at stdin_max_bytes) in the task_started event metadata, so the debug UI can show exactly what a task consumed. Off by default: on a high-fan-out workload stdin is the largest payload the recorder would write. Failed tasks always store their stdin (capped) on the task_failed event, regardless of this flag.",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.stdin_max_bytes",
+          "env": "DK_UI__RECORDER__STDIN_MAX_BYTES",
+          "description": "Byte cap for stored stdin content (store_stdin, and the always-on failed-task capture).",
+          "full_description": "Byte cap for stored stdin content (store_stdin, and the always-on failed-task capture). 0 = unlimited. Truncation is flagged as stdin_truncated in the event metadata.",
+          "type": "integer",
+          "default": 65536,
+          "secret": false,
+          "group": "ui"
+        },
+        {
           "path": "ui.recorder.flush_interval_seconds",
           "env": "DK_UI__RECORDER__FLUSH_INTERVAL_SECONDS",
           "description": "",

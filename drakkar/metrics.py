@@ -160,6 +160,16 @@ executor_spawn_duration = Histogram(
     buckets=(0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
 )
 
+# Long tail up to a minute: a saturated pool can queue tasks for many
+# windows. Read together with pool_active: long waits + busy pool = the pool
+# (or the CPUs behind it) is the bottleneck; long waits + idle pool = the
+# worker process itself is too slow to start work.
+executor_queue_wait = Histogram(
+    'drakkar_executor_queue_wait_seconds',
+    'Time a task waited for a free executor slot before its subprocess could start',
+    buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 15, 60),
+)
+
 executor_pool_active = Gauge(
     'drakkar_executor_pool_active',
     'Currently active executor tasks',

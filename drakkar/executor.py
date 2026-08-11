@@ -15,7 +15,12 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from drakkar.metrics import executor_priority_fn_errors, output_truncated, tasks_precomputed
+from drakkar.metrics import (
+    executor_priority_fn_errors,
+    executor_queue_wait,
+    output_truncated,
+    tasks_precomputed,
+)
 from drakkar.models import ExecutorError, ExecutorResult, ExecutorTask
 
 if TYPE_CHECKING:
@@ -347,7 +352,12 @@ class ExecutorPool:
         try:
             # `async with` would also work, but we need to guarantee
             # waiting_count rollback when cancellation fires before acquire.
+            # The wait is timed: it is the "pool is the bottleneck" signal —
+            # wall time a task spent queued before any work could begin.
+            wait_started = time.monotonic()
             await self._gate.acquire(priority)
+            queue_wait = time.monotonic() - wait_started
+            executor_queue_wait.observe(queue_wait)
             try:
                 # Transition from "waiting" to "active". These two lines run
                 # with no `await` between them, so they are atomic w.r.t.
@@ -364,6 +374,7 @@ class ExecutorPool:
                             pool_active=self._active_count,
                             pool_waiting=self._waiting_count,
                             slot=slot,
+                            queue_wait_ms=round(queue_wait * 1000, 1),
                         )
                     return await self._run_subprocess(task)
                 finally:

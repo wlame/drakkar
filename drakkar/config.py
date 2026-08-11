@@ -955,6 +955,26 @@ class UIRecorderConfig(BaseModel):
         ),
     )
     store_output: bool = True
+    store_stdin: bool = Field(
+        default=False,
+        description=(
+            "Store each task's stdin content (capped at stdin_max_bytes) in the "
+            'task_started event metadata, so the debug UI can show exactly what a '
+            'task consumed. Off by default: on a high-fan-out workload stdin is '
+            'the largest payload the recorder would write. Failed tasks always '
+            'store their stdin (capped) on the task_failed event, regardless of '
+            'this flag.'
+        ),
+    )
+    stdin_max_bytes: int = Field(
+        default=65536,
+        ge=0,
+        description=(
+            'Byte cap for stored stdin content (store_stdin, and the always-on '
+            'failed-task capture). 0 = unlimited. Truncation is flagged as '
+            'stdin_truncated in the event metadata.'
+        ),
+    )
     flush_interval_seconds: int = Field(default=5, ge=1)
     max_buffer: int = Field(default=50_000, ge=1000)
     # Maximum consecutive ``OperationalError`` failures tolerated on a single
