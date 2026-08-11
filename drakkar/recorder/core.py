@@ -1077,6 +1077,12 @@ class EventRecorder:
             metadata['stdin'] = stored_stdin
             if stdin_truncated:
                 metadata['stdin_truncated'] = True
+        elif stdin_size:
+            # Content not stored — record the size in metadata anyway. The
+            # entry-level stdin_size below is WS-only (dropped at DB insert),
+            # and the task detail page needs to say "N bytes consumed, content
+            # not stored" instead of showing nothing.
+            metadata['stdin_bytes'] = stdin_size
         if task.env:
             # Sanitize per-task env values before storing in the recorder DB.
             # The raw task.env stays untouched on the task object (subprocess
