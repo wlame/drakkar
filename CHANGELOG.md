@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Resource samples for postmortems: the recorder writes a
+  `resource_sample` event every `state_sync_interval_seconds` with RSS,
+  thread count, open file descriptors, CPU percent for the worker and its
+  reaped subprocesses, and host network byte totals. The rows ride the
+  ordinary events table, so rotation, archiving, and the WS stream carry
+  them — an archive alone can show which resource moved during an outage.
+  Fields whose source the platform lacks are omitted.
+- Last-breath flush: a fatal exit that skips the clean shutdown path
+  (startup failure after the recorder came up, an unhandled exception, a
+  stray `sys.exit`) now salvages the recorder's unflushed buffer through a
+  synchronous `atexit` hook, so the final seconds before a crash are
+  written instead of lost. Best-effort; SIGKILL/OOM still cannot be
+  intercepted.
+- Host network throughput in the live UI: the recorder now broadcasts a
+  WS-only `net_io` frame every `state_sync_interval_seconds` with RX/TX
+  rates in MiB/s, read from `/proc/net/dev` (all non-loopback interfaces).
+  The rates are host-wide for the network namespace — the worker plus its
+  subprocesses, and any neighbours sharing the namespace. The frame is
+  never written to the events table, and platforms without `/proc/net/dev`
+  send nothing.
+- Documentation: the Local Databases page now answers "which local SQLite
+  databases exist, what is in them, and how do I configure them" in one
+  place. New sections cover the memory-only mode (`ui.recorder.db_dir:
+  ''`), what each `store_*` flag controls, and a table of the
+  content-retention knobs (`store_stdin`, `stdin_max_bytes`,
+  `output_min_duration_ms`, `event_min_duration_ms`). The Observability
+  event catalog gained the `partition_stalled`, `runtime_health`, and
+  `runtime_stall` rows and now lists the `queue_wait_ms` / `spawn_ms` /
+  stdin metadata fields; its recorder config example shows all keys.
+
 ## [1.11.0] - 2026-08-11
 
 ### Added

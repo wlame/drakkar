@@ -470,6 +470,17 @@ Real-time view of the processing pipeline, fed by WebSocket (`/ws`). Organized i
 
 Pool utilization bar shows active, waiting, and available slot counts.
 
+The page header also shows a **network throughput readout** (`Net: RX x.x ·
+TX x.x MiB/s`), fed by a WS-only `net_io` frame the recorder broadcasts every
+`state_sync_interval_seconds`. The rates come from `/proc/net/dev`, summed
+across all non-loopback interfaces — **host-wide per network namespace**:
+they cover the worker and its subprocesses, plus anything else sharing the
+namespace (per-process network accounting does not exist without root/eBPF;
+in a container with its own network namespace this is effectively the app's
+own traffic). The frame is never written to the events table. On platforms
+without `/proc/net/dev` (macOS) no frames are sent and the readout stays
+hidden; in cluster view, each peer strip shows its own host's rates.
+
 #### `/history` -- Event Browser
 
 Filterable, paginated event browser across all partitions:
@@ -543,13 +554,19 @@ ui:
     store_events: true                # Write processing events to the events table
     store_config: true                # Write worker config (enables autodiscovery)
     store_state: true                 # Periodic state snapshots
+    state_sync_interval_seconds: 10   # Snapshot frequency for worker_state
     flush_interval_seconds: 5         # Buffer flush interval
     max_buffer: 50000                 # In-memory event buffer size
+    max_flush_retries: 3              # Failed-batch retries before the batch is dropped
     rotation_interval_hours: 1        # Rotate to a new DB file every N hours (1 = 1 hour)
     archive_enabled: true             # Merge rotated-out files into windowed .db.gz archives (see Archiving below)
     archive_window_hours: 24          # One archive per cluster per window; must be >= rotation_interval_hours
     archive_retention_days: 0         # 0 = keep archives forever; else must be >= 2x the window, in days
     store_output: true                # Include stdout/stderr in event records
+    output_min_duration_ms: 500       # Tasks faster than this store no args/stdout/stderr
+    event_min_duration_ms: 0          # Task events faster than this are not persisted at all
+    store_stdin: false                # Store each task's stdin in task_started metadata (failures always store it)
+    stdin_max_bytes: 65536            # Byte cap for stored stdin; 0 = unlimited
     annotations_enabled: true         # Accept handler-emitted annotations
     annotation_max_bytes: 16384       # Largest single annotation; 0 = unlimited
     annotation_max_bytes_per_call: 262144  # Per hook invocation; 0 = unlimited
@@ -581,9 +598,9 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 | `consumed` | Message polled from Kafka | `partition`, `offset` |
 | `arranged` | `arrange()` completes for a window | `partition`, `metadata` (message_count, task_count, offsets, message_labels, window_id) |
 | `annotation` | A handler calls `self.annotate(...)` — see [Annotations](annotations.md) | `partition`, `offset` (message scope), `task_id` (task scope), `labels`, `metadata` (kind, scope, hook, window_id, offsets, data) |
-| `task_started` | Subprocess launched (after semaphore acquired) | `task_id`, `partition`, `args`, `pid`, `labels`, `metadata` (source_offsets, slot) |
-| `task_completed` | Subprocess finished with exit 0 | `task_id`, `duration`, `exit_code`, `stdout`, `stderr`, `pid`, `labels` |
-| `task_failed` | Subprocess failed (non-zero exit, timeout, crash) | `task_id`, `duration`, `exit_code`, `pid`, `labels`, `metadata` (exception) |
+| `task_started` | Subprocess launched (after semaphore acquired) | `task_id`, `partition`, `args`, `pid`, `labels`, `metadata` (source_offsets, slot, queue_wait_ms; stdin + stdin_truncated when `store_stdin` is on, else stdin_bytes size marker) |
+| `task_completed` | Subprocess finished with exit 0 | `task_id`, `duration`, `exit_code`, `stdout`, `stderr`, `pid`, `labels`, `metadata` (spawn_ms) |
+| `task_failed` | Subprocess failed (non-zero exit, timeout, crash) | `task_id`, `duration`, `exit_code`, `pid`, `labels`, `metadata` (exception; stdin always stored, capped at `stdin_max_bytes`) |
 | `task_complete` | `on_task_complete()` hook finishes for one task | `task_id`, `partition`, `duration`, `metadata` (output_message_count) |
 | `message_complete` | `on_message_complete()` hook finishes for one source message | `partition`, `offset`, `duration`, `metadata` (task_count, succeeded, failed, replaced, output_message_count) |
 | `window_complete` | `on_window_complete()` hook finishes for one arrange() window | `partition`, `duration`, `metadata` (window_id, task_count, output_message_count) |
@@ -593,6 +610,10 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 | `committed` | Kafka offset committed | `partition`, `offset` |
 | `assigned` | Partition assigned during rebalance | `partition` |
 | `revoked` | Partition revoked during rebalance | `partition` |
+| `partition_stalled` | Partition paused because an offset stalled (`dlq.on_send_failure=stall`) | `partition` |
+| `runtime_health` | Event-loop health transition or periodic sample — see [Runtime Health](runtime-health.md) | `metadata` (kind: transition/sample, state, lag_ms, unit_count) |
+| `runtime_stall` | Event loop resumed after a stall; carries the stack traces sampled while it lasted | `duration`, `metadata` (duration_ms, stacks: [{stack, location, count}], dropped_stacks, unit_count) |
+| `resource_sample` | Periodic snapshot of what the worker consumed, every `state_sync_interval_seconds` | `metadata` (rss_bytes, threads, open_fds, cpu_self_pct, cpu_children_pct, rx_bytes_total, tx_bytes_total, interval_s — each omitted when its source is unavailable; `cpu_children_pct` counts *reaped* subprocesses, so it is bursty; the first sample carries no cpu fields) |
 | `periodic_run` | Periodic task execution completes | `task_id` (task name), `duration`, `exit_code` (0=ok, 1=error), `metadata` (status, error) |
 | `webapp_request_received` | One HTTP request passed auth + rate-limit + body parsing and is about to dispatch to T1 | `origin='http'`, `client_name`, `request_id`, `metadata` (started_at, body_bytes) |
 | `webapp_request_completed` | An HTTP request returned 200 to the caller | `origin='http'`, `client_name`, `request_id`, `duration`, `metadata` (status='ok', duration_ms) |
@@ -603,7 +624,7 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 
 For HTTP-origin rows, `partition=-1` is used as a synthetic partition value so they remain distinct from any real Kafka partition without requiring a separate table. Filter by `origin='http'` to see all webapp activity, or by `request_id=...` to walk the full lifecycle of one HTTP request (received → task_started → task_completed → completed/timeout/dropped).
 
-Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`, `stderr` are omitted for fast tasks below `output_min_duration_ms`. Events below `event_min_duration_ms` are not stored at all.
+Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`, `stderr` are omitted for fast tasks below `output_min_duration_ms`. Events below `event_min_duration_ms` are not stored at all. Stdin content is gated by `store_stdin` / `stdin_max_bytes` rather than by duration — failed tasks always store it. See [Local Databases](local-databases.md#what-the-events-table-stores-and-the-knobs-that-trim-it) for the full retention-knob table.
 
 !!! warning "Recorder upgrade story (delete pre-webapp DBs)"
     The webapp release added three columns to the `events` table --

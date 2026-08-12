@@ -18,11 +18,13 @@ This module re-imports the helpers it uses so external code (and
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
 import glob
 import json
 import os
 import queue
+import resource
 
 # ``socket`` is re-imported here so test patches like
 # ``patch('drakkar.recorder.socket.socket', ...)`` still find the module on
@@ -31,7 +33,9 @@ import queue
 # reference — patching ``socket.socket`` via either attribute path replaces
 # the class globally for both modules.
 import socket  # noqa: F401
+import sqlite3
 import time
+import weakref
 from collections import deque
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
@@ -50,6 +54,7 @@ from pydantic import BaseModel
 
 from drakkar.config import UIConfig
 from drakkar.dbfiles import secure_db_file
+from drakkar.hostinfo import read_net_io_bytes, read_open_fd_count, read_self_stats
 from drakkar.metrics import (
     recorder_buffer_size,
     recorder_dropped_events,
@@ -92,6 +97,7 @@ from drakkar.recorder.helpers import (
 from drakkar.recorder.schema import (
     _LABEL_TRACE_QUERY,
     _TRACE_QUERY,
+    EVENT_COLUMNS,
     SCHEMA_EVENTS,
     SCHEMA_WORKER_CONFIG,
     SCHEMA_WORKER_STATE,
@@ -106,6 +112,32 @@ if TYPE_CHECKING:
     from drakkar.webapp.models import WebRequestContext
 
 logger = structlog.get_logger()
+
+# Recorders currently running, for the process-wide last-breath hook below.
+# A WeakSet on purpose: holding strong references here would pin every
+# abandoned recorder (tests routinely start one and drop it) together with
+# its aiosqlite connections — whose worker threads are non-daemon and only
+# stop from ``Connection.__del__`` — and a single pinned connection then
+# blocks interpreter shutdown in ``threading._shutdown`` forever. Weak
+# membership keeps abandoned recorders collectable exactly as before, while
+# a production recorder stays reachable through the app and gets flushed.
+_LIVE_RECORDERS: weakref.WeakSet[EventRecorder] = weakref.WeakSet()
+_LAST_BREATH_REGISTERED = False
+
+
+def _last_breath_flush_all() -> None:
+    """The single atexit hook: salvage every still-live recorder's buffer."""
+    for rec in list(_LIVE_RECORDERS):
+        rec._last_breath_flush()
+
+
+def _arm_last_breath_hook() -> None:
+    """Register the process-wide hook once, on first recorder start."""
+    global _LAST_BREATH_REGISTERED
+    if not _LAST_BREATH_REGISTERED:
+        atexit.register(_last_breath_flush_all)
+        _LAST_BREATH_REGISTERED = True
+
 
 # Cross-worker sweep bounds. A cross-trace MISS — the common case when an
 # operator pastes an offset that is not in this cluster — walks every
@@ -348,6 +380,15 @@ class EventRecorder:
         self._flush_task: asyncio.Task | None = None
         self._rotation_task: asyncio.Task | None = None
         self._state_task: asyncio.Task | None = None
+        self._netio_task: asyncio.Task | None = None
+        # Previous /proc/net/dev totals + monotonic read time; the pair a
+        # net_io sample diffs against. None until the loop primes it.
+        self._netio_prev: tuple[int, int] | None = None
+        self._netio_prev_t: float = 0.0
+        # Previous (self_cpu_seconds, children_cpu_seconds, monotonic) for
+        # the resource sampler's CPU-percent deltas. None until primed —
+        # the first resource_sample carries no CPU fields.
+        self._res_prev: tuple[float, float, float] | None = None
         self._running = False
         self._ws_subscribers: set[WSSubscriber] = set()
         self._state_provider: Callable[[], dict] | None = None
@@ -590,6 +631,18 @@ class EventRecorder:
                     hint='raw recorder database files are never deleted automatically; '
                     'prune db_dir yourself or set ui.recorder.archive_enabled: true',
                 )
+        # Outside the db_dir branch on purpose: the net_io heartbeat is
+        # WS-only and resource samples still feed WS subscribers, so both
+        # should run in memory-only mode too.
+        self._netio_task = asyncio.create_task(self._host_sample_loop())
+        self._watch_background_task(self._netio_task, 'host_sample')
+        # Armed for the whole run, disarmed by a clean stop(): if the
+        # interpreter exits any other way (startup failure after this
+        # point, an unhandled exception, sys.exit), the last-breath hook
+        # salvages whatever the flush loop had not written yet. Membership
+        # is weak — see _LIVE_RECORDERS for why that is load-bearing.
+        _arm_last_breath_hook()
+        _LIVE_RECORDERS.add(self)
         await logger.ainfo(
             'recorder_started',
             category='recorder',
@@ -872,6 +925,144 @@ class EventRecorder:
                     exc_info=exc,
                 )
 
+    async def _host_sample_loop(self) -> None:
+        """Per-tick host sampling: the ``net_io`` WS heartbeat + one
+        ``resource_sample`` event.
+
+        Runs whenever the recorder runs — memory-only mode included (the
+        events then only feed WS subscribers; nothing touches the DB from
+        here). On platforms without ``/proc/net/dev`` (macOS) the network
+        half announces itself unavailable once and stays silent; the
+        resource half still samples what the platform offers (CPU, fds).
+        """
+        initial = read_net_io_bytes()
+        if initial is None:
+            await logger.ainfo(
+                'recorder_netio_unavailable',
+                category='recorder',
+                detail='/proc/net/dev is not readable on this platform; network rates will not stream to the UI',
+            )
+        else:
+            self._netio_prev = initial
+            self._netio_prev_t = time.monotonic()
+        while self._running:
+            await asyncio.sleep(self._store.state_sync_interval_seconds)
+            # Same per-iteration guard as the other loops: one bad sample
+            # must not end the heartbeat for the rest of the run.
+            try:
+                if initial is not None:
+                    self._netio_sample()
+                self._resource_sample()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await logger.awarning(
+                    'recorder_host_sample_failed',
+                    category='recorder',
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+
+    def _netio_sample(self) -> None:
+        """Diff the interface counters and broadcast one ``net_io`` frame.
+
+        The frame is broadcast-only (never buffered to the DB), so the
+        pinned events-table row shape is untouched. Rates are host-wide by
+        nature: ``/proc/net/dev`` counts the whole network namespace — this
+        process and its subprocesses, plus any neighbours sharing it.
+        """
+        counters = read_net_io_bytes()
+        now = time.monotonic()
+        if counters is None:
+            return
+        prev, prev_t = self._netio_prev, self._netio_prev_t
+        # Re-prime unconditionally so a skipped frame (below) still measures
+        # the NEXT interval from here, not across the gap.
+        self._netio_prev, self._netio_prev_t = counters, now
+        if prev is None:
+            return
+        elapsed = now - prev_t
+        rx_delta = counters[0] - prev[0]
+        tx_delta = counters[1] - prev[1]
+        if elapsed <= 0 or rx_delta < 0 or tx_delta < 0:
+            # A negative delta means an interface counter reset (interface
+            # bounce, netns change) — drop this interval rather than
+            # broadcasting a nonsense rate.
+            return
+        ts = time.time()
+        mib = 1024 * 1024
+        self._broadcast_ws(
+            {
+                'ts': ts,
+                'dt': format_dt(ts),
+                'event': 'net_io',
+                'metadata': encode_json_str(
+                    {
+                        'rx_mib_s': round(rx_delta / elapsed / mib, 3),
+                        'tx_mib_s': round(tx_delta / elapsed / mib, 3),
+                        'rx_bytes_total': counters[0],
+                        'tx_bytes_total': counters[1],
+                        'interval_s': round(elapsed, 1),
+                    }
+                ),
+            }
+        )
+
+    def _resource_sample(self) -> None:
+        """Record one ``resource_sample`` event: what this worker consumed.
+
+        The row rides the ordinary events table (metadata JSON, no schema
+        change), so rotation, archiving, and the WS stream all carry it —
+        an archive alone can answer "what were RSS / CPU / fds / network
+        doing at 04:12" long after the process is gone.
+
+        Field notes:
+
+        - ``cpu_children_pct`` comes from ``RUSAGE_CHILDREN``, which only
+          counts *reaped* subprocesses — a task's CPU lands in the sample
+          for the interval its process exited in, so the series is bursty
+          by nature and best read as an average over a few ticks.
+        - ``rss_bytes`` / ``threads`` need ``/proc`` and are absent on
+          macOS; every field is optional and simply omitted when its
+          source is unavailable.
+        - The first sample after start carries no ``cpu_*_pct`` — percents
+          are deltas and there is nothing to diff against yet.
+        """
+        now = time.monotonic()
+        self_ru = resource.getrusage(resource.RUSAGE_SELF)
+        child_ru = resource.getrusage(resource.RUSAGE_CHILDREN)
+        cpu_self = self_ru.ru_utime + self_ru.ru_stime
+        cpu_children = child_ru.ru_utime + child_ru.ru_stime
+        prev = self._res_prev
+        self._res_prev = (cpu_self, cpu_children, now)
+
+        meta: dict[str, Any] = {}
+        rss_bytes, threads = read_self_stats()
+        if rss_bytes is not None:
+            meta['rss_bytes'] = rss_bytes
+        if threads is not None:
+            meta['threads'] = threads
+        open_fds = read_open_fd_count()
+        if open_fds is not None:
+            meta['open_fds'] = open_fds
+        counters = read_net_io_bytes()
+        if counters is not None:
+            meta['rx_bytes_total'], meta['tx_bytes_total'] = counters
+        if prev is not None:
+            elapsed = now - prev[2]
+            if elapsed > 0:
+                meta['cpu_self_pct'] = round(100 * (cpu_self - prev[0]) / elapsed, 1)
+                meta['cpu_children_pct'] = round(100 * (cpu_children - prev[1]) / elapsed, 1)
+                meta['interval_s'] = round(elapsed, 1)
+
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'resource_sample',
+                'metadata': encode_json_str(meta),
+            }
+        )
+
     async def _sync_state(self) -> None:
         if not self._db or not self._store.store_state:
             return
@@ -923,6 +1114,12 @@ class EventRecorder:
                 await self._state_task
             except asyncio.CancelledError:
                 pass
+        if self._netio_task:
+            self._netio_task.cancel()
+            try:
+                await self._netio_task
+            except asyncio.CancelledError:
+                pass
         # Drop any pending deferred start events and disarm the shared sweep.
         if self._deferred_sweep is not None:
             self._deferred_sweep.cancel()
@@ -959,7 +1156,62 @@ class EventRecorder:
                 )
             self._db = None
         self._remove_live_link()
+        # Clean shutdown flushed everything above — leave the live set so
+        # interpreter exit does not reopen the closed DB. Discarding a
+        # never-added recorder (start() not reached) is a no-op.
+        _LIVE_RECORDERS.discard(self)
         await logger.ainfo('recorder_stopped', category='recorder')
+
+    def _last_breath_flush(self) -> None:
+        """Synchronous, best-effort buffer flush at interpreter exit.
+
+        Reached through the process-wide atexit hook while this recorder
+        is in ``_LIVE_RECORDERS`` (added by :meth:`start`, removed by a
+        clean :meth:`stop`). It fires exactly when the async machinery
+        could not do its job — a startup failure after the recorder came
+        up, an unhandled exception, a stray ``sys.exit`` —
+        and writes the still-buffered rows straight through :mod:`sqlite3`,
+        because at interpreter exit the event loop (and aiosqlite's worker
+        thread) are already gone. The most interesting events of a dying
+        worker are the last ones; this is what keeps them.
+
+        Best-effort by design: a short busy timeout, every failure path
+        silent. Cannot fire on SIGKILL / OOM — the watchdog file covers
+        detecting those, and whatever the last periodic flush wrote is
+        what remains.
+        """
+        if not self._running or not self._buffer or not self._db_path or not self._store.store_events:
+            return
+        batch = list(self._buffer)
+        self._buffer.clear()
+
+        columns = list(EVENT_COLUMNS[1:])  # everything but the autoincrement id
+        query = f'INSERT INTO events ({", ".join(columns)}) VALUES ({", ".join(["?"] * len(columns))})'
+        # Same origin coercion as the async flush: NOT NULL column, and the
+        # Kafka-path record helpers legitimately leave it unset.
+        rows = [
+            tuple('kafka' if (col == 'origin' and entry.get(col) is None) else entry.get(col) for col in columns)
+            for entry in batch
+        ]
+        try:
+            conn = sqlite3.connect(self._db_path, timeout=1.0)
+            try:
+                conn.executemany(query, rows)
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            # Interpreter teardown is no place to raise; the periodic
+            # flushes already wrote everything they could.
+            return
+        with contextlib.suppress(Exception):
+            logger.warning(
+                'recorder_last_breath_flush',
+                category='recorder',
+                events=len(batch),
+                db_path=self._db_path,
+                detail='process exited without a clean recorder stop; buffered events were salvaged synchronously',
+            )
 
     # --- Recording methods (sync, append to buffer) ---
 

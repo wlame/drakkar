@@ -44,6 +44,75 @@ Rules:
   offline artifact with its own tables (`workers`, `events`,
   `worker_states`) and is not part of this runtime spec.
 
+## Modes: which files exist when
+
+The recorder and the cache are switched independently, and every
+persistence flag needs a directory to write into. Identical behavior on
+both backends:
+
+| Config | Effect |
+|---|---|
+| `ui.enabled: false` | No UI subsystem at all — no recorder files, no watchdog, no WS. The cache still runs if enabled and it can resolve a `db_dir`. |
+| `ui.recorder.db_dir: ''` | **Memory-only mode.** No recorder files, no watchdog file, no archives. Live WebSocket streaming (the Live page) keeps working — events broadcast before the DB gate — but everything DB-backed is off: History, Trace, Task Detail lookups, peer autodiscovery, the Databases tab, downloads. |
+| `ui.recorder.store_events: false` | The `events` table stays empty; the WS live view still streams. `worker_config` / `worker_state` are still written per their own flags. History, trace, and task queries return nothing. |
+| `ui.recorder.store_config: false` | No `worker_config` row — this worker becomes invisible to peer autodiscovery and to cluster-scoped cache sync. |
+| `ui.recorder.store_state: false` | No periodic `worker_state` snapshots. |
+| `cache.enabled: false` *(default)* | No cache files. The handler cache API is a no-op. |
+| `cache.enabled: true` with no `db_dir` anywhere | Startup warning + effective disable — the cache never runs memory-only. |
+
+Any combination is valid: for example `store_config: true` with
+`store_events: false` keeps a worker discoverable while writing no event
+history.
+
+## What the events table stores — and the knobs that trim it
+
+The `events` table is the long-term forensic record: one row per pipeline
+event, columns type-dependent. The full event-type catalog (which event
+fires when, with which fields) lives in
+[Observability → Flight Recorder](observability.md#flight-recorder).
+The rows that matter most for after-the-fact investigations:
+
+- **`task_started`** carries `args`, `pid`, `labels`, and in `metadata`:
+  `source_offsets`, the queue wait before a slot freed up
+  (`queue_wait_ms`), and — when enabled — the task's **stdin** content
+  (otherwise a `stdin_bytes` size marker).
+- **`task_completed`** carries `duration`, `exit_code`,
+  `stdout`/`stderr`, and the subprocess start latency (`spawn_ms`) in
+  `metadata`.
+- **`task_failed`** always stores the task's stdin (capped) plus the
+  exception detail in `metadata`, regardless of `store_stdin` — a failed
+  task is exactly the one you replay later.
+- **`runtime_stall`** persists the event-loop stall duration **with the
+  captured stack traces** ([Runtime Health](runtime-health.md)), so "the
+  whole worker froze for 3 seconds at 04:12" stays answerable from the
+  archive. Emitted by the Python backend's monitor today; the Go monitor
+  is not implemented yet.
+- **`resource_sample`** is a periodic snapshot (every
+  `state_sync_interval_seconds`) of what the worker consumed: RSS, thread
+  count, open file descriptors, CPU percent for the process and its
+  *reaped* subprocesses, and the host network byte totals — so an archive
+  alone can answer "which resource was the bottleneck at 04:12". Fields
+  whose source the platform lacks are omitted, never zeroed.
+- **`annotation`** rows are your own handler's diagnostics
+  ([Annotations](annotations.md)).
+
+Content-retention knobs (all under `ui.recorder.`; they gate row
+*presence and payload*, never table layout):
+
+| Knob | Default | What it trims |
+|---|---|---|
+| `store_output` | `true` | `false` drops `stdout`/`stderr` content from all task events. |
+| `output_min_duration_ms` | `500` | Tasks faster than this keep their row but store no `args`/`stdout`/`stderr`. |
+| `event_min_duration_ms` | `0` | Task events faster than this are not persisted at all (`0` = persist everything). |
+| `store_stdin` | `false` | `true` stores each task's stdin in `task_started` metadata. Off, only the `stdin_bytes` size marker is written. Failed tasks always store stdin. |
+| `stdin_max_bytes` | `65536` | Byte cap on stored stdin (`0` = unlimited); truncation is flagged as `stdin_truncated` in the metadata. |
+| `annotations_enabled` + `annotation_max_bytes*` | `true` | Handler-annotation acceptance and size budgets. |
+
+The UI names these gates when they bite: a Task Detail page missing stdin
+or stdout says exactly which setting excluded it. The full annotated key
+list, with env-var overrides, is in the
+[Config Reference](config-reference.md).
+
 ## Schemas
 
 The DDL below is normative and **byte-identical in both backends**
@@ -227,6 +296,19 @@ counted) and dropped after `ui.recorder.max_flush_retries` consecutive
 failures. Recording-side filters (`event_min_duration_ms`,
 `output_min_duration_ms`, `store_output`) gate what enters the buffer —
 they affect row presence, never layout.
+
+**Last-breath flush**: the most interesting events of a dying worker are
+the unflushed last ones, so both backends salvage the buffer on fatal
+exits that skip the clean shutdown path. The Python backend registers an
+`atexit` hook (armed at recorder start, disarmed by a clean stop) that
+writes the remaining buffer synchronously through a direct SQLite
+connection — covering startup failures after the recorder came up,
+unhandled exceptions, and stray `sys.exit` calls. The Go backend flushes
+the recorder from a panic guard on every pipeline goroutine that runs
+user hook code, then re-panics so the crash keeps its original stack.
+Both are best-effort and log `recorder_last_breath_flush` when they fire.
+Neither can help against SIGKILL / the OOM killer — the watchdog file
+covers *detecting* those, and the last periodic flush is what remains.
 
 **Rotation** (every `ui.recorder.rotation_interval_hours`): flush →
 create + initialize the new timestamped DB (WAL, busy_timeout, schema,

@@ -52,6 +52,18 @@ When the incident is over, the flight-recorder database still holds:
 - Every runtime stall with its captured stack traces
   (`runtime_stall` events) — the Runtime tab aggregates them by blocking
   site; the raw rows survive rotation and archiving like everything else.
+- A `resource_sample` row every `state_sync_interval_seconds`: RSS,
+  thread count, open fds, CPU percent for the worker and its reaped
+  subprocesses, and host network byte totals. Chart these against the
+  task timeline to see *which* resource moved when the system froze —
+  RSS climbing toward the container limit, fds leaking, children CPU
+  saturating the cores, or the network counters flatlining.
+- The final seconds before a crash: fatal exits that skip the clean
+  shutdown path trigger a best-effort **last-breath flush**
+  (`recorder_last_breath_flush` in the log says it fired), so the buffer
+  tail is written instead of lost. SIGKILL/OOM cannot be intercepted —
+  there the watchdog marker plus the last periodic flush are what you
+  have.
 
 When data is missing on a task detail page, the page says which retention
 setting excluded it — absence of data and never-recorded data are

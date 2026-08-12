@@ -5,6 +5,7 @@ import contextlib
 import json
 import os
 import time
+import weakref
 from collections import deque
 from pathlib import Path
 
@@ -5138,3 +5139,268 @@ class TestBackgroundLoopResilience:
             await asyncio.sleep(0)
 
         assert [e for e in cap if e['event'] == 'recorder_background_task_died'] == []
+
+
+# --- net_io WS heartbeat ---
+
+
+MIB = 1024 * 1024
+
+
+class TestNetIOSample:
+    """The pure diff-and-broadcast step behind the net_io WS heartbeat.
+
+    ``_netio_sample`` needs no started recorder: it only reads counters and
+    broadcasts, so these tests construct an EventRecorder without start()
+    and subscribe directly.
+    """
+
+    def make_rec(self, tmp_path):
+        from drakkar.recorder import core as recorder_core
+
+        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+        return rec, recorder_core
+
+    def test_first_sample_primes_baseline_without_frame(self, tmp_path, monkeypatch):
+        rec, core_mod = self.make_rec(tmp_path)
+        sub = rec.subscribe()
+        monkeypatch.setattr(core_mod, 'read_net_io_bytes', lambda: (10 * MIB, 5 * MIB))
+
+        rec._netio_sample()
+
+        assert sub.empty()
+        assert rec._netio_prev == (10 * MIB, 5 * MIB)
+
+    def test_second_sample_broadcasts_rates_in_mib_s(self, tmp_path, monkeypatch):
+        rec, core_mod = self.make_rec(tmp_path)
+        sub = rec.subscribe()
+        monkeypatch.setattr(core_mod, 'read_net_io_bytes', lambda: (3 * MIB, 1 * MIB))
+        rec._netio_prev = (1 * MIB, 0)
+        rec._netio_prev_t = 100.0
+        monkeypatch.setattr(core_mod.time, 'monotonic', lambda: 102.0)
+
+        rec._netio_sample()
+
+        frame = sub.get_nowait()
+        assert frame['event'] == 'net_io'
+        meta = json.loads(frame['metadata'])
+        assert meta['rx_mib_s'] == 1.0  # 2 MiB over 2 s
+        assert meta['tx_mib_s'] == 0.5
+        assert meta['rx_bytes_total'] == 3 * MIB
+        assert meta['tx_bytes_total'] == 1 * MIB
+        assert meta['interval_s'] == 2.0
+
+    def test_counter_reset_skips_frame_and_reprimes(self, tmp_path, monkeypatch):
+        """An interface bounce makes counters go backwards — no nonsense rate."""
+        rec, core_mod = self.make_rec(tmp_path)
+        sub = rec.subscribe()
+        monkeypatch.setattr(core_mod, 'read_net_io_bytes', lambda: (1 * MIB, 0))
+        rec._netio_prev = (5 * MIB, 2 * MIB)
+        rec._netio_prev_t = 100.0
+        monkeypatch.setattr(core_mod.time, 'monotonic', lambda: 110.0)
+
+        rec._netio_sample()
+
+        assert sub.empty()
+        # The baseline moved to the new counters, so the NEXT interval measures
+        # from the reset point instead of spanning the gap.
+        assert rec._netio_prev == (1 * MIB, 0)
+
+    def test_unavailable_counters_are_a_noop(self, tmp_path, monkeypatch):
+        rec, core_mod = self.make_rec(tmp_path)
+        sub = rec.subscribe()
+        monkeypatch.setattr(core_mod, 'read_net_io_bytes', lambda: None)
+        rec._netio_prev = (1 * MIB, 0)
+
+        rec._netio_sample()
+
+        assert sub.empty()
+        assert rec._netio_prev == (1 * MIB, 0)  # baseline untouched
+
+    def test_filtered_subscriber_does_not_receive_net_io(self, tmp_path, monkeypatch):
+        rec, core_mod = self.make_rec(tmp_path)
+        sub = rec.subscribe(event_types=['task_started'])
+        monkeypatch.setattr(core_mod, 'read_net_io_bytes', lambda: (3 * MIB, 1 * MIB))
+        rec._netio_prev = (1 * MIB, 0)
+        rec._netio_prev_t = 100.0
+        monkeypatch.setattr(core_mod.time, 'monotonic', lambda: 102.0)
+
+        rec._netio_sample()
+
+        assert sub.empty()
+
+
+class TestHostSampleLoop:
+    async def test_unavailable_counters_log_once_and_never_prime(self, tmp_path, monkeypatch):
+        """macOS / exotic containers: the network half stays silent."""
+        from drakkar.recorder import core as recorder_core
+
+        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+        rec._running = False  # loop body skipped — only the priming step runs
+        monkeypatch.setattr(recorder_core, 'read_net_io_bytes', lambda: None)
+
+        with capture_logs() as cap:
+            await rec._host_sample_loop()
+
+        assert any(e['event'] == 'recorder_netio_unavailable' for e in cap)
+        assert rec._netio_prev is None
+
+    async def test_start_creates_and_stop_ends_the_sampler_task(self, tmp_path):
+        config = make_debug_config(tmp_path)
+        rec = EventRecorder(config, worker_name=WORKER_NAME)
+        await rec.start()
+        assert rec._netio_task is not None
+        await rec.stop()
+        assert rec._netio_task.done()
+
+
+class TestResourceSample:
+    """The per-tick resource snapshot (resource_sample events)."""
+
+    def make_rec(self, tmp_path, monkeypatch, *, rss=256 * MIB, threads=20, fds=42, net=(1000, 2000)):
+        from drakkar.recorder import core as recorder_core
+
+        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+        monkeypatch.setattr(recorder_core, 'read_self_stats', lambda: (rss, threads))
+        monkeypatch.setattr(recorder_core, 'read_open_fd_count', lambda: fds)
+        monkeypatch.setattr(recorder_core, 'read_net_io_bytes', lambda: net)
+        return rec, recorder_core
+
+    def sample_meta(self, rec) -> dict:
+        event = rec._buffer[-1]
+        assert event['event'] == 'resource_sample'
+        return json.loads(event['metadata'])
+
+    def test_records_platform_facts(self, tmp_path, monkeypatch):
+        rec, _ = self.make_rec(tmp_path, monkeypatch)
+
+        rec._resource_sample()
+
+        meta = self.sample_meta(rec)
+        assert meta['rss_bytes'] == 256 * MIB
+        assert meta['threads'] == 20
+        assert meta['open_fds'] == 42
+        assert meta['rx_bytes_total'] == 1000
+        assert meta['tx_bytes_total'] == 2000
+
+    def test_first_sample_has_no_cpu_percent(self, tmp_path, monkeypatch):
+        rec, _ = self.make_rec(tmp_path, monkeypatch)
+
+        rec._resource_sample()
+
+        meta = self.sample_meta(rec)
+        assert 'cpu_self_pct' not in meta
+        assert 'cpu_children_pct' not in meta
+
+    def test_second_sample_reports_cpu_deltas_as_percent(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
+        usages = iter(
+            [
+                SimpleNamespace(ru_utime=1.0, ru_stime=0.0),  # self, tick 1
+                SimpleNamespace(ru_utime=2.0, ru_stime=0.0),  # children, tick 1
+                SimpleNamespace(ru_utime=2.0, ru_stime=0.0),  # self, tick 2 (+1s cpu)
+                SimpleNamespace(ru_utime=5.0, ru_stime=1.0),  # children, tick 2 (+4s cpu)
+            ]
+        )
+        monkeypatch.setattr(core_mod.resource, 'getrusage', lambda _which: next(usages))
+        clock = iter([100.0, 110.0])  # 10 s apart
+        monkeypatch.setattr(core_mod.time, 'monotonic', lambda: next(clock))
+
+        rec._resource_sample()
+        rec._resource_sample()
+
+        meta = self.sample_meta(rec)
+        assert meta['cpu_self_pct'] == 10.0  # 1 cpu-second over 10 s
+        assert meta['cpu_children_pct'] == 40.0  # 4 cpu-seconds over 10 s
+        assert meta['interval_s'] == 10.0
+
+    def test_unavailable_sources_are_omitted_not_zeroed(self, tmp_path, monkeypatch):
+        from drakkar.recorder import core as recorder_core
+
+        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+        monkeypatch.setattr(recorder_core, 'read_self_stats', lambda: (None, None))
+        monkeypatch.setattr(recorder_core, 'read_open_fd_count', lambda: None)
+        monkeypatch.setattr(recorder_core, 'read_net_io_bytes', lambda: None)
+
+        rec._resource_sample()
+
+        meta = self.sample_meta(rec)
+        for key in ('rss_bytes', 'threads', 'open_fds', 'rx_bytes_total', 'tx_bytes_total'):
+            assert key not in meta
+
+
+class TestLastBreathFlush:
+    """The atexit salvage path for buffers a clean stop() never flushed."""
+
+    async def test_salvages_buffered_events_synchronously(self, tmp_path):
+        config = make_debug_config(tmp_path)  # flush_interval 60 → nothing auto-flushes
+        rec = EventRecorder(config, worker_name=WORKER_NAME)
+        await rec.start()
+        rec.record_consumed(make_msg(partition=3, offset=77))
+        assert len(rec._buffer) > 0
+
+        rec._last_breath_flush()  # what atexit would run after a crash
+
+        import sqlite3 as sqlite3_mod
+
+        conn = sqlite3_mod.connect(rec.db_path)
+        try:
+            rows = conn.execute("SELECT partition, offset FROM events WHERE event = 'consumed'").fetchall()
+        finally:
+            conn.close()
+        assert rows == [(3, 77)]
+        assert len(rec._buffer) == 0
+        await rec.stop()
+
+    async def test_noop_after_clean_stop(self, tmp_path):
+        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+        await rec.start()
+        db_path = rec.db_path
+        await rec.stop()
+        # Simulate a stray late event after shutdown — it must NOT reopen the DB.
+        rec._buffer.append({'ts': time.time(), 'dt': 'x', 'event': 'consumed'})
+
+        rec._last_breath_flush()
+
+        import sqlite3 as sqlite3_mod
+
+        conn = sqlite3_mod.connect(db_path)
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM events WHERE event = 'consumed'").fetchone()[0]
+        finally:
+            conn.close()
+        assert count == 0
+
+    async def test_armed_on_start_and_disarmed_on_stop(self, tmp_path):
+        from drakkar.recorder import core as recorder_core
+
+        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+        assert rec not in recorder_core._LIVE_RECORDERS
+
+        await rec.start()
+        assert rec in recorder_core._LIVE_RECORDERS
+        assert recorder_core._LAST_BREATH_REGISTERED
+
+        await rec.stop()
+        assert rec not in recorder_core._LIVE_RECORDERS
+
+    def test_live_set_holds_recorders_weakly(self, tmp_path):
+        """The regression this design exists for: a strong reference here
+        would pin abandoned test recorders together with their aiosqlite
+        connections, whose non-daemon worker threads only stop from
+        ``Connection.__del__`` — and interpreter shutdown then joins those
+        threads forever."""
+        import gc
+
+        from drakkar.recorder import core as recorder_core
+
+        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+        recorder_core._LIVE_RECORDERS.add(rec)
+        ref = weakref.ref(rec)
+
+        del rec
+        gc.collect()
+
+        assert ref() is None

@@ -1,11 +1,11 @@
-"""Tests for best-effort host CPU-capacity discovery (drakkar.hostinfo)."""
+"""Tests for best-effort host-fact discovery (drakkar.hostinfo)."""
 
 from pathlib import Path
 
 import pytest
 
 from drakkar import hostinfo
-from drakkar.hostinfo import cgroup_cpu_quota, effective_cpu_count
+from drakkar.hostinfo import cgroup_cpu_quota, effective_cpu_count, read_net_io_bytes
 
 
 def write(tmp_path: Path, name: str, content: str) -> Path:
@@ -71,3 +71,38 @@ class TestEffectiveCpuCount:
 
     def test_real_environment_reports_at_least_one(self):
         assert effective_cpu_count() >= 1
+
+
+# A realistic /proc/net/dev: two header lines, loopback, two real interfaces.
+# rx_bytes is the first field after the colon, tx_bytes the ninth.
+PROC_NET_DEV_SAMPLE = """\
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 9999999    9999    0    0    0     0          0         0  9999999    9999    0    0    0     0       0          0
+  eth0: 1000000    5000    0    0    0     0          0         0   400000    3000    0    0    0     0       0          0
+  eth1:  500000    2000    0    0    0     0          0         0   100000    1000    0    0    0     0       0          0
+"""
+
+
+class TestReadNetIOBytes:
+    def test_sums_non_loopback_interfaces(self, tmp_path):
+        p = write(tmp_path, 'net_dev', PROC_NET_DEV_SAMPLE)
+        assert read_net_io_bytes(proc_net_dev=p) == (1_500_000, 500_000)
+
+    def test_loopback_is_excluded(self, tmp_path):
+        only_lo = '\n'.join(PROC_NET_DEV_SAMPLE.splitlines()[:3]) + '\n'
+        p = write(tmp_path, 'net_dev', only_lo)
+        assert read_net_io_bytes(proc_net_dev=p) is None
+
+    def test_missing_file_is_unavailable(self, tmp_path):
+        assert read_net_io_bytes(proc_net_dev=missing(tmp_path)) is None
+
+    def test_malformed_row_is_skipped_not_fatal(self, tmp_path):
+        broken = PROC_NET_DEV_SAMPLE + '  bad0: not numbers here\n'
+        p = write(tmp_path, 'net_dev', broken)
+        assert read_net_io_bytes(proc_net_dev=p) == (1_500_000, 500_000)
+
+    def test_short_row_is_skipped_not_fatal(self, tmp_path):
+        broken = PROC_NET_DEV_SAMPLE + '  tun0: 1 2 3\n'
+        p = write(tmp_path, 'net_dev', broken)
+        assert read_net_io_bytes(proc_net_dev=p) == (1_500_000, 500_000)
