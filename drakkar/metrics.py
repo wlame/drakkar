@@ -944,6 +944,38 @@ runtime_stalls = Counter(
 )
 
 
+# --- Offload pool ---
+#
+# BaseDrakkarHandler.offload() moves CPU-bound hook work onto a small
+# thread pool so the event loop stays responsive. These three cover the
+# operator questions: is offload being used right now (running), is the
+# pool too small (queued > 0 for sustained periods), and how long do the
+# computations take (duration, labeled by the hook that offloaded).
+
+offload_running = Gauge(
+    'drakkar_offload_running',
+    'Offloaded computations currently executing on the offload thread pool',
+)
+
+offload_queued = Gauge(
+    'drakkar_offload_queued',
+    (
+        'Offloaded computations waiting for a free offload-pool thread. '
+        'Sustained non-zero values mean offload.max_threads is too small '
+        'for how often hooks offload concurrently.'
+    ),
+)
+
+offload_duration = Histogram(
+    'drakkar_offload_duration_seconds',
+    'Execution time of offloaded computations (queue wait excluded)',
+    ['hook'],
+    # Offloaded work is expected to be seconds-scale (that is why it was
+    # offloaded); buckets reach further than handler_duration's.
+    buckets=(0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120),
+)
+
+
 def start_metrics_server(config: MetricsConfig) -> None:
     """Start the Prometheus metrics HTTP server if enabled."""
     # Configured even with the server off: the histogram still feeds the

@@ -645,6 +645,86 @@ async def test_get_trace_excludes_window_annotation_from_another_partition(recor
     assert 'annotation' not in [e['event'] for e in trace]
 
 
+async def test_get_trace_includes_message_scoped_offload_event(recorder):
+    recorder.record_consumed(make_msg(partition=3, offset=42))
+    recorder.record_offload(
+        hook='on_message_complete',
+        partition=3,
+        function='H._crunch',
+        duration=4.2,
+        queued=0.01,
+        status='ok',
+        offset=42,
+    )
+    await recorder._flush()
+
+    trace = await recorder.get_trace(partition=3, msg_offset=42)
+    assert 'offload' in [e['event'] for e in trace]
+
+
+async def test_get_trace_includes_window_scoped_offload_via_offsets(recorder):
+    # Same third-branch mechanics as window annotations: no anchor columns,
+    # reached through metadata.offsets.
+    recorder.record_consumed(make_msg(partition=3, offset=42))
+    recorder.record_offload(
+        hook='arrange',
+        partition=3,
+        function='H._build_plan',
+        duration=12.5,
+        queued=0.0,
+        status='ok',
+        window_id=7,
+        offsets=(41, 42, 43),
+    )
+    await recorder._flush()
+
+    trace = await recorder.get_trace(partition=3, msg_offset=42)
+    offload_rows = [e for e in trace if e['event'] == 'offload']
+    assert len(offload_rows) == 1
+    metadata = json.loads(offload_rows[0]['metadata'])
+    assert metadata['hook'] == 'arrange'
+    assert metadata['function'] == 'H._build_plan'
+    assert metadata['status'] == 'ok'
+    assert metadata['offsets'] == [41, 42, 43]
+
+
+async def test_get_trace_excludes_offload_from_another_window(recorder):
+    recorder.record_consumed(make_msg(partition=3, offset=42))
+    recorder.record_offload(
+        hook='arrange',
+        partition=3,
+        function='H._build_plan',
+        duration=1.0,
+        queued=0.0,
+        status='ok',
+        offsets=(900, 901),
+    )
+    await recorder._flush()
+
+    trace = await recorder.get_trace(partition=3, msg_offset=42)
+    assert 'offload' not in [e['event'] for e in trace]
+
+
+async def test_record_offload_outside_hooks_persists_unanchored(recorder):
+    # partition=None (offload() from on_ready / a periodic method): the row
+    # persists but belongs to no message trace.
+    recorder.record_offload(
+        hook='none',
+        partition=None,
+        function='H._warmup',
+        duration=2.0,
+        queued=0.0,
+        status='ok',
+    )
+    await recorder._flush()
+
+    events = await recorder.get_events(event_type='offload', limit=10)
+    assert len(events) == 1
+    assert events[0]['partition'] is None
+    metadata = json.loads(events[0]['metadata'])
+    assert metadata['status'] == 'ok'
+
+
 async def test_get_trace_still_excludes_arranged_rows(recorder):
     # ``arranged`` metadata carries an offsets array of the same shape as a
     # window annotation's. Without the event filter on the new query branch

@@ -795,6 +795,34 @@ class RuntimeHealthConfig(BaseModel):
     )
 
 
+class OffloadConfig(BaseModel):
+    """Thread pool for CPU-bound work handlers move off the event loop.
+
+    Backs ``BaseDrakkarHandler.offload()``: a handler hook that needs to
+    run a heavy synchronous computation (deeply nested loops deriving task
+    parameters in ``arrange()``, result crunching in ``on_message_complete``)
+    awaits ``self.offload(fn, ...)`` and the function runs on this pool
+    instead of the event loop. The pool exists to keep the loop responsive,
+    not to add CPU throughput — under the GIL, pure-Python work is
+    serialized regardless of thread count.
+    """
+
+    max_threads: int = Field(
+        default=2,
+        ge=1,
+        le=32,
+        description=(
+            'Worker threads in the shared offload pool. Calls beyond this '
+            'many concurrent offloaded computations queue (FIFO) and show '
+            'up in the drakkar_offload_queued gauge. More threads do not '
+            'speed up pure-Python work (GIL); raise this only when several '
+            'partitions routinely offload at once and queueing delay '
+            'matters, or when the offloaded code releases the GIL '
+            '(numpy, compiled extensions).'
+        ),
+    )
+
+
 class LoggingConfig(BaseModel):
     """Structured logging settings."""
 
@@ -1706,6 +1734,7 @@ class DrakkarConfig(BaseSettings):
     dlq: DLQConfig = Field(default_factory=DLQConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     runtime_health: RuntimeHealthConfig = Field(default_factory=RuntimeHealthConfig)
+    offload: OffloadConfig = Field(default_factory=OffloadConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)

@@ -146,6 +146,7 @@ class AppLifecycle:
         await self._start_ui_and_recorder()
         self._start_runtime_health()
         self._wire_annotator()
+        self._wire_offload_pool()
         await self._start_cache()
         await self._connect_sinks()
         await self._start_webapp()
@@ -450,6 +451,25 @@ class AppLifecycle:
             max_bytes_per_call=recorder_config.annotation_max_bytes_per_call,
             log_max_bytes=recorder_config.annotation_log_max_bytes,
         )
+
+    def _wire_offload_pool(self) -> None:
+        """Replace the handler's InlineOffloader stub with the shared pool.
+
+        Runs after the recorder starts so per-call ``offload`` events have
+        somewhere to land; with the recorder absent the pool still runs
+        and feeds Prometheus only. Unlike the annotator there is no
+        enabled/disabled split — the pool is a few idle threads and
+        ``handler.offload()`` must behave identically whether or not the
+        UI is on.
+        """
+        app = self._app
+        from drakkar.offload import OffloadPool
+
+        app._offload_pool = OffloadPool(
+            app._config.offload,
+            recorder=app._recorder,
+        )
+        app._handler._offloader = app._offload_pool
 
     async def _start_cache(self) -> None:
         """Construct the cache engine and wire the handler-facing Cache.
@@ -1138,6 +1158,23 @@ class AppLifecycle:
                         category='lifecycle',
                         count=len(bg_snapshot),
                     )
+
+            # Shut the offload pool down first among the observability-
+            # adjacent subsystems: hooks have finished draining by now, so
+            # anything still queued belongs to abandoned work — drop it
+            # (cancel_futures) rather than crunch through it. A running
+            # computation finishes in the background; shutdown(wait=False)
+            # never blocks worker stop behind it.
+            if app._offload_pool is not None:
+                try:
+                    app._offload_pool.shutdown()
+                except Exception as exc:
+                    await log.awarning(
+                        'offload_pool_stop_failed',
+                        category='lifecycle',
+                        error=str(exc),
+                    )
+                app._offload_pool = None
 
             # Stop the runtime-health monitor before the recorder for the
             # same reason as the cache engine below: its final transition

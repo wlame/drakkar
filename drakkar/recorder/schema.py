@@ -181,13 +181,15 @@ CREATE INDEX IF NOT EXISTS idx_worker_state_updated ON worker_state(updated_at);
 # json_each() join walks the ``source_offsets`` array stored on each
 # task_started row; tasks are anchored by task_id thereafter.
 #
-# The third branch picks up WINDOW-scoped handler annotations. Those rows
-# describe a whole ``arrange()`` window rather than one message or task, so
-# they carry neither an ``offset`` nor a ``task_id`` and the first two
-# branches cannot see them. They instead record the window's message offsets
-# in ``metadata.offsets``, which this branch walks. The ``event =
-# 'annotation'`` filter matters: ``arranged`` rows carry an ``offsets`` array
-# of the same shape and would otherwise be pulled into every trace.
+# The third branch picks up WINDOW-scoped rows: handler annotations and
+# ``offload`` events emitted from window-wide hooks (``arrange`` /
+# ``on_window_complete``). Those rows describe a whole ``arrange()`` window
+# rather than one message or task, so they carry neither an ``offset`` nor a
+# ``task_id`` and the first two branches cannot see them. They instead record
+# the window's message offsets in ``metadata.offsets``, which this branch
+# walks. The ``event IN (...)`` filter matters: ``arranged`` rows carry an
+# ``offsets`` array of the same shape and would otherwise be pulled into
+# every trace.
 #
 # Parameter order: partition, offset, partition, offset, partition, offset.
 _TRACE_QUERY = """
@@ -201,7 +203,7 @@ _TRACE_QUERY = """
         )
         OR id IN (
             SELECT a.id FROM events a, json_each(json_extract(a.metadata, '$.offsets')) k
-            WHERE a.partition = ? AND a.event = 'annotation'
+            WHERE a.partition = ? AND a.event IN ('annotation', 'offload')
             AND k.value = ?
         )
     )

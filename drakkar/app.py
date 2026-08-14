@@ -169,6 +169,12 @@ class DrakkarApp:
         # order (before recorder, so the final flush's periodic_run event
         # still records).
         self._cache_engine: CacheEngine | None = None
+        # Offload thread pool backing handler.offload() — constructed in
+        # lifecycle._async_run (always; it is cheap and has no external
+        # dependencies), shut down in _shutdown. Forward-declared as
+        # ``Any`` to keep drakkar.offload out of the import graph at app
+        # construction time, mirroring ``_runtime_health``.
+        self._offload_pool: Any = None
 
         self._processors: dict[int, PartitionProcessor] = {}
         self._running = False

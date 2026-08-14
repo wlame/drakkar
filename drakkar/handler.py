@@ -8,7 +8,7 @@ handles sink failures.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, get_args
 
 import structlog
@@ -21,6 +21,7 @@ from pydantic import BaseModel, ValidationError
 # heavy module, so there is no circular-import risk.
 from drakkar.annotations import AnnotatorLike
 from drakkar.cache.protocol import CacheLike
+from drakkar.offload import OffloaderLike
 
 if TYPE_CHECKING:
     from drakkar.config import DrakkarConfig
@@ -246,6 +247,14 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # ``ui.recorder.annotations_enabled`` is set. Private because users call
     # the method, never the object.
     _annotator: AnnotatorLike
+
+    # Backs :meth:`offload`. Same lifecycle again: the class-level
+    # ``InlineOffloader`` stub keeps ``await self.offload(...)`` working in
+    # unit tests (it still runs the function on a thread, via
+    # ``asyncio.to_thread``, just without the shared pool, metrics, or
+    # recorder events), and the framework replaces it per-instance with the
+    # worker's ``OffloadPool`` at startup.
+    _offloader: OffloaderLike
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
@@ -518,6 +527,55 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         """
         self._annotator.emit(target, kind, data, labels=labels)
 
+    async def offload[**P, R](self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs) -> R:
+        """Run a CPU-bound synchronous function off the event loop.
+
+        Every hook runs on the worker's single event loop, so a hook that
+        spends seconds in pure-Python computation — deeply nested loops
+        deriving task parameters in ``arrange()``, result crunching in
+        ``on_message_complete()`` — freezes the whole worker: Kafka
+        polling, executor completions, sink flushes, the debug UI. Wrap
+        that computation in a plain function and await it here instead::
+
+            async def arrange(self, messages, pending):
+                plan = await self.offload(self._build_plan, messages)
+                return [ExecutorTask(...) for item in plan]
+
+            def _build_plan(self, messages):     # plain sync function
+                ...heavy nested loops...
+
+        The function runs on a small shared thread pool
+        (``offload.max_threads`` in config, default 2). This does NOT make
+        the computation faster — under the GIL pure-Python work is
+        serialized regardless of the thread it runs on — but the event
+        loop stays responsive while it runs, which is the difference
+        between a multi-second worker stall (see the runtime health
+        monitor's ``runtime_stall`` events) and millisecond jitter.
+
+        Rules inside the offloaded function:
+
+        - It is synchronous: no ``await``, no coroutines, no loop-bound
+          framework objects.
+        - ``self.cache.peek`` / ``set`` / ``delete`` / ``in`` are safe —
+          the cache guards its memory state with an internal lock. The
+          async ``self.cache.get`` (DB fallback) is loop-only: ``await``
+          it for the keys you need *before* offloading, which warms them
+          into memory, then ``peek`` inside the function.
+        - ``self.annotate(...)`` works and anchors to the same hook
+          invocation — the hook's context is copied into the thread.
+
+        Exceptions raised by ``fn`` propagate to the awaiting hook
+        unchanged. Cancellation (partition revoked, worker shutdown)
+        cancels a queued call outright; an already-running function
+        cannot be interrupted — the thread finishes and the result is
+        discarded.
+
+        Callable in unit tests without a running app: the default
+        offloader runs ``fn`` via ``asyncio.to_thread`` with identical
+        semantics, minus pool/metrics/recorder.
+        """
+        return await self._offloader.run(fn, *args, **kwargs)
+
     # ------------------------------------------------------------------
     # Webapp hooks (optional — only invoked when webapp.enabled=True).
     #
@@ -625,16 +683,20 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
 # reads the shared stubs through the class attributes unless the framework
 # replaces them with real objects at runtime.
 def _install_default_cache() -> None:
-    """Attach the stateless NoOpCache and NoOpAnnotator stubs as class attributes.
+    """Attach the stateless default stubs as class attributes.
 
-    Called once at module import. Both stubs are stateless so sharing one
-    instance across all handler classes is safe.
+    Called once at module import. All three stubs are stateless so sharing
+    one instance across all handler classes is safe. ``InlineOffloader``
+    still executes offloaded functions (on ``asyncio.to_thread``) — the
+    stub-ness is only the missing pool/metrics/recorder wiring.
     """
     from drakkar.annotations import NoOpAnnotator
     from drakkar.cache import NoOpCache
+    from drakkar.offload import InlineOffloader
 
     BaseDrakkarHandler.cache = NoOpCache()
     BaseDrakkarHandler._annotator = NoOpAnnotator()
+    BaseDrakkarHandler._offloader = InlineOffloader()
 
 
 _install_default_cache()

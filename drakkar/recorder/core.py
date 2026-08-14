@@ -1784,6 +1784,62 @@ class EventRecorder:
             }
         )
 
+    def record_offload(
+        self,
+        *,
+        hook: str,
+        partition: int | None,
+        function: str,
+        duration: float,
+        queued: float,
+        status: str,
+        error: str = '',
+        window_id: int | None = None,
+        offsets: tuple[int, ...] = (),
+        offset: int | None = None,
+        task_id: str | None = None,
+    ) -> None:
+        """Record one ``BaseDrakkarHandler.offload()`` call.
+
+        Anchoring mirrors annotations: ``offset`` for a message-anchored
+        hook, ``task_id`` for a task-anchored one, neither for window-wide
+        hooks (``arrange`` / ``on_window_complete``) whose rows are matched
+        through the ``offsets`` list inside ``metadata``. ``partition`` is
+        ``None`` when offload() ran outside a framework-invoked hook
+        (``on_ready``, a ``@periodic`` method) — the row then lives outside
+        any message trace, like ``periodic_run`` events do.
+
+        ``queued`` is the seconds the call waited for a free offload-pool
+        thread; sustained non-zero values are the signal that
+        ``offload.max_threads`` is undersized for the deployment.
+        """
+        metadata: dict[str, Any] = {
+            'hook': hook,
+            'function': function,
+            'queued': round(queued, 4),
+            'status': status,
+            'window_id': window_id,
+            # Window-scoped rows only — same trace-matching contract as
+            # window-scoped annotations (see record_annotation).
+            'offsets': list(offsets) if offset is None and task_id is None else [],
+        }
+        if error:
+            metadata['error'] = error[:500]
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'offload',
+                'partition': partition,
+                'offset': offset,
+                'task_id': task_id,
+                'duration': round(duration, 4),
+                'metadata': encode_json_str(metadata),
+                # Not a DB column; carried for live WS subscribers so the
+                # UI can label the row without parsing metadata.
+                'hook': hook,
+            }
+        )
+
     def record_periodic_run(
         self,
         name: str,
