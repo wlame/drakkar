@@ -33,6 +33,7 @@ Configured sinks (any combination)
 - **Subprocess executor pool** with semaphore-based concurrency limiting
 - **Typed message models** -- define Pydantic schemas for input/output, get auto-deserialization
 - **Cache (optional)** -- `self.cache` key/value store with memory + write-behind SQLite + eventually-consistent peer sync across workers; pluggable backends conform to the public `CacheLike` protocol ([docs](docs/cache.md))
+- **Offload for CPU-bound hooks** -- `await self.offload(fn, ...)` runs heavy pure-Python hook computation (nested arrange loops, result crunching) on a small thread pool so the event loop never stalls ([docs](docs/offload.md))
 - **Webapp pipeline (optional)** -- opt-in synchronous HTTP endpoint exposing the same handler pipeline used for Kafka, with multi-tenant bearer-token auth, per-client rpm caps, opt-in sinks delivery, and graceful-shutdown semantics. Webapp users declare four type parameters on `BaseDrakkarHandler` (Kafka in/out + HTTP request/response). See [`docs/webapp.md`](docs/webapp.md).
 - **Built-in operator UI** (FastAPI) with executor timeline, partition lag, message tracing
 - **Flight recorder** -- SQLite event log with retention and rotation

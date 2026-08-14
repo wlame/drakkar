@@ -34,6 +34,18 @@ executor:
   backpressure_high_multiplier: 32
   backpressure_low_multiplier: 4
 
+# --- Offload pool ---
+#
+# Sizes the thread pool behind handler.offload(). This worker's arrange()
+# runs its whole window-planning pass there (_build_scan_plan in
+# handler.py: nested pattern x file loops, per-file stat/read syscalls,
+# memory-tier cache probes), so that work occupies a pool thread instead
+# of stalling the event loop. 2 is the framework default; stated
+# explicitly so the integration environment demonstrates the knob.
+# See docs/offload.md.
+offload:
+  max_threads: 2
+
 # --- Sinks ---
 #
 # A NOTE ON NAMING in this section:

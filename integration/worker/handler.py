@@ -12,6 +12,9 @@ Shows how to:
 - Handle sink delivery failures with on_delivery_error() and DLQ
 - Simulate random executor failures via --fail flag
 - Use @periodic for recurring background tasks (stats, health checks)
+- OFFLOAD: run the CPU/syscall-bound window planning (nested loops +
+  file stats + cache probes) on the offload pool via self.offload(),
+  keeping the event loop responsive (docs/offload.md)
 """
 
 import asyncio
@@ -134,11 +137,14 @@ class RipgrepHandler(
     next arrange() window:
 
       - ``self.cache.peek(cache_key)`` gives a synchronous memory hit —
-        no event-loop work, safe inside the tight arrange() loop.
+        thread-safe, so it runs inside the OFFLOADED planning function
+        (see ``_build_scan_plan``).
       - If memory missed, ``await self.cache.get(cache_key)`` checks the
         local SQLite file (where the periodic flush has persisted
         earlier writes), and also reaches cross-worker values that
-        peer-sync has pulled into our DB.
+        peer-sync has pulled into our DB. ``get`` is a loop-only
+        coroutine, so this tier runs in ``arrange()`` after the offload
+        returns.
 
     A cache hit becomes a PrecomputedResult attached to the task — the
     framework skips the subprocess, synthesises an ExecutorResult, and
@@ -278,6 +284,71 @@ class RipgrepHandler(
 
     # -------------------------------------------------------------------
 
+    def _build_scan_plan(
+        self,
+        messages: list[dk.SourceMessage],
+    ) -> tuple[dict[tuple[str, str], list[dk.SourceMessage]], list[dict]]:
+        """Synchronous window planning — runs on the offload pool, not the loop.
+
+        Everything CPU- or syscall-bound about arranging a window lives
+        here: the nested patterns x file_paths bucketing, the per-target
+        stat/read syscalls behind ``_scan_target_labels``, and the
+        memory-tier cache probe. On real workloads this is the part that
+        grows with window size and can hold the event loop for seconds;
+        under ``self.offload()`` it occupies one pool thread instead,
+        while Kafka polling, executor completions, and sink flushes keep
+        running (docs/offload.md).
+
+        Cache rules inside an offloaded function: the sync ops are
+        thread-safe, so ``self.cache.peek`` is fine here; the async
+        ``self.cache.get`` (SQLite fallback) is loop-only and therefore
+        runs in ``arrange()`` AFTER this returns.
+        """
+        # Bucket every (pattern, file_path) pair across ALL messages in
+        # the window. Key = (pattern, file_path); value = list of
+        # contributing messages (their request_ids feed task metadata).
+        by_key: dict[tuple[str, str], list[dk.SourceMessage]] = {}
+        for msg in messages:
+            req: SearchRequest = msg.payload
+            if req is None:
+                continue
+            for pattern in req.patterns:
+                for file_path in req.file_paths:
+                    by_key.setdefault((pattern, file_path), []).append(msg)
+
+        # One stat/read pass per DISTINCT file rather than one per pair —
+        # and all of them on this single pool thread, replacing the
+        # per-pair asyncio.to_thread hop the pre-offload version paid.
+        labels_by_file = {file_path: _scan_target_labels(file_path) for _, file_path in by_key}
+
+        plan: list[dict] = []
+        for (pattern, file_path), contributing_msgs in by_key.items():
+            # Representative repeat: max(repeat) so the subprocess does
+            # at least as much work as anyone asked for (a merge policy).
+            merged_repeat = max((m.payload.repeat for m in contributing_msgs), default=1)
+            # The cache key is a pipe-delimited string (the framework
+            # cache stores strings, not tuples). ``match|...`` prefix
+            # namespaces these entries so other features of this handler
+            # can cohabit the same cache DB without key collisions.
+            cache_key = f'match|{pattern}|{file_path}|{merged_repeat}'
+            plan.append(
+                {
+                    'pattern': pattern,
+                    'file_path': file_path,
+                    'merged_repeat': merged_repeat,
+                    'request_ids': [m.payload.request_id for m in contributing_msgs],
+                    'offsets': [m.offset for m in contributing_msgs],
+                    'fan_in': len(contributing_msgs),
+                    'scan_labels': labels_by_file[file_path],
+                    'cache_key': cache_key,
+                    # Memory-tier probe — thread-safe sync op. ``None``
+                    # here is not yet a miss: arrange() still asks the
+                    # SQLite tier via the loop-only async get().
+                    'cached_stdout': self.cache.peek(cache_key),
+                }
+            )
+        return by_key, plan
+
     async def arrange(
         self,
         messages: list[dk.SourceMessage],
@@ -303,17 +374,13 @@ class RipgrepHandler(
         # Kafka batch boundary rather than one per task.
         request_label = f'{messages[0].partition}:{messages[0].offset}'
 
-        # Bucket every (pattern, file_path) pair across ALL messages in the
-        # window. Key = (pattern, file_path); value = list of contributing
-        # messages (with their request_ids for metadata).
-        by_key: dict[tuple[str, str], list[dk.SourceMessage]] = {}
-        for msg in messages:
-            req: SearchRequest = msg.payload
-            if req is None:
-                continue
-            for pattern in req.patterns:
-                for file_path in req.file_paths:
-                    by_key.setdefault((pattern, file_path), []).append(msg)
+        # OFFLOAD: the whole CPU/syscall-bound planning pass — nested-loop
+        # bucketing, per-file stat/read syscalls, memory-tier cache probes —
+        # runs on the offload pool in ONE call. The event loop stays free
+        # for the other partitions, the executor, and the sinks while it
+        # computes. Shows up as an `offload` event on this window's trace
+        # and in the drakkar_offload_* metrics (docs/offload.md).
+        by_key, plan = await self.offload(self._build_scan_plan, messages)
 
         # Window-scoped annotation: what the bucketing decided for this whole
         # arrange() call. This is the "why does this window have fewer tasks
@@ -369,20 +436,17 @@ class RipgrepHandler(
             'subprocess_tasks': 0,
             'precomputed_tasks': 0,
         }
-        for (pattern, file_path), contributing_msgs in by_key.items():
+        for entry in plan:
             task_id = dk.make_task_id('rg')
             if task_id in pending.pending_task_ids:
                 continue
-            # Representative repeat: max(repeat) so the subprocess does
-            # at least as much work as anyone asked for (a merge policy).
-            merged_repeat = max((m.payload.repeat for m in contributing_msgs), default=1)
-            request_ids = [m.payload.request_id for m in contributing_msgs]
-            offsets = [m.offset for m in contributing_msgs]
-            # _scan_target_labels does synchronous stat/read syscalls; run it
-            # off the main loop so a slow or stale mount under /project
-            # stalls a worker thread instead of Kafka polling for the whole
-            # window (same idiom as recorder/core.py's directory walks).
-            scan_labels = await asyncio.to_thread(_scan_target_labels, file_path)
+            pattern = entry['pattern']
+            file_path = entry['file_path']
+            merged_repeat = entry['merged_repeat']
+            request_ids = entry['request_ids']
+            offsets = entry['offsets']
+            scan_labels = entry['scan_labels']
+            cache_key = entry['cache_key']
 
             # PRECOMPUTED FAST-TRACK — consult the framework cache before
             # scheduling a subprocess. A cache hit becomes a PrecomputedResult
@@ -391,21 +455,16 @@ class RipgrepHandler(
             # debug UI marks these tasks with ``source=cache`` and the event
             # recorder sets ``metadata.precomputed=true``.
             #
-            # The cache key is a pipe-delimited string (the framework cache
-            # stores strings, not tuples). ``match|...`` prefix namespaces
-            # these entries so other features of this handler can cohabit
-            # the same cache DB without key collisions in the future.
-            cache_key = f'match|{pattern}|{file_path}|{merged_repeat}'
-
-            # Two-tier lookup: peek() is synchronous and hits the in-memory
-            # dict only — ideal for the tight arrange() loop. If memory
-            # misses, fall back to await self.cache.get() which checks
-            # the local SQLite file (populated by the background flush
-            # loop and by peer-sync pulls from other workers). This is
-            # how we now see values persisted across worker restarts
-            # AND values produced by peers — neither of which the
-            # hand-rolled dict cache could do.
-            cached_stdout = self.cache.peek(cache_key)
+            # Two-tier lookup, split across the offload boundary: the
+            # memory tier was already probed with the thread-safe peek()
+            # inside _build_scan_plan; here — back on the loop, where
+            # coroutines are allowed — a memory miss falls through to
+            # await self.cache.get(), which checks the local SQLite file
+            # (populated by the background flush loop and by peer-sync
+            # pulls from other workers). This is how we see values
+            # persisted across worker restarts AND values produced by
+            # peers — neither of which a hand-rolled dict cache could do.
+            cached_stdout = entry['cached_stdout']
             tier = 'memory'
             if cached_stdout is None:
                 cached_stdout = await self.cache.get(cache_key)
@@ -420,7 +479,7 @@ class RipgrepHandler(
                     cache_key=cache_key,
                     tier=tier,
                     decision='precomputed' if hit else 'subprocess',
-                    fan_in=len(contributing_msgs),
+                    fan_in=entry['fan_in'],
                     outcome='hit' if hit else 'miss',
                 ),
             )
@@ -456,7 +515,7 @@ class RipgrepHandler(
                         env={'PRECOMPUTED_RESULT': 'taken-from-cache'},
                         labels={
                             'source': 'cache',
-                            'fan_in_count': str(len(contributing_msgs)),
+                            'fan_in_count': str(entry['fan_in']),
                             'pattern': pattern,
                             'file': file_path,
                             'request': request_label,
@@ -506,7 +565,7 @@ class RipgrepHandler(
                         'source': 'subprocess',
                         # Label shows fan-in count so the debug UI makes it
                         # visible at a glance (e.g. "2-way fan-in").
-                        'fan_in_count': str(len(contributing_msgs)),
+                        'fan_in_count': str(entry['fan_in']),
                         'pattern': pattern,
                         'file': file_path,
                         'request': request_label,

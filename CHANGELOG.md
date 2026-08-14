@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `drakkar_offload_duration_seconds` histogram, one `offload`
   flight-recorder event per call (visible in message traces and the
   History filter), and an `offload` object on `GET /api/v1/live/overview`
-  (contract v1.10). See the new `docs/offload.md` page.
+  (contract v1.10). See the new `docs/offload.md` page. The integration
+  worker's `arrange()` uses it for its whole window-planning pass and
+  serves as the worked example.
 - The cache sync operations (`set` / `peek` / `delete` / `in`) are now
   thread-safe, so offloaded functions can use them. The async `get()`
   stays loop-only; the docs show the warm-then-peek pattern.

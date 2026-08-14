@@ -179,6 +179,17 @@ the `offload:` block without acting on it — and the UI hides the offload
 readout for Go workers automatically. See the Go repo's `docs/offload.md`
 for the full story.
 
+## Worked example
+
+The integration worker uses `offload()` in production shape:
+[`integration/worker/handler.py`](https://github.com/wlame/drakkar/blob/main/integration/worker/handler.py)
+moves its entire window-planning pass (`_build_scan_plan`) onto the pool —
+the nested `patterns × file_paths` bucketing, per-file stat/read
+syscalls, and the memory-tier `cache.peek` probes all run in one offload
+call, while the SQLite-tier `await cache.get()` fallback stays on the
+loop. It also shows the batching win: one offload call replaces what was
+previously a per-pair `asyncio.to_thread` hop.
+
 ## See also
 
 - [Runtime Health](runtime-health.md) — how stalls are detected and attributed
