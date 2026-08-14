@@ -648,12 +648,33 @@ class _DetailsState:
     # -- write admission ------------------------------------------------------
 
     def _admit(self, field: str, op: str) -> bool:
-        """Cap check + existence check. Emits at most one cap error per probe."""
+        """Cap check + existence check. Emits at most one cap error per probe.
+
+        The two caps get distinct messages naming the configured limit and
+        the config key: "write cap exceeded" alone sent operators raising
+        the wrong knob (or misspelling its env var) with no way to tell.
+        """
         if self._capped:
             return False
-        if len(self.writes) >= self._max_writes or self._bytes >= self._max_total_bytes:
+        if len(self.writes) >= self._max_writes:
             self._capped = True
-            self._on_error(field, op, 'ProbeDetailsError', 'write cap exceeded — further writes are dropped')
+            self._on_error(
+                field,
+                op,
+                'ProbeDetailsError',
+                f'max_writes cap exceeded ({self._max_writes} writes) — further writes are dropped; '
+                'raise ui.probe_details.max_writes (env DK_UI__PROBE_DETAILS__MAX_WRITES)',
+            )
+            return False
+        if self._bytes >= self._max_total_bytes:
+            self._capped = True
+            self._on_error(
+                field,
+                op,
+                'ProbeDetailsError',
+                f'max_total_bytes cap exceeded ({self._max_total_bytes} bytes) — further writes are dropped; '
+                'raise ui.probe_details.max_total_bytes (env DK_UI__PROBE_DETAILS__MAX_TOTAL_BYTES)',
+            )
             return False
         if field not in self._entries:
             self._on_error(field, op, 'ProbeDetailsError', f"unknown field '{field}' on {type(self.instance).__name__}")

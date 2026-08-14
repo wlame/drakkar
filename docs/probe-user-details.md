@@ -293,9 +293,12 @@ unbounded diagnostics during a single probe run:
 | Writes per probe | 10,000 | `ui.probe_details.max_writes` | Every further `set` / `append` / `update` call is dropped. |
 | Total serialized size per probe | 5 MB | `ui.probe_details.max_total_bytes` | Same — further writes are dropped. |
 
-The first write past either cap records one `ProbeError` ("write cap
-exceeded") so it's visible in the report; every write after that is
-silently dropped rather than raising a fresh error each time. A probe is a
+The first write past either cap records one `ProbeError` naming the
+tripped cap, its configured limit, and the config key to raise (e.g.
+"max_writes cap exceeded (10000 writes) — … raise
+`ui.probe_details.max_writes`"), so the report itself says which knob to
+turn; every write after that is silently dropped rather than raising a
+fresh error each time. A probe is a
 single replayed message — the defaults are generous headroom for real
 handler logic. Raise them in YAML (or via `DK_UI__PROBE_DETAILS__MAX_WRITES`
 and `DK_UI__PROBE_DETAILS__MAX_TOTAL_BYTES`) when a probe legitimately

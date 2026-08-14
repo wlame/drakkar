@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The probe-details "write cap exceeded" error now names the tripped cap,
+  its configured limit, and the config key to raise —
+  `ui.probe_details.max_writes` and `ui.probe_details.max_total_bytes`
+  produce distinct messages. Before, both caps shared one message, so an
+  operator could raise the wrong knob (or misspell its environment
+  variable) and see no change.
+
 ## [1.12.0] - 2026-08-12
 
 ### Added

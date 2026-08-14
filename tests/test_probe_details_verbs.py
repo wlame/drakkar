@@ -228,7 +228,10 @@ def test_write_cap_records_one_error_then_drops(errors):
         probe._active_state.reset(token)
     assert len(state.writes) == 3
     assert len(errors) == 1
-    assert 'cap' in errors[0][3]
+    # The message must name the tripped cap, its limit, and the config key —
+    # a bare "write cap exceeded" sent operators raising the wrong knob.
+    assert 'max_writes cap exceeded (3 writes)' in errors[0][3]
+    assert 'ui.probe_details.max_writes' in errors[0][3]
 
 
 def test_byte_cap_records_one_error_then_drops(errors):
@@ -242,7 +245,10 @@ def test_byte_cap_records_one_error_then_drops(errors):
     assert len(state.writes) == 1
     assert state.instance.selection_note != 'dropped'
     assert len(errors) == 1
-    assert 'cap' in errors[0][3]
+    # Same-shaped error as the writes cap but naming ITS knob: the byte cap
+    # trips independently, and raising max_writes does nothing for it.
+    assert 'max_total_bytes cap exceeded (10 bytes)' in errors[0][3]
+    assert 'ui.probe_details.max_total_bytes' in errors[0][3]
 
 
 def test_to_user_details_serializes_data_layout_and_writes(bound):
