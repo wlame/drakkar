@@ -23,6 +23,7 @@ from pathlib import Path
 # Kernel-maintained per-interface I/O counters; Linux only. The recorder's
 # net_io sampler reads it every state-sync tick.
 PROC_NET_DEV = Path('/proc/net/dev')
+PROC_MOUNTSTATS = Path('/proc/self/mountstats')
 # Per-process memory / thread facts; Linux only.
 PROC_SELF_STATUS = Path('/proc/self/status')
 # Open file descriptors of this process. ``/proc/self/fd`` on Linux;
@@ -136,6 +137,75 @@ def read_net_io_bytes(proc_net_dev: Path = PROC_NET_DEV) -> tuple[int, int] | No
     if not seen_interface:
         return None
     return rx_total, tx_total
+
+
+def read_nfs_io_bytes(mountstats: Path = PROC_MOUNTSTATS) -> tuple[int, int] | None:
+    """Total ``(read_bytes, write_bytes)`` transferred to/from NFS servers.
+
+    Summed across every NFS mount visible to this process, from
+    ``/proc/self/mountstats``. Returns ``None`` when the file is
+    unavailable (macOS) or no NFS mount is visible; callers treat that as
+    "feature off", never as an error.
+
+    Why this exists next to :func:`read_net_io_bytes`: in a container
+    with its own network namespace, kernel-NFS traffic is INVISIBLE to
+    the namespace's interface counters — the RPC traffic leaves through
+    the HOST's interfaces, because the host kernel's NFS client does the
+    transfer. ``mountstats``, by contrast, follows the *mount namespace*:
+    a bind-mounted NFS volume shows up here with live byte counters, so a
+    containerized worker reading task inputs over NFS finally sees that
+    traffic. We report the ``server_read`` / ``server_write`` columns of
+    the ``bytes:`` line — bytes actually transferred over the wire, page
+    cache hits excluded.
+
+    Honest caveat: the counters are per *mount* (per superblock), so any
+    other process on the host using the same mount contributes to them.
+    On a worker whose NFS volume exists for its own inputs, they are
+    effectively the app's traffic.
+
+    The path is a parameter only so tests can point at fixtures.
+    """
+    try:
+        lines = mountstats.read_text().splitlines()
+    except OSError:
+        return None
+
+    read_total = 0
+    write_total = 0
+    seen_nfs = False
+    in_nfs_section = False
+    # Format: one ``device <src> mounted on <mnt> with fstype <fs> ...``
+    # line starts each mount's section; NFS sections then carry indented
+    # stat lines, among them:
+    #   bytes: <normal_read> <normal_write> <direct_read> <direct_write>
+    #          <server_read> <server_write> <read_pages> <write_pages>
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('device '):
+            # ``with fstype nfs`` / ``nfs4`` (word-split so 'nfsd' or a
+            # hypothetical 'nfsX' prefix match cannot false-positive).
+            parts = stripped.split()
+            try:
+                fstype = parts[parts.index('fstype') + 1]
+            except (ValueError, IndexError):
+                fstype = ''
+            in_nfs_section = fstype in ('nfs', 'nfs2', 'nfs3', 'nfs4')
+            continue
+        if not in_nfs_section or not stripped.startswith('bytes:'):
+            continue
+        fields = stripped.removeprefix('bytes:').split()
+        if len(fields) < 6:
+            continue  # malformed row — skip it, keep other mounts
+        try:
+            read_total += int(fields[4])
+            write_total += int(fields[5])
+        except ValueError:
+            continue
+        seen_nfs = True
+
+    if not seen_nfs:
+        return None
+    return read_total, write_total
 
 
 def read_self_stats(status_path: Path = PROC_SELF_STATUS) -> tuple[int | None, int | None]:

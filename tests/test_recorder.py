@@ -5309,6 +5309,71 @@ class TestNetIOSample:
 
         assert sub.empty()
 
+    # --- NFS rates riding the net_io frame (contract v1.11) ---
+
+    def _primed_rec(self, tmp_path, monkeypatch, *, nfs):
+        """Recorder with net counters primed for a 2-second, 2/0.5 MiB/s tick."""
+        rec, core_mod = self.make_rec(tmp_path)
+        monkeypatch.setattr(core_mod, 'read_net_io_bytes', lambda: (3 * MIB, 1 * MIB))
+        monkeypatch.setattr(core_mod, 'read_nfs_io_bytes', lambda: nfs)
+        rec._netio_prev = (1 * MIB, 0)
+        rec._netio_prev_t = 100.0
+        monkeypatch.setattr(core_mod.time, 'monotonic', lambda: 102.0)
+        return rec
+
+    def test_no_nfs_mounts_means_no_nfs_keys(self, tmp_path, monkeypatch):
+        rec = self._primed_rec(tmp_path, monkeypatch, nfs=None)
+        sub = rec.subscribe()
+
+        rec._netio_sample()
+
+        meta = json.loads(sub.get_nowait()['metadata'])
+        assert 'nfs_read_mib_s' not in meta
+        assert 'nfs_read_bytes_total' not in meta
+
+    def test_first_nfs_sample_primes_without_fields(self, tmp_path, monkeypatch):
+        rec = self._primed_rec(tmp_path, monkeypatch, nfs=(10 * MIB, 2 * MIB))
+        sub = rec.subscribe()
+        assert rec._nfsio_prev is None
+
+        rec._netio_sample()
+
+        meta = json.loads(sub.get_nowait()['metadata'])
+        # rx/tx present, NFS not yet — no previous NFS counters to diff.
+        assert meta['rx_mib_s'] == 1.0
+        assert 'nfs_read_mib_s' not in meta
+        assert rec._nfsio_prev == (10 * MIB, 2 * MIB)
+
+    def test_nfs_rates_ride_the_net_io_frame(self, tmp_path, monkeypatch):
+        rec = self._primed_rec(tmp_path, monkeypatch, nfs=(10 * MIB, 2 * MIB))
+        rec._nfsio_prev = (6 * MIB, 1 * MIB)
+        sub = rec.subscribe()
+
+        rec._netio_sample()
+
+        meta = json.loads(sub.get_nowait()['metadata'])
+        assert meta['nfs_read_mib_s'] == 2.0  # 4 MiB over 2 s
+        assert meta['nfs_write_mib_s'] == 0.5
+        assert meta['nfs_read_bytes_total'] == 10 * MIB
+        assert meta['nfs_write_bytes_total'] == 2 * MIB
+        # The interface rates are untouched by the NFS addition.
+        assert meta['rx_mib_s'] == 1.0
+        assert meta['tx_mib_s'] == 0.5
+
+    def test_nfs_counter_reset_drops_only_the_nfs_fields(self, tmp_path, monkeypatch):
+        """A remount makes mount counters restart — rx/tx must still stream."""
+        rec = self._primed_rec(tmp_path, monkeypatch, nfs=(1 * MIB, 0))
+        rec._nfsio_prev = (10 * MIB, 2 * MIB)
+        sub = rec.subscribe()
+
+        rec._netio_sample()
+
+        meta = json.loads(sub.get_nowait()['metadata'])
+        assert meta['rx_mib_s'] == 1.0
+        assert 'nfs_read_mib_s' not in meta
+        # Baseline moved to the post-reset counters for the next interval.
+        assert rec._nfsio_prev == (1 * MIB, 0)
+
 
 class TestHostSampleLoop:
     async def test_unavailable_counters_log_once_and_never_prime(self, tmp_path, monkeypatch):

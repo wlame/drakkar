@@ -54,7 +54,7 @@ from pydantic import BaseModel
 
 from drakkar.config import UIConfig
 from drakkar.dbfiles import secure_db_file
-from drakkar.hostinfo import read_net_io_bytes, read_open_fd_count, read_self_stats
+from drakkar.hostinfo import read_net_io_bytes, read_nfs_io_bytes, read_open_fd_count, read_self_stats
 from drakkar.metrics import (
     recorder_buffer_size,
     recorder_dropped_events,
@@ -385,6 +385,11 @@ class EventRecorder:
         # net_io sample diffs against. None until the loop primes it.
         self._netio_prev: tuple[int, int] | None = None
         self._netio_prev_t: float = 0.0
+        # NFS byte counters (mountstats) ride the same tick as net_io but
+        # keep their own prev pair: mounts can appear/vanish independently
+        # of the interface counters, and a missing NFS sample must not
+        # break the RX/TX diff (or vice versa).
+        self._nfsio_prev: tuple[int, int] | None = None
         # Previous (self_cpu_seconds, children_cpu_seconds, monotonic) for
         # the resource sampler's CPU-percent deltas. None until primed —
         # the first resource_sample carries no CPU fields.
@@ -972,13 +977,16 @@ class EventRecorder:
         process and its subprocesses, plus any neighbours sharing it.
         """
         counters = read_net_io_bytes()
+        nfs_counters = read_nfs_io_bytes()
         now = time.monotonic()
         if counters is None:
             return
         prev, prev_t = self._netio_prev, self._netio_prev_t
+        nfs_prev = self._nfsio_prev
         # Re-prime unconditionally so a skipped frame (below) still measures
         # the NEXT interval from here, not across the gap.
         self._netio_prev, self._netio_prev_t = counters, now
+        self._nfsio_prev = nfs_counters
         if prev is None:
             return
         elapsed = now - prev_t
@@ -991,20 +999,35 @@ class EventRecorder:
             return
         ts = time.time()
         mib = 1024 * 1024
+        metadata = {
+            'rx_mib_s': round(rx_delta / elapsed / mib, 3),
+            'tx_mib_s': round(tx_delta / elapsed / mib, 3),
+            'rx_bytes_total': counters[0],
+            'tx_bytes_total': counters[1],
+            'interval_s': round(elapsed, 1),
+        }
+        # NFS rates (contract v1.11, optional keys): the interface counters
+        # above cannot see kernel-NFS traffic from inside a container's
+        # network namespace — the host's NFS client moves the bytes through
+        # the HOST's interfaces. mountstats counters follow the mount
+        # namespace instead, so they do see it. Fields appear only when an
+        # NFS mount is visible on both ends of the interval and its
+        # counters didn't go backwards (remount) — clients hide the readout
+        # when the keys are absent.
+        if nfs_counters is not None and nfs_prev is not None:
+            nfs_read_delta = nfs_counters[0] - nfs_prev[0]
+            nfs_write_delta = nfs_counters[1] - nfs_prev[1]
+            if nfs_read_delta >= 0 and nfs_write_delta >= 0:
+                metadata['nfs_read_mib_s'] = round(nfs_read_delta / elapsed / mib, 3)
+                metadata['nfs_write_mib_s'] = round(nfs_write_delta / elapsed / mib, 3)
+                metadata['nfs_read_bytes_total'] = nfs_counters[0]
+                metadata['nfs_write_bytes_total'] = nfs_counters[1]
         self._broadcast_ws(
             {
                 'ts': ts,
                 'dt': format_dt(ts),
                 'event': 'net_io',
-                'metadata': encode_json_str(
-                    {
-                        'rx_mib_s': round(rx_delta / elapsed / mib, 3),
-                        'tx_mib_s': round(tx_delta / elapsed / mib, 3),
-                        'rx_bytes_total': counters[0],
-                        'tx_bytes_total': counters[1],
-                        'interval_s': round(elapsed, 1),
-                    }
-                ),
+                'metadata': encode_json_str(metadata),
             }
         )
 

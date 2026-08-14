@@ -491,6 +491,22 @@ own traffic). The frame is never written to the events table. On platforms
 without `/proc/net/dev` (macOS) no frames are sent and the readout stays
 hidden; in cluster view, each peer strip shows its own host's rates.
 
+**The namespace caveat cuts both ways: kernel-NFS traffic is invisible
+here.** When a containerized worker reads task inputs from an NFS mount
+(bind-mounted into the container), the actual RPC traffic is moved by the
+*host* kernel's NFS client through the *host's* interfaces — the
+container's counters never move, so `Net: RX` can sit near zero while the
+host transfers a GiB/s. For that case the same frame carries an optional
+**NFS readout** (`NFS: R x.x · W x.x MiB/s`, contract v1.11), sampled from
+`/proc/self/mountstats` — the server-read/server-write byte columns summed
+across every visible NFS mount. `mountstats` follows the *mount* namespace,
+so it sees bind-mounted NFS volumes from inside a container; page-cache
+hits are excluded (only bytes actually transferred to/from the servers
+count). Caveat in the other direction: the counters are per *mount*, so
+other host processes using the same mount contribute to them. The readout
+hides itself when no NFS mount is visible. The Go backend does not sample
+mountstats yet and simply omits the keys.
+
 #### `/history` -- Event Browser
 
 Filterable, paginated event browser across all partitions:

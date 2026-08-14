@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from drakkar import hostinfo
-from drakkar.hostinfo import cgroup_cpu_quota, effective_cpu_count, read_net_io_bytes
+from drakkar.hostinfo import cgroup_cpu_quota, effective_cpu_count, read_net_io_bytes, read_nfs_io_bytes
 
 
 def write(tmp_path: Path, name: str, content: str) -> Path:
@@ -106,3 +106,57 @@ class TestReadNetIOBytes:
         broken = PROC_NET_DEV_SAMPLE + '  tun0: 1 2 3\n'
         p = write(tmp_path, 'net_dev', broken)
         assert read_net_io_bytes(proc_net_dev=p) == (1_500_000, 500_000)
+
+
+# A realistic /proc/self/mountstats: non-NFS mounts without stats, one nfs4
+# and one nfs3 mount with `bytes:` lines, and an ext4 section carrying a
+# decoy `bytes:` line that must NOT be counted. The bytes: fields are
+# normal_read normal_write direct_read direct_write SERVER_READ SERVER_WRITE
+# read_pages write_pages — we sum only the server_* pair (wire bytes).
+MOUNTSTATS_SAMPLE = """\
+device rootfs mounted on / with fstype rootfs
+device proc mounted on /proc with fstype proc
+device /dev/vda1 mounted on /data with fstype ext4
+\tbytes:\t9 9 9 9 999999 999999 9 9
+device fs1.example.com:/export/data mounted on /mnt/data with fstype nfs4 statvers=1.1
+\topts:\trw,vers=4.2,rsize=1048576,wsize=1048576
+\tage:\t86
+\tbytes:\t1048576 2048 0 0 5242880 4096 1280 1
+\tRPC iostats version: 1.1  p/v: 100003/4 (nfs)
+\txprt:\ttcp 0 0 2 0 0 767 766 0 897 0 2 0 0
+device fs2.example.com:/export/logs mounted on /mnt/logs with fstype nfs statvers=1.1
+\tbytes:\t0 0 0 0 1000000 500000 244 122
+"""
+
+
+class TestReadNfsIOBytes:
+    def test_sums_server_bytes_across_nfs_mounts_only(self, tmp_path):
+        p = write(tmp_path, 'mountstats', MOUNTSTATS_SAMPLE)
+        # 5242880 + 1000000 reads; 4096 + 500000 writes. The ext4 decoy
+        # bytes: line contributes nothing.
+        assert read_nfs_io_bytes(mountstats=p) == (6_242_880, 504_096)
+
+    def test_no_nfs_mounts_is_unavailable(self, tmp_path):
+        no_nfs = 'device rootfs mounted on / with fstype rootfs\ndevice proc mounted on /proc with fstype proc\n'
+        p = write(tmp_path, 'mountstats', no_nfs)
+        assert read_nfs_io_bytes(mountstats=p) is None
+
+    def test_missing_file_is_unavailable(self, tmp_path):
+        assert read_nfs_io_bytes(mountstats=missing(tmp_path)) is None
+
+    def test_malformed_bytes_line_is_skipped_not_fatal(self, tmp_path):
+        broken = MOUNTSTATS_SAMPLE + 'device fs3:/x mounted on /mnt/x with fstype nfs4\n\tbytes:\tnot numbers\n'
+        p = write(tmp_path, 'mountstats', broken)
+        assert read_nfs_io_bytes(mountstats=p) == (6_242_880, 504_096)
+
+    def test_short_bytes_line_is_skipped_not_fatal(self, tmp_path):
+        broken = MOUNTSTATS_SAMPLE + 'device fs3:/x mounted on /mnt/x with fstype nfs4\n\tbytes:\t1 2 3\n'
+        p = write(tmp_path, 'mountstats', broken)
+        assert read_nfs_io_bytes(mountstats=p) == (6_242_880, 504_096)
+
+    def test_nfsd_or_other_fstypes_never_match(self, tmp_path):
+        # Word-exact fstype matching: 'nfsd' (the server-side pseudo fs)
+        # must not be mistaken for a client mount.
+        content = 'device nfsd mounted on /proc/fs/nfsd with fstype nfsd\n\tbytes:\t1 1 1 1 100 100 1 1\n'
+        p = write(tmp_path, 'mountstats', content)
+        assert read_nfs_io_bytes(mountstats=p) is None

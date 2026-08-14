@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- NFS throughput readout: the `net_io` WS frame now carries optional
+  `nfs_read_mib_s` / `nfs_write_mib_s` rates (plus byte totals) sampled
+  from `/proc/self/mountstats`, and the Live page shows them next to the
+  Net readout. This closes a container blind spot: kernel-NFS traffic
+  moves through the *host's* network interfaces, so the namespace-scoped
+  RX/TX counters never see it — a worker could read a GiB/s from NFS
+  while `Net: RX` sat near zero. The mountstats counters follow the
+  mount namespace and do see bind-mounted NFS volumes. Fields appear
+  only when an NFS mount is visible (contract v1.11).
+
 - `handler.offload()`: run CPU-bound hook work on a small thread pool
   instead of the event loop. A heavy computation in `arrange()` or an
   aggregation hook no longer stalls the whole worker — polling, task
