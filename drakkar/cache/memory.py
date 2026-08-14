@@ -21,10 +21,30 @@ dirty-op is **preserved** — the DB is the source of truth, and any pending
 SET still needs to reach it via flush. Losing the dirty entry would silently
 drop the write. Evicted entries fall through to the DB on next read; the DB
 will re-warm ``_memory`` in ``get()``.
+
+Thread-safety
+-------------
+The sync operations (``set`` / ``peek`` / ``delete`` / ``__contains__``)
+are callable from functions running under ``handler.offload()`` — a
+worker thread, concurrent with the event loop. Individual dict reads are
+GIL-atomic, but the compound sequences here are not: LRU ``move_to_end``
+plus eviction, the running byte sum, and ``_dirty`` population racing the
+engine's flush swap would all corrupt across threads. One internal
+``threading.Lock`` therefore guards every touch of ``_memory`` /
+``_dirty`` / ``_bytes_sum``, including the engine-facing helpers and the
+memory sections of ``get()``. The lock is never held across an ``await``,
+and the uncontended cost on the loop-side hot path is tens of
+nanoseconds per call.
+
+The async ``get()`` stays **loop-only** — its DB fallback rides an
+``aiosqlite`` connection bound to the main loop. Offloaded code that
+needs DB-backed keys should ``await cache.get(...)`` before the offload
+(warming memory) and ``peek`` inside.
 """
 
 from __future__ import annotations
 
+import threading
 from collections import OrderedDict
 from typing import Any
 
@@ -47,8 +67,9 @@ class Cache:
     """In-memory key/value cache surfaced to handlers as ``self.cache``.
 
     This class covers the **synchronous**, memory-only operations of the
-    cache contract: ``set``, ``peek``, ``delete``, ``__contains__``. All of
-    these are GIL-safe dict manipulations; no I/O happens on these calls.
+    cache contract: ``set``, ``peek``, ``delete``, ``__contains__``. No I/O
+    happens on these calls, and they are thread-safe (see the module
+    docstring) so handlers may call them from offloaded functions.
 
     The async DB-backed ``get()`` (memory-miss → DB fallback) lives here too
     — the engine wires its reader connection in via ``attach_reader_db`` so
@@ -89,6 +110,12 @@ class Cache:
         # never walks the dict. Without this, a scrape on a large cache
         # would turn observability into an O(N) cost.
         self._bytes_sum: int = 0
+        # Guards every touch of _memory / _dirty / _bytes_sum. Needed
+        # because handler.offload() lets user code call the sync ops from
+        # a pool thread concurrent with the event loop — see the module
+        # docstring's thread-safety section. Public methods acquire it
+        # once; the private helpers below assume it is already held.
+        self._lock = threading.Lock()
 
     # -- sync API -------------------------------------------------------------
 
@@ -119,56 +146,59 @@ class Cache:
             - May trigger LRU eviction if ``max_memory_entries`` is set
               and the cap is now exceeded.
         """
+        # Encode outside the lock — serialization is the expensive part of
+        # a set() and needs no shared state.
         encoded, size_bytes = encode_value(value)
         now_ms = _now_ms()
         expires_at_ms = now_ms + int(ttl * 1000) if ttl is not None else None
 
-        # Preserve ``created_at_ms`` across overwrites — the column is
-        # "when did this key first appear", not "when was this value
-        # written". ``updated_at_ms`` is the one that changes every set.
-        existing = self._memory.get(key)
-        created_at_ms = existing.created_at_ms if existing is not None else now_ms
+        with self._lock:
+            # Preserve ``created_at_ms`` across overwrites — the column is
+            # "when did this key first appear", not "when was this value
+            # written". ``updated_at_ms`` is the one that changes every set.
+            existing = self._memory.get(key)
+            created_at_ms = existing.created_at_ms if existing is not None else now_ms
 
-        entry = CacheEntry(
-            key=key,
-            scope=scope,
-            value=encoded,
-            size_bytes=size_bytes,
-            created_at_ms=created_at_ms,
-            updated_at_ms=now_ms,
-            expires_at_ms=expires_at_ms,
-            origin_worker_id=self._origin_worker_id,
-        )
+            entry = CacheEntry(
+                key=key,
+                scope=scope,
+                value=encoded,
+                size_bytes=size_bytes,
+                created_at_ms=created_at_ms,
+                updated_at_ms=now_ms,
+                expires_at_ms=expires_at_ms,
+                origin_worker_id=self._origin_worker_id,
+            )
 
-        # Running-sum bookkeeping for ``bytes_in_memory``. If this is an
-        # overwrite, first subtract the old entry's size (we're about to
-        # replace it). Then add the new size. Keeping the sum in sync per
-        # mutation is cheaper than walking the dict on scrape.
-        if existing is not None:
-            self._bytes_sum -= existing.size_bytes
-        self._bytes_sum += size_bytes
+            # Running-sum bookkeeping for ``bytes_in_memory``. If this is an
+            # overwrite, first subtract the old entry's size (we're about to
+            # replace it). Then add the new size. Keeping the sum in sync per
+            # mutation is cheaper than walking the dict on scrape.
+            if existing is not None:
+                self._bytes_sum -= existing.size_bytes
+            self._bytes_sum += size_bytes
 
-        # Place in memory and bump to MRU. If the key already existed,
-        # OrderedDict's insertion replaces the value but keeps its slot —
-        # we then explicitly move_to_end so overwrites also count as a
-        # recency bump (consistent with typical LRU intuition).
-        self._memory[key] = entry
-        self._memory.move_to_end(key)
+            # Place in memory and bump to MRU. If the key already existed,
+            # OrderedDict's insertion replaces the value but keeps its slot —
+            # we then explicitly move_to_end so overwrites also count as a
+            # recency bump (consistent with typical LRU intuition).
+            self._memory[key] = entry
+            self._memory.move_to_end(key)
 
-        # Track dirty op. A SET overrides any prior DELETE for the same
-        # key — that's the expected last-write-wins at the dirty-map level,
-        # matching the SQL LWW at the DB level.
-        self._dirty[key] = DirtyOp(op=Op.SET, entry=entry)
+            # Track dirty op. A SET overrides any prior DELETE for the same
+            # key — that's the expected last-write-wins at the dirty-map level,
+            # matching the SQL LWW at the DB level.
+            self._dirty[key] = DirtyOp(op=Op.SET, entry=entry)
 
-        # Write-path metrics. ``writes{scope}`` ticks once per user intent
-        # — we count the call, not row transitions (matches the "throughput
-        # not state" semantics used by flush/sync counters). Memory gauges
-        # reflect the post-set state; ``_maybe_evict`` may tick them back
-        # down if the cap is exceeded.
-        metrics.cache_writes.labels(scope=str(scope)).inc()
-        self._refresh_memory_gauges()
+            # Write-path metrics. ``writes{scope}`` ticks once per user intent
+            # — we count the call, not row transitions (matches the "throughput
+            # not state" semantics used by flush/sync counters). Memory gauges
+            # reflect the post-set state; ``_maybe_evict`` may tick them back
+            # down if the cap is exceeded.
+            metrics.cache_writes.labels(scope=str(scope)).inc()
+            self._refresh_memory_gauges()
 
-        self._maybe_evict()
+            self._maybe_evict()
 
     def peek(self, key: str) -> Any | None:
         """Return the decoded value if present **and** unexpired, else None.
@@ -190,23 +220,27 @@ class Cache:
         it as a miss would overcount memory pressure. Keep peek out of
         the cache-hit-rate math.
         """
-        entry = self._memory.get(key)
-        if entry is None:
-            return None
-        if self._is_expired(entry):
-            # Opportunistic eviction. The dirty map is untouched: if there
-            # was a pending SET, letting it flush and then be cleaned up
-            # by the expiration cleanup cycle is cheaper than trying to
-            # untangle it here. A pending DELETE stays as-is. The pop + bytes
-            # accounting goes through the shared helper so the invariant
-            # "running sum tracks the dict" holds without duplicating the
-            # bookkeeping in five places.
-            self._pop_memory_entry(key)
-            self._refresh_memory_gauges()
-            return None
-        # access → MRU bump
-        self._memory.move_to_end(key)
-        return decode_value(entry.value)
+        with self._lock:
+            entry = self._memory.get(key)
+            if entry is None:
+                return None
+            if self._is_expired(entry):
+                # Opportunistic eviction. The dirty map is untouched: if there
+                # was a pending SET, letting it flush and then be cleaned up
+                # by the expiration cleanup cycle is cheaper than trying to
+                # untangle it here. A pending DELETE stays as-is. The pop + bytes
+                # accounting goes through the shared helper so the invariant
+                # "running sum tracks the dict" holds without duplicating the
+                # bookkeeping in five places.
+                self._pop_memory_entry(key)
+                self._refresh_memory_gauges()
+                return None
+            # access → MRU bump
+            self._memory.move_to_end(key)
+            raw = entry.value
+        # Decode outside the lock — deserialization can be arbitrarily
+        # expensive and touches no shared state.
+        return decode_value(raw)
 
     def attach_reader_db(self, reader_db: aiosqlite.Connection | None) -> None:
         """Wire the engine's reader aiosqlite connection into this Cache.
@@ -254,23 +288,30 @@ class Cache:
               the DB-fallback branch is skipped.
         """
         # --- memory fast path ---
-        entry = self._memory.get(key)
-        if entry is not None:
-            if self._is_expired(entry):
-                # Mirror peek()'s opportunistic eviction on stale reads —
-                # same shared helpers keep the bookkeeping coherent.
-                self._pop_memory_entry(key)
-                self._refresh_memory_gauges()
-                # Do NOT consult the DB — if the memory entry is expired,
-                # the DB row (if any) will also have expires_at_ms <= now.
-                metrics.cache_misses.inc()
-                return None
-            # access → MRU bump
-            self._memory.move_to_end(key)
-            metrics.cache_hits.labels(source='memory').inc()
+        # Lock held only for the memory section, never across an await —
+        # the DB fallback below runs lock-free.
+        with self._lock:
+            entry = self._memory.get(key)
+            if entry is not None:
+                if self._is_expired(entry):
+                    # Mirror peek()'s opportunistic eviction on stale reads —
+                    # same shared helpers keep the bookkeeping coherent.
+                    self._pop_memory_entry(key)
+                    self._refresh_memory_gauges()
+                    # Do NOT consult the DB — if the memory entry is expired,
+                    # the DB row (if any) will also have expires_at_ms <= now.
+                    metrics.cache_misses.inc()
+                    return None
+                # access → MRU bump
+                self._memory.move_to_end(key)
+                metrics.cache_hits.labels(source='memory').inc()
+                raw = entry.value
+            else:
+                raw = None
+        if raw is not None:
             # ``decode_value`` accepts ``as_type=None`` natively — no ternary
             # needed to special-case the "no revival" branch.
-            return decode_value(entry.value, as_type=as_type)
+            return decode_value(raw, as_type=as_type)
 
         # --- DB fallback ---
         if self._reader_db is None:
@@ -318,14 +359,15 @@ class Cache:
         # existing entry's bytes before overwriting — otherwise the sum
         # leaks by the old entry's size every warm. Mirrors the pattern in
         # ``set()`` which also handles the overwrite case.
-        existing = self._memory.get(db_key)
-        if existing is not None:
-            self._bytes_sum -= existing.size_bytes
-        self._memory[db_key] = warmed
-        self._memory.move_to_end(db_key)
-        self._bytes_sum += warmed.size_bytes
-        self._refresh_memory_gauges()
-        self._maybe_evict()
+        with self._lock:
+            existing = self._memory.get(db_key)
+            if existing is not None:
+                self._bytes_sum -= existing.size_bytes
+            self._memory[db_key] = warmed
+            self._memory.move_to_end(db_key)
+            self._bytes_sum += warmed.size_bytes
+            self._refresh_memory_gauges()
+            self._maybe_evict()
 
         metrics.cache_hits.labels(source='db').inc()
         # ``decode_value`` accepts ``as_type=None`` — no ternary needed.
@@ -345,17 +387,18 @@ class Cache:
         is deliberately local-only" note in the plan for the full edge
         discussion — use TTL for cross-worker invalidation.
         """
-        # Adjust running sum + gauges for the removed memory entry (if any)
-        # via the shared helpers. The dirty-map DELETE still records — the
-        # DB may have a row we can't see from memory alone, and flush needs
-        # to drop it.
-        existing = self._pop_memory_entry(key)
-        present = existing is not None
-        if present:
-            self._refresh_memory_gauges()
-        # A DELETE op overwrites any prior SET; flush will see the final
-        # state only. Entry is None since the row is going away.
-        self._dirty[key] = DirtyOp(op=Op.DELETE, entry=None)
+        with self._lock:
+            # Adjust running sum + gauges for the removed memory entry (if any)
+            # via the shared helpers. The dirty-map DELETE still records — the
+            # DB may have a row we can't see from memory alone, and flush needs
+            # to drop it.
+            existing = self._pop_memory_entry(key)
+            present = existing is not None
+            if present:
+                self._refresh_memory_gauges()
+            # A DELETE op overwrites any prior SET; flush will see the final
+            # state only. Entry is None since the row is going away.
+            self._dirty[key] = DirtyOp(op=Op.DELETE, entry=None)
         # User intent counter — ticks once per delete call regardless of
         # whether the key was actually in memory (mirrors the "throughput
         # not state" semantics used by flush/sync).
@@ -369,10 +412,11 @@ class Cache:
         An expired entry is not a member. We do **not** bump LRU here —
         membership is a probe, not an access.
         """
-        entry = self._memory.get(key)
-        if entry is None:
-            return False
-        return not self._is_expired(entry)
+        with self._lock:
+            entry = self._memory.get(key)
+            if entry is None:
+                return False
+            return not self._is_expired(entry)
 
     # -- internals ------------------------------------------------------------
     #
@@ -403,6 +447,9 @@ class Cache:
         refresh the Prometheus gauges — callers that pop multiple keys in
         one sweep should call ``_refresh_memory_gauges()`` once at the end
         to amortize the set() calls.
+
+        Caller must hold ``self._lock`` — every public entry point that
+        reaches here acquires it first.
 
         This helper is the single source of truth for the "pop + bytes-sum
         deduct" pair; five paths in this class used to inline the sequence,
@@ -446,21 +493,25 @@ class Cache:
         """
         if not keys:
             return
-        popped_any = False
-        for key in keys:
-            if self._pop_memory_entry(key) is not None:
-                popped_any = True
-        if popped_any:
-            self._refresh_memory_gauges()
+        with self._lock:
+            popped_any = False
+            for key in keys:
+                if self._pop_memory_entry(key) is not None:
+                    popped_any = True
+            if popped_any:
+                self._refresh_memory_gauges()
 
     def swap_dirty(self) -> dict[str, DirtyOp]:
         """Atomically swap ``_dirty`` for a fresh empty dict and return the
         old contents.
 
-        Tuple assignment is a single opcode under CPython's GIL, so any
-        concurrent ``set`` / ``delete`` landing after the swap writes into
-        the new empty dict and is picked up by the next flush cycle — no
-        locking needed for in-memory coherence.
+        Taken under the cache lock: a bare reference swap used to be
+        enough (single opcode under the GIL), but with ``handler.offload()``
+        a pool thread can be mid-``set`` — already inside its locked
+        compound section — and the swap must not interleave with it. The
+        lock makes the swap see either all of a concurrent set's effects
+        or none. A ``set`` / ``delete`` landing after the swap writes into
+        the new empty dict and is picked up by the next flush cycle.
 
         Symmetric with ``restore_dirty``: callers (currently just
         ``CacheEngine._flush_once``) use this to take a snapshot, perform
@@ -469,9 +520,10 @@ class Cache:
         means the engine never has to reach past the class boundary into
         ``_dirty`` directly, preserving encapsulation.
         """
-        snapshot = self._dirty
-        self._dirty = {}
-        return snapshot
+        with self._lock:
+            snapshot = self._dirty
+            self._dirty = {}
+            return snapshot
 
     def restore_dirty(self, snapshot: dict[str, DirtyOp]) -> None:
         """Merge an un-flushed snapshot back into ``_dirty`` after a failure.
@@ -486,9 +538,10 @@ class Cache:
         Paired with ``swap_dirty`` — used by ``_flush_once`` to maintain
         the "nothing lost" invariant under cancellation or commit failure.
         """
-        for key, op in snapshot.items():
-            if key not in self._dirty:
-                self._dirty[key] = op
+        with self._lock:
+            for key, op in snapshot.items():
+                if key not in self._dirty:
+                    self._dirty[key] = op
 
     def _expire_purge(self, now_ms: int) -> list[str]:
         """Remove expired entries from memory and drop any pending SET dirty ops.
@@ -516,25 +569,28 @@ class Cache:
             testable in isolation and matches the helper's "expire and
             report" contract.
         """
-        expired_keys: list[str] = []
-        for key, entry in self._memory.items():
-            if entry.expires_at_ms is not None and entry.expires_at_ms <= now_ms:
-                expired_keys.append(key)
-        for key in expired_keys:
-            self._pop_memory_entry(key)
-            # Drop pending SET ops only. DELETE ops on an expired key are
-            # still correct — the DB row may linger until the next DB purge
-            # and the pending DELETE is the mechanism that removes it
-            # (same path as a user-scheduled delete of any key).
-            pending = self._dirty.get(key)
-            if pending is not None and pending.op is Op.SET:
-                self._dirty.pop(key, None)
-        if expired_keys:
-            self._refresh_memory_gauges()
-        return expired_keys
+        with self._lock:
+            expired_keys: list[str] = []
+            for key, entry in self._memory.items():
+                if entry.expires_at_ms is not None and entry.expires_at_ms <= now_ms:
+                    expired_keys.append(key)
+            for key in expired_keys:
+                self._pop_memory_entry(key)
+                # Drop pending SET ops only. DELETE ops on an expired key are
+                # still correct — the DB row may linger until the next DB purge
+                # and the pending DELETE is the mechanism that removes it
+                # (same path as a user-scheduled delete of any key).
+                pending = self._dirty.get(key)
+                if pending is not None and pending.op is Op.SET:
+                    self._dirty.pop(key, None)
+            if expired_keys:
+                self._refresh_memory_gauges()
+            return expired_keys
 
     def _maybe_evict(self) -> None:
         """Drop the LRU key if the memory dict exceeds ``max_memory_entries``.
+
+        Caller must hold ``self._lock``.
 
         Called after every ``set`` (and after warm-on-read in ``get()``).
         Evicts at most one entry per call in the common case — since
