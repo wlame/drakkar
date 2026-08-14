@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Databases page is fast now: statistics are served from a shared
+  `<db_dir>/.dbstats.db` cache keyed by `(path, mtime, size)` instead of
+  full-scanning every file per page load. Rotated (immutable) files are
+  scanned once ever — at rotation time; a background warmer
+  (`ui.recorder.dbstats_warm_interval_seconds`) fills anything missing
+  and purges entries for externally deleted files; the file *list* is
+  always a live directory scan, so hand-deleted files disappear from the
+  page immediately. Live DBs refresh via an incremental delta scan (only
+  events past the cached max id). Cold files beyond
+  `ui.recorder.dbstats_inline_scan_limit` per request render as
+  "scanning…" rows and fill in automatically (contract v1.12).
+- The Databases page now marks the file each worker is writing right now
+  (`live_for` — an "in use" highlight resolved from the `-live.db`
+  symlinks) and lists handler cache databases as typed rows (kind
+  `cache`, entry count, shown under their stable `<worker>-cache.db`
+  name). Every row carries a `kind`: recorder / merged / cache / unknown.
+
 - NFS throughput readout: the `net_io` WS frame now carries optional
   `nfs_read_mib_s` / `nfs_write_mib_s` rates (plus byte totals) sampled
   from `/proc/self/mountstats`, and the Live page shows them next to the

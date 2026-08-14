@@ -1431,6 +1431,20 @@ components:
         has_config: {type: boolean}
         has_state: {type: boolean}
         size_bytes: {type: integer}
+        # v1.12 additions — optional so older backends stay conformant.
+        # kind: what the file IS (recorder event log / drakkar-merge
+        # output / handler cache / foreign schema).
+        kind: {type: string, enum: [recorder, merged, cache, unknown]}
+        # live_for: worker currently writing this file (resolved from the
+        # *-live.db / *-cache.db symlinks); '' when not in use.
+        live_for: {type: string}
+        # stats_pending: the file exists but its statistics are not
+        # computed yet (cold stats cache, inline scan budget exhausted) —
+        # only filename/path/size_bytes/kind are meaningful; the row
+        # fills in on a later poll.
+        stats_pending: {type: boolean}
+        # cache_entry_count: rows in cache_entries, kind='cache' only.
+        cache_entry_count: {type: [integer, 'null']}
       required: [filename, path, event_count, size_bytes]
 
     ArchiveEntry:

@@ -439,6 +439,12 @@ ui:
     archive_window_hours: 24         # one archive per cluster per window; must be >= rotation_interval_hours. env: DK_UI__RECORDER__ARCHIVE_WINDOW_HOURS
     archive_retention_days: 0        # 0 = keep archives forever; else must be >= 2x the window, in days. env: DK_UI__RECORDER__ARCHIVE_RETENTION_DAYS
 
+    # --- Databases-page stats cache (see docs/local-databases.md#the-databases-page-stats-cache) ---
+    dbstats_warm_interval_seconds: 60 # background sweep filling the .dbstats cache + purging deleted files.
+                                      # env: DK_UI__RECORDER__DBSTATS_WARM_INTERVAL_SECONDS
+    dbstats_inline_scan_limit: 4      # max cold files one /api/debug/databases request scans inline;
+                                      # the rest return stats_pending. env: DK_UI__RECORDER__DBSTATS_INLINE_SCAN_LIMIT
+
     # --- Output (stdout/stderr) capture ---
     store_output: true               # include subprocess output in events. env: DK_UI__RECORDER__STORE_OUTPUT
     store_stdin: false               # store each task's stdin (capped) in task_started

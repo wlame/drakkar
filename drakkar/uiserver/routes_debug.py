@@ -128,34 +128,51 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
 
     @router.get('/api/debug/databases', dependencies=[Depends(deps.require_auth)])
     async def api_debug_databases():
-        """List all debug database files in db_dir with stats."""
-        from drakkar.merge import scan_directory
+        """List all debug database files in db_dir with stats.
 
-        # Offloaded: scan_directory uses the SYNCHRONOUS sqlite3 module and
-        # runs COUNT(*) / GROUP BY over every .db file in db_dir. Inline, that
-        # blocked the UI server's single event loop for the whole sweep — and
-        # db_dir defaults to /tmp, shared by co-located workers, so the file
-        # count grows with the host. /healthz and /readyz live on this same
-        # loop. The /api/debug/merge route below already offloads its own
-        # blocking work; this one was simply missed.
-        databases = await asyncio.to_thread(scan_directory, config.recorder.db_dir)
+        Backed by the ``.dbstats.db`` cache (see :mod:`drakkar.dbstats`):
+        the file LIST always comes from a live directory scan — externally
+        deleted files disappear on the next request — while statistics for
+        immutable rotated files come from the cache. At most
+        ``ui.recorder.dbstats_inline_scan_limit`` cold files are scanned
+        inline; the rest return ``stats_pending`` and fill in as the
+        recorder's warmer loop catches up. Contract v1.12 adds ``kind``,
+        ``live_for`` (the worker currently writing the file — the in-use
+        highlight), ``stats_pending``, and ``cache_entry_count``.
+        """
+        from drakkar.dbstats import DbStatsCache, collect
+
+        # Offloaded: sync sqlite3 work. Even with the cache, a cold file
+        # or a live-DB delta scan does real reads — /healthz and /readyz
+        # live on this same loop.
+        cache = DbStatsCache(config.recorder.db_dir)
+        rows = await asyncio.to_thread(
+            collect,
+            config.recorder.db_dir,
+            cache,
+            inline_scan_limit=config.recorder.dbstats_inline_scan_limit,
+        )
         return JSONResponse(
             [
                 {
-                    'filename': db.filename,
-                    'path': db.path,
-                    'worker_name': db.worker_name,
-                    'cluster_name': db.cluster_name,
-                    'event_count': db.event_count,
-                    'event_counts': db.event_counts,
-                    'first_event_ts': db.first_event_ts,
-                    'last_event_ts': db.last_event_ts,
-                    'has_events': db.has_events,
-                    'has_config': db.has_config,
-                    'has_state': db.has_state,
-                    'size_bytes': db.size_bytes,
+                    'filename': row.stats.filename,
+                    'path': row.stats.path,
+                    'worker_name': row.stats.worker_name,
+                    'cluster_name': row.stats.cluster_name,
+                    'event_count': row.stats.event_count,
+                    'event_counts': row.stats.event_counts,
+                    'first_event_ts': row.stats.first_event_ts,
+                    'last_event_ts': row.stats.last_event_ts,
+                    'has_events': row.stats.has_events,
+                    'has_config': row.stats.has_config,
+                    'has_state': row.stats.has_state,
+                    'size_bytes': row.stats.size_bytes,
+                    'kind': row.stats.kind,
+                    'live_for': row.live_for,
+                    'stats_pending': row.stats_pending,
+                    'cache_entry_count': row.stats.cache_entry_count,
                 }
-                for db in databases
+                for row in rows
             ]
         )
 

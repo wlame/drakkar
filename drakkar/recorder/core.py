@@ -381,6 +381,16 @@ class EventRecorder:
         self._rotation_task: asyncio.Task | None = None
         self._state_task: asyncio.Task | None = None
         self._netio_task: asyncio.Task | None = None
+        # Databases-page stats cache (drakkar.dbstats). Constructed in
+        # start() when db_dir is set; the warmer loop keeps it filled and
+        # _rotate feeds it the freshly-immutable file. None in memory-only
+        # mode — there is no directory to describe.
+        self._dbstats: Any = None
+        self._dbstats_warm_task: asyncio.Task | None = None
+        # Fire-and-forget rotation scans; tracked so they are not GC'd
+        # mid-flight and can be awaited nowhere (their failure only costs
+        # a later warmer scan).
+        self._dbstats_rotate_tasks: set[asyncio.Task] = set()
         # Previous /proc/net/dev totals + monotonic read time; the pair a
         # net_io sample diffs against. None until the loop primes it.
         self._netio_prev: tuple[int, int] | None = None
@@ -618,6 +628,14 @@ class EventRecorder:
                 self._running = False
                 raise
             self._update_live_link()
+            # Databases-page stats cache + its warmer. Lazy import keeps
+            # drakkar.merge (sync sqlite3 scanning) out of the recorder's
+            # import chain until a DB-backed recorder actually starts.
+            from drakkar.dbstats import DbStatsCache
+
+            self._dbstats = DbStatsCache(self._store.db_dir)
+            self._dbstats_warm_task = asyncio.create_task(self._dbstats_warm_loop())
+            self._watch_background_task(self._dbstats_warm_task, 'dbstats_warm')
             if self._store.store_events:
                 self._flush_task = asyncio.create_task(self._flush_loop())
                 self._watch_background_task(self._flush_task, 'flush')
@@ -930,6 +948,42 @@ class EventRecorder:
                     exc_info=exc,
                 )
 
+    async def _dbstats_warm_loop(self) -> None:
+        """Keep the databases-page stats cache warm and purged.
+
+        Each sweep (thread-offloaded — it is sync sqlite3 work) computes
+        stats for files the cache does not know yet and drops rows for
+        files an operator deleted from ``db_dir``. When everything is
+        cached the sweep costs one directory listing and one SELECT, so
+        a short interval is fine. The first sweep runs immediately, so a
+        worker booting over a pre-existing directory starts warming
+        before anyone opens the page.
+        """
+        from drakkar.dbstats import warm_directory
+
+        while self._running:
+            try:
+                _scanned, purged = await asyncio.to_thread(warm_directory, self._store.db_dir, self._dbstats)
+                if purged:
+                    await logger.ainfo(
+                        'recorder_dbstats_purged',
+                        category='recorder',
+                        purged=purged,
+                        detail='dropped cached stats for database files removed from db_dir',
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Same per-iteration guard as the other loops: one bad sweep
+                # must not end warming for the rest of the run.
+                await logger.awarning(
+                    'recorder_dbstats_warm_failed',
+                    category='recorder',
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            await asyncio.sleep(self._store.dbstats_warm_interval_seconds)
+
     async def _host_sample_loop(self) -> None:
         """Per-tick host sampling: the ``net_io`` WS heartbeat + one
         ``resource_sample`` event.
@@ -1141,6 +1195,12 @@ class EventRecorder:
             self._netio_task.cancel()
             try:
                 await self._netio_task
+            except asyncio.CancelledError:
+                pass
+        if self._dbstats_warm_task:
+            self._dbstats_warm_task.cancel()
+            try:
+                await self._dbstats_warm_task
             except asyncio.CancelledError:
                 pass
         # Drop any pending deferred start events and disarm the shared sweep.
@@ -2728,6 +2788,7 @@ class EventRecorder:
         # None check in the debug_server helpers.
         old_db = self._db
         old_reader = self._reader_db
+        old_path = self._db_path
         self._db = new_db
         self._reader_db = new_reader
         self._db_path = new_path
@@ -2760,5 +2821,17 @@ class EventRecorder:
                     category='recorder',
                     error=str(exc),
                 )
+
+        # The just-closed file is immutable from here on — precompute its
+        # databases-page stats now (thread, fire-and-forget) so the page
+        # never pays a full scan for it. Failures only cost a later
+        # warmer-sweep retry, hence no await and no error handling beyond
+        # the task set keeping the reference alive.
+        if self._dbstats is not None and old_path:
+            from drakkar.dbstats import scan_and_store
+
+            task = asyncio.create_task(asyncio.to_thread(scan_and_store, old_path, self._dbstats))
+            self._dbstats_rotate_tasks.add(task)
+            task.add_done_callback(self._dbstats_rotate_tasks.discard)
 
         await logger.ainfo('recorder_rotated', category='recorder', new_db=self._db_path)

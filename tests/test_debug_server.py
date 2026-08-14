@@ -476,6 +476,49 @@ class TestApiDebugDatabases:
         assert data[0]['event_count'] == 2
         assert data[0]['event_counts']['consumed'] == 1
         assert data[0]['event_counts']['task_completed'] == 1
+        # Contract v1.12 fields.
+        assert data[0]['kind'] == 'recorder'
+        assert data[0]['live_for'] == ''
+        assert data[0]['stats_pending'] is False
+        assert data[0]['cache_entry_count'] is None
+
+    async def test_live_symlink_marks_in_use_and_cache_db_is_typed(self, tmp_path, mock_recorder, mock_app):
+        import sqlite3
+
+        from drakkar.recorder import SCHEMA_EVENTS
+
+        current = tmp_path / 'worker-1-2026-03-24__11_00_00.db'
+        db = sqlite3.connect(str(current))
+        db.executescript(SCHEMA_EVENTS)
+        db.commit()
+        db.close()
+        os.symlink(str(current), str(tmp_path / 'worker-1-live.db'))
+
+        cache_target = tmp_path / 'worker-1-cache.db.actual'
+        db = sqlite3.connect(str(cache_target))
+        db.execute('CREATE TABLE cache_entries (key TEXT PRIMARY KEY, value TEXT)')
+        db.execute("INSERT INTO cache_entries VALUES ('k', 'v')")
+        db.commit()
+        db.close()
+        os.symlink(str(cache_target), str(tmp_path / 'worker-1-cache.db'))
+
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/databases')
+
+        rows = {r['filename']: r for r in resp.json()}
+        # The recorder DB currently written by worker-1 is highlighted.
+        assert rows[current.name]['live_for'] == 'worker-1'
+        assert rows[current.name]['kind'] == 'recorder'
+        # The cache DB appears under its stable symlink name, typed, and
+        # in-use because its worker's recorder is live in the same dir.
+        assert rows['worker-1-cache.db']['kind'] == 'cache'
+        assert rows['worker-1-cache.db']['cache_entry_count'] == 1
+        assert rows['worker-1-cache.db']['live_for'] == 'worker-1'
+        # The symlinks themselves are not rows.
+        assert 'worker-1-live.db' not in rows
 
 
 class TestApiDebugProcessors:

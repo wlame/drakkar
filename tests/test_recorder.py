@@ -822,6 +822,30 @@ async def test_rotate_creates_new_db_and_flushes(tmp_path):
     await rec.stop()
 
 
+async def test_rotate_precomputes_stats_for_the_closed_db(tmp_path):
+    """The just-rotated file is immutable — its databases-page stats are
+    computed by the rotation hook, so the page never full-scans it."""
+    from drakkar.dbstats import DbStatsCache
+
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    old_path = rec.db_path
+    rec.record_consumed(make_msg(offset=0))
+
+    await rec._rotate()
+    # The hook is fire-and-forget; drain the tracked task(s).
+    for task in list(rec._dbstats_rotate_tasks):
+        await task
+
+    cached = DbStatsCache(str(tmp_path)).load_all()
+    assert old_path in cached
+    assert cached[old_path].stats.kind == 'recorder'
+    assert cached[old_path].stats.event_count == 1
+
+    await rec.stop()
+
+
 async def test_rotate_flushes_buffer_to_old_db(tmp_path):
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)

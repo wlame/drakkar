@@ -162,6 +162,18 @@ class DbStats:
     has_config: bool = False
     has_state: bool = False
     size_bytes: int = 0
+    # What the file IS: 'recorder' (per-worker event log), 'merged'
+    # (drakkar-merge output — carries a ``workers`` table), 'cache'
+    # (handler cache — carries ``cache_entries``), or 'unknown'
+    # (unreadable / foreign schema). Lets the databases page group and
+    # badge files instead of showing every .db as an events log.
+    kind: str = 'unknown'
+    # Highest events.id at scan time — the delta-scan cursor for files
+    # that are still being written (see drakkar.dbstats). None when the
+    # events table is absent or empty.
+    max_event_id: int | None = None
+    # Row count of ``cache_entries`` for kind='cache' files, else None.
+    cache_entry_count: int | None = None
 
 
 @dataclass
@@ -230,9 +242,27 @@ def scan_db(path: str) -> DbStats:
                 stats.last_event_ts = row['last_ts']
             for row in db.execute('SELECT event, COUNT(*) as cnt FROM events GROUP BY event'):
                 stats.event_counts[row['event']] = row['cnt']
+            # Delta-scan cursor (see drakkar.dbstats): MAX on the integer
+            # primary key is an O(1) b-tree descent, not a table scan.
+            row = db.execute('SELECT MAX(id) as max_id FROM events').fetchone()
+            if row:
+                stats.max_event_id = row['max_id']
 
         if _table_exists(db, 'worker_state'):
             stats.has_state = True
+
+        # Classify. Order matters only in that 'workers' (the merged-output
+        # schema) also carries an events table — check it before defaulting
+        # to 'recorder'.
+        if _table_exists(db, 'workers'):
+            stats.kind = 'merged'
+        elif stats.has_events or stats.has_config:
+            stats.kind = 'recorder'
+        elif _table_exists(db, 'cache_entries'):
+            stats.kind = 'cache'
+            row = db.execute('SELECT COUNT(*) as cnt FROM cache_entries').fetchone()
+            if row:
+                stats.cache_entry_count = row['cnt'] or 0
     except Exception:
         pass
     finally:

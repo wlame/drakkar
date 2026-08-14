@@ -1429,6 +1429,26 @@
           "group": "ui"
         },
         {
+          "path": "ui.recorder.dbstats_warm_interval_seconds",
+          "env": "DK_UI__RECORDER__DBSTATS_WARM_INTERVAL_SECONDS",
+          "description": "How often the background warmer sweeps db_dir, computing statistics for database files the .dbstats cache does not know yet and purging entries for deleted files.",
+          "full_description": "How often the background warmer sweeps db_dir, computing statistics for database files the .dbstats cache does not know yet and purging entries for deleted files. Cheap when everything is already cached — one directory listing plus one small SELECT.",
+          "type": "integer",
+          "default": 60,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.recorder.dbstats_inline_scan_limit",
+          "env": "DK_UI__RECORDER__DBSTATS_INLINE_SCAN_LIMIT",
+          "description": "How many cold (uncached) database files one /api/debug/databases request may fully scan inline.",
+          "full_description": "How many cold (uncached) database files one /api/debug/databases request may fully scan inline. Files beyond the cap return immediately with stats_pending=true and fill in as the warmer catches up. 0 = requests never scan; matters only on a cold cache (first boot over a pre-existing directory).",
+          "type": "integer",
+          "default": 4,
+          "secret": false,
+          "group": "ui"
+        },
+        {
           "path": "ui.recorder.store_output",
           "env": "DK_UI__RECORDER__STORE_OUTPUT",
           "description": "",

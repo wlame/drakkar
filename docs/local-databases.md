@@ -26,6 +26,7 @@ shared directory unless configured apart:
 | `<worker>-cache.db.actual` | LWW key/value cache. Never rotated. | `cache.db_dir`, falling back to `ui.recorder.db_dir` |
 | `<worker>-cache.db` → `.actual` *(symlink)* | Discovery pointer for the cache, deliberately shaped like the recorder's so one symlink-scan routine serves both. | same |
 | `<worker>.watchdog` | Not SQLite: OOM/SIGKILL detection marker (`CLEAN_EXIT` written on graceful stop). | `ui.recorder.db_dir` |
+| `.dbstats.db` | Shared stats cache behind the Databases page — derived data only, disposable, dot-prefixed so it never lists as a database itself. See [The databases-page stats cache](#the-databases-page-stats-cache). | `ui.recorder.db_dir` |
 
 See [Archiving](#archiving) below for the full mechanics of the `.db.gz` file.
 
@@ -479,6 +480,40 @@ CLI or any tool that already reads a merged `.db`.
   tick — indefinitely, without touching the raw sources, which stay safe
   and undeleted on disk. Recovery is manual: remove or rename the bad
   file so the next pass can publish a clean one.
+
+## The databases-page stats cache
+
+`GET /api/debug/databases` used to open every `.db` file and aggregate its
+whole events table per page load. It is now backed by
+`<db_dir>/.dbstats.db` (table `db_stats_v1` — identical schema on both
+backends; a mixed fleet shares the file):
+
+- **The directory stays the source of truth.** The file *list* is a live
+  scan on every request — a file you delete from `db_dir` by hand
+  disappears from the page immediately, and the cache only supplies
+  derived statistics, keyed by `(path, mtime_ns, size_bytes)`. Rotated
+  files are immutable, so their key never changes and they are scanned
+  exactly once, ever.
+- **Three feeders**: rotation precomputes the just-closed file's stats;
+  a warmer loop (`ui.recorder.dbstats_warm_interval_seconds`, default 60)
+  sweeps for anything missing and purges rows whose files are gone; a
+  page request itself scans at most
+  `ui.recorder.dbstats_inline_scan_limit` (default 4) cold files inline —
+  the rest render as `stats_pending` rows and fill in as the warmer
+  catches up (the UI re-polls automatically).
+- **Live DBs are delta-scanned**: the events table is append-only with a
+  monotonic `id`, so refreshing the file a worker is writing costs only
+  its new rows, not a full `GROUP BY`.
+- **Disposable and self-healing**: delete `.dbstats.db` and everything
+  rescans; a corrupt file is discarded and rebuilt automatically. Writes
+  are idempotent, so concurrent workers share it with WAL + busy-timeout
+  and no coordination.
+
+The page also marks **in-use files** (`live_for` — resolved from the
+`*-live.db` / `*-cache.db` symlinks; note a stale symlink after a
+SIGKILL marks its file in-use until the worker restarts) and now lists
+**cache databases** as typed rows (`kind: cache`, entry count, shown
+under the stable symlink name).
 
 ## Schema evolution
 

@@ -982,6 +982,28 @@ class UIRecorderConfig(BaseModel):
             '(archive_retention_days * 24 >= 2 * archive_window_hours).'
         ),
     )
+    dbstats_warm_interval_seconds: int = Field(
+        default=60,
+        ge=5,
+        description=(
+            'How often the background warmer sweeps db_dir, computing '
+            'statistics for database files the .dbstats cache does not '
+            'know yet and purging entries for deleted files. Cheap when '
+            'everything is already cached — one directory listing plus '
+            'one small SELECT.'
+        ),
+    )
+    dbstats_inline_scan_limit: int = Field(
+        default=4,
+        ge=0,
+        description=(
+            'How many cold (uncached) database files one /api/debug/databases '
+            'request may fully scan inline. Files beyond the cap return '
+            'immediately with stats_pending=true and fill in as the warmer '
+            'catches up. 0 = requests never scan; matters only on a cold '
+            'cache (first boot over a pre-existing directory).'
+        ),
+    )
     store_output: bool = True
     store_stdin: bool = Field(
         default=False,
