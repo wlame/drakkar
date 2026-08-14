@@ -1090,6 +1090,23 @@
       ]
     },
     {
+      "key": "offload",
+      "title": "Offload pool (offload:)",
+      "doc_anchor": "offload-pool-offload",
+      "entries": [
+        {
+          "path": "offload.max_threads",
+          "env": "DK_OFFLOAD__MAX_THREADS",
+          "description": "Worker threads in the shared offload pool.",
+          "full_description": "Worker threads in the shared offload pool. Calls beyond this many concurrent offloaded computations queue (FIFO) and show up in the drakkar_offload_queued gauge. More threads do not speed up pure-Python work (GIL); raise this only when several partitions routinely offload at once and queueing delay matters, or when the offloaded code releases the GIL (numpy, compiled extensions).",
+          "type": "integer",
+          "default": 2,
+          "secret": false,
+          "group": "offload"
+        }
+      ]
+    },
+    {
       "key": "logging",
       "title": "Logging (logging:)",
       "doc_anchor": "logging-logging",

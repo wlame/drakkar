@@ -66,6 +66,7 @@ nav:
   - Observability: observability.md
   - Debugging Bottlenecks: debugging-bottlenecks.md
   - Runtime Health (event-loop lag watchdog): runtime-health.md
+  - Offload (CPU-bound hook work off the loop): offload.md
   - Local Databases: local-databases.md
   - Performance: performance.md
   - Deployment: deployment.md

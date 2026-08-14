@@ -130,6 +130,16 @@ Prometheus needed for a quick read.
 | `drakkar_handler_duration_seconds` | Histogram | `hook` (`arrange`, `on_task_complete`, `on_message_complete`, `on_error`, `on_window_complete`, etc.) | Duration of user handler hook execution. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30 |
 | `drakkar_handler_hook_errors_total` | Counter | `hook` | User hooks that raised instead of returning. The framework contains the failure and keeps the partition flowing, so this counter is the only signal that a handler is broken — **alert on any non-zero rate** |
 
+#### Offload pool
+
+CPU-bound hook work moved off the event loop via [`handler.offload()`](offload.md).
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `drakkar_offload_running` | Gauge | -- | Offloaded computations currently executing on the offload thread pool |
+| `drakkar_offload_queued` | Gauge | -- | Offloaded calls waiting for a free pool thread. Sustained non-zero values mean `offload.max_threads` is undersized for how often hooks offload concurrently |
+| `drakkar_offload_duration_seconds` | Histogram | `hook` | Execution time of offloaded computations, queue wait excluded. Buckets reach 120s — offloaded work is expected to be seconds-scale |
+
 #### Recorder
 
 Emitted only when [`ui.enabled=true`](configuration.md#ui-flight-recorder-ui). Track flight-recorder health -- buffer depth, drops under load, and flush latency. Alert on sustained non-zero `dropped_events_total` or p99 `flush_duration_seconds` exceeding `flush_interval_seconds`.
@@ -614,6 +624,7 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 | `runtime_health` | Event-loop health transition or periodic sample — see [Runtime Health](runtime-health.md) | `metadata` (kind: transition/sample, state, lag_ms, unit_count) |
 | `runtime_stall` | Event loop resumed after a stall; carries the stack traces sampled while it lasted | `duration`, `metadata` (duration_ms, stacks: [{stack, location, count}], dropped_stacks, unit_count) |
 | `resource_sample` | Periodic snapshot of what the worker consumed, every `state_sync_interval_seconds` | `metadata` (rss_bytes, threads, open_fds, cpu_self_pct, cpu_children_pct, rx_bytes_total, tx_bytes_total, interval_s — each omitted when its source is unavailable; `cpu_children_pct` counts *reaped* subprocesses, so it is bursty; the first sample carries no cpu fields) |
+| `offload` | One `handler.offload()` call completed — CPU-bound hook work run on the offload thread pool; see [Offload](offload.md) | `partition` (NULL outside hooks), `offset` / `task_id` (annotation-style anchoring), `duration`, `metadata` (hook, function, queued, status: ok/error/cancelled, window_id, offsets, error) |
 | `periodic_run` | Periodic task execution completes | `task_id` (task name), `duration`, `exit_code` (0=ok, 1=error), `metadata` (status, error) |
 | `webapp_request_received` | One HTTP request passed auth + rate-limit + body parsing and is about to dispatch to T1 | `origin='http'`, `client_name`, `request_id`, `metadata` (started_at, body_bytes) |
 | `webapp_request_completed` | An HTTP request returned 200 to the caller | `origin='http'`, `client_name`, `request_id`, `duration`, `metadata` (status='ok', duration_ms) |

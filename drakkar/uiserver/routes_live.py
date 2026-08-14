@@ -151,7 +151,7 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         # ``hook_flags`` hides completion-hook tabs (Task/Message/Window
         # Results) for hooks the handler doesn't implement.
         kafka_cfg = drakkar_app._config.kafka
-        return {
+        overview = {
             'worker_id': drakkar_app._worker_id,
             'running_tasks': running_tasks,
             'pending_tasks': pending_tasks,
@@ -175,6 +175,14 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             'kafka_ui_cluster': kafka_cfg.ui_cluster_name,
             'kafka_source_topic': kafka_cfg.source_topic,
         }
+        # Key-presence-as-flag (same idiom as ``webapp_tile`` on the
+        # dashboard): backends without an offload pool — the Go worker,
+        # or this worker before lifecycle wiring — omit the key entirely
+        # and the UI readout stays hidden. ``snapshot()`` is thread-safe,
+        # so no main-loop dispatch is needed.
+        if drakkar_app._offload_pool is not None:
+            overview['offload'] = drakkar_app._offload_pool.snapshot()
+        return overview
 
     @html.get('/live', response_class=HTMLResponse)
     async def live(request: Request):

@@ -209,6 +209,15 @@ class Cache:
     ) -> Any | None: ...
 ```
 
+**Thread-safety.** The four sync operations (`set` / `peek` / `delete` /
+`in`) are safe to call from functions running under
+[`handler.offload()`](offload.md) — the cache guards its memory state
+with an internal lock, so a pool thread and the event loop can use the
+same cache concurrently. The async `get()` stays **loop-only** (its
+SQLite fallback rides a connection bound to the main loop): `await` it
+for the keys you need *before* offloading, which warms them into memory,
+then `peek` inside the offloaded function.
+
 ### `set(key, value, *, ttl=None, scope=CacheScope.LOCAL)`
 
 Stores `value` under `key` in the in-memory dict and schedules a flush to

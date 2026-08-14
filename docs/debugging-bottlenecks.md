@@ -31,7 +31,7 @@ Read the signals in this order; stop at the first row that matches.
 | Signal | Where to look | Meaning |
 |---|---|---|
 | `executor_pool_exceeds_cpus` warning at startup | worker log, or compare `drakkar_executor_pool_max` vs `drakkar_host_effective_cpus` | The pool is bigger than the CPUs behind it. Concurrent tasks time-share cores; wall times stretch and converge. Shrink the pool or grow the machine. |
-| Loop lag high / stalls recorded | Runtime tab: state badge, lag sparkline, **Top blocking sites** | The worker's own event loop is the bottleneck. The aggregated stall sites name the exact code that blocked it — that code is your fix target. |
+| Loop lag high / stalls recorded | Runtime tab: state badge, lag sparkline, **Top blocking sites** | The worker's own event loop is the bottleneck. The aggregated stall sites name the exact code that blocked it — that code is your fix target. When the site is your own hook's CPU work, wrap it in [`self.offload(...)`](offload.md). |
 | `spawn_ms` grows toward the task duration | timeline hover, `drakkar_executor_spawn_seconds` p99 | The parent process cannot start subprocesses fast enough (fork/exec on a congested loop, or a starved CPU). Usually accompanies the row above. |
 | `queue_wait_ms` long while pool is busy | timeline hover, `drakkar_executor_queue_wait_seconds` + `drakkar_executor_pool_active` | Healthy executor, undersized pool: tasks queue because every slot is taken. Raise the pool — but only up to the effective CPU count. |
 | `queue_wait_ms` long while pool is idle | same, with `pool_active` low | Work exists but slots stay empty — the worker process is too slow to schedule it. Check the Runtime tab for stalls; this is loop congestion, not pool sizing. |

@@ -56,7 +56,7 @@ def test_artifact_is_valid_json_matching_the_schema():
     raw = json.loads(ARTIFACT_PATH.read_text())
     # Round-trips through the pydantic model without error.
     parsed = ConfigMetadata.model_validate(raw)
-    assert len(parsed.groups) == 11
+    assert len(parsed.groups) == 12
 
 
 # --- 2. Anchor parity: every doc_anchor must exist on the real docs page ---

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `handler.offload()`: run CPU-bound hook work on a small thread pool
+  instead of the event loop. A heavy computation in `arrange()` or an
+  aggregation hook no longer stalls the whole worker — polling, task
+  completions, sink flushes, and the UI keep running while it computes.
+  Configured by the new `offload.max_threads` setting (default 2). Adds
+  the `drakkar_offload_running` / `drakkar_offload_queued` gauges, the
+  `drakkar_offload_duration_seconds` histogram, one `offload`
+  flight-recorder event per call (visible in message traces and the
+  History filter), and an `offload` object on `GET /api/v1/live/overview`
+  (contract v1.10). See the new `docs/offload.md` page.
+- The cache sync operations (`set` / `peek` / `delete` / `in`) are now
+  thread-safe, so offloaded functions can use them. The async `get()`
+  stays loop-only; the docs show the warm-then-peek pattern.
+
 ### Changed
 
 - The probe-details "write cap exceeded" error now names the tripped cap,

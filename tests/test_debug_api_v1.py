@@ -65,6 +65,10 @@ def mock_app():
     # ``handler=None`` pins hook_flags to the deterministic all-False branch.
     app.handler = None
     app._consumer = None
+    # ``_offload_pool=None`` keeps the overview's optional ``offload`` key
+    # absent (key-presence is the contract's feature flag); a bare
+    # MagicMock would be truthy and leak an unserializable snapshot in.
+    app._offload_pool = None
     # No declared UI pages by default; client_with_pages overrides.
     app.ui_pages = []
 
@@ -534,6 +538,20 @@ class TestApiV1LiveOverview:
         assert data['kafka_ui_base'] == ''
         assert data['kafka_ui_cluster'] == ''
         assert data['kafka_source_topic'] == 'input-events'
+        # No offload pool wired → the optional key is ABSENT, not null —
+        # key-presence is the feature flag the UI keys off (contract v1.10).
+        assert 'offload' not in data
+
+    async def test_offload_key_present_when_pool_wired(self, debug_config, mock_recorder, mock_app):
+        offload_pool = MagicMock()
+        offload_pool.snapshot.return_value = {'running': 1, 'queued': 3, 'max_threads': 2}
+        mock_app._offload_pool = offload_pool
+        mock_recorder.config = debug_config
+
+        async with make_client(debug_config, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/live/overview')
+        data = resp.json()
+        assert data['offload'] == {'running': 1, 'queued': 3, 'max_threads': 2}
 
     async def test_running_pending_split_and_arranging(self, debug_config, mock_recorder, mock_app):
         now = time.time()

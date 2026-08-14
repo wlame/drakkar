@@ -846,6 +846,18 @@ debug UI and expiring with the flight recorder's normal retention. See
 
 ---
 
+## Offloading CPU-bound Work
+
+`await self.offload(fn, *args, **kwargs)` runs a plain synchronous
+function on a small thread pool and returns its result — for hooks whose
+heavy pure-Python computation (nested loops deriving task parameters,
+result crunching) would otherwise stall the event loop for seconds. The
+sync cache ops and `self.annotate` work inside the offloaded function.
+See [Offload](offload.md) for the full contract, the cache
+warm-then-peek pattern, and the observability that comes with it.
+
+---
+
 ## Periodic Tasks
 
 Decorate async handler methods with `@periodic(seconds=N)` to run them

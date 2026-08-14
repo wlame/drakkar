@@ -96,6 +96,7 @@ class TestShape:
             'dlq',
             'metrics',
             'runtime_health',
+            'offload',
             'logging',
             'ui',
             'cache',

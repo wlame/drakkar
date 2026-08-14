@@ -334,6 +334,20 @@ runtime_health:
 
 ---
 
+## Offload pool (`offload:`)
+
+📚 [Offloading CPU-bound hook work](offload.md) · [Runtime health](runtime-health.md)
+
+Thread pool behind `handler.offload()` — CPU-bound hook computations moved off the event loop so the worker stays responsive.
+
+```yaml
+offload:
+  max_threads: 2                   # concurrent offloaded computations before queueing.
+                                   # env: DK_OFFLOAD__MAX_THREADS
+```
+
+---
+
 ## Logging (`logging:`)
 
 📚 [Deep details](configuration.md#logging-logging)

@@ -1280,6 +1280,18 @@ components:
         kafka_ui_base: {type: string}
         kafka_ui_cluster: {type: string}
         kafka_source_topic: {type: string}
+        # Optional on purpose (key-presence is the feature flag): present
+        # only on backends with an offload thread pool behind the
+        # handler's offload() API. Backends without one (the Go worker —
+        # goroutine preemption makes an offload pool unnecessary there)
+        # omit the key and the UI readout stays hidden.
+        offload:
+          type: object
+          properties:
+            running: {type: integer}
+            queued: {type: integer}
+            max_threads: {type: integer}
+          required: [running, queued, max_threads]
       required: [worker_id, running_tasks, pending_tasks, arranging, pool_active,
                  pool_waiting, pool_max, partition_count, max_ui_rows,
                  ws_min_duration_ms, hook_flags, kafka_ui_base, kafka_ui_cluster,

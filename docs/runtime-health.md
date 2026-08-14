@@ -108,8 +108,9 @@ Every field is environment-overridable (`DK_RUNTIME_HEALTH__*`); see the
 ## Interpreting what you find
 
 - **Stall stacks pointing at handler code** — an `arrange()` or hook
-  doing synchronous I/O or heavy CPU work on the loop. Move it to a
-  thread (`asyncio.to_thread`) or a subprocess task.
+  doing synchronous I/O or heavy CPU work on the loop. Wrap the
+  computation in [`self.offload(...)`](offload.md) — the framework's
+  thread pool for exactly this case — or make it a subprocess task.
 - **Stall stacks pointing at a library** — a client library with a
   blocking call path (DNS resolution, synchronous connect, compression).
   The stack names the exact call to wrap or replace.
@@ -138,5 +139,6 @@ fleets share one config shape.
 
 ## See also
 
+- [Offload](offload.md) — the remedy for stalls caused by CPU-bound hook code
 - [Observability](observability.md) — metrics, flight recorder, logs
 - [Config reference](config-reference.md#runtime-health-runtime-health)

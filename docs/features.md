@@ -23,6 +23,7 @@ Per-feature guides: [Configuration](configuration.md) ·
 | Prometheus panel + links | `ui.prometheus_url` | off (empty) | Dashboard deep-links into a Prometheus instance |
 | Cross-worker fleet view | shared `ui.recorder.db_dir` | — | Worker autodiscovery, workers list, cross-tracing |
 | Handler cache | `cache.enabled` | **off** | LWW key/value store for handler code |
+| Offload pool | `offload.max_threads` | **on** (2 threads) | [`handler.offload()`](offload.md) — CPU-bound hook work off the event loop; always available, the knob only sizes it |
 | Cache peer sync | `cache.peer_sync.enabled` | **on** (when cache on) | Cross-worker cache convergence via the shared directory |
 | Synchronous HTTP ingress | `webapp.enabled` | **off** (`:8090`) | POST → handler pipeline → JSON response |
 | Aligned startup | `kafka.startup_align_enabled` | **on** | Fleet restarts converge on one rebalance |
