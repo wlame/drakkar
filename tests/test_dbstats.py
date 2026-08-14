@@ -268,6 +268,15 @@ class TestSymlinks:
         assert collect(str(tmp_path), cache, inline_scan_limit=-1) == []
 
 
+class TestMemoryOnlyMode:
+    def test_empty_db_dir_creates_no_stray_cache_file(self, tmp_path, monkeypatch):
+        """db_dir='' (memory-only recorder): collect must not open the
+        cache at all — that would create ./.dbstats.db in the CWD."""
+        monkeypatch.chdir(tmp_path)
+        assert collect('', DbStatsCache(''), inline_scan_limit=4) == []
+        assert not (tmp_path / DBSTATS_FILENAME).exists()
+
+
 class TestCacheResilience:
     def test_corrupt_cache_file_self_heals(self, tmp_path, monkeypatch):
         cache = DbStatsCache(str(tmp_path))

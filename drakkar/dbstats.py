@@ -458,6 +458,11 @@ def collect(db_dir: str, cache: DbStatsCache, *, inline_scan_limit: int) -> list
     scan; ``-1`` means unlimited (the warmer). Rows beyond the cap come
     back with ``stats_pending=True``.
     """
+    # Before touching the cache: with no directory there is nothing to
+    # list AND nothing to cache — opening the cache here would create a
+    # stray ./.dbstats.db in the CWD in memory-only mode (db_dir='').
+    if not db_dir or not os.path.isdir(db_dir):
+        return []
     listing = _scan_listing(db_dir)
     cached = cache.load_all()
     budget = [inline_scan_limit]
