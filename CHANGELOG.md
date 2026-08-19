@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- New cache scope `CacheScope.MEMORY`: the entry lives in worker memory
+  only and is never flushed to SQLite. TTL, `peek`, `get`, and `in` work
+  as usual. A memory-scoped `set` records a delete tombstone, so it also
+  purges any disk row an earlier wider-scoped write left for the same
+  key. Memory-scoped entries are lost on LRU eviction and worker
+  restart, and the `/debug/cache` entries browser does not list them.
+
+### Changed
+
+- The cache docs page now opens with a quick-reference table of the five
+  handler-facing methods and the rules of thumb for choosing between
+  `get`, `peek`, and `in`.
+
 ## [1.13.0] - 2026-08-14
 
 ### Added

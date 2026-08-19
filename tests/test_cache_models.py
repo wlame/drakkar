@@ -25,13 +25,15 @@ from drakkar.cache import CacheScope, decode_value, encode_value
 
 
 def test_cache_scope_members_and_values():
-    """The enum exposes exactly three scopes with the string values the SQL
-    CHECK constraint references."""
+    """The enum exposes exactly four scopes; the persisted three carry the
+    string values the SQL CHECK constraint references, and MEMORY stays
+    out of that constraint (memory-only entries never flush)."""
+    assert CacheScope.MEMORY.value == 'memory'
     assert CacheScope.LOCAL.value == 'local'
     assert CacheScope.CLUSTER.value == 'cluster'
     assert CacheScope.GLOBAL.value == 'global'
-    # exactly three members — no hidden INTERNAL/DEBUG scopes
-    assert {s.value for s in CacheScope} == {'local', 'cluster', 'global'}
+    # exactly four members — no hidden INTERNAL/DEBUG scopes
+    assert {s.value for s in CacheScope} == {'memory', 'local', 'cluster', 'global'}
 
 
 def test_cache_scope_is_str_enum():

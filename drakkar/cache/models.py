@@ -6,8 +6,10 @@ exercised in isolation without spinning up SQLite or the engine. Every
 
 Scope model
 -----------
-``CacheScope`` names the visibility contract a cache entry has in peer-sync:
+``CacheScope`` names how far a cache entry reaches — from process memory
+to every peer:
 
+- ``MEMORY``  — this worker's memory only; never flushed to SQLite
 - ``LOCAL``   — this worker only; never pulled by peers
 - ``CLUSTER`` — workers with the same ``cluster_name``; pulled by same-cluster peers
 - ``GLOBAL``  — visible to all peers regardless of cluster
@@ -54,17 +56,21 @@ from pydantic import BaseModel
 
 
 class CacheScope(StrEnum):
-    """Visibility discriminator for a cache entry.
+    """Reach discriminator for a cache entry.
 
-    The string values match the SQL schema's ``CHECK(scope IN (...))``
-    constraint and the peer-sync scope-filter WHERE clauses. Keep the
-    values in lockstep with ``cache_entries.scope`` column constraints.
+    The persisted values (LOCAL and wider) match the SQL schema's
+    ``CHECK(scope IN (...))`` constraint and the peer-sync scope-filter
+    WHERE clauses. Keep those in lockstep with ``cache_entries.scope``
+    column constraints. ``MEMORY`` is deliberately absent from the CHECK:
+    memory-scoped entries never reach the DB, and the constraint doubles
+    as a guard that would loudly reject one if it ever leaked to disk.
 
     StrEnum inheritance means ``CacheScope.LOCAL`` is both a distinct
     enum member and an ordinary string equal to ``'local'`` — useful
     when binding SQL parameters or serializing to JSON.
     """
 
+    MEMORY = 'memory'
     LOCAL = 'local'
     CLUSTER = 'cluster'
     GLOBAL = 'global'

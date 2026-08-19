@@ -253,6 +253,45 @@ async def test_flush_once_delete_nonexistent_is_harmless(tmp_path):
         await engine.stop()
 
 
+async def test_flush_once_memory_scope_writes_no_row(tmp_path):
+    """A MEMORY-scoped set never lands in SQLite — its dirty op is a
+    DELETE tombstone, which is a 0-row no-op when the key has no row."""
+    engine = await _make_engine(tmp_path)
+    await engine.start()
+    try:
+        engine._cache.set('mem_k', 'v', scope=CacheScope.MEMORY)  # type: ignore[reportPrivateUsage]
+        await engine._flush_once()  # type: ignore[reportPrivateUsage]
+
+        db_path = tmp_path / 'w1-cache.db.actual'
+        assert await _count_rows(db_path) == 0
+        # the value is still served from memory
+        assert engine._cache.peek('mem_k') == 'v'  # type: ignore[reportPrivateUsage]
+    finally:
+        await engine.stop()
+
+
+async def test_flush_once_memory_scope_purges_stale_row_of_earlier_local_write(tmp_path):
+    """Re-scoping a key to MEMORY tombstones the disk row a previous
+    LOCAL write created — otherwise an eviction or restart would let
+    ``get`` resurrect the stale persisted value."""
+    engine = await _make_engine(tmp_path)
+    await engine.start()
+    try:
+        engine._cache.set('k', 'old-persisted', scope=CacheScope.LOCAL)  # type: ignore[reportPrivateUsage]
+        await engine._flush_once()  # type: ignore[reportPrivateUsage]
+
+        db_path = tmp_path / 'w1-cache.db.actual'
+        assert (await _fetch_row(db_path, 'k')) is not None
+
+        engine._cache.set('k', 'memory-only', scope=CacheScope.MEMORY)  # type: ignore[reportPrivateUsage]
+        await engine._flush_once()  # type: ignore[reportPrivateUsage]
+
+        assert (await _fetch_row(db_path, 'k')) is None
+        assert engine._cache.peek('k') == 'memory-only'  # type: ignore[reportPrivateUsage]
+    finally:
+        await engine.stop()
+
+
 # --- batching + atomic-swap ------------------------------------------------
 
 

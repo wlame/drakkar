@@ -14,7 +14,10 @@ from __future__ import annotations
 # dataclass fields directly to SQL parameters without translation. The
 # CHECK on `scope` keeps `CacheScope` values enforced at the DB layer too —
 # a corrupt peer that tried to write a bogus scope would be rejected at
-# UPSERT time rather than silently corrupting our store.
+# UPSERT time rather than silently corrupting our store. `'memory'` is
+# deliberately NOT in the CHECK: memory-scoped entries never flush (set()
+# records a DELETE tombstone instead), so a `'memory'` row reaching this
+# table is a bug and the constraint makes it fail loudly.
 #
 # Two indexes:
 #

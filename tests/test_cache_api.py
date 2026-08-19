@@ -292,6 +292,80 @@ def test_dirty_op_has_no_entry_for_delete():
     assert dirty.entry is None
 
 
+# --- CacheScope.MEMORY (memory-only entries) ---------------------------------
+
+
+def test_set_memory_scope_records_delete_tombstone_in_dirty():
+    """A MEMORY-scoped `set` records ``Op.DELETE`` (a disk tombstone), not
+    ``Op.SET`` — the entry must never flush to SQLite, and any disk row a
+    previous wider-scoped write left behind must be purged."""
+    cache = _make_cache()
+    cache.set('k', 'v', scope=CacheScope.MEMORY)
+    dirty = cache._dirty['k']  # type: ignore[reportPrivateUsage]
+    assert dirty.op is Op.DELETE
+    assert dirty.entry is None
+
+
+def test_set_memory_scope_peek_returns_value():
+    """MEMORY-scoped entries are readable through `peek` like any other."""
+    cache = _make_cache()
+    cache.set('k', {'a': 1}, scope=CacheScope.MEMORY)
+    assert cache.peek('k') == {'a': 1}
+
+
+def test_set_memory_scope_contains_and_get_see_the_entry():
+    """`in` and `get` serve MEMORY-scoped entries from the memory fast
+    path — scope never gates reads."""
+    cache = _make_cache()
+    cache.set('k', 'v', scope=CacheScope.MEMORY)
+    assert 'k' in cache
+    assert asyncio.run(cache.get('k')) == 'v'
+
+
+def test_set_memory_scope_respects_ttl():
+    """TTL applies to MEMORY-scoped entries exactly as to persisted ones."""
+    cache = _make_cache()
+    cache.set('k', 'v', ttl=0.001, scope=CacheScope.MEMORY)
+    time.sleep(0.003)
+    assert cache.peek('k') is None
+    assert 'k' not in cache
+
+
+def test_set_local_then_memory_replaces_pending_set_with_tombstone():
+    """Re-scoping a key to MEMORY supersedes a pending SET — otherwise the
+    flush would persist a value the user just declared memory-only."""
+    cache = _make_cache()
+    cache.set('k', 'v1', scope=CacheScope.LOCAL)
+    assert cache._dirty['k'].op is Op.SET  # type: ignore[reportPrivateUsage]
+    cache.set('k', 'v2', scope=CacheScope.MEMORY)
+    assert cache._dirty['k'].op is Op.DELETE  # type: ignore[reportPrivateUsage]
+    # the in-memory value is the new one regardless of the tombstone
+    assert cache.peek('k') == 'v2'
+
+
+def test_set_memory_then_local_marks_op_set_again():
+    """Re-scoping back to LOCAL turns the pending op into a normal SET —
+    last write wins at the dirty-map level."""
+    cache = _make_cache()
+    cache.set('k', 'v1', scope=CacheScope.MEMORY)
+    cache.set('k', 'v2', scope=CacheScope.LOCAL)
+    dirty = cache._dirty['k']  # type: ignore[reportPrivateUsage]
+    assert dirty.op is Op.SET
+    assert dirty.entry is not None
+    assert dirty.entry.scope is CacheScope.LOCAL
+
+
+def test_memory_scope_entry_is_lost_after_lru_eviction():
+    """MEMORY-scoped entries have no DB row to fall back to: once evicted
+    under the LRU cap, reads miss. Best-effort by design."""
+    cache = _make_cache(max_memory_entries=1)
+    cache.set('a', 1, scope=CacheScope.MEMORY)
+    cache.set('b', 2, scope=CacheScope.MEMORY)  # evicts 'a'
+    assert cache.peek('a') is None
+    assert asyncio.run(cache.get('a')) is None
+    assert cache.peek('b') == 2
+
+
 # --- LRU eviction (max_memory_entries set) -----------------------------------
 
 

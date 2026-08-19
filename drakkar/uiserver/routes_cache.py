@@ -70,7 +70,9 @@ def create_cache_router(deps: UIDeps) -> APIRouter:
         Query params:
           limit         — rows per page (default 200, enforced [0, 1000])
           offset        — pagination offset
-          scope         — exact scope match (``local``/``cluster``/``global``)
+          scope         — exact scope match (``local``/``cluster``/``global``;
+                          ``memory``-scoped entries never reach the DB, so
+                          this browser never lists them)
           search        — substring match against key (case-sensitive)
           expired_only  — show only expired rows (``expires_at_ms <= now_ms``)
 

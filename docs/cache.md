@@ -11,6 +11,36 @@ unconditionally — no `if self.cache is not None` guards.
 
 ---
 
+## Quick reference
+
+The handler-facing surface is five methods:
+
+| Method | Sync? | What it does |
+|--------|-------|--------------|
+| `set(key, value, *, ttl=None, scope=CacheScope.LOCAL)` | sync | Store a value with optional TTL (seconds) and peer-sync scope. Memory write now; SQLite on the next flush cycle. |
+| `await get(key, *, as_type=None)` | **async** | Lookup with memory → DB fallback; `None` on miss. `as_type=SomeModel` revives the JSON via `model_validate()` for a typed return. |
+| `peek(key)` | sync | Memory-only probe, no DB fallback. TTL-aware, but a key that lives only on disk reports `None`. |
+| `delete(key)` | sync | Drop from memory, schedule the DB-row deletion for the next flush. Returns `True` iff the key was in memory. Local-only — peers keep their copy. |
+| `key in cache` | sync | TTL-aware membership check, memory only, no LRU bump. |
+
+Rules of thumb:
+
+- **`get` when you want the truth** — it is the only method that consults
+  SQLite. `peek` and `in` see only what is already warm in memory.
+- `get` is async by contract even when the cache is disabled (the no-op
+  stub keeps the same signature), so call sites do not change between
+  enabled and disabled states.
+- For cross-worker invalidation **use TTL, never `delete`** — see
+  [Delete is local-only](#delete-is-local-only-the-main-sharp-edge).
+- The four sync methods are safe inside [`handler.offload()`](offload.md);
+  `get()` is loop-only. Warm the keys you need with `get` *before*
+  offloading, then `peek` inside the offloaded function.
+
+Full semantics, metrics side effects, and sharp edges: see the
+[API reference](#api-reference) below.
+
+---
+
 ## What it solves
 
 Before this feature, handlers that wanted to memoize subprocess results
@@ -233,7 +263,8 @@ on a peer that can't parse the value later).
 (the entry will remain until explicitly deleted or the worker's cache DB
 is wiped).
 
-`scope` controls peer-sync visibility. See [CacheScope](#cachescope) below.
+`scope` controls how far the entry reaches — from process memory
+(`MEMORY`) to every peer (`GLOBAL`). See [CacheScope](#cachescope) below.
 
 ### `peek(key)`
 
@@ -295,17 +326,31 @@ access). Does not consult the DB.
 
 ```python
 class CacheScope(StrEnum):
+    MEMORY = 'memory'     # this worker's memory only; never flushed to SQLite
     LOCAL = 'local'       # this worker only; peers never pull
     CLUSTER = 'cluster'   # same-cluster peers pull via sync
     GLOBAL = 'global'     # all peers (any cluster) pull via sync
 ```
 
-Scope filters peer sync's `SELECT` when another worker pulls from your
-cache DB:
+The scopes form a reach ladder — each step widens where the entry can
+travel: process memory → this worker's DB file → same-cluster peers →
+all peers.
+
+For the persisted scopes, scope filters peer sync's `SELECT` when
+another worker pulls from your cache DB:
 
 - Same cluster peer pulls `scope IN ('cluster', 'global')`
 - Different cluster peer pulls `scope = 'global'` only
 - `scope = 'local'` never leaves this worker
+
+`MEMORY` entries never reach the DB at all. A `MEMORY` set stores the
+value in memory and records a **delete tombstone** for the key instead
+of a write — so if an earlier wider-scoped `set` left a row on disk,
+the next flush purges it. This keeps the invariant "a `MEMORY` key never
+serves disk data": without the tombstone, an LRU eviction or a worker
+restart would let `get()` resurrect the stale persisted value. The
+flip side: `MEMORY` entries are lost on eviction and restart — see
+[the edge case below](#memory-entries-are-volatile-and-invisible-to-the-entries-browser).
 
 ---
 
@@ -313,6 +358,7 @@ cache DB:
 
 | Scope | Use when | Example |
 |-------|----------|---------|
+| `MEMORY` | Hot, cheap-to-recompute values that should never touch disk; also values too churn-heavy to be worth flush traffic | Per-worker negative-lookup markers; request-coalescing flags with sub-second TTL |
 | `LOCAL` | Per-worker results that peers will compute independently (or that are worker-specific) | Hot-path subprocess memoization; per-worker rate limit counters |
 | `CLUSTER` | Expensive results worth sharing across workers in the same deployment | Regex match results over a shared corpus; enrichment lookups |
 | `GLOBAL` | Results universal across clusters (rare — usually signals "this is really a DB sink") | Cross-deployment config distribution (unusual) |
@@ -415,6 +461,28 @@ memory again (and may evict a different key in turn). The
 `drakkar_cache_evictions_total` counter tracks churn — a sustained
 high rate means the cap is undersized for the working set.
 
+### MEMORY entries are volatile (and invisible to the entries browser)
+
+`CacheScope.MEMORY` trades durability for zero disk traffic. Three
+consequences, all by design:
+
+- **LRU eviction loses the entry.** Persisted scopes fall through to
+  the DB after an eviction and re-warm on the next `get()`; a `MEMORY`
+  entry has no DB row, so once evicted the next read is a plain miss.
+  Best-effort under memory pressure.
+- **A worker restart loses all MEMORY entries.** Same reason — there is
+  nothing on disk to warm from.
+- **The `/debug/cache` entries browser never lists them.** The browser
+  reads the cache DB file; `MEMORY` entries exist only in the process
+  dict. They are still counted in the page's in-memory header stats
+  and in the `entries_in_memory` / `bytes_in_memory` gauges.
+
+Re-scoping a key **to** `MEMORY` purges its disk row on the next flush
+(the tombstone described in [CacheScope](#cachescope)); re-scoping back
+to a persisted scope resumes normal flushing. Peers that synced a
+wider-scoped value before the re-scope keep their copy until its TTL
+expires — the same local-only limitation as `delete`.
+
 ### Secrets in cache values
 
 The recorder redacts secrets before writing `worker_config`
@@ -435,6 +503,10 @@ See [`delete()` above](#deletekey) for the full story.
 
 ## Consistency model
 
+- **`MEMORY` scope opts out of all of this.** Memory-scoped entries are
+  process-local: no durability window, no peer visibility, no LWW —
+  they live and die with the worker process. Everything below concerns
+  the persisted scopes.
 - **Eventually consistent** across workers. A `set()` on worker A is
   visible on worker B at most ~(flush_interval + sync_interval) later
   (default: 3s + 30s = 33s).
@@ -482,6 +554,10 @@ opens `/debug/cache`.
   scope, size, age, TTL remaining, origin worker
 - Side panel on click: decoded JSON value + full metadata
   (created_at, updated_at, expires_at, origin_worker_id)
+
+The table lists the cache **DB file**, so `MEMORY`-scoped entries never
+appear in it — they show up only in the in-memory header stats. See
+[the edge case above](#memory-entries-are-volatile-and-invisible-to-the-entries-browser).
 
 ### `/debug/periodic` — system periodic tasks
 

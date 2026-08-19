@@ -20,7 +20,9 @@ we pop the LRU key (the first item in iteration order). The evicted key's
 dirty-op is **preserved** — the DB is the source of truth, and any pending
 SET still needs to reach it via flush. Losing the dirty entry would silently
 drop the write. Evicted entries fall through to the DB on next read; the DB
-will re-warm ``_memory`` in ``get()``.
+will re-warm ``_memory`` in ``get()``. ``CacheScope.MEMORY`` entries are the
+exception: they have no DB row to fall through to, so eviction (and worker
+restart) simply loses them — the next read is a miss. Best-effort by design.
 
 Thread-safety
 -------------
@@ -136,12 +138,19 @@ class Cache:
             ttl: optional time-to-live in **seconds**; ``None`` means
                 "never expires". Internally we convert to a wall-clock
                 ``expires_at_ms`` so downstream comparisons are trivial.
-            scope: visibility for peer sync (default LOCAL — safe choice;
-                LOCAL entries never leave this worker).
+            scope: reach of the entry (default LOCAL — safe choice;
+                LOCAL entries never leave this worker). ``MEMORY`` keeps
+                the entry out of SQLite entirely: it lives in ``_memory``
+                only, is lost on eviction or restart, and the dirty map
+                records a DELETE tombstone instead of a SET so any disk
+                row a previous wider-scoped write left behind is purged
+                on the next flush (otherwise an eviction or restart would
+                resurrect the stale disk value through ``get``).
 
         Side effects:
             - Writes to ``_memory`` (creates or overwrites).
-            - Writes to ``_dirty`` with an ``Op.SET`` referencing the entry.
+            - Writes to ``_dirty`` — an ``Op.SET`` referencing the entry,
+              or an ``Op.DELETE`` tombstone for ``MEMORY`` scope.
             - Bumps the key to MRU position in the OrderedDict.
             - May trigger LRU eviction if ``max_memory_entries`` is set
               and the cap is now exceeded.
@@ -188,7 +197,18 @@ class Cache:
             # Track dirty op. A SET overrides any prior DELETE for the same
             # key — that's the expected last-write-wins at the dirty-map level,
             # matching the SQL LWW at the DB level.
-            self._dirty[key] = DirtyOp(op=Op.SET, entry=entry)
+            #
+            # MEMORY scope: memory write + disk tombstone. The DELETE keeps
+            # the invariant "a MEMORY key never serves disk data" — without
+            # it, a row left behind by an earlier wider-scoped write would
+            # survive and get() would resurrect the stale value after an
+            # eviction or restart. A DELETE on a key with no disk row is a
+            # cheap no-op at flush time, so we record it unconditionally
+            # rather than trying to guess disk state from here.
+            if scope is CacheScope.MEMORY:
+                self._dirty[key] = DirtyOp(op=Op.DELETE, entry=None)
+            else:
+                self._dirty[key] = DirtyOp(op=Op.SET, entry=entry)
 
             # Write-path metrics. ``writes{scope}`` ticks once per user intent
             # — we count the call, not row transitions (matches the "throughput
