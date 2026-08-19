@@ -64,6 +64,7 @@ nav:
   - Webapp: webapp.md
   - Executor: executor.md
   - Observability: observability.md
+  - Kafka Read API (inspect topics from the UI server): kafka-read.md
   - Debugging Bottlenecks: debugging-bottlenecks.md
   - Runtime Health (event-loop lag watchdog): runtime-health.md
   - Offload (CPU-bound hook work off the loop): offload.md

@@ -1350,6 +1350,21 @@ class UIConfig(BaseModel):
             'of ``auth_token``, per the reasoning on ``probe_enabled``.'
         ),
     )
+    kafka_read_enabled: bool = Field(
+        default=True,
+        description=(
+            'Serve ``GET /api/debug/kafka/*`` — ad-hoc reads of the configured '
+            'topics (source, dlq, and each Kafka sink by instance name; never '
+            'an arbitrary topic). Reads use assign()-only consumers that join '
+            'no consumer group and commit no offsets, so they are invisible to '
+            'the pipeline. Set to false to serve 403 instead — independently '
+            'of ``auth_token``, per the reasoning on ``probe_enabled``. When '
+            'the resolved Kafka security of any readable topic is not '
+            'PLAINTEXT while ``auth_token`` is empty, startup logs a warning '
+            'naming the exposed aliases (the API stays available — gate it '
+            'with ``auth_token`` or close it here).'
+        ),
+    )
 
     @field_validator('auth_token', mode='before')
     @classmethod

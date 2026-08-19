@@ -43,6 +43,8 @@ tags:
     description: Operator debug tools (databases, trace, metrics, probe).
   - name: cache
     description: Read-only handler-cache browser.
+  - name: kafka-read
+    description: Ad-hoc reads of the configured Kafka topics (no consumer-group side effects).
   - name: config
     description: Every config field Drakkar accepts, joined with live values.
   - name: meta
@@ -805,6 +807,119 @@ paths:
               schema: {$ref: '#/components/schemas/CacheStats'}
         '404':
           description: Cache is disabled.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/kafka/topics:
+    get:
+      tags: [kafka-read]
+      operationId: getKafkaTopics
+      summary: Readable Kafka topic aliases
+      description: >-
+        The configured read aliases — `source`, `dlq`, and each Kafka sink
+        by instance name. Raw topic names and broker addresses are never
+        exposed; the alias is the entire addressing surface. 403
+        {"error":...} when ui.kafka_read_enabled=false.
+      responses:
+        '200':
+          description: The alias list.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KafkaReadTopics'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/kafka/{alias}/message:
+    get:
+      tags: [kafka-read]
+      operationId: getKafkaMessage
+      summary: One Kafka message by coordinates
+      description: >-
+        Fetches exactly one message by (partition, offset) from the aliased
+        topic via an ad-hoc assign()-only consumer — no consumer group is
+        joined, no offsets move. 404 for an unknown alias or partition, an
+        offset outside the current watermarks, or a compacted/deleted
+        record; 502 when the brokers do not answer within the deadline.
+      parameters:
+        - name: alias
+          in: path
+          required: true
+          schema: {type: string}
+        - name: partition
+          in: query
+          required: true
+          schema: {type: integer, minimum: 0}
+        - name: offset
+          in: query
+          required: true
+          schema: {type: integer, minimum: 0}
+      responses:
+        '200':
+          description: The message with full record metadata.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KafkaReadMessage'}
+        '404':
+          description: Unknown alias/partition, offset out of range, or record gone.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '502':
+          description: Brokers unreachable or fetch deadline elapsed.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/kafka/{alias}/messages:
+    get:
+      tags: [kafka-read]
+      operationId: getKafkaMessages
+      summary: Stream a time window of Kafka messages (NDJSON)
+      description: >-
+        application/x-ndjson — one KafkaReadMessage JSON object per line,
+        oldest-first within each partition, best effort across partitions.
+        Starts at the first offsets at/after from_ts (broker-side
+        offsets-for-times) and ends at to_ts, after limit messages (server
+        cap 10000), or at the end-of-topic snapshot taken when the request
+        started — whichever comes first. A mid-stream broker failure
+        terminates the stream with a final {"error": "..."} line (the 200
+        header is already committed). Same ad-hoc no-group consumer
+        contract as the single-message endpoint.
+      parameters:
+        - name: alias
+          in: path
+          required: true
+          schema: {type: string}
+        - name: from_ts
+          in: query
+          required: true
+          schema: {type: integer, minimum: 0}
+        - name: to_ts
+          in: query
+          schema: {type: integer, minimum: 0}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 10000}
+        - name: partition
+          in: query
+          schema: {type: integer, minimum: 0}
+      responses:
+        '200':
+          description: NDJSON stream of KafkaReadMessage lines.
+          content:
+            application/x-ndjson:
+              schema: {$ref: '#/components/schemas/KafkaReadMessage'}
+        '404':
+          description: Unknown alias or partition.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '502':
+          description: Brokers unreachable while resolving the window.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Detail'}
@@ -1897,6 +2012,50 @@ components:
         entries_in_db: {type: integer}
         bytes_in_db: {type: integer}
       required: [entries_in_memory, bytes_in_memory, entries_in_db, bytes_in_db]
+
+    KafkaReadTopics:
+      type: object
+      properties:
+        topics:
+          type: array
+          items:
+            type: object
+            properties:
+              alias: {type: string}
+              kind: {type: string, enum: [source, dlq, sink]}
+            required: [alias, kind]
+      required: [topics]
+
+    KafkaReadHeader:
+      type: object
+      properties:
+        key: {type: string}
+        value: {type: [string, 'null']}
+        value_encoding: {type: [string, 'null'], enum: [utf-8, base64, null]}
+      required: [key, value, value_encoding]
+
+    KafkaReadMessage:
+      type: object
+      description: >-
+        One Kafka record. Byte fields (payload, key, header values) carry
+        utf-8 text when the bytes decode, otherwise base64, with the
+        encoding flagged alongside. alias echoes the configured read
+        alias; the raw topic name is deliberately absent from the wire.
+      properties:
+        alias: {type: string}
+        partition: {type: integer}
+        offset: {type: integer}
+        timestamp_ms: {type: [integer, 'null']}
+        key: {type: [string, 'null']}
+        key_encoding: {type: [string, 'null'], enum: [utf-8, base64, null]}
+        payload: {type: string}
+        payload_encoding: {type: string, enum: [utf-8, base64]}
+        payload_size_bytes: {type: integer}
+        headers:
+          type: array
+          items: {$ref: '#/components/schemas/KafkaReadHeader'}
+      required: [alias, partition, offset, timestamp_ms, key, key_encoding,
+                 payload, payload_encoding, payload_size_bytes, headers]
 
     ConfigReferenceEntry:
       type: object

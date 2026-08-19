@@ -389,6 +389,8 @@ ui:
                                    # and takes executor slots. false = 403. env: DK_UI__PROBE_ENABLED
   merge_enabled: true              # POST /api/debug/merge; writes merged-<ts>.db into recorder.db_dir,
                                    # never reclaimed. false = 403. env: DK_UI__MERGE_ENABLED
+  kafka_read_enabled: true         # GET /api/debug/kafka/*; ad-hoc reads of the configured topics
+                                   # (source/dlq/sink aliases only). false = 403. env: DK_UI__KAFKA_READ_ENABLED
 
   # --- Deployment metadata ---
   expose_env_vars: []              # env vars captured into worker_config table. env: DK_UI__EXPOSE_ENV_VARS (JSON list)

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Kafka Read API (contract v1.13): `GET /api/v1/debug/kafka/*` fetches
+  one message by (partition, offset) or streams a time window as NDJSON.
+  Topics are addressed by configured alias only (`source`, `dlq`, or a
+  Kafka sink instance name) — raw topic names never appear in the API.
+  Reads use assign()-only consumers: no consumer group is joined, no
+  offsets move. Gated by `ui.auth_token` and the new
+  `ui.kafka_read_enabled` flag (default true); startup logs a warning
+  when Kafka security is on but the UI has no auth token.
 - New cache scope `CacheScope.MEMORY`: the entry lives in worker memory
   only and is never flushed to SQLite. TTL, `peek`, `get`, and `in` work
   as usual. A memory-scoped `set` records a delete tombstone, so it also
