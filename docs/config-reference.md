@@ -392,6 +392,12 @@ ui:
   kafka_read_enabled: true         # GET /api/debug/kafka/*; ad-hoc reads of the configured topics
                                    # (source/dlq/sink aliases only). false = 403. env: DK_UI__KAFKA_READ_ENABLED
 
+  # --- Timed consume pause (Live page; OPT-IN — pausing stops message intake) ---
+  consume_pause:
+    enabled: false                 # serve the pause API + Live-page control. env: DK_UI__CONSUME_PAUSE__ENABLED
+    durations_seconds: [15, 60, 300, 900]  # preset buttons; API accepts any 1..3600s.
+                                   # env: DK_UI__CONSUME_PAUSE__DURATIONS_SECONDS (JSON list)
+
   # --- Deployment metadata ---
   expose_env_vars: []              # env vars captured into worker_config table. env: DK_UI__EXPOSE_ENV_VARS (JSON list)
                                    # e.g. ['GIT_SHA', 'DEPLOY_ENV', 'K8S_POD_NAME']

@@ -1349,6 +1349,31 @@
           "group": "ui"
         },
         {
+          "path": "ui.consume_pause.enabled",
+          "env": "DK_UI__CONSUME_PAUSE__ENABLED",
+          "description": "Serve the consume-pause API (``/api/debug/consume-pause``) and show the pause control on the Live page.",
+          "full_description": "Serve the consume-pause API (``/api/debug/consume-pause``) and show the pause control on the Live page. Off by default: pausing stops message intake for the chosen duration, which is a production-affecting act — enable it deliberately, for debug-friendly deployments.",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.consume_pause.durations_seconds",
+          "env": "DK_UI__CONSUME_PAUSE__DURATIONS_SECONDS",
+          "description": "Preset pause durations (seconds) offered as one-click buttons on the Live page.",
+          "full_description": "Preset pause durations (seconds) offered as one-click buttons on the Live page. The API itself accepts any duration between 1 and 3600 seconds regardless of the presets.",
+          "type": "array",
+          "default": [
+            15,
+            60,
+            300,
+            900
+          ],
+          "secret": false,
+          "group": "ui"
+        },
+        {
           "path": "ui.recorder.db_dir",
           "env": "DK_UI__RECORDER__DB_DIR",
           "description": "",

@@ -1262,6 +1262,56 @@ class UITimelineConfig(BaseModel):
     )
 
 
+class UIConsumePauseConfig(BaseModel):
+    """Timed debug pause of the pipeline consumer, driven from the Live page.
+
+    Opt-in (``enabled: false`` by default) because it directly affects the
+    pipeline's work: while paused the worker fetches nothing from Kafka and
+    consumer lag grows. The pause never leaves the consumer group — it uses
+    partition pause/resume (the same primitive backpressure uses), the poll
+    loop keeps running, and heartbeats continue — so no rebalance is ever
+    triggered, and every pause is bounded by an explicit duration with an
+    auto-resume timer. See ``ConsumePauseController``.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            'Serve the consume-pause API (``/api/debug/consume-pause``) and '
+            'show the pause control on the Live page. Off by default: pausing '
+            'stops message intake for the chosen duration, which is a '
+            'production-affecting act — enable it deliberately, for '
+            'debug-friendly deployments.'
+        ),
+    )
+    durations_seconds: list[int] = Field(
+        default_factory=lambda: [15, 60, 300, 900],
+        description=(
+            'Preset pause durations (seconds) offered as one-click buttons on '
+            'the Live page. The API itself accepts any duration between 1 and '
+            '3600 seconds regardless of the presets.'
+        ),
+    )
+
+    @field_validator('durations_seconds')
+    @classmethod
+    def _validate_durations(cls, v: list[int]) -> list[int]:
+        """Reject preset lists the UI cannot sensibly render.
+
+        Each preset must sit in the same [1, 3600] range the API enforces —
+        a preset button that the API would reject with 422 is a config
+        mistake better caught at startup.
+        """
+        if not v:
+            raise ValueError('durations_seconds must not be empty')
+        if len(v) > 10:
+            raise ValueError('durations_seconds supports at most 10 presets')
+        for d in v:
+            if not (1 <= d <= 3600):
+                raise ValueError(f'durations_seconds entries must be in [1, 3600], got {d}')
+        return v
+
+
 class UIConfig(BaseModel):
     """The operator web UI: HTTP server, presentation, and sub-sections.
 
@@ -1438,6 +1488,7 @@ class UIConfig(BaseModel):
             'config (it runs same-origin in the operator UI).'
         ),
     )
+    consume_pause: UIConsumePauseConfig = Field(default_factory=UIConsumePauseConfig)
     recorder: UIRecorderConfig = Field(default_factory=UIRecorderConfig)
     release: UIReleaseConfig = Field(default_factory=UIReleaseConfig)
     probe_details: UIProbeDetailsConfig = Field(default_factory=UIProbeDetailsConfig)

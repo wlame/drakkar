@@ -65,6 +65,7 @@ nav:
   - Executor: executor.md
   - Observability: observability.md
   - Kafka Read API (inspect topics from the UI server): kafka-read.md
+  - Consume Pause (timed debug pause from the Live page): consume-pause.md
   - Debugging Bottlenecks: debugging-bottlenecks.md
   - Runtime Health (event-loop lag watchdog): runtime-health.md
   - Offload (CPU-bound hook work off the loop): offload.md

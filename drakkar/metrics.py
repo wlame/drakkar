@@ -269,6 +269,11 @@ backpressure_active = Gauge(
     'Whether consumer is paused due to backpressure (1=paused, 0=flowing)',
 )
 
+consume_pause_active = Gauge(
+    'drakkar_consume_pause_active',
+    'Whether consuming is paused by an operator debug pause (1=paused, 0=flowing)',
+)
+
 total_queued = Gauge(
     'drakkar_total_queued',
     'Total messages buffered in partition queues plus in-flight tasks',

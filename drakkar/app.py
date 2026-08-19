@@ -24,6 +24,7 @@ from structlog.contextvars import bind_contextvars, unbind_contextvars
 from drakkar import __version__
 from drakkar.cache import CacheEngine
 from drakkar.config import DrakkarConfig, load_config
+from drakkar.consume_pause import ConsumePauseController
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
@@ -183,6 +184,10 @@ class DrakkarApp:
         # dlq.on_send_failure=stall. Excluded from backpressure resume;
         # cleared on revoke so a reassignment starts fresh.
         self._stalled_partitions: set[int] = set()
+        # Operator-driven timed pause (Live page control; opt-in via
+        # ui.consume_pause.enabled). Constructed unconditionally — it is a
+        # tiny state holder; the routes gate on the config flag.
+        self._consume_pause = ConsumePauseController(self)
         # Readiness signal for the ``/readyz`` Kubernetes probe (exposed
         # via the debug server). Flipped to ``True`` after the worker has
         # cleared its full startup sequence — consumer subscribed, sinks
@@ -216,6 +221,11 @@ class DrakkarApp:
     @property
     def config(self) -> DrakkarConfig:
         return self._config
+
+    @property
+    def consume_pause(self) -> ConsumePauseController:
+        """The operator-driven timed pause controller (Live page control)."""
+        return self._consume_pause
 
     @property
     def handler(self) -> BaseDrakkarHandler:

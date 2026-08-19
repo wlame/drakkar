@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Timed consume pause (contract v1.14, opt-in via
+  `ui.consume_pause.enabled`): the Live page gains preset buttons
+  (15s/1m/5m/15m by default, configurable) that pause message intake for
+  a bounded period, with a countdown banner and a Resume button. The
+  pause uses partition pause/resume — the consumer group is never left,
+  so no rebalance — auto-resumes at its deadline, coordinates with
+  backpressure (never overrides it), and never touches stall-paused
+  partitions. New gauge `drakkar_consume_pause_active`. Enabled in the
+  integration demo's main cluster.
 - Kafka Read API (contract v1.13): `GET /api/v1/debug/kafka/*` fetches
   one message by (partition, offset) or streams a time window as NDJSON.
   Topics are addressed by configured alias only (`source`, `dlq`, or a

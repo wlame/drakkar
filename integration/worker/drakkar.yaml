@@ -187,6 +187,11 @@ ui:
   enabled: true
   host: "0.0.0.0"
   port: 8080
+  # Timed consume pause from the Live page. Deliberately enabled on the
+  # main cluster only (the fast workers stay untouched) so the demo can
+  # exercise pausing without stopping all intake.
+  consume_pause:
+    enabled: true
   expose_env_vars:
     - "WORKER_ID"
     - "DK_CONFIG"

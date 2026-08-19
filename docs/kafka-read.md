@@ -180,6 +180,21 @@ does not apply here, same caveat as [cache values](cache.md#secrets-in-cache-val
 
 ---
 
+## UI integration
+
+drakkar-ui builds two features on this API:
+
+- Every `p:offset` Kafka icon across the app (live cards, history, task
+  detail, trace) offers **Probe this message** — it opens the Message
+  Probe tab prefilled with the real record fetched by coordinates. With
+  an external Kafka-UI configured too, the icon becomes a small action
+  menu with both destinations; with neither available, the icon hides.
+- A **DLQ** tab on the Debug page lists a time window of the dead-letter
+  topic, opens any message in a side panel, and sends it to the probe.
+
+Both appear automatically when the backend serves this API and disappear
+when `ui.kafka_read_enabled=false`.
+
 ## Related pages
 
 - [Observability](observability.md) — the operator UI this API belongs to

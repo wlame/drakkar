@@ -642,7 +642,12 @@ class AppLifecycle:
                 if idle_slots > 0:
                     executor_idle_waste.inc(idle_slots * dt)
 
-            if app._paused and total <= low_watermark:
+            # An active operator debug pause (ui.consume_pause) outranks the
+            # backpressure resume: queues draining below the low watermark
+            # must not restart fetching while the operator asked for quiet.
+            # The debug resume hands control back here — if backpressure is
+            # still holding, this branch resumes once queues drain.
+            if app._paused and total <= low_watermark and not app._consume_pause.active:
                 # Never resume partitions paused by a delivery stall — they
                 # stay paused until restart/revoke regardless of backpressure.
                 partition_ids = [p for p in app._processors if p not in app._stalled_partitions]
@@ -721,13 +726,13 @@ class AppLifecycle:
 
         assigned_partitions.set(len(app._processors))
 
-        # If backpressure is active, the poll loop has already paused the
-        # previously-assigned partitions. Newly-assigned partitions were not
-        # in that pause set, so Kafka would deliver messages from them until
-        # the next poll tick re-evaluated the watermark. Pause them now so
-        # the backpressure gate is not bypassed between assignment and the
-        # next _poll_loop iteration.
-        if app._paused and newly_added and app._consumer is not None:
+        # If backpressure or an operator debug pause is active, the
+        # previously-assigned partitions are already paused. Newly-assigned
+        # partitions were not in that pause set, so Kafka would deliver
+        # messages from them until the next poll tick (or the pause's end).
+        # Pause them now so neither gate is bypassed between assignment and
+        # the next _poll_loop iteration.
+        if (app._paused or app._consume_pause.active) and newly_added and app._consumer is not None:
             consumer = app._consumer
 
             async def _pause_newly_assigned() -> None:

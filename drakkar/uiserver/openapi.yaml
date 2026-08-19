@@ -812,6 +812,74 @@ paths:
               schema: {$ref: '#/components/schemas/Detail'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
+  /api/v1/debug/consume-pause:
+    get:
+      tags: [debug-tools]
+      operationId: getConsumePause
+      summary: Consume-pause state
+      description: >-
+        Always 200 — `enabled: false` in the body is the signal the Live
+        page hides its pause control on (no failure-probe needed).
+      responses:
+        '200':
+          description: Current pause state and the configured presets.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConsumePauseState'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [debug-tools]
+      operationId: postConsumePause
+      summary: Pause consuming for a bounded period
+      description: >-
+        Pauses fetching on the assigned partitions for duration_seconds
+        (1-3600), then auto-resumes. Never leaves the consumer group — the
+        poll loop and heartbeats continue, so no rebalance is triggered. A
+        pause while one is active replaces the deadline. 403 {"error":...}
+        when ui.consume_pause.enabled=false (default — the feature is
+        opt-in); 503 while the consumer is not running.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                duration_seconds: {type: integer, minimum: 1, maximum: 3600}
+              required: [duration_seconds]
+      responses:
+        '200':
+          description: The new (active) pause state.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConsumePauseState'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '503':
+          description: Consumer not running yet.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/consume-resume:
+    post:
+      tags: [debug-tools]
+      operationId: postConsumeResume
+      summary: Resume consuming now
+      description: >-
+        Ends an active debug pause immediately. Idempotent — resuming while
+        not paused answers 200 with the inactive state. Partitions still
+        held by backpressure stay paused until queues drain (the pause
+        never overrides backpressure). 403 when
+        ui.consume_pause.enabled=false.
+      responses:
+        '200':
+          description: The (inactive) pause state.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConsumePauseState'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
   /api/v1/debug/kafka/topics:
     get:
       tags: [kafka-read]
@@ -2012,6 +2080,22 @@ components:
         entries_in_db: {type: integer}
         bytes_in_db: {type: integer}
       required: [entries_in_memory, bytes_in_memory, entries_in_db, bytes_in_db]
+
+    ConsumePauseState:
+      type: object
+      description: >-
+        State of the operator debug pause. resume_at_ms / requested_seconds
+        are null while inactive; durations_seconds carries the configured
+        Live-page presets.
+      properties:
+        enabled: {type: boolean}
+        durations_seconds:
+          type: array
+          items: {type: integer}
+        active: {type: boolean}
+        resume_at_ms: {type: [integer, 'null']}
+        requested_seconds: {type: [integer, 'null']}
+      required: [enabled, durations_seconds, active, resume_at_ms, requested_seconds]
 
     KafkaReadTopics:
       type: object

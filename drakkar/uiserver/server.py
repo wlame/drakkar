@@ -581,6 +581,7 @@ def create_ui_app(
     # module-import graph acyclic.
     from drakkar.uiserver.routes_cache import create_cache_router
     from drakkar.uiserver.routes_config_reference import create_config_reference_router
+    from drakkar.uiserver.routes_consume_pause import create_consume_pause_router
     from drakkar.uiserver.routes_debug import create_debug_router
     from drakkar.uiserver.routes_kafka_read import create_kafka_read_router
     from drakkar.uiserver.routes_live import create_live_router
@@ -645,6 +646,7 @@ def create_ui_app(
         create_live_router(deps, include_html=include_html),
         create_debug_router(deps, include_html=include_html),
         create_cache_router(deps),
+        create_consume_pause_router(deps),
         create_kafka_read_router(deps),
         create_runtime_router(deps),
         create_config_reference_router(deps),
