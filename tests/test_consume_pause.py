@@ -40,9 +40,7 @@ from drakkar.models import ExecutorTask
 
 class _Handler(BaseDrakkarHandler):
     async def arrange(self, messages, pending):
-        return [
-            ExecutorTask(task_id=f't-{m.offset}', args=['x'], source_offsets=[m.offset]) for m in messages
-        ]
+        return [ExecutorTask(task_id=f't-{m.offset}', args=['x'], source_offsets=[m.offset]) for m in messages]
 
 
 @pytest.fixture

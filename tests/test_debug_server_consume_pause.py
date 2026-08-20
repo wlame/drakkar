@@ -97,9 +97,7 @@ async def test_mutating_routes_403_when_disabled():
 async def test_routes_require_token_when_configured():
     async with _client(_mock_app(), make_ui_config(enabled=True, auth_token='secret-t')) as client:
         anonymous = await client.get('/api/debug/consume-pause')
-        authed = await client.get(
-            '/api/debug/consume-pause', headers={'Authorization': 'Bearer secret-t'}
-        )
+        authed = await client.get('/api/debug/consume-pause', headers={'Authorization': 'Bearer secret-t'})
     assert anonymous.status_code == 401
     assert authed.status_code == 200
 
