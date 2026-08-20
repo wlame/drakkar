@@ -1533,6 +1533,10 @@ components:
         origin: {type: string}
         client_name: {type: [string, 'null']}
         request_id: {type: [string, 'null']}
+        # v1.16, optional: present only for throughput-counted completions
+        # (throughput.cost_label configured, success, cost >= min_cost).
+        cost: {type: [number, 'null']}
+        speed: {type: [number, 'null'], description: cost / duration, cost-units per second.}
       required: [task_id, status]
 
     ArrangeTasksMap:

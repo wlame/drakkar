@@ -46,6 +46,7 @@ from drakkar.models import (
 )
 from drakkar.offsets import OffsetTracker
 from drakkar.recorder import EventRecorder
+from drakkar.throughput import ThroughputTracker
 
 logger = structlog.get_logger()
 
@@ -190,6 +191,7 @@ class PartitionProcessor:
         dlq_send: DLQSendCallback | None = None,
         on_dlq_failure: str = 'drop',
         on_stall: StallCallback | None = None,
+        throughput: ThroughputTracker | None = None,
     ) -> None:
         self._partition_id = partition_id
         self._handler = handler
@@ -199,6 +201,7 @@ class PartitionProcessor:
         self._on_collect = on_collect
         self._on_commit = on_commit
         self._recorder = recorder
+        self._throughput = throughput
         self._on_parse_error = on_parse_error
         self._dlq_send = dlq_send
         # dlq.on_send_failure strategy: 'drop' commits past lost payloads,
@@ -759,12 +762,20 @@ class PartitionProcessor:
             if result.spawn_seconds is not None:
                 executor_spawn_duration.observe(result.spawn_seconds)
             observe_task_labels(task.labels)
+            # Contract v1.16: counted successful completions carry cost and
+            # speed. The tracker owns the label-side counting rules; the
+            # failed and precomputed paths never reach this call.
+            cost_speed = (
+                self._throughput.observe_completion(task.labels, result.duration_seconds) if self._throughput else None
+            )
             if self._recorder:
                 self._recorder.record_task_completed(
                     result,
                     self._partition_id,
                     pool_active=self._executor_pool.active_count,
                     pool_waiting=self._executor_pool.waiting_count,
+                    cost=cost_speed[0] if cost_speed else None,
+                    speed=cost_speed[1] if cost_speed else None,
                 )
 
             bind_contextvars(hook='on_task_complete', task_id=task.task_id)

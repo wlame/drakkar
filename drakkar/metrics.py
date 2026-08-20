@@ -116,6 +116,42 @@ task_label_value = Histogram(
     buckets=(0.001, 0.01, 0.1, 1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9),
 )
 
+# --- Throughput (contract v1.16) ---
+#
+# Cost is operator-defined and unitless (bytes, a computed score, ...), so
+# the speed buckets are log-spaced like task_label_value's, shifted up:
+# speed = cost / duration can exceed the raw cost range.
+task_speed = Histogram(
+    'drakkar_task_speed',
+    (
+        'Per-task speed (cost / duration, cost-units per second) of '
+        'throughput-counted completions. Requires throughput.cost_label; '
+        'excluded tasks (failed, precomputed, below min_cost) are not '
+        'observed.'
+    ),
+    buckets=(0.001, 0.01, 0.1, 1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10),
+)
+
+throughput_gauge = Gauge(
+    'drakkar_throughput',
+    (
+        'Sliding-window throughput: sum of the cost of tasks completed in '
+        'the last {window} seconds divided by the window, refreshed each '
+        'second. Zero while idle; unset when throughput.cost_label is off.'
+    ),
+    ['window'],
+)
+
+task_rate_gauge = Gauge(
+    'drakkar_task_rate',
+    (
+        'Sliding-window completion rate (tasks per second) over the same '
+        'windows as drakkar_throughput, counting only throughput-counted '
+        'tasks.'
+    ),
+    ['window'],
+)
+
 # Set once at startup from MetricsConfig; empty tuple = feature off, and the
 # per-task observe loop below is then a no-op.
 _task_label_histogram_keys: tuple[str, ...] = ()

@@ -2154,6 +2154,59 @@ async def test_sync_state_writes_row(tmp_path):
     await rec.stop()
 
 
+async def test_task_completed_metadata_carries_cost_and_speed(recorder):
+    result = make_result('t-counted')
+    queue = recorder.subscribe()
+
+    recorder.record_task_completed(result, partition=0, cost=8_388_608.0, speed=4_194_304.123456)
+
+    event = queue.get_nowait()
+    meta = json.loads(event['metadata'])
+    assert meta['cost'] == 8_388_608.0
+    assert meta['speed'] == 4_194_304.123  # rounded to 3 decimals
+    recorder.unsubscribe(queue)
+
+
+async def test_task_completed_metadata_omits_cost_when_uncounted(recorder):
+    result = make_result('t-uncounted')
+    queue = recorder.subscribe()
+
+    recorder.record_task_completed(result, partition=0)
+
+    event = queue.get_nowait()
+    meta = json.loads(event['metadata']) if event.get('metadata') else {}
+    assert 'cost' not in meta
+    assert 'speed' not in meta
+    recorder.unsubscribe(queue)
+
+
+async def test_sync_state_writes_throughput_column(tmp_path):
+    rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    await rec.start()
+    windows = {'1': {'throughput': 5.0, 'task_rate': 1.0, 'tasks': 1}}
+    rec.set_state_provider(lambda: {'uptime_seconds': 1.0, 'throughput': windows})
+
+    await rec._sync_state()
+
+    async with rec._db.execute('SELECT throughput FROM worker_state ORDER BY id DESC LIMIT 1') as cur:
+        row = await cur.fetchone()
+    assert json.loads(row[0]) == windows
+    await rec.stop()
+
+
+async def test_sync_state_throughput_column_null_when_feature_off(tmp_path):
+    rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    await rec.start()
+    rec.set_state_provider(lambda: {'uptime_seconds': 1.0})
+
+    await rec._sync_state()
+
+    async with rec._db.execute('SELECT throughput FROM worker_state ORDER BY id DESC LIMIT 1') as cur:
+        row = await cur.fetchone()
+    assert row[0] is None
+    await rec.stop()
+
+
 async def test_sync_state_writes_runtime_health_columns(tmp_path):
     rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
     await rec.start()

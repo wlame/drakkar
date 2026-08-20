@@ -1013,6 +1013,33 @@
       ]
     },
     {
+      "key": "throughput",
+      "title": "Throughput (throughput:)",
+      "doc_anchor": "throughput-throughput",
+      "entries": [
+        {
+          "path": "throughput.cost_label",
+          "env": "DK_THROUGHPUT__COST_LABEL",
+          "description": "Task label key whose numeric value is the task cost — a number correlating with computational hardness (bytes, a computed score, any unit).",
+          "full_description": "Task label key whose numeric value is the task cost — a number correlating with computational hardness (bytes, a computed score, any unit). Empty (the default) disables the whole feature. Values that do not parse as finite numbers leave the task uncounted.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "throughput"
+        },
+        {
+          "path": "throughput.min_cost",
+          "env": "DK_THROUGHPUT__MIN_COST",
+          "description": "Smallest cost worth counting.",
+          "full_description": "Smallest cost worth counting. Tasks below it carry no speed and enter no aggregate — useful when fixed overhead dominates small tasks and their speeds would mislead.",
+          "type": "number",
+          "default": 0.0,
+          "secret": false,
+          "group": "throughput"
+        }
+      ]
+    },
+    {
       "key": "runtime_health",
       "title": "Runtime health (runtime_health:)",
       "doc_anchor": "runtime-health-runtime-health",

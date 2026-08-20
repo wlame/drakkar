@@ -314,6 +314,24 @@ metrics:
 
 ---
 
+## Throughput (`throughput:`)
+
+📚 [Throughput](throughput.md) · [Observability](observability.md)
+
+Opt-in task cost tracking: a numeric label becomes per-task speed and
+sliding-window throughput.
+
+```yaml
+throughput:
+  cost_label: ""     # task label key holding the numeric cost; "" disables.
+                     # env: DK_THROUGHPUT__COST_LABEL
+  min_cost: 0.0      # smallest cost worth counting; smaller tasks carry no
+                     # speed and enter no aggregate.
+                     # env: DK_THROUGHPUT__MIN_COST
+```
+
+---
+
 ## Runtime health (`runtime_health:`)
 
 📚 [Runtime health](runtime-health.md) · [Observability](observability.md)

@@ -86,8 +86,8 @@ The rows that matter most for after-the-fact investigations:
 - **`runtime_stall`** persists the event-loop stall duration **with the
   captured stack traces** ([Runtime Health](runtime-health.md)), so "the
   whole worker froze for 3 seconds at 04:12" stays answerable from the
-  archive. Emitted by the Python backend's monitor today; the Go monitor
-  is not implemented yet.
+  archive. Both backends emit it; on Go the stacks are goroutine-dump
+  groups.
 - **`resource_sample`** is a periodic snapshot (every
   `state_sync_interval_seconds`) of what the worker consumed: RSS, thread
   count, open file descriptors, CPU percent for the process and its
@@ -211,6 +211,7 @@ CREATE TABLE IF NOT EXISTS worker_state (
     paused              INTEGER,
     health_state        TEXT,    -- 'healthy'/'degraded'/'stalled'; NULL = monitor off
     loop_lag_ms         REAL,    -- event-loop lag at the sync tick
+    throughput          TEXT,    -- five-window throughput JSON; NULL = feature off
     updated_at          REAL NOT NULL,
     updated_at_dt       TEXT NOT NULL
 );

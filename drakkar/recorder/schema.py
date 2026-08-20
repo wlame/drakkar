@@ -172,6 +172,7 @@ CREATE TABLE IF NOT EXISTS worker_state (
     paused              INTEGER,
     health_state        TEXT,
     loop_lag_ms         REAL,
+    throughput          TEXT,
     updated_at          REAL NOT NULL,
     updated_at_dt       TEXT NOT NULL
 );

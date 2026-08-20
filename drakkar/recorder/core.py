@@ -1129,6 +1129,23 @@ class EventRecorder:
             }
         )
 
+    def broadcast_throughput(self, windows: dict) -> None:
+        """Broadcast one ``throughput`` WS frame (contract v1.16).
+
+        Broadcast-only like ``net_io`` — never buffered to the DB, so the
+        pinned events-table row shape is untouched. ``windows`` is the
+        five-window aggregate from the throughput tracker.
+        """
+        ts = time.time()
+        self._broadcast_ws(
+            {
+                'ts': ts,
+                'dt': format_dt(ts),
+                'event': 'throughput',
+                'metadata': encode_json_str({'windows': windows}),
+            }
+        )
+
     def _resource_sample(self) -> None:
         """Record one ``resource_sample`` event: what this worker consumed.
 
@@ -1260,8 +1277,8 @@ class EventRecorder:
                 pool_active, pool_max, total_queued,
                 consumed_count, completed_count, failed_count,
                 produced_count, committed_count, paused,
-                health_state, loop_lag_ms, updated_at, updated_at_dt)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                health_state, loop_lag_ms, throughput, updated_at, updated_at_dt)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 app_state.get('uptime_seconds', 0),
                 encode_json_str(app_state.get('assigned_partitions', [])),
@@ -1278,6 +1295,8 @@ class EventRecorder:
                 # NULL when the runtime-health monitor is off (v1.15).
                 app_state.get('health_state'),
                 app_state.get('loop_lag_ms'),
+                # NULL when throughput.cost_label is off (v1.16).
+                encode_json_str(app_state['throughput']) if app_state.get('throughput') else None,
                 now,
                 format_dt(now),
             ],
@@ -1589,6 +1608,8 @@ class EventRecorder:
         origin: str | None = None,
         client_name: str | None = None,
         request_id: str | None = None,
+        cost: float | None = None,
+        speed: float | None = None,
     ) -> None:
         self._counters['completed'] += 1
         duration_ms = result.duration_seconds * 1000
@@ -1641,6 +1662,12 @@ class EventRecorder:
             # Parent-side share of the duration (see ExecutorResult.spawn_seconds);
             # the live UI shows it in the timeline hover detail.
             completed_meta['spawn_ms'] = round(result.spawn_seconds * 1000, 1)
+        if cost is not None and speed is not None:
+            # Contract v1.16: present only for throughput-counted tasks —
+            # the caller applied the counting rules; excluded tasks carry
+            # no keys at all, never zeros.
+            completed_meta['cost'] = cost
+            completed_meta['speed'] = round(speed, 3)
         if completed_meta:
             entry['metadata'] = encode_json_str(completed_meta)
         if include_output:

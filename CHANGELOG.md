@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Task cost, speed, and throughput (contract v1.16, opt-in via
+  `throughput.cost_label`): name a numeric task label that correlates
+  with each task's computational hardness — file size, a computed score,
+  any unit. Counted completions gain `cost` and `speed` (cost/duration)
+  in their `task_completed` metadata and on `GET /api/v1/recent-tasks`
+  rows; a per-second broadcast-only `throughput` WS frame carries
+  sliding-window aggregates (throughput, task rate, task count) for the
+  fixed window set 1/5/30/60/300 s; new Prometheus series
+  `drakkar_task_speed`, `drakkar_throughput{window}`,
+  `drakkar_task_rate{window}`; `worker_state` rows snapshot the windows
+  as JSON in the new `throughput` column, so merged fleet databases
+  replay throughput history. `throughput.min_cost` excludes tasks whose
+  fixed overhead would fabricate misleading speeds; failed and
+  precomputed tasks are never counted. New docs page: Throughput. The
+  integration demo's main worker enables it with the scan target's byte
+  size as the cost.
+
 ## [1.14.1] - 2026-08-20
 
 ### Fixed

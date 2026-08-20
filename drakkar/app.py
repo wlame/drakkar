@@ -155,6 +155,10 @@ class DrakkarApp:
         # ``_webapp`` below; the uiserver routes read it for the
         # /runtime/health snapshot.
         self._runtime_health: Any = None
+        # Throughput tracker (contract v1.16) — constructed by the
+        # lifecycle when throughput.cost_label is set; None otherwise.
+        # Partition processors feed it, worker_state snapshots read it.
+        self._throughput: Any = None
         # Webapp HTTP server — constructed in lifecycle._async_run when
         # webapp.enabled=true. ``None`` otherwise (the lifecycle never
         # touches the field on the disabled path). Held here so the
@@ -415,6 +419,10 @@ class DrakkarApp:
             health_state, loop_lag_ms = self._runtime_health.brief_state()
             state['health_state'] = health_state
             state['loop_lag_ms'] = loop_lag_ms
+        if self._throughput is not None:
+            # Contract v1.16: the five-window aggregate as JSON — the
+            # worker_state time series then replays throughput history.
+            state['throughput'] = self._throughput.window_stats()
         return state
 
     async def _handle_dlq_failure(self, error: 'DeliveryError', partition_id: int, reason: str) -> None:

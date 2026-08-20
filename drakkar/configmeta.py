@@ -38,6 +38,7 @@ from drakkar.config import (
     OffloadConfig,
     RuntimeHealthConfig,
     SinksConfig,
+    ThroughputConfig,
     UIConfig,
     WebAppConfig,
 )
@@ -123,6 +124,7 @@ _GROUP_DEFS: list[tuple[str, str, str, type[BaseModel] | None]] = [
     ('sinks', 'Sinks (sinks:)', 'sinks-sinks', SinksConfig),
     ('dlq', 'Dead letter queue (dlq:)', 'dead-letter-queue-dlq', DLQConfig),
     ('metrics', 'Metrics (metrics:)', 'metrics-metrics', MetricsConfig),
+    ('throughput', 'Throughput (throughput:)', 'throughput-throughput', ThroughputConfig),
     ('runtime_health', 'Runtime health (runtime_health:)', 'runtime-health-runtime-health', RuntimeHealthConfig),
     ('offload', 'Offload pool (offload:)', 'offload-pool-offload', OffloadConfig),
     ('logging', 'Logging (logging:)', 'logging-logging', LoggingConfig),

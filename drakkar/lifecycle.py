@@ -145,6 +145,7 @@ class AppLifecycle:
         await self._start_observability()
         await self._start_ui_and_recorder()
         self._start_runtime_health()
+        self._start_throughput()
         self._wire_annotator()
         self._wire_offload_pool()
         await self._start_cache()
@@ -425,6 +426,26 @@ class AppLifecycle:
             recorder=app._recorder,
         )
         app._runtime_health.start()
+
+    def _start_throughput(self) -> None:
+        """Start the task cost/throughput tracker when configured.
+
+        Runs after the recorder for the same reason as the runtime-health
+        monitor: the per-second WS frame broadcasts through it. A None
+        recorder (ui.enabled=false) still leaves Prometheus and the
+        worker_state snapshots working. Must run before partitions are
+        assigned — processors capture the tracker handle at construction.
+        """
+        app = self._app
+        if not app._config.throughput.cost_label:
+            return
+        from drakkar.throughput import ThroughputTracker
+
+        app._throughput = ThroughputTracker(
+            app._config.throughput,
+            recorder=app._recorder,
+        )
+        app._throughput.start()
 
     def _wire_annotator(self) -> None:
         """Replace the handler's NoOpAnnotator stub with a live one.
@@ -719,6 +740,7 @@ class AppLifecycle:
                     dlq_send=app._dlq_sink.send if app._dlq_sink else None,
                     on_dlq_failure=app._config.dlq.on_send_failure,
                     on_stall=self._pause_stalled_partition,
+                    throughput=app._throughput,
                 )
                 app._processors[pid] = processor
                 processor.start()
@@ -1184,6 +1206,16 @@ class AppLifecycle:
             # Stop the runtime-health monitor before the recorder for the
             # same reason as the cache engine below: its final transition
             # or stall event still needs a live recorder to land in.
+            if app._throughput is not None:
+                try:
+                    await app._throughput.stop()
+                except Exception as exc:
+                    await log.awarning(
+                        'throughput_stop_failed',
+                        category='lifecycle',
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
             if app._runtime_health is not None:
                 try:
                     await app._runtime_health.stop()

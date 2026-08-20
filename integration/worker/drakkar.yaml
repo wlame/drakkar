@@ -179,6 +179,14 @@ metrics:
   enabled: true
   port: 9090
 
+# Task cost / speed / throughput demo (contract v1.16): every scan task
+# already labels its target's exact byte size; treating it as the cost
+# makes the timeline's throughput track read as "bytes scanned per second".
+# min_cost skips tiny files, where process overhead dwarfs the scan itself.
+throughput:
+  cost_label: file_size_bytes
+  min_cost: 50000
+
 logging:
   level: "INFO"
   format: "json"

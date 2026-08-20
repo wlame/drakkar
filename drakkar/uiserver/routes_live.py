@@ -410,6 +410,18 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
                         t['pid'] = e['pid']
                     if e['event'] == 'task_completed':
                         t['stdout_size'] = e.get('stdout_size')
+                        # Contract v1.16: throughput-counted completions
+                        # carry cost/speed in their metadata; surface them
+                        # on the row so the timeline shows per-task speed
+                        # without re-deriving. Absent for excluded tasks.
+                        if e.get('metadata'):
+                            try:
+                                completed_meta = json.loads(e['metadata'])
+                                if 'speed' in completed_meta:
+                                    t['cost'] = completed_meta.get('cost')
+                                    t['speed'] = completed_meta.get('speed')
+                            except (json.JSONDecodeError, TypeError):
+                                pass
 
         # Apply ws_min_duration_ms filtering: hide fast completed tasks
         # from the live UI, same as the WebSocket path. Running tasks

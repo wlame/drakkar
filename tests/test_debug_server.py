@@ -2476,6 +2476,32 @@ class TestApiRecentTasks:
         assert tasks_by_id['task-1']['duration'] == 1.5
         await db.close()
 
+    async def test_recent_tasks_carries_cost_and_speed_from_metadata(self, tmp_path, mock_recorder, mock_app):
+        """Contract v1.16: throughput-counted completions surface cost/speed
+        on the row; uncounted ones (task-1 here) carry no keys at all."""
+        client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
+        now = time.time()
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, args, pid) '
+            "VALUES (?, ?, 'task_started', 0, 'task-5', '[]', 500)",
+            (now - 6, '2026-04-02'),
+        )
+        await db.execute(
+            'INSERT INTO events (ts, dt, event, partition, task_id, duration, pid, metadata) '
+            "VALUES (?, ?, 'task_completed', 0, 'task-5', 2.0, 500, ?)",
+            (now - 4, '2026-04-02', json.dumps({'cost': 8388608.0, 'speed': 4194304.0})),
+        )
+        await db.commit()
+
+        async with client as c:
+            resp = await c.get('/api/recent-tasks?minutes=5')
+
+        tasks_by_id = {t['task_id']: t for t in resp.json()['tasks']}
+        assert tasks_by_id['task-5']['cost'] == 8388608.0
+        assert tasks_by_id['task-5']['speed'] == 4194304.0
+        assert 'speed' not in tasks_by_id['task-1']
+        await db.close()
+
     async def test_recent_tasks_running_status(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
         async with client as c:

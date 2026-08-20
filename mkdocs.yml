@@ -69,6 +69,7 @@ nav:
   - Debugging Bottlenecks: debugging-bottlenecks.md
   - Runtime Health (event-loop lag watchdog): runtime-health.md
   - Host Pressure (NFS RTT, PSI, throttling): host-pressure.md
+  - Throughput (task cost and speed): throughput.md
   - Offload (CPU-bound hook work off the loop): offload.md
   - Local Databases: local-databases.md
   - Performance: performance.md
