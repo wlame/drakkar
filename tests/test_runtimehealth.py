@@ -498,3 +498,24 @@ def test_probe_respects_interval():
 
     with mon._probe_lock:
         assert len(mon._pending_probes) == 1
+
+
+def test_probe_first_capture_ignores_host_uptime(monkeypatch):
+    # time.monotonic() counts from BOOT on Linux: on a freshly started host
+    # (every CI runner) it can be smaller than the probe interval, and the
+    # old 0.0 sentinel silently delayed the first probe until host uptime
+    # exceeded it. The first probe must fire regardless of the clock value.
+    import threading
+
+    from drakkar import runtimehealth as rh
+
+    config = RuntimeHealthConfig(probe_interval_seconds=3600.0)
+    mon = RuntimeHealthMonitor(config, recorder=RecorderSpy())  # type: ignore[arg-type]
+    mon._loop_thread_id = threading.get_ident()
+    monkeypatch.setattr(rh.time, 'monotonic', lambda: 100.0)  # "booted 100 s ago"
+    mon._heartbeat = 100.0
+
+    mon._sample_once()
+
+    with mon._probe_lock:
+        assert len(mon._pending_probes) == 1

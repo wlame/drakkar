@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The first opt-in runtime probe now fires immediately after start. Before,
+  the probe scheduler compared `time.monotonic()` — which counts from boot
+  on Linux — against a zero baseline, so on a freshly started host the
+  first `runtime_probe` event silently waited until host uptime exceeded
+  `runtime_health.probe_interval_seconds`.
+
 ## [1.14.0] - 2026-08-20
 
 ### Added

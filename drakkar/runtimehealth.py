@@ -298,8 +298,12 @@ class RuntimeHealthMonitor:
         self._loop_native_tid: int | None = None
         # Opt-in probe bookkeeping: capture happens on the sampler thread,
         # but recording must run on the loop — captured probes queue here
-        # and the next heartbeat tick drains them.
-        self._last_probe_at = 0.0
+        # and the next heartbeat tick drains them. None (not 0.0) marks
+        # "never probed": time.monotonic() counts from BOOT on Linux, so on
+        # a freshly started host `monotonic() - 0.0` can be smaller than
+        # the probe interval and a zero sentinel would silently delay the
+        # first probe until host uptime exceeds it.
+        self._last_probe_at: float | None = None
         self._pending_probes: list[dict[str, Any]] = []
         self._probe_lock = threading.Lock()
         # Last unit count the heartbeat computed; probes reuse it because
@@ -566,8 +570,8 @@ class RuntimeHealthMonitor:
         now = time.monotonic()
         stalled_now = now - self._heartbeat >= self._config.stall_seconds
         episode = self._episode
-        probe_due = (
-            self._config.probe_interval_seconds > 0 and now - self._last_probe_at >= self._config.probe_interval_seconds
+        probe_due = self._config.probe_interval_seconds > 0 and (
+            self._last_probe_at is None or now - self._last_probe_at >= self._config.probe_interval_seconds
         )
         if not stalled_now and episode is None and not probe_due:
             return
