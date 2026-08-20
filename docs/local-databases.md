@@ -209,11 +209,17 @@ CREATE TABLE IF NOT EXISTS worker_state (
     produced_count      INTEGER,
     committed_count     INTEGER,
     paused              INTEGER,
+    health_state        TEXT,    -- 'healthy'/'degraded'/'stalled'; NULL = monitor off
+    loop_lag_ms         REAL,    -- event-loop lag at the sync tick
     updated_at          REAL NOT NULL,
     updated_at_dt       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_worker_state_updated ON worker_state(updated_at);
 ```
+
+The two runtime-health columns let a merged fleet database answer "which
+worker was degraded when" without replaying events. Databases written by
+older backends lack them; readers treat that as NULL.
 
 ### `cache_entries` (cache)
 

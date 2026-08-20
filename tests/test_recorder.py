@@ -2148,7 +2148,22 @@ async def test_sync_state_writes_row(tmp_path):
     assert data['consumed_count'] == 100
     assert data['completed_count'] == 50
     assert data['paused'] == 0
+    assert data['health_state'] is None  # provider carried no monitor state
+    assert data['loop_lag_ms'] is None
     assert data['updated_at_dt'] is not None
+    await rec.stop()
+
+
+async def test_sync_state_writes_runtime_health_columns(tmp_path):
+    rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+    await rec.start()
+    rec.set_state_provider(lambda: {'uptime_seconds': 1.0, 'health_state': 'degraded', 'loop_lag_ms': 132.5})
+
+    await rec._sync_state()
+
+    async with rec._db.execute('SELECT health_state, loop_lag_ms FROM worker_state ORDER BY id DESC LIMIT 1') as cur:
+        row = await cur.fetchone()
+    assert row == ('degraded', 132.5)
     await rec.stop()
 
 
@@ -5433,6 +5448,12 @@ class TestResourceSample:
         monkeypatch.setattr(recorder_core, 'read_self_stats', lambda: (rss, threads))
         monkeypatch.setattr(recorder_core, 'read_open_fd_count', lambda: fds)
         monkeypatch.setattr(recorder_core, 'read_net_io_bytes', lambda: net)
+        # Host-pressure sources default to "unavailable" so tests never read
+        # the real /proc of the machine running them.
+        monkeypatch.setattr(recorder_core, 'read_loadavg', lambda: None)
+        monkeypatch.setattr(recorder_core, 'read_pressure', lambda: None)
+        monkeypatch.setattr(recorder_core, 'read_cpu_throttle', lambda: None)
+        monkeypatch.setattr(recorder_core, 'read_nfs_mount_stats', lambda: None)
         return rec, recorder_core
 
     def sample_meta(self, rec) -> dict:
@@ -5498,6 +5519,260 @@ class TestResourceSample:
         meta = self.sample_meta(rec)
         for key in ('rss_bytes', 'threads', 'open_fds', 'rx_bytes_total', 'tx_bytes_total'):
             assert key not in meta
+
+
+class TestResourceSampleHostPressure:
+    """The host-pressure keys added to resource_sample (contract v1.15)."""
+
+    def make_rec(self, tmp_path, monkeypatch):
+        from drakkar.recorder import core as recorder_core
+
+        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+        monkeypatch.setattr(recorder_core, 'read_self_stats', lambda: (None, None))
+        monkeypatch.setattr(recorder_core, 'read_open_fd_count', lambda: None)
+        monkeypatch.setattr(recorder_core, 'read_net_io_bytes', lambda: None)
+        monkeypatch.setattr(recorder_core, 'read_loadavg', lambda: None)
+        monkeypatch.setattr(recorder_core, 'read_pressure', lambda: None)
+        monkeypatch.setattr(recorder_core, 'read_cpu_throttle', lambda: None)
+        monkeypatch.setattr(recorder_core, 'read_nfs_mount_stats', lambda: None)
+        return rec, recorder_core
+
+    def sample_meta(self, rec) -> dict:
+        event = rec._buffer[-1]
+        assert event['event'] == 'resource_sample'
+        return json.loads(event['metadata'])
+
+    def test_load_and_psi_reported_as_read(self, tmp_path, monkeypatch):
+        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
+        monkeypatch.setattr(core_mod, 'read_loadavg', lambda: (4.21, 3.05, 2.0))
+        monkeypatch.setattr(core_mod, 'read_pressure', lambda: {'cpu_some_avg10': 12.5, 'io_full_avg10': 3.1})
+
+        rec._resource_sample()
+
+        meta = self.sample_meta(rec)
+        assert meta['load1'] == 4.21
+        assert meta['load5'] == 3.05
+        assert meta['psi_cpu_some_avg10'] == 12.5
+        assert meta['psi_io_full_avg10'] == 3.1
+
+    def test_throttle_first_tick_primes_second_reports_delta(self, tmp_path, monkeypatch):
+        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
+        readings = iter([(100, 500_000), (103, 750_000)])
+        monkeypatch.setattr(core_mod, 'read_cpu_throttle', lambda: next(readings))
+
+        rec._resource_sample()
+        first = self.sample_meta(rec)
+        rec._resource_sample()
+        second = self.sample_meta(rec)
+
+        assert 'cpu_throttled_periods' not in first
+        assert second['cpu_throttled_periods'] == 3
+        assert second['cpu_throttled_ms'] == 250.0
+
+    def test_throttle_zero_delta_is_reported_as_zero(self, tmp_path, monkeypatch):
+        # Zero throttling under a quota is a real answer ("we were NOT
+        # gated"), distinct from "no cgroup limit" which omits the keys.
+        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
+        monkeypatch.setattr(core_mod, 'read_cpu_throttle', lambda: (42, 987_000))
+
+        rec._resource_sample()
+        rec._resource_sample()
+
+        meta = self.sample_meta(rec)
+        assert meta['cpu_throttled_periods'] == 0
+        assert meta['cpu_throttled_ms'] == 0.0
+
+    def test_throttle_counter_reset_skips_interval_and_reprimes(self, tmp_path, monkeypatch):
+        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
+        readings = iter([(100, 500_000), (2, 1_000), (4, 3_000)])
+        monkeypatch.setattr(core_mod, 'read_cpu_throttle', lambda: next(readings))
+
+        rec._resource_sample()
+        rec._resource_sample()  # counters went backwards — no keys
+        reset_meta = self.sample_meta(rec)
+        rec._resource_sample()  # measured from the re-primed values
+        final_meta = self.sample_meta(rec)
+
+        assert 'cpu_throttled_periods' not in reset_meta
+        assert final_meta['cpu_throttled_periods'] == 2
+        assert final_meta['cpu_throttled_ms'] == 2.0
+
+    def test_nfs_mounts_report_interval_ops_rtt_retrans(self, tmp_path, monkeypatch):
+        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
+        readings = iter(
+            [
+                {'/mnt/data': (1000, 1010, 40_000), '/mnt/logs': (500, 500, 1_000)},
+                {'/mnt/data': (1100, 1130, 90_000), '/mnt/logs': (500, 500, 1_000)},
+            ]
+        )
+        monkeypatch.setattr(core_mod, 'read_nfs_mount_stats', lambda: next(readings))
+
+        rec._resource_sample()
+        first = self.sample_meta(rec)
+        rec._resource_sample()
+        second = self.sample_meta(rec)
+
+        assert 'nfs_mounts' not in first  # nothing to diff yet
+        # /mnt/data: 100 ops, (1130-1010)-(1100-1000)=20 retrans,
+        # 50000 ms rtt over 100 ops = 500 ms/op. /mnt/logs was quiet — no row.
+        assert second['nfs_mounts'] == [{'mount': '/mnt/data', 'ops': 100, 'rtt_ms': 500.0, 'retrans': 20}]
+
+    def test_nfs_counter_reset_drops_mount_for_the_interval(self, tmp_path, monkeypatch):
+        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
+        readings = iter(
+            [
+                {'/mnt/data': (1000, 1000, 40_000)},
+                {'/mnt/data': (10, 10, 100)},  # remount — counters reset
+                {'/mnt/data': (60, 62, 600)},
+            ]
+        )
+        monkeypatch.setattr(core_mod, 'read_nfs_mount_stats', lambda: next(readings))
+
+        rec._resource_sample()
+        rec._resource_sample()
+        reset_meta = self.sample_meta(rec)
+        rec._resource_sample()
+        final_meta = self.sample_meta(rec)
+
+        assert 'nfs_mounts' not in reset_meta
+        assert final_meta['nfs_mounts'] == [{'mount': '/mnt/data', 'ops': 50, 'rtt_ms': 10.0, 'retrans': 2}]
+
+    def test_retrans_without_ops_still_reports_the_mount(self, tmp_path, monkeypatch):
+        # A server that stopped answering: retransmissions climb while no
+        # operation completes — the most important interval to report.
+        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
+        readings = iter(
+            [
+                {'/mnt/data': (1000, 1000, 40_000)},
+                {'/mnt/data': (1000, 1025, 40_000)},
+            ]
+        )
+        monkeypatch.setattr(core_mod, 'read_nfs_mount_stats', lambda: next(readings))
+
+        rec._resource_sample()
+        rec._resource_sample()
+
+        meta = self.sample_meta(rec)
+        assert meta['nfs_mounts'] == [{'mount': '/mnt/data', 'ops': 0, 'rtt_ms': 0.0, 'retrans': 25}]
+
+    def test_all_pressure_sources_unavailable_add_no_keys(self, tmp_path, monkeypatch):
+        rec, _ = self.make_rec(tmp_path, monkeypatch)
+
+        rec._resource_sample()
+        rec._resource_sample()
+
+        meta = self.sample_meta(rec)
+        for key in ('load1', 'load5', 'cpu_throttled_periods', 'cpu_throttled_ms', 'nfs_mounts'):
+            assert key not in meta
+        assert not any(key.startswith('psi_') for key in meta)
+
+
+class TestRuntimeEpisodeAndProbeRows:
+    """Row shapes of the v1.15 runtime_lag_episode / runtime_probe events."""
+
+    def test_lag_episode_row_carries_verdict_and_flat_evidence(self, tmp_path):
+        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+
+        rec.record_runtime_lag_episode(
+            duration_ms=12500.0,
+            peak_lag_ms=1900.0,
+            lag_sum_ms=8000.0,
+            verdict='starved',
+            stall_count=3,
+            sample_count=40,
+            stacks=[{'stack': 'File x', 'location': 'x.py:1', 'count': 40}],
+            dropped_stacks=0,
+            unit_count=7000,
+            cpu_ms=210.0,
+            cpu_ratio=0.017,
+            evidence={'cpu_throttled_ms': 4200.0, 'load1': 31.5},
+        )
+
+        event = rec._buffer[-1]
+        assert event['event'] == 'runtime_lag_episode'
+        assert event['duration'] == 12.5
+        meta = json.loads(event['metadata'])
+        assert meta['verdict'] == 'starved'
+        assert meta['stall_count'] == 3
+        assert meta['cpu_ratio'] == 0.017
+        # Evidence merges flat into the metadata (contract v1.15).
+        assert meta['cpu_throttled_ms'] == 4200.0
+        assert meta['load1'] == 31.5
+        assert 'evidence' not in meta
+
+    def test_lag_episode_row_omits_unavailable_cpu_fields(self, tmp_path):
+        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+
+        rec.record_runtime_lag_episode(
+            duration_ms=1000.0,
+            peak_lag_ms=200.0,
+            lag_sum_ms=600.0,
+            verdict='inconclusive',
+            stall_count=0,
+            sample_count=0,
+            stacks=[],
+            dropped_stacks=0,
+            unit_count=10,
+        )
+
+        meta = json.loads(rec._buffer[-1]['metadata'])
+        assert 'cpu_ms' not in meta
+        assert 'cpu_ratio' not in meta
+
+    def test_probe_row_shape(self, tmp_path):
+        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+
+        rec.record_runtime_probe(
+            lag_ms=12.0,
+            unit_count=140,
+            stacks=[{'stack': 'File y', 'location': 'y.py:9', 'count': 1}],
+        )
+
+        event = rec._buffer[-1]
+        assert event['event'] == 'runtime_probe'
+        meta = json.loads(event['metadata'])
+        assert meta['lag_ms'] == 12.0
+        assert meta['unit_count'] == 140
+        assert meta['stacks'][0]['location'] == 'y.py:9'
+
+
+class TestDbDirNetworkFsWarning:
+    """Startup warning when ui.recorder.db_dir resolves to a network filesystem."""
+
+    class _CapturingLogger:
+        def __init__(self):
+            self.warnings: list[tuple[str, dict]] = []
+
+        async def awarning(self, event, **kwargs):
+            self.warnings.append((event, kwargs))
+
+    async def test_warns_with_mount_and_fstype_when_on_network_fs(self, tmp_path, monkeypatch):
+        from drakkar.recorder import core as recorder_core
+
+        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+        monkeypatch.setattr(recorder_core, 'detect_network_fs', lambda _path: ('/mnt/data', 'nfs4'))
+        captured = self._CapturingLogger()
+        monkeypatch.setattr(recorder_core, 'logger', captured)
+
+        await rec._warn_if_db_dir_network_fs()
+
+        assert len(captured.warnings) == 1
+        event, fields = captured.warnings[0]
+        assert event == 'recorder_db_dir_network_fs'
+        assert fields['mount'] == '/mnt/data'
+        assert fields['fstype'] == 'nfs4'
+
+    async def test_silent_on_local_filesystem(self, tmp_path, monkeypatch):
+        from drakkar.recorder import core as recorder_core
+
+        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+        monkeypatch.setattr(recorder_core, 'detect_network_fs', lambda _path: None)
+        captured = self._CapturingLogger()
+        monkeypatch.setattr(recorder_core, 'logger', captured)
+
+        await rec._warn_if_db_dir_network_fs()
+
+        assert captured.warnings == []
 
 
 class TestLastBreathFlush:

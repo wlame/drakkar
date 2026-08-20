@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Host-pressure sampling (contract v1.15): `resource_sample` events now
+  carry load averages, PSI pressure percentages, cgroup CPU-throttle
+  deltas, and per-NFS-mount health (`ops`, average `rtt_ms`, `retrans`
+  per interval). These answer "which resource is the host fighting for"
+  during an incident and replay from recorded databases. New docs page:
+  Host Pressure.
+- Runtime lag episodes (contract v1.15): every degraded/stalled span now
+  produces one `runtime_lag_episode` event with stack samples aggregated
+  across the whole span, loop-thread CPU time, host evidence, and a
+  verdict — `blocked`, `cpu_bound`, `starved`, or `inconclusive`. The
+  `/runtime/health` snapshot reports the open episode with a running
+  verdict, so the UI can show the diagnosis during the incident. This
+  removes the old blind spot where diffuse starvation showed a `stalled`
+  badge but "No stalls recorded".
+- Opt-in runtime stack probes: set
+  `runtime_health.probe_interval_seconds` above 0 to record a
+  `runtime_probe` event with the loop thread's stack every interval — a
+  low-rate flight-recorder profiler for production tuning.
+- `worker_state` rows now carry `health_state` and `loop_lag_ms`, so a
+  merged fleet database shows which worker was degraded at which time.
+- The recorder warns at startup (`recorder_db_dir_network_fs`) when
+  `ui.recorder.db_dir` resolves to a network filesystem — SQLite there
+  risks lock corruption and makes the recorder share fate with the
+  network path.
+- New config keys `runtime_health.episode_max_seconds` (default 300) and
+  `runtime_health.probe_interval_seconds` (default 0 = off).
 - Timed consume pause (contract v1.14, opt-in via
   `ui.consume_pause.enabled`): the Live page gains preset buttons
   (15s/1m/5m/15m by default, configurable) that pause message intake for
@@ -38,6 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The cache docs page now opens with a quick-reference table of the five
   handler-facing methods and the rules of thumb for choosing between
   `get`, `peek`, and `in`.
+
+### Fixed
+
+- `GET /api/v1/live/overview` now uses a bounded main-loop dispatch: when
+  the loop is wedged it answers with empty task maps and real pool
+  numbers instead of hanging. Before the fix, the UI header could show
+  "Pool: N / 0 slots" during an incident because the overview request —
+  the only source of the pool maximum — never returned.
 
 ## [1.13.0] - 2026-08-14
 

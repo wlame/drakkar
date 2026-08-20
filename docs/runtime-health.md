@@ -6,7 +6,7 @@ probe at once. The runtime health monitor watches for exactly that — and
 when it happens, tells you **what** blocked the loop, not just that
 something did.
 
-It answers three questions:
+It answers four questions:
 
 1. **How healthy is the loop right now?** — continuous lag measurement,
    a state badge (`healthy` / `degraded` / `stalled`), Prometheus
@@ -14,7 +14,12 @@ It answers three questions:
 2. **What blocked it?** — during a stall, a sampler thread captures the
    stack trace of the code the loop thread is stuck in. The stacks land
    in the flight recorder, so post-mortems work days later.
-3. **What is the loop carrying?** — an on-demand census groups live
+3. **Was it blocked at all — or starved?** — every degraded/stalled span
+   becomes a [lag episode](#lag-episodes-and-verdicts) with stacks
+   aggregated across the whole span and a verdict: `blocked`,
+   `cpu_bound`, `starved`, or `inconclusive`. This covers the case a
+   single-stall view cannot: diffuse slowness with no one culprit call.
+4. **What is the loop carrying?** — an on-demand census groups live
    asyncio tasks by coroutine and suspension point: `37 × MyHandler.arrange
    — suspended at handler.py:412`.
 
@@ -60,6 +65,55 @@ transition, not dozens. Every transition is logged, recorded as a
 `runtime_health` event, and reflected in the
 `drakkar_runtime_health_state` gauge.
 
+## Lag episodes and verdicts
+
+A single hard block produces a clean `runtime_stall` event with the
+guilty stack. But the second failure shape — the one that used to render
+as a `stalled` badge over "No stalls recorded" — is *diffuse*: thousands
+of small delays, no single blocking call, usually because the **host**
+is the problem (CPU starvation, cgroup throttling, a struggling NFS
+server slowing every syscall).
+
+An **episode** covers that shape. It opens when the monitor leaves
+`healthy` and closes when it returns (or after `episode_max_seconds`,
+default 300 — a longer incident flushes and continues in a fresh
+episode, so evidence exists even if the process dies mid-incident).
+While an episode is open:
+
+- The sampler thread captures the loop thread's stack on **every**
+  wakeup, not only while the heartbeat is stale, and aggregates the
+  samples with the usual dedup-and-count.
+- The monitor tracks the loop *thread's* CPU time
+  (`/proc/self/task/<tid>/stat`) next to wall time — thread-level, so
+  offload and recorder threads cannot pollute the ratio.
+
+On close, one `runtime_lag_episode` event records duration, peak and
+accumulated lag, the stall count, the aggregated stacks, CPU numbers,
+best-effort host evidence (cgroup throttling during the episode, CPU
+PSI, load) — and the **verdict**:
+
+| Verdict | Signature | Reading |
+|---|---|---|
+| `blocked` | little loop CPU, one non-idle call site dominates the samples | a blocking call; the top stack names it |
+| `cpu_bound` | loop CPU ≈ wall time | the loop itself computed through the lag; the top stack is the hot site — [offload](offload.md) it |
+| `starved` | little loop CPU, no dominant site (throttle/PSI evidence strengthens it) | the process wanted CPU and did not get it — host-level contention, not your code; see [Host Pressure](host-pressure.md) |
+| `inconclusive` | none of the above dominates | mixed or short episode; look at the raw numbers |
+
+The `/runtime/health` snapshot carries `current_episode` (with a running
+verdict) and `recent_episodes` **from monitor memory**, so the Runtime
+tab shows the diagnosis *during* the incident even when the recorder's
+database path is degraded.
+
+## Stack probes (opt-in profiler)
+
+Set `runtime_health.probe_interval_seconds` above 0 and the sampler
+thread records a `runtime_probe` event with the loop thread's stack every
+interval, healthy or not — a low-rate flight-recorder profiler. Useful to
+answer "where does the loop actually spend its time" while tuning a
+production workload, and to have baseline stacks on disk from *before* an
+incident. Off by default (`0`): it writes events for as long as the
+worker runs.
+
 ## What you see
 
 **Debug UI → Live → Runtime tab**: state badge, current lag, a lag
@@ -76,9 +130,13 @@ button that runs the task census.
 | `drakkar_runtime_stalls_total` | counter | stalls detected |
 
 **Flight recorder**: `runtime_health` events (state transitions +
-periodic samples) and `runtime_stall` events (duration, captured stacks,
-task count) — with the same retention as every other event, so history
-survives restarts.
+periodic samples), `runtime_stall` events (duration, captured stacks,
+task count), `runtime_lag_episode` events (span, verdict, aggregated
+stacks, CPU + host evidence), and opt-in `runtime_probe` events — with
+the same retention as every other event, so history survives restarts.
+The periodic `worker_state` snapshot also carries `health_state` and
+`loop_lag_ms` columns, so a merged fleet database can answer "which
+worker was degraded when" with one query.
 
 **API**:
 
@@ -100,6 +158,8 @@ runtime_health:
   max_stall_stacks: 10             # distinct stacks kept per stall
   sample_interval_seconds: 10.0    # recorder history sample cadence
   history_window_seconds: 900      # in-memory sparkline window
+  episode_max_seconds: 300.0       # flush cap for one lag episode
+  probe_interval_seconds: 0.0      # opt-in stack probes; 0 = off
 ```
 
 Every field is environment-overridable (`DK_RUNTIME_HEALTH__*`); see the
@@ -115,27 +175,36 @@ Every field is environment-overridable (`DK_RUNTIME_HEALTH__*`); see the
   blocking call path (DNS resolution, synchronous connect, compression).
   The stack names the exact call to wrap or replace.
 - **Degraded without stalls** — many small blocks rather than one big
-  one. The `drakkar_loop_lag_seconds` histogram shows how bad the tail
-  is; lowering `stall_seconds` narrows the attribution blind spot at the
-  cost of more sampling during rough patches.
+  one. This is exactly what episodes exist for: check the episode's
+  verdict. `starved` (with throttle/PSI evidence) means the host, not
+  the code; `blocked`/`cpu_bound` name the site. The
+  `drakkar_loop_lag_seconds` histogram shows how bad the tail is.
 - **A census full of one coroutine** — a fan-out that outran its
   backpressure. The suspension point shows what everything is waiting
   on.
 
 ## Limits
 
-- A block shorter than `stall_seconds` shows up in the lag histogram
-  but carries no stack — the sampler never saw it in the act.
+- A block shorter than `stall_seconds`, outside any episode, shows up in
+  the lag histogram but carries no stack — the sampler never saw it in
+  the act. (Inside an episode, every sampler wakeup captures.)
 - The census counts and locates coroutines; it does not measure their
-  CPU time. For time-based profiling use a sampling profiler.
+  CPU time. For continuous time attribution, enable
+  [stack probes](#stack-probes-opt-in-profiler) or use a sampling
+  profiler.
+- Episode CPU attribution needs `/proc/self/task/<tid>/stat`; where it
+  is unreadable the verdict falls back to stack dominance and host
+  evidence alone.
 
 ## Cross-backend note
 
 The wire contract is backend-neutral: `unit_label` says what
-`unit_count` counts (`tasks` here, `goroutines` on the Go backend), and
-lag maps to Go's scheduler latency. The Go backend does not implement
-the monitor yet; it accepts the `runtime_health:` config block so mixed
-fleets share one config shape.
+`unit_count` counts (`tasks` here, `goroutines` on the Go backend). The
+Go backend implements the same monitor with Go-shaped introspection:
+heartbeat lag measures scheduler latency, episode stacks are aggregated
+goroutine-dump groups, and episode CPU comes from process rusage (Go has
+no single loop thread — a blocked goroutine does not stall the others,
+so the verdicts that matter there are `starved` and `cpu_bound`).
 
 ## See also
 

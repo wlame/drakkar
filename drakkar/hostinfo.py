@@ -37,6 +37,54 @@ CGROUP_V2_CPU_MAX = Path('/sys/fs/cgroup/cpu.max')
 CGROUP_V1_CPU_QUOTA = Path('/sys/fs/cgroup/cpu/cpu.cfs_quota_us')
 CGROUP_V1_CPU_PERIOD = Path('/sys/fs/cgroup/cpu/cpu.cfs_period_us')
 
+# Host load averages (1/5/15 min); Linux only.
+PROC_LOADAVG = Path('/proc/loadavg')
+# Kernel pressure-stall information (PSI): one file per resource, each with
+# precomputed 10s/60s/300s averages — Linux ≥ 4.20, sometimes masked in
+# containers.
+PROC_PRESSURE_DIR = Path('/proc/pressure')
+# cgroup CPU throttling counters: cumulative "how often / how long did the
+# quota gate us". v2 keeps them in cpu.stat next to usage; v1 in its own
+# cpu.stat with throttled_time in NANOseconds.
+CGROUP_V2_CPU_STAT = Path('/sys/fs/cgroup/cpu.stat')
+CGROUP_V1_CPU_STAT = Path('/sys/fs/cgroup/cpu/cpu.stat')
+# Mount table used to answer "what filesystem type backs this path".
+PROC_MOUNTS = Path('/proc/mounts')
+# Per-thread scheduler stats; {tid} is a kernel thread id (native_id).
+PROC_TASK_STAT_TEMPLATE = '/proc/self/task/{tid}/stat'
+
+# Filesystem types that put a network round-trip under every write — a
+# recorder database on one of these shares fate with the network path.
+NETWORK_FS_TYPES = frozenset(
+    {
+        'nfs',
+        'nfs2',
+        'nfs3',
+        'nfs4',
+        'cifs',
+        'smb3',
+        'smbfs',
+        'sshfs',
+        'fuse.sshfs',
+        '9p',
+        'glusterfs',
+        'ceph',
+        'lustre',
+        'afs',
+    }
+)
+
+# PSI files worth sampling, as (file name, line kind, emitted key) rows —
+# data over branching so adding a resource is a row, not a code path.
+# cpu has no meaningful `full` line (newer kernels print one, always ~0).
+_PSI_ROWS = (
+    ('cpu', 'some', 'cpu_some_avg10'),
+    ('io', 'some', 'io_some_avg10'),
+    ('io', 'full', 'io_full_avg10'),
+    ('memory', 'some', 'mem_some_avg10'),
+    ('memory', 'full', 'mem_full_avg10'),
+)
+
 
 def effective_cpu_count() -> int:
     """CPUs this process can actually use, as a whole number (min 1).
@@ -235,6 +283,204 @@ def read_self_stats(status_path: Path = PROC_SELF_STATUS) -> tuple[int | None, i
         except (ValueError, IndexError):
             continue
     return rss_bytes, threads
+
+
+def read_loadavg(path: Path = PROC_LOADAVG) -> tuple[float, float, float] | None:
+    """Host load averages ``(load1, load5, load15)``, or None when unavailable.
+
+    Load average counts runnable + uninterruptible-sleep tasks host-wide —
+    the classic "is the whole box oversubscribed" number, complementing the
+    per-cgroup views below. The path is a parameter only for tests.
+    """
+    try:
+        fields = path.read_text().split()
+        return float(fields[0]), float(fields[1]), float(fields[2])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def read_pressure(dir_path: Path = PROC_PRESSURE_DIR) -> dict[str, float] | None:
+    """Kernel pressure-stall averages (PSI), or None when PSI is unavailable.
+
+    Returns the 10-second averages as ``{cpu_some_avg10, io_some_avg10,
+    io_full_avg10, mem_some_avg10, mem_full_avg10}`` — percent of wall time
+    in which at least one task (``some``) or every non-idle task (``full``)
+    was stalled on the resource. These are the kernel's own precomputed
+    windows, so a 10-second sampling cadence reads them loss-free.
+
+    A single unreadable/malformed resource file drops its keys; None only
+    when nothing was readable (pre-4.20 kernel, PSI masked in the
+    container). The directory is a parameter only for tests.
+    """
+    result: dict[str, float] = {}
+    for file_name, line_kind, key in _PSI_ROWS:
+        try:
+            text = (dir_path / file_name).read_text()
+        except OSError:
+            continue
+        # Each line: ``some avg10=1.23 avg60=0.80 avg300=0.40 total=123``.
+        for line in text.splitlines():
+            fields = line.split()
+            if len(fields) < 2 or fields[0] != line_kind:
+                continue
+            try:
+                key_name, _, value = fields[1].partition('=')
+                if key_name == 'avg10':
+                    result[key] = float(value)
+            except ValueError:
+                pass
+            break
+    return result or None
+
+
+def read_cpu_throttle(
+    v2_stat: Path = CGROUP_V2_CPU_STAT,
+    v1_stat: Path = CGROUP_V1_CPU_STAT,
+) -> tuple[int, int] | None:
+    """Cumulative cgroup CPU throttling ``(nr_throttled, throttled_usec)``.
+
+    ``nr_throttled`` counts enforcement periods in which the cgroup hit its
+    quota and was descheduled; ``throttled_usec`` is the total time spent
+    throttled. Both are cumulative since cgroup creation — callers diff
+    them per interval. None when the process runs without a CPU controller
+    (bare host, no quota) or the files are unreadable.
+
+    cgroup v2 is tried first (``throttled_usec`` in microseconds), then v1
+    (``throttled_time`` in nanoseconds, converted). The paths are
+    parameters only for tests.
+    """
+    for path, time_key, divisor in ((v2_stat, 'throttled_usec', 1), (v1_stat, 'throttled_time', 1000)):
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        nr_throttled: int | None = None
+        throttled_usec: int | None = None
+        for line in text.splitlines():
+            key, _, value = line.partition(' ')
+            try:
+                if key == 'nr_throttled':
+                    nr_throttled = int(value)
+                elif key == time_key:
+                    throttled_usec = int(value) // divisor
+            except ValueError:
+                continue
+        if nr_throttled is not None and throttled_usec is not None:
+            return nr_throttled, throttled_usec
+    return None
+
+
+def read_nfs_mount_stats(mountstats: Path = PROC_MOUNTSTATS) -> dict[str, tuple[int, int, int]] | None:
+    """Per-NFS-mount cumulative ``{mount: (ops, trans, rtt_ms_total)}``.
+
+    Summed across every operation type in the mount's ``per-op statistics``
+    section of ``/proc/self/mountstats``: ``ops`` completed operations,
+    ``trans`` transmissions (``trans - ops`` = retransmissions — the "server
+    not answering" signal), and ``rtt_ms_total`` cumulative server
+    round-trip milliseconds (``rtt / ops`` = average RTT per op — the
+    "server slow" signal, which moves under storage contention even while
+    throughput looks normal). All cumulative; callers diff per interval.
+
+    None when the file is unavailable or no NFS mount is visible. The path
+    is a parameter only for tests.
+    """
+    try:
+        lines = mountstats.read_text().splitlines()
+    except OSError:
+        return None
+
+    per_mount: dict[str, tuple[int, int, int]] = {}
+    current_mount: str | None = None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('device '):
+            parts = stripped.split()
+            try:
+                fstype = parts[parts.index('fstype') + 1]
+                mount = parts[parts.index('on') + 1]
+            except (ValueError, IndexError):
+                current_mount = None
+                continue
+            if fstype in ('nfs', 'nfs2', 'nfs3', 'nfs4'):
+                current_mount = mount
+                per_mount.setdefault(mount, (0, 0, 0))
+            else:
+                current_mount = None
+            continue
+        if current_mount is None:
+            continue
+        # Per-op lines: ``READ: <ops> <trans> <timeouts> <bytes_sent>
+        # <bytes_recv> <queue_ms> <rtt_ms> <execute_ms> [errors]``. Any
+        # ALL-CAPS ``NAME:`` line with enough numeric fields qualifies.
+        op_name, sep, rest = stripped.partition(':')
+        if not sep or not op_name.isupper():
+            continue
+        fields = rest.split()
+        if len(fields) < 8:
+            continue
+        try:
+            ops, trans, rtt_ms = int(fields[0]), int(fields[1]), int(fields[6])
+        except ValueError:
+            continue
+        prev_ops, prev_trans, prev_rtt = per_mount[current_mount]
+        per_mount[current_mount] = (prev_ops + ops, prev_trans + trans, prev_rtt + rtt_ms)
+
+    return per_mount or None
+
+
+def read_thread_cpu_ms(tid: int, template: str = PROC_TASK_STAT_TEMPLATE) -> float | None:
+    """CPU milliseconds (user + system) consumed by one thread, or None.
+
+    Reads ``/proc/self/task/<tid>/stat`` — readable from ANY thread, which
+    is the point: a watchdog thread can measure the event-loop thread's CPU
+    consumption while that thread is wedged. ``tid`` is the kernel thread
+    id (``threading.get_native_id()``), not the Python ident.
+
+    The template is a parameter only for tests.
+    """
+    try:
+        text = Path(template.format(tid=tid)).read_text()
+        # Field 2 (comm) may contain spaces and parentheses; everything
+        # before the LAST ')' is comm, fields after it are space-split.
+        # utime is stat field 14, stime 15 → indexes 11 and 12 after comm.
+        fields = text.rpartition(')')[2].split()
+        ticks = int(fields[11]) + int(fields[12])
+        return ticks * 1000.0 / os.sysconf('SC_CLK_TCK')
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def detect_network_fs(path: str, mounts_path: Path = PROC_MOUNTS) -> tuple[str, str] | None:
+    """``(mount_point, fstype)`` when *path* lives on a network filesystem.
+
+    Resolves the path, walks ``/proc/mounts``, keeps the longest mount-point
+    prefix (real path-component prefix, so ``/mnt/data`` never claims
+    ``/mnt/database``), and reports the mount only when its fstype is in
+    :data:`NETWORK_FS_TYPES`. None otherwise — including when the mount
+    table is unreadable; this feeds a warning, never a refusal.
+
+    The mounts path is a parameter only for tests.
+    """
+    try:
+        lines = mounts_path.read_text().splitlines()
+    except OSError:
+        return None
+
+    resolved = os.path.realpath(path)
+    best: tuple[str, str] | None = None
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        mount_point, fstype = fields[1], fields[2]
+        if resolved != mount_point and not resolved.startswith(mount_point.rstrip('/') + '/'):
+            continue
+        if best is None or len(mount_point) > len(best[0]):
+            best = (mount_point, fstype)
+
+    if best is not None and best[1] in NETWORK_FS_TYPES:
+        return best
+    return None
 
 
 def read_open_fd_count(fd_dirs: tuple[Path, ...] = FD_DIRS) -> int | None:

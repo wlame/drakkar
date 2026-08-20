@@ -68,6 +68,7 @@ nav:
   - Consume Pause (timed debug pause from the Live page): consume-pause.md
   - Debugging Bottlenecks: debugging-bottlenecks.md
   - Runtime Health (event-loop lag watchdog): runtime-health.md
+  - Host Pressure (NFS RTT, PSI, throttling): host-pressure.md
   - Offload (CPU-bound hook work off the loop): offload.md
   - Local Databases: local-databases.md
   - Performance: performance.md

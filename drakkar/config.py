@@ -793,6 +793,29 @@ class RuntimeHealthConfig(BaseModel):
             'aggregate per second) served to the debug UI sparkline.'
         ),
     )
+    episode_max_seconds: float = Field(
+        default=300.0,
+        ge=10,
+        description=(
+            'Maximum length of one lag episode. An episode spans the time '
+            'the runtime is degraded or stalled; on recovery (or at this '
+            'cap, for incidents that outlive it) the monitor writes one '
+            'runtime_lag_episode event with aggregated stacks and a '
+            'verdict — blocked, cpu_bound, starved, or inconclusive.'
+        ),
+    )
+    probe_interval_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        description=(
+            'Opt-in flight-recorder profiler: when above 0, the sampler '
+            'thread records a runtime_probe event with the runtime '
+            "thread's stack every interval, regardless of health state. "
+            'Useful for tuning production workloads and post-incident '
+            'analysis; 0 (the default) disables it because it writes '
+            'events for as long as the worker runs.'
+        ),
+    )
 
 
 class OffloadConfig(BaseModel):

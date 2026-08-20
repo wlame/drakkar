@@ -75,6 +75,8 @@ CREATE TABLE worker_states (
     produced_count      INTEGER,
     committed_count     INTEGER,
     paused              INTEGER,
+    health_state        TEXT,
+    loop_lag_ms         REAL,
     updated_at          REAL NOT NULL,
     updated_at_dt       TEXT NOT NULL
 );
@@ -141,6 +143,10 @@ _STATE_COLUMNS = [
     'produced_count',
     'committed_count',
     'paused',
+    # v1.15 runtime-health columns; row.get() yields None for databases
+    # written by older backends, which INSERTs as NULL.
+    'health_state',
+    'loop_lag_ms',
     'updated_at',
     'updated_at_dt',
 ]

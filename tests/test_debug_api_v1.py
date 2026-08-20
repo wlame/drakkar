@@ -1062,3 +1062,30 @@ class TestDashboardLinks:
             legacy = await c.get('/api/dashboard')
             v1 = await c.get('/api/v1/dashboard')
         assert legacy.json()['links'] == v1.json()['links']
+
+
+# ---------------------------------------------------------------------------
+# Overview under a wedged main loop
+# ---------------------------------------------------------------------------
+
+
+async def test_live_overview_answers_degraded_when_main_loop_is_wedged(client, mock_app, monkeypatch):
+    """A wedged main loop must not hang the overview: the endpoint answers
+    with empty task maps but REAL pool stats (read off-loop) — the UI
+    header's pool_max has no other source during an incident."""
+    from drakkar.uiserver.server import UIDeps
+
+    async def never_answers(self, coro, default=None):
+        coro.close()  # the dispatch never ran it; don't leave it un-awaited
+        return default
+
+    monkeypatch.setattr(UIDeps, 'dispatch_bounded', never_answers)
+
+    resp = await client.get('/api/v1/live/overview')
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body['running_tasks'] == {}
+    assert body['pending_tasks'] == {}
+    assert body['pool_max'] == 8
+    assert body['pool_active'] == 2

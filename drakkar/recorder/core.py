@@ -54,7 +54,17 @@ from pydantic import BaseModel
 
 from drakkar.config import UIConfig
 from drakkar.dbfiles import secure_db_file
-from drakkar.hostinfo import read_net_io_bytes, read_nfs_io_bytes, read_open_fd_count, read_self_stats
+from drakkar.hostinfo import (
+    detect_network_fs,
+    read_cpu_throttle,
+    read_loadavg,
+    read_net_io_bytes,
+    read_nfs_io_bytes,
+    read_nfs_mount_stats,
+    read_open_fd_count,
+    read_pressure,
+    read_self_stats,
+)
 from drakkar.metrics import (
     recorder_buffer_size,
     recorder_dropped_events,
@@ -404,6 +414,14 @@ class EventRecorder:
         # the resource sampler's CPU-percent deltas. None until primed —
         # the first resource_sample carries no CPU fields.
         self._res_prev: tuple[float, float, float] | None = None
+        # Previous cumulative cgroup throttling counters
+        # (nr_throttled, throttled_usec); the sample reports deltas, so the
+        # first tick after start emits nothing for them.
+        self._throttle_prev: tuple[int, int] | None = None
+        # Previous per-mount NFS op counters {mount: (ops, trans, rtt_ms)}
+        # for the per-interval RTT/retransmit derivation. Mounts appear and
+        # vanish independently, so this is keyed per mount, not one pair.
+        self._nfs_ops_prev: dict[str, tuple[int, int, int]] | None = None
         self._running = False
         self._ws_subscribers: set[WSSubscriber] = set()
         self._state_provider: Callable[[], dict] | None = None
@@ -570,6 +588,7 @@ class EventRecorder:
         self._running = True
         if self._store.db_dir:
             await self._warn_if_db_dir_world_writable()
+            await self._warn_if_db_dir_network_fs()
             self._db_path = make_db_path(self._store.db_dir, self._worker_name)
             # Open writer + apply PRAGMA + create schema + open reader in a
             # single try/except. A failure at any of these steps must close
@@ -723,6 +742,31 @@ class EventRecorder:
                 'point debug.db_dir at a directory owned by the worker user '
                 '(e.g. /var/lib/drakkar) on shared hosts',
             )
+
+    async def _warn_if_db_dir_network_fs(self) -> None:
+        """Warn when the recorder DB directory sits on a network filesystem.
+
+        SQLite on NFS/CIFS is a double hazard: file locking is unreliable
+        (corruption risk), and every flush shares fate with the network
+        path — when the storage server degrades, the recorder's writes
+        block ON THE EVENT LOOP's flush cadence, so the observability
+        stack degrades exactly when it is needed most. Warning only; the
+        operator may accept the trade-off knowingly.
+        """
+        hit = detect_network_fs(self._store.db_dir)
+        if hit is None:
+            return
+        mount, fstype = hit
+        await logger.awarning(
+            'recorder_db_dir_network_fs',
+            category='recorder',
+            db_dir=self._store.db_dir,
+            mount=mount,
+            fstype=fstype,
+            hint='recorder databases on a network filesystem share fate with '
+            'the storage server and risk SQLite lock corruption; point '
+            'ui.recorder.db_dir at a local disk',
+        )
 
     def subscribe(self, event_types: Collection[str] | None = None) -> WSSubscriber:
         """Subscribe to the live event stream.
@@ -1132,6 +1176,28 @@ class EventRecorder:
                 meta['cpu_children_pct'] = round(100 * (cpu_children - prev[1]) / elapsed, 1)
                 meta['interval_s'] = round(elapsed, 1)
 
+        # Host-pressure keys (contract v1.15): which resource is the host
+        # fighting for. All best-effort and optional, like everything above.
+        loadavg = read_loadavg()
+        if loadavg is not None:
+            meta['load1'], meta['load5'] = round(loadavg[0], 2), round(loadavg[1], 2)
+        pressure = read_pressure()
+        if pressure is not None:
+            for key, value in pressure.items():
+                meta[f'psi_{key}'] = value
+        throttle = read_cpu_throttle()
+        throttle_prev = self._throttle_prev
+        self._throttle_prev = throttle
+        if throttle is not None and throttle_prev is not None:
+            periods_delta = throttle[0] - throttle_prev[0]
+            usec_delta = throttle[1] - throttle_prev[1]
+            # Negative delta = cgroup replaced (container restart in place);
+            # skip the interval, the re-prime above already happened.
+            if periods_delta >= 0 and usec_delta >= 0:
+                meta['cpu_throttled_periods'] = periods_delta
+                meta['cpu_throttled_ms'] = round(usec_delta / 1000, 1)
+        meta.update(self._nfs_mount_deltas())
+
         self._record(
             {
                 'ts': time.time(),
@@ -1139,6 +1205,49 @@ class EventRecorder:
                 'metadata': encode_json_str(meta),
             }
         )
+
+    def _nfs_mount_deltas(self) -> dict[str, Any]:
+        """Per-interval NFS health per mount: ``{'nfs_mounts': [...]}`` or ``{}``.
+
+        Diffs the cumulative mountstats op counters against the previous
+        tick and derives, per mount: operations completed, average server
+        round-trip per operation (the shared-storage-contention signal —
+        RTT multiplies under server load while byte throughput can look
+        normal), and retransmissions (``trans - ops`` — the "server not
+        answering" signal). Quiet mounts (no ops, no retrans) are skipped;
+        a counter that went backwards (remount) drops the mount for this
+        interval and re-primes.
+        """
+        current = read_nfs_mount_stats()
+        prev = self._nfs_ops_prev
+        self._nfs_ops_prev = current
+        if current is None or prev is None:
+            return {}
+
+        mounts: list[dict[str, Any]] = []
+        for mount, (ops, trans, rtt_ms) in sorted(current.items()):
+            prev_counters = prev.get(mount)
+            if prev_counters is None:
+                continue  # mount appeared mid-interval — first full interval counts
+            ops_delta = ops - prev_counters[0]
+            trans_delta = trans - prev_counters[1]
+            rtt_delta = rtt_ms - prev_counters[2]
+            if ops_delta < 0 or trans_delta < 0 or rtt_delta < 0:
+                continue  # counter reset (remount)
+            retrans = trans_delta - ops_delta
+            if ops_delta == 0 and retrans <= 0:
+                continue  # quiet mount — no signal, no row
+            mounts.append(
+                {
+                    'mount': mount,
+                    'ops': ops_delta,
+                    'rtt_ms': round(rtt_delta / ops_delta, 1) if ops_delta else 0.0,
+                    'retrans': max(0, retrans),
+                }
+            )
+        if not mounts:
+            return {}
+        return {'nfs_mounts': mounts}
 
     async def _sync_state(self) -> None:
         if not self._db or not self._store.store_state:
@@ -1150,8 +1259,9 @@ class EventRecorder:
                (uptime_seconds, assigned_partitions, partition_count,
                 pool_active, pool_max, total_queued,
                 consumed_count, completed_count, failed_count,
-                produced_count, committed_count, paused, updated_at, updated_at_dt)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                produced_count, committed_count, paused,
+                health_state, loop_lag_ms, updated_at, updated_at_dt)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 app_state.get('uptime_seconds', 0),
                 encode_json_str(app_state.get('assigned_partitions', [])),
@@ -1165,6 +1275,9 @@ class EventRecorder:
                 self._counters['produced'],
                 self._counters['committed'],
                 int(app_state.get('paused', False)),
+                # NULL when the runtime-health monitor is off (v1.15).
+                app_state.get('health_state'),
+                app_state.get('loop_lag_ms'),
                 now,
                 format_dt(now),
             ],
@@ -1759,6 +1872,79 @@ class EventRecorder:
                         'stacks': stacks,
                         'dropped_stacks': dropped_stacks,
                         'unit_count': unit_count,
+                    }
+                ),
+            }
+        )
+
+    def record_runtime_lag_episode(
+        self,
+        *,
+        duration_ms: float,
+        peak_lag_ms: float,
+        lag_sum_ms: float,
+        verdict: str,
+        stall_count: int,
+        sample_count: int,
+        stacks: list[dict],
+        dropped_stacks: int,
+        unit_count: int,
+        cpu_ms: float | None = None,
+        cpu_ratio: float | None = None,
+        evidence: dict | None = None,
+    ) -> None:
+        """One closed lag episode (contract v1.15).
+
+        An episode spans the whole time the runtime was degraded or
+        stalled; where ``runtime_stall`` answers "what blocked the loop
+        just now", this row answers "what was the loop doing across the
+        entire bad window, and was it blocked, busy, or starved of CPU".
+        ``evidence`` carries optional corroborating host-pressure readings
+        (``cpu_throttled_ms``, ``psi_cpu_some_avg10``, ``load1``), merged
+        flat into the metadata.
+        """
+        meta: dict[str, Any] = {
+            'duration_ms': duration_ms,
+            'peak_lag_ms': peak_lag_ms,
+            'lag_sum_ms': lag_sum_ms,
+            'verdict': verdict,
+            'stall_count': stall_count,
+            'sample_count': sample_count,
+            'stacks': stacks,
+            'dropped_stacks': dropped_stacks,
+            'unit_count': unit_count,
+        }
+        if cpu_ms is not None:
+            meta['cpu_ms'] = cpu_ms
+        if cpu_ratio is not None:
+            meta['cpu_ratio'] = cpu_ratio
+        if evidence:
+            meta.update(evidence)
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'runtime_lag_episode',
+                'duration': round(duration_ms / 1000, 4),
+                'metadata': encode_json_str(meta),
+            }
+        )
+
+    def record_runtime_probe(self, *, lag_ms: float, unit_count: int, stacks: list[dict]) -> None:
+        """One opt-in runtime stack probe (contract v1.15).
+
+        Enabled by ``runtime_health.probe_interval_seconds > 0``: a
+        flight-recorder profiler sample of what the runtime thread was
+        executing, taken regardless of health state.
+        """
+        self._record(
+            {
+                'ts': time.time(),
+                'event': 'runtime_probe',
+                'metadata': encode_json_str(
+                    {
+                        'lag_ms': lag_ms,
+                        'unit_count': unit_count,
+                        'stacks': stacks,
                     }
                 ),
             }

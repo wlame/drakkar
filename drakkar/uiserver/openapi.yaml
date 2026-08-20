@@ -2210,6 +2210,34 @@ components:
         top_location: {type: [string, 'null'], description: file:line of the first captured blocking site.}
       required: [t, duration_ms, stack_count, top_location]
 
+    RuntimeEpisodeSummary:
+      description: >-
+        One closed lag episode, without the aggregated stacks — those live
+        in the episode's runtime_lag_episode flight-recorder event.
+      type: object
+      properties:
+        t: {type: number, description: Epoch seconds when the episode closed.}
+        duration_ms: {type: number}
+        verdict: {type: string, enum: [blocked, cpu_bound, starved, inconclusive]}
+        peak_lag_ms: {type: number}
+        top_location: {type: [string, 'null'], description: file:line of the dominant sampled site.}
+      required: [t, duration_ms, verdict, peak_lag_ms, top_location]
+
+    RuntimeCurrentEpisode:
+      description: >-
+        The lag episode open right now, served from monitor memory so it
+        answers during the incident itself. verdict is the running
+        classification over the samples so far.
+      type: object
+      properties:
+        started_t: {type: number, description: Epoch seconds the episode opened.}
+        wall_ms: {type: number}
+        peak_lag_ms: {type: number}
+        cpu_ms: {type: [number, 'null'], description: Scheduler-thread CPU consumed so far; null when unreadable.}
+        sample_count: {type: integer}
+        verdict: {type: string, enum: [blocked, cpu_bound, starved, inconclusive]}
+      required: [started_t, wall_ms, peak_lag_ms, cpu_ms, sample_count, verdict]
+
     RuntimeHealthSnapshot:
       type: object
       properties:
@@ -2226,6 +2254,15 @@ components:
         recent_stalls:
           type: array
           items: {$ref: '#/components/schemas/RuntimeStallSummary'}
+        # v1.15, optional: absent on older backends. null between episodes.
+        current_episode:
+          oneOf:
+            - {$ref: '#/components/schemas/RuntimeCurrentEpisode'}
+            - {type: 'null'}
+        # v1.15, optional: closed episodes, newest last, bounded (50).
+        recent_episodes:
+          type: array
+          items: {$ref: '#/components/schemas/RuntimeEpisodeSummary'}
       required: [enabled, state, unit_label, current_lag_ms, heartbeat_age_ms, window, recent_stalls]
 
     RuntimeUnitGroup:

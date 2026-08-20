@@ -170,6 +170,8 @@ CREATE TABLE IF NOT EXISTS worker_state (
     produced_count      INTEGER,
     committed_count     INTEGER,
     paused              INTEGER,
+    health_state        TEXT,
+    loop_lag_ms         REAL,
     updated_at          REAL NOT NULL,
     updated_at_dt       TEXT NOT NULL
 );

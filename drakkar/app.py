@@ -399,7 +399,7 @@ class DrakkarApp:
 
     def _get_worker_state(self) -> dict:
         """Return current worker state for the recorder's state sync."""
-        return {
+        state = {
             'uptime_seconds': time.monotonic() - self._start_time,
             'assigned_partitions': sorted(self._processors.keys()),
             'partition_count': len(self._processors),
@@ -408,6 +408,14 @@ class DrakkarApp:
             'total_queued': self._total_queued(),
             'paused': self._paused,
         }
+        if self._runtime_health is not None:
+            # Contract v1.15: merged fleet databases can answer "which
+            # worker was degraded when" without replaying events. NULL
+            # (absent here) means the monitor is off.
+            health_state, loop_lag_ms = self._runtime_health.brief_state()
+            state['health_state'] = health_state
+            state['loop_lag_ms'] = loop_lag_ms
+        return state
 
     async def _handle_dlq_failure(self, error: 'DeliveryError', partition_id: int, reason: str) -> None:
         """Apply the ``dlq.on_send_failure`` strategy when the DLQ fallback failed.

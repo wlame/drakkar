@@ -98,7 +98,10 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         in-flight Arrange calls, pool occupancy, UI tuning knobs, handler
         hook flags, and the Kafka-UI deep-link config.
         """
-        active = await dispatch_to_loop(recorder.get_active_tasks(), deps.drakkar_app.main_loop)
+        # Bounded dispatch: when the main loop is wedged the overview must
+        # still answer (degraded) — it carries pool_max, which the UI header
+        # can get nowhere else, and a hung fetch left it rendering "0 slots".
+        active = await deps.dispatch_bounded(recorder.get_active_tasks(), default=[])
         now = time.time()
         # split tasks: running (have task_started in DB) vs pending (no task_started yet)
         processors = drakkar_app.processors
@@ -131,7 +134,7 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
                     )
             return snapshot, arranging_data
 
-        pending_snapshot, arranging = await dispatch_to_loop(_snapshot_processors(), deps.drakkar_app.main_loop)
+        pending_snapshot, arranging = await deps.dispatch_bounded(_snapshot_processors(), default=({}, []))
         for _pid, entries in pending_snapshot.items():
             for tid, args, partition_id, source_offsets in entries:
                 entry = {

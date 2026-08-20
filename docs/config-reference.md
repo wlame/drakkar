@@ -330,6 +330,10 @@ runtime_health:
   max_stall_stacks: 10             # distinct stacks kept per stall. env: DK_RUNTIME_HEALTH__MAX_STALL_STACKS
   sample_interval_seconds: 10.0    # recorder history sample cadence. env: DK_RUNTIME_HEALTH__SAMPLE_INTERVAL_SECONDS
   history_window_seconds: 900      # in-memory sparkline window. env: DK_RUNTIME_HEALTH__HISTORY_WINDOW_SECONDS
+  episode_max_seconds: 300.0       # max length of one lag episode before it flushes.
+                                   # env: DK_RUNTIME_HEALTH__EPISODE_MAX_SECONDS
+  probe_interval_seconds: 0.0      # opt-in stack probe cadence; 0 disables.
+                                   # env: DK_RUNTIME_HEALTH__PROBE_INTERVAL_SECONDS
 ```
 
 ---
