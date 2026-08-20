@@ -49,6 +49,8 @@ Thumbs.db
 .serena/
 .remember/
 .superpowers/
+.scratch/
+CLAUDE.local.md
 docs/plans/
 
 # Environment and secrets
