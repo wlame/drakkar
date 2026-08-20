@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.1] - 2026-08-20
+
 ### Fixed
 
 - The first opt-in runtime probe now fires immediately after start. Before,
