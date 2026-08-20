@@ -109,6 +109,19 @@ class InlineOffloader:
         return await asyncio.to_thread(functools.partial(fn, *args, **kwargs))
 
 
+def resolve_max_threads(configured: int, executor_pool_max: int) -> int:
+    """The effective offload pool size for ``offload.max_threads``.
+
+    An explicit positive value wins untouched. 0 (the config default) sizes
+    the pool from the executor pool — ``ceil(executor.max_executors / 4)`` with a
+    floor of 2 — so a bigger subprocess fleet gets proportionally more
+    offload headroom without every deployment tuning a second knob.
+    """
+    if configured > 0:
+        return configured
+    return max(2, -(-executor_pool_max // 4))
+
+
 class OffloadPool:
     """Bounded thread pool executing handler-offloaded computations.
 
@@ -119,21 +132,31 @@ class OffloadPool:
     tuning signal for ``offload.max_threads``.
     """
 
-    def __init__(self, config: OffloadConfig, *, recorder: EventRecorder | None = None) -> None:
+    def __init__(
+        self,
+        config: OffloadConfig,
+        *,
+        recorder: EventRecorder | None = None,
+        executor_pool_max: int = 0,
+    ) -> None:
         """Create the pool.
 
         Args:
-            config: sizing settings (``max_threads``).
+            config: sizing settings (``max_threads``; 0 = auto).
             recorder: flight recorder for per-call ``offload`` events, or
                 ``None`` when the UI/recorder is disabled — the pool then
                 feeds Prometheus only.
+            executor_pool_max: the executor pool size the auto default
+                scales from (see :func:`resolve_max_threads`); ignored
+                when ``max_threads`` is explicit.
         """
+        resolved = resolve_max_threads(config.max_threads, executor_pool_max)
         self._executor = ThreadPoolExecutor(
-            max_workers=config.max_threads,
+            max_workers=resolved,
             thread_name_prefix='drakkar-offload',
         )
         self._recorder = recorder
-        self._max_threads = config.max_threads
+        self._max_threads = resolved
         # Own counters rather than reading the Prometheus gauges back:
         # the live-overview endpoint needs plain ints, and gauge internals
         # are private API. The counters are the source of truth and the
@@ -146,7 +169,7 @@ class OffloadPool:
 
     @property
     def max_threads(self) -> int:
-        """Configured pool size (``offload.max_threads``)."""
+        """Effective pool size (``offload.max_threads``, auto-resolved when 0)."""
         return self._max_threads
 
     def snapshot(self) -> dict[str, int]:

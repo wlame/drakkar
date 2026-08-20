@@ -27,7 +27,7 @@ from drakkar import metrics
 from drakkar.config import OffloadConfig
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.hookctx import bind_hook_context, clear_hook_context, current_hook_context
-from drakkar.offload import InlineOffloader, OffloaderLike, OffloadPool
+from drakkar.offload import InlineOffloader, OffloaderLike, OffloadPool, resolve_max_threads
 
 
 class FakeRecorder:
@@ -301,3 +301,65 @@ def test_offload_after_shutdown_raises_and_leaks_no_counter():
     with pytest.raises(RuntimeError):
         asyncio.run(scenario())
     assert pool.snapshot() == {'running': 0, 'queued': 0, 'max_threads': 1}
+
+
+class TestResolveMaxThreads:
+    @pytest.mark.parametrize(
+        ('pool_max', 'expected'),
+        [
+            (1, 2),  # floor of 2
+            (4, 2),
+            (8, 2),  # the motivating examples: ceil(n/4), min 2
+            (9, 3),
+            (12, 3),
+            (13, 4),
+            (16, 4),
+            (40, 10),
+            (0, 2),  # no executor pool known — floor
+        ],
+    )
+    def test_auto_scales_with_the_executor_pool(self, pool_max, expected):
+        assert resolve_max_threads(0, pool_max) == expected
+
+    def test_explicit_value_wins_untouched(self):
+        assert resolve_max_threads(7, 40) == 7
+        assert resolve_max_threads(1, 40) == 1
+
+    def test_pool_uses_the_resolved_auto_size(self):
+        pool = OffloadPool(OffloadConfig(), recorder=None, executor_pool_max=13)
+        try:
+            assert pool.max_threads == 4
+        finally:
+            pool.shutdown()
+
+    def test_default_config_without_executor_hint_floors_at_two(self):
+        pool = OffloadPool(OffloadConfig(), recorder=None)
+        try:
+            assert pool.max_threads == 2
+        finally:
+            pool.shutdown()
+
+
+async def test_lifecycle_wires_auto_sized_pool_from_the_executor_config():
+    """The wiring path resolves max_threads=0 against executor.max_executors
+    — pinned end to end because the executor field name is easy to get
+    wrong (the similarly named pool_max belongs to the Postgres sink)."""
+    from types import SimpleNamespace
+
+    from drakkar.config import DrakkarConfig
+    from drakkar.lifecycle import AppLifecycle
+
+    config = DrakkarConfig()
+    config.executor.max_executors = 13
+    handler = SimpleNamespace(_offloader=None)
+    app = SimpleNamespace(_config=config, _recorder=None, _handler=handler, _offload_pool=None)
+    lifecycle = AppLifecycle.__new__(AppLifecycle)
+    lifecycle._app = app
+
+    lifecycle._wire_offload_pool()
+
+    try:
+        assert app._offload_pool.max_threads == 4  # ceil(13 / 4)
+        assert handler._offloader is app._offload_pool
+    finally:
+        app._offload_pool.shutdown()

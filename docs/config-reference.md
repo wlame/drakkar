@@ -364,7 +364,8 @@ Thread pool behind `handler.offload()` — CPU-bound hook computations moved off
 
 ```yaml
 offload:
-  max_threads: 2                   # concurrent offloaded computations before queueing.
+  max_threads: 0                   # concurrent offloaded computations before queueing.
+                                   # 0 = auto: ceil(executor.max_executors / 4), min 2.
                                    # env: DK_OFFLOAD__MAX_THREADS
 ```
 

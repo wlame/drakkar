@@ -489,6 +489,7 @@ class AppLifecycle:
         app._offload_pool = OffloadPool(
             app._config.offload,
             recorder=app._recorder,
+            executor_pool_max=app._config.executor.max_executors,
         )
         app._handler._offloader = app._offload_pool
 

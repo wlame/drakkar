@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `offload.max_threads` now defaults to `0` = automatic sizing:
+  `ceil(executor.max_executors / 4)` with a minimum of 2 (pool 8 -> 2 threads,
+  9 -> 3, 13 -> 4), so bigger executor pools get proportional offload
+  headroom without a second knob. An explicit value still wins untouched.
+
 ### Added
 
 - Task cost, speed, and throughput (contract v1.16, opt-in via

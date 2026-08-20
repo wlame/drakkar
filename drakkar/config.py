@@ -865,17 +865,20 @@ class OffloadConfig(BaseModel):
     """
 
     max_threads: int = Field(
-        default=2,
-        ge=1,
+        default=0,
+        ge=0,
         le=32,
         description=(
-            'Worker threads in the shared offload pool. Calls beyond this '
-            'many concurrent offloaded computations queue (FIFO) and show '
-            'up in the drakkar_offload_queued gauge. More threads do not '
-            'speed up pure-Python work (GIL); raise this only when several '
-            'partitions routinely offload at once and queueing delay '
-            'matters, or when the offloaded code releases the GIL '
-            '(numpy, compiled extensions).'
+            'Worker threads in the shared offload pool. 0 (the default) '
+            'sizes the pool automatically from the executor pool: '
+            'ceil(executor.max_executors / 4), with a minimum of 2 — e.g. pool '
+            '8 -> 2 threads, 9 -> 3, 13 -> 4. Calls beyond this many '
+            'concurrent offloaded computations queue (FIFO) and show up '
+            'in the drakkar_offload_queued gauge. More threads do not '
+            'speed up pure-Python work (GIL); set an explicit value only '
+            'when several partitions routinely offload at once and '
+            'queueing delay matters, or when the offloaded code releases '
+            'the GIL (numpy, compiled extensions).'
         ),
     )
 

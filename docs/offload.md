@@ -44,7 +44,9 @@ propagate unchanged.
 ## What it does — and does not — buy you
 
 `offload()` runs the function on a small dedicated thread pool
-(`offload.max_threads`, default 2). Be clear about the physics:
+(`offload.max_threads`; by default sized automatically from the executor
+pool — `ceil(executor.max_executors / 4)`, minimum 2). Be clear about the
+physics:
 
 - **It does NOT make the computation faster.** Under the GIL,
   pure-Python bytecode is serialized no matter which thread runs it.
@@ -122,12 +124,17 @@ semantics, minus the shared pool, metrics, and recorder events.
 
 ```yaml
 offload:
-  max_threads: 2        # env: DK_OFFLOAD__MAX_THREADS
+  max_threads: 0        # 0 = auto: ceil(executor.max_executors / 4), min 2
+                        # env: DK_OFFLOAD__MAX_THREADS
 ```
 
-Default 2 is right for most deployments: the knob bounds how many
+The default (`0` = auto) sizes the pool from the executor pool —
+`ceil(executor.max_executors / 4)` with a minimum of 2, so pool 8 → 2 threads,
+9 → 3, 13 → 4 — a bigger subprocess fleet gets proportionally more
+offload headroom without tuning a second knob. The knob bounds how many
 offloaded computations run at once before newer calls queue — it is a
-queueing knob, not a speed knob (see the GIL note above). Raise it when
+queueing knob, not a speed knob (see the GIL note above). Set an explicit
+value when
 several partitions routinely offload at the same time *and* the
 `drakkar_offload_queued` gauge shows sustained waiting, or when the
 offloaded code releases the GIL.
