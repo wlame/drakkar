@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `io.max_threads`: size asyncio's default `to_thread` executor — the one
+  pool every blocking call from handlers and the framework shares. Python
+  caps it at `min(32, cpu_count + 4)`, which silently limits blocking-I/O
+  fan-out on many-core hosts; 0 (the default) keeps Python's sizing. New
+  docs page "Threads & Pools" maps the event loop, the executor
+  subprocesses, the blocking-I/O pool, and the offload pool — which
+  mechanism fits which work, and how to read saturation of each from the
+  observability stack.
+
 ## [1.15.0] - 2026-08-21
 
 ### Changed

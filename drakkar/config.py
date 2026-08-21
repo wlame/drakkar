@@ -852,6 +852,41 @@ class RuntimeHealthConfig(BaseModel):
     )
 
 
+class IOConfig(BaseModel):
+    """Blocking-I/O thread pool: asyncio's default ``to_thread`` executor.
+
+    Every ``asyncio.to_thread(...)`` / ``loop.run_in_executor(None, ...)``
+    call — handler filesystem reads, plus the framework's own background
+    file work (archive passes, database-stats scans) — shares ONE
+    process-wide pool: asyncio's default executor. Python sizes it
+    ``min(32, cpu_count + 4)``, so a many-core host is capped at 32
+    concurrent blocking operations no matter what; under slow storage each
+    blocked call holds a thread for its full wall time and later calls
+    queue invisibly behind it.
+
+    This section makes that pool's size a first-class knob. Distinct from
+    ``offload.max_threads``, which sizes the separate dedicated pool
+    behind ``handler.offload()`` (CPU-bound work) — see the Threads docs
+    page for the full map.
+    """
+
+    max_threads: int = Field(
+        default=0,
+        ge=0,
+        le=512,
+        description=(
+            "Worker threads in asyncio's default to_thread executor. 0 "
+            "(the default) keeps Python's own sizing, min(32, cpu_count "
+            '+ 4). Set an explicit value when handler I/O concurrency is '
+            'capped by the pool — e.g. many-core hosts doing wide '
+            'blocking filesystem fan-out. Blocking I/O releases the GIL, '
+            'so large values are legitimate here (unlike '
+            'offload.max_threads); the trade-off is pressure on the '
+            'storage behind the calls.'
+        ),
+    )
+
+
 class OffloadConfig(BaseModel):
     """Thread pool for CPU-bound work handlers move off the event loop.
 
@@ -1883,6 +1918,7 @@ class DrakkarConfig(BaseSettings):
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     throughput: ThroughputConfig = Field(default_factory=ThroughputConfig)
     runtime_health: RuntimeHealthConfig = Field(default_factory=RuntimeHealthConfig)
+    io: IOConfig = Field(default_factory=IOConfig)
     offload: OffloadConfig = Field(default_factory=OffloadConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     ui: UIConfig = Field(default_factory=UIConfig)

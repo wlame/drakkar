@@ -1137,6 +1137,23 @@
       ]
     },
     {
+      "key": "io",
+      "title": "Blocking I/O pool (io:)",
+      "doc_anchor": "blocking-i-o-pool-io",
+      "entries": [
+        {
+          "path": "io.max_threads",
+          "env": "DK_IO__MAX_THREADS",
+          "description": "Worker threads in asyncio's default to_thread executor.",
+          "full_description": "Worker threads in asyncio's default to_thread executor. 0 (the default) keeps Python's own sizing, min(32, cpu_count + 4). Set an explicit value when handler I/O concurrency is capped by the pool — e.g. many-core hosts doing wide blocking filesystem fan-out. Blocking I/O releases the GIL, so large values are legitimate here (unlike offload.max_threads); the trade-off is pressure on the storage behind the calls.",
+          "type": "integer",
+          "default": 0,
+          "secret": false,
+          "group": "io"
+        }
+      ]
+    },
+    {
       "key": "offload",
       "title": "Offload pool (offload:)",
       "doc_anchor": "offload-pool-offload",

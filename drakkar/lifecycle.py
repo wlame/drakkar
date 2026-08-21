@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import signal
 import time
 from collections.abc import Coroutine
@@ -147,6 +148,7 @@ class AppLifecycle:
         self._start_runtime_health()
         self._start_throughput()
         self._wire_annotator()
+        self._wire_io_executor()
         self._wire_offload_pool()
         await self._start_cache()
         await self._connect_sinks()
@@ -471,6 +473,33 @@ class AppLifecycle:
             max_bytes=recorder_config.annotation_max_bytes,
             max_bytes_per_call=recorder_config.annotation_max_bytes_per_call,
             log_max_bytes=recorder_config.annotation_log_max_bytes,
+        )
+
+    def _wire_io_executor(self) -> None:
+        """Resize asyncio's default to_thread executor when io.max_threads is set.
+
+        Every ``asyncio.to_thread`` call in the process — handler blocking
+        I/O plus the framework's own background file work — shares this one
+        pool, which Python caps at ``min(32, cpu_count + 4)``. Installing a
+        replacement via ``loop.set_default_executor`` lifts that cap;
+        ``asyncio.run``'s cleanup (``shutdown_default_executor``) then owns
+        its shutdown exactly as it owns the stock pool's, so lifecycle
+        teardown needs no extra step. 0 (the default) leaves Python's own
+        sizing untouched.
+        """
+        app = self._app
+        max_threads = app._config.io.max_threads
+        if max_threads <= 0:
+            return
+        from concurrent.futures import ThreadPoolExecutor
+
+        executor = ThreadPoolExecutor(max_workers=max_threads, thread_name_prefix='drakkar-io')
+        asyncio.get_running_loop().set_default_executor(executor)
+        logger.info(
+            'io_executor_configured',
+            category='lifecycle',
+            max_threads=max_threads,
+            replaces_default=f'min(32, cpu_count + 4) = {min(32, (os.cpu_count() or 1) + 4)}',
         )
 
     def _wire_offload_pool(self) -> None:

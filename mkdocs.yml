@@ -71,6 +71,7 @@ nav:
   - Host Pressure (NFS RTT, PSI, throttling): host-pressure.md
   - Throughput (task cost and speed): throughput.md
   - Offload (CPU-bound hook work off the loop): offload.md
+  - Threads & Pools (which mechanism for which work): threads.md
   - Local Databases: local-databases.md
   - Performance: performance.md
   - Deployment: deployment.md

@@ -97,6 +97,7 @@ class TestShape:
             'metrics',
             'throughput',
             'runtime_health',
+            'io',
             'offload',
             'logging',
             'ui',

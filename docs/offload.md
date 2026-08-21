@@ -133,8 +133,10 @@ The default (`0` = auto) sizes the pool from the executor pool —
 9 → 3, 13 → 4 — a bigger subprocess fleet gets proportionally more
 offload headroom without tuning a second knob. The knob bounds how many
 offloaded computations run at once before newer calls queue — it is a
-queueing knob, not a speed knob (see the GIL note above). Set an explicit
-value when
+queueing knob, not a speed knob (see the GIL note above). Its sibling
+`io.max_threads` sizes the separate blocking-I/O pool behind
+`asyncio.to_thread` — see [Threads & Pools](threads.md) for the full map.
+Set an explicit value when
 several partitions routinely offload at the same time *and* the
 `drakkar_offload_queued` gauge shows sustained waiting, or when the
 offloaded code releases the GIL.

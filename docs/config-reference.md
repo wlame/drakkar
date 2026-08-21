@@ -356,6 +356,23 @@ runtime_health:
 
 ---
 
+## Blocking I/O pool (`io:`)
+
+📚 [Threads & Pools](threads.md) · [Offloading CPU-bound hook work](offload.md)
+
+asyncio's default `to_thread` executor: every blocking call the handler (or the framework) sends
+through `asyncio.to_thread` shares this one process-wide pool.
+
+```yaml
+io:
+  max_threads: 0     # 0 = keep Python's default, min(32, cpu_count + 4).
+                     # Set explicitly when blocking-I/O fan-out is capped by
+                     # the pool (e.g. many-core hosts reading slow storage).
+                     # env: DK_IO__MAX_THREADS
+```
+
+---
+
 ## Offload pool (`offload:`)
 
 📚 [Offloading CPU-bound hook work](offload.md) · [Runtime health](runtime-health.md)
