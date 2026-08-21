@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-08-21
+
 ### Added
 
 - `io.max_threads`: size asyncio's default `to_thread` executor — the one
