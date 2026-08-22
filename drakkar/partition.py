@@ -382,10 +382,13 @@ class PartitionProcessor:
 
                 await self._process_window(messages)
 
-            # drain remaining queued messages after _running becomes False
+            # Drain remaining queued messages after _running becomes False,
+            # in window_size chunks. One unbounded window here would hand
+            # arrange() the whole backlog at every shutdown/rebalance —
+            # a memory spike, and quadratic pain for O(n²) arrange hooks.
             while self._queue.qsize() > 0:
                 messages = []
-                while not self._queue.empty():
+                while len(messages) < self._window_size:
                     try:
                         messages.append(self._queue.get_nowait())
                     except asyncio.QueueEmpty:
@@ -1046,6 +1049,21 @@ class PartitionProcessor:
             wc_start = time.monotonic()
             try:
                 on_complete_result = await self._handler.on_window_complete(window.results, window.source_messages)
+            except Exception as e:
+                # Log and move on — mirrors on_message_complete below. This
+                # runs inside a fire-and-forget task, so a raising hook would
+                # otherwise skip the window's recorder event, delivery, and
+                # the final _try_commit, surfacing only as an
+                # unretrieved-task-exception warning at GC time.
+                await logger.aerror(
+                    'on_window_complete_failed',
+                    category='handler',
+                    partition=self._partition_id,
+                    window_id=window.window_id,
+                    error=str(e),
+                    exc_info=True,
+                )
+                on_complete_result = None
             finally:
                 # Released together in the ``finally`` — see on_task_complete
                 # above for why unbinding after the ``try`` leaks.

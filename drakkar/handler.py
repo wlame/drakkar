@@ -32,6 +32,7 @@ from drakkar.models import (
     CollectResult,
     DeliveryAction,
     DeliveryError,
+    ErrorAction,
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
@@ -55,7 +56,7 @@ logger = structlog.get_logger()
 #
 # No ``bound=`` constraint: webapp users opt in by declaring concrete Pydantic
 # models in those slots; the framework only requires non-None at startup when
-# ``webapp.enabled=True`` (Task 4). Users who never enable the webapp keep the
+# ``webapp.enabled=True``. Users who never enable the webapp keep the
 # defaults and never see the HTTP hooks.
 HttpRequestT = TypeVar('HttpRequestT', default=None)
 HttpResponseT = TypeVar('HttpResponseT', default=None)
@@ -97,7 +98,7 @@ class DrakkarHandler(Protocol[InputT, OutputT, HttpRequestT, HttpResponseT]):
     async def on_window_complete(
         self, results: list[ExecutorResult], source_messages: list[SourceMessage]
     ) -> CollectResult | None: ...
-    async def on_error(self, task: ExecutorTask, error: ExecutorError) -> str | list[ExecutorTask]: ...
+    async def on_error(self, task: ExecutorTask, error: ExecutorError) -> ErrorAction | list[ExecutorTask]: ...
     async def on_delivery_error(self, error: DeliveryError) -> DeliveryAction: ...
     async def on_assign(self, partitions: list[int]) -> None: ...
     async def on_revoke(self, partitions: list[int]) -> None: ...
@@ -235,7 +236,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # Webapp users read ``http_request_model`` / ``http_response_model`` from
     # the *class*, mirroring how ``input_model`` / ``output_model`` work for
     # the Kafka path. ``None`` means "this slot was not specified" (PEP 696
-    # default); the webapp bootstrap (Task 4) fail-fasts when these are None
+    # default); the webapp bootstrap fail-fasts when these are None
     # and ``webapp.enabled=True``.
     http_request_model: type[BaseModel] | None = None
     http_response_model: type[BaseModel] | None = None
@@ -434,14 +435,14 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         self,
         task: ExecutorTask,
         error: ExecutorError,
-    ) -> str | list[ExecutorTask]:
+    ) -> ErrorAction | list[ExecutorTask]:
         """Handle an executor task failure.
 
         Return ErrorAction.RETRY to retry, ErrorAction.SKIP to drop,
         or a list of new ExecutorTasks to spawn replacement work.
         Default: SKIP.
         """
-        return DeliveryAction.SKIP
+        return ErrorAction.SKIP
 
     async def on_delivery_error(
         self,
@@ -665,13 +666,6 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         no-op pass-through (``return request_id``) without needing to
         rediscover the id from ``req``. Override to embed business fields
         (e.g. ``f"{req.tenant}/{request_id}"``).
-
-        Note: this signature includes ``request_id`` as a parameter — a
-        deliberate divergence from the original plan (which took only
-        ``req``). The plan's signature couldn't satisfy its own documented
-        default ("return the framework request_id") without the framework
-        passing the id through. See plan checkbox text and Task 3 commit
-        notes for the rationale.
         """
         return request_id
 

@@ -2,8 +2,10 @@
 
 The merged database contains:
 - ``workers`` table: one row per source DB's worker_config
-- ``events`` table: all events from all DBs, ordered by timestamp,
-  with a ``worker_id`` foreign key linking each event to its worker
+- ``events`` table: all events from all DBs, with a ``worker_id``
+  foreign key linking each event to its worker. Rows are copied
+  source-by-source; readers order via the ``ts`` index, so insertion
+  order is not part of the contract.
 - ``worker_states`` table: all state snapshots with ``worker_id`` FK
 
 This module is used by the debug UI merge feature and can also be
@@ -16,6 +18,10 @@ import os
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import structlog
+
+logger = structlog.get_logger()
 
 MERGED_SCHEMA = """
 CREATE TABLE workers (
@@ -57,7 +63,11 @@ CREATE TABLE events (
     duration     REAL,
     output_topic TEXT,
     metadata     TEXT,
-    pid          INTEGER
+    pid          INTEGER,
+    labels       TEXT,
+    origin       TEXT,
+    client_name  TEXT,
+    request_id   TEXT
 );
 
 CREATE TABLE worker_states (
@@ -129,6 +139,14 @@ _EVENT_COLUMNS = [
     'output_topic',
     'metadata',
     'pid',
+    # Present in the live recorder schema (drakkar/recorder/schema.py, the
+    # cross-backend contract). ``row.get()`` yields None for source files
+    # written by older backends, which INSERTs as NULL — hence nullable
+    # here even though the live ``origin`` column is NOT NULL.
+    'labels',
+    'origin',
+    'client_name',
+    'request_id',
 ]
 
 _STATE_COLUMNS = [
@@ -271,8 +289,10 @@ def scan_db(path: str) -> DbStats:
             row = db.execute('SELECT COUNT(*) as cnt FROM cache_entries').fetchone()
             if row:
                 stats.cache_entry_count = row['cnt'] or 0
-    except Exception:
-        pass
+    except Exception as e:
+        # Partial stats are returned as-is (kind stays 'unknown') — but an
+        # unreadable file is worth a line, not silence.
+        logger.warning('db_scan_failed', path=path, error=str(e))
     finally:
         if db is not None:
             db.close()
@@ -379,7 +399,8 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
 
             assert worker_id is not None
             worker_map[db_path] = worker_id
-        except Exception:
+        except Exception as e:
+            logger.warning('merge_source_skipped', path=db_path, phase='workers', error=str(e))
             continue
         finally:
             if src is not None:
@@ -390,8 +411,13 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
     # file: the archive pass deletes exactly what that list names.
     incomplete: set[str] = set()
 
-    # phase 2: collect all events into a temp list, sort by ts, then insert
-    all_events: list[tuple] = []
+    # phase 2: copy events per source. No cross-source buffering or global
+    # sort — readers order via the ``ts`` index, so a globally sorted
+    # insertion order buys nothing and buffering every source's rows at
+    # once spiked memory on large merges. Peak memory is now one source.
+    event_cols = ', '.join(['worker_id', *_EVENT_COLUMNS])
+    event_placeholders = ', '.join(['?'] * (1 + len(_EVENT_COLUMNS)))
+    insert_event_sql = f'INSERT INTO events ({event_cols}) VALUES ({event_placeholders})'
 
     for db_path in db_paths:
         if db_path not in worker_map:
@@ -403,23 +429,16 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
             src.row_factory = _dict_factory
             if _table_exists(src, 'events'):
                 rows = src.execute('SELECT * FROM events ORDER BY ts').fetchall()
-                for row in rows:
-                    values = tuple(row.get(col) for col in _EVENT_COLUMNS)
-                    all_events.append((wid, *values))
-        except Exception:
+                batch = [(wid, *(row.get(col) for col in _EVENT_COLUMNS)) for row in rows]
+                out.executemany(insert_event_sql, batch)
+                result.event_count += len(batch)
+        except Exception as e:
+            logger.warning('merge_source_skipped', path=db_path, phase='events', error=str(e))
             incomplete.add(db_path)
             continue
         finally:
             if src is not None:
                 src.close()
-
-    # sort all events by ts (index 1 in the tuple: worker_id, ts, ...)
-    all_events.sort(key=lambda r: r[1] or 0)
-
-    cols = ', '.join(['worker_id', *_EVENT_COLUMNS])
-    placeholders = ', '.join(['?'] * (1 + len(_EVENT_COLUMNS)))
-    out.executemany(f'INSERT INTO events ({cols}) VALUES ({placeholders})', all_events)
-    result.event_count = len(all_events)
 
     # phase 3: merge worker_state rows
     for db_path in db_paths:
@@ -438,7 +457,8 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
                     values = [row.get(col) for col in _STATE_COLUMNS]
                     out.execute(f'INSERT INTO worker_states ({cols}) VALUES ({placeholders})', [wid, *values])
                     result.state_count += 1
-        except Exception:
+        except Exception as e:
+            logger.warning('merge_source_skipped', path=db_path, phase='states', error=str(e))
             incomplete.add(db_path)
             continue
         finally:

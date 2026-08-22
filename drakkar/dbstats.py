@@ -57,8 +57,12 @@ import sqlite3
 import time
 from dataclasses import dataclass, field, replace
 
+import structlog
+
 from drakkar.dbfiles import secure_db_file
 from drakkar.merge import DbStats, _dict_factory, _table_exists, scan_db
+
+logger = structlog.get_logger()
 
 DBSTATS_FILENAME = '.dbstats.db'
 
@@ -145,12 +149,18 @@ class DbStatsCache:
     def _connect(self) -> sqlite3.Connection:
         try:
             return self._connect_once()
-        except sqlite3.DatabaseError:
+        except sqlite3.DatabaseError as e:
             # A corrupt or non-SQLite cache file (partial write, operator
             # accident in the shared dir) would otherwise silently disable
             # caching forever — every page load degrades to full rescans
             # with nothing telling anyone why. The cache is 100% derived
             # data, so the honest self-heal is: throw it away and rebuild.
+            logger.warning(
+                'dbstats_cache_reset',
+                path=self._path,
+                error=str(e),
+                action='deleting corrupt cache DB (plus WAL/SHM) and rebuilding — derived data only',
+            )
             for suffix in ('', '-wal', '-shm'):
                 try:
                     os.remove(self._path + suffix)
@@ -178,7 +188,8 @@ class DbStatsCache:
         break the page)."""
         try:
             db = self._connect()
-        except Exception:
+        except Exception as e:
+            logger.debug('dbstats_cache_open_failed', path=self._path, error=str(e))
             return {}
         try:
             db.row_factory = _dict_factory
@@ -207,7 +218,8 @@ class DbStatsCache:
                 )
                 out[row['path']] = CachedStats(stats=stats, mtime_ns=row['mtime_ns'], size_bytes=row['size_bytes'])
             return out
-        except Exception:
+        except Exception as e:
+            logger.debug('dbstats_cache_load_failed', path=self._path, error=str(e))
             return {}
         finally:
             db.close()
@@ -217,7 +229,8 @@ class DbStatsCache:
         costs a rescan later, never an error on the page path."""
         try:
             db = self._connect()
-        except Exception:
+        except Exception as e:
+            logger.debug('dbstats_cache_open_failed', path=self._path, error=str(e))
             return
         try:
             db.execute(
@@ -246,8 +259,8 @@ class DbStatsCache:
                 ],
             )
             db.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug('dbstats_cache_store_failed', path=stats.path, error=str(e))
         finally:
             db.close()
 
@@ -260,7 +273,8 @@ class DbStatsCache:
         """
         try:
             db = self._connect()
-        except Exception:
+        except Exception as e:
+            logger.debug('dbstats_cache_open_failed', path=self._path, error=str(e))
             return 0
         try:
             rows = db.execute('SELECT path FROM db_stats_v1').fetchall()
@@ -270,7 +284,8 @@ class DbStatsCache:
             if stale:
                 db.commit()
             return len(stale)
-        except Exception:
+        except Exception as e:
+            logger.debug('dbstats_cache_purge_failed', path=self._path, error=str(e))
             return 0
         finally:
             db.close()
@@ -387,7 +402,9 @@ def _delta_scan(path: str, cached: CachedStats) -> DbStats | None:
             max_event_id=new_max,
             cache_entry_count=prev.cache_entry_count,
         )
-    except Exception:
+    except Exception as e:
+        # Caller falls back to a full scan — best-effort optimization only.
+        logger.debug('dbstats_delta_scan_failed', path=path, error=str(e))
         return None
     finally:
         if db is not None:
