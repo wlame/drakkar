@@ -22,6 +22,7 @@ import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import __version__
+from drakkar.appconfig import load_app_config
 from drakkar.cache import CacheEngine
 from drakkar.config import DrakkarConfig, load_config
 from drakkar.consume_pause import ConsumePauseController
@@ -131,6 +132,12 @@ class DrakkarApp:
                         f'configured: {", ".join(missing_bases)}; affected links render as plain text'
                     ),
                 )
+        # Load the handler-declared application config (docs/app-config.md)
+        # at construction — after load_config, before the lifecycle ever
+        # calls on_startup — so a bad app: section or env override is a
+        # fail-fast startup error and ``self.app_config`` is usable inside
+        # every hook, on_startup included.
+        self._wire_app_config()
         self._worker_id = worker_id or os.environ.get(self._config.worker_name_env, '') or f'drakkar-{id(self):x}'
         self._cluster_name = ''
         if self._config.cluster_name_env:
@@ -304,6 +311,49 @@ class DrakkarApp:
             cluster_name=self._cluster_name,
         )
         asyncio.run(self._lifecycle._async_run())
+
+    def _wire_app_config(self) -> None:
+        """Load the handler-declared application config and attach it.
+
+        When the handler declares ``app_config_model``, build the instance
+        from the already-parsed ``config.app`` section plus the handler's
+        own env prefix (``app_env_prefix``) and attach it so
+        ``self.app_config`` is set before any hook runs. A validation
+        failure propagates and is startup-fatal — ``load_app_config``'s
+        error names the section and the model.
+
+        When the handler declares NO model but the YAML carries a
+        non-empty ``app:`` section, warn loudly: a typo'd setup (section
+        present, declaration forgotten) must not be silent.
+        """
+        model = getattr(self._handler, 'app_config_model', None)
+        if model is None:
+            if self._config.app:
+                logger.warning(
+                    'app_config_ignored',
+                    category='lifecycle',
+                    keys=sorted(self._config.app),
+                    message=(
+                        'drakkar.yaml carries a non-empty app: section but the handler '
+                        'declares no app_config_model — the section is ignored'
+                    ),
+                )
+            return
+        env_prefix = getattr(self._handler, 'app_env_prefix', 'APP_')
+        # Wrap the section content back under its key: load_app_config
+        # takes a whole-file-shaped dict (mirroring load_config), and
+        # ``config.app`` is the section body, not the file.
+        app_config = load_app_config(model, yaml_data={'app': self._config.app}, env_prefix=env_prefix)
+        self._handler._app_config = app_config
+        # Field COUNT only — values may include credentials and never
+        # belong in a log line.
+        logger.info(
+            'app_config_loaded',
+            category='lifecycle',
+            model=model.__name__,
+            env_prefix=env_prefix,
+            field_count=len(model.model_fields),
+        )
 
     def _build_sinks(self) -> None:
         """Create sink instances from config and register with SinkManager.

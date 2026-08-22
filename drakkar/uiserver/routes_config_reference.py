@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from drakkar.configmeta import ConfigFieldMeta, build_config_metadata
+from drakkar.configmeta import ConfigFieldMeta, _to_jsonable, build_config_metadata, walk_model_fields
 
 if TYPE_CHECKING:
     from drakkar.uiserver.server import UIDeps
@@ -225,6 +225,41 @@ def build_config_reference(config_dump: dict[str, Any]) -> ConfigReferenceRespon
     return ConfigReferenceResponse(groups=groups)
 
 
+def build_app_config_group(instance: BaseModel, env_prefix: str) -> ConfigReferenceGroup:
+    """Build the runtime ``app`` group from a handler-declared app config.
+
+    The static artifact (drakkar/configmeta.py) cannot describe the user's
+    model — it only exists at runtime on the live handler — so this group
+    is built per-request from the SAME walk machinery the framework fields
+    use: descriptions, types, defaults, and nesting all come out exactly
+    like the vendored entries. Entry paths carry the literal ``app.``
+    prefix (matching how framework entries carry their full YAML path);
+    env names use the handler's own prefix with the ``app`` segment
+    dropped (``app.scoring.url`` -> ``MYAPP_SCORING__URL``). Secrets mask
+    for both ``SecretStr`` annotations and the framework's
+    ``json_schema_extra={'drakkar_secret': True}`` marker — the walk flags
+    either, and masking itself reuses :data:`SECRET_MASK`.
+    """
+    field_metas = walk_model_fields(
+        type(instance),
+        path_prefix=['app'],
+        group='app',
+        env_prefix=env_prefix,
+        env_skip_segments=1,
+    )
+    # A python-mode dump keeps SecretStr instances, which ``_to_jsonable``
+    # unwraps to their real value — the same convention the metadata
+    # defaults use — so ``is_default`` compares real value to real default
+    # BEFORE ``_build_entries`` masks both for the response. (A json-mode
+    # dump would pre-mask live SecretStr values with pydantic's own
+    # placeholder and break that comparison.)
+    live_dump = {'app': _to_jsonable(instance.model_dump(mode='python'))}
+    entries: list[ConfigReferenceEntry] = []
+    for field_meta in field_metas:
+        entries.extend(_build_entries(field_meta, live_dump))
+    return ConfigReferenceGroup(key='app', title='Application', doc_anchor='app-config', entries=entries)
+
+
 def create_config_reference_router(deps: UIDeps) -> APIRouter:
     """Build the router owning ``GET /api/v1/config-reference`` (v1-only, no legacy alias)."""
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
@@ -247,6 +282,17 @@ def create_config_reference_router(deps: UIDeps) -> APIRouter:
         field) since it has no per-element metadata path of its own.
         """
         config_dump = deps.drakkar_app._config.model_dump(mode='json')
-        return build_config_reference(config_dump)
+        response = build_config_reference(config_dump)
+        # Contract v1.17: one extra runtime group for the handler-declared
+        # application config (docs/app-config.md). getattr-guarded because
+        # tests mount this router over a MagicMock app without a handler;
+        # a handler without a declared model has app_config None and the
+        # group is simply absent.
+        handler = getattr(deps.drakkar_app, 'handler', None)
+        app_config = getattr(handler, 'app_config', None)
+        if isinstance(app_config, BaseModel):
+            env_prefix = getattr(handler, 'app_env_prefix', 'APP_')
+            response.groups.append(build_app_config_group(app_config, env_prefix))
+        return response
 
     return router

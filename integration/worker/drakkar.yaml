@@ -46,6 +46,19 @@ executor:
 offload:
   max_threads: 2
 
+# --- User-defined app config (docs/app-config.md) ---
+#
+# The reserved app: section belongs to the handler's own AppConfig model
+# (integration/worker/models.py) — the framework passes it through
+# unvalidated and loads it with the handler's RGAPP_ env prefix
+# (docker-compose overrides worker-2's threshold via
+# RGAPP_PRIORITY_MATCH_THRESHOLD). The api_key shows masked in the
+# Debug UI's config reference (Application group).
+app:
+  priority_match_threshold: 20
+  scoring_service_url: "http://scoring-stub:9000/score"
+  scoring_api_key: "integration-demo-scoring-key"
+
 # --- Sinks ---
 #
 # A NOTE ON NAMING in this section:

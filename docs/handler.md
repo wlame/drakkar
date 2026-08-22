@@ -869,6 +869,17 @@ pages appear as extra navigation entries and are validated at startup, so
 a broken declaration fails the boot rather than a page render. See
 [Declared UI Pages](ui-pages.md) for the page/widget vocabulary.
 
+## App Config Class Attributes
+
+`app_config_model` and `app_env_prefix` declare a user-defined application
+config: your own Pydantic model, loaded by the framework from the reserved
+`app:` section of the same `drakkar.yaml` plus env vars under your own
+prefix (e.g. `MYAPP_PRIORITY_THRESHOLD=20`), validated fail-fast at
+startup, and exposed as `self.app_config` in every hook — `on_startup`
+included. Secrets (`SecretStr` or the `drakkar_secret` marker) mask in the
+Debug UI's config reference, where the model appears as its own group. See
+[App Config](app-config.md).
+
 ---
 
 ## Offloading CPU-bound Work

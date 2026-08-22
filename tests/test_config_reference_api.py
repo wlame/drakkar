@@ -15,8 +15,10 @@ import time
 from unittest.mock import AsyncMock, MagicMock
 
 from httpx import ASGITransport, AsyncClient
+from pydantic import BaseModel, Field, SecretStr
 
 from drakkar.config import DrakkarConfig, KafkaSinkConfig, PostgresSinkConfig, WebClientConfig
+from drakkar.handler import BaseDrakkarHandler
 from drakkar.recorder import EventRecorder
 from drakkar.uiserver.routes_config_reference import SECRET_MASK
 from drakkar.uiserver.server import create_ui_app
@@ -27,11 +29,13 @@ from tests.conftest import make_ui_config
 # ---------------------------------------------------------------------------
 
 
-def make_app(config: DrakkarConfig) -> MagicMock:
+def make_app(config: DrakkarConfig, handler: object = None) -> MagicMock:
     """Build a MagicMock ``DrakkarApp`` stand-in carrying a real ``DrakkarConfig``.
 
     Mirrors ``mock_app`` in ``tests/test_debug_api_v1.py`` — only the bits
     the config-reference endpoint and its router-mounting code path touch.
+    ``handler`` feeds the runtime app-config group; ``None`` (the default)
+    exercises the no-handler path most endpoint tests want.
     """
     app = MagicMock()
     app._worker_id = 'test-worker'
@@ -41,12 +45,12 @@ def make_app(config: DrakkarConfig) -> MagicMock:
     app._config = config
     app._config.ui.release.enabled = False
     app.cache_engine = None
-    app.handler = None
+    app.handler = handler
     app._consumer = None
     return app
 
 
-async def get_config_reference(config: DrakkarConfig) -> dict:
+async def get_config_reference(config: DrakkarConfig, handler: object = None) -> dict:
     """Round-trip ``config`` through a real ASGI request and return the parsed JSON body.
 
     Reuses ``config.ui`` as the debug-server's own ``UIConfig`` (rather than
@@ -60,7 +64,7 @@ async def get_config_reference(config: DrakkarConfig) -> dict:
     recorder._reader_db = None
     recorder.reader_db = None
     recorder.config = ui_config
-    app = make_app(config)
+    app = make_app(config, handler=handler)
     fastapi_app = create_ui_app(ui_config, recorder, app)
     async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test') as client:
         headers = {}
@@ -286,3 +290,129 @@ class TestEnvPassthrough:
         body = await get_config_reference(DrakkarConfig())
         entry = entries_by_path(body, 'kafka.brokers')[0]
         assert entry['env'] == 'DK_KAFKA__BROKERS'
+
+
+# ---------------------------------------------------------------------------
+# Runtime app-config group (docs/app-config.md, contract v1.17)
+# ---------------------------------------------------------------------------
+
+
+class ScoringSection(BaseModel):
+    """Nested model inside the demo app config."""
+
+    url: str = 'http://localhost:9000/score'
+    timeout_seconds: int = 5
+
+
+class ReferenceAppConfig(BaseModel):
+    """Demo user model: descriptions, both secret conventions, nesting."""
+
+    priority_threshold: int = Field(
+        default=10,
+        description='Tasks scoring above this are prioritized. Everything else queues normally.',
+    )
+    api_key: SecretStr = SecretStr('')
+    webhook_token: str = Field(default='', json_schema_extra={'drakkar_secret': True})
+    scoring: ScoringSection = Field(default_factory=ScoringSection)
+
+
+class AppConfigHandler(BaseDrakkarHandler):
+    """Handler declaring the app config, with a loaded instance attached
+    the way ``DrakkarApp._wire_app_config`` attaches it."""
+
+    app_config_model = ReferenceAppConfig
+    app_env_prefix = 'MYAPP_'
+
+    async def arrange(self, messages, pending):
+        return []
+
+
+def make_app_config_handler(instance: ReferenceAppConfig) -> AppConfigHandler:
+    handler = AppConfigHandler()
+    handler._app_config = instance
+    return handler
+
+
+class TestAppConfigGroup:
+    async def test_group_present_with_expected_identity(self):
+        handler = make_app_config_handler(ReferenceAppConfig())
+        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        group = body['groups'][-1]
+        assert group['key'] == 'app'
+        assert group['title'] == 'Application'
+        assert group['doc_anchor'] == 'app-config'
+
+    async def test_group_absent_when_no_handler(self):
+        body = await get_config_reference(DrakkarConfig())
+        assert 'app' not in [g['key'] for g in body['groups']]
+
+    async def test_group_absent_when_handler_declares_no_model(self):
+        class PlainHandler(BaseDrakkarHandler):
+            async def arrange(self, messages, pending):
+                return []
+
+        body = await get_config_reference(DrakkarConfig(), handler=PlainHandler())
+        assert 'app' not in [g['key'] for g in body['groups']]
+
+    async def test_entries_carry_app_prefixed_paths_and_user_env_names(self):
+        handler = make_app_config_handler(ReferenceAppConfig())
+        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        entry = entries_by_path(body, 'app.priority_threshold')[0]
+        assert entry['env'] == 'MYAPP_PRIORITY_THRESHOLD'
+        assert entry['type'] == 'integer'
+        assert entry['description'] == 'Tasks scoring above this are prioritized.'
+        assert entry['full_description'].endswith('Everything else queues normally.')
+
+    async def test_nested_model_walks_with_double_underscore_env(self):
+        handler = make_app_config_handler(ReferenceAppConfig(scoring=ScoringSection(url='http://scoring-svc:9000')))
+        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        url_entry = entries_by_path(body, 'app.scoring.url')[0]
+        assert url_entry['env'] == 'MYAPP_SCORING__URL'
+        assert url_entry['value'] == 'http://scoring-svc:9000'
+        assert url_entry['is_default'] is False
+        timeout_entry = entries_by_path(body, 'app.scoring.timeout_seconds')[0]
+        assert timeout_entry['value'] == 5
+        assert timeout_entry['is_default'] is True
+
+    async def test_secretstr_field_is_masked_and_never_leaks_raw(self):
+        handler = make_app_config_handler(ReferenceAppConfig(api_key=SecretStr('raw-secret-key')))
+        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        entry = entries_by_path(body, 'app.api_key')[0]
+        assert entry['secret'] is True
+        assert entry['value'] == SECRET_MASK
+        # is_default computed BEFORE masking: the live value differs from
+        # the (empty) default even though both would mask identically.
+        assert entry['is_default'] is False
+        assert 'raw-secret-key' not in str(body)
+
+    async def test_drakkar_secret_marker_field_is_masked(self):
+        handler = make_app_config_handler(ReferenceAppConfig(webhook_token='raw-webhook-token'))
+        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        entry = entries_by_path(body, 'app.webhook_token')[0]
+        assert entry['secret'] is True
+        assert entry['value'] == SECRET_MASK
+        assert 'raw-webhook-token' not in str(body)
+
+    async def test_unset_secret_stays_visible_as_empty_and_default(self):
+        handler = make_app_config_handler(ReferenceAppConfig())
+        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        entry = entries_by_path(body, 'app.api_key')[0]
+        assert entry['value'] == ''
+        assert entry['is_default'] is True
+
+    async def test_default_scalar_reports_is_default_true(self):
+        handler = make_app_config_handler(ReferenceAppConfig())
+        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        entry = entries_by_path(body, 'app.priority_threshold')[0]
+        assert entry['value'] == 10
+        assert entry['default'] == 10
+        assert entry['is_default'] is True
+
+    async def test_framework_groups_unchanged_by_app_group(self):
+        """Adding the runtime group appends data — the 14 static groups keep
+        their keys and order."""
+        handler = make_app_config_handler(ReferenceAppConfig())
+        body = await get_config_reference(DrakkarConfig(), handler=handler)
+        static_keys = [g['key'] for g in body['groups'][:-1]]
+        baseline = await get_config_reference(DrakkarConfig())
+        assert static_keys == [g['key'] for g in baseline['groups']]

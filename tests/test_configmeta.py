@@ -103,6 +103,12 @@ def test_group_anchors_cover_every_real_config_section():
     real_anchors = _doc_heading_anchors()
     # The cheatsheet section documents env-var syntax, not a config group.
     real_anchors.discard('environment-variable-override-cheatsheet')
+    # The app-config section documents the user-owned pass-through `app:`
+    # section, whose group exists only at runtime (built from the live
+    # handler's model by the config-reference endpoint) — the static
+    # metadata deliberately excludes it. Its runtime group's doc_anchor
+    # ('app-config') still points at this heading.
+    real_anchors.discard('app-config')
     metadata = build_config_metadata()
     mapped_anchors = {group.doc_anchor for group in metadata.groups}
     assert mapped_anchors == real_anchors
@@ -122,8 +128,18 @@ def _independent_leaf_paths(model_cls: type[BaseModel], prefix: str = '') -> set
     `*` segment. list[SomeModel] fields (only webapp.clients) are NOT
     decomposed — they're one leaf, matching the production walker.
     """
+    # Root fields deliberately absent from the metadata: `app` is the
+    # user-owned pass-through section (docs/app-config.md) — its shape
+    # belongs to the handler-declared model, so the static artifact cannot
+    # (and must not) describe it. Kept as an explicit skip here, mirroring
+    # drakkar.configmeta.EXCLUDED_ROOT_FIELDS, so this independent
+    # recomputation stays a real cross-check of the production walker.
+    skipped_root_fields = {'app'}
+
     paths: set[str] = set()
     for name, info in model_cls.model_fields.items():
+        if not prefix and name in skipped_root_fields:
+            continue
         annotation = info.annotation
         full_path = f'{prefix}.{name}' if prefix else name
 
@@ -139,6 +155,24 @@ def _independent_leaf_paths(model_cls: type[BaseModel], prefix: str = '') -> set
 
         paths.add(full_path)
     return paths
+
+
+def test_app_field_is_excluded_from_metadata_and_artifact_is_unchanged():
+    """The `app` pass-through field must not surface in the static metadata.
+
+    Its shape is user-owned (docs/app-config.md) and rendered at runtime by
+    the config-reference endpoint instead. Regenerating in memory and
+    comparing to the committed artifact proves the field's introduction
+    left the vendored file byte-identical.
+    """
+    assert 'app' in DrakkarConfig.model_fields, 'the reserved app: section must exist on DrakkarConfig'
+    metadata = build_config_metadata()
+    all_paths = {entry.path for group in metadata.groups for entry in group.entries}
+    assert 'app' not in all_paths
+    assert not any(path.startswith('app.') for path in all_paths)
+    # Byte-stability of the vendored artifact against the live tree.
+    fresh = build_config_metadata().model_dump_json(indent=2) + '\n'
+    assert ARTIFACT_PATH.read_text() == fresh
 
 
 def test_every_leaf_field_appears_exactly_once():

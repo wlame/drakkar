@@ -4,6 +4,7 @@ __version__ = '1.16.0'
 
 from drakkar.annotations import AnnotatorLike
 from drakkar.app import DrakkarApp
+from drakkar.appconfig import load_app_config
 from drakkar.cache import CacheLike, CacheScope
 from drakkar.config import DrakkarConfig, WebAppConfig, WebClientConfig, load_config
 from drakkar.handler import BaseDrakkarHandler, DrakkarHandler
@@ -79,6 +80,7 @@ __all__ = [
     'WebReport',
     'WebRequestContext',
     'format_rfc3339_micro',
+    'load_app_config',
     'load_config',
     'make_request_id',
     'make_stable_task_id',

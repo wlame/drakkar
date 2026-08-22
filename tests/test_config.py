@@ -481,6 +481,48 @@ def test_config_serialization(config_yaml_file: Path):
     assert data['executor']['max_executors'] == 40
 
 
+# --- Reserved app: section (user-defined application config) ---
+
+
+def test_drakkar_config_app_section_defaults_to_empty_dict():
+    cfg = DrakkarConfig()
+    assert cfg.app == {}
+
+
+def test_load_config_app_section_passes_through_unvalidated(tmp_path: Path):
+    """The app: section reaches ``config.app`` verbatim — no framework validation."""
+    config_path = tmp_path / 'app.yaml'
+    config_path.write_text(
+        'executor:\n'
+        '  binary_path: /bin/echo\n'
+        'app:\n'
+        '  priority_threshold: 20\n'
+        '  scoring:\n'
+        '    url: http://scoring-service:9000\n'
+    )
+    cfg = load_config(config_path)
+    assert cfg.app == {'priority_threshold': 20, 'scoring': {'url': 'http://scoring-service:9000'}}
+
+
+def test_drakkar_config_rejects_dk_app_env_overrides(monkeypatch: pytest.MonkeyPatch):
+    """DK_APP__* belongs to nobody: the framework passes app.* through and the
+    handler binds its own prefix — the guard names the offending vars, sorted."""
+    monkeypatch.setenv('DK_APP__PRIORITY_THRESHOLD', '20')
+    monkeypatch.setenv('DK_APP__API_KEY', 'sekrit')
+    with pytest.raises(ValidationError, match='DK_APP__\\* environment overrides are not supported') as excinfo:
+        DrakkarConfig()
+    # Sorted var list, mirroring the retired-debug-section guard's style.
+    assert 'DK_APP__API_KEY, DK_APP__PRIORITY_THRESHOLD' in str(excinfo.value)
+
+
+def test_load_config_rejects_dk_app_env_overrides_with_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    config_path = tmp_path / 'app.yaml'
+    config_path.write_text('executor:\n  binary_path: /bin/echo\n')
+    monkeypatch.setenv('DK_APP__X', '1')
+    with pytest.raises(ValidationError, match='app_env_prefix'):
+        load_config(config_path)
+
+
 def test_deep_merge_recursive():
     """_deep_merge recursively merges nested dicts."""
     from drakkar.config import _deep_merge

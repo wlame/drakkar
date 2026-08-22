@@ -9,7 +9,7 @@ handles sink failures.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, get_args
 
 import structlog
 from pydantic import BaseModel, ValidationError
@@ -76,6 +76,11 @@ class DrakkarHandler(Protocol[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # One details model per handler; registering it is the opt-in for the
     # probe's User-defined tab.
     probe_details_model: type[BaseModel] | None
+    # One application-config model per handler; registering it is the
+    # opt-in for the framework-loaded ``self.app_config`` instance
+    # (drakkar.yaml ``app:`` section + the handler's own env prefix).
+    app_config_model: ClassVar[type[BaseModel] | None]
+    app_env_prefix: ClassVar[str]
     # Declared UI pages: a deployment's custom dashboard pages, each a
     # list of widgets reading from a built-in source. Registering these
     # is the opt-in for the extra nav entries; validated at startup via
@@ -206,6 +211,22 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # Declared UI pages; see the Protocol attribute above.
     ui_pages: list[Page] | None = None
 
+    # Application config declaration — see the :attr:`app_config` property
+    # for the full story. ``app_config_model`` opts the handler into the
+    # framework-loaded app config; ``app_env_prefix`` names the env-var
+    # namespace the application owns (never ``DK_*``, which belongs to the
+    # framework). ClassVar: these describe the handler CLASS, like
+    # ``probe_details_model`` above, and are never set per-instance.
+    app_config_model: ClassVar[type[BaseModel] | None] = None
+    app_env_prefix: ClassVar[str] = 'APP_'
+
+    # Backing field for :attr:`app_config`. A class-level ``None`` (rather
+    # than an ``__init__`` assignment) keeps the property working on
+    # subclasses that override ``__init__`` without calling
+    # ``super().__init__()`` — the same reasoning as ``cache`` below. The
+    # framework sets the loaded instance per-instance at startup.
+    _app_config: BaseModel | None = None
+
     # Handler-facing cache attribute. The framework reassigns this to either
     # a real ``Cache`` (when ``config.cache.enabled=true``) or leaves the
     # class-level NoOpCache default in place. Kept as a class attribute (not
@@ -268,6 +289,39 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
             cls.http_request_model = http_req_t
         if http_resp_t and issubclass(http_resp_t, BaseModel):
             cls.http_response_model = http_resp_t
+
+    @property
+    def app_config(self) -> BaseModel | None:
+        """The validated user-defined application config, or ``None``.
+
+        Declare a Pydantic model on the handler class and the framework
+        loads it at startup from the same ``drakkar.yaml`` the framework
+        config comes from — the reserved top-level ``app:`` section — with
+        env-var overrides under the handler's own prefix and the
+        framework's exact precedence (model defaults → YAML → env with
+        ``__`` nesting)::
+
+            class AppConfig(BaseModel):
+                priority_threshold: int = 10
+                scoring_url: str = 'http://localhost:9000/score'
+                api_key: SecretStr = SecretStr('')
+
+            class MyHandler(BaseDrakkarHandler[In, Out]):
+                app_config_model = AppConfig
+                app_env_prefix = 'MYAPP_'
+
+                async def arrange(self, messages, pending):
+                    threshold = self.app_config.priority_threshold
+                    ...
+
+        With that declaration, ``app: {priority_threshold: 20}`` in YAML or
+        ``MYAPP_PRIORITY_THRESHOLD=20`` in the environment both reach
+        ``self.app_config`` — validated fail-fast at startup, available
+        before ``on_startup`` runs, and rendered as one more group in the
+        debug UI's config reference (secrets masked). ``None`` when the
+        handler declares no ``app_config_model``. See docs/app-config.md.
+        """
+        return self._app_config
 
     def message_label(self, msg: SourceMessage) -> str:
         """Return a short label for a message, used in logs and UI.

@@ -58,6 +58,7 @@ nav:
   - UI Customization Cookbook (a worked example): ui-customization-cookbook.md
   - Timeline Tuning (history depth, color rules, label roles): ui-timeline.md
   - Configuration: configuration.md
+  - App Config (your own settings in drakkar.yaml): app-config.md
   - Features & Enable Order: features.md
   - Sinks: sinks.md
   - Sink Write Operations: sink-write-operations.md

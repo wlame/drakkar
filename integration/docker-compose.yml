@@ -217,6 +217,11 @@ services:
       DK_METRICS__PORT: "9091"
       DK_UI__PORT: "8082"
       DK_UI__PUBLIC_URL: "http://localhost:8082/"
+      # App-config demo (docs/app-config.md): override one field of the
+      # handler-declared AppConfig via the handler's OWN env prefix —
+      # never DK_APP__* (the framework rejects that). Only worker-2, so
+      # the Debug UI shows a per-worker divergence from the shared yaml.
+      RGAPP_PRIORITY_MATCH_THRESHOLD: "35"
     ports:
       - "9091:9091"
       - "8082:8082"

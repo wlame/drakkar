@@ -622,6 +622,18 @@ webapp:
 
 ---
 
+## App config
+
+The reserved top-level `app:` section carries **user-defined application
+config** — the framework passes it through unvalidated to the
+handler-declared Pydantic model and exposes the validated instance as
+`self.app_config`. Env overrides use the handler's own prefix (e.g.
+`MYAPP_SCORING__URL`), never `DK_APP__*` (rejected at startup). The Debug
+UI's config reference renders the model as its own `Application` group,
+secrets masked. See [App Config](app-config.md) for the full feature.
+
+---
+
 ## Environment-variable override cheatsheet
 
 The pattern: **`DK_<SECTION>__<FIELD>`** -- prefix `DK_`, double underscore between nesting levels, single underscore within a field name.

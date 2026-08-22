@@ -79,6 +79,7 @@ Top-level settings that control worker identity and cluster grouping.
 | `worker_name_env` | `str` | `'WORKER_ID'` | Name of the environment variable that holds the worker name. Used in logs, metrics, and the operator UI. If the env var is empty or unset, falls back to `drakkar-{hex_id}`. |
 | `cluster_name` | `str` | `''` | Logical cluster name for grouping workers in the operator UI. Workers with the same cluster name are displayed together and can cross-trace messages. |
 | `cluster_name_env` | `str` | `''` | Name of an environment variable that holds the cluster name. If set and non-empty, overrides the static `cluster_name` value. |
+| `app` | `dict` | `{}` | Reserved section for **user-defined application config**: passed through unvalidated to the handler-declared model and exposed as `self.app_config`, with env overrides under the handler's own prefix (never `DK_APP__*`). See [App Config](app-config.md). |
 
 ```yaml
 worker_name_env: HOSTNAME

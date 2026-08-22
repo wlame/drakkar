@@ -918,6 +918,20 @@ class TestConfigSummary:
         summary = cfg.config_summary(worker_id='w')
         assert 'dlq=on' in summary
 
+    def test_summary_with_app_section_is_byte_identical_to_baseline(self):
+        """The user-owned app: section must never surface in the one-liner.
+
+        The summary is byte-compared with the Go backend, so introducing
+        the pass-through section must not change a single character —
+        with or without content in it.
+        """
+        baseline = make_config().config_summary(worker_id='w')
+        cfg = make_config(app={'priority_threshold': 20, 'scoring_url': 'http://scoring-service:9000'})
+        summary = cfg.config_summary(worker_id='w')
+        assert summary == baseline
+        # No app token at all ('webapp=' legitimately contains 'app').
+        assert ' app=' not in summary
+
     def test_summary_multiple_sink_types(self):
         from drakkar.config import PostgresSinkConfig
 

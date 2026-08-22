@@ -13,10 +13,34 @@ MessageGroup — and emits the aggregated summary (single row per request).
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from drakkar import probe_field
 from drakkar.probe import Column, Detail, Element, Link
+
+
+class AppConfig(BaseModel):
+    """User-defined application config — the app-config feature demo.
+
+    Loaded by the framework from drakkar.yaml's reserved ``app:`` section
+    plus ``RGAPP_*`` env overrides (see the handler's ``app_config_model``
+    / ``app_env_prefix`` class attributes and docs/app-config.md), and
+    read as ``self.app_config`` in hooks. Rendered as the ``Application``
+    group in the Debug UI config reference, with the SecretStr masked.
+    """
+
+    priority_match_threshold: int = Field(
+        default=20,
+        description='Requests whose total match count exceeds this are treated as priority notifications.',
+    )
+    scoring_service_url: str = Field(
+        default='http://localhost:9000/score',
+        description='Endpoint a real deployment would send match scores to (demo value, never called).',
+    )
+    scoring_api_key: SecretStr = Field(
+        default=SecretStr(''),
+        description='Credential for the scoring endpoint; masked in the Debug UI config reference.',
+    )
 
 
 class RankRequest(BaseModel):

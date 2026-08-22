@@ -1899,6 +1899,28 @@ class DrakkarConfig(BaseSettings):
             )
         return values
 
+    @model_validator(mode='before')
+    @classmethod
+    def _reject_dk_app_env_overrides(cls, values: object) -> object:
+        """Refuse ``DK_APP__*`` env vars — the ``app.*`` section is not framework-owned.
+
+        The ``app:`` section belongs to the handler-declared application
+        config model (see docs/app-config.md), which binds its own env
+        prefix (``BaseDrakkarHandler.app_env_prefix``, default ``APP_``).
+        Letting ``DK_APP__*`` silently merge into the pass-through dict
+        would create a second, framework-flavored override path for the
+        same values. Sorted var order keeps this message byte-comparable
+        with the Go backend's twin guard.
+        """
+        app_env = sorted(name for name in os.environ if name.startswith('DK_APP__'))
+        if app_env:
+            raise ValueError(
+                'DK_APP__* environment overrides are not supported: the app.* section is '
+                "passed through to the handler's own config model, which binds its own env "
+                'prefix (app_env_prefix, default APP_); rename: ' + ', '.join(app_env)
+            )
+        return values
+
     worker_name_env: str = Field(
         default='WORKER_ID',
         description='Environment variable that holds the worker name for logs, metrics, and UI',
@@ -1924,6 +1946,13 @@ class DrakkarConfig(BaseSettings):
     ui: UIConfig = Field(default_factory=UIConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     webapp: WebAppConfig = Field(default_factory=WebAppConfig)
+    app: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            'Reserved section for user-defined application config (see docs/app-config.md); '
+            'the framework passes it through unvalidated to the handler-declared model'
+        ),
+    )
 
     def config_summary(self, worker_id: str = '', cluster_name: str = '') -> str:
         """One-line human-readable config summary for startup logging and debug UI.
@@ -2074,7 +2103,7 @@ def _apply_list_field_defaults(merged: dict) -> dict:
     return new_merged
 
 
-def _parse_env_overrides(prefix: str, delimiter: str) -> dict:
+def _parse_env_overrides(prefix: str, delimiter: str, *, skip_config_key: bool = True) -> dict:
     """Extract env vars with prefix, split by delimiter into nested dict.
 
     Numeric path segments are detected and the surrounding dict is
@@ -2082,13 +2111,19 @@ def _parse_env_overrides(prefix: str, delimiter: str) -> dict:
     ``{'webapp': {'clients': [{'rpm': '10'}]}}``). This lets list-of-objects
     config fields (like ``webapp.clients``) be overridden by env vars in
     the same nested-delimiter style as scalar fields.
+
+    ``skip_config_key`` drops ``<prefix>CONFIG`` — the framework's own
+    config-file-path convention (``DK_CONFIG``). The app-config loader
+    (:mod:`drakkar.appconfig`) passes ``False``: a user prefix has no such
+    convention, and silently dropping e.g. ``MYAPP_CONFIG`` would lose a
+    legitimate override of a user field named ``config``.
     """
     result: dict[str, Any] = {}
     for key, value in os.environ.items():
         if not key.startswith(prefix):
             continue
         # skip the config file path env var itself
-        if key == f'{prefix}CONFIG':
+        if skip_config_key and key == f'{prefix}CONFIG':
             continue
         parts = key[len(prefix) :].lower().split(delimiter)
         d = result

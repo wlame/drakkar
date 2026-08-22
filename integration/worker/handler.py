@@ -29,6 +29,7 @@ from metrics import (
     search_match_count,
 )
 from models import (
+    AppConfig,
     CacheLookupRow,
     MatchAnalysisRow,
     PatternRankRow,
@@ -170,6 +171,13 @@ class RipgrepHandler(
       - Filesystem JSONL: if total_matches > 50
     """
 
+    # User-defined app config — see docs/app-config.md. The framework
+    # loads AppConfig from drakkar.yaml's app: section (plus RGAPP_* env
+    # overrides — docker-compose raises worker-2's threshold that way)
+    # and exposes it as self.app_config before any hook runs.
+    app_config_model = AppConfig
+    app_env_prefix = 'RGAPP_'
+
     # User-defined Message Probe tab — see docs/probe-user-details.md.
     # The probe.set/append/update calls sprinkled through this handler
     # are near-zero-cost no-ops outside a probe — but any computation
@@ -242,6 +250,12 @@ class RipgrepHandler(
             binary=config.executor.binary_path,
             max_executors=config.executor.max_executors,
             fail_rate=FAIL_RATE,
+            # self.app_config is already loaded here — the framework wires
+            # it before on_startup. Threshold only; the api_key stays out
+            # of logs (SecretStr would mask it anyway).
+            priority_match_threshold=self.app_config.priority_match_threshold
+            if isinstance(self.app_config, AppConfig)
+            else None,
         )
         return config
 

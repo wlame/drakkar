@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- User-defined app config (contract v1.17): a handler declares its own
+  Pydantic model (`app_config_model` / `app_env_prefix` class attributes)
+  and the framework loads it from the reserved `app:` section of the same
+  `drakkar.yaml`, plus env overrides under the handler's own prefix
+  (`MYAPP_SCORING__URL`), with the framework precedence (defaults → YAML →
+  env). Validated fail-fast at startup and exposed as `self.app_config`
+  before `on_startup` runs. The config-reference endpoint gains a runtime
+  `Application` group built from the model — descriptions, env names,
+  defaults, and nesting like framework fields, secrets (`SecretStr` or the
+  `drakkar_secret` marker) masked. `DK_APP__*` env vars are rejected with
+  a pointer to the handler prefix; a non-empty `app:` section with no
+  declared model logs `app_config_ignored`. Standalone loading via the new
+  public `load_app_config()`. New docs page `docs/app-config.md`.
+
 ### Fixed
 
 - Recorder: a flush interrupted by cancellation (UI timeout, shutdown) now
@@ -43,6 +59,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the Go backend.
 - The runtime-health routes now honor `ui.auth_token` like every other
   API route (they were the only router without the bearer-token gate).
+- Documentation accuracy pass: correct stale claims (executor `PriorityGate`
+  and process-group kill, precomputed-task metrics, webapp 429 body and
+  ports, periodic metric names, recorder flush buckets, worker_state
+  columns, cache browser defaults, filesystem sink example), repair three
+  broken anchors, and document previously missing config sections
+  (`throughput:`, `io:`, `offload:`, consume pause, probe details,
+  annotations, custom sinks, DLQ security) across configuration.md,
+  config-reference.md, features.md, handler.md, observability.md, and the
+  docs home page.
 
 ### Changed
 
@@ -58,18 +83,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other tests, replace wall-clock timing assertions with deterministic
   synchronization, and drop seven seconds of real sleeps from the rotation
   tests.
-
-### Fixed
-
-- Documentation accuracy pass: correct stale claims (executor `PriorityGate`
-  and process-group kill, precomputed-task metrics, webapp 429 body and
-  ports, periodic metric names, recorder flush buckets, worker_state
-  columns, cache browser defaults, filesystem sink example), repair three
-  broken anchors, and document previously missing config sections
-  (`throughput:`, `io:`, `offload:`, consume pause, probe details,
-  annotations, custom sinks, DLQ security) across configuration.md,
-  config-reference.md, features.md, handler.md, observability.md, and the
-  docs home page.
 
 ## [1.16.0] - 2026-08-21
 

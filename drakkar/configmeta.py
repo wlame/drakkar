@@ -49,6 +49,15 @@ from drakkar.config import (
 # live next to the server code that serves them.
 ARTIFACT_PATH = Path(__file__).parent / 'uiserver' / 'config-metadata.json'
 
+# DrakkarConfig fields excluded from the static metadata walk. ``app`` is
+# the reserved pass-through section for user-defined application config
+# (docs/app-config.md): its real shape belongs to the handler-declared
+# model, which this build-time walk cannot see — the config-reference
+# endpoint builds that group at runtime from the live handler instead
+# (see drakkar/uiserver/routes_config_reference.py). Excluding it keeps
+# the vendored artifact identical to its pre-``app`` form.
+EXCLUDED_ROOT_FIELDS = frozenset({'app'})
+
 
 class ConfigFieldMeta(BaseModel):
     """Everything the Configs debug-UI tab needs to render one config field."""
@@ -298,15 +307,46 @@ def _json_type(annotation: Any) -> str:
     return 'string'
 
 
+def _annotation_is_secretstr(annotation: Any) -> bool:
+    """True when the annotation is ``SecretStr`` (possibly inside a union).
+
+    Every framework SecretStr field also carries the explicit
+    ``drakkar_secret`` marker, so for the vendored artifact this check is
+    redundant by construction — it exists for USER app-config models
+    (docs/app-config.md), where a bare ``api_key: SecretStr`` should mask
+    in the config-reference UI without requiring the marker convention.
+    """
+    if isinstance(annotation, type) and issubclass(annotation, SecretStr):
+        return True
+    origin = get_origin(annotation)
+    if origin is Union or origin is types.UnionType:
+        return any(_annotation_is_secretstr(arg) for arg in get_args(annotation))
+    return False
+
+
 def _is_secret(field_info: FieldInfo) -> bool:
     extra = field_info.json_schema_extra
-    return isinstance(extra, dict) and bool(extra.get('drakkar_secret'))
+    if isinstance(extra, dict) and bool(extra.get('drakkar_secret')):
+        return True
+    return _annotation_is_secretstr(field_info.annotation)
 
 
-def _build_leaf(field_info: FieldInfo, path_segments: list[str], group: str) -> ConfigFieldMeta:
+def _build_leaf(
+    field_info: FieldInfo,
+    path_segments: list[str],
+    group: str,
+    *,
+    env_prefix: str = 'DK_',
+    env_skip_segments: int = 0,
+) -> ConfigFieldMeta:
     path = '.'.join(path_segments)
     is_dynamic = '*' in path_segments
-    env = None if is_dynamic else 'DK_' + '__'.join(seg.upper() for seg in path_segments)
+    # ``env_skip_segments`` drops leading path segments from the env name:
+    # the runtime app-config group prefixes paths with a literal ``app``
+    # segment that is NOT part of the user model's own env nesting
+    # (``app.scoring.url`` -> ``MYAPP_SCORING__URL``, not ``MYAPP_APP__...``).
+    env_segments = path_segments[env_skip_segments:]
+    env = None if is_dynamic else env_prefix + '__'.join(seg.upper() for seg in env_segments)
 
     description = field_info.description or ''
 
@@ -325,7 +365,15 @@ def _build_leaf(field_info: FieldInfo, path_segments: list[str], group: str) -> 
     )
 
 
-def _walk(model_cls: type[BaseModel], path_segments: list[str], group: str, out: list[ConfigFieldMeta]) -> None:
+def _walk(
+    model_cls: type[BaseModel],
+    path_segments: list[str],
+    group: str,
+    out: list[ConfigFieldMeta],
+    *,
+    env_prefix: str = 'DK_',
+    env_skip_segments: int = 0,
+) -> None:
     """Recursively append every leaf field of ``model_cls`` to ``out``.
 
     Nested single-model fields recurse in place (path extended by the field
@@ -350,15 +398,44 @@ def _walk(model_cls: type[BaseModel], path_segments: list[str], group: str, out:
         full_path = [*path_segments, name]
 
         if _is_basemodel(annotation):
-            _walk(annotation, full_path, group, out)
+            _walk(annotation, full_path, group, out, env_prefix=env_prefix, env_skip_segments=env_skip_segments)
             continue
 
         value_model = _dict_of_model_value_type(annotation)
         if value_model is not None:
-            _walk(value_model, [*full_path, '*'], group, out)
+            _walk(
+                value_model,
+                [*full_path, '*'],
+                group,
+                out,
+                env_prefix=env_prefix,
+                env_skip_segments=env_skip_segments,
+            )
             continue
 
-        out.append(_build_leaf(info, full_path, group))
+        out.append(_build_leaf(info, full_path, group, env_prefix=env_prefix, env_skip_segments=env_skip_segments))
+
+
+def walk_model_fields(
+    model_cls: type[BaseModel],
+    *,
+    path_prefix: list[str],
+    group: str,
+    env_prefix: str = 'DK_',
+    env_skip_segments: int = 0,
+) -> list[ConfigFieldMeta]:
+    """Walk an arbitrary Pydantic model with the canonical traversal rules.
+
+    Public entry point over :func:`_walk` for callers describing models the
+    static artifact cannot know — the config-reference endpoint uses it to
+    build the runtime ``app`` group from a handler-declared app-config
+    model (docs/app-config.md), with the handler's own ``env_prefix`` and
+    the leading ``app`` path segment excluded from env names via
+    ``env_skip_segments``.
+    """
+    out: list[ConfigFieldMeta] = []
+    _walk(model_cls, path_prefix, group, out, env_prefix=env_prefix, env_skip_segments=env_skip_segments)
+    return out
 
 
 def build_config_metadata() -> ConfigMetadata:
@@ -366,6 +443,10 @@ def build_config_metadata() -> ConfigMetadata:
     entries_by_group: dict[str, list[ConfigFieldMeta]] = {key: [] for key, *_rest in _GROUP_DEFS}
 
     for field_name, field_info in DrakkarConfig.model_fields.items():
+        if field_name in EXCLUDED_ROOT_FIELDS:
+            # The user-owned app: pass-through section — see the constant's
+            # comment for why the static walk cannot describe it.
+            continue
         annotation = field_info.annotation
         if _is_basemodel(annotation):
             # Every nested-model field on DrakkarConfig shares its name with
