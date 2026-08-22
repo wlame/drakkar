@@ -1,48 +1,46 @@
 # Drakkar
-## Poll -> Execute -> Sink
 
-Kafka subprocess orchestration framework with pluggable output sinks. Consumes messages from Kafka, runs CPU-intensive external binaries in a managed subprocess pool, and delivers results to any combination of Kafka, PostgreSQL, MongoDB, Redis, HTTP, and filesystem.
+**Kafka → subprocess pool → sinks, for Python 3.13+.**
+
+Drakkar is an orchestration framework for CPU-heavy stream processing: it consumes messages from Kafka, turns them into invocations of an external binary run in a managed subprocess pool, and delivers the results to any combination of Kafka, PostgreSQL, MongoDB, Redis, HTTP, and files. You write a handler with a few async hooks; the framework owns polling, windowing, backpressure, delivery, offset commits, and observability.
 
 Workers are the Drakkars, executors are the Vikings.
 
-## What it does
-
-```
-Kafka source topic
-    |
-    v
-[ Drakkar Worker ]
-    |
-    +-- poll messages (per-partition pipelines)
-    +-- arrange() -> executor tasks (user hook)
-    +-- run external binary via subprocess pool
-    +-- on_task_complete() -> sink payloads (user hook)
-    +-- on_message_complete() -> aggregate per source message (user hook, optional)
-    +-- deliver to configured sinks (Kafka, Postgres, Mongo, Redis, HTTP, files)
-    +-- commit offsets (watermark-based, only after all sinks confirm)
-    |
-    v
-Configured sinks (any combination)
+```mermaid
+flowchart LR
+    K["Kafka<br>source topic"] -- "poll" --> W
+    subgraph worker ["Drakkar worker — one pipeline per partition"]
+        W["window of<br>messages"] --> A["arrange()<br>your code"]
+        A -- "tasks" --> P["subprocess pool<br>runs your binary"]
+        P -- "results" --> T["on_task_complete()<br>your code"]
+    end
+    T -- "payloads" --> S["sinks — any combination<br>Kafka · Postgres · MongoDB · Redis · HTTP · files"]
+    S -- "failed delivery" --> DLQ["DLQ topic"]
+    S -- "all confirmed" --> CO["commit offsets<br>(watermark)"]
 ```
 
-- **Per-partition independent pipelines** with offset watermark tracking
-- **Pluggable sinks** -- configure any combination of Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem; third-party sinks register via entry points (see [`docs/sinks.md#custom-sinks-plugin-api`](docs/sinks.md#custom-sinks-plugin-api))
-- **Dead letter queue** -- failed deliveries go to a DLQ Kafka topic with error metadata
-- **Cooperative-sticky rebalancing** -- non-revoked partitions continue without interruption
-- **Backpressure** via Kafka pause/resume -- memory stays bounded regardless of consumer lag
-- **Subprocess executor pool** with semaphore-based concurrency limiting
-- **Typed message models** -- define Pydantic schemas for input/output, get auto-deserialization
-- **Cache (optional)** -- `self.cache` key/value store with memory + write-behind SQLite + eventually-consistent peer sync across workers; pluggable backends conform to the public `CacheLike` protocol ([docs](docs/cache.md))
-- **Offload for CPU-bound hooks** -- `await self.offload(fn, ...)` runs heavy pure-Python hook computation (nested arrange loops, result crunching) on a small thread pool so the event loop never stalls ([docs](docs/offload.md))
-- **Webapp pipeline (optional)** -- opt-in synchronous HTTP endpoint exposing the same handler pipeline used for Kafka, with multi-tenant bearer-token auth, per-client rpm caps, opt-in sinks delivery, and graceful-shutdown semantics. Webapp users declare four type parameters on `BaseDrakkarHandler` (Kafka in/out + HTTP request/response). See [`docs/webapp.md`](docs/webapp.md).
-- **Built-in operator UI** (FastAPI) with executor timeline, partition lag, message tracing
-- **Flight recorder** -- SQLite event log with retention and rotation
-- **Prometheus metrics** -- pipeline, executor, per-sink, and shutdown / drain metrics
-- **Structured JSON logging** -- ECS-compatible, ready for Elastic
-- **Kubernetes-ready** -- unauthenticated `/healthz` and `/readyz` probes plus reference manifests in [`deploy/k8s/`](deploy/k8s/); see [`docs/deployment.md`](docs/deployment.md)
-- **Crash detection** -- watchdog file distinguishes clean restarts from SIGKILL/OOM-kill on the next startup, with `drakkar_suspected_oom_kills_total` and a structured warning ([`docs/observability.md`](docs/observability.md))
-- **Perf extras** -- `pip install "py-drakkar[perf]"` enables the `orjson` fast path for recorder JSON encoding
-- **DLQ replay** -- `scripts/replay_dlq.py` reads dead-lettered records and republishes them to a target topic (see [`docs/sinks.md#dlq-replay`](docs/sinks.md#dlq-replay))
+<!-- TODO(wlame): screenshot or GIF of the Live executor timeline goes here.
+<p align="center"><img src="docs/media/timeline.gif" alt="Live executor timeline" width="800"></p>
+-->
+
+**[Documentation](https://wlame.github.io/drakkar)** — full guides for every feature below.
+
+## Features
+
+- **Per-partition pipelines** with watermark offset tracking — commits happen only after every sink confirmed
+- **Pluggable sinks** — Kafka, PostgreSQL, MongoDB, Redis, HTTP, filesystem; multiple named instances per type, third-party sinks via entry points
+- **Dead letter queue** with replay tooling; `on_delivery_error()` decides retry / skip / DLQ per failure
+- **Backpressure** via Kafka pause/resume — memory stays bounded regardless of lag
+- **Typed messages** — Pydantic models as type parameters, auto de/serialization
+- **Operator UI** — live executor timeline, partition lag, message tracing, and a Message Probe that runs a pasted message through the full pipeline with zero footprint on production state
+- **UI customization** — handler-defined probe tabs, links/badges/formats on any field, declared dashboard pages — all server-side, no client code
+- **Cache** (optional) — `self.cache` key/value store with write-behind SQLite and peer sync across workers
+- **Offload** — `await self.offload(fn, ...)` keeps CPU-bound hook work off the event loop
+- **Webapp** (optional) — the same handler pipeline exposed as a synchronous HTTP endpoint with auth and rate limits
+- **Observability** — Prometheus metrics, ECS-compatible structured logging, flight recorder (SQLite event log), runtime-health and host-pressure monitors, task cost/throughput stats
+- **Kubernetes-ready** — `/healthz` and `/readyz` probes, reference manifests, crash/OOM detection on restart
+
+A **Go implementation** ([drakkar-go](https://github.com/wlame/drakkar-go)) is config- and contract-compatible; both backends serve the same [drakkar-ui](https://github.com/wlame/drakkar-ui) web UI and can run side by side in one fleet.
 
 ## Quick start
 
@@ -51,392 +49,108 @@ uv init my-processor && cd my-processor
 uv add py-drakkar
 ```
 
-### 1. Define your message models
-
-```python
-# models.py
-from pydantic import BaseModel
-
-class InputMessage(BaseModel):
-    request_id: str
-    data: str
-    priority: int = 1
-
-class ProcessedResult(BaseModel):
-    request_id: str
-    result: str
-    processed: bool
-
-class ResultSummary(BaseModel):
-    request_id: str
-    status: str
-```
-
-### 2. Implement your handler
-
 ```python
 # handler.py
-import structlog
-from prometheus_client import Counter
-
+from pydantic import BaseModel
 from drakkar import (
-    BaseDrakkarHandler, CollectResult, DeliveryAction, DeliveryError,
-    ErrorAction, ExecutorTask, KafkaPayload, PostgresOp, PostgresPayload,
-    RedisOp, RedisPayload, make_task_id,
+    BaseDrakkarHandler, CollectResult, ExecutorTask,
+    KafkaPayload, PostgresPayload, make_task_id,
 )
-from models import InputMessage, ProcessedResult, RequestKey, ResultSummary, StatusUpdate
 
-logger = structlog.get_logger()
+class JobInput(BaseModel):
+    job_id: str
+    command: str
 
-# custom Prometheus metric (user-defined)
-items_processed = Counter('app_items_processed_total', 'Total processed items')
+class JobOutput(BaseModel):
+    job_id: str
+    result: str
 
-class MyHandler(BaseDrakkarHandler[InputMessage, ProcessedResult]):
+class MyHandler(BaseDrakkarHandler[JobInput, JobOutput]):
     async def arrange(self, messages, pending):
-        tasks = []
-        for msg in messages:
-            # msg.payload is an InputMessage instance (auto-deserialized)
-            tasks.append(ExecutorTask(
-                task_id=make_task_id("proc"),
-                args=["--input", msg.payload.data],
+        # window of Kafka messages -> subprocess tasks
+        return [
+            ExecutorTask(
+                task_id=make_task_id('job'),
+                args=['--cmd', msg.payload.command],
                 source_offsets=[msg.offset],
-                metadata={"request_id": msg.payload.request_id},
-            ))
-        return tasks
+                metadata={'job_id': msg.payload.job_id},
+            )
+            for msg in messages
+        ]
 
     async def on_task_complete(self, result):
-        output = ProcessedResult(
-            request_id=result.task.metadata["request_id"],
+        # subprocess output -> sink payloads
+        output = JobOutput(
+            job_id=result.task.metadata['job_id'],
             result=result.stdout.strip(),
-            processed=result.exit_code == 0,
         )
-        summary = ResultSummary(
-            request_id=output.request_id,
-            status="done" if output.processed else "failed",
+        return CollectResult(
+            kafka=[KafkaPayload(data=output, key=output.job_id.encode())],
+            postgres=[PostgresPayload(table='results', data=output)],
         )
-
-        # custom Prometheus metric
-        items_processed.inc()
-
-        # async structured logging
-        await logger.ainfo(
-            "item_processed",
-            category="handler",
-            request_id=output.request_id,
-            processed=output.processed,
-        )
-
-        # route to sinks based on business logic
-        sinks = CollectResult(
-            kafka=[KafkaPayload(data=output, key=output.request_id.encode())],
-            postgres=[
-                PostgresPayload(table="results", data=summary),
-                # UPDATE "requests" SET "status" = $1 WHERE "request_id" = $2
-                PostgresPayload(
-                    op=PostgresOp.UPDATE,
-                    table="requests",
-                    data=StatusUpdate(status=summary.status),
-                    where=RequestKey(request_id=output.request_id),
-                ),
-            ],
-        )
-
-        # conditional: cache successful results in Redis
-        if output.processed:
-            sinks.redis.extend([
-                RedisPayload(key=f"result:{output.request_id}", data=summary, ttl=3600),
-                # INCRBY drakkar:hits:<day> 1
-                RedisPayload(op=RedisOp.INCRBY, key=f"hits:{output.day}", amount=1),
-            ])
-
-        return sinks
-
-    async def on_error(self, task, error):
-        await logger.awarning(
-            "task_failed", category="handler",
-            task_id=task.task_id, exit_code=error.exit_code,
-        )
-        return ErrorAction.RETRY
-
-    async def on_delivery_error(self, error: DeliveryError):
-        await logger.awarning(
-            "delivery_failed", category="handler",
-            sink=error.sink_name, error=error.error,
-        )
-        # retry transient failures, DLQ for permanent ones
-        if error.sink_type in ("http", "redis"):
-            return DeliveryAction.RETRY
-        return DeliveryAction.DLQ
 ```
-
-### 3. Configure
 
 ```yaml
 # drakkar.yaml
 kafka:
   brokers: "localhost:9092"
-  source_topic: "input-events"
+  source_topic: "jobs"
   consumer_group: "my-workers"
 
 executor:
-  binary_path: "/usr/local/bin/my-processor"
+  binary_path: "/usr/local/bin/my-tool"
   max_executors: 8
-  task_timeout_seconds: 120
-  window_size: 20
+  task_timeout_seconds: 60
 
 sinks:
   kafka:
-    results:
-      topic: "output-results"
+    job_results_out:
+      topic: "job-results"
   postgres:
-    main:
+    main_db:
       dsn: "postgresql://user:pass@localhost:5432/mydb"
-  redis:
-    cache:
-      url: "redis://localhost:6379/0"
-      key_prefix: "app:"
-
-dlq:
-  topic: ""  # auto-derived: input-events_dlq
-
-metrics:
-  port: 9090
-
-ui:
-  port: 8080
 ```
-
-### 4. Run
 
 ```python
 # main.py
 from drakkar import DrakkarApp
 from handler import MyHandler
 
-app = DrakkarApp(
-    handler=MyHandler(),
-    config_path="drakkar.yaml",
-)
-app.run()
+DrakkarApp(handler=MyHandler(), config_path='drakkar.yaml').run()
 ```
-
-Worker name is read from the `WORKER_ID` environment variable by default (configurable via `worker_name_env` in config).
-
-## Handler hooks
-
-| Hook | When | Purpose |
-|---|---|---|
-| `on_startup(config)` | Before components start | Modify config (e.g., auto-detect CPU count) |
-| `on_ready(config, db_pool)` | After sinks connected | Initialize state from DB, run migrations |
-| `arrange(messages, pending)` | Window of messages received | Transform messages into executor tasks |
-| `on_task_complete(result)` | Each task completes | Process per-task result into sink payloads |
-| `on_message_complete(group)` | All tasks for one source message finish | Aggregate per-message results (fan-out → fan-in) |
-| `on_window_complete(results, messages)` | All tasks in a window done | Aggregate results across a window |
-| `on_error(task, error)` | Task fails | Return `RETRY`, `SKIP`, or replacement tasks |
-| `on_delivery_error(error)` | Sink delivery fails | Return `DLQ` (default), `RETRY`, or `SKIP` |
-| `on_assign(partitions)` | Partitions assigned | Initialize per-partition state |
-| `on_revoke(partitions)` | Partitions revoked | Cleanup per-partition state |
-
-See [`docs/handler.md`](docs/handler.md) for hook semantics and [`docs/fan-out.md`](docs/fan-out.md) for the fan-out → fan-in pattern with `on_message_complete`.
-
-## Periodic tasks
-
-Use the `@periodic` decorator to schedule recurring background coroutines on the handler. They run in the same async loop alongside the poll loop, start after `on_ready()`, and are cancelled on shutdown. Overlapping runs are prevented -- the next interval starts only after the current invocation finishes.
-
-```python
-from drakkar import BaseDrakkarHandler, periodic
-
-class MyHandler(BaseDrakkarHandler):
-    async def on_ready(self, config, db_pool):
-        self.db_pool = db_pool
-
-    @periodic(seconds=60)
-    async def refresh_cache(self):
-        async with self.db_pool.acquire() as conn:
-            self.cache = await conn.fetch("SELECT * FROM lookup")
-
-    @periodic(seconds=30, on_error="stop")
-    async def health_ping(self):
-        await http_post("https://health.example.com/ping")
-```
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `seconds` | `float` | required | Interval between runs |
-| `on_error` | `"continue" \| "stop"` | `"continue"` | `"continue"` logs and retries next interval; `"stop"` logs and cancels the task |
-
-## Sinks
-
-Configure any combination in the `sinks:` section. Each type supports multiple named instances.
-
-| Sink | Payload | Serialization |
-|------|---------|---------------|
-| `KafkaPayload` | `data: BaseModel`, `key: bytes` | `data.model_dump_json().encode()` -> value |
-| `PostgresPayload` | `op`, `table`, `data`, `where`, `conflict`, `statement`, `params` | INSERT / UPDATE / UPSERT, or operator-authored SQL by name |
-| `MongoPayload` | `op: MongoOp`, `collection: str`, `data`, `filter`, + statement fields | one write operation per payload, or a named MQL statement |
-| `HttpPayload` | `data: BaseModel` | POST body per `encoding` (`json`/`form`/`multipart`) |
-| `RedisPayload` | `op`, `key`, `data`, `ttl`, `fields`, `members`, `amount`, `script`, `keys`, `args` | one write command per data type, or operator-authored Lua by name |
-| `FilePayload` | `data: BaseModel`, `path: str` | `data.model_dump_json() + "\n"` -> JSONL line |
-
-**Routing**: if you have multiple sinks of the same type, set `sink="name"` on the payload. With a single sink per type, the framework routes automatically.
-
-**Error handling**: on delivery failure, `on_delivery_error()` is called. Default action: write to DLQ. The DLQ topic is auto-derived as `{source_topic}_dlq`.
-
-## Typed messages
-
-Define Pydantic models for your input/output and use them as type parameters:
-
-```python
-class MyHandler(BaseDrakkarHandler[InputModel, OutputModel]):
-    async def arrange(self, messages, pending):
-        for msg in messages:
-            msg.payload  # InputModel instance, auto-deserialized
-            msg.value    # raw bytes, always available as fallback
-```
-
-Non-generic `BaseDrakkarHandler` (no type params) works too -- you get raw bytes in `msg.value`.
-
-Webapp users declare **four** type parameters (`InputT`, `OutputT`, `HttpRequestT`, `HttpResponseT`) and override `arrange_http_request` / `on_http_request_complete` to expose the pipeline as a synchronous HTTP endpoint. See [`docs/webapp.md`](docs/webapp.md).
-
-## Scaling
-
-Run multiple instances with the same `consumer_group`. Kafka's cooperative-sticky rebalancing distributes partitions across workers.
 
 ```bash
 WORKER_ID=worker-1 python main.py
-WORKER_ID=worker-2 python main.py
 ```
 
-## Configuration
+Every config field can be overridden by environment variables (`DK_` prefix, `__` for nesting: `DK_EXECUTOR__MAX_EXECUTORS=16`). Scale horizontally by running more workers in the same consumer group; cooperative-sticky rebalancing spreads partitions without stopping the others.
 
-All config fields support environment variable override with `DK_` prefix and `__` for nesting:
+More hooks are available for aggregation and error handling — `on_message_complete` (fan-out → fan-in), `on_window_complete`, `on_error`, `@periodic` background tasks, lifecycle hooks. See the [handler guide](https://wlame.github.io/drakkar/handler/).
 
-```bash
-DK_KAFKA__BROKERS=kafka:9092
-DK_EXECUTOR__MAX_EXECUTORS=16
-DK_UI__PORT=8081
-```
+## Try it
 
-## Observability
-
-### Operator UI
-
-Enabled by default at `:8080`. At startup the worker fetches the latest [drakkar-ui](https://github.com/wlame/drakkar-ui) release — the one versioned SPA shared by the Python and Go backends — caches it per-user under `~/.cache/drakkar/ui/`, and serves it at `/`. When GitHub is unreachable it falls back to the built-in server-rendered pages below (marked with a **built-in UI** badge in the header). The installed `drakkar-ui` CLI manages the shared cache (`drakkar-ui where` / `update` / `fetch --version=vX.Y.Z`), command-for-command identical to the Go backend's CLI.
-
-Pages:
-
-- `/` -- dashboard with partition tiles, pool utilization, event counters
-- `/partitions` -- per-partition stats
-- `/live` -- tabbed live view: Arrange (with filter, progress bars, and a right-side batch-detail sidebar), Executors (timeline), Collect
-- `/debug` -- tabbed tools: Metrics, Periodic Tasks, Message Trace, Cache (when enabled), Databases, Message Probe. Deep-link `#trace/<partition>/<offset>` opens the Trace tab pre-filled.
-- `/history` -- filterable event browser with partition and event type toggles
-- `/task/{task_id}` -- task detail with PID, duration, CLI command, stdout/stderr
-
-Optional: set `kafka.ui_url` and `kafka.ui_cluster_name` in config to render a small Kafka-UI icon next to every `<partition:offset>` link; clicking the icon opens the corresponding message in Kafka-UI (provectus).
-
-The server also self-describes: `GET /api/v1/identity` reports the backend flavor, build version, and the served UI version (rendered in the UI header's version popover), and the full `/api/v1` contract is browsable via `GET /api/v1/openapi.json` plus a self-hosted Swagger UI at `GET /docs` (no CDN).
-
-### Message Probe
-
-The **Message Probe** tab on `/debug` lets you paste a raw message value and run it end-to-end through the live handler's full pipeline -- `arrange` -> subprocess executor -> `on_task_complete` -> `on_message_complete` -> `on_window_complete` -- without touching any production state. The report shows the parsed `SourceMessage`, every generated task with stdin/stdout/stderr/exit code/duration, each hook's returned `CollectResult`, the sink payloads that **would have been** produced (grouped by sink type), every cache call made during the run, a timeline waterfall, and any exceptions with full tracebacks. Click any task row to open a right-side sidebar with the full scrollable stdin/stdout/stderr (handles 15k+ lines).
-
-**Safety guarantees** (enforced by tests): no sink writes, no offset commits, no event-recorder rows, no cache writes, no peer sync -- zero footprint on the live system, even when production Kafka traffic is processed concurrently with the probe. The cache swap is gated by an asyncio contextvar so concurrent production tasks (poll loop, partition processors, `@periodic` background tasks) keep hitting the real cache directly while the probe sees its own isolated suppression-and-logging layer. Cache reads are opt-in for the probe via the **Use cache (read-only)** checkbox; when enabled, the probe forwards reads to the live cache but still silently suppresses writes within the probe's own pipeline. The `handler.cache` swap is always restored in a `finally` block, even if a hook raises.
-
-Paste your message, click Run, and see the full behavior instead of inferring it from flight-recorder rows.
-
-### Prometheus metrics
-
-Exposed at `:9090/metrics`. Key metrics:
-
-- `drakkar_messages_consumed_total{partition}`
-- `drakkar_executor_tasks_total{status}`, `drakkar_executor_duration_seconds`
-- `drakkar_sink_payloads_delivered_total{sink_type, sink_name}`
-- `drakkar_sink_deliver_errors_total{sink_type, sink_name}`
-- `drakkar_sink_deliver_duration_seconds{sink_type, sink_name}`
-- `drakkar_sink_dlq_messages_total`
-- `drakkar_backpressure_active`, `drakkar_total_queued`
-- `drakkar_offset_lag{partition}`, `drakkar_assigned_partitions`
-- `drakkar_handler_duration_seconds{hook}`
-- `drakkar_worker_info` (worker_id, version, consumer_group)
-- `drakkar_uncommitted_offsets_at_stop`, `drakkar_inflight_at_stop` -- shutdown snapshots
-- `drakkar_drain_timeout_hit_total` -- drain exceeded `executor.drain_timeout_seconds`
-- `drakkar_suspected_oom_kills_total` -- watchdog detected the previous run did not exit cleanly
-
-### Structured logging
-
-JSON to stderr, ECS-compatible. Every log line includes `service_name`, `worker_id`, `consumer_group`, `category`, and `timestamp`.
-
-Use `structlog.get_logger()` for async logging in your handlers:
-
-```python
-import structlog
-logger = structlog.get_logger()
-
-# in any async hook
-await logger.ainfo("my_event", category="handler", custom_field="value")
-```
-
-## Integration test
-
-A full docker-compose example lives in `integration/` with all 6 sink types:
+A full docker-compose environment with Kafka, all six sink types, five workers, and a load generator lives in [`integration/`](integration/):
 
 ```bash
 cd integration
 docker compose up --build
 ```
 
-Services and web UIs:
-
-| URL | Service |
-|-----|---------|
-| `http://localhost:8081` | Worker 1 UI (primary workers, shared consumer group) |
-| `http://localhost:8082` | Worker 2 UI |
-| `http://localhost:8083` | Worker 3 UI |
-| `http://localhost:8084` | Fast-worker 1 UI (separate consumer group, `on_window_complete` aggregation) |
-| `http://localhost:8085` | Fast-worker 2 UI |
-| `http://localhost:8087` | Redis Commander |
-| `http://localhost:8088` | Kafka UI |
-| `http://localhost:8089` | MongoDB Express |
-| `http://localhost:9099` | Prometheus |
-
-The integration scenario:
-- 3 primary workers consuming from a 50-partition topic (main pipeline)
-- 2 fast-workers on a separate consumer group demonstrating `on_window_complete` window aggregation
-- Each result goes to Kafka + Postgres + MongoDB + Redis (always)
-- Two Postgres sink instances (`postgres.main` + `postgres.hot`) showing multiple-sinks-of-same-type routing
-- Framework cache (`self.cache`) is enabled with `scope=CLUSTER` — peer sync propagates entries between primary workers (see the Cache tab in `/debug`)
-- High-match results (>20) trigger HTTP webhook
-- Very high-match results (>50) write to JSONL file
-- 5% simulated executor failures with retry via `on_error()`
-- Failed deliveries route to DLQ or retry based on sink type
-
-Flight-recorder databases and per-worker cache databases both live in `integration/shared/`, which is mounted into every worker container as `/shared`. Recorder files are per-worker timestamped (`worker-1-2026-03-23__14_55_00.db` with a `{worker}-live.db` symlink). Cache files are single per-worker (`worker-1-cache.db.actual` with a `{worker}-cache.db` symlink used for peer discovery). See `integration/shared/README.md` for details.
+Then open `http://localhost:8081` for the first worker's UI. See the [integration guide](https://wlame.github.io/drakkar/integration/).
 
 ## Development
 
-Development tasks run through [`just`](https://github.com/casey/just) — the `justfile` is the single entrypoint, and CI calls the same recipes, so `just ci` locally and GitHub CI cannot disagree.
+[`just`](https://github.com/casey/just) is the dev entrypoint; CI runs the same recipes.
 
 ```bash
-# one-time setup
-just install          # uv sync with dev + perf extras
-
-# day-to-day
-just test             # run the unit test suite
-just test -k cache    # pass any pytest args through
-just fmt              # format with ruff
-just lint             # lint with ruff
-just typecheck        # type-check with ty
-just ci               # everything CI enforces: format check → lint → types → tests + coverage gate
-
-# more
-just cover            # tests with the coverage gate (95%) + xml/junit artifacts
-just docs-serve       # live-reload docs at http://127.0.0.1:8000
-just check            # full pre-push battery: ci + strict docs build
-just release minor    # run ci, bump the version, commit + tag (prints push commands, never pushes)
-just --list           # see every recipe (integration env, chaos test, DLQ replay, ...)
+just install     # uv sync with dev + perf extras
+just test        # unit tests (hermetic, no network)
+just ci          # format check -> lint -> types -> tests + coverage gate
+just docs-serve  # live-reload docs at http://127.0.0.1:8000
+just --list      # everything else (integration env, chaos test, DLQ replay, ...)
 ```
 
-Without `just`, the underlying tools work directly: `uv sync --extra=dev`, `uv run pytest`, `uv run --extra=dev ruff check drakkar/ tests/`, `uv run ty check drakkar/`. See [`docs/development.md`](docs/development.md) for the full workflow.
+See [`docs/development.md`](docs/development.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 

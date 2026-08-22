@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Rewrite the README as a short GitHub-first overview: features, one
+  quick-start example, and links into the docs site. Details that lived
+  only in the README now live in the docs.
+- Replace the architecture diagram on the docs home page with a clearer
+  pipeline view: window, user hooks, subprocess pool, sinks, DLQ, and
+  watermark commit.
+- Condense AGENTS.md to the non-derivable facts: cross-backend contract,
+  invariants, commands, and footguns.
+
 ## [1.16.0] - 2026-08-21
 
 ### Added
