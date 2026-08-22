@@ -62,18 +62,6 @@ def test_executor_config_defaults():
     assert cfg.max_stderr_bytes == 0
 
 
-def test_executor_config_custom_values():
-    cfg = ExecutorConfig(
-        binary_path='/bin/test',
-        max_retries=5,
-        drain_timeout_seconds=10,
-        backpressure_high_multiplier=16,
-        backpressure_low_multiplier=2,
-    )
-    assert cfg.max_retries == 5
-    assert cfg.drain_timeout_seconds == 10
-
-
 def test_executor_config_rejects_empty_binary_path():
     with pytest.raises(ValidationError):
         ExecutorConfig(binary_path='')
@@ -134,27 +122,10 @@ def test_kafka_sink_config():
     assert cfg.brokers == ''
 
 
-def test_kafka_sink_config_custom_brokers():
-    cfg = KafkaSinkConfig(topic='results', brokers='other:9092')
-    assert cfg.brokers == 'other:9092'
-
-
 def test_postgres_sink_config():
     cfg = PostgresSinkConfig(dsn='postgresql://localhost/db')
     assert cfg.pool_min == 2
     assert cfg.pool_max == 10
-
-
-def test_postgres_sink_config_custom_pool():
-    cfg = PostgresSinkConfig(dsn='postgresql://localhost/db', pool_min=5, pool_max=20)
-    assert cfg.pool_min == 5
-    assert cfg.pool_max == 20
-
-
-def test_mongo_sink_config():
-    cfg = MongoSinkConfig(uri='mongodb://localhost:27017', database='mydb')
-    assert cfg.uri == 'mongodb://localhost:27017'
-    assert cfg.database == 'mydb'
 
 
 def test_http_sink_config_defaults():
@@ -163,18 +134,6 @@ def test_http_sink_config_defaults():
     assert cfg.timeout_seconds == 30
     assert cfg.headers == {}
     assert cfg.max_retries == 3
-
-
-def test_http_sink_config_custom():
-    cfg = HttpSinkConfig(
-        url='https://api.example.com',
-        method='PUT',
-        timeout_seconds=10,
-        headers={'Authorization': 'Bearer xxx'},
-        max_retries=0,
-    )
-    assert cfg.method == 'PUT'
-    assert cfg.headers['Authorization'] == 'Bearer xxx'
 
 
 # --- H8: HttpSinkConfig.url validation ---
@@ -284,21 +243,11 @@ def test_redis_sink_config_defaults():
     assert cfg.key_prefix == ''
 
 
-def test_redis_sink_config_custom():
-    cfg = RedisSinkConfig(url='redis://cache:6379/1', key_prefix='drakkar:')
-    assert cfg.key_prefix == 'drakkar:'
-
-
 def test_file_sink_config_requires_base_path():
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError):
         FileSinkConfig()
-
-
-def test_file_sink_config_custom():
-    cfg = FileSinkConfig(base_path='/data/output')
-    assert cfg.base_path == '/data/output'
 
 
 # --- SinksConfig ---
@@ -366,12 +315,6 @@ def test_dlq_config_defaults():
     assert cfg.brokers == ''
 
 
-def test_dlq_config_custom():
-    cfg = DLQConfig(topic='my-dlq', brokers='dlq-cluster:9092')
-    assert cfg.topic == 'my-dlq'
-    assert cfg.brokers == 'dlq-cluster:9092'
-
-
 # --- Other config models ---
 
 
@@ -434,14 +377,6 @@ def test_logging_config_invalid_format():
 def test_worker_name_env_default():
     cfg = DrakkarConfig(executor=ExecutorConfig(binary_path='/bin/true'))
     assert cfg.worker_name_env == 'WORKER_ID'
-
-
-def test_worker_name_env_custom():
-    cfg = DrakkarConfig(
-        executor=ExecutorConfig(binary_path='/bin/true'),
-        worker_name_env='MY_WORKER',
-    )
-    assert cfg.worker_name_env == 'MY_WORKER'
 
 
 def test_drakkar_config_sinks_default():
@@ -566,13 +501,6 @@ def test_web_client_config_defaults():
     assert cfg.rpm == 4
 
 
-def test_web_client_config_custom_values():
-    cfg = WebClientConfig(name='tenant-a', token='secret-token', rpm=60)
-    assert cfg.name == 'tenant-a'
-    assert cfg.token == 'secret-token'
-    assert cfg.rpm == 60
-
-
 def test_web_client_config_rejects_empty_name():
     with pytest.raises(ValidationError) as exc_info:
         WebClientConfig(name='')
@@ -601,27 +529,6 @@ def test_webapp_config_defaults():
     assert cfg.clients[0].name == 'anonymous'
     assert cfg.clients[0].token == ''
     assert cfg.clients[0].rpm == 4
-
-
-def test_webapp_config_custom_values():
-    cfg = WebAppConfig(
-        enabled=True,
-        host='127.0.0.1',
-        port=9999,
-        path='/api/process',
-        sinks_enabled=True,
-        request_timeout_seconds=10.5,
-        max_concurrent=32,
-        clients=[
-            WebClientConfig(name='anonymous', token='', rpm=4),
-            WebClientConfig(name='tenant-a', token='token-a', rpm=60),
-        ],
-    )
-    assert cfg.enabled is True
-    assert cfg.port == 9999
-    assert cfg.path == '/api/process'
-    assert cfg.sinks_enabled is True
-    assert len(cfg.clients) == 2
 
 
 # --- WebAppConfig validation rules ---

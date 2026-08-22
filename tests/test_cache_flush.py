@@ -1,4 +1,4 @@
-"""Tests for the CacheEngine flush loop (Task 7).
+"""Tests for the CacheEngine flush loop.
 
 The flush loop is the pipeline that moves pending mutations from the
 Cache's in-memory ``_dirty`` map to the worker's SQLite cache DB. The
@@ -22,7 +22,7 @@ contract we verify here:
    rely on this invariant.
 
 We exercise everything against real on-disk SQLite via ``tmp_path`` +
-``aiosqlite`` rather than mocks. The lifecycle tests (Task 6) already
+``aiosqlite`` rather than mocks. The lifecycle tests already
 verified the schema lands correctly; here we drive it through the flush
 code path and inspect the resulting rows.
 """
@@ -681,7 +681,7 @@ async def test_flush_counter_not_incremented_on_empty_dirty(tmp_path):
 def test_lww_upsert_sql_has_conflict_guard():
     """``LWW_UPSERT_SQL`` must contain the LWW conflict guard — the flush
     code uses the constant verbatim, so any regression in the SQL would
-    silently break the cross-worker sync path (Task 12) that reuses it."""
+    silently break the cross-worker sync path that reuses it."""
     sql = LWW_UPSERT_SQL.lower()
     assert 'on conflict(key) do update' in sql
     # the WHERE clause with the (newer ts) OR (equal ts AND smaller origin) guard
@@ -689,7 +689,7 @@ def test_lww_upsert_sql_has_conflict_guard():
     assert 'excluded.origin_worker_id < cache_entries.origin_worker_id' in sql
 
 
-# --- Task 8: periodic task registration + final drain ---------------------
+# --- Periodic task registration + final drain ------------------------------
 
 # The flush loop is registered via ``asyncio.create_task(run_periodic_task(...,
 # name='cache.flush', system=True))`` during ``CacheEngine.start``. These
@@ -843,18 +843,6 @@ async def test_stop_final_drain_runs_before_writer_close(tmp_path):
     db_path = tmp_path / 'w1-cache.db.actual'
     row = await _fetch_row(db_path, 'proof')
     assert row is not None
-
-
-async def test_stop_without_start_does_not_touch_flush_task(tmp_path):
-    """``stop()`` called on an engine that never started must not raise
-    from attempting to cancel a non-existent flush task.
-
-    Matches the existing ``test_stop_without_start_is_safe`` lifecycle
-    invariant but specifically covers the Task 8 additions."""
-    engine = await _make_engine(tmp_path, worker_id='w1')
-    # no start() call
-    await engine.stop()  # must not raise
-    assert engine._flush_task is None  # type: ignore[reportPrivateUsage]
 
 
 async def test_flush_loop_error_does_not_stop_engine(tmp_path, monkeypatch):
@@ -1149,7 +1137,7 @@ async def test_stop_final_drain_failure_is_logged_and_stop_completes(tmp_path, m
     assert 'cache_final_drain_failed' in captured_events
 
 
-# --- Task 12: aiosqlite error injection ----------------------------------
+# --- aiosqlite error injection ---------------------------------------------
 #
 # Production workers will sometimes see ``OperationalError('database is
 # locked')`` under contention and ``OperationalError('disk I/O error')``

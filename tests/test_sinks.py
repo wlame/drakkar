@@ -155,6 +155,23 @@ async def test_kafka_sink_deliver_empty(mock_cls, kafka_sink_config):
     mock_producer.produce.assert_not_called()
 
 
+async def test_kafka_sink_deliver_not_connected_raises(kafka_sink_config):
+    """A silent return would let the offset commit past lost payloads."""
+    from drakkar.sinks.kafka import KafkaSink
+
+    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    with pytest.raises(RuntimeError, match='not connected'):
+        await sink.deliver([KafkaPayload(data=SampleOutput())])
+
+
+async def test_kafka_sink_deliver_empty_not_connected_returns(kafka_sink_config):
+    """The empty-batch early return stays silent even before connect()."""
+    from drakkar.sinks.kafka import KafkaSink
+
+    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    await sink.deliver([])  # must not raise
+
+
 @patch('drakkar.sinks.kafka.AIOProducer')
 async def test_kafka_sink_deliver_error_increments_metrics(mock_cls, kafka_sink_config):
     from drakkar.metrics import sink_deliver_errors
@@ -313,11 +330,25 @@ async def test_kafka_sink_deliver_future_with_error_raises(mock_cls, kafka_sink_
         await sink.deliver([KafkaPayload(data=SampleOutput())])
 
 
-def test_kafka_sink_type():
+@pytest.mark.parametrize('sink_name', ['kafka', 'postgres', 'mongo', 'http', 'redis', 'filesystem'])
+def test_sink_type_reports_backend_name(sink_name, tmp_path):
+    """Every sink's ``sink_type`` equals its backend name (used as a metrics label)."""
+    from drakkar.sinks.filesystem import FileSink
+    from drakkar.sinks.http import HttpSink
     from drakkar.sinks.kafka import KafkaSink
+    from drakkar.sinks.mongo import MongoSink
+    from drakkar.sinks.postgres import PostgresSink
+    from drakkar.sinks.redis import RedisSink
 
-    sink = KafkaSink('x', KafkaSinkConfig(topic='t'))
-    assert sink.sink_type == 'kafka'
+    factories = {
+        'kafka': lambda: KafkaSink('x', KafkaSinkConfig(topic='t')),
+        'postgres': lambda: PostgresSink('main', PostgresSinkConfig(dsn='postgresql://localhost/testdb')),
+        'mongo': lambda: MongoSink('analytics', MongoSinkConfig(uri='mongodb://localhost:27017', database='testdb')),
+        'http': lambda: HttpSink('webhook', HttpSinkConfig(url='https://api.example.com/results')),
+        'redis': lambda: RedisSink('cache', RedisSinkConfig(url='redis://localhost:6379/0', key_prefix='drakkar:')),
+        'filesystem': lambda: FileSink('output', FileSinkConfig(base_path=str(tmp_path))),
+    }
+    assert factories[sink_name]().sink_type == sink_name
 
 
 # =============================================================================
@@ -521,6 +552,15 @@ async def test_postgres_sink_deliver_empty(pg_sink_config):
 
     await sink.deliver([])
     mock_pool.acquire.assert_not_called()
+
+
+async def test_postgres_sink_deliver_not_connected_raises(pg_sink_config):
+    """A silent return would let the offset commit past lost payloads."""
+    from drakkar.sinks.postgres import PostgresSink
+
+    sink = PostgresSink('main', pg_sink_config)
+    with pytest.raises(RuntimeError, match='not connected'):
+        await sink.deliver([PostgresPayload(table='results', data=SampleOutput())])
 
 
 async def test_postgres_sink_sql_injection_table(pg_sink_config):
@@ -950,13 +990,6 @@ async def test_postgres_sink_close_not_connected(pg_sink_config):
     await sink.close()  # should not raise
 
 
-def test_postgres_sink_type(pg_sink_config):
-    from drakkar.sinks.postgres import PostgresSink
-
-    sink = PostgresSink('main', pg_sink_config)
-    assert sink.sink_type == 'postgres'
-
-
 # =============================================================================
 # MongoDB sink
 # =============================================================================
@@ -1166,6 +1199,15 @@ async def test_mongo_sink_deliver_empty(mongo_sink_config):
     mock_collection.insert_one.assert_not_called()
 
 
+async def test_mongo_sink_deliver_not_connected_raises(mongo_sink_config):
+    """A silent return would let the offset commit past lost payloads."""
+    from drakkar.sinks.mongo import MongoSink
+
+    sink = MongoSink('analytics', mongo_sink_config)
+    with pytest.raises(RuntimeError, match='not connected'):
+        await sink.deliver([MongoPayload(collection='c', data=SampleOutput())])
+
+
 async def test_mongo_sink_deliver_error_increments_metrics(mongo_sink_config):
     from drakkar.metrics import sink_deliver_errors
 
@@ -1199,13 +1241,6 @@ async def test_mongo_sink_close_not_connected(mongo_sink_config):
 
     sink = MongoSink('analytics', mongo_sink_config)
     await sink.close()  # should not raise
-
-
-def test_mongo_sink_type(mongo_sink_config):
-    from drakkar.sinks.mongo import MongoSink
-
-    sink = MongoSink('analytics', mongo_sink_config)
-    assert sink.sink_type == 'mongo'
 
 
 # =============================================================================
@@ -1341,6 +1376,15 @@ async def test_http_sink_deliver_5xx_raises(http_sink_config):
         await sink.deliver([HttpPayload(data=SampleOutput())])
 
 
+async def test_http_sink_deliver_not_connected_raises(http_sink_config):
+    """A silent return would let the offset commit past lost payloads."""
+    from drakkar.sinks.http import HttpSink
+
+    sink = HttpSink('webhook', http_sink_config)
+    with pytest.raises(RuntimeError, match='not connected'):
+        await sink.deliver([HttpPayload(data=SampleOutput())])
+
+
 async def test_http_sink_deliver_timeout_raises(http_sink_config):
     import httpx
 
@@ -1396,13 +1440,6 @@ async def test_http_sink_close_not_connected(http_sink_config):
 
     sink = HttpSink('webhook', http_sink_config)
     await sink.close()  # should not raise
-
-
-def test_http_sink_type(http_sink_config):
-    from drakkar.sinks.http import HttpSink
-
-    sink = HttpSink('webhook', http_sink_config)
-    assert sink.sink_type == 'http'
 
 
 async def test_http_sink_json_encoding_is_unchanged_by_default(http_sink_config):
@@ -2271,6 +2308,15 @@ async def test_redis_sink_deliver_empty(redis_sink_config):
     mock_client.set.assert_not_called()
 
 
+async def test_redis_sink_deliver_not_connected_raises(redis_sink_config):
+    """A silent return would let the offset commit past lost payloads."""
+    from drakkar.sinks.redis import RedisSink
+
+    sink = RedisSink('cache', redis_sink_config)
+    with pytest.raises(RuntimeError, match='not connected'):
+        await sink.deliver([RedisPayload(key='k', data=SampleOutput())])
+
+
 async def test_redis_sink_key_prefix(redis_sink_config):
     """Key prefix from config is prepended to payload key."""
     sink, mock_client = _make_redis_sink(redis_sink_config)
@@ -2324,13 +2370,6 @@ async def test_redis_sink_close_not_connected(redis_sink_config):
 
     sink = RedisSink('cache', redis_sink_config)
     await sink.close()  # should not raise
-
-
-def test_redis_sink_type(redis_sink_config):
-    from drakkar.sinks.redis import RedisSink
-
-    sink = RedisSink('cache', redis_sink_config)
-    assert sink.sink_type == 'redis'
 
 
 # =============================================================================
@@ -2428,6 +2467,56 @@ async def test_file_sink_deliver_different_files(tmp_path):
     assert '"r2"' in file_b.read_text()
 
 
+async def test_file_sink_deliver_interleaved_files_preserves_per_file_order(tmp_path):
+    """Grouping by target file must keep payload order within each file."""
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
+    payloads = [
+        FilePayload(path='a.jsonl', data=SampleOutput(request_id='a1')),
+        FilePayload(path='b.jsonl', data=SampleOutput(request_id='b1')),
+        FilePayload(path='a.jsonl', data=SampleOutput(request_id='a2')),
+        FilePayload(path='b.jsonl', data=SampleOutput(request_id='b2')),
+    ]
+    await sink.deliver(payloads)
+
+    lines_a = (tmp_path / 'a.jsonl').read_text().splitlines()
+    lines_b = (tmp_path / 'b.jsonl').read_text().splitlines()
+    assert ['"a1"' in ln for ln in lines_a] == [True, False]
+    assert '"a2"' in lines_a[1]
+    assert '"b1"' in lines_b[0]
+    assert '"b2"' in lines_b[1]
+
+
+async def test_file_sink_deliver_offloads_batch_in_one_thread_hop(tmp_path):
+    """The blocking resolve+write work runs in ONE to_thread call per batch."""
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
+    payloads = [FilePayload(path=f'f{i}.jsonl', data=SampleOutput()) for i in range(3)]
+
+    with patch('drakkar.sinks.filesystem.asyncio.to_thread', wraps=asyncio.to_thread) as to_thread:
+        await sink.deliver(payloads)
+
+    to_thread.assert_called_once()
+    assert all((tmp_path / f'f{i}.jsonl').exists() for i in range(3))
+
+
+async def test_file_sink_deliver_validates_all_paths_before_writing(tmp_path):
+    """A traversal payload anywhere in the batch means nothing is written."""
+    from drakkar.sinks.filesystem import FileSink
+
+    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
+    payloads = [
+        FilePayload(path='good.jsonl', data=SampleOutput()),
+        FilePayload(path='../escape.jsonl', data=SampleOutput()),
+    ]
+    with pytest.raises(ValueError, match='Path traversal detected'):
+        await sink.deliver(payloads)
+
+    assert not (tmp_path / 'good.jsonl').exists()
+
+
 async def test_file_sink_deliver_empty(tmp_path):
     from drakkar.sinks.filesystem import FileSink
 
@@ -2466,13 +2555,6 @@ async def test_file_sink_close(tmp_path):
 
     sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
     await sink.close()  # no-op, should not raise
-
-
-def test_file_sink_type(tmp_path):
-    from drakkar.sinks.filesystem import FileSink
-
-    sink = FileSink('output', FileSinkConfig(base_path=str(tmp_path)))
-    assert sink.sink_type == 'filesystem'
 
 
 # --- Path containment tests ---
@@ -2548,6 +2630,31 @@ async def test_dlq_sink_connect(mock_cls):
 
     mock_cls.assert_called_once_with({'bootstrap.servers': 'kafka:9092'})
     assert sink._producer is not None
+
+
+def test_dlq_message_serialize_fallback_logs_warning():
+    """The str(p) fallback stays, but the degraded entry must leave a trace."""
+    from drakkar.sinks.dlq import DLQMessage
+
+    class _Broken(SampleOutput):
+        def model_dump_json(self, **kwargs):
+            raise RuntimeError('cannot serialize')
+
+    from drakkar.models import DeliveryError
+
+    error = DeliveryError(sink_name='results', sink_type='kafka', error='boom', payloads=[_Broken()])
+    msg = DLQMessage(delivery_error=error, partition_id=0)
+
+    with patch('drakkar.sinks.dlq.logger') as mock_logger:
+        serialized = msg.serialize()
+
+    mock_logger.warning.assert_called_once()
+    assert mock_logger.warning.call_args[0][0] == 'dlq_payload_serialization_fallback'
+    assert mock_logger.warning.call_args[1]['payload_type'] == '_Broken'
+    entry = json.loads(serialized)
+    # The fallback representation still reached the DLQ entry.
+    assert len(entry['original_payloads']) == 1
+    assert 'request_id' in entry['original_payloads'][0]
 
 
 async def test_dlq_sink_send():

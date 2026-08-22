@@ -63,8 +63,9 @@ def _create_source_db(
             ev_ts = ev.get('ts', time.time())
             db.execute(
                 """INSERT INTO events (ts, dt, event, partition, offset, task_id, args,
-                   stdout_size, stdout, stderr, exit_code, duration, output_topic, metadata, pid)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   stdout_size, stdout, stderr, exit_code, duration, output_topic, metadata, pid,
+                   labels, origin, client_name, request_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     ev_ts,
                     format_dt(ev_ts),
@@ -81,6 +82,11 @@ def _create_source_db(
                     ev.get('output_topic'),
                     ev.get('metadata'),
                     ev.get('pid'),
+                    ev.get('labels'),
+                    # 'kafka' is the live column's NOT NULL default.
+                    ev.get('origin', 'kafka'),
+                    ev.get('client_name'),
+                    ev.get('request_id'),
                 ],
             )
 
@@ -381,7 +387,11 @@ def test_merge_single_db_state(tmp_path):
 
 
 def test_merge_two_workers_interleaved_events(tmp_path):
-    """Events from two workers are merged in timestamp order."""
+    """Events from two workers interleave correctly when read in ts order.
+
+    Insertion order is per-source (not globally sorted); the reader
+    contract is ``ORDER BY ts`` via the ts index.
+    """
     db1 = tmp_path / 'w1.db'
     db2 = tmp_path / 'w2.db'
     _create_source_db(
@@ -410,11 +420,11 @@ def test_merge_two_workers_interleaved_events(tmp_path):
 
     merged = sqlite3.connect(output)
     merged.row_factory = sqlite3.Row
-    rows = merged.execute('SELECT * FROM events ORDER BY id').fetchall()
+    rows = merged.execute('SELECT * FROM events ORDER BY ts').fetchall()
 
-    # events should be in timestamp order (1000, 1001, 1002, 1003, 1004)
+    # all events from both workers, interleaved by timestamp
     timestamps = [r['ts'] for r in rows]
-    assert timestamps == sorted(timestamps)
+    assert timestamps == [1000.0, 1001.0, 1002.0, 1003.0, 1004.0]
 
     # verify worker_id foreign keys are correct
     workers = {r['id']: r['worker_name'] for r in merged.execute('SELECT * FROM workers')}
@@ -754,11 +764,17 @@ def test_merge_overwrites_existing_output(tmp_path):
 
 
 def test_merge_three_workers_global_order(tmp_path):
-    """Events from three workers are merged in correct global timestamp order."""
+    """A ts-ordered read over three merged workers yields every event globally sorted.
+
+    The merge no longer sorts at insertion time; the ts index is the
+    reader's ordering contract.
+    """
     dbs = []
+    expected_ts = []
     for i, (name, base_ts) in enumerate([('w1', 1000), ('w2', 999), ('w3', 1001)]):
         p = tmp_path / f'{name}.db'
         events = [{'ts': base_ts + j * 0.5, 'event': 'consumed', 'partition': i, 'offset': j} for j in range(5)]
+        expected_ts.extend(ev['ts'] for ev in events)
         _create_source_db(p, worker_name=name, events=events)
         dbs.append(str(p))
 
@@ -769,8 +785,8 @@ def test_merge_three_workers_global_order(tmp_path):
     assert result.worker_count == 3
 
     merged = sqlite3.connect(output)
-    timestamps = [r[0] for r in merged.execute('SELECT ts FROM events ORDER BY id')]
-    assert timestamps == sorted(timestamps)
+    timestamps = [r[0] for r in merged.execute('SELECT ts FROM events ORDER BY ts')]
+    assert timestamps == sorted(expected_ts)
     merged.close()
 
 
@@ -835,6 +851,10 @@ def test_merge_preserves_all_event_columns(tmp_path):
             'output_topic': 'results',
             'metadata': '{"slot": 2}',
             'pid': 12345,
+            'labels': '{"request_id": "req-1"}',
+            'origin': 'http',
+            'client_name': 'search-webapp',
+            'request_id': 'req-1',
         },
     ]
     _create_source_db(db1, worker_name='w1', events=events)
@@ -858,6 +878,106 @@ def test_merge_preserves_all_event_columns(tmp_path):
     assert row['output_topic'] == 'results'
     assert row['metadata'] == '{"slot": 2}'
     assert row['pid'] == 12345
+    assert row['labels'] == '{"request_id": "req-1"}'
+    assert row['origin'] == 'http'
+    assert row['client_name'] == 'search-webapp'
+    assert row['request_id'] == 'req-1'
+    merged.close()
+
+
+def test_merge_carries_live_schema_tracing_columns(tmp_path):
+    """labels/origin/client_name/request_id survive the merge per event.
+
+    Archives are the only remaining copy of rotated events — dropping
+    these columns would lose label tracing and webapp attribution
+    irrecoverably.
+    """
+    db1 = tmp_path / 'w1.db'
+    events = [
+        {
+            'ts': 1000.0,
+            'event': 'task_completed',
+            'task_id': 't1',
+            'labels': '{"customer": "acme"}',
+            'origin': 'kafka',
+        },
+        {
+            'ts': 1001.0,
+            'event': 'task_completed',
+            'task_id': 't2',
+            'origin': 'http',
+            'client_name': 'ingest-webapp',
+            'request_id': 'req-42',
+        },
+    ]
+    _create_source_db(db1, worker_name='w1', events=events)
+    output = str(tmp_path / 'merged.db')
+
+    result = merge_databases([str(db1)], output)
+    assert result.event_count == 2
+
+    merged = sqlite3.connect(output)
+    merged.row_factory = sqlite3.Row
+    by_task = {r['task_id']: r for r in merged.execute('SELECT * FROM events')}
+    assert by_task['t1']['labels'] == '{"customer": "acme"}'
+    assert by_task['t1']['origin'] == 'kafka'
+    assert by_task['t2']['origin'] == 'http'
+    assert by_task['t2']['client_name'] == 'ingest-webapp'
+    assert by_task['t2']['request_id'] == 'req-42'
+    merged.close()
+
+
+def test_merge_old_schema_source_yields_nulls_for_new_columns(tmp_path):
+    """A pre-webapp source (no labels/origin/... columns) merges without error.
+
+    ``row.get()`` yields None for the missing columns, which lands as
+    NULL in the merged file — hence the merged columns stay nullable
+    even though the live ``origin`` column is NOT NULL.
+    """
+    db_path = tmp_path / 'old.db'
+    db = sqlite3.connect(str(db_path))
+    # The pre-v1.x events table, ending at pid — built inline because the
+    # shipped schema no longer has this shape.
+    db.executescript(
+        """
+        CREATE TABLE events (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts           REAL NOT NULL,
+            dt           TEXT NOT NULL,
+            event        TEXT NOT NULL,
+            partition    INTEGER,
+            offset       INTEGER,
+            task_id      TEXT,
+            args         TEXT,
+            stdout_size  INTEGER DEFAULT 0,
+            stdout       TEXT,
+            stderr       TEXT,
+            exit_code    INTEGER,
+            duration     REAL,
+            output_topic TEXT,
+            metadata     TEXT,
+            pid          INTEGER
+        );
+        """
+    )
+    db.execute(
+        "INSERT INTO events (ts, dt, event, partition, offset, task_id) VALUES (1000.0, '2026-01-01', 'consumed', 0, 7, 't-old')"
+    )
+    db.commit()
+    db.close()
+    output = str(tmp_path / 'merged.db')
+
+    result = merge_databases([str(db_path)], output)
+    assert result.event_count == 1
+
+    merged = sqlite3.connect(output)
+    merged.row_factory = sqlite3.Row
+    row = merged.execute('SELECT * FROM events').fetchone()
+    assert row['task_id'] == 't-old'
+    assert row['labels'] is None
+    assert row['origin'] is None
+    assert row['client_name'] is None
+    assert row['request_id'] is None
     merged.close()
 
 
@@ -934,18 +1054,6 @@ def test_merge_skips_corrupt_db_in_worker_phase(tmp_path):
     # corrupt DB is skipped, good DB is merged
     assert result.worker_count == 1
     assert result.event_count == 1
-
-
-def test_merge_skips_corrupt_db_events_phase(tmp_path):
-    """DB that opens for worker phase but fails on reopen for events is skipped gracefully."""
-    db1 = tmp_path / 'w1.db'
-    _create_source_db(db1, worker_name='worker-1', events=[{'ts': 1000.0, 'event': 'consumed'}])
-    output = str(tmp_path / 'merged.db')
-
-    # Merge normally to verify baseline
-    result = merge_databases([str(db1)], output)
-    assert result.event_count == 1
-    assert result.worker_count == 1
 
 
 def test_merge_all_corrupt_dbs(tmp_path):

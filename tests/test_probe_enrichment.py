@@ -1,4 +1,4 @@
-"""Tests for probe-details enrichment declarations (Phase 1)."""
+"""Tests for probe-details enrichment declarations."""
 
 import pytest
 from pydantic import BaseModel, ValidationError

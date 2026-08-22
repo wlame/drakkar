@@ -26,19 +26,6 @@ def test_cache_peer_sync_config_defaults():
     assert cfg.timeout_seconds == 5.0
 
 
-def test_cache_peer_sync_config_custom_values():
-    cfg = CachePeerSyncConfig(
-        enabled=False,
-        interval_seconds=120.0,
-        batch_size=1000,
-        timeout_seconds=10.0,
-    )
-    assert cfg.enabled is False
-    assert cfg.interval_seconds == 120.0
-    assert cfg.batch_size == 1000
-    assert cfg.timeout_seconds == 10.0
-
-
 def test_cache_peer_sync_config_rejects_invalid():
     # interval_seconds must be > 0 (gt=0)
     with pytest.raises(ValidationError):
@@ -74,23 +61,6 @@ def test_cache_config_defaults():
     assert cfg.peer_sync.interval_seconds == 30.0
 
 
-def test_cache_config_custom_values():
-    cfg = CacheConfig(
-        enabled=True,
-        db_dir='/var/lib/drakkar/cache',
-        flush_interval_seconds=1.5,
-        cleanup_interval_seconds=30.0,
-        max_memory_entries=1000,
-        peer_sync=CachePeerSyncConfig(enabled=False),
-    )
-    assert cfg.enabled is True
-    assert cfg.db_dir == '/var/lib/drakkar/cache'
-    assert cfg.flush_interval_seconds == 1.5
-    assert cfg.cleanup_interval_seconds == 30.0
-    assert cfg.max_memory_entries == 1000
-    assert cfg.peer_sync.enabled is False
-
-
 def test_cache_config_rejects_invalid_intervals():
     # flush_interval_seconds must be > 0 (gt=0)
     with pytest.raises(ValidationError):
@@ -115,12 +85,6 @@ def test_cache_config_max_memory_entries_none_is_valid():
     # engine logs a warning at startup so operators see the decision.
     cfg = CacheConfig(max_memory_entries=None)
     assert cfg.max_memory_entries is None
-
-
-def test_cache_config_max_memory_entries_explicit_value_is_honored():
-    # Explicit smaller cap wins over the default.
-    cfg = CacheConfig(max_memory_entries=500)
-    assert cfg.max_memory_entries == 500
 
 
 def test_cache_config_db_dir_empty_stays_empty():
@@ -160,15 +124,6 @@ def test_drakkar_config_has_cache_field():
     assert isinstance(cfg.cache, CacheConfig)
     # default: disabled
     assert cfg.cache.enabled is False
-
-
-def test_drakkar_config_cache_custom():
-    cfg = DrakkarConfig(
-        executor=ExecutorConfig(binary_path='/bin/true'),
-        cache=CacheConfig(enabled=True, flush_interval_seconds=0.5),
-    )
-    assert cfg.cache.enabled is True
-    assert cfg.cache.flush_interval_seconds == 0.5
 
 
 # --- Environment variable overrides (DK_CACHE__* via pydantic-settings) ---

@@ -18,6 +18,7 @@ from drakkar.models import (
     MongoPayload,
     PostgresPayload,
     RedisPayload,
+    SinkDeliveryFailedError,
 )
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.manager import (
@@ -243,24 +244,36 @@ class FailConnectSink(FakeSink):
 
 
 async def test_connect_all_runs_sinks_in_parallel():
-    """Three sinks each sleeping 0.1s should connect in ~0.1s total, not 0.3s.
+    """All three sinks must be inside connect() at the same moment.
 
-    Upper threshold 0.15s — tight enough to rule out partial-parallelism
-    (2-of-3 serial would land around ~0.2s). Lower bound 0.09s rules out
-    a degenerate implementation that returns before any sink actually
-    slept for its full delay. Both bounds fail loudly if a regression
-    partially or fully serializes connect_all.
+    Each sink's connect() joins a barrier and blocks until every sink has
+    entered connect(). A serialized (or partially serialized) connect_all
+    would never get all three in-flight at once, so the wait_for below
+    times out and fails loudly — no wall-clock timing bands involved.
     """
+    in_flight = 0
+    max_in_flight = 0
+    all_in_flight = asyncio.Event()
+
+    class BarrierConnectSink(FakeSink):
+        async def connect(self) -> None:
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            if in_flight == 3:
+                all_in_flight.set()
+            await asyncio.wait_for(all_in_flight.wait(), timeout=5)
+            in_flight -= 1
+            self.connected = True
+
     mgr = SinkManager()
-    mgr.register(SlowConnectSink(name='a', sink_type='kafka', connect_delay=0.1))
-    mgr.register(SlowConnectSink(name='b', sink_type='postgres', connect_delay=0.1))
-    mgr.register(SlowConnectSink(name='c', sink_type='mongo', connect_delay=0.1))
+    mgr.register(BarrierConnectSink(name='a', sink_type='kafka'))
+    mgr.register(BarrierConnectSink(name='b', sink_type='postgres'))
+    mgr.register(BarrierConnectSink(name='c', sink_type='mongo'))
 
-    start = time.monotonic()
     await mgr.connect_all()
-    elapsed = time.monotonic() - start
 
-    assert 0.09 <= elapsed < 0.15, f'expected parallel connect in [0.09s, 0.15s), got {elapsed:.3f}s'
+    assert max_in_flight == 3, f'expected all 3 connects in flight at once, peak was {max_in_flight}'
     for sink in mgr.sinks.values():
         assert sink.connected  # type: ignore[attr-defined]
 
@@ -782,6 +795,88 @@ async def test_deliver_error_retry_exhausted_falls_to_dlq():
     assert on_error.call_count == 2  # called on each failed attempt
 
 
+class _RecordingDLQ:
+    """DLQSink stand-in: records sends and returns a fixed confirmation."""
+
+    def __init__(self, ok: bool = True) -> None:
+        self.ok = ok
+        self.sent: list[tuple[DeliveryError, int, int]] = []
+
+    async def send(self, error: DeliveryError, partition_id: int, attempt_count: int = 1) -> bool:
+        self.sent.append((error, partition_id, attempt_count))
+        return self.ok
+
+
+async def test_deliver_error_retry_exhausted_lands_in_dlq():
+    """An exhausted-RETRY batch must reach the DLQ, not vanish silently."""
+    mgr = SinkManager()
+    dlq = _RecordingDLQ()
+    mgr.attach_runtime(recorder=None, dlq_sink=dlq, dlq_on_send_failure='drop')
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    on_error = AsyncMock(return_value=DeliveryAction.RETRY)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=5, max_retries=2)
+
+    assert on_error.call_count == 2
+    assert len(dlq.sent) == 1
+    error, partition_id, attempt_count = dlq.sent[0]
+    assert error.sink_name == 'out'
+    assert len(error.payloads) == 1
+    assert partition_id == 5
+    assert attempt_count == 2
+
+
+async def test_deliver_error_retry_exhausted_dlq_send_failure_stall_raises():
+    """Exhausted RETRY + failing DLQ + on_send_failure=stall must raise, not drop."""
+    mgr = SinkManager()
+    mgr.attach_runtime(recorder=None, dlq_sink=_RecordingDLQ(ok=False), dlq_on_send_failure='stall')
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    on_error = AsyncMock(return_value=DeliveryAction.RETRY)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    with pytest.raises(SinkDeliveryFailedError):
+        await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0, max_retries=1)
+
+
+async def test_deliver_error_retry_exhausted_without_dlq_drop_mode_counts():
+    """No DLQ sink wired: drop mode counts the loss instead of raising."""
+    from drakkar.metrics import dlq_dropped_payloads
+
+    before = dlq_dropped_payloads.labels(partition='6')._value.get()
+    mgr = SinkManager()  # no DLQ sink, default on_send_failure='drop'
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    on_error = AsyncMock(return_value=DeliveryAction.RETRY)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=6, max_retries=1)  # must not raise
+
+    assert dlq_dropped_payloads.labels(partition='6')._value.get() == before + 1
+
+
+async def test_deliver_error_dlq_action_does_not_use_manager_dlq():
+    """The DLQ action is shipped by the on_delivery_error wrapper (app.py) —
+    the manager must not send it a second time."""
+    mgr = SinkManager()
+    dlq = _RecordingDLQ()
+    mgr.attach_runtime(recorder=None, dlq_sink=dlq, dlq_on_send_failure='drop')
+    sink = FakeSink('out', sink_type='kafka')
+    sink.fail_on_deliver = True
+    mgr.register(sink)
+
+    on_error = AsyncMock(return_value=DeliveryAction.DLQ)
+    result = CollectResult(kafka=[KafkaPayload(data=SampleData())])
+    await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
+
+    assert dlq.sent == []
+
+
 async def test_deliver_error_dlq_action():
     mgr = SinkManager()
     sink = FakeSink('out', sink_type='kafka')
@@ -815,6 +910,44 @@ async def test_deliver_partial_failure():
 
     assert len(good_sink.delivered) == 1  # kafka succeeded
     on_error.assert_called_once()  # postgres failed
+
+
+async def test_deliver_all_settles_all_groups_before_raising_first_exception():
+    """Two failing sink groups: both must run to completion, then the first
+    exception propagates — a bare gather would abandon the slow group
+    mid-flight on the fast group's raise and swallow its failure."""
+
+    slow_settled = asyncio.Event()
+
+    class SlowFailSink(FakeSink):
+        async def deliver(self, payloads: list) -> None:
+            await asyncio.sleep(0.05)
+            slow_settled.set()
+            raise RuntimeError('slow sink down')
+
+    mgr = SinkManager()
+    fast = FakeSink('fast', sink_type='kafka')
+    fast.fail_on_deliver = True
+    slow = SlowFailSink('slow', sink_type='postgres')
+    mgr.register(fast)
+    mgr.register(slow)
+
+    handled: list[str] = []
+
+    async def raising_handler(error: DeliveryError) -> DeliveryAction:
+        handled.append(error.sink_name)
+        raise RuntimeError(f'handler exploded for {error.sink_name}')
+
+    result = CollectResult(
+        kafka=[KafkaPayload(sink='fast', data=SampleData())],
+        postgres=[PostgresPayload(sink='slow', table='t', data=SampleData())],
+    )
+    with pytest.raises(RuntimeError, match='handler exploded'):
+        await mgr.deliver_all(result, on_delivery_error=raising_handler, partition_id=0)
+
+    # Both groups reached their (failing) terminal state before the raise.
+    assert slow_settled.is_set()
+    assert sorted(handled) == ['fast', 'slow']
 
 
 # --- BaseSink repr ---
@@ -1106,7 +1239,7 @@ async def test_deliver_all_tolerates_none_recorder_and_none_dlq_sink_on_failure(
     internal guards (``if self._recorder is not None``, ``if self._dlq_sink
     is not None``) is what lets ``_async_run`` skip recorder wiring when
     ``debug.enabled=False`` — and lets tests construct a bare manager for
-    unrelated assertions. Locks in the public contract introduced by Task 5.
+    unrelated assertions. Locks in that public constructor contract.
     """
     mgr = SinkManager(recorder=None, dlq_sink=None)
     sink = FakeSink('out', sink_type='kafka')
@@ -1148,19 +1281,32 @@ class SlowDeliverSink(FakeSink):
 
 
 async def test_deliver_all_runs_sinks_in_parallel():
-    """Three sinks with different latencies should deliver in ~max(latencies).
+    """All three sinks must be inside deliver() at the same moment.
 
-    With sequential delivery total would be 50 + 100 + 200 = 350ms. With gather
-    it should be ~max(delays) = 200ms. Upper bound 0.25s rules out
-    partial-parallelism (2-of-3 serial lands around ~300ms). Lower bound 0.19s
-    rules out a degenerate implementation that returns before the slowest sink
-    finishes its sleep. Both bounds fail loudly if the implementation regressed
-    or was never actually parallelized.
+    Each sink's deliver() joins a barrier and blocks until every sink has
+    entered deliver(). A serialized (or partially serialized) deliver_all
+    would never get all three in-flight at once, so the wait_for below
+    times out and fails loudly — no wall-clock timing bands involved.
     """
+    in_flight = 0
+    max_in_flight = 0
+    all_in_flight = asyncio.Event()
+
+    class BarrierDeliverSink(FakeSink):
+        async def deliver(self, payloads: list[BaseModel]) -> None:
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            if in_flight == 3:
+                all_in_flight.set()
+            await asyncio.wait_for(all_in_flight.wait(), timeout=5)
+            in_flight -= 1
+            self.delivered.append(payloads)
+
     mgr = SinkManager()
-    mgr.register(SlowDeliverSink(name='fast', sink_type='kafka', deliver_delay=0.05))
-    mgr.register(SlowDeliverSink(name='medium', sink_type='postgres', deliver_delay=0.1))
-    mgr.register(SlowDeliverSink(name='slow', sink_type='mongo', deliver_delay=0.2))
+    mgr.register(BarrierDeliverSink(name='fast', sink_type='kafka'))
+    mgr.register(BarrierDeliverSink(name='medium', sink_type='postgres'))
+    mgr.register(BarrierDeliverSink(name='slow', sink_type='mongo'))
 
     result = CollectResult(
         kafka=[KafkaPayload(sink='fast', data=SampleData())],
@@ -1169,11 +1315,9 @@ async def test_deliver_all_runs_sinks_in_parallel():
     )
     on_error = AsyncMock(return_value=DeliveryAction.SKIP)
 
-    start = time.monotonic()
     await mgr.deliver_all(result, on_delivery_error=on_error, partition_id=0)
-    elapsed = time.monotonic() - start
 
-    assert 0.19 <= elapsed < 0.25, f'expected parallel deliver in [0.19s, 0.25s), got {elapsed:.3f}s'
+    assert max_in_flight == 3, f'expected all 3 deliveries in flight at once, peak was {max_in_flight}'
     stats = mgr.get_all_stats()
     assert stats[('kafka', 'fast')].delivered_count == 1
     assert stats[('postgres', 'medium')].delivered_count == 1
@@ -1352,7 +1496,7 @@ async def test_deliver_all_preserves_sink_stats_per_sink_under_gather():
     assert ok_b_stats.last_error_ts is None
 
 
-# --- Circuit breaker (Phase 2 Task 7) ---
+# --- Circuit breaker ---
 #
 # The per-sink circuit breaker trips after `failure_threshold` consecutive
 # terminal failures (retries exhausted). While open, deliveries bypass the
@@ -2005,7 +2149,7 @@ async def test_idempotent_sink_exhausts_retries_then_surfaces_error():
 
 
 async def test_idempotent_retry_counts_as_single_circuit_breaker_attempt():
-    """Phase 2 invariant: one delivery batch counts as ONE consecutive
+    """Breaker invariant: one delivery batch counts as ONE consecutive
     failure on the circuit breaker, regardless of in-call retries.
 
     With ``idempotent=True`` and three transient failures, the breaker

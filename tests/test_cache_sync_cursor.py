@@ -1,7 +1,7 @@
-"""Tests for the CacheEngine peer-sync cursor + error isolation (Task 13).
+"""Tests for the CacheEngine peer-sync cursor + error isolation.
 
-Task 11 added peer discovery + scope-aware pull. Task 12 closed the apply
-loop with LWW UPSERT + memory invalidation. Task 13 layers on the two
+Peer discovery + scope-aware pull and the LWW-UPSERT apply loop are
+covered in their own test files. This file layers on the two
 remaining concerns that make peer sync a durable, steady-state system:
 
 1. **Per-peer cursor** (``_peer_cursors: dict[str, int]``) — ensures each
@@ -36,9 +36,9 @@ remaining concerns that make peer sync a durable, steady-state system:
    via ``run_periodic_task(system=True)`` in ``CacheEngine.start()``.
 
 All tests use the same ``tmp_path`` + ``aiosqlite`` on-disk pattern as
-Tasks 11-12 for filesystem/DB realism, plus the ``_seed_peer_cache_db`` /
-``_seed_peer_live_db`` helpers from those files (duplicated here per the
-"self-contained per-task test file" convention).
+the other sync test files for filesystem/DB realism, plus the
+``_seed_peer_cache_db`` / ``_seed_peer_live_db`` helpers from those files
+(duplicated here to keep each file self-contained).
 """
 
 from __future__ import annotations
@@ -63,8 +63,8 @@ from tests.conftest import make_ui_config
 # --- helpers ---------------------------------------------------------------
 #
 # Mirror the helpers in the other sync test files so this file stays
-# self-contained — the same construct appears in Tasks 11 and 12, but
-# duplicating keeps test failures localized to one task's file.
+# self-contained — the same construct appears there too, but
+# duplicating keeps test failures localized to one file.
 
 
 def make_debug_config(tmp_path: Path, **overrides: Any) -> UIConfig:

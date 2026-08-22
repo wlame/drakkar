@@ -1,4 +1,4 @@
-"""Tests for Task 15: handler.cache attribute, NoOpCache stub, and app wiring.
+"""Tests for the handler.cache attribute, NoOpCache stub, and app wiring.
 
 This module verifies the user-facing contract where every handler has a
 ``self.cache`` attribute populated by the framework. When the cache is disabled
@@ -176,47 +176,6 @@ class _SimpleHandler(BaseDrakkarHandler):
 
     async def arrange(self, messages, pending):
         return []
-
-
-async def test_app_wires_real_cache_when_enabled(tmp_path, monkeypatch) -> None:
-    """When cache.enabled=true, DrakkarApp constructs a CacheEngine and
-    attaches a real Cache to the handler's ``cache`` attribute."""
-    from drakkar.app import DrakkarApp
-
-    handler = _SimpleHandler()
-    config = _make_config_with_cache(tmp_path, cache_enabled=True)
-    app = DrakkarApp(handler=handler, config=config, worker_id='w1')
-
-    # Build only the fragment we care about: cache-engine construction.
-    # We avoid a full _async_run to keep the test unit-scoped.
-    app._recorder = None  # no recorder; cache wiring still works
-    # Replicate the cache-engine construction block from _async_run.
-    if app.config.cache.enabled:
-        engine = CacheEngine(
-            config=app.config.cache,
-            ui_config=app.config.ui,
-            worker_id=app._worker_id,
-            cluster_name=app._cluster_name,
-            recorder=app._recorder,
-        )
-        handler_cache = Cache(
-            origin_worker_id=app._worker_id,
-            max_memory_entries=app.config.cache.max_memory_entries,
-        )
-        engine.attach_cache(handler_cache)
-        await engine.start()
-        app._cache_engine = engine
-        app._handler.cache = handler_cache
-
-    try:
-        assert isinstance(handler.cache, Cache)
-        assert not isinstance(handler.cache, NoOpCache)
-        # Verify the real cache works end to end via memory path.
-        handler.cache.set('hello', 'world')
-        assert handler.cache.peek('hello') == 'world'
-    finally:
-        if app._cache_engine is not None:
-            await app._cache_engine.stop()
 
 
 async def test_app_leaves_noop_cache_when_disabled(tmp_path) -> None:

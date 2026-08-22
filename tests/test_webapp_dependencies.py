@@ -433,7 +433,7 @@ def test_post_with_no_auth_returns_401_flat_body():
 def test_post_with_valid_token_reaches_runner_happy_path():
     """E2E: valid Bearer token passes auth+rate-limit → 200 from the runner.
 
-    With Task 6a wired, the test handler's no-op
+    The test handler's no-op
     ``arrange_http_request``/``on_http_request_complete`` produce a
     successful WebReport. Reaching 200 (rather than 401/429) proves the
     dependencies admitted the request.

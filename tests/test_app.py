@@ -408,16 +408,6 @@ async def test_app_no_sinks_raises(test_config_no_sinks):
         await app._lifecycle._async_run()
 
 
-# --- Signal handling ---
-
-
-async def test_app_handle_signal(test_config):
-    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._running = True
-    app._lifecycle._handle_signal()
-    assert not app._running
-
-
 # --- Shutdown ---
 
 
@@ -482,6 +472,8 @@ async def test_stop_processor_handles_arrange_error(test_config):
 
 
 async def test_safe_call_catches_handler_errors(test_config):
+    """A failing on_assign hook is swallowed by _safe_call and logged as a warning."""
+
     class ErrorOnAssignHandler(BaseDrakkarHandler):
         async def arrange(self, messages, pending):
             return []
@@ -496,8 +488,13 @@ async def test_safe_call_catches_handler_errors(test_config):
     app._consumer = MagicMock()
     app._consumer.commit = AsyncMock()
 
-    app._lifecycle._on_assign([0])
-    await asyncio.sleep(0.2)
+    with capture_logs() as cap:
+        app._lifecycle._on_assign([0])
+        await asyncio.sleep(0.2)
+
+    failures = [entry for entry in cap if entry['event'] == 'async_callback_failed']
+    assert failures, f'expected async_callback_failed in logs, got: {[e["event"] for e in cap]}'
+    assert 'on_assign failed' in str(failures[0])
 
     for proc in app.processors.values():
         await proc.stop()
@@ -595,64 +592,6 @@ async def test_app_total_queued_with_processors(test_config):
 
 
 # --- Backpressure ---
-
-
-async def test_app_backpressure_pauses_and_resumes(test_config):
-    """When queue exceeds high watermark, consumer is paused. When it drops
-    below low watermark, consumer is resumed."""
-    from drakkar.executor import ExecutorPool
-
-    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
-    app._consumer = AsyncMock()
-    app._running = True
-
-    app._lifecycle._on_assign([0])
-    await asyncio.sleep(0.05)
-
-    # config: max_executors=2, high_mult=32, low_mult=4 → high=64, low=8
-    # Simulate high queue by directly putting messages
-    for i in range(65):
-        msg = SourceMessage(topic='t', partition=0, offset=i, value=b'x', timestamp=0)
-        app.processors[0]._queue.put_nowait(msg)
-
-    # Run one iteration of the poll loop manually
-    total = app._total_queued()
-    assert total >= 64
-
-    max_executors = app.config.executor.max_executors
-    high_watermark = max_executors * app.config.executor.backpressure_high_multiplier
-    low_watermark = max(1, max_executors * app.config.executor.backpressure_low_multiplier)
-
-    # Simulate pause trigger
-    if not app._paused and total >= high_watermark:
-        partition_ids = list(app.processors.keys())
-        if partition_ids:
-            await app._consumer.pause(partition_ids)
-            app._paused = True
-
-    app._consumer.pause.assert_called_once_with([0])
-    assert app._paused
-
-    # Drain queue to below low watermark
-    while app.processors[0]._queue.qsize() > low_watermark - 1:
-        app.processors[0]._queue.get_nowait()
-
-    total = app._total_queued()
-    assert total <= low_watermark
-
-    # Simulate resume trigger
-    if app._paused and total <= low_watermark:
-        partition_ids = list(app.processors.keys())
-        if partition_ids:
-            await app._consumer.resume(partition_ids)
-            app._paused = False
-
-    app._consumer.resume.assert_called_once_with([0])
-    assert not app._paused
-
-    for proc in app.processors.values():
-        await proc.stop()
 
 
 async def test_newly_assigned_partition_is_paused_when_backpressure_active(test_config):
@@ -912,10 +851,22 @@ async def test_poll_loop_dispatches_messages_to_processors(test_config):
 
     app._consumer.poll_batch = _poll_once
 
+    # Spy on enqueue so we can assert routing regardless of how fast the
+    # processor drains its queue afterwards.
+    enqueued: dict[int, list[SourceMessage]] = {0: [], 1: []}
+    for pid, proc in app.processors.items():
+        real_enqueue = proc.enqueue
+
+        def _spy(msg, _pid=pid, _real=real_enqueue):
+            enqueued[_pid].append(msg)
+            _real(msg)
+
+        proc.enqueue = _spy
+
     await app._lifecycle._poll_loop()
 
-    assert app.processors[0].queue_size >= 0  # message was consumed (may already be processed)
-    assert app.processors[1].queue_size >= 0
+    assert enqueued[0] == [msg0]
+    assert enqueued[1] == [msg1]
 
     for proc in app.processors.values():
         await proc.stop()
@@ -1030,7 +981,7 @@ async def test_poll_loop_executor_idle_waste_metric(test_config):
         await proc.stop()
 
 
-# --- Task 7: Debug security startup gate ---
+# --- Debug security startup gate ---
 
 
 @pytest.fixture
@@ -1499,7 +1450,7 @@ async def test_lifecycle_shutdown_drains_and_flips_ready(test_config):
     that _shutdown drains the processors collection and flips is_ready
     off — the two invariants the lifecycle owns on the way out.
 
-    This is the focused unit test promised by Phase 4 Task 3: it exercises
+    This focused unit test exercises
     the lifecycle as an isolated object rather than indirectly via
     ``app._shutdown``, so a future regression in the back-reference wiring
     will surface here even if the higher-level integration tests still pass.
@@ -1551,25 +1502,6 @@ def test_lifecycle_handle_signal_flips_running_off(test_config):
     lifecycle._handle_signal()
 
     assert app._running is False
-
-
-async def test_lifecycle_back_reference_shares_state(test_config):
-    """AppLifecycle holds only a back-reference to DrakkarApp; mutations
-    on either side must be visible on the other. This guards against a
-    future refactor that accidentally copies app state into the lifecycle.
-    """
-    from drakkar.lifecycle import AppLifecycle
-
-    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
-    lifecycle = AppLifecycle(app)
-
-    # Mutate via app, observe via lifecycle.
-    app._running = True
-    assert lifecycle._app._running is True
-
-    # Mutate via lifecycle, observe via app.
-    lifecycle._app._paused = True
-    assert app._paused is True
 
 
 # --- Lifecycle: watchdog wiring -------------------------------------------

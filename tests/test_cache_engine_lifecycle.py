@@ -20,7 +20,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from drakkar.cache import LWW_UPSERT_SQL, CacheEngine
+from drakkar.cache import CacheEngine
 from drakkar.config import CacheConfig, UIConfig
 from tests.conftest import make_ui_config
 
@@ -393,17 +393,3 @@ def test_cache_config_disabled_with_none_does_not_warn():
         CacheConfig(enabled=False, max_memory_entries=None)
     unbounded_events = [ev for ev in captured if ev.get('event') == 'cache_max_memory_entries_unbounded']
     assert unbounded_events == []
-
-
-# --- constants --------------------------------------------------------------
-
-
-def test_lww_upsert_sql_is_defined():
-    """`LWW_UPSERT_SQL` is exported as a module constant.
-
-    Task 6 creates a placeholder; Task 7 populates its body with the full
-    UPSERT. For now we just assert the constant exists and is a string —
-    the flush loop in Task 7 will start exercising its actual content.
-    """
-    assert isinstance(LWW_UPSERT_SQL, str)
-    assert len(LWW_UPSERT_SQL) > 0

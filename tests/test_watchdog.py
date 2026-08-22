@@ -278,3 +278,50 @@ def test_path_includes_worker_id(tmp_path: Path) -> None:
     """
     wd = WatchdogFile(data_dir=tmp_path, worker_id='w42')
     assert wd.path == tmp_path / 'w42.watchdog'
+
+
+def test_unreadable_previous_watchdog_treated_as_clean(watchdog: WatchdogFile, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transient read failure on the prior watchdog must not trip a
+    false OOM alarm — ``check_previous`` treats it as a clean run.
+
+    Simulated via ``Path.read_text`` raising ``OSError`` for this
+    watchdog's path (a real kernel-level read error is not reproducible
+    hermetically).
+    """
+    watchdog.write()
+
+    real_read_text = Path.read_text
+
+    def failing_read(self: Path, *args: object, **kwargs: object) -> str:
+        if self == watchdog.path:
+            raise OSError('transient I/O failure')
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, 'read_text', failing_read)
+
+    before = suspected_oom_kills._value.get()
+    with structlog.testing.capture_logs() as cap:
+        assert watchdog.check_previous() is True
+    assert suspected_oom_kills._value.get() == before
+    assert not any(e.get('log_level') == 'warning' for e in cap)
+
+
+def test_mark_clean_tolerates_unlink_race(watchdog: WatchdogFile, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The marker write succeeds but the file vanishes before the unlink
+    (another process / cleanup hook won the race) — ``mark_clean`` must
+    swallow the ``FileNotFoundError`` and return quietly.
+    """
+    watchdog.write()
+
+    real_unlink = Path.unlink
+
+    def racing_unlink(self: Path, *args: object, **kwargs: object) -> None:
+        if self == watchdog.path:
+            real_unlink(self)  # the "other process" removes it first
+            raise FileNotFoundError(self)
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'unlink', racing_unlink)
+
+    watchdog.mark_clean()  # must not raise
+    assert not watchdog.path.exists()

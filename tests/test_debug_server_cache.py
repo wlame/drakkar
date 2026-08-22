@@ -108,7 +108,7 @@ def _make_mock_app(cache_engine: CacheEngine | None = None):
     sink_mgr.get_all_stats.return_value = {}
     app.sink_manager = sink_mgr
 
-    # Critical for Task 16: the debug server reads cache_engine off the app
+    # Critical: the debug server reads cache_engine off the app
     # to decide which routes work and which return 404.
     app.cache_engine = cache_engine
     app._cache_engine = cache_engine

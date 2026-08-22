@@ -20,7 +20,6 @@ from drakkar.models import (
     RedisOp,
     RedisPayload,
     SourceMessage,
-    TaskOrigin,
     make_stable_task_id,
     make_task_id,
 )
@@ -208,20 +207,6 @@ def test_executor_result_truncation_flags_default_false(executor_task):
     assert result.stderr_truncated is False
 
 
-def test_executor_result_truncation_flags_settable(executor_task):
-    result = ExecutorResult(
-        exit_code=0,
-        stdout='partial',
-        stderr='',
-        duration_seconds=0.1,
-        task=executor_task,
-        stdout_truncated=True,
-        stderr_truncated=True,
-    )
-    assert result.stdout_truncated is True
-    assert result.stderr_truncated is True
-
-
 def test_message_group_all_succeeded_counts():
     t1 = _task('t1')
     group = MessageGroup(
@@ -301,7 +286,6 @@ def test_executor_task_with_precomputed_result():
     assert t.precomputed is pr
     assert t.args == []  # unused when precomputed
     assert t.precomputed.stdout == 'cached payload'
-    assert make_task_id('task').startswith('task-')
 
 
 # --- TaskOrigin / origin / client_name / request_id ---
@@ -383,13 +367,6 @@ def test_executor_task_origin_rejects_unknown_value():
 
     with pytest.raises(ValidationError):
         ExecutorTask(task_id='t-bad', source_offsets=[0], origin='websocket')  # type: ignore[arg-type]
-
-
-def test_task_origin_alias_exposes_the_two_known_values():
-    """``TaskOrigin`` is a public type alias importable from drakkar.models."""
-    from typing import get_args
-
-    assert set(get_args(TaskOrigin)) == {'kafka', 'http'}
 
 
 # --- PostgresPayload operations ---
@@ -564,6 +541,39 @@ def test_redis_payload_rejects_fields_the_op_does_not_use(op, kwargs, unused):
     """
     with pytest.raises(ValidationError, match=f"does not use '{unused}'"):
         RedisPayload(op=op, **kwargs)
+
+
+def test_redis_payload_set_with_script_fields_fails_validation():
+    """A non-script op carrying script-only fields must fail, not silently drop them."""
+    with pytest.raises(ValidationError, match='does not use'):
+        RedisPayload(op=RedisOp.SET, key='k', data=SampleData(), script='cap', keys=['recent'])
+
+
+def test_redis_op_fields_table_covers_every_field():
+    """required + optional + forbidden must equal the full field set for every op.
+
+    A field left out of an op's contract would be silently ignored when set
+    — the hazard the table exists to prevent — so a future RedisPayload
+    field must land in one of the three buckets for EVERY op before this
+    test passes again.
+    """
+    from drakkar.models import _REDIS_OP_FIELDS
+
+    all_fields = set(RedisPayload.model_fields) - {'sink', 'op'}
+    # The contract's deliberately-optional fields, per op. Everything else
+    # must be either required or forbidden.
+    optional_fields = {
+        RedisOp.SET: {'ttl'},
+        RedisOp.PUSH: {'side'},
+        RedisOp.SCRIPT: {'args'},
+    }
+    assert set(_REDIS_OP_FIELDS) == set(RedisOp), 'every op must have a row in the table'
+    for op, (required, forbidden) in _REDIS_OP_FIELDS.items():
+        optional = optional_fields.get(op, set())
+        assert not (required & forbidden), f'{op.value}: fields both required and forbidden'
+        uncovered = all_fields - required - optional - forbidden
+        assert not uncovered, f'{op.value}: fields outside the contract: {sorted(uncovered)}'
+        assert required | optional | forbidden == all_fields, f'{op.value}: contract names unknown fields'
 
 
 @pytest.mark.parametrize(

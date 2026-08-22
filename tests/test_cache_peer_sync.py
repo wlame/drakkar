@@ -1,4 +1,4 @@
-"""Tests for the CacheEngine peer-sync per-cycle deadline (Phase 2 Task 2).
+"""Tests for the CacheEngine peer-sync per-cycle deadline.
 
 The engine's ``_sync_once`` wraps ``_sync_inner`` with ``asyncio.wait_for``
 to bound a single cycle's wall-clock time. The cap prevents a single slow
@@ -400,7 +400,7 @@ async def test_peer_sync_default_deadline_derives_from_interval(tmp_path):
         await engine.stop()
 
 
-# --- concurrent peer-sync regression (Phase 2 Task 10) ---------------------
+# --- concurrent peer-sync regression ----------------------------------------
 #
 # Two dimensions of concurrency to pin down:
 #
@@ -791,6 +791,118 @@ async def test_peer_sync_deadline_does_not_leave_stale_memory(tmp_path):
             await cur.close()
         assert row is not None, 'peer row must have been committed inside the shield'
         assert row[0] == new_value, f'expected committed peer value, got {row[0]!r}'
+    finally:
+        await engine.stop()
+
+
+# --- orphaned shielded peer-commit tracking ----------------------------------
+#
+# ``_apply_peer_rows`` shields the commit from the sync-cycle deadline. When
+# the deadline cancels the awaiter, the shielded task keeps running — the
+# engine must keep a reference and await it before the next cycle touches
+# the writer and before ``stop()`` closes it. Otherwise the next cycle can
+# interleave transactions on the writer, and ``stop()`` can close
+# ``_writer_db`` mid-executemany.
+
+
+def _make_peer_row(key: str, value_json: str, updated_at_ms: int) -> tuple:
+    """One peer row tuple in ``LWW_UPSERT_SQL`` binding order."""
+    return (
+        key,
+        CacheScope.GLOBAL.value,
+        value_json,
+        len(value_json.encode('utf-8')),
+        updated_at_ms,  # created_at_ms
+        updated_at_ms,
+        None,  # no TTL
+        'peer1',
+    )
+
+
+async def _orphan_peer_commit(engine: CacheEngine, *, commit_sleep: float) -> tuple:
+    """Drive ``_apply_peer_rows`` into an orphaned shielded commit.
+
+    Patches the writer's ``commit`` to sleep AFTER the real commit, then
+    cancels the awaiter via a short ``wait_for`` — the shielded task keeps
+    running through the sleep. Returns the peer row that was applied and
+    the original ``commit`` so callers can restore it.
+    """
+    assert engine._writer_db is not None
+    original_commit = engine._writer_db.commit
+
+    async def slow_commit(*args: Any, **kwargs: Any):
+        await original_commit(*args, **kwargs)
+        await asyncio.sleep(commit_sleep)
+
+    engine._writer_db.commit = slow_commit  # type: ignore[method-assign,assignment]
+
+    row = _make_peer_row('orphaned', '"fresh"', 9_999_999_999)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            engine._apply_peer_rows(peer_name='peer1', rows=[row]),
+            timeout=0.05,
+        )
+    # The deadline fired while the shielded commit was still sleeping —
+    # the engine must be holding a live reference to the orphan.
+    pending = engine._pending_peer_commit
+    assert pending is not None and not pending.done(), 'orphaned commit task must stay referenced'
+    return row, original_commit
+
+
+async def test_stop_awaits_orphaned_peer_commit(tmp_path):
+    """``stop()`` must await a deadline-orphaned peer commit before closing
+    the writer — pre-fix it could close ``_writer_db`` mid-commit."""
+    engine = await _make_engine(
+        tmp_path,
+        worker_id='me',
+        cluster_name='prod',
+        cache_overrides={
+            'peer_sync': CachePeerSyncConfig(enabled=True, interval_seconds=30.0),
+        },
+    )
+    _row, original_commit = await _orphan_peer_commit(engine, commit_sleep=0.3)
+
+    # stop() while the orphan is mid-sleep. It must wait the orphan out,
+    # then drain + close without touching a closed connection.
+    await engine.stop()
+
+    assert engine._pending_peer_commit is None, 'stop() must consume the orphan reference'
+    _ = original_commit  # writer is closed; nothing to restore
+
+    # The orphaned commit's row actually landed before the writer closed.
+    async with (
+        aiosqlite.connect(str(tmp_path / 'me-cache.db.actual')) as db,
+        db.execute('SELECT value FROM cache_entries WHERE key = ?', ('orphaned',)) as cur,
+    ):
+        row = await cur.fetchone()
+    assert row is not None, 'orphaned peer commit must complete before stop() closes the writer'
+    assert row[0] == '"fresh"'
+
+
+async def test_next_sync_cycle_awaits_orphaned_peer_commit(tmp_path):
+    """The next ``_sync_once`` must await the previous cycle's orphaned
+    commit before starting — no writer interleaving across cycles."""
+    engine = await _make_engine(
+        tmp_path,
+        worker_id='me',
+        cluster_name='prod',
+        cache_overrides={
+            'peer_sync': CachePeerSyncConfig(enabled=True, interval_seconds=30.0),
+        },
+    )
+    try:
+        _row, original_commit = await _orphan_peer_commit(engine, commit_sleep=0.2)
+
+        # Next cycle (no peers seeded, so the pull itself is a no-op) —
+        # it must first wait the orphan out and clear the reference.
+        await engine._sync_once()
+
+        pending = engine._pending_peer_commit
+        assert pending is None, 'next sync cycle must await and clear the orphaned commit'
+
+        # Restore the real commit so stop()'s drain is not slowed down.
+        assert engine._writer_db is not None
+        engine._writer_db.commit = original_commit  # type: ignore[method-assign,assignment]
     finally:
         await engine.stop()
 

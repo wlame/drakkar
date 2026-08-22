@@ -58,7 +58,7 @@ def test_cache_scope_is_str_enum():
         None,
     ],
 )
-def testencode_value_primitive_roundtrips_via_json(value):
+def test_encode_value_primitive_roundtrips_via_json(value):
     """Primitives encode to their `json.dumps` form, and the reported byte
     count matches the UTF-8 length of the string."""
     encoded, size = encode_value(value)
@@ -66,7 +66,7 @@ def testencode_value_primitive_roundtrips_via_json(value):
     assert size == len(encoded.encode('utf-8'))
 
 
-def testencode_value_list_and_dict():
+def test_encode_value_list_and_dict():
     """Containers encode via plain json.dumps — no Pydantic detour for
     primitive-only structures."""
     data = {'items': [1, 2, 3], 'name': 'test'}
@@ -75,7 +75,7 @@ def testencode_value_list_and_dict():
     assert size == len(encoded.encode('utf-8'))
 
 
-def testencode_value_pydantic_model_uses_model_dump_json():
+def test_encode_value_pydantic_model_uses_model_dump_json():
     """Pydantic models go through `model_dump_json()` so we get the model's
     declared field types (e.g. Enum values, datetime iso) — not whatever
     `__dict__` happens to contain."""
@@ -93,7 +93,7 @@ def testencode_value_pydantic_model_uses_model_dump_json():
     assert size == len(encoded.encode('utf-8'))
 
 
-def testencode_value_size_uses_utf8_byte_count_not_codepoint_count():
+def test_encode_value_size_uses_utf8_byte_count_not_codepoint_count():
     """Multi-byte UTF-8 characters must be counted by byte length — this is
     what SQLite will store and what Prometheus `bytes_in_memory` must reflect.
     """
@@ -119,14 +119,14 @@ def testencode_value_size_uses_utf8_byte_count_not_codepoint_count():
         {'a': 1, 'b': 'two'},
     ],
 )
-def testdecode_value_without_as_type_returns_plain_json(value):
+def test_decode_value_without_as_type_returns_plain_json(value):
     """Without `as_type`, decode returns the raw parsed JSON — no magic
     revival into domain objects."""
     encoded = json.dumps(value)
     assert decode_value(encoded) == value
 
 
-def testdecode_value_dict_stays_a_plain_dict_without_as_type():
+def test_decode_value_dict_stays_a_plain_dict_without_as_type():
     """A dict-shaped JSON input must stay a plain dict — we explicitly
     do NOT try to guess whether it's a Pydantic model."""
     encoded = json.dumps({'id': 7, 'name': 'alice'})
@@ -136,7 +136,7 @@ def testdecode_value_dict_stays_a_plain_dict_without_as_type():
     assert decoded == {'id': 7, 'name': 'alice'}
 
 
-def testdecode_value_with_as_type_revives_pydantic_model():
+def test_decode_value_with_as_type_revives_pydantic_model():
     """Pass `as_type=MyModel` to get a typed instance back via
     `model_validate` — the standard Pydantic entry point for external data."""
 
@@ -151,7 +151,7 @@ def testdecode_value_with_as_type_revives_pydantic_model():
     assert user.name == 'alice'
 
 
-def testdecode_value_with_as_type_roundtripsencode_valued_pydantic():
+def test_decode_value_with_as_type_roundtrips_encoded_pydantic():
     """End-to-end: encode a Pydantic model, decode with its type, equality."""
 
     class Item(BaseModel):
@@ -164,7 +164,7 @@ def testdecode_value_with_as_type_roundtripsencode_valued_pydantic():
     assert decoded == original
 
 
-def testdecode_value_empty_string_raises():
+def test_decode_value_empty_string_raises():
     """An empty string is not valid JSON — surface the error rather than
     silently returning None, which could mask a data-corruption bug."""
     with pytest.raises(json.JSONDecodeError):

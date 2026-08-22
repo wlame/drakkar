@@ -54,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   watermark commit.
 - Condense AGENTS.md to the non-derivable facts: cross-backend contract,
   invariants, commands, and footguns.
+- Test-suite cleanup: remove tests that re-tested libraries or duplicated
+  other tests, replace wall-clock timing assertions with deterministic
+  synchronization, and drop seven seconds of real sleeps from the rotation
+  tests.
 
 ### Fixed
 

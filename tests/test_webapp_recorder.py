@@ -1,4 +1,4 @@
-"""Tests for Task 8 — recorder schema extension + webapp event types.
+"""Tests for the recorder schema extension + webapp event types.
 
 Coverage focus:
 

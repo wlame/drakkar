@@ -1,6 +1,6 @@
-"""Tests for the webapp's T2->T1 dispatch wiring (Task 6b).
+"""Tests for the webapp's T2->T1 dispatch wiring.
 
-Covers the behaviours added in Task 6b:
+Covers:
 
 * Future round-trip happy path — the route handler calls
   ``dispatch_to_loop`` on a real cross-thread setup and gets the
@@ -429,8 +429,12 @@ def test_max_concurrent_returns_503_capacity_when_pool_full(background_loop):
     async def arrange_impl(req, pending):
         return [task]
 
+    in_execute: list[object] = []
+
     async def execute(task_arg, recorder, partition_id):
-        # Sleep on T1 until ``release`` flips, then return.
+        # Record entry (proves this request holds a semaphore slot), then
+        # sleep on T1 until ``release`` flips.
+        in_execute.append(task_arg)
         while not release.is_set():
             await asyncio.sleep(0.01)
         return _canned_result(task_arg)
@@ -456,8 +460,15 @@ def test_max_concurrent_returns_503_capacity_when_pool_full(background_loop):
             t = threading.Thread(target=_send, args=(client,), daemon=True)
             t.start()
             threads.append(t)
-        # Give them time to acquire the semaphore.
-        time.sleep(0.1)
+        # Poll until both slow requests are inside execute() — each entry
+        # proves a semaphore slot is held. Same poll-until pattern as the
+        # cancellation test above; no fixed sleep.
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if len(in_execute) == 2:
+                break
+            time.sleep(0.01)
+        assert len(in_execute) == 2, 'both slow requests should hold semaphore slots'
 
         # Third request: must get 503 capacity quickly.
         third = client.post('/process', json={'pattern': 'hi'})

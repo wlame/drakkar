@@ -1,4 +1,4 @@
-"""Tests for the Task 9 debug-UI updates of the webapp pipeline.
+"""Tests for the debug-UI updates of the webapp pipeline.
 
 Covers:
 
@@ -259,7 +259,6 @@ async def test_task_detail_renders_partition_for_kafka(debug_config):
     assert 'Partition' in text
     # Kafka task should NOT render the HTTP-specific labels.
     assert 'Request ID' not in text
-    assert 'Client' not in text or 'Client' in text  # 'Client' may appear in unrelated context
     # Specifically, the HTTP origin pill must be absent.
     assert '>HTTP<' not in text
 

@@ -1,7 +1,7 @@
 """Tests for the Message Probe debug runner.
 
-Covers the building blocks of the no-footprint probe (Task 1) plus the
-``DebugRunner`` happy-path orchestration added in Task 2a:
+Covers the building blocks of the no-footprint probe plus the
+``DebugRunner`` happy-path orchestration:
 
 - ``DebugCacheProxy`` — Cache-shaped wrapper that suppresses writes and
   optionally forwards reads while logging every call.
@@ -960,7 +960,7 @@ def test_probe_task_entry_status_literal_rejects_invalid():
 
 # --- DebugRunner: happy path ------------------------------------------------
 #
-# These tests exercise the orchestration layer added in Task 2a. They use
+# These tests exercise the orchestration layer. They use
 # precomputed tasks (``ExecutorTask.precomputed``) so the test does not
 # depend on a real binary living at a specific path; the executor's fast
 # path returns a synthetic ``ExecutorResult`` from those fields directly.
@@ -986,7 +986,7 @@ def _make_executor_pool() -> ExecutorPool:
 def _make_config(*, max_retries: int = 1) -> DrakkarConfig:
     """Minimal DrakkarConfig — only executor block is read by the runner.
 
-    ``max_retries`` is exposed so Task 4's tests can control the retry
+    ``max_retries`` is exposed so the on_error tests can control the retry
     budget per scenario (retry path, retries exhausted, etc.).
     """
     return DrakkarConfig(
@@ -1286,18 +1286,17 @@ async def test_runner_partial_report_mid_run_is_truncated():
     assert len(final.tasks) == 2
 
 
-# --- Task 2b: Safety guarantee negative-assertion tests ---------------------
+# --- Safety guarantee negative-assertion tests -------------------------------
 #
 # The Message Probe promises a *zero-footprint* run: no rows written, no
 # offsets committed, no sinks called, no cache mutations, no
 # PartitionProcessor state touched. These six tests enforce the
-# guarantees listed in the Solution Overview by actively sabotaging any
+# guarantees by actively sabotaging any
 # module the probe MUST NOT touch — patched methods raise AssertionError
 # if they are reached, so any accidental regression fails loudly.
 #
-# Each test pairs with one bullet in the "Safety guarantees" list of
-# docs/plans/20260422-message-probe-debug-tab.md; keeping the mapping
-# 1:1 makes it obvious when a promise is unprotected.
+# Each test pins exactly one isolation guarantee, so when one fails it
+# is obvious which promise broke.
 
 
 class _CacheWritingHandler(_HappyPathHandler):
@@ -1527,7 +1526,7 @@ async def test_runner_never_reaches_offset_commit_path():
 async def test_runner_restores_handler_cache_when_on_task_complete_raises():
     """If ``on_task_complete`` raises and the error IS propagated, cache restore still runs.
 
-    Task 3 made the runner catch on_task_complete exceptions so they land
+    The runner catches on_task_complete exceptions so they land
     in ``DebugReport.errors`` instead of propagating. To exercise the
     exception-propagation path, we patch ``_run_stages`` to re-raise the
     captured error, forcing the cache restore through a real exception
@@ -1542,7 +1541,7 @@ async def test_runner_restores_handler_cache_when_on_task_complete_raises():
         app_config=_make_config(),
     )
 
-    # Patch _run_stages to raise, bypassing Task 3's in-runner error
+    # Patch _run_stages to raise, bypassing the in-runner error
     # capture. This forces the cache-restore path to go through a real
     # exception flow — without the finally clause in _run_locked, the
     # assertion below would fail.
@@ -1606,7 +1605,7 @@ async def test_runner_never_constructs_or_invokes_partition_processor():
     assert len(report.tasks) == 1
 
 
-# --- Task 2c: use_cache toggle + proxy integration tests -------------------
+# --- use_cache toggle + proxy integration tests -----------------------------
 #
 # These tests exercise the ``use_cache`` flag end-to-end through the
 # runner. They prove that:
@@ -1927,9 +1926,9 @@ async def test_probe_cache_summary_counts_match_cache_calls():
     assert outcomes.count('suppressed') == 2
 
 
-# --- Task 3: Error capture for every hook -----------------------------------
+# --- Error capture for every hook --------------------------------------------
 #
-# These tests exercise the graceful error-capture layer added in Task 3.
+# These tests exercise the graceful error-capture layer.
 # The runner must never propagate a hook's exception; every failure
 # becomes a ``ProbeError`` on ``DebugReport.errors`` with the full
 # traceback, the corresponding stage's ``error`` field gets a one-line
@@ -2093,14 +2092,14 @@ async def test_runner_captures_on_task_complete_error_and_continues_other_tasks(
     assert report.errors[0].stage == 'task_complete:t-0'
     assert report.errors[0].exception_class == 'ValueError'
 
-    # Task 0's entry carries the one-line error summary, task 1's does not.
+    # t-0's entry carries the one-line error summary, t-1's does not.
     assert len(report.tasks) == 2
     assert report.tasks[0].task_id == 't-0'
     assert report.tasks[0].on_task_complete_error is not None
     assert 'boom for task 0' in report.tasks[0].on_task_complete_error
     assert report.tasks[1].task_id == 't-1'
     assert report.tasks[1].on_task_complete_error is None
-    # Task 1's on_task_complete_result IS populated (the handler returned
+    # t-1's on_task_complete_result IS populated (the handler returned
     # a CollectResult for it).
     assert report.tasks[1].on_task_complete_result is not None
 
@@ -2242,7 +2241,7 @@ async def test_runner_arrange_error_preserves_cache_calls_in_report():
     assert report.cache_summary['writes_suppressed'] >= 1
 
 
-# --- Task 4: on_error path (retries and replacements) ----------------------
+# --- on_error path (retries and replacements) --------------------------------
 #
 # These tests exercise the probe's ``on_error`` integration. When the
 # executor raises ``ExecutorTaskError`` (e.g. a precomputed task with
@@ -3492,7 +3491,7 @@ async def test_on_message_complete_sees_synthesized_failure_when_on_task_complet
 
     report = await runner.run(ProbeInput(value='x', offset=1))
 
-    # The on_task_complete error was captured (Task 3's guarantee).
+    # The on_task_complete error was captured (the runner's guarantee).
     tc_errors = [e for e in report.errors if e.stage.startswith('task_complete:')]
     assert len(tc_errors) == 1
     assert tc_errors[0].exception_class == 'RuntimeError'

@@ -58,6 +58,9 @@ async def test_base_handler_on_error_returns_skip(
 ):
     action = await handler.on_error(executor_task, executor_error)
     assert action == ErrorAction.SKIP
+    # The exact enum matters: DeliveryAction.SKIP shares the value 'skip',
+    # so a bare equality check would not catch returning the wrong enum.
+    assert isinstance(action, ErrorAction)
 
 
 async def test_base_handler_on_assign_is_noop(handler: BaseDrakkarHandler):

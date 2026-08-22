@@ -8,8 +8,8 @@ Two layers of behaviour:
    drain phase begins so new requests get an immediate 503 while
    in-flight requests continue draining.
 
-Drain-with-in-flight tests live in Task 6b — by then the runner +
-cancellation wiring is in place.
+Drain-with-in-flight tests live in the section further down, where the
+runner + cancellation wiring is in place.
 """
 
 from __future__ import annotations
@@ -294,7 +294,7 @@ async def test_shutdown_handles_missing_webapp_gracefully(shutdown_app):
 
 
 # ---------------------------------------------------------------------------
-# Drain-with-in-flight-HTTP-requests (Task 6b)
+# Drain-with-in-flight-HTTP-requests
 # ---------------------------------------------------------------------------
 
 

@@ -1,9 +1,10 @@
-"""Tests for the CacheEngine peer-sync pull step (Task 11).
+"""Tests for the CacheEngine peer-sync pull step.
 
-This task adds the *discovery + per-peer pull* half of peer sync. The LWW
-UPSERT step and the cursor-based incremental behavior land in Tasks 12-13.
+This covers the *discovery + per-peer pull* half of peer sync. The LWW
+UPSERT step and the cursor-based incremental behavior are covered in
+``tests/test_cache_sync_apply.py`` and ``tests/test_cache_sync_cursor.py``.
 
-The plan requires these behaviors:
+The behaviors pinned down here:
 
 1. ``_sync_once`` calls ``discover_peer_dbs(db_dir, '-cache.db', self_id)``
    with the expected arguments — we spy on the helper to verify.

@@ -154,7 +154,19 @@ async def test_stop_flushes_before_removing_symlink(tmp_path):
 # --- Rotation updates symlink ---
 
 
-async def test_rotation_updates_live_symlink(tmp_path):
+async def test_rotation_updates_live_symlink(tmp_path, monkeypatch):
+    # make_db_path stamps to the second — patch in a counter so the
+    # rotation opens a genuinely new path without a wall-clock sleep.
+    import drakkar.recorder.core as recorder_core
+
+    real_make_db_path = recorder_core.make_db_path
+    counter = iter(range(1, 100))
+    monkeypatch.setattr(
+        recorder_core,
+        'make_db_path',
+        lambda db_dir, worker_name: real_make_db_path(db_dir, f'{worker_name}-r{next(counter)}'),
+    )
+
     config = _make_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER)
     await rec.start()
@@ -162,9 +174,6 @@ async def test_rotation_updates_live_symlink(tmp_path):
     link = Path(live_link_path(str(tmp_path), WORKER))
     first_target = os.readlink(link)
 
-    import asyncio
-
-    await asyncio.sleep(1.1)  # ensure different timestamp
     await rec._rotate()
 
     second_target = os.readlink(link)
@@ -177,7 +186,7 @@ async def test_rotation_updates_live_symlink(tmp_path):
 # --- File listing ---
 
 
-def testlist_db_files_excludes_live_symlink(tmp_path):
+def test_list_db_files_excludes_live_symlink(tmp_path):
     (tmp_path / 'worker-1-2026-03-16__14_00_00.db').touch()
     (tmp_path / 'worker-1-2026-03-16__15_00_00.db').touch()
     live = tmp_path / 'worker-1-live.db'
@@ -188,7 +197,7 @@ def testlist_db_files_excludes_live_symlink(tmp_path):
     assert all('live' not in f for f in files)
 
 
-def testlist_db_files_excludes_other_workers(tmp_path):
+def test_list_db_files_excludes_other_workers(tmp_path):
     (tmp_path / 'worker-1-2026-03-16__14_00_00.db').touch()
     (tmp_path / 'worker-2-2026-03-16__14_00_00.db').touch()
 

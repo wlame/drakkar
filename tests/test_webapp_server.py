@@ -10,7 +10,7 @@ Focus areas:
   - request before main loop ready → 503 ``not_ready`` with the
     Kafka-routing hint.
   - request during shutdown → 503 ``status='shutdown'``.
-* Request once both gates pass exercises the runner (Task 6a). The
+* Request once both gates pass exercises the runner. The
   default ``arrange_http_request`` raises ``NotImplementedError`` so
   the route handler returns a flat 500 — happy-path runner tests live
   in ``tests/test_webapp_runner.py``.
@@ -18,14 +18,18 @@ Focus areas:
 
 from __future__ import annotations
 
+import asyncio
 import socket
+import threading
 import time
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
 from drakkar.config import WebAppConfig, WebClientConfig
 from drakkar.handler import BaseDrakkarHandler
@@ -201,7 +205,7 @@ def test_start_in_thread_and_wait_until_ready_returns_once_serving():
         # ConnectionRefusedError here.
         with httpx.Client() as client:
             # Hit the configured route — body shape matters now
-            # because Task 6a parses the body before dispatching to
+            # because the route parses the body before dispatching to
             # the runner. Empty JSON validates against the test's
             # ``_HttpReq`` model (all defaults). The fixture's raising
             # ``arrange_http_request`` maps to a flat 500 from the route.
@@ -253,7 +257,7 @@ def test_stop_when_never_started_does_not_raise():
 
 
 # ---------------------------------------------------------------------------
-# Per-request 503 gates (ahead of the Task 6 runner)
+# Per-request 503 gates (checked before dispatching to the runner)
 # ---------------------------------------------------------------------------
 
 
@@ -314,7 +318,7 @@ def test_request_during_shutdown_returns_503_with_status_shutdown():
 
 
 def test_request_when_ready_and_not_shutting_down_dispatches_to_runner():
-    """Both gates pass → request flows into the runner (Task 6a).
+    """Both gates pass → request flows into the runner.
 
     ``_RaisingWebHandler.arrange_http_request`` raises
     ``NotImplementedError``; that failure surfaces as a flat 500 from the
@@ -394,5 +398,175 @@ def test_oversized_body_returns_413_with_go_parity_envelope():
                 headers={'content-type': 'application/json'},
             )
             assert response.status_code == 422
+    finally:
+        webapp.stop(drain_timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# Construction-time validation: hooks not overridden
+# ---------------------------------------------------------------------------
+
+
+class _TypedButHookless(BaseDrakkarHandler[_Input, _Output, _HttpReq, _HttpResp]):
+    """HTTP types declared, but both HTTP hooks left at the Base defaults."""
+
+    async def arrange(self, messages, pending):
+        return []
+
+
+def test_construction_raises_when_http_hooks_not_overridden():
+    """Typed handler that never overrides the HTTP hooks → ConfigurationError."""
+    handler = _TypedButHookless()
+    app = _make_app_stub(handler)
+    config = _make_config(port=_free_port())
+
+    with pytest.raises(ConfigurationError, match='arrange_http_request'):
+        WebApp(app, config)
+
+
+# ---------------------------------------------------------------------------
+# wait_until_ready timeout stages
+# ---------------------------------------------------------------------------
+
+
+def test_wait_until_ready_times_out_when_loop_never_captured():
+    """Stage-1 timeout: the inner loop was never signalled ready."""
+    webapp = WebApp(_make_app_stub(_WebHandler()), _make_config(port=_free_port()))
+
+    with pytest.raises(TimeoutError, match='inner loop'):
+        webapp.wait_until_ready(timeout=0.05)
+
+
+def test_wait_until_ready_times_out_when_uvicorn_never_starts():
+    """Stage-2 timeout: loop captured but uvicorn never flips ``started``."""
+    webapp = WebApp(_make_app_stub(_WebHandler()), _make_config(port=_free_port()))
+    webapp._loop_ready.set()
+    webapp._uvicorn_server = SimpleNamespace(started=False)
+
+    with pytest.raises(TimeoutError, match='started state'):
+        webapp.wait_until_ready(timeout=0.05)
+
+
+# ---------------------------------------------------------------------------
+# stop(): drain-timeout warning when the thread refuses to join
+# ---------------------------------------------------------------------------
+
+
+def test_stop_warns_when_thread_join_exceeds_drain_timeout():
+    """A stuck worker thread must not block shutdown — stop() warns and returns."""
+    webapp = WebApp(_make_app_stub(_WebHandler()), _make_config(port=_free_port()))
+    hang = threading.Event()
+    stuck = threading.Thread(target=hang.wait, daemon=True)
+    stuck.start()
+    webapp._thread = stuck
+    webapp._uvicorn_server = SimpleNamespace(should_exit=False)
+
+    with capture_logs() as cap:
+        webapp.stop(drain_timeout=0.05)
+
+    assert webapp._uvicorn_server.should_exit is True
+    assert any(e['event'] == 'webapp_stop_thread_join_timeout' for e in cap)
+    hang.set()
+    stuck.join(timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# _observe_outcome: early-error paths carry no start time
+# ---------------------------------------------------------------------------
+
+
+def test_observe_outcome_without_start_time_counts_but_skips_histogram():
+    """When request.state has no start-time the counter still increments
+    but no duration sample is observed (there is nothing to measure)."""
+    from drakkar.metrics import webapp_request_duration, webapp_requests
+
+    webapp = WebApp(_make_app_stub(_WebHandler()), _make_config(port=_free_port()))
+    request = SimpleNamespace(state=SimpleNamespace())  # no webapp_start_monotonic
+
+    counter = webapp_requests.labels(client='obs-test', status='error')
+    histogram = webapp_request_duration.labels(client='obs-test', status='error')
+    count_before = counter._value.get()
+    hist_before = histogram._sum.get()
+
+    webapp._observe_outcome(request=request, client='obs-test', status='error')
+
+    assert counter._value.get() == count_before + 1
+    assert histogram._sum.get() == hist_before  # untouched — no start time
+
+
+# ---------------------------------------------------------------------------
+# _signal_cancel: main-loop scheduling and its late-shutdown fallback
+# ---------------------------------------------------------------------------
+
+
+def test_signal_cancel_schedules_on_main_loop_when_available():
+    """With a healthy main loop the set() runs via call_soon_threadsafe."""
+    webapp = WebApp(_make_app_stub(_WebHandler()), _make_config(port=_free_port()))
+
+    class _ImmediateLoop:
+        """Fake loop that runs the callback synchronously — proves the
+        cancel flag is set through the threadsafe-scheduling path."""
+
+        def call_soon_threadsafe(self, cb):
+            cb()
+
+    webapp._app.main_loop = _ImmediateLoop()
+    ctx = SimpleNamespace(cancelled=asyncio.Event())
+
+    webapp._signal_cancel(ctx)
+
+    assert ctx.cancelled.is_set()
+
+
+def test_signal_cancel_falls_back_to_direct_set_when_loop_closed():
+    """A closed main loop (late shutdown) raises RuntimeError from
+    call_soon_threadsafe; the flag must still be set directly."""
+    webapp = WebApp(_make_app_stub(_WebHandler()), _make_config(port=_free_port()))
+
+    class _ClosedLoop:
+        def call_soon_threadsafe(self, cb):
+            raise RuntimeError('Event loop is closed')
+
+    webapp._app.main_loop = _ClosedLoop()
+    ctx = SimpleNamespace(cancelled=asyncio.Event())
+
+    webapp._signal_cancel(ctx)
+
+    assert ctx.cancelled.is_set()
+
+
+# ---------------------------------------------------------------------------
+# request_id resolution failure → flat 500
+# ---------------------------------------------------------------------------
+
+
+class _BadRequestIdHandler(_WebHandler):
+    """Handler whose http_request_id override raises — the route must
+    answer with the flat 500 envelope instead of propagating."""
+
+    def http_request_id(self, req, headers):
+        raise RuntimeError('id resolution exploded')
+
+
+def test_request_id_resolution_failure_returns_flat_500():
+    handler = _BadRequestIdHandler()
+    app = _make_app_stub(handler, is_ready=True)
+    port = _free_port()
+    config = _make_config(port=port)
+    webapp = WebApp(app, config)
+
+    try:
+        webapp.start_in_thread()
+        webapp.wait_until_ready(timeout=5.0)
+
+        with httpx.Client() as client, capture_logs() as cap:
+            response = client.post(f'http://127.0.0.1:{port}/process', json={})
+
+        assert response.status_code == 500
+        body = response.json()
+        assert body['status'] == 'error'
+        assert body['error'] == 'internal error'
+        assert 'request_id' in body
+        assert any(e['event'] == 'webapp_request_id_resolution_failed' for e in cap)
     finally:
         webapp.stop(drain_timeout=2.0)

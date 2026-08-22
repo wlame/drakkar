@@ -174,47 +174,6 @@ async def test_execute_concurrency_limit():
     assert pool.waiting_count == 0
 
 
-async def test_execute_concurrency_cap_holds_under_burst():
-    """With a large burst (N * cap tasks), the pool never exceeds its cap.
-
-    Separate from the basic concurrency test so a failure here is a
-    clear signal that the semaphore survives heavy contention, not
-    just a small overlap.
-    """
-    max_executors = 3
-    pool = ExecutorPool(
-        binary_path=sys.executable,
-        max_executors=max_executors,
-        task_timeout_seconds=10,
-    )
-    burst_size = max_executors * 4  # 12 tasks, only 3 can run at once
-    tasks = [make_task(task_id=f'burst-{i}', args=['-c', 'import time; time.sleep(0.1)']) for i in range(burst_size)]
-
-    max_observed_active = 0
-    sampler_stop = asyncio.Event()
-
-    async def sample_active_count() -> None:
-        nonlocal max_observed_active
-        while not sampler_stop.is_set():
-            if pool.active_count > max_observed_active:
-                max_observed_active = pool.active_count
-            await asyncio.sleep(0.005)
-
-    sampler = asyncio.create_task(sample_active_count())
-    try:
-        await asyncio.gather(*[pool.execute(t) for t in tasks])
-    finally:
-        sampler_stop.set()
-        await sampler
-
-    assert max_observed_active <= max_executors, f'burst exceeded cap: {max_observed_active} > {max_executors}'
-    assert max_observed_active >= max_executors, (
-        f'burst never saturated the pool: peak {max_observed_active} < {max_executors}'
-    )
-    assert pool.active_count == 0
-    assert pool.waiting_count == 0
-
-
 async def test_execute_active_count_tracking(echo_pool: ExecutorPool):
     assert echo_pool.active_count == 0
     task = make_task(args=['test'])
@@ -341,24 +300,6 @@ async def test_no_binary_path_anywhere_raises_error():
     assert exc_info.value.error.exception is not None
     assert exc_info.value.result.exit_code == -1
     assert exc_info.value.error.kind == 'launch_failure'
-
-
-async def test_pool_binary_path_none_task_binary_path_none_explicit():
-    """Explicit None on both pool and task raises the same clear error."""
-    pool = ExecutorPool(
-        binary_path=None,
-        max_executors=2,
-        task_timeout_seconds=10,
-    )
-    task = ExecutorTask(
-        task_id='both-none',
-        args=[],
-        source_offsets=[0],
-        binary_path=None,
-    )
-    with pytest.raises(ExecutorTaskError) as exc_info:
-        await pool.execute(task)
-    assert 'binary_path' in str(exc_info.value).lower()
 
 
 async def test_waiting_count_tracks_queued_tasks():
@@ -1221,13 +1162,13 @@ async def test_priority_gate_cancelled_after_slot_assigned_returns_slot():
 # --- default_priority -------------------------------------------------------
 
 
-def testdefault_priority_returns_min_source_offset():
+def test_default_priority_returns_min_source_offset():
     """Default priority is the smallest source_offset across the task's offsets."""
     task = ExecutorTask(task_id='t', source_offsets=[100, 50, 200])
     assert default_priority(task) == 50
 
 
-def testdefault_priority_zero_for_empty_source_offsets():
+def test_default_priority_zero_for_empty_source_offsets():
     """Edge case: tasks with no source_offsets all share priority 0.
 
     These degrade to FIFO via the gate's seq tiebreaker, which matches

@@ -1,7 +1,7 @@
 """Tests for the handler-facing Cache API (memory + DB-backed behavior).
 
-Task 4 covered the synchronous operations of `Cache` — `set`, `peek`,
-`delete`, `__contains__` — all pure in-memory dict ops. Task 9 adds:
+The synchronous operations of `Cache` — `set`, `peek`, `delete`,
+`__contains__` — are all pure in-memory dict ops. On top of them sit:
 
 - An async ``get(key, *, as_type=None)`` with memory → DB fallback
 - A second aiosqlite connection (``_reader_db``) on ``CacheEngine`` so
@@ -12,7 +12,7 @@ Task 4 covered the synchronous operations of `Cache` — `set`, `peek`,
 
 The tests are split into two groups:
 
-1. Pure memory-only semantics (Task 4 — untouched).
+1. Pure memory-only semantics.
 2. Async ``get`` behavior including DB fallback, Pydantic revival,
    expiration handling, LRU warm-on-read, and writer/reader isolation.
 
@@ -20,9 +20,9 @@ We exercise ``get`` against real on-disk SQLite via ``tmp_path`` so the
 reader connection is a true second connection — any test that used
 ``:memory:`` would mask cross-connection issues.
 
-The Prometheus ``drakkar_cache_evictions_total`` counter is introduced
-in Task 4; the full metrics-wiring pass (including hits/misses/source
-labels) happens in Task 14.
+The Prometheus ``drakkar_cache_evictions_total`` counter is asserted
+here; the full metrics wiring (including hits/misses/source labels) is
+covered in ``tests/test_cache_metrics.py``.
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ def test_delete_is_local_only_no_peer_propagation_mechanism():
     the local dirty-op (``Op.DELETE``). There must be no peer-send queue,
     no tombstone, no cross-worker invalidation path — all of that would be
     a future-version design. Cross-worker delete semantics are tested
-    end-to-end in Task 11/13."""
+    end-to-end in the peer-sync test files."""
     cache = _make_cache()
     cache.set('k', 'v')
     cache.delete('k')
@@ -183,7 +183,7 @@ def test_contains_returns_false_for_expired_entry():
 @pytest.mark.parametrize('scope', list(CacheScope))
 def test_set_stores_scope_on_entry(scope):
     """Each scope lands on the entry verbatim — used by peer sync to filter
-    which rows are eligible for cross-worker propagation (Task 11)."""
+    which rows are eligible for cross-worker propagation."""
     cache = _make_cache()
     cache.set('k', 'v', scope=scope)
     entry = cache._memory['k']  # type: ignore[reportPrivateUsage]
@@ -204,7 +204,7 @@ def test_set_defaults_to_local_scope():
 
 def test_overwrite_updates_updated_at_ms():
     """Overwriting a key must refresh ``updated_at_ms`` — this is what
-    drives LWW resolution on the peer-sync path (Task 11/12)."""
+    drives LWW resolution on the peer-sync path."""
     cache = _make_cache()
     cache.set('k', 'v1')
     first_updated = cache._memory['k'].updated_at_ms  # type: ignore[reportPrivateUsage]
@@ -471,7 +471,7 @@ def test_lru_no_eviction_metric_when_cap_not_exceeded():
 
 def test_dirty_op_is_importable_with_op_enum():
     """DirtyOp must be importable and carry `op` + optional `entry`. The
-    engine (Task 7) relies on this exact shape."""
+    engine's flush loop relies on this exact shape."""
     entry = None
     op = DirtyOp(op=Op.DELETE, entry=entry)
     assert op.op is Op.DELETE
@@ -479,7 +479,7 @@ def test_dirty_op_is_importable_with_op_enum():
 
 
 # =============================================================================
-# Task 9: async get() with DB fallback + reader connection isolation
+# Async get() with DB fallback + reader connection isolation
 # =============================================================================
 #
 # The tests below exercise the ``Cache.get`` async method and the
@@ -782,25 +782,31 @@ async def test_reader_used_for_gets_writer_used_for_writes(tmp_path):
         reader_original_executemany = engine._reader_db.executemany  # type: ignore[reportPrivateUsage]
         reader_original_execute = engine._reader_db.execute  # type: ignore[reportPrivateUsage]
 
-        async def writer_spy_executemany(sql, params):
+        # The spies are plain (non-async) functions that return aiosqlite's
+        # own result object untouched — it is BOTH awaitable and an async
+        # context manager, and production code uses both forms
+        # (``await db.executemany(...)`` and ``async with db.execute(...)``).
+        # An ``async def`` spy would return a bare coroutine that supports
+        # only ``await``, breaking the ``async with`` call sites.
+        def writer_spy_executemany(sql, params):
             nonlocal writer_executemany_calls
             writer_executemany_calls += 1
-            return await writer_original_executemany(sql, params)
+            return writer_original_executemany(sql, params)
 
-        async def writer_spy_execute(*args, **kwargs):
+        def writer_spy_execute(*args, **kwargs):
             nonlocal writer_execute_calls
             writer_execute_calls += 1
-            return await writer_original_execute(*args, **kwargs)
+            return writer_original_execute(*args, **kwargs)
 
-        async def reader_spy_executemany(sql, params):
+        def reader_spy_executemany(sql, params):
             nonlocal reader_executemany_calls
             reader_executemany_calls += 1
-            return await reader_original_executemany(sql, params)
+            return reader_original_executemany(sql, params)
 
-        async def reader_spy_execute(*args, **kwargs):
+        def reader_spy_execute(*args, **kwargs):
             nonlocal reader_execute_calls
             reader_execute_calls += 1
-            return await reader_original_execute(*args, **kwargs)
+            return reader_original_execute(*args, **kwargs)
 
         engine._writer_db.executemany = writer_spy_executemany  # type: ignore[reportPrivateUsage,assignment]
         engine._writer_db.execute = writer_spy_execute  # type: ignore[reportPrivateUsage,assignment]

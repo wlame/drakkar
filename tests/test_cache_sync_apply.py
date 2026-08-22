@@ -1,9 +1,9 @@
-"""Tests for the CacheEngine peer-sync UPSERT apply step (Task 12).
+"""Tests for the CacheEngine peer-sync UPSERT apply step.
 
-Task 11 added the *pull* side: discovering peers and SELECTing rows with a
-scope-aware filter. Task 12 closes the loop by applying the pulled rows
+The *pull* side discovers peers and SELECTs rows with a scope-aware
+filter. The apply step closes the loop by writing the pulled rows
 back into our own ``cache_entries`` table via the shared ``LWW_UPSERT_SQL``
-constant — the exact same SQL used by the local flush path (Task 7), so
+constant — the exact same SQL used by the local flush path, so
 local and cross-worker writes cannot diverge in their conflict resolution.
 
 The contract verified here:
@@ -31,7 +31,7 @@ The contract verified here:
    byte-identical row lands locally.
 
 All tests exercise the real on-disk SQLite stack via ``tmp_path`` +
-``aiosqlite``, consistent with Task 11. Peer DBs are minimal fixtures
+``aiosqlite``, consistent with the pull tests. Peer DBs are minimal fixtures
 built through the same helpers as the pull tests.
 """
 
@@ -58,8 +58,8 @@ from tests.conftest import make_ui_config
 
 # --- helpers ---------------------------------------------------------------
 #
-# These mirror the Task 11 sync-pull helpers. Duplication is deliberate:
-# each task keeps a self-contained test file so failures localize cleanly.
+# These mirror the helpers in tests/test_cache_sync_pull.py. Duplication
+# is deliberate: each file stays self-contained so failures localize cleanly.
 
 
 def make_debug_config(tmp_path: Path, **overrides: Any) -> UIConfig:

@@ -1091,3 +1091,20 @@ async def test_live_overview_answers_degraded_when_main_loop_is_wedged(client, m
     assert body['pending_tasks'] == {}
     assert body['pool_max'] == 8
     assert body['pool_active'] == 2
+
+
+# ---------------------------------------------------------------------------
+# register_v1_aliases: startup guard
+# ---------------------------------------------------------------------------
+
+
+def test_register_v1_aliases_with_no_legacy_routes_fails_loudly():
+    """Zero registered aliases means the /api/v1 surface would silently be
+    missing — the registration must raise at startup instead of serving a
+    broken UI contract."""
+    from fastapi import FastAPI
+
+    from drakkar.uiserver.server import register_v1_aliases
+
+    with pytest.raises(RuntimeError, match='no legacy API routes'):
+        register_v1_aliases(FastAPI(), [])

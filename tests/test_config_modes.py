@@ -768,65 +768,6 @@ class TestCombinedModes:
 
 
 # ============================================================================
-# 9. Backpressure edge cases with different multipliers
-# ============================================================================
-
-
-class TestBackpressureEdgeCases:
-    async def test_backpressure_with_multiplier_1(self):
-        """Low multipliers don't cause division by zero or infinite loops."""
-        config = make_config(
-            executor=ExecutorConfig(
-                binary_path='/bin/echo',
-                max_executors=1,
-                task_timeout_seconds=10,
-                backpressure_high_multiplier=1,
-                backpressure_low_multiplier=1,
-            ),
-        )
-        app = DrakkarApp(handler=SimpleHandler(), config=config)
-        app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=1, task_timeout_seconds=10)
-        app._consumer = AsyncMock()
-        app._running = True
-
-        max_executors = config.executor.max_executors
-        high_watermark = max_executors * config.executor.backpressure_high_multiplier
-        low_watermark = max(1, max_executors * config.executor.backpressure_low_multiplier)
-
-        # high=1, low=1 — pause/resume thresholds are the same
-        assert high_watermark == 1
-        assert low_watermark == 1
-
-        app._lifecycle._on_assign([0])
-        proc = app.processors[0]
-        proc._queue.put_nowait(make_msg(offset=0))
-
-        total = app._total_queued()
-        assert total >= 1
-
-        # simulate pause
-        if not app._paused and total >= high_watermark:
-            await app._consumer.pause([0])
-            app._paused = True
-
-        assert app._paused
-        app._consumer.pause.assert_called_once()
-
-        # drain to 0
-        while not proc._queue.empty():
-            proc._queue.get_nowait()
-
-        total = app._total_queued()
-        # total is 0, low_watermark is 1 → 0 <= 1 → resume
-        if app._paused and total <= low_watermark:
-            await app._consumer.resume([0])
-            app._paused = False
-
-        assert not app._paused
-        await proc.stop()
-
-
-# ============================================================================
 # 10. Consumer without callbacks
 # ============================================================================
 

@@ -1,6 +1,6 @@
 """Tests for :class:`drakkar.webapp.runner.WebappRunner` — happy path + errors.
 
-Coverage focus for Task 6a:
+Coverage focus:
 
 * End-to-end roundtrip on a synthetic ``DrakkarApp`` stub: the runner
   builds a ``WebReport`` whose ``request_id``/``client``/``status='ok'``
@@ -260,7 +260,7 @@ async def test_runner_happy_path_returns_assembled_web_report():
     assert report.task_summary.success == 2
     assert report.task_summary.failed == 0
 
-    # Sinks stays None on the sinks_enabled=False path (Task 6a default).
+    # Sinks stays None on the sinks_enabled=False path (the default).
     assert report.sinks is None
 
     # Timeline records arrange / execute / on_http_request_complete.
@@ -402,8 +402,8 @@ async def test_runner_handles_failed_task_in_summary():
     assert report.task_summary.total == 2
     assert report.task_summary.success == 1
     assert report.task_summary.failed == 1
-    # The failed task is intentionally NOT in ``report.tasks`` — Task 6a
-    # only reports successful executions there. Task 6b/6c may revisit.
+    # The failed task is intentionally NOT in ``report.tasks`` — only
+    # successful executions are reported there.
     assert len(report.tasks) == 1
 
 
@@ -657,14 +657,14 @@ async def test_runner_allocates_cancelled_event_lazily():
 
     await runner.run(ctx)
     # After run completes the event is bound to a real loop and hasn't
-    # been set (Task 6a never trips cancellation; Task 6b adds the
-    # set/check pair).
+    # been set (the runner itself never trips cancellation; the
+    # dispatch wiring owns the set/check pair).
     assert isinstance(ctx.cancelled, asyncio.Event)
     assert ctx.cancelled.is_set() is False
 
 
 # ---------------------------------------------------------------------------
-# Task 6c: sinks-enabled delivery path
+# Sinks-enabled delivery path
 #
 # These tests focus on the runner's optional sinks block: it triggers
 # only when ``WebAppConfig.sinks_enabled=True``, calls

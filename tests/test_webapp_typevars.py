@@ -83,7 +83,7 @@ def test_three_param_subclass_leaves_response_slot_none():
     A user who declares only ``HttpRequestT`` (and leaves ``HttpResponseT`` to
     its default) gets a class with ``http_response_model = None``. This is a
     nonsensical configuration for a real webapp handler but the framework
-    must handle it gracefully — the webapp bootstrap (Task 4) is responsible
+    must handle it gracefully — the webapp bootstrap is responsible
     for fail-fasting at app startup, not the type-extraction code.
     """
 

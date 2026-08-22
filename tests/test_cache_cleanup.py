@@ -1,4 +1,4 @@
-"""Tests for the CacheEngine cleanup loop (Task 10).
+"""Tests for the CacheEngine cleanup loop.
 
 The cleanup loop reclaims space from expired entries. It runs on its own
 periodic cadence (``cache.cleanup_interval_seconds``, default 60s) and

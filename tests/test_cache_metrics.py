@@ -1,9 +1,9 @@
-"""Tests for the Prometheus metrics wiring across the cache subsystem (Task 14).
+"""Tests for the Prometheus metrics wiring across the cache subsystem.
 
-The earlier tasks introduced individual counters alongside the code paths
-that drive them (``cache_evictions`` in Task 4, ``cache_flush_entries`` in
-Task 7, ``cache_cleanup_removed`` + DB gauges in Task 10, and
-``cache_sync_*`` counters in Tasks 12-13). Task 14 fills in the remaining
+Individual counters are asserted alongside the code paths that drive
+them (``cache_evictions``, ``cache_flush_entries``,
+``cache_cleanup_removed`` + DB gauges, and the ``cache_sync_*``
+counters) in their own test files. This file covers the remaining
 metrics:
 
 - Read-path: ``cache_hits{source}`` / ``cache_misses``
@@ -33,10 +33,7 @@ from drakkar import metrics
 from drakkar.cache import (
     Cache,
     CacheEngine,
-    CacheEntry,
     CacheScope,
-    DirtyOp,
-    Op,
 )
 from drakkar.config import CacheConfig, UIConfig
 from tests.conftest import make_ui_config
@@ -254,20 +251,6 @@ def test_delete_on_missing_key_still_increments_deletes():
     assert after - before == 1
 
 
-# --- LRU eviction -----------------------------------------------------------
-
-
-def test_lru_eviction_increments_evictions_counter():
-    """LRU eviction ticks ``evictions_total`` — already tested in Task 4,
-    re-asserted here to document the full metrics grid."""
-    cache = _make_cache(max_memory_entries=1)
-    before = _counter_value(metrics.cache_evictions)
-    cache.set('a', 1)
-    cache.set('b', 2)  # evicts 'a'
-    after = _counter_value(metrics.cache_evictions)
-    assert after - before == 1
-
-
 # --- memory gauges (running sum) --------------------------------------------
 
 
@@ -426,144 +409,6 @@ async def test_db_warm_on_read_updates_gauges(tmp_path):
         warmed = cache._memory['k']  # type: ignore[reportPrivateUsage]
         assert _gauge_value(metrics.cache_entries_in_memory) == 1
         assert _gauge_value(metrics.cache_bytes_in_memory) == warmed.size_bytes
-    finally:
-        await engine.stop()
-
-
-# --- flush metric already covered; include a sanity regression test ---------
-
-
-async def test_flush_set_counter_is_rows_count(tmp_path):
-    """``flush_entries_total{op="set"}`` ticks by number of SET ops drained."""
-    engine = await _make_engine(tmp_path)
-    await engine.start()
-    try:
-        cache = engine._cache  # type: ignore[reportPrivateUsage]
-        assert cache is not None
-        before = _counter_value(metrics.cache_flush_entries, op='set')
-        for i in range(3):
-            cache.set(f'k{i}', i)
-        await engine._flush_once()  # type: ignore[reportPrivateUsage]
-        after = _counter_value(metrics.cache_flush_entries, op='set')
-        assert after - before == 3
-    finally:
-        await engine.stop()
-
-
-async def test_flush_delete_counter_is_rows_count(tmp_path):
-    """``flush_entries_total{op="delete"}`` ticks by number of DELETE ops drained."""
-    engine = await _make_engine(tmp_path)
-    await engine.start()
-    try:
-        cache = engine._cache  # type: ignore[reportPrivateUsage]
-        assert cache is not None
-        before = _counter_value(metrics.cache_flush_entries, op='delete')
-        for i in range(2):
-            cache.delete(f'missing{i}')
-        await engine._flush_once()  # type: ignore[reportPrivateUsage]
-        after = _counter_value(metrics.cache_flush_entries, op='delete')
-        assert after - before == 2
-    finally:
-        await engine.stop()
-
-
-# --- cleanup metric -----------------------------------------------------------
-
-
-async def test_cleanup_removed_counter_matches_rows_deleted(tmp_path):
-    """``cleanup_removed_total`` ticks by the number of rows removed per cycle."""
-    engine = await _make_engine(tmp_path)
-    await engine.start()
-    try:
-        cache = engine._cache  # type: ignore[reportPrivateUsage]
-        assert cache is not None
-
-        # Seed the DB with 3 expired entries via raw dirty-map writes
-        now_ms = 1_000_000_000_000  # any past timestamp
-        for i in range(3):
-            entry = CacheEntry(
-                key=f'expired{i}',
-                scope=CacheScope.LOCAL,
-                value='"v"',
-                size_bytes=3,
-                created_at_ms=now_ms,
-                updated_at_ms=now_ms,
-                expires_at_ms=now_ms + 1,  # long in the past
-                origin_worker_id='w1',
-            )
-            cache._memory[entry.key] = entry  # type: ignore[reportPrivateUsage]
-            cache._dirty[entry.key] = DirtyOp(op=Op.SET, entry=entry)  # type: ignore[reportPrivateUsage]
-        await engine._flush_once()  # type: ignore[reportPrivateUsage]
-
-        before = _counter_value(metrics.cache_cleanup_removed)
-        await engine._cleanup_once()  # type: ignore[reportPrivateUsage]
-        after = _counter_value(metrics.cache_cleanup_removed)
-        assert after - before == 3
-    finally:
-        await engine.stop()
-
-
-# --- DB gauges refreshed during cleanup --------------------------------------
-
-
-async def test_cleanup_refreshes_db_gauges(tmp_path):
-    """After a cleanup cycle, ``cache_entries_in_db`` and
-    ``cache_bytes_in_db`` reflect the current DB state."""
-    engine = await _make_engine(tmp_path)
-    await engine.start()
-    try:
-        cache = engine._cache  # type: ignore[reportPrivateUsage]
-        assert cache is not None
-        cache.set('a', 'hello')
-        cache.set('b', 'world')
-        await engine._flush_once()  # type: ignore[reportPrivateUsage]
-
-        await engine._cleanup_once()  # type: ignore[reportPrivateUsage]
-
-        assert _gauge_value(metrics.cache_entries_in_db) == 2
-        # bytes sum of the two entries as stored in DB
-        entry_a = cache._memory['a']  # type: ignore[reportPrivateUsage]
-        entry_b = cache._memory['b']  # type: ignore[reportPrivateUsage]
-        assert _gauge_value(metrics.cache_bytes_in_db) == entry_a.size_bytes + entry_b.size_bytes
-    finally:
-        await engine.stop()
-
-
-# --- sync metrics -----------------------------------------------------------
-#
-# The peer-sync counters (cache_sync_entries_fetched / upserted /
-# cache_sync_errors) are already exercised thoroughly in
-# tests/test_cache_sync_apply.py and tests/test_cache_sync_cursor.py.
-# Here we just re-assert the basic shape against a hand-fed row batch so
-# Task 14's review has a single file to skim for metrics coverage.
-
-
-async def test_sync_apply_ticks_fetched_and_upserted_counters(tmp_path):
-    """A peer-row apply ticks ``sync_entries_fetched`` and
-    ``sync_entries_upserted`` by the batch size."""
-    engine = await _make_engine(tmp_path)
-    await engine.start()
-    try:
-        rows = [
-            (
-                f'peer-k{i}',
-                'local',
-                f'"v{i}"',
-                len(f'"v{i}"'.encode()),
-                1_700_000_000_000 + i,
-                1_700_000_000_000 + i,
-                None,
-                'peer-w',
-            )
-            for i in range(4)
-        ]
-        fetched_before = _counter_value(metrics.cache_sync_entries_fetched, peer='peer-w')
-        upserted_before = _counter_value(metrics.cache_sync_entries_upserted, peer='peer-w')
-        await engine._apply_peer_rows(peer_name='peer-w', rows=rows)  # type: ignore[reportPrivateUsage]
-        fetched_after = _counter_value(metrics.cache_sync_entries_fetched, peer='peer-w')
-        upserted_after = _counter_value(metrics.cache_sync_entries_upserted, peer='peer-w')
-        assert fetched_after - fetched_before == 4
-        assert upserted_after - upserted_before == 4
     finally:
         await engine.stop()
 

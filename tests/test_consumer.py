@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from drakkar.config import KafkaConfig
 from drakkar.consumer import CONSUMER_MAX_WORKERS, LAG_QUERY_TIMEOUT_SECONDS, KafkaConsumer
@@ -120,8 +121,13 @@ async def test_poll_batch_logs_errors(mock_cls, kafka_config):
     mock_cls.return_value = mock_inner
 
     consumer = KafkaConsumer(kafka_config)
-    messages = await consumer.poll_batch(timeout=0.1)
+    with capture_logs() as cap:
+        messages = await consumer.poll_batch(timeout=0.1)
+
     assert messages == []
+    warnings = [e for e in cap if e['event'] == 'consumer_error']
+    assert len(warnings) == 1
+    assert warnings[0]['log_level'] == 'warning'
 
 
 @patch('drakkar.consumer.AIOConsumer')
@@ -231,16 +237,6 @@ async def test_get_total_lag(mock_cls, kafka_config):
     consumer = KafkaConsumer(kafka_config)
     total = await consumer.get_total_lag([0, 1])
     assert total == 25  # 10 + 15
-
-
-@patch('drakkar.consumer.AIOConsumer')
-async def test_close(mock_cls, kafka_config):
-    mock_inner = AsyncMock()
-    mock_cls.return_value = mock_inner
-
-    consumer = KafkaConsumer(kafka_config)
-    await consumer.close()
-    mock_inner.close.assert_called_once()
 
 
 @patch('drakkar.consumer.AIOConsumer')

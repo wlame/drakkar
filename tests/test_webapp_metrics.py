@@ -1,4 +1,4 @@
-"""Tests for webapp metrics (Task 7).
+"""Tests for webapp metrics.
 
 Covers the five metrics added to :mod:`drakkar.metrics`:
 

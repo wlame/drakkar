@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import BaseModel as BM
@@ -986,7 +987,7 @@ async def test_on_window_complete_returns_collect_result(echo_pool):
 # --- stop() timeout + force cancel ---
 
 
-async def test_stop_force_cancels_hung_processor(echo_pool):
+async def test_stop_force_cancels_hung_processor(echo_pool, monkeypatch):
     """When the processor is stuck, stop() force-cancels after timeout."""
     blocked = asyncio.Event()
 
@@ -1006,21 +1007,21 @@ async def test_stop_force_cancels_hung_processor(echo_pool):
     proc.enqueue(make_msg(offset=0))
     proc.start()
     await blocked.wait()
-
-    # Simulate stop() with a short timeout to avoid 10s wait
-    proc._running = False
     task = proc._task
     assert task is not None
 
-    try:
-        await asyncio.wait_for(task, timeout=0.1)
-    except TimeoutError:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-    proc._task = None
+    # stop() hardcodes a 10s grace period before force-cancel; shrink it so
+    # the test exercises the real cancel path without the real wait.
+    real_wait_for = asyncio.wait_for
+
+    async def fast_wait_for(awaitable, timeout=None):
+        if timeout == 10.0:
+            timeout = 0.05
+        return await real_wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr(asyncio, 'wait_for', fast_wait_for)
+
+    await proc.stop()
 
     assert proc._task is None
     assert task.cancelled() or task.done()
@@ -3081,3 +3082,87 @@ async def test_raising_on_task_complete_does_not_leak_its_context(echo_pool):
         f'on_task_complete leaked task_id into the message-level hook: {handler.snapshot}'
     )
     assert handler.snapshot.get('hook') == 'on_message_complete'
+
+
+# --- on_window_complete raising must not skip recording or commit ---
+
+
+class RaisingWindowCompleteHandler(BaseDrakkarHandler):
+    async def arrange(self, messages, pending):
+        return [
+            ExecutorTask(
+                task_id=f'task-{msg.offset}',
+                args=['hello'],
+                source_offsets=[msg.offset],
+            )
+            for msg in messages
+        ]
+
+    async def on_window_complete(self, results, source_messages):
+        raise RuntimeError('window hook boom')
+
+
+async def test_raising_on_window_complete_still_records_and_commits(echo_pool):
+    """A raising on_window_complete is contained like on_message_complete.
+
+    The hook runs inside a fire-and-forget task; before the fix its
+    exception escaped, skipping the window's recorder event and the final
+    _try_commit and surfacing only as an unretrieved-task warning.
+    """
+    handler = RaisingWindowCompleteHandler()
+    recorder = MagicMock()
+    committed: list[tuple[int, int]] = []
+
+    async def on_commit(partition_id, offset):
+        committed.append((partition_id, offset))
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=on_commit,
+        recorder=recorder,
+    )
+
+    proc.enqueue(make_msg(offset=0))
+    proc.enqueue(make_msg(offset=1))
+    proc.start()
+    await wait_for(lambda: any(c[1] == 2 for c in committed))
+    await proc.stop()
+
+    assert recorder.record_window_complete.call_count >= 1
+    assert any(c[1] == 2 for c in committed)
+
+
+# --- shutdown drain must respect window_size ---
+
+
+async def test_shutdown_drain_chunks_backlog_into_window_size(echo_pool):
+    """Stopping with a full queue drains it in window_size chunks.
+
+    Before the fix the drain emptied the whole queue into a single window,
+    handing arrange() an unbounded batch at every shutdown/rebalance.
+    """
+    handler = EchoHandler()
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=5,
+    )
+
+    for i in range(15):  # 3x window_size
+        proc.enqueue(make_msg(offset=i))
+
+    proc.start()
+    # signal_stop before the loop's first await point: _running goes False
+    # before the main loop ever checks it, so the whole backlog goes
+    # through the shutdown drain path.
+    proc.signal_stop()
+    await proc.stop()
+
+    assert handler.arrange_calls, 'drain did not process the queued messages'
+    window_sizes = [n for n, _ in handler.arrange_calls]
+    assert all(n <= 5 for n in window_sizes), f'drain exceeded window_size: {window_sizes}'
+    assert sum(window_sizes) == 15

@@ -5,7 +5,6 @@ import asyncio
 import pytest
 
 from drakkar.hookctx import (
-    HookContext,
     bind_hook_context,
     clear_hook_context,
     current_hook_context,
@@ -116,17 +115,6 @@ def test_clear_hook_context_in_finally_restores_context_after_raise():
             clear_hook_context(token)
 
     assert current_hook_context() is None
-
-
-def test_hook_context_counters_accumulate_in_place():
-    ctx = HookContext(partition=0, hook='arrange')
-    ctx.drops += 1
-    ctx.drops += 1
-    ctx.accepted_bytes += 100
-    ctx.accepted_bytes += 250
-
-    assert ctx.drops == 2
-    assert ctx.accepted_bytes == 350
 
 
 async def test_bind_hook_context_does_not_leak_between_concurrent_tasks():

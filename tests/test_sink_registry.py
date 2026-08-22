@@ -6,7 +6,7 @@ That fixture is autouse to keep test order irrelevant — without it a
 later test could observe registrations from an earlier one and produce a
 false positive.
 
-The tests cover four behaviours required by Phase 4 Task 5:
+The tests cover four behaviours:
 
 * register / get round-trip and validation guarantees;
 * ``discover()`` driven by a mocked ``importlib.metadata.entry_points``;

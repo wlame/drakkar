@@ -50,6 +50,23 @@ class _RecData(BaseModel):
 WORKER_NAME = 'test-worker'
 
 
+@pytest.fixture
+def unique_db_paths(monkeypatch):
+    """``make_db_path`` stamps to the second, so a rotation inside the same
+    second would reuse the filename and silently rotate onto the old file.
+    Patch in a counter so every rotation opens a genuinely new path — no
+    wall-clock sleeps needed."""
+    import drakkar.recorder.core as recorder_core
+
+    real_make_db_path = recorder_core.make_db_path
+    counter = iter(range(1, 100))
+    monkeypatch.setattr(
+        recorder_core,
+        'make_db_path',
+        lambda db_dir, worker_name: real_make_db_path(db_dir, f'{worker_name}-r{next(counter)}'),
+    )
+
+
 def make_debug_config(tmp_path, **overrides) -> UIConfig:
     defaults = {
         'enabled': True,
@@ -102,19 +119,19 @@ async def recorder(tmp_path):
 # --- DB path generation ---
 
 
-def testmake_db_path_includes_timestamp():
+def test_make_db_path_includes_timestamp():
     path = make_db_path('/tmp', 'worker-1')
     assert path.startswith('/tmp/worker-1-')
     assert path.endswith('.db')
     assert '__' in path  # YYYY-MM-DD__HH_MM_SS
 
 
-def testmake_db_path_uses_worker_name():
+def test_make_db_path_uses_worker_name():
     path = make_db_path('/var/log', 'my-worker')
     assert path.startswith('/var/log/my-worker-')
 
 
-def testlist_db_files_returns_sorted(tmp_path):
+def test_list_db_files_returns_sorted(tmp_path):
     for name in [
         'test-worker-2026-03-16__14_00_00.db',
         'test-worker-2026-03-15__10_00_00.db',
@@ -126,7 +143,7 @@ def testlist_db_files_returns_sorted(tmp_path):
     assert '10_00' in files[0]  # sorted oldest first
 
 
-def testlist_db_files_excludes_live_symlink(tmp_path):
+def test_list_db_files_excludes_live_symlink(tmp_path):
     (tmp_path / 'test-worker-2026-03-16__14_00_00.db').touch()
     live = tmp_path / 'test-worker-live.db'
     live.symlink_to('test-worker-2026-03-16__14_00_00.db')
@@ -1637,7 +1654,7 @@ async def test_window_complete_persisted(recorder):
 # --- Rotation smoothness ---
 
 
-async def test_rotation_no_event_loss(tmp_path):
+async def test_rotation_no_event_loss(tmp_path, unique_db_paths):
     """Events recorded before, during, and after rotation are all queryable."""
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
@@ -1657,9 +1674,6 @@ async def test_rotation_no_event_loss(tmp_path):
     rec.record_consumed(make_msg(offset=3))
     old_path = rec.db_path
 
-    import asyncio
-
-    await asyncio.sleep(1.1)  # ensure different second-level timestamp
     await rec._rotate()  # flushes buffer to old DB, opens new DB
 
     # old DB should have all 4 events
@@ -2536,15 +2550,12 @@ async def test_discover_workers_ignores_non_symlink_files(tmp_path):
 # --- Rotation compatibility with new tables ---
 
 
-async def test_rotation_recreates_all_tables(tmp_path):
+async def test_rotation_recreates_all_tables(tmp_path, unique_db_paths):
     """After rotation, all configured tables exist in the new DB."""
-    import asyncio
-
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
-    await asyncio.sleep(1.1)
     await rec._rotate()
 
     assert await _table_exists(rec._db, 'events')
@@ -2553,10 +2564,8 @@ async def test_rotation_recreates_all_tables(tmp_path):
     await rec.stop()
 
 
-async def test_rotation_auto_rewrites_config(tmp_path):
+async def test_rotation_auto_rewrites_config(tmp_path, unique_db_paths):
     """Rotation automatically re-writes worker_config to the new DB."""
-    import asyncio
-
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
@@ -2564,7 +2573,6 @@ async def test_rotation_auto_rewrites_config(tmp_path):
     await rec.write_config(_make_drakkar_config())
     old_path = rec.db_path
 
-    await asyncio.sleep(1.1)
     await rec._rotate()
     new_path = rec.db_path
     assert old_path != new_path
@@ -2577,16 +2585,13 @@ async def test_rotation_auto_rewrites_config(tmp_path):
     await rec.stop()
 
 
-async def test_rotation_state_sync_uses_new_db(tmp_path):
+async def test_rotation_state_sync_uses_new_db(tmp_path, unique_db_paths):
     """_sync_state after rotation writes to the new DB."""
-    import asyncio
-
     config = make_debug_config(tmp_path)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
     rec.set_state_provider(lambda: {'uptime_seconds': 99.0})
 
-    await asyncio.sleep(1.1)
     await rec._rotate()
 
     rec._counters['consumed'] = 42
@@ -2598,10 +2603,8 @@ async def test_rotation_state_sync_uses_new_db(tmp_path):
     await rec.stop()
 
 
-async def test_rotation_respects_granular_flags(tmp_path):
+async def test_rotation_respects_granular_flags(tmp_path, unique_db_paths):
     """Rotation with store_events=False still creates config/state tables."""
-    import asyncio
-
     config = make_debug_config(
         tmp_path,
         store_events=False,
@@ -2611,7 +2614,6 @@ async def test_rotation_respects_granular_flags(tmp_path):
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
-    await asyncio.sleep(1.1)
     await rec._rotate()
 
     assert not await _table_exists(rec._db, 'events')
@@ -3612,7 +3614,7 @@ def test_detect_worker_ip_closes_socket_when_getsockname_raises():
 
 # --- Recorder buffer / drop / flush metrics ---
 #
-# Task 5 (Phase 1 ship-blockers): three Prometheus metrics surface the
+# Three Prometheus metrics surface the
 # flush pipeline's health — gauge for live depth, counter for silent
 # overflow drops, histogram for flush latency. These tests exercise each
 # wiring path end-to-end against a real recorder. We follow the existing
@@ -3773,7 +3775,7 @@ async def test_recorder_dropped_events_not_incremented_when_skip_db(tmp_path):
     await rec.stop()
 
 
-# --- Task 8 (Phase 3): aiosqlite error injection / snapshot-restore ------
+# --- aiosqlite error injection / snapshot-restore ---------------------------
 #
 # Production recorders will sometimes hit aiosqlite ``OperationalError`` —
 # under contention (``database is locked``) or disk failure (``disk I/O
@@ -4137,7 +4139,7 @@ _ROUND_TRIP_PAYLOADS = [
 
 
 @pytest.mark.parametrize('payload', _ROUND_TRIP_PAYLOADS)
-def testencode_json_round_trip(payload):
+def test_encode_json_round_trip(payload):
     """``encode_json(x)`` → ``json.loads`` → re-encode must be stable.
 
     Property: a payload that survives one encode/decode cycle must
@@ -4155,7 +4157,7 @@ def testencode_json_round_trip(payload):
 
 
 @pytest.mark.parametrize('payload', _ROUND_TRIP_PAYLOADS)
-def testencode_json_orjson_stdlib_byte_parity(payload):
+def test_encode_json_orjson_stdlib_byte_parity(payload):
     """Both encoder paths produce byte-for-byte identical output.
 
     Swapping the ``perf`` extra on/off (install/uninstall orjson) MUST
@@ -4185,46 +4187,7 @@ def testencode_json_orjson_stdlib_byte_parity(payload):
     assert fast_path_bytes == stdlib_bytes, f'fast-path bytes {fast_path_bytes!r} != stdlib bytes {stdlib_bytes!r}'
 
 
-def testencode_json_monkeypatched_fallback_matches_orjson(monkeypatch):
-    """Force the stdlib fallback by patching ``encode_json`` and
-    verify that encoded output is still identical to the fast path.
-
-    This exercises the ``except ImportError`` branch structurally — we
-    can't actually uninstall orjson at test time, but we can run the
-    fallback code and prove its output matches.
-    """
-    from datetime import UTC, datetime
-
-    from drakkar import recorder
-
-    # Capture the fast-path bytes before patching. The datetime proves the
-    # canonical-timestamp fallback hook is what both paths run through.
-    payload = {
-        'b': 1,
-        'a': 2,
-        'nested': {'y': 'val', 'x': 3},
-        'unicode': 'naïve',
-        'ts': datetime(2026, 4, 24, 12, 30, 45, 7, tzinfo=UTC),
-    }
-    fast_path_bytes = recorder.encode_json(payload)
-
-    # Swap in the stdlib fallback (verbatim from recorder helpers).
-    def fallback(obj):
-        return json.dumps(
-            obj,
-            sort_keys=True,
-            default=recorder._json_default,
-            separators=(',', ':'),
-            ensure_ascii=False,
-        ).encode('utf-8')
-
-    monkeypatch.setattr(recorder, 'encode_json', fallback)
-    fallback_bytes = recorder.encode_json(payload)
-
-    assert fast_path_bytes == fallback_bytes
-
-
-def testencode_json_datetime_canonical_format():
+def test_encode_json_datetime_canonical_format():
     """Datetimes encode in the canonical cross-backend format on BOTH paths.
 
     Fixed six-digit microseconds + ``Z`` suffix (:mod:`drakkar.timefmt`) —
@@ -4248,7 +4211,7 @@ def testencode_json_datetime_canonical_format():
     assert encode_json({'ts': micro}) == b'{"ts":"2026-04-24T12:30:45.123456Z"}'
 
 
-def testencode_json_str_decodes_bytes():
+def test_encode_json_str_decodes_bytes():
     """``encode_json_str`` returns a string that equals the bytes
     decoded as UTF-8 — no hidden encoding differences."""
     from drakkar.recorder import encode_json, encode_json_str
@@ -4257,7 +4220,7 @@ def testencode_json_str_decodes_bytes():
     assert encode_json_str(payload) == encode_json(payload).decode('utf-8')
 
 
-def testencode_json_non_json_native_types_via_default_str():
+def test_encode_json_non_json_native_types_via_default_str():
     """Custom classes fall back to ``default=str`` (both paths).
 
     orjson raises ``TypeError`` on unsupported types by default; we pass
@@ -4295,7 +4258,7 @@ def testencode_json_non_json_native_types_via_default_str():
     assert decoded == {'obj': 'custom-repr'}
 
 
-def testencode_json_sort_keys_deterministic():
+def test_encode_json_sort_keys_deterministic():
     """``OPT_SORT_KEYS`` / ``sort_keys=True`` make output deterministic
     regardless of dict insertion order. Critical for cache dedup hashes
     downstream — two workers encoding the same logical payload must

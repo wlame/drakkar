@@ -7,7 +7,7 @@ import re
 import time
 import typing
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -184,26 +184,26 @@ async def client(debug_config, mock_recorder, mock_app):
 
 
 class TestFormatTs:
-    def testformat_ts_none_returns_empty(self):
+    def test_format_ts_none_returns_empty(self):
         assert format_ts(None) == ''
 
-    def testformat_ts_returns_hms(self):
+    def test_format_ts_returns_hms(self):
         result = format_ts(1000.0)
         assert result != ''
         assert re.match(r'\d{2}:\d{2}:\d{2}$', result)
 
-    def testformat_ts_ms_none_returns_empty(self):
+    def test_format_ts_ms_none_returns_empty(self):
         assert format_ts_ms(None) == ''
 
-    def testformat_ts_ms_returns_hms_millis(self):
+    def test_format_ts_ms_returns_hms_millis(self):
         result = format_ts_ms(1000.0)
         assert result != ''
         assert re.match(r'\d{2}:\d{2}:\d{2}\.\d{3}$', result)
 
-    def testformat_ts_full_none_returns_empty(self):
+    def test_format_ts_full_none_returns_empty(self):
         assert format_ts_full(None) == ''
 
-    def testformat_ts_full_returns_datetime_millis(self):
+    def test_format_ts_full_returns_datetime_millis(self):
         result = format_ts_full(1000.0)
         assert result != ''
         assert re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$', result)
@@ -1328,26 +1328,25 @@ async def test_message_results_end_to_end_duration_paired_from_consumed(
     carries end_to_end_duration = message_complete.ts - consumed.ts."""
     rec = await _start_live_recorder(tmp_path)
     try:
-        # Record consumed first, then message_complete. The recorder uses
-        # time.time() for ``ts`` so we just ensure a minimal wall-clock
-        # gap between the two and assert the difference is measurable.
+        # Record consumed first, then message_complete. The recorder stamps
+        # ``ts`` with time.time(), so inject deterministic timestamps and
+        # assert the exact difference — no wall-clock sleeps.
         from drakkar.models import SourceMessage
 
         msg = SourceMessage(topic='t', partition=3, offset=100, value=b'{}', timestamp=1000)
-        rec.record_consumed(msg)
-        import asyncio
-
-        await asyncio.sleep(0.02)
-        rec.record_message_complete(
-            partition=3,
-            offset=100,
-            duration=0.01,
-            task_count=1,
-            succeeded=1,
-            failed=0,
-            replaced=0,
-            output_message_count=1,
-        )
+        with patch('time.time', return_value=1000.0):
+            rec.record_consumed(msg)
+        with patch('time.time', return_value=1000.25):
+            rec.record_message_complete(
+                partition=3,
+                offset=100,
+                duration=0.01,
+                task_count=1,
+                succeeded=1,
+                failed=0,
+                replaced=0,
+                output_message_count=1,
+            )
         fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
@@ -1355,12 +1354,8 @@ async def test_message_results_end_to_end_duration_paired_from_consumed(
         body = resp.json()
         assert len(body) == 1
         row = body[0]
-        # End-to-end = message_complete.ts - consumed.ts. We slept 20ms so
-        # it's comfortably > 0. Upper bound is loose to avoid flakiness
-        # on slow CI runners.
-        assert row['end_to_end_duration'] is not None
-        assert row['end_to_end_duration'] > 0.0
-        assert row['end_to_end_duration'] < 5.0
+        # End-to-end = message_complete.ts - consumed.ts = exactly 0.25s.
+        assert row['end_to_end_duration'] == pytest.approx(0.25)
     finally:
         await rec.stop()
 
@@ -1375,38 +1370,36 @@ async def test_message_results_end_to_end_picks_most_recent_prior_consumed(
     event prior to the message_complete — not the oldest."""
     rec = await _start_live_recorder(tmp_path)
     try:
-        import asyncio
-
         from drakkar.models import SourceMessage
 
         msg = SourceMessage(topic='t', partition=3, offset=100, value=b'{}', timestamp=1000)
-        # Old consumed event (simulates a previous replay)
-        rec.record_consumed(msg)
-        await asyncio.sleep(0.05)
-        # Newer consumed event — the one that this message_complete belongs to
-        rec.record_consumed(msg)
-        await asyncio.sleep(0.02)
-        rec.record_message_complete(
-            partition=3,
-            offset=100,
-            duration=0.01,
-            task_count=1,
-            succeeded=1,
-            failed=0,
-            replaced=0,
-            output_message_count=1,
-        )
+        # Deterministic injected timestamps: old consumed at t=1000 (a
+        # previous replay), the real consumed at t=1005, and the
+        # message_complete at t=1005.25.
+        with patch('time.time', return_value=1000.0):
+            rec.record_consumed(msg)
+        with patch('time.time', return_value=1005.0):
+            rec.record_consumed(msg)
+        with patch('time.time', return_value=1005.25):
+            rec.record_message_complete(
+                partition=3,
+                offset=100,
+                duration=0.01,
+                task_count=1,
+                succeeded=1,
+                failed=0,
+                replaced=0,
+                output_message_count=1,
+            )
         fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.get('/api/live/message-results')
         body = resp.json()
         row = body[0]
-        # If pairing picked the oldest consumed it would be > 0.06s.
-        # Picking the most-recent-prior consumed puts it between the 20ms
-        # sleep and the 50ms total gap — assert < 50ms with margin.
-        assert row['end_to_end_duration'] is not None
-        assert row['end_to_end_duration'] < 0.05
+        # If pairing picked the oldest consumed it would report 5.25s.
+        # Picking the most-recent-prior consumed gives exactly 0.25s.
+        assert row['end_to_end_duration'] == pytest.approx(0.25)
     finally:
         await rec.stop()
 
@@ -1558,7 +1551,7 @@ async def test_sink_breakdown_empty_offsets_returns_empty_map(
 # --- Hook-flag detection — hides unused completion-hook tabs ---
 
 
-def testhook_flags_no_overrides_returns_all_false():
+def test_hook_flags_no_overrides_returns_all_false():
     """Plain BaseDrakkarHandler subclass with no hook overrides → all False."""
     from drakkar.handler import BaseDrakkarHandler
     from drakkar.uiserver.server import hook_flags
@@ -1574,7 +1567,7 @@ def testhook_flags_no_overrides_returns_all_false():
     }
 
 
-def testhook_flags_detects_overrides():
+def test_hook_flags_detects_overrides():
     """Each overridden hook flips its flag; non-overridden stay False."""
     from drakkar.handler import BaseDrakkarHandler
     from drakkar.models import CollectResult, ExecutorResult, MessageGroup
@@ -1729,56 +1722,6 @@ async def test_debug_page_returns_200(debug_client):
     assert 'Databases' in resp.text
 
 
-async def test_api_debug_databases_empty(debug_client):
-    resp = await debug_client.get('/api/debug/databases')
-    assert resp.status_code == 200
-    assert resp.json() == []
-
-
-async def test_api_debug_databases_lists_files(tmp_path, mock_recorder, mock_app):
-    import sqlite3
-
-    from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG
-
-    db_path = tmp_path / 'worker-1-2026-03-24__10_00_00.db'
-    db = sqlite3.connect(str(db_path))
-    db.executescript(SCHEMA_WORKER_CONFIG)
-    db.execute(
-        """INSERT INTO worker_config
-           (id, worker_name, cluster_name, ip_address, debug_port, debug_url,
-            kafka_brokers, source_topic, consumer_group, binary_path,
-            max_executors, task_timeout_seconds, max_retries, window_size,
-            sinks_json, env_vars_json, created_at, created_at_dt)
-           VALUES (1, 'worker-1', 'main', '10.0.0.1', 8080, NULL,
-                   'kafka:9092', 'topic', 'grp', '/bin/rg',
-                   4, 120, 3, 10, '{}', '{}', 1000.0, '1970-01-01 00:16:40.000')""",
-    )
-    db.executescript(SCHEMA_EVENTS)
-    db.execute(
-        "INSERT INTO events (ts, dt, event, partition) VALUES (1000.0, '1970-01-12 13:46:40.000', 'consumed', 0)"
-    )
-    db.execute(
-        "INSERT INTO events (ts, dt, event, partition) VALUES (1001.0, '1970-01-12 13:50:01.000', 'task_completed', 0)"
-    )
-    db.commit()
-    db.close()
-
-    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-    fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-    transport = ASGITransport(app=fastapi_app)
-    async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/api/debug/databases')
-
-    assert resp.status_code == 200
-    data = resp.json()
-    assert len(data) == 1
-    assert data[0]['worker_name'] == 'worker-1'
-    assert data[0]['cluster_name'] == 'main'
-    assert data[0]['event_count'] == 2
-    assert data[0]['event_counts']['consumed'] == 1
-    assert data[0]['event_counts']['task_completed'] == 1
-
-
 async def test_api_debug_databases_skips_symlinks(tmp_path, mock_recorder, mock_app):
     import sqlite3
 
@@ -1861,31 +1804,6 @@ async def test_api_debug_merge_rejects_traversal(debug_client):
         json={'filenames': ['../etc/passwd', 'a.db']},
     )
     assert resp.status_code == 400
-
-
-async def test_debug_download(tmp_path, mock_recorder, mock_app):
-    db_path = tmp_path / 'test.db'
-    db_path.write_bytes(b'fake-sqlite')
-
-    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-    fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-    transport = ASGITransport(app=fastapi_app)
-    async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/debug/download/test.db')
-
-    assert resp.status_code == 200
-    assert resp.content == b'fake-sqlite'
-
-
-async def test_debug_download_rejects_traversal(debug_client):
-    """Traversal attempts are blocked — either 400 or 404 (no file served)."""
-    resp = await debug_client.get('/debug/download/../../../etc/passwd')
-    assert resp.status_code in (400, 404)
-
-
-async def test_debug_download_missing_file(debug_client):
-    resp = await debug_client.get('/debug/download/nonexistent.db')
-    assert resp.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -2877,7 +2795,7 @@ class TestDebugPage:
     async def test_probe_tab_rendered_in_debug_html(self, tmp_path, mock_recorder, mock_app):
         """``GET /debug`` → HTML includes the Message Probe tab button, panel,
         the visible header, the results container id, AND the rendering
-        helpers (``renderProbeReport`` + section markers) that Task 7 adds.
+        helpers (``renderProbeReport`` + section markers).
         Keeps the UI work honest without depending on a JS test stack — the
         endpoint behavior itself is covered by the probe endpoint tests above.
         """
@@ -2895,7 +2813,7 @@ class TestDebugPage:
         # rendering.
         assert 'Message Probe' in html
         assert 'probe-result' in html
-        # Task 7: rendering helpers must be present so the client can turn
+        # Rendering helpers must be present so the client can turn
         # a DebugReport into A/B/C cards. These are inline-script markers,
         # so a substring check is enough to prove the functions were
         # injected.
@@ -2908,7 +2826,7 @@ class TestDebugPage:
         assert 'probe-section-input' in html
         assert 'probe-section-arrange' in html
         assert 'probe-section-tasks' in html
-        # Task 8: the right-side task-detail sidebar and its helpers.
+        # The right-side task-detail sidebar and its helpers.
         # The sidebar container is rendered once in the probe tab panel.
         assert 'id="probe-task-sidebar"' in html
         # openTaskSidebar is the real (non-stub) implementation — its name
@@ -2918,7 +2836,7 @@ class TestDebugPage:
         # ESC-close marker: a document-level keydown listener that dismisses
         # the sidebar. The function name is the simplest stable marker.
         assert 'closeTaskSidebar' in html
-        # Task 9: section helpers and wrapper ids for on_message_complete /
+        # Section helpers and wrapper ids for on_message_complete /
         # on_window_complete / Planned sink outputs. Presence of the
         # function names proves the helpers were injected; the section ids
         # prove ``renderProbeReport`` wires them in.
@@ -2928,7 +2846,7 @@ class TestDebugPage:
         assert 'probe-section-message-complete' in html
         assert 'probe-section-window-complete' in html
         assert 'probe-section-sinks' in html
-        # Task 10: Cache calls / Timeline / Errors sections + the toolbar +
+        # Cache calls / Timeline / Errors sections + the toolbar +
         # the input-form chip polish. All surfaces are script-injected so a
         # substring check is enough — the endpoint behavior is covered by
         # the probe endpoint tests below.
@@ -2948,6 +2866,9 @@ class TestUIServerClass:
     """Cover UIServer start/stop (lines 945-977)."""
 
     async def test_start_creates_server_and_thread(self, debug_config, mock_recorder, mock_app):
+        # NOTE: uses a real thread — patching ``threading.Thread`` would also
+        # break the worker threads ``asyncio.to_thread`` needs for the
+        # bind-readiness wait inside ``start()``.
         from unittest.mock import patch
 
         from drakkar.uiserver.server import UIServer
@@ -2956,25 +2877,26 @@ class TestUIServerClass:
         assert server._server is None
         assert server._thread is None
 
+        fake_uvicorn = MagicMock()
+        fake_uvicorn.started = True  # pretend the bind succeeded instantly
+        fake_uvicorn.run = MagicMock()
+
         with (
-            patch('drakkar.uiserver.server.uvicorn.Server') as mock_uvi_server,
+            patch('drakkar.uiserver.server.uvicorn.Server', return_value=fake_uvicorn) as mock_uvi_server,
             patch('drakkar.uiserver.server.uvicorn.Config') as mock_uvi_config,
-            patch('drakkar.uiserver.server.threading.Thread') as mock_thread,
             patch('drakkar.uiserver.server.logger') as mock_logger,
         ):
-            mock_uvi_server.return_value = MagicMock()
             mock_uvi_config.return_value = MagicMock()
-            mock_thread_instance = MagicMock()
-            mock_thread.return_value = mock_thread_instance
             mock_logger.ainfo = AsyncMock()
 
             await server.start()
 
             mock_uvi_server.assert_called_once()
-            mock_thread.assert_called_once()
-            mock_thread_instance.start.assert_called_once()
-            assert server._server is not None
+            assert server._server is fake_uvicorn
             assert server._thread is not None
+            assert server._thread.name == 'drakkar-ui-server'
+            server._thread.join(timeout=2.0)
+            fake_uvicorn.run.assert_called_once()
 
     async def test_stop_signals_exit_and_joins(self, debug_config, mock_recorder, mock_app):
         from unittest.mock import patch
@@ -3002,6 +2924,61 @@ class TestUIServerClass:
         with patch('drakkar.uiserver.server.logger') as mock_logger:
             mock_logger.ainfo = AsyncMock()
             await server.stop()  # should not raise
+
+    async def test_start_with_dead_thread_raises_bind_error(self, debug_config, mock_recorder, mock_app):
+        """A server thread that exits before serving (e.g. port in use) must raise.
+
+        Mirrors the Go backend, where a debug-server bind failure is fatal:
+        without the UI server the worker has no probe surface at all.
+        """
+        from unittest.mock import patch
+
+        from drakkar.uiserver.server import UIServer
+
+        server = UIServer(debug_config, mock_recorder, mock_app)
+
+        # ``run`` returns immediately with ``started`` still False — the
+        # shape uvicorn leaves behind after sys.exit(1) on a bind failure.
+        fake_uvicorn = MagicMock()
+        fake_uvicorn.started = False
+        fake_uvicorn.run = lambda: None
+
+        with (
+            patch('drakkar.uiserver.server.uvicorn.Server', return_value=fake_uvicorn),
+            patch('drakkar.uiserver.server.logger') as mock_logger,
+        ):
+            mock_logger.ainfo = AsyncMock()
+            mock_logger.aerror = AsyncMock()
+            with pytest.raises(RuntimeError, match='already in use'):
+                await server.start()
+            mock_logger.aerror.assert_awaited_once()
+            assert mock_logger.aerror.await_args.args[0] == 'ui_server_start_failed'
+
+    async def test_start_returns_once_uvicorn_reports_started(self, debug_config, mock_recorder, mock_app):
+        """start() waits for uvicorn's ``started`` flag, then logs success."""
+        from unittest.mock import patch
+
+        from drakkar.uiserver.server import UIServer
+
+        server = UIServer(debug_config, mock_recorder, mock_app)
+
+        fake_uvicorn = MagicMock()
+        fake_uvicorn.started = False
+
+        def _run() -> None:
+            # simulate a successful bind: uvicorn flips ``started`` in-thread
+            fake_uvicorn.started = True
+
+        fake_uvicorn.run = _run
+
+        with (
+            patch('drakkar.uiserver.server.uvicorn.Server', return_value=fake_uvicorn),
+            patch('drakkar.uiserver.server.logger') as mock_logger,
+        ):
+            mock_logger.ainfo = AsyncMock()
+            await server.start()
+            events = [call.args[0] for call in mock_logger.ainfo.await_args_list]
+            assert 'ui_server_started' in events
 
 
 # ---------------------------------------------------------------------------
@@ -4879,7 +4856,7 @@ async def test_api_debug_processors_snapshot_runs_on_main_loop(mock_recorder, de
 
 
 # ---------------------------------------------------------------------------
-# _flush_and_select helper (Task 9): consolidates the "flush + read via
+# _flush_and_select helper: consolidates the "flush + read via
 # reader_db with writer fallback" pattern. The helper is a closure inside
 # ``create_ui_app`` so it isn't imported directly — instead these tests
 # exercise it through ``/api/events`` which routes a minimal SELECT through
@@ -5055,7 +5032,7 @@ async def test_flush_and_select_logs_a_dispatch_failure_as_its_own_cause(
 
 async def test_flush_and_select_helper_prefers_reader_db_over_writer(tmp_path, mock_recorder, debug_config, mock_app):
     """Sanity check that the helper reads through ``reader_db`` not
-    ``_db`` when both are set (the whole point of Task 6). Uses two
+    ``_db`` when both are set (the whole point of the helper). Uses two
     independent DB files: a writer with one row, a reader with three.
     A helper that read the writer would return 1 row; the endpoint
     must return 3.
@@ -5326,3 +5303,216 @@ class TestBuiltinUIBadge:
             resp = await c.get('/')
         assert resp.status_code == 200
         assert 'built-in UI' not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Kafka-UI deep-link builder
+# ---------------------------------------------------------------------------
+
+
+class TestKafkaUiMessageUrl:
+    """``UIDeps.kafka_ui_message_url`` — feature-toggle + URL shape."""
+
+    def _make_deps(self, mock_recorder, mock_app) -> UIDeps:
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp')
+        return UIDeps(
+            config=cfg,
+            recorder=mock_recorder,
+            drakkar_app=mock_app,
+            templates=MagicMock(),
+        )
+
+    def test_returns_empty_string_when_kafka_ui_not_configured(self, mock_recorder, mock_app):
+        """Missing ui_url/ui_cluster_name acts as a feature toggle — ''."""
+        deps = self._make_deps(mock_recorder, mock_app)
+        assert deps.kafka_ui_message_url('topic-a', 0, 42) == ''
+
+    def test_builds_seek_url_with_encoded_cluster_and_topic(self, mock_recorder, mock_app):
+        """Configured Kafka-UI base + cluster produce the seekTo deep link,
+        URL-encoding the cluster name and topic."""
+        mock_app._config.kafka.ui_url = 'http://kafka-ui.internal:8080/'
+        mock_app._config.kafka.ui_cluster_name = 'prod cluster'
+        deps = self._make_deps(mock_recorder, mock_app)
+
+        url = deps.kafka_ui_message_url('events.raw', 3, 1200)
+
+        assert url == (
+            'http://kafka-ui.internal:8080/ui/clusters/prod%20cluster/all-topics/'
+            'events.raw/messages?seekType=OFFSET&seekTo=3%3A%3A1200&limit=1'
+        )
+
+    def test_returns_empty_string_for_empty_topic(self, mock_recorder, mock_app):
+        mock_app._config.kafka.ui_url = 'http://kafka-ui.internal:8080'
+        mock_app._config.kafka.ui_cluster_name = 'prod'
+        deps = self._make_deps(mock_recorder, mock_app)
+        assert deps.kafka_ui_message_url('', 0, 0) == ''
+
+
+# ---------------------------------------------------------------------------
+# dispatch_bounded: main-loop timeout degrades instead of hanging
+# ---------------------------------------------------------------------------
+
+
+async def test_dispatch_bounded_returns_default_on_main_loop_timeout(mock_recorder, mock_app, monkeypatch):
+    """A wedged main loop (here: a loop that is never run) must not hang the
+    UI request — dispatch_bounded logs and returns the caller's default."""
+    from drakkar.uiserver import server as server_mod
+
+    monkeypatch.setattr(server_mod, 'MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS', 0.05)
+
+    stuck_loop = asyncio.new_event_loop()  # real loop, never run — wedged
+    try:
+        mock_app.main_loop = stuck_loop
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp')
+        deps = UIDeps(config=cfg, recorder=mock_recorder, drakkar_app=mock_app, templates=MagicMock())
+
+        async def _never_answers():
+            return 'unreachable'
+
+        # Keep a handle so the never-started coroutine can be closed —
+        # otherwise its GC emits a "never awaited" RuntimeWarning.
+        coro = _never_answers()
+
+        from structlog.testing import capture_logs
+
+        with capture_logs() as cap:
+            result = await deps.dispatch_bounded(coro, default='degraded')
+
+        assert result == 'degraded'
+        assert any(e['event'] == 'ui_main_loop_dispatch_timeout' for e in cap)
+        coro.close()
+    finally:
+        stuck_loop.close()
+
+
+# ---------------------------------------------------------------------------
+# UIServer._wait_until_serving: dead thread means the bind failed
+# ---------------------------------------------------------------------------
+
+
+def test_wait_until_serving_raises_when_server_thread_died(debug_config, mock_recorder, mock_app):
+    """uvicorn exits its daemon thread on a bind failure; the startup wait
+    must surface that as a loud RuntimeError instead of timing out."""
+    import threading
+    from types import SimpleNamespace
+
+    from drakkar.uiserver.server import UIServer
+
+    server = UIServer(debug_config, mock_recorder, mock_app)
+    server._server = SimpleNamespace(started=False)
+    dead = threading.Thread(target=lambda: None)
+    dead.start()
+    dead.join()
+    server._thread = dead
+
+    with pytest.raises(RuntimeError, match='already in use'):
+        server._wait_until_serving(timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# UIServer._resolve_ui_bundle: resolution errors are never fatal
+# ---------------------------------------------------------------------------
+
+
+class TestResolveUiBundle:
+    """The bundle ladder degrades to the built-in pages on errors."""
+
+    async def test_resolve_error_returns_none(self, debug_config, mock_recorder, mock_app, monkeypatch):
+        import drakkar.uihost
+        from drakkar.uiserver.server import UIServer
+
+        mock_app._config.ui.release.enabled = True
+
+        def _boom(release_cfg):
+            raise RuntimeError('network down')
+
+        monkeypatch.setattr(drakkar.uihost, 'resolve', _boom)
+        server = UIServer(debug_config, mock_recorder, mock_app)
+
+        from structlog.testing import capture_logs
+
+        with capture_logs() as cap:
+            assert await server._resolve_ui_bundle() is None
+        assert any(e['event'] == 'ui_resolve_failed' for e in cap)
+
+    async def test_resolve_returning_none_yields_none(self, debug_config, mock_recorder, mock_app, monkeypatch):
+        import drakkar.uihost
+        from drakkar.uiserver.server import UIServer
+
+        mock_app._config.ui.release.enabled = True
+        monkeypatch.setattr(drakkar.uihost, 'resolve', lambda release_cfg: None)
+        server = UIServer(debug_config, mock_recorder, mock_app)
+
+        assert await server._resolve_ui_bundle() is None
+
+
+# ---------------------------------------------------------------------------
+# Host-header parsing + origin allowlist edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestParseHostHeaderEdgeCases:
+    """Malformed / unusual Host headers must degrade, never raise."""
+
+    def test_empty_header_returns_empty_host(self):
+        from drakkar.uiserver.server_helpers import parse_host_header
+
+        assert parse_host_header('') == ('', None)
+
+    def test_unclosed_ipv6_bracket_treated_as_whole_host(self):
+        from drakkar.uiserver.server_helpers import parse_host_header
+
+        assert parse_host_header('[::1') == ('[::1', None)
+
+    def test_ipv6_with_non_numeric_port_falls_back_to_none(self):
+        from drakkar.uiserver.server_helpers import parse_host_header
+
+        assert parse_host_header('[::1]:banana') == ('::1', None)
+
+    def test_hostname_with_non_numeric_port_falls_back_to_none(self):
+        from drakkar.uiserver.server_helpers import parse_host_header
+
+        # A non-numeric "port" means the header was never host:port — the
+        # whole string is kept as the host, with no port.
+        assert parse_host_header('example.com:banana') == ('example.com:banana', None)
+
+
+class TestOriginAllowedMalformedUrls:
+    """urlparse raises ValueError on invalid IPv6 URLs — the helper must
+    treat those as a rejection (or skip the bad allowlist entry), not crash."""
+
+    def test_malformed_origin_with_allowlist_rejected(self):
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=['https://ops.internal'])
+        assert origin_allowed('http://[::1', 'testserver', cfg) is False
+
+    def test_malformed_allowlist_entry_skipped_but_valid_entry_matches(self):
+        cfg = make_ui_config(
+            auth_token='secret',
+            allowed_ws_origins=['http://[::1', 'https://ops.internal'],
+        )
+        assert origin_allowed('https://ops.internal', 'ignored', cfg) is True
+
+    def test_malformed_origin_same_origin_fallback_rejected(self):
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
+        assert origin_allowed('http://[::1', 'testserver', cfg) is False
+
+
+# ---------------------------------------------------------------------------
+# backend_version: installed-package lookup with source-tree fallback
+# ---------------------------------------------------------------------------
+
+
+def test_backend_version_falls_back_to_package_dunder(monkeypatch):
+    """When py-drakkar is not installed as a distribution (editable /
+    source-tree runs), the helper falls back to ``drakkar.__version__``."""
+    import importlib.metadata
+
+    from drakkar import __version__
+    from drakkar.uiserver.server_helpers import backend_version
+
+    def _not_installed(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, 'version', _not_installed)
+
+    assert backend_version() == __version__
