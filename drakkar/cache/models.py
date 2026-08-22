@@ -186,15 +186,16 @@ def decode_value[T: BaseModel](json_text: str, *, as_type: type[T] | None = None
 # value (``Op.SET`` with the current ``CacheEntry`` payload) or DELETE a
 # row (``Op.DELETE``, no payload needed — the key is enough for SQL).
 #
-# Flush swaps the ``_dirty`` map atomically under the GIL:
-#
-#     snapshot, self._dirty = self._dirty, {}
-#
-# Any ``set`` or ``delete`` that lands **during** the flush writes into the
-# fresh empty dict and gets picked up by the next cycle — no locking needed
-# for in-memory coherence because Python dict ops are single-operation atomic
-# under CPython's GIL. (If we ever run on a free-threaded interpreter, we'd
-# wrap mutation in a lock; that's out of scope for v1.)
+# Every touch of ``_dirty`` (and ``_memory`` / ``_bytes_sum``) happens under
+# the Cache's internal ``threading.Lock`` — required since
+# ``handler.offload()`` lets pool threads call the sync ops concurrently
+# with the event loop. Flush takes its snapshot via ``Cache.swap_dirty()``,
+# which swaps ``_dirty`` for a fresh empty dict under that lock; any ``set``
+# or ``delete`` landing around the swap writes either to the snapshotted
+# dict (flushed this cycle) or to the new dict (picked up next cycle). On
+# flush failure ``Cache.restore_dirty()`` merges the snapshot back, letting
+# newer racing ops win. See the thread-safety section in
+# ``drakkar.cache.memory``'s module docstring.
 
 
 class Op(Enum):

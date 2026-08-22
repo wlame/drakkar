@@ -2,7 +2,7 @@
 
 The handler API surface — ``set`` / ``peek`` / ``delete`` / ``__contains__`` /
 async ``get`` — lives here. Persistence (write-behind to SQLite, peer-sync
-across workers) is owned by ``CacheEngine`` in ``drakkar.cache_engine``. This
+across workers) is owned by ``CacheEngine`` in ``drakkar.cache.engine``. This
 split is intentional: a handler that calls ``self.cache.set(...)`` only
 needs to know about this module's contract, not the engine's lifecycle.
 
@@ -340,7 +340,10 @@ class Cache:
             return None
 
         now_ms = _now_ms()
-        cursor = await self._reader_db.execute(
+        # ``async with`` guarantees the cursor is closed even when the
+        # fetch raises — a bare execute/close pair would leak the cursor
+        # on exception.
+        async with self._reader_db.execute(
             # SELECT only the columns we need to reconstruct a CacheEntry;
             # the WHERE clause filters out expired rows at the DB layer so
             # we don't have to post-filter in Python.
@@ -349,9 +352,8 @@ class Cache:
             'FROM cache_entries '
             'WHERE key = ? AND (expires_at_ms IS NULL OR expires_at_ms > ?)',
             (key, now_ms),
-        )
-        row = await cursor.fetchone()
-        await cursor.close()
+        ) as cursor:
+            row = await cursor.fetchone()
         if row is None:
             metrics.cache_misses.inc()
             return None
@@ -369,29 +371,65 @@ class Cache:
             expires_at_ms=db_expires,
             origin_worker_id=db_origin,
         )
-        # Warm-on-read puts the key at MRU in the OrderedDict; the
-        # _maybe_evict call below respects the cap (may drop an older key,
-        # but preserves its dirty op if any — same invariant as set()).
-        #
-        # ``_bytes_sum`` accounting: if the key is already in memory (race
-        # with a concurrent ``set`` between the earlier miss check and this
-        # warm, or a double-warm from a future refactor), subtract the
-        # existing entry's bytes before overwriting — otherwise the sum
-        # leaks by the old entry's size every warm. Mirrors the pattern in
-        # ``set()`` which also handles the overwrite case.
+        # The DB read above ran outside the lock, so a concurrent ``set``
+        # or ``delete`` may have landed on this key in the meantime.
+        # Warming unconditionally would clobber the newer memory value
+        # with the stale DB row (while the dirty op still flushes the new
+        # value — memory and DB would then permanently disagree), or
+        # resurrect a key a racing ``delete`` just removed. Inside the
+        # lock we therefore:
+        #  - serve the existing memory entry when it is as new as the DB
+        #    row (a racing ``set`` won);
+        #  - treat a pending dirty DELETE as authoritative (miss);
+        #  - serve a pending dirty SET's entry when it is as new as the
+        #    DB row (the racing set's entry was already LRU-evicted);
+        #  - otherwise warm memory with the DB row as before.
         with self._lock:
             existing = self._memory.get(db_key)
-            if existing is not None:
-                self._bytes_sum -= existing.size_bytes
-            self._memory[db_key] = warmed
-            self._memory.move_to_end(db_key)
-            self._bytes_sum += warmed.size_bytes
-            self._refresh_memory_gauges()
-            self._maybe_evict()
+            pending = self._dirty.get(db_key)
+            if (
+                existing is not None
+                and not self._is_expired(existing)
+                and existing.updated_at_ms >= warmed.updated_at_ms
+            ):
+                # A racing set already installed an equal-or-newer value —
+                # keep it; the stale DB row must not overwrite memory.
+                self._memory.move_to_end(db_key)
+                raw, hit_source = existing.value, 'memory'
+            elif pending is not None and pending.op is Op.DELETE:
+                # A racing delete (or a MEMORY-scope tombstone): warming
+                # would resurrect the key in memory while the pending
+                # DELETE removes the DB row on the next flush.
+                metrics.cache_misses.inc()
+                return None
+            elif (
+                pending is not None
+                and pending.entry is not None
+                and not self._is_expired(pending.entry)
+                and pending.entry.updated_at_ms >= warmed.updated_at_ms
+            ):
+                # A racing set whose entry was already evicted from memory
+                # — its pending op still holds the freshest value.
+                raw, hit_source = pending.entry.value, 'memory'
+            else:
+                # Warm-on-read puts the key at MRU in the OrderedDict; the
+                # _maybe_evict call below respects the cap (may drop an
+                # older key, but preserves its dirty op if any — same
+                # invariant as set()). ``_bytes_sum``: subtract an existing
+                # (older) entry's bytes before overwriting, mirroring the
+                # overwrite handling in ``set()``.
+                if existing is not None:
+                    self._bytes_sum -= existing.size_bytes
+                self._memory[db_key] = warmed
+                self._memory.move_to_end(db_key)
+                self._bytes_sum += warmed.size_bytes
+                self._refresh_memory_gauges()
+                self._maybe_evict()
+                raw, hit_source = warmed.value, 'db'
 
-        metrics.cache_hits.labels(source='db').inc()
-        # ``decode_value`` accepts ``as_type=None`` — no ternary needed.
-        return decode_value(warmed.value, as_type=as_type)
+        metrics.cache_hits.labels(source=hit_source).inc()
+        # Decode outside the lock — ``decode_value`` accepts ``as_type=None``.
+        return decode_value(raw, as_type=as_type)
 
     def delete(self, key: str) -> bool:
         """Remove ``key`` from memory and schedule a DB row deletion on next flush.
@@ -403,8 +441,8 @@ class Cache:
 
         **Local-only**: this does NOT propagate to peers. A peer who synced
         our value before the delete still has its own copy and may re-push
-        it back via LWW if its ``updated_at_ms`` is newer. See the "delete
-        is deliberately local-only" note in the plan for the full edge
+        it back via LWW if its ``updated_at_ms`` is newer. See the
+        "TTL vs. delete" section in ``docs/cache.md`` for the full edge
         discussion — use TTL for cross-worker invalidation.
         """
         with self._lock:

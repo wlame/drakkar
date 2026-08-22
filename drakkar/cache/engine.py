@@ -149,11 +149,13 @@ class CacheEngine:
         # cache-DB file, and splitting caches across engines would make
         # the ``_dirty`` swap (see ``_flush_once``) ambiguous.
         self._cache: Cache | None = None
-        # Serializes flush cycles. The periodic flush task and the
-        # shutdown final drain can otherwise run ``_flush_once``
-        # concurrently — both swapping the dirty map and writing through
-        # the same writer connection with interleaved transactions.
-        self._flush_lock = asyncio.Lock()
+        # Serializes every user of the writer connection: flush cycles
+        # (periodic + shutdown drain), cleanup's DELETE+commit, and
+        # peer-sync's UPSERT+commit. All three share ``_writer_db``, and
+        # aiosqlite serializes individual *statements*, not transactions —
+        # without one lock, a commit from cleanup or peer-sync could land
+        # mid-flush and persist a half-applied flush batch.
+        self._writer_lock = asyncio.Lock()
         # Consecutive failed flush cycles. Reset on success. Used to
         # escalate logging when the writer connection is persistently
         # broken (dirty entries accumulate in memory and would be lost
@@ -215,8 +217,14 @@ class CacheEngine:
         # Cursor state is in-memory only. A worker restart resets cursors to
         # zero and the next cycle re-pulls everything from peers — bounded by
         # TTL cleanup and LWW rejection, so no runaway work. Persisting
-        # cursors across restarts is a follow-up (marked as such in the plan).
+        # cursors across restarts is a possible future improvement.
         self._peer_cursors: dict[str, int] = {}
+        # The most recent shielded peer-commit task. When the sync-cycle
+        # deadline cancels the awaiter in ``_apply_peer_rows``, the
+        # shielded task keeps running — holding the reference here lets
+        # the next sync cycle and ``stop()`` await it (bounded) before
+        # touching or closing the writer connection.
+        self._pending_peer_commit: asyncio.Task | None = None
 
     @property
     def reader_db(self) -> aiosqlite.Connection | None:
@@ -378,10 +386,12 @@ class CacheEngine:
 
         db_dir = self._resolve_db_dir()
         if not db_dir:
-            # Warn-and-continue (not fail-at-startup) per the plan. The
-            # handler will still get a Cache instance; it just won't
-            # persist. Peer-sync is automatically disabled because it
-            # needs the writer connection to apply UPSERTs.
+            # Warn-and-continue (not fail-at-startup): the cache is an
+            # optional accelerator, so a missing db_dir degrades to
+            # no-persistence rather than blocking the worker. The handler
+            # still gets a Cache instance; it just won't persist.
+            # Peer-sync is automatically disabled because it needs the
+            # writer connection to apply UPSERTs.
             await logger.awarning(
                 'cache_engine_disabled_no_db_dir',
                 category='cache',
@@ -575,6 +585,11 @@ class CacheEngine:
                 pass
             self._flush_task = None
 
+        # A peer-commit task orphaned by a cancelled sync cycle may still
+        # be running — await it (bounded) before the final drain and the
+        # writer close, so we never close ``_writer_db`` mid-executemany.
+        await self._await_pending_peer_commit(timeout=self._config.peer_sync.timeout_seconds)
+
         # Step 3: final drain — catches any dirty ops that accumulated
         # after the last scheduled flush fired, so shutdown isn't a
         # write-loss window.
@@ -619,15 +634,16 @@ class CacheEngine:
     async def _flush_once(self) -> None:
         """Run one serialized flush cycle with failure-streak tracking.
 
-        Wraps :meth:`_flush_locked` in ``_flush_lock`` so the periodic
-        flush task and the shutdown final drain can never interleave a
-        dirty-map swap or share the writer transaction. Tracks
+        Wraps :meth:`_flush_locked` in ``_writer_lock`` — the lock shared
+        by every writer-connection user (flush, cleanup, peer-sync
+        commit) — so no other path can commit mid-flush and no two flush
+        cycles can interleave a dirty-map swap. Tracks
         consecutive failures and escalates to ERROR once the streak
         reaches ``FLUSH_FAILURE_ESCALATION_THRESHOLD`` — a persistently
         broken writer means dirty entries accumulate in memory and are
         lost if the shutdown drain also fails.
         """
-        async with self._flush_lock:
+        async with self._writer_lock:
             try:
                 await self._flush_locked()
             except Exception as e:
@@ -654,12 +670,15 @@ class CacheEngine:
 
         A single flush cycle does the following:
 
-        1. **Atomic swap** — snapshot the current ``_dirty`` map and
-           reset it to an empty dict in one tuple-assign operation. Under
-           CPython's GIL this is atomic: any ``Cache.set`` /
-           ``Cache.delete`` landing during the swap either wrote to the
-           now-snapshotted dict (and will be flushed this cycle) or to
-           the fresh empty dict (picked up next cycle). No writes lost.
+        1. **Atomic swap** — take a snapshot of the current ``_dirty``
+           map and replace it with a fresh empty dict via
+           ``Cache.swap_dirty()``, which performs the swap under the
+           Cache's ``threading.Lock`` (``handler.offload()`` threads
+           mutate ``_dirty`` concurrently with the loop). Any
+           ``Cache.set`` / ``Cache.delete`` landing around the swap
+           either wrote to the now-snapshotted dict (flushed this cycle)
+           or to the fresh empty dict (picked up next cycle). No writes
+           lost.
 
         2. **Split by op type** — ``Op.SET`` entries go through
            ``LWW_UPSERT_SQL`` as an ``executemany``; ``Op.DELETE`` keys
@@ -770,8 +789,16 @@ class CacheEngine:
                 # Restore un-committed ops through Cache's helper — the
                 # merge logic (skip keys with newer live ops) lives there
                 # too so the engine doesn't have to know about race
-                # semantics on ``_dirty``.
+                # semantics on ``_dirty``. Sync call first so it runs even
+                # if the rollback await below is itself cancelled.
                 self._cache.restore_dirty(snapshot)
+                # Roll back the open transaction. Without this, the
+                # partial batch (e.g. a successful UPSERT executemany
+                # followed by a failed DELETE executemany) would sit in
+                # an open transaction and be silently committed by the
+                # next unrelated commit on the shared writer connection.
+                with contextlib.suppress(Exception):
+                    await self._writer_db.rollback()
 
         # Metric ticks — one label per op type. Incremented even for
         # LWW-rejected UPSERTs (see docstring point 4): the flush did
@@ -840,13 +867,24 @@ class CacheEngine:
         # boundary ms) for consistency with ``Cache._is_expired`` and
         # ``_expire_purge`` — an entry whose ``expires_at_ms`` equals
         # ``now_ms`` is expired and gets cleaned up here too.
-        cursor = await self._writer_db.execute(
-            'DELETE FROM cache_entries WHERE expires_at_ms IS NOT NULL AND expires_at_ms <= ?',
-            (now_ms,),
-        )
-        removed = cursor.rowcount if cursor.rowcount is not None else 0
-        await cursor.close()
-        await self._writer_db.commit()
+        #
+        # ``_writer_lock`` serializes this DELETE+commit against flush and
+        # peer-sync on the shared writer connection — without it, this
+        # commit could land mid-flush and persist a half-applied batch.
+        async with self._writer_lock:
+            try:
+                async with self._writer_db.execute(
+                    'DELETE FROM cache_entries WHERE expires_at_ms IS NOT NULL AND expires_at_ms <= ?',
+                    (now_ms,),
+                ) as cursor:
+                    removed = cursor.rowcount if cursor.rowcount is not None else 0
+                await self._writer_db.commit()
+            except BaseException:
+                # Roll back the open transaction so a failed purge can't be
+                # silently committed by the next writer commit.
+                with contextlib.suppress(Exception):
+                    await self._writer_db.rollback()
+                raise
 
         # Step 2 + 3: memory sweep + dirty-map pruning for expired SETs.
         # Delegate to ``Cache._expire_purge`` — the helper handles both
@@ -859,10 +897,13 @@ class CacheEngine:
 
         # Step 4: refresh DB-size gauges with a single aggregate query. We
         # use ``coalesce(sum(size_bytes), 0)`` so an empty table yields 0
-        # rather than NULL.
-        cursor = await self._writer_db.execute('SELECT count(*), coalesce(sum(size_bytes), 0) FROM cache_entries')
-        row = await cursor.fetchone()
-        await cursor.close()
+        # rather than NULL. Read-only, but it runs on the writer connection,
+        # so take the writer lock to stay out of other paths' transactions.
+        async with (
+            self._writer_lock,
+            self._writer_db.execute('SELECT count(*), coalesce(sum(size_bytes), 0) FROM cache_entries') as cursor,
+        ):
+            row = await cursor.fetchone()
         if row is not None:
             db_count, db_bytes = row
             metrics.cache_entries_in_db.set(db_count)
@@ -908,7 +949,10 @@ class CacheEngine:
         # at ``<peer>-live.db`` alongside it. We open the recorder DB
         # read-only to avoid any chance of writes to a peer's file.
         live_link = str(Path(db_dir) / f'{peer_worker_name}-live.db')
-        if not os.path.exists(live_link):
+        # ``to_thread`` keeps the stat() off the event loop — on a slow
+        # shared filesystem (NFS) a sync ``os.path.exists`` here would
+        # block every other task for the duration of the round trip.
+        if not await asyncio.to_thread(os.path.exists, live_link):
             # Peer's recorder may be down or not configured with
             # ``store_config=True``. Don't populate the cache so next
             # cycle can retry.
@@ -1155,6 +1199,46 @@ class CacheEngine:
         # wall clock. ``max(..., cursor_ms)`` enforces monotonicity.
         return max(int(rows[-1][5]), cursor_ms)
 
+    async def _await_pending_peer_commit(self, timeout: float) -> None:
+        """Await (bounded) a peer-commit task orphaned by a cancelled cycle.
+
+        When the sync-cycle deadline cancels the awaiter in
+        ``_apply_peer_rows``, the shielded commit task keeps running.
+        Called at the start of the next sync cycle and from ``stop()`` so
+        the orphan finishes before anything else uses — or closes — the
+        writer connection. On timeout the reference is kept so a later
+        call retries; an orphan's exception is retrieved and logged here
+        (its original awaiter was cancelled, so nobody else will).
+        """
+        task = self._pending_peer_commit
+        if task is None:
+            return
+        if not task.done():
+            try:
+                # Shield again: a bounded wait must not cancel the commit
+                # it is waiting for.
+                await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+            except TimeoutError:
+                await logger.awarning(
+                    'cache_peer_commit_still_running',
+                    category='cache',
+                    timeout_seconds=timeout,
+                )
+                return
+            except Exception:
+                # Retrieved below via task.exception(); fall through.
+                pass
+        self._pending_peer_commit = None
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                await logger.awarning(
+                    'cache_orphaned_peer_commit_failed',
+                    category='cache',
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+
     async def _sync_once(self) -> dict[str, list[tuple]]:
         """Pull one batch of entries from every discovered peer with a
         per-cycle wall-clock deadline.
@@ -1175,6 +1259,11 @@ class CacheEngine:
         and re-raise ``TimeoutError`` so the periodic-task wrapper
         classifies the run as ``status=error``.
         """
+        # A commit orphaned by the PREVIOUS cycle's deadline must finish
+        # before this cycle touches the writer — otherwise the two could
+        # interleave transactions on the shared connection.
+        await self._await_pending_peer_commit(timeout=self._config.peer_sync.timeout_seconds)
+
         cycle_deadline = self._config.peer_sync.cycle_deadline_seconds
         # ``None`` is the default: derive from the interval so operators
         # who never tune the deadline still get a reasonable bound. The
@@ -1334,7 +1423,24 @@ class CacheEngine:
         #    skipping the counter ticks and ``_invalidate_memory_keys``
         #    call. The DB would hold the new peer rows but the memory
         #    cache would still hold the STALE pre-sync values.
-        await asyncio.shield(self._commit_peer_rows(peer_name=peer_name, rows=rows))
+        #
+        # The shielded work runs as a real task we keep a reference to:
+        # when the deadline cancels *us*, the task keeps running, and the
+        # next sync cycle / ``stop()`` await it via
+        # ``_await_pending_peer_commit`` before touching the writer again.
+        commit_task = asyncio.create_task(
+            self._commit_peer_rows(peer_name=peer_name, rows=rows),
+            name='cache.peer_commit',
+        )
+        self._pending_peer_commit = commit_task
+        try:
+            await asyncio.shield(commit_task)
+        finally:
+            # Only clear when the task actually finished — on cancellation
+            # of the awaiter the task is still running and must stay
+            # referenced for the bounded await later.
+            if commit_task.done():
+                self._pending_peer_commit = None
 
     async def _commit_peer_rows(self, *, peer_name: str, rows: list[tuple]) -> None:
         """Run the executemany + commit + bookkeeping trio uninterruptibly.
@@ -1354,8 +1460,18 @@ class CacheEngine:
         # lets the method stay callable in isolation (e.g. tests).
         if self._writer_db is None:
             return
-        await self._writer_db.executemany(LWW_UPSERT_SQL, rows)
-        await self._writer_db.commit()
+        # ``_writer_lock`` serializes this UPSERT+commit against flush and
+        # cleanup on the shared writer connection.
+        async with self._writer_lock:
+            try:
+                await self._writer_db.executemany(LWW_UPSERT_SQL, rows)
+                await self._writer_db.commit()
+            except BaseException:
+                # Roll back the open transaction so a failed peer batch
+                # can't be silently committed by the next writer commit.
+                with contextlib.suppress(Exception):
+                    await self._writer_db.rollback()
+                raise
 
         # Both counters tick AFTER commit so they stay consistent under
         # commit-failure. Mirrors the flush path's post-commit metric-tick

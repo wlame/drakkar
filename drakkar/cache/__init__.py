@@ -23,8 +23,8 @@ from __future__ import annotations
 # Re-exported for backward compatibility — tests historically reach through
 # ``cache_module.aiosqlite`` to patch ``aiosqlite.connect`` on the shared
 # module object. Keeping the import here means those patches still take
-# effect against ``cache_engine`` (both modules reference the same aiosqlite
-# module object).
+# effect against ``drakkar.cache.engine`` (both modules reference the same
+# aiosqlite module object).
 import aiosqlite  # noqa: F401
 import structlog
 
@@ -49,9 +49,9 @@ from drakkar.cache.sql import (
 # Module-level logger preserved here too so external code that did
 # ``from drakkar.cache import logger`` (or referenced ``cache_module.logger``
 # in test patches) keeps working. Note: this is a *separate* logger
-# instance from the one used inside ``cache_engine`` — patching this one
-# will not affect engine-side logging. Tests that need to spy on engine
-# log calls should patch ``drakkar.cache_engine.logger`` directly.
+# instance from the one used inside ``drakkar.cache.engine`` — patching
+# this one will not affect engine-side logging. Tests that need to spy on
+# engine log calls should patch ``drakkar.cache.engine.logger`` directly.
 logger = structlog.get_logger()
 
 __all__ = [
