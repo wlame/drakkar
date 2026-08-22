@@ -9,39 +9,32 @@ Drakkar consumes messages from Kafka, runs CPU-intensive external binaries in a 
 <div class="diagram-light" markdown>
 ```mermaid
 flowchart LR
-    K["Kafka\nsource topic"] --> P["poll"]
+    K["Kafka\nsource topic"] -- "poll" --> W
 
-    subgraph worker ["Drakkar Worker"]
-        P --> A["arrange()\n<i>user hook</i>"]
-        subgraph pool ["Executor Pool"]
-            direction TB
-            S0["#0 ▰▰▰▰▰▰▰▰▰▰▰▰"]
-            S1["#1 ▰▰▰▰▰▰"]
-            S2["#2 ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰"]
-            S3["#3 ▰▰▰▰"]
-            S0 ~~~ S1 ~~~ S2 ~~~ S3
-        end
-        A -- "tasks" --> pool
-        pool -- "results" --> C["on_task_complete()\n<i>user hook</i>"]
+    subgraph worker ["Drakkar worker — one pipeline per partition"]
+        W["window of\nmessages"] --> A["arrange()\n<i>your code</i>"]
+        A -- "tasks" --> P["subprocess pool\nruns your binary"]
+        P -- "results" --> T["on_task_complete()\n<i>your code</i>"]
     end
 
-    C --> SK["Kafka"]
-    C --> SP["Postgres"]
-    C --> SM["Mongo"]
-    C --> SR["Redis"]
-    C --> SH["HTTP"]
-    C --> SF["Files"]
+    T -- "payloads" --> sinks
+    subgraph sinks ["sinks — any combination"]
+        direction TB
+        SK["Kafka"] ~~~ SP["Postgres"] ~~~ SM["MongoDB"]
+        SR["Redis"] ~~~ SH["HTTP"] ~~~ SF["files"]
+    end
+    sinks -- "all confirmed" --> CO["commit offsets\n(watermark)"]
+    sinks -- "failed delivery" --> DLQ["DLQ topic"]
 
     style worker fill:#f0fdfa,stroke:#0d9488,stroke-width:2px,color:#1a1a1a
-    style pool fill:#f5f3ee,stroke:#94a3b8,stroke-width:1px,color:#6b7280
-    style P fill:#f8fafc,stroke:#64748b,color:#1a1a1a
+    style sinks fill:#f8fafc,stroke:#94a3b8,stroke-width:1px,color:#6b7280
     style K fill:#e0f2fe,stroke:#0284c7,color:#1a1a1a
+    style W fill:#f8fafc,stroke:#64748b,color:#1a1a1a
     style A fill:#fef3c7,stroke:#d97706,color:#1a1a1a
-    style C fill:#fef3c7,stroke:#d97706,color:#1a1a1a
-    style S0 fill:#34d399,stroke:#059669,color:#064e3b
-    style S1 fill:#fbbf24,stroke:#d97706,color:#451a03
-    style S2 fill:#34d399,stroke:#059669,color:#064e3b
-    style S3 fill:#f87171,stroke:#dc2626,color:#450a0a
+    style P fill:#f5f3ee,stroke:#64748b,color:#1a1a1a
+    style T fill:#fef3c7,stroke:#d97706,color:#1a1a1a
+    style CO fill:#e0f2fe,stroke:#0284c7,color:#1a1a1a
+    style DLQ fill:#fee2e2,stroke:#dc2626,color:#450a0a
     style SK fill:#d1fae5,stroke:#059669,color:#1a1a1a
     style SP fill:#d1fae5,stroke:#059669,color:#1a1a1a
     style SM fill:#d1fae5,stroke:#059669,color:#1a1a1a
@@ -54,45 +47,38 @@ flowchart LR
 <div class="diagram-dark" markdown>
 ```mermaid
 flowchart LR
-    K["Kafka\nsource topic"] --> P["poll"]
+    K["Kafka\nsource topic"] -- "poll" --> W
 
-    subgraph worker ["Drakkar Worker"]
-        P --> A["arrange()\n<i>user hook</i>"]
-        subgraph pool ["Executor Pool"]
-            direction TB
-            S0["#0 ▰▰▰▰▰▰▰▰▰▰▰▰"]
-            S1["#1 ▰▰▰▰▰▰"]
-            S2["#2 ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰"]
-            S3["#3 ▰▰▰▰"]
-            S0 ~~~ S1 ~~~ S2 ~~~ S3
-        end
-        A -- "tasks" --> pool
-        pool -- "results" --> C["on_task_complete()\n<i>user hook</i>"]
+    subgraph worker ["Drakkar worker — one pipeline per partition"]
+        W["window of\nmessages"] --> A["arrange()\n<i>your code</i>"]
+        A -- "tasks" --> P["subprocess pool\nruns your binary"]
+        P -- "results" --> T["on_task_complete()\n<i>your code</i>"]
     end
 
-    C --> SK["Kafka"]
-    C --> SP["Postgres"]
-    C --> SM["Mongo"]
-    C --> SR["Redis"]
-    C --> SH["HTTP"]
-    C --> SF["Files"]
+    T -- "payloads" --> sinks
+    subgraph sinks ["sinks — any combination"]
+        direction TB
+        SK["Kafka"] ~~~ SP["Postgres"] ~~~ SM["MongoDB"]
+        SR["Redis"] ~~~ SH["HTTP"] ~~~ SF["files"]
+    end
+    sinks -- "all confirmed" --> CO["commit offsets\n(watermark)"]
+    sinks -- "failed delivery" --> DLQ["DLQ topic"]
 
     style worker fill:#1a3a3a,stroke:#2dd4bf,stroke-width:2px,color:#e2e8f0
-    style pool fill:#1e293b,stroke:#64748b,stroke-width:1px,color:#94a3b8
-    style P fill:#1e293b,stroke:#64748b,color:#e2e8f0
+    style sinks fill:#1e293b,stroke:#64748b,stroke-width:1px,color:#94a3b8
     style K fill:#172554,stroke:#60a5fa,color:#e2e8f0
+    style W fill:#1e293b,stroke:#64748b,color:#e2e8f0
     style A fill:#422006,stroke:#f59e0b,color:#fef3c7
-    style C fill:#422006,stroke:#f59e0b,color:#fef3c7
-    style S0 fill:#065f46,stroke:#34d399,color:#d1fae5
-    style S1 fill:#78350f,stroke:#fbbf24,color:#fef3c7
-    style S2 fill:#065f46,stroke:#34d399,color:#d1fae5
-    style S3 fill:#7f1d1d,stroke:#f87171,color:#fee2e2
-    style SK fill:#052e16,stroke:#4ade80,color:#d1fae5
-    style SP fill:#052e16,stroke:#4ade80,color:#d1fae5
-    style SM fill:#052e16,stroke:#4ade80,color:#d1fae5
-    style SR fill:#052e16,stroke:#4ade80,color:#d1fae5
-    style SH fill:#052e16,stroke:#4ade80,color:#d1fae5
-    style SF fill:#052e16,stroke:#4ade80,color:#d1fae5
+    style P fill:#1e293b,stroke:#64748b,color:#e2e8f0
+    style T fill:#422006,stroke:#f59e0b,color:#fef3c7
+    style CO fill:#172554,stroke:#60a5fa,color:#e2e8f0
+    style DLQ fill:#7f1d1d,stroke:#f87171,color:#fee2e2
+    style SK fill:#065f46,stroke:#34d399,color:#d1fae5
+    style SP fill:#065f46,stroke:#34d399,color:#d1fae5
+    style SM fill:#065f46,stroke:#34d399,color:#d1fae5
+    style SR fill:#065f46,stroke:#34d399,color:#d1fae5
+    style SH fill:#065f46,stroke:#34d399,color:#d1fae5
+    style SF fill:#065f46,stroke:#34d399,color:#d1fae5
 ```
 </div>
 
