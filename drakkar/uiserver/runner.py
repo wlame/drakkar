@@ -688,9 +688,9 @@ class DebugRunner:
                 exercises the real binary and honours the real
                 task_timeout.
             app_config: the active ``DrakkarConfig``. The probe uses
-                ``app_config.executor.max_retries`` (task 4) and the
-                configured source topic for empty ``ProbeInput.topic``
-                requests (task 5 via the endpoint wiring).
+                ``app_config.executor.max_retries`` and the configured
+                source topic for empty ``ProbeInput.topic`` requests
+                (via the endpoint wiring).
         """
         self._handler = handler
         self._executor_pool = executor_pool
@@ -794,8 +794,8 @@ class DebugRunner:
         # (handler.cache's declared type), so direct assignment is
         # type-safe.
         self._handler.cache = state.cache_proxy
-        # Bind the probe-details state (Task 3's `probe_details_model`, if the
-        # handler registered one) so `drakkar.probe.set/append/update` calls
+        # Bind the probe-details state (the handler's `probe_details_model`,
+        # if it registered one) so `drakkar.probe.set/append/update` calls
         # made from anywhere in handler code during this run land here
         # instead of being silent no-ops. Left unbound (None) when the
         # handler has no model — `probe.set()` etc. stay no-ops, matching
@@ -835,8 +835,8 @@ class DebugRunner:
 
         Extracted into its own coroutine so the ``finally`` block in
         ``_run_locked`` only has to worry about cache restoration —
-        stage logic lives here. Task 3 added try/except wrappers around
-        every hook so exceptions never crash the probe — they land in
+        stage logic lives here. Every hook runs inside a try/except
+        wrapper so exceptions never crash the probe — they land in
         ``state.errors`` as ``ProbeError`` entries and the runner
         short-circuits downstream stages based on which hook failed
         (see ``_record_error`` and the per-stage logic below).
@@ -939,7 +939,8 @@ class DebugRunner:
     # Each helper runs one hook stage with error capture. They return a
     # value (or a flag) so the caller can decide whether to short-circuit
     # the pipeline. Keeping each stage in its own method keeps _run_stages
-    # readable and mirrors the stage-by-stage rules documented in the plan.
+    # readable and mirrors the stage-by-stage short-circuit rules listed
+    # in the ``_run_stages`` docstring.
 
     def _run_deserialize(self, *, state: RunState, msg: SourceMessage) -> bool:
         """Run handler.deserialize_message with error capture. Returns True on success.
@@ -1027,7 +1028,7 @@ class DebugRunner:
         """Run handler.on_message_complete with error capture.
 
         Even on failure, the runner continues to on_window_complete —
-        the two hooks are independent (per plan rules), so a broken
+        the two hooks are independent by design, so a broken
         on_message_complete should not mask on_window_complete's
         behaviour from the operator.
 

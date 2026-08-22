@@ -700,9 +700,9 @@ recorder_flush_duration = Histogram(
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
 )
 
-# Recorder flush retry observability — Phase 3 hardening.
+# Recorder flush retry observability.
 #
-# ``_flush`` now catches ``OperationalError`` (disk full, WAL contention,
+# ``_flush`` catches ``OperationalError`` (disk full, WAL contention,
 # DB locked, etc.), re-queues the drained batch at the FRONT of the
 # buffer, and retries on the next flush tick. These two counters surface
 # the retry path:
@@ -885,7 +885,7 @@ suspected_oom_kills = Counter(
 #   * the configured client list (operator-controlled, typically <10 entries)
 #   * a single fixed sentinel ``client='unauthenticated'`` for requests that
 #     never matched a configured client (auth_failed / pre-auth gate hits).
-# Status labels are drawn from a closed set documented in the plan:
+# Status labels are drawn from a closed set:
 #   ``ok | timeout | error | rate_limited | auth_failed | shutdown |
 #   not_ready | capacity``.
 #

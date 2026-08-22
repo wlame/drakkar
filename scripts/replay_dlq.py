@@ -43,9 +43,8 @@ Exit codes:
     130 — Ctrl+C after flushing the producer (standard SIGINT convention).
 
 Notes:
-    - This script uses ``confluent_kafka.aio.AIOProducer`` (matching the rest
-      of the project). The plan originally referenced ``aiokafka`` — the
-      codebase standardized on ``confluent_kafka`` so we use it here too.
+    - This script uses ``confluent_kafka.aio.AIOProducer``, matching the
+      Kafka client the rest of the project standardized on.
     - The DLQ entry format is defined by ``DLQMessage.serialize()`` in
       ``drakkar/sinks/dlq.py``. ``original_payloads`` is a JSON list of strings,
       each string a ``model_dump_json()`` of the original failed payload —

@@ -106,7 +106,7 @@ class TaskReport(BaseModel):
 
     Excludes stdout/stderr deliberately — operators read those via the
     recorder/debug UI, never via the webapp response body (size + PII
-    blast radius). See plan section "Response shape" for the rationale.
+    blast radius). See the response examples in ``docs/webapp.md``.
     """
 
     task_id: str
@@ -182,7 +182,7 @@ WebReportStatus = Literal[
 class WebReport(BaseModel):
     """Assembled JSON response for a synchronous-HTTP request.
 
-    Mirrors the shape documented in the plan's "Response shape" section.
+    Mirrors the response shape documented in ``docs/webapp.md``.
     The user's ``HttpResponseT`` lives under ``result``; everything else
     is framework-built (timing, task list, cache stats, sink summary,
     timeline). NO subprocess stdout/stderr is ever included in the

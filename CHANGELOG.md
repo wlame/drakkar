@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Recorder: a flush interrupted by cancellation (UI timeout, shutdown) now
+  re-queues its batch instead of losing it; all SQLite error types go
+  through the same retry/drop accounting; `stop()` always completes its
+  teardown.
+- Recorder: `cross_trace_by_label` now scans peer databases off the event
+  loop with the same scan budget as `cross_trace`.
+- File sink: writes happen on a worker thread, not on the event loop; a bad
+  path anywhere in a batch now fails before any byte is written.
+- Sinks: deliveries that exhaust their retries now go to the DLQ under the
+  configured `dlq.on_send_failure` policy instead of being dropped
+  silently. A sink that is not connected raises instead of silently
+  confirming. `deliver_all` settles every sink group before raising.
+- Sinks: `RedisPayload` now rejects `script`/`keys`/`args` on non-script
+  operations instead of silently ignoring them.
+- Postgres sink: the connect log now redacts the full DSN, including
+  password-style query parameters.
+- Cache: one writer lock serializes flush, cleanup, and peer-sync commits;
+  a failed flush rolls back its open transaction. A read no longer
+  overwrites a newer concurrent write (or resurrects a delete) when it
+  warms memory from SQLite. A deadline-cancelled peer-sync commit is
+  awaited by the next cycle and by `stop()`.
+- Pipeline: an exception from `on_window_complete` no longer skips the
+  window's recorder event and offset commit. The shutdown drain processes
+  the backlog in `window_size` chunks instead of one unbounded window.
+- Archive merge: merged databases now carry `labels`, `origin`,
+  `client_name`, and `request_id`, so archived events keep label tracing
+  and webapp attribution. Merge and dbstats failures are logged instead of
+  swallowed silently.
+- Event loop: peer discovery scans, webapp start/stop waits, UI-server
+  thread join, and watchdog file I/O all run on worker threads. The UI
+  server now verifies its port bind at startup and fails loudly, matching
+  the Go backend.
+- The runtime-health routes now honor `ui.auth_token` like every other
+  API route (they were the only router without the bearer-token gate).
+
 ### Changed
 
 - Rewrite the README as a short GitHub-first overview: features, one

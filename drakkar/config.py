@@ -1767,7 +1767,7 @@ class WebAppConfig(BaseModel):
       loop → user's ``arrange_http_request`` → executor pool → user's
       ``on_http_request_complete`` → JSON response.
 
-    See ``docs/webapp.md`` (added in Task 10) for the full feature guide.
+    See ``docs/webapp.md`` for the full feature guide.
     """
 
     enabled: bool = False

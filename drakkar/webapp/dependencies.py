@@ -63,8 +63,8 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
-# Hint included in 429 response bodies. Documented in the plan under
-# "HTTP status codes" — clients hitting the rpm cap should publish to
+# Hint included in 429 response bodies (see "Status codes" in
+# ``docs/webapp.md``) — clients hitting the rpm cap should publish to
 # the source topic for higher throughput and restart-resilient delivery.
 KAFKA_FALLBACK_HINT = (
     'route this workload through the Kafka source topic for higher throughput and worker-restart resilience'

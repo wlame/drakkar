@@ -413,8 +413,7 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
                 pass
         pid = (completed or failed or {}).get('pid') or (started or {}).get('pid')
 
-        # ``origin`` is part of every event row (column added in Task 8 of
-        # the webapp pipeline plan); HTTP-origin tasks carry the
+        # ``origin`` is part of every event row; HTTP-origin tasks carry the
         # ``client_name`` / ``request_id`` columns too. The template uses
         # these to swap the Partition/Offset header for Client/Request ID.
         origin_value = 'kafka'

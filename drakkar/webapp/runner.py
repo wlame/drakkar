@@ -25,9 +25,9 @@ flat 500 body. The original traceback is captured on the exception so
 the route handler / logger can record it without leaking it into the
 response body.
 
-Task 6b adds cooperative cancellation around the user-facing side
-effects (sink delivery is Task 6c, ``on_http_request_complete`` is
-already here). When the route handler on T2 hits its
+Cooperative cancellation wraps the user-facing side effects (sink
+delivery and ``on_http_request_complete``). When the route handler on
+T2 hits its
 ``request_timeout_seconds`` budget, it (a) sets ``ctx.cancelled`` via
 ``call_soon_threadsafe`` so the flag is set on T1's loop, and (b)
 cancels the cross-thread ``concurrent.futures.Future`` so any awaits
@@ -42,8 +42,8 @@ they finish naturally and their results are simply discarded after
 the cancellation gate trips. Documented as a known limitation; v2
 may add SIGTERM-on-cancel for in-flight subprocesses.
 
-Task 6c adds the optional sinks-enabled path between the two
-cancellation checks. When ``config.sinks_enabled`` is True the runner
+The optional sinks-enabled path sits between the two cancellation
+checks. When ``config.sinks_enabled`` is True the runner
 calls ``handler.on_message_complete(group)`` and, if it returns a
 ``CollectResult``, delivers each sink-type batch sequentially through
 ``SinkManager.deliver_all`` so the cancellation flag can short-circuit
@@ -170,8 +170,8 @@ class WebappRunner:
 
         High-level flow (see module docstring for the rationale):
 
-        1. allocate ``ctx.cancelled`` on this loop (so a Task 6b timeout
-           on T2 binds the Event to T1, the loop that will await it);
+        1. allocate ``ctx.cancelled`` on this loop (so a timeout on T2
+           binds the Event to T1, the loop that will await it);
         2. assign a synthetic offset and build the source message;
         3. call ``arrange_http_request`` on the user hook, stamp tasks;
         4. submit tasks via the executor pool and gather results;
@@ -180,9 +180,8 @@ class WebappRunner:
         6. assemble and return the ``WebReport``.
         """
         # ``cancelled`` is allocated on the loop that awaits it (T1).
-        # Task 6b uses this to short-circuit late side effects when T2's
-        # ``wait_for`` already 504'd; Task 6a leaves the field unused but
-        # the allocation is cheap and keeps the contract uniform.
+        # The cancellation gates below use it to short-circuit late side
+        # effects when T2's ``wait_for`` already 504'd.
         if ctx.cancelled is None:
             ctx.cancelled = asyncio.Event()
 
@@ -279,8 +278,8 @@ class WebappRunner:
         finally:
             clear_hook_context(hook_token)
 
-        # Stamp every task with the HTTP origin markers. The plan note
-        # confirms ``ExecutorTask`` is a mutable Pydantic model (no
+        # Stamp every task with the HTTP origin markers.
+        # ``ExecutorTask`` is a mutable Pydantic model (no
         # ``model_config['frozen']``), so direct assignment is the
         # simplest correct option. ``model_copy(update=...)`` would
         # produce a fresh object the user no longer holds a reference
@@ -340,8 +339,6 @@ class WebappRunner:
         # Bail out before building the synthetic ``MessageGroup`` and
         # invoking the user's response hook — those side effects are
         # wasted work once T2 has already returned a 504 to the caller.
-        # The metric increment + recorder row land in Task 7 / Task 8;
-        # for now we structured-log only.
         if ctx.cancelled is not None and ctx.cancelled.is_set():
             await logger.ainfo(
                 'webapp_request_dropped_after_timeout',
@@ -370,7 +367,7 @@ class WebappRunner:
             request_id=ctx.request_id,
         )
 
-        # ----- Stage: optional sinks delivery (Task 6c) -----
+        # ----- Stage: optional sinks delivery -----
         # Only fires on the opt-in ``sinks_enabled=True`` path. Mirrors
         # the Kafka pipeline's behaviour: ``on_message_complete`` may
         # return ``None`` (no rollup payloads) — we treat that as "no
@@ -460,11 +457,10 @@ class WebappRunner:
                 success=len(successful_results),
                 failed=len(group_errors),
             ),
-            # Task 6a does not thread per-request cache stats through the
+            # Per-request cache stats are not threaded through the
             # runner — the cache exposes only Prometheus counters today,
             # and there is no per-request observation hook. CacheStats
-            # default zeros keep the response shape stable for clients;
-            # Task 6c / Task 7 may revisit if a per-request hook lands.
+            # default zeros keep the response shape stable for clients.
             cache=CacheStats(),
             # Populated by ``_deliver_sinks`` only when ``sinks_enabled``
             # is True AND ``on_message_complete`` returned a non-empty
@@ -551,18 +547,18 @@ class WebappRunner:
         """Build a compact ``TaskReport`` from an executor result.
 
         Excludes stdout/stderr by design — operators read those via the
-        recorder/debug UI. The plan's "Response shape" section
-        documents this rule explicitly.
+        recorder/debug UI (see the response-shape reference in
+        ``docs/webapp.md``).
         """
         return TaskReport(
             task_id=result.task.task_id,
             exit_code=result.exit_code,
             duration_ms=result.duration_seconds * 1000.0,
-            retries=0,  # Retries land in Task 6b/6c on the on_error path.
+            retries=0,  # Retry tracking is not threaded through the webapp path.
         )
 
     # ------------------------------------------------------------------
-    # Sinks integration (Task 6c)
+    # Sinks integration
     # ------------------------------------------------------------------
 
     async def _deliver_sinks(
@@ -613,8 +609,8 @@ class WebappRunner:
         """
         # Step 1: invoke on_message_complete to gather sink payloads.
         # Wrap user-hook exceptions in WebappHandlerError so the route
-        # handler can emit a flat 500 — same pattern as Task 6a uses
-        # for arrange_http_request / on_http_request_complete.
+        # handler can emit a flat 500 — same pattern as
+        # arrange_http_request / on_http_request_complete.
         try:
             collect_result = await self._app._handler.on_message_complete(group)
         except Exception as exc:

@@ -1707,8 +1707,9 @@ function probeMakeScrollablePreBlock(title, content, opts) {
     // Card-style block for long textual fields (stdin/stdout/stderr/result
     // JSON). Content is always written via ``textContent`` — NEVER innerHTML
     // — because probe input can contain arbitrary bytes (null chars, ANSI
-    // escapes, etc.) that must not be parsed as HTML. See the XSS notes in
-    // the plan's "Critical" section.
+    // escapes, etc.) that must never be parsed as HTML: a probe payload
+    // echoing attacker-controlled markup would otherwise run script in
+    // the operator's browser (stored XSS).
     opts = opts || {};
     var wrap = document.createElement('div');
     wrap.className = 'mb-3 rounded border border-cream-200';

@@ -391,8 +391,8 @@ When a worker restarts, its in-memory dict is empty. The DB file
 (`<worker>-cache.db`) still has all the entries, so `get()` will
 lazily warm memory on first access per key. There is **no eager
 preload** on startup — adding it would stall startup and race with
-normal traffic. The plan considered and rejected it (YAGNI: normal
-traffic warms the cache within one flush cycle).
+normal traffic. This is deliberate (YAGNI: normal traffic warms the
+cache within one flush cycle).
 
 The peer-sync cursor resets to 0 on restart, so the worker also
 re-pulls everything from peers once. Bounded by TTL cleanup and LWW
