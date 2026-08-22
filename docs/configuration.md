@@ -314,7 +314,9 @@ Produces messages to a Kafka topic.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `topic` | `str` | *(required)* | Target Kafka topic for output messages. |
-| `brokers` | `str` | `''` | Kafka brokers for this sink. If empty, inherits from `kafka.brokers` (same cluster as the source). |
+| `brokers` | `str` | `''` | Kafka brokers for this sink. If empty, inherits from `kafka.brokers` (same cluster as the source) — and with them `kafka.security` and `kafka.client_config`. |
+| `security` | `KafkaSecurityConfig` | PLAINTEXT | Transport authentication and encryption for this sink. Only consulted when `brokers` is set; an inheriting sink uses the consumer's security instead. Same shape as [Kafka security](#kafka-security-kafkasecurity). |
+| `client_config` | `dict[str, str]` | `{}` | Raw librdkafka properties for this sink, merged after `security`. Only consulted when `brokers` is set. Same rules as [the escape hatch](#raw-librdkafka-overrides-client_config). |
 | `ui_url` | `str` | `''` | URL to a web UI for this sink (e.g., Kafka UI, Kowl). Displayed as a link in the operator UI dashboard. |
 
 ### PostgreSQL Sink (`sinks.postgres.<name>`)
@@ -326,6 +328,7 @@ Inserts rows into a PostgreSQL database via an asyncpg connection pool.
 | `dsn` | `str` | *(required)* | | PostgreSQL connection string (e.g., `postgresql://user:pass@host:5432/db`). |
 | `pool_min` | `int` | `2` | >= 1 | Minimum number of connections in the pool. |
 | `pool_max` | `int` | `10` | >= 1 | Maximum number of connections in the pool. |
+| `statements` | `dict[str, str]` | `{}` | | Operator-authored SQL keyed by name, run by `PostgresPayload(op='statement')` with `:name` placeholder binding. See [statement — arbitrary SQL](sink-write-operations.md#statement-arbitrary-sql-operator-controlled). |
 | `ui_url` | `str` | `''` | | URL to a database management UI (e.g., pgAdmin). |
 
 ### MongoDB Sink (`sinks.mongo.<name>`)
@@ -336,6 +339,7 @@ Inserts documents into a MongoDB database via PyMongo's AsyncMongoClient.
 |-------|------|---------|-------------|
 | `uri` | `str` | *(required)* | MongoDB connection URI (e.g., `mongodb://host:27017`). |
 | `database` | `str` | *(required)* | Target database name. |
+| `statements` | `dict` | `{}` | Operator-authored MQL keyed by name, run by `MongoPayload(op='statement')` with `:name` placeholder binding. See [statement — arbitrary MQL](sink-write-operations.md#statement-arbitrary-mql-operator-controlled). |
 | `ui_url` | `str` | `''` | URL to a MongoDB management UI (e.g., Mongo Express). |
 
 ### HTTP Sink (`sinks.http.<name>`)
@@ -403,6 +407,7 @@ Sets key-value pairs in Redis.
 |-------|------|---------|-------------|
 | `url` | `str` | `'redis://localhost:6379/0'` | Redis connection URL. |
 | `key_prefix` | `str` | `''` | Prefix prepended to all keys (e.g., `cache:` produces keys like `cache:my-key`). |
+| `scripts` | `dict[str, str]` | `{}` | Operator-authored Lua keyed by name, run by `RedisPayload(op='script')` with `keys`/`args` passed as `KEYS`/`ARGV`. See [script — arbitrary Lua](sink-write-operations.md#script-arbitrary-lua-operator-controlled). |
 | `ui_url` | `str` | `''` | URL to a Redis management UI (e.g., RedisInsight). |
 
 ### Filesystem Sink (`sinks.filesystem.<name>`)
@@ -411,8 +416,21 @@ Appends JSONL lines to files on disk.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `base_path` | `str` | `''` | Optional base directory. Individual payloads specify their own full paths. |
+| `base_path` | `str` | *(required)* | Base directory. Payload paths are resolved relative to it and must stay contained within it — absolute or traversing paths are rejected. |
 | `ui_url` | `str` | `''` | URL to a file browser or related UI. |
+
+### Custom Sinks (`sinks.custom.<type>.<name>`)
+
+Plugin-discovered sink instances. Top-level keys under `sinks.custom` are sink type names registered via `[project.entry-points."drakkar.sinks"]`; second-level keys are instance names; the leaf dict is plugin-defined config passed verbatim to the sink class constructor (Drakkar cannot validate its shape — the plugin can wrap it in its own Pydantic model). An unregistered type name fails at startup rather than silently dropping the sink. See [Custom sinks (plugin API)](sinks.md#custom-sinks-plugin-api).
+
+```yaml
+sinks:
+  custom:
+    my_custom_type:
+      audit_trail_out:
+        endpoint: https://audit.internal.example.com
+        buffer_size: 500
+```
 
 ### Example: Multiple Named Sinks
 
@@ -470,7 +488,7 @@ machine and metrics.
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `failure_threshold` | `int` | `5` | >= 1 | Consecutive terminal failures required to trip the breaker. A `SKIP` outcome does NOT count — it's operator intent, not a health signal. |
-| `cooldown_seconds` | `float` | `30.0` | >= 0.1 | Seconds the breaker stays open before promoting to half-open and allowing a single probe through. |
+| `cooldown_seconds` | `float` | `30.0` | >= 0.0 | Seconds the breaker stays open before promoting to half-open and allowing a single probe through. |
 
 ```yaml
 sinks:
@@ -493,7 +511,9 @@ Failed sink deliveries can be routed to a [DLQ](sinks.md#dead-letter-queue) Kafk
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `topic` | `str` | `''` | DLQ Kafka topic name. If empty, auto-derived as `{source_topic}_dlq` (e.g., `input-events_dlq`). |
-| `brokers` | `str` | `''` | Kafka brokers for the DLQ. If empty, inherits from `kafka.brokers`. |
+| `brokers` | `str` | `''` | Kafka brokers for the DLQ. If empty, inherits from `kafka.brokers` — and with them `kafka.security` and `kafka.client_config`, on the same same-cluster-means-same-credentials rule the Kafka sinks follow. |
+| `security` | `KafkaSecurityConfig` | PLAINTEXT | Transport authentication and encryption for the DLQ producer. Only consulted when `brokers` is set. Same shape as [Kafka security](#kafka-security-kafkasecurity). |
+| `client_config` | `dict[str, str]` | `{}` | Raw librdkafka properties for the DLQ producer, merged after `security`. Only consulted when `brokers` is set. Same rules as [the escape hatch](#raw-librdkafka-overrides-client_config). |
 | `on_send_failure` | `'drop'` \| `'stall'` | `'drop'` | Strategy when the DLQ write itself fails. `drop`: log + count the loss, commit the offset, keep the pipeline moving. `stall`: leave the offset uncommitted and pause the partition until restart — no loss, at the cost of consumer lag. See [When the DLQ itself fails](sinks.md#when-the-dlq-itself-fails). |
 
 ```yaml
@@ -513,11 +533,31 @@ Prometheus metrics endpoint configuration.
 |-------|------|---------|-------------|-------------|
 | `enabled` | `bool` | `true` | | Enable or disable the Prometheus metrics HTTP server. |
 | `port` | `int` | `9090` | 1--65535 | Port for the Prometheus metrics endpoint. |
+| `task_label_histograms` | `list[str]` | `[]` | | Task label keys whose numeric values are observed into the `drakkar_task_label_value` histogram at task completion, one time series per key (e.g. a file-size or line-count label). Values that do not parse as finite numbers are skipped. |
 
 ```yaml
 metrics:
   enabled: true
   port: 9090
+  task_label_histograms: [file_size_bytes]
+```
+
+---
+
+## Throughput (`throughput:`)
+
+Opt-in task cost tracking: per-task speed and windowed throughput — see the dedicated
+[Throughput](throughput.md) page for the full feature.
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `cost_label` | `str` | `''` | | Task label key whose numeric value is the task cost — a number correlating with computational hardness (bytes, a computed score, any unit). Empty (the default) disables the whole feature. Values that do not parse as finite numbers leave the task uncounted. |
+| `min_cost` | `float` | `0.0` | >= 0 | Smallest cost worth counting. Tasks below it carry no speed and enter no aggregate — useful when fixed overhead dominates small tasks and their speeds would mislead. |
+
+```yaml
+throughput:
+  cost_label: file_size_bytes
+  min_cost: 0.0
 ```
 
 ---
@@ -538,6 +578,40 @@ runtime_health:
   sample_interval_seconds: 10.0
   history_window_seconds: 900
 ```
+
+## Blocking I/O pool (`io:`)
+
+Sizing for asyncio's default `to_thread` executor — the single process-wide pool
+behind every `asyncio.to_thread(...)` call, handler filesystem reads included.
+Distinct from `offload.max_threads`, which sizes the separate pool behind
+`handler.offload()`. See [Threads & Pools](threads.md) for the full map.
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `max_threads` | `int` | `0` | 0--512 | Worker threads in asyncio's default `to_thread` executor. `0` (the default) keeps Python's own sizing, `min(32, cpu_count + 4)`. Set an explicit value when handler I/O concurrency is capped by the pool — e.g. many-core hosts doing wide blocking filesystem fan-out. Blocking I/O releases the GIL, so large values are legitimate here; the trade-off is pressure on the storage behind the calls. |
+
+```yaml
+io:
+  max_threads: 0
+```
+
+---
+
+## Offload pool (`offload:`)
+
+Thread pool behind [`handler.offload()`](offload.md) — CPU-bound hook work moved
+off the event loop. See the dedicated [Offload](offload.md) page.
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `max_threads` | `int` | `0` | 0--32 | Worker threads in the shared offload pool. `0` (the default) sizes the pool automatically from the executor pool: `ceil(executor.max_executors / 4)`, minimum 2. Calls beyond this many concurrent offloaded computations queue (FIFO) and show up in the `drakkar_offload_queued` gauge. More threads do not speed up pure-Python work (GIL); set an explicit value only when several partitions routinely offload at once and queueing delay matters, or when the offloaded code releases the GIL (numpy, compiled extensions). |
+
+```yaml
+offload:
+  max_threads: 0
+```
+
+---
 
 ## Logging (`logging:`)
 
@@ -597,6 +671,7 @@ Top-level `ui.*` fields configure the UI server itself and the presentation sett
 | `auth_token` | `str` | `''` | | Bearer token for sensitive endpoints (database download, merge, message probe) **and** for the WebSocket live-event stream at `/ws`. **Empty (the default) disables auth entirely** — every endpoint is reachable without credentials and the WebSocket skips both token and Origin checks. This is intentional: the UI is intended for private-network deployments, and a startup warning (`ui_unauthenticated`) names the unauthenticated posture in logs along with any side-effecting endpoint still enabled. When set to a non-empty value, protected HTTP endpoints require `Authorization: Bearer <token>` header or `?token=<token>` query parameter; WebSocket connections without a valid token are closed with code 4401. Comparison uses `secrets.compare_digest` to avoid timing side-channels. Leading/trailing whitespace is stripped on config load so `auth_token: " secret "` in YAML still works (and a token of only spaces is treated as empty). Read-only pages (dashboard, live, partitions, sinks, history) are always accessible. |
 | `probe_enabled` | `bool` | `true` | | Serve `POST /api/debug/probe`. The probe runs caller-supplied bytes through the live handler and the real executor subprocess pool, so it competes with production traffic for executor slots. `false` serves `403` instead — independently of `auth_token` (see [Authentication](#authentication)). Probes never write sinks, recorder rows, cache entries, or offsets, so switching it off costs no pipeline behavior. |
 | `merge_enabled` | `bool` | `true` | | Serve `POST /api/debug/merge`. Each call writes a new `merged-<ts>.db` into `ui.recorder.db_dir` and nothing reclaims it, so repeated calls grow unbounded. `false` serves `403` instead — independently of `auth_token`. |
+| `kafka_read_enabled` | `bool` | `true` | | Serve `GET /api/debug/kafka/*` — ad-hoc reads of the configured topics (source, DLQ, and each Kafka sink by instance name; never an arbitrary topic). Reads use `assign()`-only consumers that join no consumer group and commit no offsets, so they are invisible to the pipeline. `false` serves `403` instead — independently of `auth_token`. When the resolved Kafka security of any readable topic is not PLAINTEXT while `auth_token` is empty, startup logs a warning naming the exposed aliases. See [Kafka Read API](kafka-read.md). |
 | `allowed_ws_origins` | `list[str]` | `[]` | | Explicit allowlist of WebSocket `Origin` header values. Only consulted when `auth_token` is set (empty token = no origin check, dev workflow preserved). Empty list + non-empty `auth_token` = same-origin fallback: Origin host must match the `Host` header. Non-empty list = strict allowlist; any Origin not in the list is rejected with close code 4403. Comparison is case-insensitive and normalizes default ports (`:80` for http, `:443` for https) so `https://ops.internal` and `https://ops.internal:443` are equivalent. Missing Origin header (non-browser clients) is always accepted -- the token check already authenticated them. |
 | `public_url` | `str` | `''` | | External URL for this worker's UI. Used when workers discover each other -- if set, this URL is advertised instead of the auto-detected `http://{ip}:{port}`. Useful behind load balancers or Kubernetes ingresses. |
 | `expose_env_vars` | `list[str]` | `[]` | | List of environment variable names to capture and store in `worker_config.env_vars_json`. Useful for recording deployment metadata (e.g., `['GIT_SHA', 'DEPLOY_ENV', 'K8S_POD_NAME']`). |
@@ -654,6 +729,27 @@ ui:
   custom_renderers_path: /etc/drakkar/renderers.js
 ```
 
+### Consume Pause (`ui.consume_pause:`)
+
+Timed debug pause of message intake, driven from the Live page — see the dedicated
+[Consume Pause](consume-pause.md) page.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `false` | Serve the consume-pause API (`/api/debug/consume-pause`) and show the pause control on the Live page. Off by default: pausing stops message intake for the chosen duration, which is a production-affecting act — enable it deliberately, for debug-friendly deployments. |
+| `durations_seconds` | `list[int]` | `[15, 60, 300, 900]` | Preset pause durations (seconds) offered as one-click buttons on the Live page. Each preset must sit in the same 1--3600 range the API enforces; the API itself accepts any duration in that range regardless of the presets. |
+
+### Probe Details Caps (`ui.probe_details:`)
+
+Write caps for the Message Probe's user-defined details tab (`max_writes`, default
+`10000`; `max_total_bytes`, default `5000000`) — see
+[Probe User Details](probe-user-details.md) for the feature and when to raise them.
+
+### Timeline Tuning (`ui.timeline:`)
+
+Live-timeline history depth, first-match-wins bar color rules, and label roles —
+covered field-by-field on the dedicated [Timeline Tuning](ui-timeline.md) page.
+
 ### Flight Recorder (`ui.recorder:`)
 
 Flight-recorder persistence — the UI's data store. All flags below require `db_dir` to be non-empty; any combination of the `store_*` flags is valid.
@@ -669,16 +765,24 @@ Flight-recorder persistence — the UI's data store. All flags below require `db
 | `archive_enabled` | `bool` | `true` | | Fold rotated-out files into compressed per-cluster, per-window archives and delete the raw files a pass successfully merged. `false` disables the pass entirely — no raw file is ever deleted automatically. See [Archiving](local-databases.md#archiving). |
 | `archive_window_hours` | `int` | `24` | >= 1, and >= `rotation_interval_hours` | Width of one archive window in hours (UTC epoch-aligned); a window is archived once it ended a full window ago and none of its files were written in the last rotation interval. |
 | `archive_retention_days` | `int` | `0` | >= 0, and `>= 2 * archive_window_hours / 24` when non-zero | How long archived `.db.gz` files are kept before deletion. `0` keeps archives forever. |
+| `dbstats_warm_interval_seconds` | `int` | `60` | >= 5 | How often the background warmer sweeps `db_dir`, computing statistics for database files the `.dbstats` cache does not know yet and purging entries for deleted files. Cheap when everything is already cached — one directory listing plus one small SELECT. |
+| `dbstats_inline_scan_limit` | `int` | `4` | >= 0 | How many cold (uncached) database files one `/api/debug/databases` request may fully scan inline. Files beyond the cap return immediately with `stats_pending=true` and fill in as the warmer catches up. `0` = requests never scan; matters only on a cold cache (first boot over a pre-existing directory). |
 | `store_output` | `bool` | `true` | | Include subprocess stdout/stderr in event records. Disable to save disk space when output is large or not needed for debugging. |
+| `store_stdin` | `bool` | `false` | | Store each task's stdin content (capped at `stdin_max_bytes`) in the `task_started` event metadata, so the debug UI can show exactly what a task consumed. Off by default: on a high-fan-out workload stdin is the largest payload the recorder would write. Failed tasks always store their stdin (capped) on the `task_failed` event, regardless of this flag. |
+| `stdin_max_bytes` | `int` | `65536` | >= 0 | Byte cap for stored stdin content (`store_stdin`, and the always-on failed-task capture). `0` = unlimited. Truncation is flagged as `stdin_truncated` in the event metadata. |
 | `flush_interval_seconds` | `int` | `5` | >= 1 | How often (seconds) the in-memory event buffer is flushed to SQLite. |
 | `max_buffer` | `int` | `50000` | >= 1000 | Maximum number of events held in the in-memory buffer. When full, oldest events are dropped (ring buffer). |
 | `max_flush_retries` | `int` | `3` | >= 1 | How many times a flush batch is re-queued on transient `OperationalError` (database is locked, disk I/O error, etc.) before the batch is dropped. On drop, `drakkar_recorder_flush_batches_dropped_total` ticks; on each retry `drakkar_recorder_flush_retries_total` ticks. |
 | `event_min_duration_ms` | `int` | `0` | >= 0 | See [Duration Thresholds](#duration-thresholds) above. |
 | `output_min_duration_ms` | `int` | `500` | >= 0 | See [Duration Thresholds](#duration-thresholds) above. |
+| `annotations_enabled` | `bool` | `true` | | Record handler [annotations](annotations.md) (diagnostic records attached to a window, message, or task from inside a hook) as rows in the `events` table. |
+| `annotation_max_bytes` | `int` | `16384` | >= 0 | Byte cap for one annotation payload; an oversize record is dropped whole rather than truncated. `0` disables the cap. See [Annotations](annotations.md) for the budgets and the drop policy. |
+| `annotation_max_bytes_per_call` | `int` | `262144` | >= 0 | Total annotation bytes one hook invocation may add — bounds a handler annotating every message of a wide window. `0` disables the cap. |
+| `annotation_log_max_bytes` | `int` | `2048` | >= 0 | Cap on the payload copy written to the warning log when an annotation is dropped — log lines usually ship to a metered aggregator. |
 
 ### UI Release (`ui.release:`)
 
-Decoupled drakkar-ui bundle fetching. The UI ships as its own versioned bundle (the separate drakkar-ui repo, published to GitHub Releases); when enabled, the worker resolves that bundle (cache → fetch) and serves it in place of the built-in server-rendered pages. A fetch failure is never fatal — the worker falls back to the built-in pages, so the default is safe offline too.
+Decoupled drakkar-ui bundle fetching. The UI ships as its own versioned bundle (the separate drakkar-ui repo, published to GitHub Releases); when enabled, the worker resolves that bundle (cache → fetch) and serves it in place of the built-in server-rendered pages. A fetch failure is never fatal — the worker falls back to the drakkar-ui release embedded in the package, and only to the built-in server-rendered pages when even that embedded fallback is missing, so the default is safe offline too.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

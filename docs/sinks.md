@@ -90,7 +90,7 @@ ignored value — `PostgresPayload(op='insert', where=key)` raises.
 **Serialization:** `data.model_dump()` produces a `{column: value}` dict. Column
 and table names are validated against SQL injection. Columns are emitted in
 sorted order — not model-declaration order — so both backends render identical
-SQL; see [Column order](sink-write-operations.md#column-order).
+SQL; see [Column order](sink-write-operations.md#postgres-column-order).
 
 **Batching:** payloads batch only with *adjacent* same-shaped neighbours, so
 execution order always matches payload order. `insert` and `upsert` runs go out
@@ -612,7 +612,7 @@ uv run python scripts/replay_dlq.py \
 ```
 
 The script prints `replayed N/M` to stderr every 1000 records and a final
-summary line (`summary: read=… published=… filtered_out=… errors=…`) when it
+summary line (`summary: read=… published=… would_publish=… filtered_out=… skipped_invalid=… errors=…`) when it
 finishes. Ctrl+C is handled gracefully — the in-flight produce completes and
 the producer is flushed before exit.
 
@@ -972,7 +972,8 @@ async def on_task_complete(self, result: dk.ExecutorResult) -> dk.CollectResult 
 
     # Conditional: JSONL file log for very high-match results
     if len(matches) > 50:
-        sinks.files.append(dk.FilePayload(path='/tmp/high-match-results.jsonl', data=full_result))
+        # Relative to the sink's required base_path — absolute paths are rejected.
+        sinks.files.append(dk.FilePayload(path='high-match-results.jsonl', data=full_result))
 
     return sinks
 ```

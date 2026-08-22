@@ -18,12 +18,20 @@ Per-feature guides: [Configuration](configuration.md) ·
 |---|---|---|---|
 | Metrics exporter | `metrics.enabled` | **on** (`:9090`) | Raw Prometheus endpoint on its own port |
 | Operator UI + probes | `ui.enabled` | **on** (`:8080`) | UI server, `/api/v1`, `/ws`, **`/healthz` + `/readyz`**, and the flight recorder |
+| Message probe endpoint | `ui.probe_enabled` | **on** | `POST /api/debug/probe` — runs caller bytes through the live handler and real executor pool; `false` = 403, independently of `auth_token` |
+| Database merge endpoint | `ui.merge_enabled` | **on** | `POST /api/debug/merge` — writes an unreclaimed `merged-<ts>.db` per call; `false` = 403, independently of `auth_token` |
+| Kafka read API | `ui.kafka_read_enabled` | **on** | `GET /api/debug/kafka/*` — pipeline-invisible reads of the configured topics; `false` = 403, independently of `auth_token` |
+| Consume pause | `ui.consume_pause.enabled` | **off** | Timed Live-page pause of message intake (auto-resume); off because pausing is production-affecting |
 | Recorder persistence | `ui.recorder.db_dir` | `/tmp` | Where event history and worker metadata live; empty = memory-only |
+| Recorder archiving | `ui.recorder.archive_enabled` | **on** | Fold rotated-out DB files into per-cluster `.db.gz` window archives; off = raw files are never deleted automatically |
 | Decoupled UI bundle | `ui.release.enabled` | **on** | Fetch + serve the drakkar-ui SPA release (falls back to built-in pages) |
 | Prometheus panel + links | `ui.prometheus_url` | off (empty) | Dashboard deep-links into a Prometheus instance |
 | Cross-worker fleet view | shared `ui.recorder.db_dir` | — | Worker autodiscovery, workers list, cross-tracing |
 | Handler cache | `cache.enabled` | **off** | LWW key/value store for handler code |
 | Offload pool | `offload.max_threads` | **on** (2 threads) | [`handler.offload()`](offload.md) — CPU-bound hook work off the event loop; always available, the knob only sizes it |
+| Blocking-I/O pool size | `io.max_threads` | `0` (Python's sizing) | Size of asyncio's default `to_thread` executor; `0` keeps `min(32, cpu_count + 4)` — a knob, not a switch |
+| Runtime health monitor | `runtime_health.enabled` | **on** | Event-loop lag heartbeat, stall stack sampling, Runtime tab, `runtime_health` events |
+| Task cost & throughput | `throughput.cost_label` | **off** (empty) | Naming a numeric task label enables per-task speed and windowed throughput ([Throughput](throughput.md)) |
 | Cache peer sync | `cache.peer_sync.enabled` | **on** (when cache on) | Cross-worker cache convergence via the shared directory |
 | Synchronous HTTP ingress | `webapp.enabled` | **off** (`:8090`) | POST → handler pipeline → JSON response |
 | Aligned startup | `kafka.startup_align_enabled` | **on** | Fleet restarts converge on one rebalance |

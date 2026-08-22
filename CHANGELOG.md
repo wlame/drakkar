@@ -18,6 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Condense AGENTS.md to the non-derivable facts: cross-backend contract,
   invariants, commands, and footguns.
 
+### Fixed
+
+- Documentation accuracy pass: correct stale claims (executor `PriorityGate`
+  and process-group kill, precomputed-task metrics, webapp 429 body and
+  ports, periodic metric names, recorder flush buckets, worker_state
+  columns, cache browser defaults, filesystem sink example), repair three
+  broken anchors, and document previously missing config sections
+  (`throughput:`, `io:`, `offload:`, consume pause, probe details,
+  annotations, custom sinks, DLQ security) across configuration.md,
+  config-reference.md, features.md, handler.md, observability.md, and the
+  docs home page.
+
 ## [1.16.0] - 2026-08-21
 
 ### Added

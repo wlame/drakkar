@@ -99,6 +99,13 @@ Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execut
 - **[Structured logging](observability.md#structured-logging)** -- JSON/ECS-compatible via structlog, ready for Elastic
 - **[Periodic tasks](handler.md#periodic-tasks)** -- `@periodic` decorator for recurring background coroutines
 - **[Task labels](handler.md#task-labels)** -- custom [message_label()](handler.md#message_label) for human-readable log/UI identifiers
+- **[Runtime health](runtime-health.md)** -- event-loop lag watchdog with a live state badge, lag episodes with verdicts, and opt-in stack probes
+- **[Host pressure](host-pressure.md)** -- CPU / cgroup / memory / network-mount pressure sampling that answers "which shared resource is this worker fighting for?"
+- **[Task cost & throughput](throughput.md)** -- opt-in per-task cost and speed via a `cost_label` role, plus windowed worker throughput on the Live page
+- **[Offload](offload.md)** -- `await self.offload(fn, ...)` runs CPU-bound hook work on a thread pool instead of freezing the event loop
+- **[Consume pause](consume-pause.md)** -- opt-in timed pause of message intake from the Live page, auto-resuming at its deadline
+- **[Kafka read API](kafka-read.md)** -- inspect the worker's topics from the operator UI without touching any consumer group
+- **[Recorder archiving](observability.md#archiving)** -- flight-recorder databases rotate into gzip archives, downloadable from the UI
 - **[Error hooks](handler.md#on_error)** -- [on_error](handler.md#on_error) for executor failures, [on_delivery_error](handler.md#on_delivery_error) for sink failures (retry, skip, or DLQ)
 
 ## Quick Start
@@ -204,6 +211,7 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 | [Probe User Details](probe-user-details.md) | `probe_details_model` — a handler-defined tab in the Message Probe, `probe_field()` views and write caps |
 | [UI Enrichment](ui-enrichment.md) | Links, badges, formats, hints, and detail panels for probe-details fields and table columns; custom cell renderers |
 | [Declared UI Pages](ui-pages.md) | `ui_pages` — a handler's own dashboard page built from built-in data sources, no client-side code |
+| [UI Customization Cookbook](ui-customization-cookbook.md) | One small handler built through five short steps, showing how probe details, enrichment, and declared pages compose |
 | [Timeline Tuning](ui-timeline.md) | `ui.timeline` — history depth, first-match-wins color rules, and tag/caption/highlight/filter/marker label roles |
 | [Configuration](configuration.md) | Full YAML reference, env var overrides, `DrakkarConfig` model |
 | [Features & Enable Order](features.md) | Which switch enables what, dependency rules, tiered rollout order |
@@ -212,7 +220,14 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 | [Executor](executor.md) | Subprocess pool, concurrency, timeouts, retries, binary resolution |
 | [Webapp](webapp.md) | Synchronous HTTP pipeline, auth, rate limits, status codes |
 | [Observability](observability.md) | Operator UI pages, Prometheus metrics, structured logging setup |
+| [Kafka Read API](kafka-read.md) | Debug endpoints for reading Kafka topics from the UI server — fetch one message by coordinates or stream a time window, invisible to the pipeline |
+| [Consume Pause](consume-pause.md) | Timed Live-page pause of message intake for inspecting a live worker; auto-resumes at its deadline |
+| [Debugging Bottlenecks](debugging-bottlenecks.md) | Runbook for a worker that periodically looks stuck: the recorded signals and what each combination means |
 | [Runtime Health](runtime-health.md) | Event-loop lag monitor: heartbeat, stall sampler, state badge, Prometheus metrics |
+| [Host Pressure](host-pressure.md) | CPU / cgroup / memory / network-mount pressure sampling with episode verdicts — which shared resource the worker is fighting for |
+| [Throughput](throughput.md) | Opt-in task cost and speed via the `cost_label` role, plus windowed worker throughput |
+| [Offload](offload.md) | `await self.offload(fn, ...)` — CPU-bound hook work on a thread pool instead of freezing the event loop |
+| [Threads & Pools](threads.md) | Map of the worker's execution mechanisms — event loop, subprocess pool, two thread pools — and their sizing rules |
 | [Local Databases](local-databases.md) | SQLite spec: schemas, discovery, peer sync, mixed-fleet support |
 | [Performance](performance.md) | Per-task overhead, bottleneck analysis, tuning recommendations |
 | [Config Calculator](calculator.md) | Interactive calculator for recommended config values |

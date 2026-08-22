@@ -130,6 +130,15 @@ Prometheus needed for a quick read.
 | `drakkar_handler_duration_seconds` | Histogram | `hook` (`arrange`, `on_task_complete`, `on_message_complete`, `on_error`, `on_window_complete`, etc.) | Duration of user handler hook execution. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30 |
 | `drakkar_handler_hook_errors_total` | Counter | `hook` | User hooks that raised instead of returning. The framework contains the failure and keeps the partition flowing, so this counter is the only signal that a handler is broken — **alert on any non-zero rate** |
 
+#### Periodic tasks
+
+Covers both user-defined [`@periodic`](#periodic-tasks) methods and the framework's system loops (`cache.flush`, `cache.sync`, `cache.cleanup`, ...), keyed by task name.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `drakkar_periodic_task_runs_total` | Counter | `name`, `status` (`ok`, `error`) | Periodic task executions by name and outcome. Alert on a non-zero `status="error"` rate — the wrapper logs and keeps scheduling by default, so this counter is the durable failure signal. |
+| `drakkar_periodic_task_duration_seconds` | Histogram | `name` | Duration of periodic task executions. Buckets: 0.001, 0.01, 0.1, 0.5, 1, 5, 10, 30, 60. |
+
 #### Offload pool
 
 CPU-bound hook work moved off the event loop via [`handler.offload()`](offload.md).
@@ -148,9 +157,11 @@ Emitted only when [`ui.enabled=true`](configuration.md#ui-flight-recorder-ui). T
 |--------|------|--------|-------------|
 | `drakkar_recorder_buffer_size` | Gauge | -- | Current depth of the in-memory event buffer. Updated on every `_record()` call and after each flush. A sustained value near `max_buffer` signals the flush loop can't keep up with incoming events -- raise `flush_interval_seconds` or `max_buffer`, or investigate disk latency. |
 | `drakkar_recorder_dropped_events_total` | Counter | -- | Events evicted from the ring buffer because it was full at record time. Non-zero means event history has gaps; scale the buffer up or speed up flushes. This was previously a silent failure mode -- the counter makes it alertable. |
-| `drakkar_recorder_flush_duration_seconds` | Histogram | -- | Duration of the full flush body (`executemany` + `commit`). Exposes disk-I/O latency tail. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1. Alert on p99 exceeding `flush_interval_seconds` -- flushes overlapping the next scheduled flush starve the buffer. |
+| `drakkar_recorder_flush_duration_seconds` | Histogram | -- | Duration of the full flush body (`executemany` + `commit`). Exposes disk-I/O latency tail. Buckets: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5. Alert on p99 exceeding `flush_interval_seconds` -- flushes overlapping the next scheduled flush starve the buffer. |
 | `drakkar_recorder_flush_retries_total` | Counter | -- | Flush attempts that failed with `aiosqlite.OperationalError` and re-queued their batch at the front of the buffer. A non-zero `rate(...[5m])` signals a transient DB-health issue (WAL lock, disk pressure); if it climbs without stabilising, the recorder is about to start dropping batches. Pair with `drakkar_recorder_flush_batches_dropped_total` to distinguish "retrying" from "giving up". |
 | `drakkar_recorder_flush_batches_dropped_total` | Counter | -- | Batches discarded after `max_flush_retries` consecutive failures. This is silent recorder data loss — alert on any non-zero rate. Investigate disk space, filesystem health, and WAL contention. |
+| `drakkar_recorder_requeue_overflow_total` | Counter | -- | Events silently dropped from the recorder buffer tail when an `OperationalError`-triggered requeue exceeded `max_buffer` capacity (concurrent records filled the deque during the flush). Any non-zero value is data loss on the flush-retry path — alert alongside `flush_batches_dropped_total`. |
+| `drakkar_recorder_ws_dropped_events_total` | Counter | -- | Events dropped for a live WebSocket subscriber whose queue was full. Affects only that subscriber, which is signalled to resync from the DB, so the UI self-heals; sustained growth means live views cannot keep up with event volume. |
 | `drakkar_recorder_annotations_total` | Counter | -- | Handler annotations accepted and written to the recorder. See [Annotations](annotations.md). |
 | `drakkar_recorder_annotations_dropped_total` | Counter | `reason` | Annotations discarded before reaching the recorder. `reason` is `oversize` (payload alone exceeded `annotation_max_bytes`), `budget_exhausted` (the hook invocation had spent `annotation_max_bytes_per_call`), `no_context` (called outside a framework-invoked hook — a handler bug), or `unserializable`. Payloads are dropped whole, never truncated. The accompanying warning log falls silent after five drops in one hook invocation to protect the log pipeline, so **alert on this counter, not on log volume**. |
 
@@ -178,7 +189,7 @@ Emitted only when [`cache.enabled=true`](cache.md). Memory gauges are maintained
 | `drakkar_cache_bytes_in_db` | Gauge | -- | Sum of `size_bytes` across DB rows. Refreshed by the cleanup loop. |
 
 Cache flush/sync/cleanup loop durations are captured by the existing
-`periodic_task_duration{name="cache.flush|cache.sync|cache.cleanup"}`
+`drakkar_periodic_task_duration_seconds{name="cache.flush|cache.sync|cache.cleanup"}`
 histogram — no dedicated cache-only timing histograms.
 
 #### Webapp
@@ -252,6 +263,12 @@ with `drakkar_uncommitted_offsets_at_stop` and
 `drakkar_inflight_at_stop` from the previous run (Prometheus retains
 the last-set value across restarts) to gauge how much in-flight work
 was lost.
+
+Some feature-specific metrics are documented on their own pages rather
+than here: [runtime health](runtime-health.md#what-you-see) (event-loop
+lag gauges and stall counters),
+[task cost & throughput](throughput.md#where-the-numbers-appear), and
+[consume pause](consume-pause.md#observability).
 
 ### User-Defined Metrics
 
@@ -723,7 +740,7 @@ This table is what enables the worker autodiscovery feature -- other workers sca
 
 #### `worker_state` -- Periodic Snapshots
 
-Appended every `state_sync_interval_seconds` (default: 10). Captures a point-in-time snapshot: `uptime_seconds`, `assigned_partitions`, `partition_count`, `pool_active`, `pool_max`, `total_queued`, cumulative counters (`consumed_count`, `completed_count`, `failed_count`, `produced_count`, `committed_count`), and `paused` flag.
+Appended every `state_sync_interval_seconds` (default: 10). Captures a point-in-time snapshot: `uptime_seconds`, `assigned_partitions`, `partition_count`, `pool_active`, `pool_max`, `total_queued`, cumulative counters (`consumed_count`, `completed_count`, `failed_count`, `produced_count`, `committed_count`), `paused` flag, `health_state` and `loop_lag_ms` from the [runtime health monitor](runtime-health.md), and a `throughput` JSON column with the windowed [task throughput](throughput.md) snapshot (NULL when `throughput.cost_label` is unset).
 
 ### File Layout and Rotation
 

@@ -260,6 +260,21 @@ sinks:
       ui_url: ''                   # env: DK_SINKS__FILESYSTEM__ARCHIVE__UI_URL
 ```
 
+### Custom sinks (plugins)
+
+📚 [Deep details](configuration.md#custom-sinks-sinkscustomtypename) · [Plugin API](sinks.md#custom-sinks-plugin-api)
+
+Instances of sink types registered by plugin packages via `[project.entry-points."drakkar.sinks"]`. The leaf config dict is plugin-defined and passed verbatim to the sink class constructor; an unregistered type name fails at startup.
+
+```yaml
+sinks:
+  custom:
+    my_custom_type:                # entry-point-registered sink type name
+      audit_trail_out:             # instance name (free-form, referenced from handler code)
+        endpoint: https://audit.internal.example.com   # plugin-defined fields — Drakkar passes
+        buffer_size: 500                               #   the dict through unvalidated
+```
+
 ### Circuit breaker (shared default)
 
 📚 [Deep details](configuration.md#circuit-breaker-sinkscircuit_breaker) · [State machine](sinks.md#circuit-breaker)
@@ -284,7 +299,12 @@ Failed sink deliveries (after retries are exhausted, or when a circuit breaker i
 ```yaml
 dlq:
   topic: ''                        # empty = auto-derive "{source_topic}_dlq". env: DK_DLQ__TOPIC
-  brokers: ''                      # empty = inherit kafka.brokers. env: DK_DLQ__BROKERS
+  brokers: ''                      # empty = inherit kafka.brokers AND kafka.security. env: DK_DLQ__BROKERS
+  security: {}                     # only consulted when `brokers` is set above; same fields as
+                                   #   kafka.security (env: DK_DLQ__SECURITY__<FIELD>).
+                                   #   Leaving brokers empty is the usual choice.
+  client_config: {}                # raw librdkafka overrides for the DLQ producer, merged after
+                                   #   security; only consulted when `brokers` is set
 
   # Strategy when the DLQ write itself fails (payloads have nowhere safe to go):
   #   drop  — log CRITICAL + tick drakkar_dlq_dropped_payloads_total, commit the offset,
@@ -505,13 +525,30 @@ ui:
     event_min_duration_ms: 0         # min ms to persist to SQLite (0 = persist all). env: DK_UI__RECORDER__EVENT_MIN_DURATION_MS
     output_min_duration_ms: 500      # min ms to include stdout/stderr in event. env: DK_UI__RECORDER__OUTPUT_MIN_DURATION_MS
 
-  # --- drakkar-ui bundle fetching (never fatal; offline falls back to built-in pages) ---
+    # --- Handler annotations (see annotations.md; 0 disables a byte cap) ---
+    annotations_enabled: true        # record self.annotate(...) rows in the events table. env: DK_UI__RECORDER__ANNOTATIONS_ENABLED
+    annotation_max_bytes: 16384      # cap per annotation payload; oversize records drop whole.
+                                     # env: DK_UI__RECORDER__ANNOTATION_MAX_BYTES
+    annotation_max_bytes_per_call: 262144  # total annotation bytes one hook invocation may add.
+                                     # env: DK_UI__RECORDER__ANNOTATION_MAX_BYTES_PER_CALL
+    annotation_log_max_bytes: 2048   # cap on the payload copy in the drop-warning log line.
+                                     # env: DK_UI__RECORDER__ANNOTATION_LOG_MAX_BYTES
+
+  # --- drakkar-ui bundle fetching (never fatal; offline falls back to the embedded bundle, then built-in pages) ---
   release:
     enabled: true                    # resolve + serve the drakkar-ui bundle. env: DK_UI__RELEASE__ENABLED
     repo: wlame/drakkar-ui           # "owner/name" GitHub repo publishing UI bundles. env: DK_UI__RELEASE__REPO
     pinned_version: ''               # known-good UI release tag (e.g. v1.2.0); '' = unpinned. env: DK_UI__RELEASE__PINNED_VERSION
     cache_dir: ''                    # bundle cache root; '' = $XDG_CACHE_HOME/drakkar/ui. env: DK_UI__RELEASE__CACHE_DIR
     check_update: true               # resolve the latest release tag on startup. env: DK_UI__RELEASE__CHECK_UPDATE
+
+  # --- Message Probe user-details write caps (see probe-user-details.md) ---
+  probe_details:
+    max_writes: 10000                # max probe.set/append/update calls per probe run; the first write
+                                     # past the cap records one ProbeError, further writes drop silently.
+                                     # env: DK_UI__PROBE_DETAILS__MAX_WRITES
+    max_total_bytes: 5000000         # total serialized bytes of probe-details writes per run; past it,
+                                     # writes drop like max_writes. env: DK_UI__PROBE_DETAILS__MAX_TOTAL_BYTES
 
   # --- Live timeline tuning: history depth, bar color rules, label roles (see ui-timeline.md) ---
   timeline:

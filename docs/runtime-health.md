@@ -163,7 +163,7 @@ runtime_health:
 ```
 
 Every field is environment-overridable (`DK_RUNTIME_HEALTH__*`); see the
-[config reference](config-reference.md#runtime-health-runtime-health).
+[config reference](config-reference.md#runtime-health-runtime_health).
 
 ## Interpreting what you find
 
@@ -210,4 +210,4 @@ so the verdicts that matter there are `starved` and `cpu_bound`).
 
 - [Offload](offload.md) — the remedy for stalls caused by CPU-bound hook code
 - [Observability](observability.md) — metrics, flight recorder, logs
-- [Config reference](config-reference.md#runtime-health-runtime-health)
+- [Config reference](config-reference.md#runtime-health-runtime_health)

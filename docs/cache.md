@@ -207,7 +207,7 @@ fires, `_sync_once` tears down the in-flight peer reads, ticks the
 unlabelled `cache_peer_sync_timeouts_total` counter, and raises
 `TimeoutError` so the periodic-task wrapper classifies the run as
 `status=error` — dashboards keyed on
-`periodic_task_runs{status='error'}` pick up deadline breaches through
+`drakkar_periodic_task_runs_total{status='error'}` pick up deadline breaches through
 the same alerting path as other failures. The periodic loop keeps
 running (the wrapper's default on-error behavior is to log + schedule
 the next tick), so a single deadline fire does not disable peer sync.
@@ -548,9 +548,9 @@ opens `/debug/cache`.
 ### `/debug/cache` — entries browser
 
 - Header stats: in-memory entries / bytes, DB entries / bytes
-- Filter bar: scope dropdown, key-prefix search, "show only expired"
-  toggle
-- Paginated table of entries (limit default 100, max 1000): key,
+- Filter bar: scope dropdown, key search (case-sensitive substring
+  match), "show only expired" toggle
+- Paginated table of entries (limit default 200, max 1000): key,
   scope, size, age, TTL remaining, origin worker
 - Side panel on click: decoded JSON value + full metadata
   (created_at, updated_at, expires_at, origin_worker_id)

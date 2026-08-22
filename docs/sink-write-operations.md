@@ -63,7 +63,7 @@ PostgresPayload(
 ```
 
 Renders `UPDATE "jobs" SET "finished_at" = $1, "status" = $2 WHERE "id" = $3`
-(columns are sorted — see [Column order](#column-order)).
+(columns are sorted — see [Column order](#postgres-column-order)).
 
 `where` is required and may not serialize to an empty mapping — an empty
 predicate would rewrite every row in the table. A `None` value in `where`

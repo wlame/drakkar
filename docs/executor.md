@@ -1,6 +1,6 @@
 # Executor System
 
-Drakkar runs external binaries as subprocesses -- not through a shell, but directly via `asyncio.create_subprocess_exec`. Arguments are passed as a list, making the execution safe from shell injection by design. Concurrency is controlled by an `asyncio.Semaphore` sized to `executor.max_executors`, and each task is bounded by a wall-clock timeout via `asyncio.wait_for`.
+Drakkar runs external binaries as subprocesses -- not through a shell, but directly via `asyncio.create_subprocess_exec`. Arguments are passed as a list, making the execution safe from shell injection by design. Concurrency is controlled by a `PriorityGate` (a semaphore-like gate that wakes contended waiters in priority order) sized to `executor.max_executors`, and each task is bounded by a wall-clock timeout via `asyncio.wait_for`.
 
 ---
 
@@ -103,7 +103,7 @@ Four outcomes are possible:
 
 **Non-zero exit** -- Raises `ExecutorTaskError`. The [on_error()](handler.md#on_error) hook decides what to do.
 
-**Timeout** -- The process is killed (`proc.kill()`), and `ExecutorTaskError` is raised with `stderr='task timed out'`.
+**Timeout** -- The whole process tree is killed with `os.killpg(SIGKILL)` (the subprocess starts in its own process group, so grandchildren die too; on Windows, which has no process groups, this falls back to `proc.kill()`), and `ExecutorTaskError` is raised with `stderr='task timed out'`.
 
 **OSError (binary not found)** -- `ExecutorTaskError` is raised immediately. No process was ever started.
 
@@ -123,6 +123,7 @@ Returned on successful execution (exit code 0). Also attached to `ExecutorTaskEr
 | `stdout` | `str` | Captured process stdout, decoded as UTF-8 with `errors='replace'`. |
 | `stderr` | `str` | Captured process stderr, decoded as UTF-8 with `errors='replace'`. |
 | `duration_seconds` | `float` | Wall-clock time from process start to completion, rounded to 3 decimal places. |
+| `spawn_seconds` | `float \| None` | Wall-clock time creating the subprocess took (fork/exec plus any event-loop scheduling delay around it) — the parent-side share of `duration_seconds`. Single-digit milliseconds on a healthy host; grows when the worker process itself is the bottleneck. `None` for precomputed results. |
 | `task` | `ExecutorTask` | The original task that produced this result. Carries `metadata` and `labels` through the pipeline. |
 | `pid` | `int \| None` | OS process ID. `None` if the process never started. |
 | `stdout_truncated` | `bool` | `True` when stdout retention stopped at `executor.max_stdout_bytes` and the remainder was discarded. Always `False` with unlimited caps and for precomputed results. |
@@ -518,7 +519,7 @@ executor:
 | Field | Type | Default | Min | Description |
 |-------|------|---------|-----|-------------|
 | `binary_path` | `str \| None` | `None` | 1 char | Default subprocess binary. `None` requires per-task override via `ExecutorTask.binary_path`. |
-| `max_executors` | `int` | `4` | 1 | Concurrent subprocess limit (semaphore size). |
+| `max_executors` | `int` | `4` | 1 | Concurrent subprocess limit (`PriorityGate` size). |
 | `task_timeout_seconds` | `int` | `120` | 1 | Per-subprocess wall-clock timeout in seconds. |
 | `max_stdout_bytes` | `int` | `0` | 0 | Maximum bytes of stdout retained per task. `0` = unlimited. Excess output is still read and discarded (the process never blocks on a full pipe); the retained prefix is cut at a UTF-8 character boundary and `ExecutorResult.stdout_truncated` is set. |
 | `max_stderr_bytes` | `int` | `0` | 0 | Same as `max_stdout_bytes`, for stderr; sets `ExecutorResult.stderr_truncated`. |

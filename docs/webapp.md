@@ -427,9 +427,11 @@ attempted, not the full configured sink set.
 
 ## Status codes
 
-Every error response shares a flat envelope shape: `status` (string),
-`error` (human-readable), `request_id` (server-side id where one was
-allocated), and a per-status set of extra fields. The 429 / 503 bodies
+Error responses from the runner share a flat envelope shape: `status`
+(string), `error` (human-readable), `request_id` (server-side id where
+one was allocated), and a per-status set of extra fields. The 401 and
+429 gates fire before the runner allocates that envelope, so their
+bodies use their own shapes (see the table). The 429 / 503 bodies
 include a `hint` field telling the client to switch to the Kafka source
 topic for higher throughput and worker-restart resilience.
 
@@ -439,7 +441,7 @@ topic for higher throughput and worker-restart resilience.
 | 401 | `auth_failed` | `Authorization` header is missing-with-no-anonymous-slot, malformed, or names a non-configured token | `{"error": "unauthorized"}` |
 | 413 | n/a (`error: request_too_large`) | Body exceeds `max_body_bytes` (enforced before parsing; identical on both backends) | `{"error": "request_too_large", "request_id": "req-...", "details": "request body exceeds webapp.max_body_bytes (10485760 bytes)"}` |
 | 422 | n/a (legacy `error: invalid_request`) | Body is missing or fails Pydantic validation against `HttpRequestT` | `{"error": "invalid_request", "request_id": "req-...", "details": [{"loc": ["query"], "msg": "Field required", "type": "missing"}]}` |
-| 429 | `rate_limited` | Per-client rpm window is full | `{"status": "rate_limited", "error": "client 'tenant-a' exceeded rpm cap (60); try again later", "request_id": "req-...", "rpm_limit": 60, "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
+| 429 | n/a (`error: rate_limited`) | Per-client rpm window is full (rejected at the gate, before the runner; the response also carries a `Retry-After` header with the wait rounded up to whole seconds) | `{"error": "rate_limited", "client": "tenant-a", "rpm_limit": 60, "retry_after_seconds": 1.7, "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
 | 503 | `capacity` | `max_concurrent` semaphore is full at request time | `{"status": "capacity", "error": "webapp is over capacity; request rejected", "request_id": "req-...", "max_concurrent": 64, "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
 | 503 | `shutdown` | The worker is in the drain phase and refusing new requests | `{"status": "shutdown", "error": "webapp is shutting down; request rejected", "request_id": "req-...", "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
 | 503 | `not_ready` | The webapp accepted the connection but the main pipeline has not yet completed startup | `{"status": "not_ready", "error": "webapp is starting; main pipeline is not yet ready", "request_id": "req-...", "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
@@ -648,7 +650,8 @@ for Kafka demos. It demonstrates:
 - **Per-worker enablement** -- only `worker-1` flips
   `webapp.enabled=true` (via the `DK_WEBAPP__ENABLED=true` env var); the
   other two workers leave the shared yaml default of `false` so they
-  never bind port 8090. This matches the third row of the
+  never bind port 8091 (the integration stack overrides the framework
+  default of 8090). This matches the third row of the
   [Load balancer caveat](#load-balancer-caveat) table.
 - **Anonymous client at rpm=4** -- the default `load_generator`
   service polls `POST /process` every 10 seconds with no
@@ -683,7 +686,7 @@ What to expect within ~30 seconds of the stack being healthy:
 - `http://localhost:8081/live` highlights HTTP-origin tasks with the
   origin column populated; the same tasks dequeue ahead of pending
   Kafka tasks at the gate.
-- `drakkar_webapp_requests_total{worker="worker-1",status="ok"}` climbs
+- `drakkar_webapp_requests_total{client="anonymous",status="ok"}` climbs
   in Prometheus (`http://localhost:9099`).
 
 ### File map
@@ -696,7 +699,7 @@ What to expect within ~30 seconds of the stack being healthy:
 | `integration/worker/handler.py` | 4-param `BaseDrakkarHandler`; defines `arrange_http_request`, `on_http_request_complete`, and the `task_priority` override. |
 | `integration/worker/models.py` | Adds `RankRequest` / `RankResponse`. |
 | `integration/worker/drakkar.yaml` | `webapp:` block with two clients; `enabled=false` by default and flipped per-worker via env. |
-| `integration/docker-compose.yml` | Defines `load_generator` and `load_generator_tenant_a`; exposes port 8090 and a `/healthz` healthcheck on `worker-1`. |
+| `integration/docker-compose.yml` | Defines `load_generator` and `load_generator_tenant_a`; exposes webapp port 8091 on `worker-1` and reuses the debug UI server's `/healthz` (port 8081) as the readiness gate — the webapp itself owns no `/healthz` route. |
 
 ---
 

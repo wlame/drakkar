@@ -13,7 +13,7 @@ right time during the message-processing pipeline. See [Configuration](configura
 | `arrange(messages, pending)` | A window of messages is ready to process | Once per window per partition | `list[`[`ExecutorTask`](executor.md#executortask)`]` |
 | `on_task_complete(result)` | A single task completes successfully (exit 0) | Once per successful task | [`CollectResult`](sinks.md#collectresult) `\| None` |
 | `on_message_complete(group)` | All tasks derived from a single source message reached a terminal state | Once per source message | [`CollectResult`](sinks.md#collectresult) `\| None` |
-| `on_window_complete(results, messages)` | All tasks in a window finished | Once per window per partition | [`CollectResult`](sinks.md#collectresult) `\| None` |
+| `on_window_complete(results, source_messages)` | All tasks in a window finished | Once per window per partition | [`CollectResult`](sinks.md#collectresult) `\| None` |
 | `on_error(task, error)` | A single task fails (non-zero exit, timeout, crash) | Once per failed task | `ErrorAction \| list[`[`ExecutorTask`](executor.md#executortask)`]` |
 | `on_delivery_error(error)` | A sink's deliver() raises an exception | Once per failed sink delivery batch | `DeliveryAction` |
 | `on_assign(partitions)` | Kafka assigns partitions during rebalance | Once per rebalance event | `None` |
@@ -229,7 +229,7 @@ Attach a [`PrecomputedResult`](#precomputedresult) to the task via the
 async def arrange(self, messages, pending):
     tasks = []
     for msg in messages:
-        cached = self.cache.get(msg.payload.request_id)
+        cached = await self.cache.get(msg.payload.request_id)
         if cached is not None:
             # Short-circuit: handler supplies the outcome directly.
             tasks.append(dk.ExecutorTask(
@@ -275,8 +275,10 @@ async def arrange(self, messages, pending):
 - `task_started` and `task_completed` events still fire (with
   `metadata.precomputed=true`) so the flight recorder timeline stays
   coherent.
-- `executor_duration` histogram is **not** observed for precomputed
-  tasks — their duration is artificial and would skew the distribution.
+- `executor_duration` is observed with the supplied `duration_seconds`
+  (default `0.0`) — set a realistic value if you care about the
+  histogram, or filter on `drakkar_tasks_precomputed_total` when the
+  synthetic durations would skew your view of real subprocess runs.
 - `drakkar_tasks_precomputed_total` increments once per precomputed
   task; operators can chart it against
   `drakkar_executor_tasks_total{status="completed"}` to see the
@@ -464,7 +466,7 @@ When `cache.enabled=false` (the default), `self.cache` is a no-op stub
 — `peek`/`get` return `None`, `set`/`delete` silently discard. Handler
 code can call the cache unconditionally.
 
-Full API, cross-worker sync behavior, scope rules (`LOCAL` /
+Full API, cross-worker sync behavior, scope rules (`MEMORY` / `LOCAL` /
 `CLUSTER` / `GLOBAL`), and the documented "delete is local-only" sharp
 edge are covered on the dedicated [Cache](cache.md) page.
 
@@ -722,7 +724,7 @@ worker crash — Kafka will redeliver from the last committed offset.
 
 ### When commits happen
 
-Commits are attempted at two points:
+Commits are attempted at three points:
 
 1. **After each window completes** — when the last task in a window
    finishes and all sink deliveries succeed.
@@ -839,10 +841,33 @@ self.annotate(msg, 'input_selection', {'candidates': paths, 'chosen': p})
 
 ## Annotations
 
-`self.annotate(target, kind, data)` records structured diagnostics against a
-window, a source message, or a task, visible on that entity's trace in the
-debug UI and expiring with the flight recorder's normal retention. See
+`self.annotate(target, kind, data, labels=...)` records structured diagnostics
+against a window, a source message, or a task, visible on that entity's trace
+in the debug UI and expiring with the flight recorder's normal retention. The
+optional `labels` keyword attaches string labels stored on the row, indexed
+and searchable the same way `ExecutorTask.labels` are. See
 [Annotations](annotations.md) for scopes, budgets, and the drop policy.
+
+---
+
+## UI Class Attributes
+
+Two optional class attributes let a handler extend the operator UI without
+any client-side code:
+
+`probe_details_model` — a Pydantic model class that opts the handler into
+the Message Probe's user-defined details tab: during a probe run, hooks
+write into the model's fields via the module-level `probe.set` /
+`probe.append` / `probe.update` verbs (`from drakkar import probe`), and
+the UI renders the result as its own tab. See
+[Probe User Details](probe-user-details.md) for the model conventions,
+`probe_field()` views, and the write caps.
+
+`ui_pages` — a list of `Page` declarations, each describing a custom
+dashboard page built from widgets over built-in data sources. Registered
+pages appear as extra navigation entries and are validated at startup, so
+a broken declaration fails the boot rather than a page render. See
+[Declared UI Pages](ui-pages.md) for the page/widget vocabulary.
 
 ---
 
