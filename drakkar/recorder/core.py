@@ -81,21 +81,10 @@ from drakkar.models import (
     SourceMessage,
 )
 from drakkar.peer_discovery import discover_peer_dbs
-
-# Re-exports — keep the previous public surface so tests and external
-# imports of ``drakkar.recorder.<name>`` continue working without changes.
-# ``encode_json``, ``_HAS_ORJSON`` and ``_SECRET_ENV_PATTERNS`` are not
-# referenced inside this module after the helper extraction but ARE
-# imported by tests; the ``noqa: F401`` markers silence the unused-import
-# warning while preserving the public attribute path on
-# ``drakkar.recorder``.
 from drakkar.recorder.archive import run_archive_pass
 from drakkar.recorder.helpers import (
-    _HAS_ORJSON,  # noqa: F401  (re-exported for tests)
-    _SECRET_ENV_PATTERNS,  # noqa: F401  (re-exported for tests)
     BUSY_TIMEOUT_MS,
     detect_worker_ip,
-    encode_json,  # noqa: F401  (re-exported for tests)
     encode_json_str,
     encode_ws_event,
     format_dt,
@@ -613,8 +602,8 @@ class EventRecorder:
                 # Explicit busy_timeout so shared-db_dir contention behaves
                 # identically to the Go backend (which has no driver default).
                 await self._db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
-                # Webapp-release schema check (Task 8 of the webapp pipeline
-                # plan). Run BEFORE ``_create_schema`` so a pre-existing
+                # Webapp-release schema check. Run BEFORE ``_create_schema``
+                # so a pre-existing
                 # legacy DB is rejected before ``CREATE INDEX`` references
                 # a missing column. Detection rule: an existing
                 # ``events`` table must already carry every column listed
@@ -1341,8 +1330,26 @@ class EventRecorder:
             self._deferred_sweep = None
         self._deferred_ws.clear()
 
-        await self._flush()
-        await self._sync_state()
+        # Final flush + state sync are best-effort: a failure in either must
+        # not skip the DB closes, live-link removal, and _LIVE_RECORDERS
+        # discard below, or shutdown would leak connections and interpreter
+        # exit would try to flush into a recorder that never tore down.
+        try:
+            await self._flush()
+        except Exception as exc:
+            await logger.awarning(
+                'recorder_final_flush_failed',
+                category='recorder',
+                error=str(exc),
+            )
+        try:
+            await self._sync_state()
+        except Exception as exc:
+            await logger.awarning(
+                'recorder_final_state_sync_failed',
+                category='recorder',
+                error=str(exc),
+            )
         # Close the reader first. A close failure here should not block
         # the writer close below — the writer close is what actually
         # finalizes pending commits and tears down the WAL.
@@ -1567,7 +1574,7 @@ class EventRecorder:
         # webapp path (``WebappRunner`` stamps each task before
         # submission). Explicit kwargs override only when callers need to
         # record an event for a task that doesn't carry those fields
-        # (e.g., a synthetic test row). See plan Task 8 for the contract.
+        # (e.g., a synthetic test row).
         resolved_origin = origin if origin is not None else getattr(task, 'origin', 'kafka')
         resolved_client_name = client_name if client_name is not None else getattr(task, 'client_name', None)
         resolved_request_id = request_id if request_id is not None else getattr(task, 'request_id', None)
@@ -2168,7 +2175,7 @@ class EventRecorder:
             }
         )
 
-    # --- Webapp request lifecycle events (Task 8) ---
+    # --- Webapp request lifecycle events ---
     #
     # These helpers record HTTP-origin request lifecycle events to the
     # ``events`` table alongside the per-task rows already produced by
@@ -2393,7 +2400,7 @@ class EventRecorder:
         if since:
             conditions.append('ts >= ?')
             params.append(since)
-        # ``origin`` filter (Task 9, webapp pipeline plan) — debug UI uses
+        # ``origin`` filter — debug UI uses
         # it to split the history page between Kafka-origin tasks and
         # HTTP-origin webapp requests. Indexed via ``idx_events_origin``.
         if origin:
@@ -2428,47 +2435,24 @@ class EventRecorder:
         if local_events:
             return sorted(local_events, key=lambda e: e.get('ts', 0))
 
-        # search other workers' live DBs
+        # Fallback: other workers' live DBs. Same shape as ``cross_trace`` —
+        # the blocking directory walk runs in a thread (inline it would stall
+        # the main loop for the whole sweep), and the sweep is bounded so a
+        # directory full of peers cannot pin the caller.
         if not self._store.db_dir:
             return []
 
         json_path = f'$.{label_key}'
-        for target in sorted(glob.glob(os.path.join(self._store.db_dir, '*-live.db'))):
-            real = os.path.realpath(target)
-            if real == self._db_path:
-                continue
-            try:
-                async with aiosqlite.connect(f'file:{real}?mode=ro', uri=True) as db:
-                    worker_name = os.path.basename(real)
-                    async with db.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name='worker_config'"
-                    ) as cur:
-                        if await cur.fetchone():
-                            async with db.execute(
-                                'SELECT worker_name, cluster_name FROM worker_config WHERE id = 1'
-                            ) as cfg_cur:
-                                cfg_row = await cfg_cur.fetchone()
-                                if cfg_row:
-                                    worker_name = cfg_row[0]
-                                    if self._cluster_name and cfg_row[1] != self._cluster_name:
-                                        continue
+        budget = _ScanBudget()
+        live_targets = await asyncio.to_thread(self._enumerate_peer_live_dbs)
+        for target in live_targets:
+            if not budget.allow():
+                break
+            events = await self._query_db_file(target, _LABEL_TRACE_QUERY, [json_path, label_value])
+            if events:
+                return sorted(events, key=lambda e: e.get('ts', 0))
 
-                    async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='events'") as cur:
-                        if not await cur.fetchone():
-                            continue
-
-                    async with db.execute(_LABEL_TRACE_QUERY, [json_path, label_value]) as cur:
-                        columns = [d[0] for d in cur.description]
-                        rows = await cur.fetchall()
-                        events = [dict(zip(columns, row, strict=False)) for row in rows]
-
-                    for ev in events:
-                        ev['worker_name'] = worker_name
-                    if events:
-                        return sorted(events, key=lambda e: e.get('ts', 0))
-            except Exception:
-                continue
-
+        budget.report('cross_trace_by_label')
         return []
 
     async def get_trace(self, partition: int, msg_offset: int) -> list[dict]:
@@ -2490,7 +2474,17 @@ class EventRecorder:
         partition: int,
         msg_offset: int,
     ) -> list[dict]:
-        """Run trace query against a DB file, return events with worker_name from config."""
+        """Run the partition+offset trace query against a DB file."""
+        params = [partition, msg_offset, partition, msg_offset, partition, msg_offset]
+        return await self._query_db_file(db_path, _TRACE_QUERY, params)
+
+    async def _query_db_file(self, db_path: str, query: str, params: list) -> list[dict]:
+        """Run a trace query against a peer DB file read-only.
+
+        Returns matching events tagged with the peer's ``worker_name`` (read
+        from its ``worker_config``), or ``[]`` when the file is unreadable,
+        lacks an ``events`` table, or belongs to a different cluster.
+        """
         try:
             async with aiosqlite.connect(f'file:{db_path}?mode=ro', uri=True) as db:
                 # Read worker_name and check cluster membership from worker_config
@@ -2513,9 +2507,7 @@ class EventRecorder:
                     if not await cur.fetchone():
                         return []
 
-                async with db.execute(
-                    _TRACE_QUERY, [partition, msg_offset, partition, msg_offset, partition, msg_offset]
-                ) as cur:
+                async with db.execute(query, params) as cur:
                     columns = [d[0] for d in cur.description]
                     rows = await cur.fetchall()
                     events = [dict(zip(columns, row, strict=False)) for row in rows]
@@ -2524,6 +2516,8 @@ class EventRecorder:
                     ev['worker_name'] = worker_name
                 return events
         except Exception:
+            # A locked, corrupt, or vanished peer DB must not poison the
+            # cross-worker sweep — skip it and let the caller keep scanning.
             return []
 
     async def cross_trace(self, partition: int, msg_offset: int) -> list[dict]:
@@ -2757,9 +2751,9 @@ class EventRecorder:
                 recorder_buffer_size.set(0)
                 return
             # Take a LOCAL snapshot of the rows to flush BEFORE the DB
-            # write. If the write fails with OperationalError we re-queue
-            # this exact list at the FRONT of the buffer so ordering is
-            # preserved and no events are lost. Using ``list(...)`` freezes
+            # write. If the write fails (sqlite3.Error) or is interrupted
+            # (cancellation) we re-queue this exact list at the FRONT of the
+            # buffer so ordering is preserved and no events are lost. Using ``list(...)`` freezes
             # the view — a concurrent ``_record`` append between here and
             # the write would land at the END of the deque (because we
             # drain via ``popleft`` below) and is unaffected by the snapshot.
@@ -2783,8 +2777,8 @@ class EventRecorder:
                 'metadata',
                 'pid',
                 'labels',
-                # Webapp-release columns (Task 8 of the webapp pipeline
-                # plan). Default to ``origin='kafka'`` / NULL for the
+                # Webapp-release columns.
+                # Default to ``origin='kafka'`` / NULL for the
                 # other two when the recording site doesn't populate
                 # them — matches the SQL DEFAULT and keeps the SQL
                 # statement future-proof if the same column list is
@@ -2812,19 +2806,32 @@ class EventRecorder:
             # surfaces disk-I/O latency tail so operators can alert on p99
             # regressions before the buffer backs up enough to drop events.
             flush_start = time.monotonic()
+            # ``batch_settled`` flips once the popped batch has a final home:
+            # committed, re-queued for retry, or deliberately dropped at the
+            # retry cap. Any other exit — a CancelledError from a caller's
+            # timeout or from ``stop()`` cancelling the flush task, or an
+            # unexpected error — reaches the ``finally`` with the flag still
+            # False and re-queues the batch, so cancellation mid-write can
+            # never silently lose it. (No rollback is attempted there: the
+            # write may have landed in the connection's open transaction, so
+            # a retried batch can at worst duplicate rows — acceptable for a
+            # flight recorder, unlike silent loss.)
+            batch_settled = False
             try:
                 await db.executemany(query, rows)
                 await db.commit()
-            except aiosqlite.OperationalError as exc:
+                batch_settled = True
+            except sqlite3.Error as exc:
+                # ``sqlite3.Error``, not just OperationalError: aiosqlite
+                # raises the stdlib sqlite3 exception classes, and the whole
+                # DatabaseError/IntegrityError/ProgrammingError family must
+                # go through the same retry/drop accounting rather than
+                # bypassing it.
+                #
                 # Transient DB errors (``database is locked``, ``disk I/O
                 # error``, ENOSPC, WAL corruption, etc.) should not cost us
                 # the batch. Re-queue the snapshot at the FRONT of the
-                # buffer and let the next flush tick retry. ``extendleft``
-                # reverses its iterable, so we pre-reverse ``batch`` to
-                # preserve the original FIFO ordering within the re-queued
-                # rows. Any rows that a concurrent ``_record`` appended
-                # while we were awaiting stay at the back — correct, since
-                # they are strictly newer than the retried batch.
+                # buffer and let the next flush tick retry.
                 #
                 # Rotation edge case: if ``_rotate`` ran BETWEEN a failed
                 # flush and the retry attempt, the re-queued rows end up
@@ -2843,50 +2850,32 @@ class EventRecorder:
                     # outage that eventually recovers would leave the
                     # counter at N and the FIRST post-recovery failure
                     # would immediately trip the drop path again.
-                    recorder_flush_batches_dropped.inc()
-                    await logger.aerror(
-                        'recorder_flush_batch_dropped',
-                        category='recorder',
-                        attempt=self._flush_failures,
-                        batch_size=len(batch),
-                        error=str(exc),
-                    )
+                    # Bookkeeping runs before the ``await`` on the logger so
+                    # a cancellation during the log cannot make the finally
+                    # re-queue a batch we decided to drop.
+                    batch_settled = True
+                    attempt = self._flush_failures
                     self._flush_failures = 0
+                    recorder_flush_batches_dropped.inc()
                     # Buffer state unchanged (batch already popped); reflect
                     # the (possibly post-concurrent-append) depth.
                     recorder_buffer_size.set(len(self._buffer))
+                    await logger.aerror(
+                        'recorder_flush_batch_dropped',
+                        category='recorder',
+                        attempt=attempt,
+                        batch_size=len(batch),
+                        error=str(exc),
+                    )
                     return
                 # Not yet at the retry cap — re-queue and let the next tick
                 # try again. Log at WARNING so the operator sees the retry
-                # trail before any drop happens.
-                #
-                # Overflow detection: ``self._buffer`` is bounded by
-                # ``deque(maxlen=max_buffer)``. If a concurrent ``_record``
-                # append filled the buffer while we were awaiting the flush,
-                # ``extendleft`` will silently evict rows from the TAIL
-                # (newest events) to honour ``maxlen``. Those rows are lost
-                # without any metric tick in ``_record`` (that path only
-                # counts drops on the append side). We measure the potential
-                # overflow arithmetically — ``(len_before + batch_len) -
-                # maxlen`` — and tick ``recorder_requeue_overflow`` by the
-                # number of rows the deque had to discard, so operators can
-                # alert on this previously silent data-loss path.
-                buffer_len_before = len(self._buffer)
-                batch_len = len(batch)
-                self._buffer.extendleft(reversed(batch))
-                maxlen = self._buffer.maxlen
-                if maxlen is not None:
-                    overflow = (buffer_len_before + batch_len) - maxlen
-                    if overflow > 0:
-                        recorder_requeue_overflow.inc(overflow)
-                        await logger.awarning(
-                            'recorder_buffer_overflow_on_requeue',
-                            category='recorder',
-                            dropped=overflow,
-                            buffer_len_before=buffer_len_before,
-                            batch_size=batch_len,
-                            max_buffer=maxlen,
-                        )
+                # trail before any drop happens. The re-queue itself is
+                # synchronous and flips ``batch_settled`` before the log
+                # await, so a cancellation during the log cannot re-queue
+                # the batch a second time in the finally.
+                self._requeue_front(batch)
+                batch_settled = True
                 await logger.awarning(
                     'recorder_flush_retry',
                     category='recorder',
@@ -2895,8 +2884,17 @@ class EventRecorder:
                     batch_size=len(batch),
                     error=str(exc),
                 )
-                recorder_buffer_size.set(len(self._buffer))
                 return
+            finally:
+                if not batch_settled:
+                    # Interrupted mid-write — typically CancelledError from a
+                    # caller's timeout or from ``stop()`` cancelling the flush
+                    # task — with the transaction not committed. Put the batch
+                    # back so the next flush tick retries it, and let the
+                    # exception propagate. Everything here is synchronous:
+                    # awaiting during a cancellation unwind could be cancelled
+                    # again and skip the re-queue.
+                    self._requeue_front(batch)
             # Success path: reset the retry counter and record the histogram.
             self._flush_failures = 0
             recorder_flush_duration.observe(time.monotonic() - flush_start)
@@ -2904,6 +2902,46 @@ class EventRecorder:
             # zero, but a concurrent _record() during the await could have
             # appended in between — reading len(self._buffer) is the correct value.
             recorder_buffer_size.set(len(self._buffer))
+
+    def _requeue_front(self, batch: list[dict]) -> None:
+        """Put a popped-but-unflushed batch back at the FRONT of the buffer.
+
+        ``extendleft`` reverses its iterable, so ``batch`` is pre-reversed to
+        preserve the original FIFO ordering within the re-queued rows. Rows
+        that a concurrent ``_record`` appended while the flush awaited stay
+        at the back — correct, since they are strictly newer.
+
+        Overflow detection: ``self._buffer`` is bounded by
+        ``deque(maxlen=max_buffer)``. If concurrent appends filled the buffer
+        during the flush's await window, ``extendleft`` silently evicts rows
+        from the TAIL (newest events) to honour ``maxlen``. Those rows are
+        lost without any metric tick in ``_record`` (that path only counts
+        drops on the append side), so the potential overflow is measured
+        arithmetically — ``(len_before + batch_len) - maxlen`` — and ticked
+        on ``recorder_requeue_overflow`` so operators can alert on this
+        otherwise silent data-loss path.
+
+        Fully synchronous (sync logging included): it also runs from the
+        cancellation unwind in ``_flush``, where an await could itself be
+        cancelled and skip the re-queue.
+        """
+        buffer_len_before = len(self._buffer)
+        batch_len = len(batch)
+        self._buffer.extendleft(reversed(batch))
+        maxlen = self._buffer.maxlen
+        if maxlen is not None:
+            overflow = (buffer_len_before + batch_len) - maxlen
+            if overflow > 0:
+                recorder_requeue_overflow.inc(overflow)
+                logger.warning(
+                    'recorder_buffer_overflow_on_requeue',
+                    category='recorder',
+                    dropped=overflow,
+                    buffer_len_before=buffer_len_before,
+                    batch_size=batch_len,
+                    max_buffer=maxlen,
+                )
+        recorder_buffer_size.set(len(self._buffer))
 
     async def _rotation_loop(self) -> None:
         while self._running:

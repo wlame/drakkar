@@ -12,7 +12,7 @@ Three tables back the recorder DB:
 - ``worker_state``  — periodic snapshot of counters / pool state for the
   debug UI's "what is this worker doing right now?" panels.
 
-Webapp-release schema extension (Task 8 of the webapp pipeline plan):
+Webapp-release schema extension:
 The ``events`` table grew three columns — ``origin``, ``client_name``,
 ``request_id`` — to track HTTP-origin tasks alongside Kafka-origin tasks
 without a separate code path. These columns are added directly to the
@@ -31,7 +31,7 @@ already produces fresh DBs per worker run). The startup-time
 converts the otherwise-confusing ``OperationalError: no such column``
 mid-request error into a clear startup failure with an actionable
 upgrade path — see :class:`RecorderSchemaError` and ``docs/observability.md``
-(Task 10) for the full upgrade story.
+for the full upgrade story.
 """
 
 from __future__ import annotations
