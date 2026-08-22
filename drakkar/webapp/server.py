@@ -108,10 +108,10 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
-# Hint included in every 429 / 503 response body. Documented in the plan
-# under "HTTP status codes" as the Kafka-fallback pattern: clients
-# rate-limited or hitting an unavailable webapp should publish to the
-# source topic for higher throughput and restart-resilient delivery.
+# Hint included in every 429 / 503 response body — the Kafka-fallback
+# pattern (see ``docs/webapp.md``): clients rate-limited or hitting an
+# unavailable webapp should publish to the source topic for higher
+# throughput and restart-resilient delivery.
 KAFKA_FALLBACK_HINT = (
     'route this workload through the Kafka source topic for higher throughput and worker-restart resilience'
 )
@@ -201,7 +201,7 @@ class WebApp:
         self._uvicorn_server: uvicorn.Server | None = None
         # The webapp's inner asyncio loop, captured by the FastAPI lifespan
         # hook running on T2. ``None`` until the thread enters the lifespan
-        # startup phase. Future tasks (Task 6) dispatch back to T1 from this
+        # startup phase. The route handler dispatches back to T1 from this
         # loop using ``dispatch_to_loop(coro, target_loop=self._app.main_loop)``.
         self._loop: asyncio.AbstractEventLoop | None = None
         # Signalled by the FastAPI lifespan startup hook — ``wait_until_ready``
@@ -213,14 +213,14 @@ class WebApp:
         # any dispatch.
         self.shutdown_event: threading.Event = threading.Event()
 
-        # Auth + rate-limit dependencies (Task 5). Built once at
+        # Auth + rate-limit dependencies. Built once at
         # construction time so the route handler can refer to them via
         # ``Depends(self._authenticate)`` / ``Depends(self._rate_limit)``.
         # The factories close over ``config`` and over per-client deque
         # state respectively — a fresh ``WebApp`` instance gets its own
         # rate-limit counters, which keeps tests independent.
         # ``drakkar_app`` is forwarded so the auth-failed / rate-limited
-        # branches can reach the optional recorder (Task 8) without
+        # branches can reach the optional recorder without
         # adding a separate per-request lookup site.
         self._authenticate = make_authenticate(config, drakkar_app)
         self._rate_limit = make_rate_limit(config, drakkar_app)
@@ -232,7 +232,7 @@ class WebApp:
         # 500 about a missing override.
         self._validate_handler_types()
 
-        # Webapp runner — Task 6a. One instance per ``WebApp`` so the
+        # Webapp runner. One instance per ``WebApp`` so the
         # synthetic ``SourceMessage.offset`` counter is monotone for the
         # process lifetime. The runner runs on the main loop (T1); the
         # FastAPI route handler dispatches to it via ``dispatch_to_loop``.
@@ -314,7 +314,7 @@ class WebApp:
             sinks_enabled=self._config.sinks_enabled,
         )
         if unauth:
-            # Documented in the plan: emit a distinct warning when every
+            # Emit a distinct warning when every
             # configured client has an empty token (anonymous-only). Lets
             # operators alert on a private-network deployment that should
             # have had a token configured.
@@ -357,7 +357,7 @@ class WebApp:
         while elapsed < deadline:
             if self._uvicorn_server is not None and getattr(self._uvicorn_server, 'started', False):
                 return
-            threading.Event().wait(step)  # sleep without an extra import
+            time.sleep(step)
             elapsed += step
         # If we reach here uvicorn never flipped ``started`` — surface
         # the same TimeoutError shape so callers can handle both stages
@@ -410,8 +410,8 @@ class WebApp:
             ``'unauthenticated'`` for auth-failed / pre-auth gate hits.
             Cardinality stays bounded by the configured client list + 1.
         status:
-            One of: ``ok | timeout | error | rate_limited | auth_failed |
-            shutdown | not_ready | capacity``. Documented in the plan.
+            One of the closed set: ``ok | timeout | error | rate_limited |
+            auth_failed | shutdown | not_ready | capacity``.
         """
         webapp_requests.labels(client=client, status=status).inc()
         # ``request.state`` may be missing the start-time on early-error
@@ -520,8 +520,8 @@ class WebApp:
         # (``WebappAuthError``, ``WebappRateLimitError``) through this
         # handler. The handler emits ``JSONResponse`` directly with the
         # carried ``body_dict`` — bypassing the default ``HTTPException``
-        # envelope (``{'detail': ...}``) so the response shape stays flat
-        # as documented in the plan.
+        # envelope (``{'detail': ...}``) so the response shape stays flat,
+        # matching the error bodies documented in ``docs/webapp.md``.
         #
         # The handler also records the matching ``webapp_requests_total``
         # / ``webapp_request_duration_seconds`` metric pair. It reads the
@@ -532,8 +532,9 @@ class WebApp:
         # configured clients + 1.
         @app.exception_handler(WebappError)
         async def _webapp_error_handler(request: Request, exc: WebappError) -> JSONResponse:
-            # Map status code → metric status label. The plan documents
-            # these names and prevents ad-hoc additions.
+            # Map status code → metric status label. The label names come
+            # from the closed status set (see the webapp metrics block in
+            # ``metrics.py``) — no ad-hoc additions.
             status_label = 'auth_failed' if exc.status_code == 401 else 'rate_limited'
             client_label = getattr(request.state, 'client_name', None)
             if client_label is None or status_label == 'auth_failed':
@@ -553,7 +554,6 @@ class WebApp:
         # Single POST route. The handler is a method on ``self`` so it
         # can reach ``self._app.is_ready`` and ``self.shutdown_event``
         # without closing over the whole ``WebApp`` from a free function.
-        # Task 6 replaces the 501 stub with a real runner dispatch.
         path = self._config.path
 
         # Capture the dependency callables in local names so the
@@ -615,9 +615,9 @@ class WebApp:
         ) -> Any:
             # The ``Request`` type-hint tells FastAPI "give me the raw
             # ASGI request, do not parse the body". Body parsing into
-            # ``HttpRequestT`` happens inside the runner introduced in
-            # Task 6 — we deliberately skip it here so the readiness
-            # gates fire on a body-shape-agnostic path.
+            # ``HttpRequestT`` happens inside the runner — we deliberately
+            # skip it here so the readiness gates fire on a
+            # body-shape-agnostic path.
             #
             # The auth and rate-limit dependencies have already run by
             # the time we get here: a 401 or 429 short-circuits via

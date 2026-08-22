@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
 from drakkar.concurrency import dispatch_to_loop
@@ -35,7 +35,9 @@ CENSUS_TIMEOUT_SECONDS: float = 5.0
 
 def create_runtime_router(deps: UIDeps) -> APIRouter:
     """Build the runtime-health router. Pure factory, no side effects."""
-    router = APIRouter()
+    # Gated behind require_auth (no-op without a token) like every other
+    # API router — the Go backend gates these routes the same way.
+    router = APIRouter(dependencies=[Depends(deps.require_auth)])
 
     @router.get('/api/v1/runtime/health')
     async def api_runtime_health():

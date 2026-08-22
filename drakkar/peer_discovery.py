@@ -22,39 +22,24 @@ Callers:
 
 from __future__ import annotations
 
+import asyncio
 import glob
 import os
 from collections.abc import AsyncIterator
 
 
-async def discover_peer_dbs(
-    db_dir: str,
-    suffix: str,
-    self_worker_name: str,
-) -> AsyncIterator[tuple[str, str]]:
-    """Yield (worker_name, resolved_db_path) for each peer symlink in db_dir.
+def _scan_peer_dbs(db_dir: str, suffix: str, self_worker_name: str) -> list[tuple[str, str]]:
+    """Synchronous filesystem scan behind :func:`discover_peer_dbs`.
 
-    Scans `db_dir/*<suffix>` for symlinks, skips our own entry and any
-    broken symlinks, and yields pairs with the target path resolved via
-    `os.path.realpath`. The function is async (even though its body is
-    synchronous) so callers can `async for` it and we keep the option to
-    do async filesystem work later.
-
-    Returns nothing if `db_dir` is empty, missing, or has no matching
-    symlinks — callers can rely on the iterator never raising for the
-    "cache disabled" / "first worker to start" cases.
-
-    Args:
-        db_dir: shared directory that holds worker DB files. Empty or
-            missing directory yields nothing.
-        suffix: symlink name suffix — e.g. ``'-live.db'`` for recorder
-            discovery, ``'-cache.db'`` for cache peer sync.
-        self_worker_name: our own worker name; its symlink is filtered
-            out so we don't peer with ourselves.
+    All the stat/glob/realpath calls live here so the async wrapper can
+    run the whole scan in one worker thread — `db_dir` is typically a
+    shared (often NFS) mount, where a single stalled stat call would
+    otherwise block the event loop.
     """
     if not db_dir or not os.path.isdir(db_dir):
-        return
+        return []
 
+    results: list[tuple[str, str]] = []
     # glob returns symlinks themselves, not their targets, which is what we
     # want. Sorted so peers are visited in a deterministic order — the Go
     # backend's filepath.Glob returns sorted paths, and an identical visit
@@ -78,4 +63,35 @@ async def discover_peer_dbs(
             # peer may come back later with a fresh file and new symlink.
             continue
 
-        yield worker_name, target
+        results.append((worker_name, target))
+    return results
+
+
+async def discover_peer_dbs(
+    db_dir: str,
+    suffix: str,
+    self_worker_name: str,
+) -> AsyncIterator[tuple[str, str]]:
+    """Yield (worker_name, resolved_db_path) for each peer symlink in db_dir.
+
+    Scans `db_dir/*<suffix>` for symlinks, skips our own entry and any
+    broken symlinks, and yields pairs with the target path resolved via
+    `os.path.realpath`. The whole filesystem scan runs in a worker thread
+    (`asyncio.to_thread`) because `db_dir` is usually a shared NFS mount
+    and every stat call there can stall; the async-generator surface lets
+    callers keep their `async for` loops unchanged.
+
+    Returns nothing if `db_dir` is empty, missing, or has no matching
+    symlinks — callers can rely on the iterator never raising for the
+    "cache disabled" / "first worker to start" cases.
+
+    Args:
+        db_dir: shared directory that holds worker DB files. Empty or
+            missing directory yields nothing.
+        suffix: symlink name suffix — e.g. ``'-live.db'`` for recorder
+            discovery, ``'-cache.db'`` for cache peer sync.
+        self_worker_name: our own worker name; its symlink is filtered
+            out so we don't peer with ourselves.
+    """
+    for pair in await asyncio.to_thread(_scan_peer_dbs, db_dir, suffix, self_worker_name):
+        yield pair

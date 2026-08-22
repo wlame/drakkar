@@ -239,6 +239,8 @@ class TestV1Auth:
         '/api/v1/debug/cache/stats',
         '/api/v1/debug/archives',
         '/api/v1/debug/archives/test-2026-08-08_00-00__2026-08-09_00-00.db.gz',
+        '/api/v1/runtime/health',
+        '/api/v1/debug/runtime/units',
     ]
 
     def _make_authed_client(self, tmp_path, mock_recorder, mock_app):

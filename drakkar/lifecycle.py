@@ -280,7 +280,8 @@ class AppLifecycle:
             # True when no suspect-OOM signature was found; logging that
             # at info level lets operators confirm the watchdog ran
             # without grepping the warn-only suspect path.
-            previous_run_clean = self._watchdog.check_previous()
+            # File I/O on db_dir (often NFS) — keep it off the event loop.
+            previous_run_clean = await asyncio.to_thread(self._watchdog.check_previous)
             if previous_run_clean:
                 await log.ainfo(
                     'watchdog_previous_run_clean',
@@ -619,7 +620,9 @@ class AppLifecycle:
                 # 5s is generous for a clean uvicorn bind on a free port;
                 # tests use the same default. A startup-time TimeoutError
                 # is logged and the worker proceeds without the webapp.
-                app._webapp.wait_until_ready(timeout=5.0)
+                # ``wait_until_ready`` blocks (Event.wait + poll loop), so
+                # run it off-loop to keep the main loop responsive.
+                await asyncio.to_thread(app._webapp.wait_until_ready, timeout=5.0)
             except Exception as exc:
                 await log.aerror(
                     'webapp_start_failed',
@@ -934,7 +937,8 @@ class AppLifecycle:
         if self._watchdog is None:
             return
         try:
-            self._watchdog.write()
+            # File I/O on db_dir (often NFS) — keep it off the event loop.
+            await asyncio.to_thread(self._watchdog.write)
         except OSError as exc:
             await logger.awarning(
                 'watchdog_write_failed',
@@ -1149,7 +1153,8 @@ class AppLifecycle:
             # availability would be the wrong tradeoff at this layer.
             if self._watchdog is not None:
                 try:
-                    self._watchdog.mark_clean()
+                    # File I/O on db_dir (often NFS) — keep it off the loop.
+                    await asyncio.to_thread(self._watchdog.mark_clean)
                 except OSError as exc:
                     await log.awarning(
                         'watchdog_mark_clean_failed',
@@ -1304,12 +1309,17 @@ class AppLifecycle:
             # Stop the webapp uvicorn thread. ``stop`` is a sync method
             # (the webapp owns its own thread/loop, not an asyncio task)
             # and bounds its join on ``drain_timeout`` so a stuck request
-            # cannot prevent worker shutdown. Wrapped in try/except so a
-            # filesystem / thread hiccup at the very end does not skip
-            # the consumer close on the next line.
+            # cannot prevent worker shutdown. The join can block for the
+            # full drain_timeout, so run it off-loop — the main loop must
+            # keep servicing the rest of teardown. Wrapped in try/except
+            # so a filesystem / thread hiccup at the very end does not
+            # skip the consumer close on the next line.
             if app._webapp is not None:
                 try:
-                    app._webapp.stop(drain_timeout=app._config.executor.drain_timeout_seconds)
+                    await asyncio.to_thread(
+                        app._webapp.stop,
+                        drain_timeout=app._config.executor.drain_timeout_seconds,
+                    )
                 except Exception as exc:
                     await log.awarning(
                         'webapp_stop_failed',

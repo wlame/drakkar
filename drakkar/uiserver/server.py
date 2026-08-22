@@ -44,23 +44,17 @@ from drakkar.config import UIConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uihost import ResolvedBundle
 
-# Re-import the helpers that used to live here so test patches like
-# ``drakkar.uiserver.server.hook_flags`` keep working without changes.
-# ``_DEFAULT_PORTS`` / ``normalize_hostport`` / ``parse_host_header`` are
-# not referenced inside this module after the helper extraction but ARE
-# imported by tests via the original ``drakkar.uiserver.server.<name>``
-# path; ``noqa: F401`` keeps the re-export visible without tripping
-# ruff's unused-import check.
+# Re-import the helpers that used to live here so test imports and
+# patches like ``drakkar.uiserver.server.hook_flags`` keep working
+# without changes; ``noqa: F401`` keeps the re-exports visible without
+# tripping ruff's unused-import check.
 from drakkar.uiserver.server_helpers import (
-    _DEFAULT_PORTS,  # noqa: F401  (re-exported for tests)
     format_ts,
     format_ts_full,
     format_ts_ms,
     format_uptime,
     hook_flags,  # noqa: F401  (re-exported for tests)
-    normalize_hostport,  # noqa: F401  (re-exported for tests)
     origin_allowed,  # noqa: F401  (re-exported for tests)
-    parse_host_header,  # noqa: F401  (re-exported for tests)
     worker_group,  # noqa: F401  (re-exported for tests)
 )
 
@@ -712,7 +706,45 @@ class UIServer:
             daemon=True,
         )
         self._thread.start()
+        # Verify the bind before declaring success. Without this a
+        # port-in-use error dies silently inside the daemon thread while
+        # the worker keeps running with no probe surface (/healthz,
+        # /readyz). The Go backend treats a debug-server bind failure as
+        # fatal — mirror that by raising so startup fails visibly. The
+        # wait runs off-loop (to_thread) because it polls with sleeps.
+        try:
+            await asyncio.to_thread(self._wait_until_serving, timeout=5.0)
+        except Exception as exc:
+            await logger.aerror(
+                'ui_server_start_failed',
+                category='ui',
+                host=self._config.host,
+                port=self._config.port,
+                error=str(exc),
+            )
+            raise
         await logger.ainfo('ui_server_started', category='ui', port=self._config.port)
+
+    def _wait_until_serving(self, timeout: float) -> None:
+        """Block (in a worker thread) until uvicorn is serving or fail loudly.
+
+        ``uvicorn.Server.started`` flips True once the socket is bound
+        and accept() is running; on a bind failure uvicorn logs and
+        ``sys.exit(1)``s, killing the daemon thread — so a dead thread
+        before ``started`` means the bind failed.
+        """
+        assert self._server is not None and self._thread is not None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if getattr(self._server, 'started', False):
+                return
+            if not self._thread.is_alive():
+                raise RuntimeError(
+                    f'UI server thread exited before serving — '
+                    f'is {self._config.host}:{self._config.port} already in use?'
+                )
+            time.sleep(0.05)
+        raise TimeoutError(f'UI server did not start serving within {timeout}s')
 
     async def _resolve_ui_bundle(self) -> ResolvedBundle | None:
         """Resolve the drakkar-ui bundle when ``ui.release.enabled``, else ``None``.
@@ -757,22 +789,7 @@ class UIServer:
         if self._server:
             self._server.should_exit = True
         if self._thread:
-            self._thread.join(timeout=5.0)
+            # join() blocks; run it off-loop so a slow uvicorn drain
+            # cannot stall the main event loop during shutdown.
+            await asyncio.to_thread(self._thread.join, timeout=5.0)
         await logger.ainfo('ui_server_stopped', category='ui')
-
-
-# ---------------------------------------------------------------------------
-# Re-exports for tests that still import request-body models from
-# ``drakkar.uiserver.server``. Kept at the bottom because importing the routes
-# modules above triggers their module-level Pydantic class definitions,
-# which we then surface here for backwards compatibility.
-# ---------------------------------------------------------------------------
-
-# Tests + the historical public surface expect these names on the server
-# module. Import lazily-after-module-load: routes_live and routes_debug
-# define their request-body models at module scope.
-from drakkar.uiserver.routes_debug import _ProbeRequest  # noqa: E402, F401
-from drakkar.uiserver.routes_live import (  # noqa: E402, F401
-    _ArrangeTaskLookupRequest,
-    _SinkBreakdownRequest,
-)
