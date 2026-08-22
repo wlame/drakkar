@@ -550,11 +550,20 @@ both backends:
    `id = 1` row **mapped by column name** (column order never matters).
 
 **Liveness semantics**: a peer is listed iff its symlink exists and
-resolves. The symlink is removed on graceful shutdown; after a crash the
-worker stays visible until archiving removes the file it points at (or,
-with `archive_enabled: false`, indefinitely — see
-[Archiving](#archiving)). There is no timestamp-based staleness rule — by
-design, so a crashed worker's history remains reachable.
+resolves. The symlink is removed on graceful shutdown; after a crash or
+an OOM kill the worker stays visible until archiving removes the file it
+points at (or, with `archive_enabled: false`, indefinitely — see
+[Archiving](#archiving)). Listed is not the same as alive: each entry
+carries `last_seen_ts` (the newest `worker_state.updated_at` heartbeat,
+written every `ui.recorder.state_sync_interval_seconds`; falls back to
+`MAX(events.ts)` when the peer runs `store_state: false`; `null` when
+neither exists) and `online` — `true` iff that heartbeat is no older
+than `ui.workers_offline_after_seconds` (default 30). A crashed worker
+therefore stays listed — its history remains reachable — but flips to
+offline once its heartbeat goes stale. The worker answering the request
+always reports itself online. Size the threshold to at least 2–3x the
+largest `state_sync_interval_seconds` in the fleet so healthy workers
+never flap offline between heartbeats.
 
 **Cross-worker tracing** (`trace`, `trace-by-label`) searches: own live
 DB → other workers' live DBs (sorted, first match wins) → rotated files

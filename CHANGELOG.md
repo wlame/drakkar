@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Worker-liveness detection (contract v1.18): each entry in the workers
+  list now carries `last_seen_ts` (newest `worker_state.updated_at`
+  heartbeat, falling back to the newest event timestamp; `null` when
+  neither exists) and `online`. A worker is online when its heartbeat is
+  no older than the new `ui.workers_offline_after_seconds` (default 30,
+  env `DK_UI__WORKERS_OFFLINE_AFTER_SECONDS`); the worker answering the
+  request is always online. Crashed or OOM-killed workers, whose
+  `-live.db` symlink is never removed, now show as offline instead of
+  looking healthy forever. Peer scan failures during discovery are
+  logged (`recorder_peer_scan_failed`) instead of skipped silently.
+
 - User-defined app config (contract v1.17): a handler declares its own
   Pydantic model (`app_config_model` / `app_env_prefix` class attributes)
   and the framework loads it from the reserved `app:` section of the same

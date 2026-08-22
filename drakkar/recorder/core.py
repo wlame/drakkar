@@ -2672,6 +2672,33 @@ class EventRecorder:
 
     # --- Autodiscovery ---
 
+    # Where a peer's "last heartbeat" timestamp comes from, in preference
+    # order. ``worker_state.updated_at`` is written every
+    # ``state_sync_interval_seconds``; peers with ``store_state: false``
+    # fall back to the newest event timestamp. Both columns are indexed
+    # (idx_worker_state_updated, idx_events_ts), so each MAX() is an O(1)
+    # index-tail lookup, not a table scan.
+    _PEER_LAST_SEEN_SOURCES: tuple[tuple[str, str], ...] = (
+        ('worker_state', 'updated_at'),
+        ('events', 'ts'),
+    )
+
+    @classmethod
+    async def _peer_last_seen(cls, db: aiosqlite.Connection) -> float | None:
+        """Newest heartbeat timestamp found in a peer DB, or None when neither
+        source table has a row (or exists at all)."""
+        for table, column in cls._PEER_LAST_SEEN_SOURCES:
+            try:
+                # f-string SQL is safe here: table/column come from the
+                # constant _PEER_LAST_SEEN_SOURCES tuple, never from input.
+                async with db.execute(f'SELECT MAX({column}) FROM {table}') as cur:
+                    row = await cur.fetchone()
+            except Exception:
+                continue  # table missing in this peer's DB — try the next source
+            if row and row[0] is not None:
+                return float(row[0])
+        return None
+
     async def discover_workers(self) -> list[dict]:
         """Scan db_dir for other workers' -live.db symlinks, read their worker_config.
 
@@ -2679,11 +2706,23 @@ class EventRecorder:
         (shared with the cache peer-sync loop). We keep the recorder-specific
         step — reading the `worker_config` row out of each resolved DB —
         right here; the cache will supply its own row-reader in a later task.
+
+        Each returned dict carries two liveness fields on top of the raw
+        ``worker_config`` columns:
+
+        - ``last_seen_ts`` — newest heartbeat timestamp (see
+          :meth:`_peer_last_seen`), or ``None`` when no source is available;
+        - ``online`` — True when that heartbeat is no older than
+          ``ui.workers_offline_after_seconds``. A crashed or OOM-killed
+          worker leaves its ``-live.db`` symlink behind, so it stays listed
+          — this flag is what tells the UI it is gone.
         """
         if not self._store.db_dir or not self._store.store_config:
             return []
+        threshold = self._config.workers_offline_after_seconds
+        now = time.time()
         workers: list[dict] = []
-        async for _worker_name, target in discover_peer_dbs(
+        async for peer_name, target in discover_peer_dbs(
             self._store.db_dir,
             '-live.db',
             self._worker_name,
@@ -2698,9 +2737,24 @@ class EventRecorder:
                     async with db.execute('SELECT * FROM worker_config WHERE id = 1') as cur:
                         columns = [d[0] for d in cur.description]
                         row = await cur.fetchone()
-                        if row:
-                            workers.append(dict(zip(columns, row, strict=False)))
-            except Exception:
+                        if not row:
+                            continue
+                        worker = dict(zip(columns, row, strict=False))
+                    last_seen = await self._peer_last_seen(db)
+                    worker['last_seen_ts'] = last_seen
+                    worker['online'] = last_seen is not None and (now - last_seen) <= threshold
+                    workers.append(worker)
+            except Exception as exc:
+                # A locked, corrupt, or vanished peer DB must not poison the
+                # whole scan — log it and keep going with the other peers.
+                await logger.awarning(
+                    'recorder_peer_scan_failed',
+                    category='recorder',
+                    peer=peer_name,
+                    db_path=target,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
                 continue
         return workers
 

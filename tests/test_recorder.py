@@ -25,6 +25,7 @@ from drakkar.models import (
 from drakkar.recorder import (
     SCHEMA_EVENTS,
     SCHEMA_WORKER_CONFIG,
+    SCHEMA_WORKER_STATE,
     EventRecorder,
     detect_worker_ip,
     format_dt,
@@ -2545,6 +2546,130 @@ async def test_discover_workers_ignores_non_symlink_files(tmp_path):
     workers = await rec.discover_workers()
     assert len(workers) == 0
     await rec.stop()
+
+
+# --- Autodiscovery liveness (last_seen_ts / online) ---
+
+
+async def _make_peer_db(
+    tmp_path,
+    name: str,
+    *,
+    with_state_table: bool = True,
+    heartbeat_ts: float | None = None,
+    event_ts: float | None = None,
+) -> None:
+    """Create a peer live DB (config row + live symlink) with optional heartbeats.
+
+    Mirrors what a real peer writes: the static ``worker_config`` row plus,
+    depending on the flags, a ``worker_state`` heartbeat row and/or an
+    ``events`` row — enough to drive every branch of ``_peer_last_seen``.
+    """
+    db_path = tmp_path / f'{name}-2026-03-24__10_00_00.db'
+    async with aiosqlite.connect(str(db_path)) as db:
+        await db.executescript(SCHEMA_WORKER_CONFIG)
+        if with_state_table:
+            await db.executescript(SCHEMA_WORKER_STATE)
+        if event_ts is not None:
+            await db.executescript(SCHEMA_EVENTS)
+        await db.execute(
+            'INSERT INTO worker_config (id, worker_name, created_at, created_at_dt) VALUES (1, ?, ?, ?)',
+            [name, 1000.0, format_dt(1000.0)],
+        )
+        if heartbeat_ts is not None:
+            await db.execute(
+                'INSERT INTO worker_state (updated_at, updated_at_dt) VALUES (?, ?)',
+                [heartbeat_ts, format_dt(heartbeat_ts)],
+            )
+        if event_ts is not None:
+            await db.execute(
+                "INSERT INTO events (ts, dt, event) VALUES (?, ?, 'task_started')",
+                [event_ts, format_dt(event_ts)],
+            )
+        await db.commit()
+    os.symlink(db_path.name, live_link_path(str(tmp_path), name))
+
+
+async def test_discover_workers_fresh_heartbeat_reports_online(tmp_path):
+    """A peer with a recent worker_state heartbeat is online with last_seen set."""
+    heartbeat = time.time()
+    await _make_peer_db(tmp_path, 'peer-fresh', heartbeat_ts=heartbeat)
+    rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+
+    workers = await rec.discover_workers()
+
+    assert len(workers) == 1
+    assert workers[0]['online'] is True
+    assert workers[0]['last_seen_ts'] == heartbeat
+
+
+async def test_discover_workers_stale_heartbeat_reports_offline(tmp_path):
+    """A heartbeat older than workers_offline_after_seconds means offline."""
+    heartbeat = time.time() - 3600
+    await _make_peer_db(tmp_path, 'peer-stale', heartbeat_ts=heartbeat)
+    rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+
+    workers = await rec.discover_workers()
+
+    assert len(workers) == 1
+    assert workers[0]['online'] is False
+    assert workers[0]['last_seen_ts'] == heartbeat
+
+
+async def test_discover_workers_missing_state_table_falls_back_to_events(tmp_path):
+    """With no worker_state table (store_state: false), MAX(events.ts) is used."""
+    event_ts = time.time()
+    await _make_peer_db(tmp_path, 'peer-events-only', with_state_table=False, event_ts=event_ts)
+    rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+
+    workers = await rec.discover_workers()
+
+    assert len(workers) == 1
+    assert workers[0]['online'] is True
+    assert workers[0]['last_seen_ts'] == event_ts
+
+
+async def test_discover_workers_empty_state_table_falls_back_to_events(tmp_path):
+    """An empty worker_state table (no heartbeat rows yet) also falls back to events."""
+    event_ts = time.time()
+    await _make_peer_db(tmp_path, 'peer-empty-state', with_state_table=True, event_ts=event_ts)
+    rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+
+    workers = await rec.discover_workers()
+
+    assert len(workers) == 1
+    assert workers[0]['online'] is True
+    assert workers[0]['last_seen_ts'] == event_ts
+
+
+async def test_discover_workers_no_heartbeat_sources_reports_offline_with_null_last_seen(tmp_path):
+    """A peer with neither worker_state rows nor an events table is offline, last_seen None."""
+    await _make_peer_db(tmp_path, 'peer-silent')
+    rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+
+    workers = await rec.discover_workers()
+
+    assert len(workers) == 1
+    assert workers[0]['online'] is False
+    assert workers[0]['last_seen_ts'] is None
+
+
+async def test_discover_workers_threshold_comes_from_config(tmp_path):
+    """The same heartbeat flips online/offline with ui.workers_offline_after_seconds."""
+    heartbeat = time.time() - 60
+    await _make_peer_db(tmp_path, 'peer-borderline', heartbeat_ts=heartbeat)
+
+    lenient = EventRecorder(
+        make_debug_config(tmp_path, workers_offline_after_seconds=120),
+        worker_name=WORKER_NAME,
+    )
+    strict = EventRecorder(
+        make_debug_config(tmp_path, workers_offline_after_seconds=30),
+        worker_name=WORKER_NAME,
+    )
+
+    assert (await lenient.discover_workers())[0]['online'] is True
+    assert (await strict.discover_workers())[0]['online'] is False
 
 
 # --- Rotation compatibility with new tables ---

@@ -1551,6 +1551,17 @@ class UIConfig(BaseModel):
             'http://<ip>:<port> from the bind address.'
         ),
     )
+    workers_offline_after_seconds: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            'A discovered worker whose newest heartbeat is older than this '
+            'many seconds is reported offline in the workers list. Size it '
+            'to at least 2-3x the largest '
+            '``ui.recorder.state_sync_interval_seconds`` in the fleet so a '
+            'healthy worker never flaps offline between heartbeats.'
+        ),
+    )
     expose_env_vars: list[str] = Field(default_factory=list)
     max_rows: int = Field(default=5000, ge=100)
     log_min_duration_ms: int = Field(default=500, ge=0)

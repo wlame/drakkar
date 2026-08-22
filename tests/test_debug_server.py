@@ -1702,6 +1702,44 @@ async def test_api_workers_unclustered_at_end(client, mock_recorder, mock_app):
     assert names == ['a-worker', 'test-worker', 'z-worker']
 
 
+async def test_api_workers_current_worker_always_online(client, mock_recorder):
+    """The current worker reports online=True with last_seen_ts = now."""
+    mock_recorder.discover_workers.return_value = []
+    before = time.time()
+    resp = await client.get('/api/workers')
+    after = time.time()
+    me = resp.json()[0]
+    assert me['is_current'] is True
+    assert me['online'] is True
+    assert before <= me['last_seen_ts'] <= after
+
+
+async def test_api_workers_passes_through_peer_liveness_fields(client, mock_recorder):
+    """Peer last_seen_ts/online from discover_workers reach the response unchanged."""
+    mock_recorder.discover_workers.return_value = [
+        {
+            'worker_name': 'w-crashed',
+            'ip_address': '10.0.0.2',
+            'debug_port': 8080,
+            'last_seen_ts': None,
+            'online': False,
+        },
+        {
+            'worker_name': 'w-alive',
+            'ip_address': '10.0.0.3',
+            'debug_port': 8080,
+            'last_seen_ts': 1234.5,
+            'online': True,
+        },
+    ]
+    resp = await client.get('/api/workers')
+    data = {w['worker_name']: w for w in resp.json()}
+    assert data['w-crashed']['online'] is False
+    assert data['w-crashed']['last_seen_ts'] is None
+    assert data['w-alive']['online'] is True
+    assert data['w-alive']['last_seen_ts'] == 1234.5
+
+
 # --- Debug databases page and API ---
 
 

@@ -1303,6 +1303,16 @@
           "group": "ui"
         },
         {
+          "path": "ui.workers_offline_after_seconds",
+          "env": "DK_UI__WORKERS_OFFLINE_AFTER_SECONDS",
+          "description": "A discovered worker whose newest heartbeat is older than this many seconds is reported offline in the workers list.",
+          "full_description": "A discovered worker whose newest heartbeat is older than this many seconds is reported offline in the workers list. Size it to at least 2-3x the largest ``ui.recorder.state_sync_interval_seconds`` in the fleet so a healthy worker never flaps offline between heartbeats.",
+          "type": "integer",
+          "default": 30,
+          "secret": false,
+          "group": "ui"
+        },
+        {
           "path": "ui.expose_env_vars",
           "env": "DK_UI__EXPOSE_ENV_VARS",
           "description": "",

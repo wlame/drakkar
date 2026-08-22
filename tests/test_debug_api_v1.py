@@ -173,6 +173,12 @@ class TestV1Aliases:
             # uptime is wall-clock and differs between the two calls
             legacy_json.pop('uptime', None)
             v1_json.pop('uptime', None)
+        if legacy == '/api/workers':
+            # the current worker's last_seen_ts is wall-clock "now" and
+            # differs between the two calls; peers keep theirs (DB-sourced)
+            for worker in (*legacy_json, *v1_json):
+                if worker.get('is_current'):
+                    worker.pop('last_seen_ts', None)
         assert v1_json == legacy_json
 
     async def test_download_alias_serves_file(self, tmp_path, mock_recorder, mock_app):

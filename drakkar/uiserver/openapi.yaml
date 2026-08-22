@@ -1377,6 +1377,12 @@ components:
         url: {type: string}
         cluster: {type: string}
         is_current: {type: boolean}
+        # v1.18, optional: liveness from recorder heartbeats. Absent on older
+        # backends — clients must then treat every worker as online. The
+        # is_current worker is always online; online=false means the heartbeat
+        # is older than ui.workers_offline_after_seconds (default 30).
+        last_seen_ts: {type: [number, 'null']}
+        online: {type: boolean}
       required: [worker_name, url, is_current]
 
     ProcessorsReport:

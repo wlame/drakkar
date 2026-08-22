@@ -438,6 +438,9 @@ ui:
   host: 127.0.0.1                  # bind address. Use 0.0.0.0 for non-loopback. env: DK_UI__HOST
   port: 8080                       # 1–65535. env: DK_UI__PORT
   public_url: ''                   # external URL advertised to peers (LB / ingress). env: DK_UI__PUBLIC_URL
+  workers_offline_after_seconds: 30  # peer with no heartbeat newer than this shows offline in the
+                                   # workers list; use >= 2-3x the fleet's largest recorder
+                                   # state_sync_interval_seconds. env: DK_UI__WORKERS_OFFLINE_AFTER_SECONDS
 
   # --- Auth (opt-in by default; most endpoints are read-only) ---
   auth_token: ''                   # bearer token; empty = unauthenticated + startup warning. env: DK_UI__AUTH_TOKEN

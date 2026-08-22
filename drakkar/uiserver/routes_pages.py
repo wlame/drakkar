@@ -738,6 +738,9 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
         Each worker gets a ``url`` field (debug_url if set, else http://ip:port),
         a ``cluster`` field from the stored cluster_name (falls back to
         auto-derived group from worker name), and ``is_current`` for self.
+        Discovered peers carry ``last_seen_ts``/``online`` liveness fields
+        from the recorder; the current worker is always online (it is
+        answering this request) with ``last_seen_ts`` = now.
 
         Workers are sorted: clustered first (by cluster then name),
         unclustered at the end (sorted by name).
@@ -756,6 +759,10 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
             'ip_address': None,
             'debug_port': config.port,
             'debug_url': config.public_url or None,
+            # The current worker is serving this very response, so it is
+            # online by definition — no heartbeat lookup needed.
+            'last_seen_ts': time.time(),
+            'online': True,
         }
         workers.append(current_entry)
 

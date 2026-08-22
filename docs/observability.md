@@ -976,6 +976,26 @@ works identically.
 6. On graceful shutdown, the `*-live.db` symlink is removed so
    stopped workers don't appear in the dropdown.
 
+### Liveness
+
+A crashed or OOM-killed worker never removes its symlink, so it would
+stay listed forever. To tell such workers apart from healthy ones, each
+discovered worker carries two liveness fields in `/api/v1/workers`:
+
+- `last_seen_ts` -- the newest heartbeat, read from the peer's
+  `worker_state.updated_at` (written every
+  `ui.recorder.state_sync_interval_seconds`, default 10s). Workers with
+  `store_state: false` fall back to their newest event timestamp;
+  `null` when neither source exists.
+- `online` -- `true` when the heartbeat is no older than
+  `ui.workers_offline_after_seconds` (default 30). The worker serving
+  the request always reports itself online.
+
+Set `workers_offline_after_seconds` to at least 2--3x the largest
+`state_sync_interval_seconds` in the fleet so a healthy worker never
+flaps offline between heartbeats. An offline worker stays listed --
+its recorded history is still reachable -- it is just marked as gone.
+
 ### Worker Switcher
 
 The UI navigation bar includes a worker dropdown that lists all
