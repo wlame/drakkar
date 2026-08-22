@@ -87,8 +87,12 @@ class HttpSink(BaseSink[HttpPayload]):
 
         Raises httpx.HTTPStatusError on non-2xx responses.
         """
-        if not payloads or not self._client:
+        if not payloads:
             return
+        # ``deliver`` must raise on failure (BaseSink contract) — silently
+        # returning here would let the offset commit past lost payloads.
+        if self._client is None:
+            raise RuntimeError(f'HttpSink {self._name!r} is not connected — call connect() before deliver()')
 
         start = time.monotonic()
         labels = {'sink_type': self.sink_type, 'sink_name': self._name}

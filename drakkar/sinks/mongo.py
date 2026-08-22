@@ -155,7 +155,12 @@ def _dumped(model: BaseModel | None, field: str, op: MongoOp) -> dict:
     ``on_error`` in the handler's own code, this one through
     ``on_delivery_error``.
     """
-    assert model is not None  # the per-op field contract guarantees it
+    # Explicit raise rather than assert: ``python -O`` strips asserts, which
+    # would turn a broken per-op field contract into a confusing AttributeError.
+    if model is None:
+        raise RuntimeError(
+            f'MongoPayload(op={op.value!r}) reached the builder without {field!r} — per-op contract broken'
+        )
     dumped = model.model_dump()
     if not dumped:
         raise ValueError(
@@ -192,7 +197,10 @@ def _write_for(op: MongoOp, predicate: dict[str, Any], update: '_UpdateDocument'
 
     # Everything else writes a document, guaranteed present by both the
     # per-op payload contract and the statement config validation.
-    assert update is not None
+    if update is None:
+        raise RuntimeError(
+            f'MongoOp {op.value!r} reached the write builder without an update document — contract broken'
+        )
     if op is MongoOp.UPDATE_MANY:
         return UpdateMany(predicate, update), 'update_many', (predicate, update), {}
     if op is MongoOp.UPSERT:
@@ -366,8 +374,12 @@ class MongoSink(BaseSink[MongoPayload]):
         an insert, an update and a delete against one collection travel
         together, which ``insert_many`` could not express at all.
         """
-        if not payloads or self._db is None:
+        if not payloads:
             return
+        # ``deliver`` must raise on failure (BaseSink contract) — silently
+        # returning here would let the offset commit past lost payloads.
+        if self._db is None:
+            raise RuntimeError(f'MongoSink {self._name!r} is not connected — call connect() before deliver()')
 
         start = time.monotonic()
         labels = {'sink_type': self.sink_type, 'sink_name': self._name}
@@ -431,7 +443,10 @@ class MongoSink(BaseSink[MongoPayload]):
         if len(run) == 1:
             await self._execute_single(run[0])
             return
-        assert self._db is not None
+        # Explicit raise rather than assert — asserts vanish under ``python -O``
+        # (see the matching note in BaseSink.should_skip_delivery).
+        if self._db is None:
+            raise RuntimeError(f'MongoSink {self._name!r} has no database handle — internal invariant broken')
         try:
             await self._db[run[0].collection].bulk_write([unit.model for unit in run], ordered=True)
         except BulkWriteError as e:
@@ -451,7 +466,8 @@ class MongoSink(BaseSink[MongoPayload]):
         Avoids bulk-write overhead for a one-payload run, and attribution
         comes from the raised error itself.
         """
-        assert self._db is not None
+        if self._db is None:
+            raise RuntimeError(f'MongoSink {self._name!r} has no database handle — internal invariant broken')
         await getattr(self._db[unit.collection], unit.method)(*unit.args, **unit.kwargs)
 
     async def close(self) -> None:

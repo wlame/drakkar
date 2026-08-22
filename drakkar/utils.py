@@ -9,10 +9,22 @@ import threading
 import time
 from collections.abc import Awaitable, Callable
 
+# Query parameters whose value is secret material. Matched by substring so
+# variants like ``sslpassword`` or ``api_token`` are caught too — over-redacting
+# an odd parameter name in a log line is harmless, leaking a secret is not.
+_SENSITIVE_QUERY_PARAM = re.compile(r'(?i)([?&][^=&#]*(?:password|passwd|pwd|secret|token|key)[^=&#]*=)[^&#]*')
+
 
 def redact_url(url: str) -> str:
-    """Redact credentials from URIs. Replaces user:pass@ with ***:***@."""
-    return re.sub(r'://[^@/]+@', '://***:***@', url)
+    """Redact credentials from URIs.
+
+    Replaces ``user:pass@`` with ``***:***@`` and blanks the value of any
+    password-like query parameter (``?password=...``, ``&sslkey=...``) —
+    DSNs such as ``postgresql://host/db?password=x`` carry the secret in
+    the query string instead of the authority part.
+    """
+    redacted = re.sub(r'://[^@/]+@', '://***:***@', url)
+    return _SENSITIVE_QUERY_PARAM.sub(r'\1***', redacted)
 
 
 # Module-level monotone counter for ``make_request_id``. Locked so the

@@ -53,7 +53,18 @@ class DLQMessage:
         for p in self.delivery_error.payloads:
             try:
                 payloads_json.append(p.model_dump_json())
-            except Exception:
+            except Exception as e:
+                # str(p) keeps the DLQ entry usable, but the degraded shape
+                # deserves a trace — a payload that cannot serialize itself
+                # usually points at a broken user model.
+                logger.warning(
+                    'dlq_payload_serialization_fallback',
+                    category='sink',
+                    payload_type=type(p).__name__,
+                    sink_name=self.delivery_error.sink_name,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
                 payloads_json.append(str(p))
 
         msg = {

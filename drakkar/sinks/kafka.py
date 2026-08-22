@@ -96,8 +96,12 @@ class KafkaSink(BaseSink[KafkaPayload]):
         Submits all messages, flushes to push them into flight,
         then awaits all delivery futures and verifies broker acknowledgement.
         """
-        if not payloads or self._producer is None:
+        if not payloads:
             return
+        # ``deliver`` must raise on failure (BaseSink contract) — silently
+        # returning here would let the offset commit past lost payloads.
+        if self._producer is None:
+            raise RuntimeError(f'KafkaSink {self._name!r} is not connected — call connect() before deliver()')
 
         start = time.monotonic()
         labels = {'sink_type': self.sink_type, 'sink_name': self._name}

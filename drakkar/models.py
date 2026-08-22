@@ -414,9 +414,6 @@ class MessageGroup(BaseModel):
         replaced via on_error contributes to neither (its successors do).
         So ``len(tasks)`` may exceed ``len(results) + len(errors)``; the
         difference is the count of replaced tasks.
-
-    See also: ``SourceGroup`` (a future, not-yet-implemented extension
-    for aggregating across multiple source messages).
     """
 
     source_message: SourceMessage = Field(description='The originating Kafka message.')
@@ -884,44 +881,54 @@ class RedisOp(StrEnum):
 # Per-op field contract: (required, must-be-unset). Enforced in BOTH
 # directions, for the same reason as _PG_OP_FIELDS — twelve operations in one
 # class with optional fields would otherwise silently drop a mis-set field.
+# Every non-SCRIPT op forbids the script-only fields (``script``, ``keys``,
+# ``args``) so e.g. SET with a stray ``script=`` fails loudly instead of
+# silently ignoring it — the exact hazard this table exists to prevent.
+_SCRIPT_ONLY_FIELDS = frozenset({'script', 'keys', 'args'})
 _REDIS_OP_FIELDS: dict[RedisOp, tuple[frozenset[str], frozenset[str]]] = {
-    RedisOp.SET: (frozenset({'key', 'data'}), frozenset({'fields', 'members', 'amount', 'side', 'start', 'stop'})),
+    RedisOp.SET: (
+        frozenset({'key', 'data'}),
+        frozenset({'fields', 'members', 'amount', 'side', 'start', 'stop'}) | _SCRIPT_ONLY_FIELDS,
+    ),
     RedisOp.DELETE: (
         frozenset({'key'}),
-        frozenset({'data', 'ttl', 'fields', 'members', 'amount', 'side', 'start', 'stop'}),
+        frozenset({'data', 'ttl', 'fields', 'members', 'amount', 'side', 'start', 'stop'}) | _SCRIPT_ONLY_FIELDS,
     ),
     RedisOp.EXPIRE: (
         frozenset({'key', 'ttl'}),
-        frozenset({'data', 'fields', 'members', 'amount', 'side', 'start', 'stop'}),
+        frozenset({'data', 'fields', 'members', 'amount', 'side', 'start', 'stop'}) | _SCRIPT_ONLY_FIELDS,
     ),
     RedisOp.INCRBY: (
         frozenset({'key', 'amount'}),
-        frozenset({'data', 'ttl', 'fields', 'members', 'side', 'start', 'stop'}),
+        frozenset({'data', 'ttl', 'fields', 'members', 'side', 'start', 'stop'}) | _SCRIPT_ONLY_FIELDS,
     ),
     RedisOp.HSET: (
         frozenset({'key', 'fields'}),
-        frozenset({'data', 'ttl', 'members', 'amount', 'side', 'start', 'stop'}),
+        frozenset({'data', 'ttl', 'members', 'amount', 'side', 'start', 'stop'}) | _SCRIPT_ONLY_FIELDS,
     ),
     RedisOp.HDEL: (
         frozenset({'key', 'fields'}),
-        frozenset({'data', 'ttl', 'members', 'amount', 'side', 'start', 'stop'}),
+        frozenset({'data', 'ttl', 'members', 'amount', 'side', 'start', 'stop'}) | _SCRIPT_ONLY_FIELDS,
     ),
-    RedisOp.PUSH: (frozenset({'key', 'data'}), frozenset({'ttl', 'fields', 'members', 'amount', 'start', 'stop'})),
+    RedisOp.PUSH: (
+        frozenset({'key', 'data'}),
+        frozenset({'ttl', 'fields', 'members', 'amount', 'start', 'stop'}) | _SCRIPT_ONLY_FIELDS,
+    ),
     RedisOp.TRIM: (
         frozenset({'key', 'start', 'stop'}),
-        frozenset({'data', 'ttl', 'fields', 'members', 'amount', 'side'}),
+        frozenset({'data', 'ttl', 'fields', 'members', 'amount', 'side'}) | _SCRIPT_ONLY_FIELDS,
     ),
     RedisOp.SADD: (
         frozenset({'key', 'members'}),
-        frozenset({'data', 'ttl', 'fields', 'amount', 'side', 'start', 'stop'}),
+        frozenset({'data', 'ttl', 'fields', 'amount', 'side', 'start', 'stop'}) | _SCRIPT_ONLY_FIELDS,
     ),
     RedisOp.SREM: (
         frozenset({'key', 'members'}),
-        frozenset({'data', 'ttl', 'fields', 'amount', 'side', 'start', 'stop'}),
+        frozenset({'data', 'ttl', 'fields', 'amount', 'side', 'start', 'stop'}) | _SCRIPT_ONLY_FIELDS,
     ),
     RedisOp.ZADD: (
         frozenset({'key', 'members'}),
-        frozenset({'data', 'ttl', 'fields', 'amount', 'side', 'start', 'stop'}),
+        frozenset({'data', 'ttl', 'fields', 'amount', 'side', 'start', 'stop'}) | _SCRIPT_ONLY_FIELDS,
     ),
     RedisOp.SCRIPT: (
         frozenset({'script', 'keys'}),

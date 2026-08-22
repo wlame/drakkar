@@ -139,14 +139,22 @@ def _sorted_mapping(value: object) -> dict[str, object]:
 
 def _render_set(payload: RedisPayload, key: str) -> _Rendered:
     """SET pk <json> [EX ttl]."""
-    assert payload.data is not None  # the per-op contract guarantees it
+    # Explicit raise rather than assert: ``python -O`` strips asserts, which
+    # would turn a broken per-op contract into a confusing AttributeError.
+    if payload.data is None:
+        raise RuntimeError(
+            f'RedisPayload(op={payload.op.value!r}) reached the renderer without data — per-op contract broken'
+        )
     kwargs: dict[str, object] = {'ex': payload.ttl} if payload.ttl is not None else {}
     return 'set', (key, payload.data.model_dump_json()), kwargs
 
 
 def _render_push(payload: RedisPayload, key: str) -> _Rendered:
     """LPUSH/RPUSH pk <json> — one list element is one serialized object."""
-    assert payload.data is not None
+    if payload.data is None:
+        raise RuntimeError(
+            f'RedisPayload(op={payload.op.value!r}) reached the renderer without data — per-op contract broken'
+        )
     method = 'rpush' if payload.side == 'right' else 'lpush'
     return method, (key, payload.data.model_dump_json()), {}
 
@@ -331,8 +339,12 @@ class RedisSink(BaseSink[RedisPayload]):
         ``internal/sinks/redis.go`` — the two must stay observably
         identical (divergence #18 in its migration notes).
         """
-        if not payloads or not self._client:
+        if not payloads:
             return
+        # ``deliver`` must raise on failure (BaseSink contract) — silently
+        # returning here would let the offset commit past lost payloads.
+        if self._client is None:
+            raise RuntimeError(f'RedisSink {self._name!r} is not connected — call connect() before deliver()')
 
         start = time.monotonic()
         labels = {'sink_type': self.sink_type, 'sink_name': self._name}
@@ -427,7 +439,10 @@ class RedisSink(BaseSink[RedisPayload]):
         remaps them to the builtins ``SinkManager`` recognises, so the
         manager's bounded fast-retry re-sends the batch when that is safe.
         """
-        assert self._client is not None
+        # Explicit raise rather than assert — asserts vanish under ``python -O``
+        # (see the matching note in BaseSink.should_skip_delivery).
+        if self._client is None:
+            raise RuntimeError(f'RedisSink {self._name!r} has no client — internal invariant broken')
         pipe = self._client.pipeline(transaction=False)
         for command in commands:
             await command.queue(pipe)
@@ -458,7 +473,8 @@ class RedisSink(BaseSink[RedisPayload]):
 
     async def _execute_single(self, command: _Command) -> None:
         """Run one command directly — the shape the pre-batching loop produced."""
-        assert self._client is not None
+        if self._client is None:
+            raise RuntimeError(f'RedisSink {self._name!r} has no client — internal invariant broken')
         await command.execute(self._client)
 
     async def close(self) -> None:

@@ -27,6 +27,7 @@ from drakkar.pgsql import (
     render_upsert,
 )
 from drakkar.sinks.base import BaseSink
+from drakkar.utils import redact_url
 
 logger = structlog.get_logger()
 
@@ -206,7 +207,11 @@ class PostgresSink(BaseSink[PostgresPayload]):
             'postgres_sink_connected',
             category='sink',
             sink_name=self._name,
-            host=self._config.dsn.split('@')[-1],
+            # The whole DSN goes through ``redact_url`` rather than a
+            # split('@') — a DSN without an authority part (e.g.
+            # ``postgresql://host/db?password=x``) would otherwise log
+            # the secret verbatim.
+            host=redact_url(self._config.dsn),
             statements=len(self._statements),
         )
 
@@ -227,8 +232,12 @@ class PostgresSink(BaseSink[PostgresPayload]):
         two must stay observably identical (divergence #18 in its migration
         notes).
         """
-        if not payloads or not self._pool:
+        if not payloads:
             return
+        # ``deliver`` must raise on failure (BaseSink contract) — silently
+        # returning here would let the offset commit past lost payloads.
+        if self._pool is None:
+            raise RuntimeError(f'PostgresSink {self._name!r} is not connected — call connect() before deliver()')
 
         start = time.monotonic()
         labels = {'sink_type': self.sink_type, 'sink_name': self._name}

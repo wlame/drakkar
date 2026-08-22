@@ -6,6 +6,7 @@ payload.path. Creates the file if it doesn't exist. Raises an error
 if the parent directory is missing or not writable.
 """
 
+import asyncio
 import os
 import time
 from pathlib import Path
@@ -74,28 +75,47 @@ class FileSink(BaseSink[FilePayload]):
         start = time.monotonic()
         labels = {'sink_type': self.sink_type, 'sink_name': self._name}
         try:
-            for payload in payloads:
-                if self._base_path:
-                    resolved = os.path.realpath(os.path.join(self._base_path, payload.path))
-                    base_real = os.path.realpath(self._base_path)
-                    if not resolved.startswith(base_real + os.sep) and resolved != base_real:
-                        raise ValueError(
-                            f'Path traversal detected: {payload.path!r} resolves outside base_path {self._base_path!r}'
-                        )
-                    path = Path(resolved)
-                else:
-                    path = Path(payload.path)
-                if not path.parent.is_dir():
-                    raise FileNotFoundError(f'Parent directory does not exist: {path.parent}')
-                line = payload.data.model_dump_json() + '\n'
-                with open(path, 'a') as f:
-                    f.write(line)
+            # Path resolution (realpath) and file appends are blocking OS
+            # calls — one to_thread hop for the whole batch keeps them off
+            # the event loop without a thread switch per payload.
+            await asyncio.to_thread(self._append_batch, payloads)
 
             sink_payloads_delivered.labels(**labels).inc(len(payloads))
             sink_deliver_duration.labels(**labels).observe(time.monotonic() - start)
         except Exception:
             sink_deliver_errors.labels(**labels).inc()
             raise
+
+    def _resolve_target(self, payload_path: str) -> Path:
+        """Resolve a payload path against base_path, refusing escapes."""
+        if not self._base_path:
+            return Path(payload_path)
+        resolved = os.path.realpath(os.path.join(self._base_path, payload_path))
+        base_real = os.path.realpath(self._base_path)
+        if not resolved.startswith(base_real + os.sep) and resolved != base_real:
+            raise ValueError(
+                f'Path traversal detected: {payload_path!r} resolves outside base_path {self._base_path!r}'
+            )
+        return Path(resolved)
+
+    def _append_batch(self, payloads: list[FilePayload]) -> None:
+        """Synchronous batch write — runs inside ``asyncio.to_thread``.
+
+        Every path is resolved and validated before the first byte is
+        written, then lines are grouped per target file so each file is
+        opened once per batch. Line order within a file follows payload
+        order.
+        """
+        lines_by_path: dict[Path, list[str]] = {}
+        for payload in payloads:
+            path = self._resolve_target(payload.path)
+            if not path.parent.is_dir():
+                raise FileNotFoundError(f'Parent directory does not exist: {path.parent}')
+            lines_by_path.setdefault(path, []).append(payload.data.model_dump_json() + '\n')
+
+        for path, lines in lines_by_path.items():
+            with open(path, 'a') as f:
+                f.writelines(lines)
 
     async def close(self) -> None:
         """No-op — filesystem doesn't hold persistent connections."""

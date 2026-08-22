@@ -545,9 +545,12 @@ class SinkManager:
         # Dispatch per-sink delivery coroutines concurrently. Each coroutine
         # owns its own retry/DLQ/stats logic, so concurrent execution is safe
         # — stats are scoped per (sink_type, name), no cross-sink contention.
-        # Any exception that leaks out of ``_deliver_to_sink`` is a bug and
-        # should propagate loudly; we prefer a crash over a silently-lost
-        # batch, so we DO NOT pass ``return_exceptions=True`` here.
+        # ``return_exceptions=True`` lets every sibling delivery settle — a
+        # bare gather would abandon in-flight groups on the first raise and
+        # swallow any later failures entirely. After all groups finish we
+        # re-raise the FIRST exception (iteration order), mirroring
+        # ``connect_all``: an exception leaking out of ``_deliver_to_sink``
+        # still propagates loudly, it just no longer cancels its siblings.
         coros = [
             self._deliver_to_sink(
                 sink_type=sink_type,
@@ -559,7 +562,10 @@ class SinkManager:
             )
             for (sink_type, sink_name) in groups
         ]
-        await asyncio.gather(*coros)
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        for result_or_exc in results:
+            if isinstance(result_or_exc, BaseException):
+                raise result_or_exc
 
     async def _deliver_with_transient_retry(
         self,
@@ -593,9 +599,9 @@ class SinkManager:
         The retries happen INSIDE a single ``_deliver_to_sink`` attempt
         from the circuit breaker's perspective: whether we made 1 or N
         underlying attempts, the breaker sees exactly one ``record_*``
-        call for this delivery. That preserves the Phase 2 invariant
-        that a single batch with in-call retries counts as ONE consecutive
-        failure.
+        call for this delivery. That preserves the circuit-breaker
+        invariant that a single batch with in-call retries counts as ONE
+        consecutive failure.
         """
         # Non-idempotent fast path: a single shot, exactly as before.
         # We intentionally do NOT wrap in try/except here so the
@@ -866,11 +872,13 @@ class SinkManager:
                             payload_count=len(payloads),
                         )
                         return
-                    else:
-                        # DLQ or RETRY exhausted — DLQ handling is done by the caller (app.py)
-                        # since it needs access to the DLQ sink which lives outside the manager.
-                        # This is a terminal failure for the sink — tell the breaker
-                        # so consecutive failures can accumulate toward the trip threshold.
+                    elif action == DeliveryAction.DLQ:
+                        # The DLQ write already happened inside the
+                        # on_delivery_error callback (app.py's wrapper handles
+                        # the DLQ action, including dlq.on_send_failure).
+                        # Terminal failure for the sink — tell the breaker so
+                        # consecutive failures accumulate toward the trip
+                        # threshold.
                         sink.record_failure()
                         logger.warning(
                             'sink_delivery_failed_to_dlq',
@@ -880,6 +888,16 @@ class SinkManager:
                             payload_count=len(payloads),
                             attempts=attempt,
                         )
+                        return
+                    else:
+                        # RETRY with the budget exhausted. The handler never
+                        # returned DLQ, so the app-level wrapper (which DLQs
+                        # only on a DLQ action) never shipped these payloads
+                        # — route them to the DLQ here instead of dropping
+                        # them silently (docs/sinks.md promises this
+                        # fallthrough).
+                        sink.record_failure()
+                        await self._dlq_exhausted_retry(error=error, partition_id=partition_id, attempts=attempt)
                         return
         finally:
             # Probe-slot leak guard. ``record_success`` / ``record_failure``
@@ -892,3 +910,50 @@ class SinkManager:
             # circuit in half_open forever.
             if probe_claimed and sink.probe_inflight:
                 sink.release_probe_inflight()
+
+    async def _dlq_exhausted_retry(
+        self,
+        error: DeliveryError,
+        partition_id: int,
+        attempts: int,
+    ) -> None:
+        """Ship a retries-exhausted batch to the DLQ, honoring ``dlq.on_send_failure``.
+
+        The handler kept answering RETRY, so the app-level wrapper — which
+        DLQs only when the handler returns the DLQ action — never shipped
+        these payloads. Without this fallthrough the batch would vanish
+        once the retry budget ran out.
+        """
+        if self._dlq_sink is not None and await self._dlq_sink.send(
+            error, partition_id=partition_id, attempt_count=attempts
+        ):
+            logger.warning(
+                'sink_delivery_retries_exhausted_to_dlq',
+                category='sink',
+                sink_type=error.sink_type,
+                sink_name=error.sink_name,
+                payload_count=len(error.payloads),
+                attempts=attempts,
+            )
+            return
+        # No DLQ sink wired, or the DLQ write failed — the payloads have
+        # nowhere safe to go. Apply the dlq.on_send_failure strategy, the
+        # same way the circuit-open path above does.
+        if self._dlq_on_send_failure == 'stall':
+            raise SinkDeliveryFailedError(
+                sink_name=error.sink_name,
+                sink_type=error.sink_type,
+                reason='delivery retries exhausted and DLQ unavailable',
+            )
+        dlq_dropped_payloads.labels(partition=str(partition_id)).inc()
+        await logger.acritical(
+            'dlq_failure_payloads_dropped',
+            category='sink',
+            sink_name=error.sink_name,
+            sink_type=error.sink_type,
+            partition=partition_id,
+            payload_count=len(error.payloads),
+            reason='delivery retries exhausted and DLQ unavailable',
+            action='ALERT: payloads lost (dlq.on_send_failure=drop) — '
+            'set dlq.on_send_failure=stall to prefer replay over loss',
+        )
