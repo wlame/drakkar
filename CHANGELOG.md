@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An archive pass could merge and delete a *peer's* live database in a
+  shared `db_dir`. Source selection excluded only symlinks and the pass's
+  own database, and settledness read only the main file's mtime, which
+  under WAL moves on checkpoint rather than on every write — so a worker
+  rotating hourly saw a worker rotating daily as settled. The victim kept
+  writing to an unlinked inode and disappeared from autodiscovery and cache
+  peer sync. Every `<worker>-live.db` symlink target is now excluded
+  whoever owns it, and settledness also reads the `-wal` sidecar.
+
 - The flight recorder no longer buffers events it can never write. In
   memory-only mode (`db_dir` empty) and with `store_events: false` there is
   no flush loop, so the ring buffer filled to `max_buffer` and then counted

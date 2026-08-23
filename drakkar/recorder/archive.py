@@ -274,11 +274,24 @@ def assign_windows(
 
 
 def _is_settled(path: str, mtime_cutoff: float) -> bool:
-    """Whether ``path`` stopped being written before ``mtime_cutoff``."""
+    """Whether ``path`` stopped being written before ``mtime_cutoff``.
+
+    The ``-wal`` sidecar is consulted alongside the main file because under
+    WAL the main file's mtime only moves on checkpoint — a database written
+    to continuously can look untouched for hours. The sidecar moves on every
+    write, so the newer of the two is the real answer. A missing sidecar
+    (checkpointed and cleaned up, or never in WAL mode) leaves the main
+    file's mtime as the answer; an unreadable path is never settled.
+    """
     try:
-        return os.path.getmtime(path) < mtime_cutoff
+        newest = os.path.getmtime(path)
     except OSError:
         return False
+    try:
+        newest = max(newest, os.path.getmtime(path + '-wal'))
+    except OSError:
+        pass
+    return newest < mtime_cutoff
 
 
 def run_archive_pass(
@@ -329,26 +342,59 @@ def run_archive_pass(
         _release_lock(lock_fd, lock_path)
 
 
+def _live_targets(db_dir: str) -> set[str]:
+    """Resolved paths of every worker's currently-open recorder database.
+
+    The ``<worker>-live.db`` symlinks are the in-use markers: each points at
+    the file that worker is writing right now. A shared ``db_dir`` holds one
+    per worker, and every one of them is off limits to an archive pass —
+    including peers'. Without this a fleet whose workers rotate on different
+    schedules eats itself: a worker rotating hourly sees a peer that rotates
+    daily as settled, merges its live database and unlinks the inode the
+    peer is still writing to.
+
+    Dangling links (crashed worker, target already archived) are skipped —
+    they mark nothing. Resolution is through ``realpath`` on both sides so a
+    symlinked or relative ``db_dir`` cannot hide a match.
+    """
+    targets: set[str] = set()
+    for link in Path(db_dir).glob('*-live.db'):
+        if not link.is_symlink():
+            continue
+        try:
+            target = os.path.realpath(str(link))
+        except OSError:
+            continue
+        if os.path.isfile(target):
+            targets.add(target)
+    return targets
+
+
 def _list_raw_dbs(db_dir: str, exclude_path: str) -> list[str]:
     """Return the raw recorder files in ``db_dir`` worth considering.
 
-    Skips the live symlink and any other link, the caller's live database,
-    and dot-prefixed names — the latter are the intermediate merge files a
-    pass writes, and in a shared ``db_dir`` one worker must not merge away
-    another worker's work in progress.
+    Skips the live symlinks and any other link, every worker's live database
+    (this one's and its peers' — see :func:`_live_targets`), and dot-prefixed
+    names: the latter are the intermediate merge files a pass writes, and in
+    a shared ``db_dir`` one worker must not merge away another worker's work
+    in progress.
 
-    The live database is compared through ``realpath`` on both sides, so a
-    symlinked or relative ``db_dir`` cannot make the running worker's own
-    file look like a different one.
+    Live databases are compared through ``realpath`` on both sides, so a
+    symlinked or relative ``db_dir`` cannot make a running worker's file look
+    like a different one. ``exclude_path`` stays in the check as well as the
+    symlink map: the caller's own file must be safe even in the window where
+    its live link is missing or has not been repointed yet.
     """
-    live = os.path.realpath(exclude_path) if exclude_path else ''
+    live = _live_targets(db_dir)
+    if exclude_path:
+        live.add(os.path.realpath(exclude_path))
     paths: list[str] = []
     for path in Path(db_dir).glob('*.db'):
         if path.name.startswith('.'):
             continue
         if path.is_symlink() or not path.is_file():
             continue
-        if live and os.path.realpath(str(path)) == live:
+        if live and os.path.realpath(str(path)) in live:
             continue
         paths.append(str(path))
     return paths

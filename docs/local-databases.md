@@ -385,6 +385,21 @@ archive can therefore carry a handful of events timestamped slightly past
 its own window end — archives partition by when a file was *opened*, not
 by when each event inside it happened.
 
+### Live databases are never archive candidates
+
+Each running worker keeps a `<worker>-live.db` symlink pointing at the file
+it is writing right now. An archive pass excludes every one of those
+targets — its own and every peer's — so a worker can never merge away a
+database another worker still holds open. This matters when workers in one
+`db_dir` do not share a rotation setting: without the rule, a worker on
+`rotation_interval_hours: 1` would judge a worker on `24` by its own
+schedule and delete a file still in use.
+
+Settledness is judged from both the database file and its `-wal` sidecar.
+Under WAL the main file's modification time only moves on checkpoint, so a
+continuously written database can look untouched for hours; the sidecar
+moves on every write.
+
 ### Lock election in a shared `db_dir`
 
 Workers sharing one `db_dir` each attempt the archive pass on every

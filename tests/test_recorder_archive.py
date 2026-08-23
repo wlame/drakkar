@@ -19,6 +19,7 @@ from drakkar.recorder import archive as archive_mod
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.archive import (
     LOCK_STALE_SECONDS,
+    _is_settled,
     archive_file_name,
     assign_windows,
     list_archives,
@@ -73,10 +74,16 @@ def _make_db(
         )
     db.commit()
     db.close()
+    stamp = start if mtime is None else mtime
     if sidecars:
         for suffix in ('-wal', '-shm'):
-            (db_dir / (path.name + suffix)).write_bytes(b'')
-    stamp = start if mtime is None else mtime
+            sidecar = db_dir / (path.name + suffix)
+            sidecar.write_bytes(b'')
+            # Stamped with the DB itself: settledness reads the -wal mtime
+            # (under WAL the main file only moves on checkpoint), so leaving
+            # the sidecar at "now" would make every backdated fixture look
+            # like a database still being written to.
+            os.utime(sidecar, (stamp, stamp))
     os.utime(path, (stamp, stamp))
     return str(path)
 
@@ -385,6 +392,77 @@ def test_run_archive_pass_never_touches_the_live_database(tmp_path):
     assert len(_archives(tmp_path)) == 1
 
 
+def test_run_archive_pass_never_touches_a_peers_live_database(tmp_path):
+    """A peer's live DB is a plain file to this worker — only its own
+    ``exclude_path`` was checked. In a fleet where workers rotate on
+    different schedules the peer's file looks settled to a faster-rotating
+    archiver, which then merges it away and unlinks the inode the peer is
+    still writing to. The peer keeps running, its ``-live.db`` symlink
+    dangles, and autodiscovery and cache peer sync lose it.
+
+    The ``*-live.db`` symlinks are the in-use markers, so whatever they
+    resolve to is off limits regardless of whose worker it is.
+    """
+    now = time.time()
+    start = _due_start(now)
+    peer_live = _make_db(tmp_path, 'worker-2', start)
+    (tmp_path / 'worker-2-live.db').symlink_to(Path(peer_live).name)
+    rotated = _make_db(tmp_path, 'worker-1', start + HOUR)
+
+    _run(tmp_path)
+
+    assert Path(peer_live).exists(), "a peer's live database was archived away"
+    assert not Path(rotated).exists()
+    assert len(_archives(tmp_path)) == 1
+
+
+def test_run_archive_pass_archives_a_peer_file_whose_live_link_moved_on(tmp_path):
+    """Only the *current* target is protected. Once a peer rotates, its old
+    file is an ordinary rotated DB and must still be archivable — otherwise
+    a shared db_dir would never shrink.
+    """
+    now = time.time()
+    start = _due_start(now)
+    old = _make_db(tmp_path, 'worker-2', start)
+    current = _make_db(tmp_path, 'worker-2', now - 60, mtime=now - 60)
+    (tmp_path / 'worker-2-live.db').symlink_to(Path(current).name)
+
+    _run(tmp_path)
+
+    assert not Path(old).exists()
+    assert Path(current).exists()
+    assert len(_archives(tmp_path)) == 1
+
+
+def test_is_settled_reads_the_wal_sidecar(tmp_path):
+    """Under WAL the main DB file's mtime only moves on checkpoint, so a
+    busy database can look untouched for hours. The ``-wal`` sidecar moves
+    on every write, so settledness must consider it too.
+    """
+    now = time.time()
+    path = Path(_make_db(tmp_path, 'worker-2', now - DAY, mtime=now - DAY))
+    wal = tmp_path / (path.name + '-wal')
+    os.utime(wal, (now, now))
+
+    assert not _is_settled(str(path), now - HOUR)
+
+
+def test_is_settled_ignores_a_settled_wal_sidecar(tmp_path):
+    now = time.time()
+    path = Path(_make_db(tmp_path, 'worker-2', now - DAY, mtime=now - DAY))
+    wal = tmp_path / (path.name + '-wal')
+    os.utime(wal, (now - DAY, now - DAY))
+
+    assert _is_settled(str(path), now - HOUR)
+
+
+def test_is_settled_without_a_wal_sidecar_uses_the_main_file(tmp_path):
+    now = time.time()
+    path = Path(_make_db(tmp_path, 'worker-2', now - DAY, mtime=now - DAY, sidecars=False))
+
+    assert _is_settled(str(path), now - HOUR)
+
+
 def test_run_archive_pass_ignores_another_workers_in_flight_merge_file(tmp_path):
     now = time.time()
     start = _due_start(now)
@@ -434,7 +512,9 @@ def test_run_archive_pass_sets_aside_a_source_the_merge_cannot_read(tmp_path):
     corrupt = tmp_path / _db_name('worker-2', start + HOUR)
     corrupt.write_bytes(b'this file is not a SQLite database at all' * 8)
     for suffix in ('-wal', '-shm'):
-        (tmp_path / (corrupt.name + suffix)).write_bytes(b'sidecar')
+        sidecar = tmp_path / (corrupt.name + suffix)
+        sidecar.write_bytes(b'sidecar')
+        os.utime(sidecar, (start, start))
     os.utime(corrupt, (start, start))
 
     with capture_logs() as cap:
