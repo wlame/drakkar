@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.1] - 2026-08-23
+
 ### Changed
 
 - Update dependencies: confluent-kafka 2.14.0 -> 2.15.0, pytest 9.0.3 ->
