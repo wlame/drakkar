@@ -2605,6 +2605,9 @@ def _make_dlq_sink():
 
     mock_producer = AsyncMock()
     mock_producer.produce.side_effect = lambda **kw: _make_future()
+    # 0 = the broker took everything; send() reads a non-zero remainder as
+    # "the DLQ write was not confirmed".
+    mock_producer.flush.return_value = 0
     sink = DLQSink(topic='test-dlq', brokers='localhost:9092')
     sink._producer = mock_producer
     return sink, mock_producer
@@ -2759,18 +2762,65 @@ async def test_dlq_sink_send_delivery_report_failure_increments_counter():
     assert sink_dlq_messages._value.get() == successes_before
 
 
-async def test_dlq_sink_send_no_longer_calls_flush():
-    """H3: flush() before `await future` made the future a no-op and the
-    failure path less specific. send() now awaits the delivery-report
-    future directly — flush() must NOT be invoked on the happy path.
+async def test_dlq_sink_send_flushes_the_producer():
+    """``AIOProducer`` hands messages to librdkafka only once its internal
+    buffer reaches ``batch_size`` (1000) or the ``buffer_timeout`` (1.0 s)
+    inactivity timer fires. A DLQ write is a single message, so without an
+    explicit flush every ``send()`` waits out that timer — one second per
+    failed batch on the hot failure path. Same reasoning as ``KafkaSink``.
     """
     sink, mock_producer = _make_dlq_sink()
-    await sink.send(_sample_delivery_error(), partition_id=0)
+    mock_producer.flush.return_value = 0
+
+    assert await sink.send(_sample_delivery_error(), partition_id=0) is True
 
     mock_producer.produce.assert_called_once()
-    # The redundant flush is gone — the delivery future alone represents
-    # the delivery outcome.
-    mock_producer.flush.assert_not_called()
+    mock_producer.flush.assert_called_once()
+
+
+async def test_dlq_sink_send_returns_false_when_flush_leaves_messages_queued():
+    """A non-zero flush remainder means the broker never took the message."""
+    sink, mock_producer = _make_dlq_sink()
+    mock_producer.flush.return_value = 2
+
+    assert await sink.send(_sample_delivery_error(), partition_id=0) is False
+
+
+async def test_dlq_sink_send_returns_false_on_delivery_report_error():
+    """The delivery future resolves to a Message, and a failed delivery is
+    carried in ``Message.error()`` rather than raised. Reporting success
+    there would commit the source offsets past payloads no broker holds.
+    """
+    sink, mock_producer = _make_dlq_sink()
+    mock_producer.flush.return_value = 0
+    failed = _make_mock_message()
+    failed.error.return_value = 'BrokerNotAvailable'
+
+    def _failing_future(**_kwargs):
+        fut = asyncio.get_event_loop().create_future()
+        fut.set_result(failed)
+        return fut
+
+    mock_producer.produce.side_effect = _failing_future
+
+    assert await sink.send(_sample_delivery_error(), partition_id=0) is False
+
+
+async def test_dlq_sink_send_returns_false_when_future_resolves_to_none():
+    """Defensive twin of the KafkaSink guard: a ``None`` delivery report
+    carries no confirmation, so it must not be read as one.
+    """
+    sink, mock_producer = _make_dlq_sink()
+    mock_producer.flush.return_value = 0
+
+    def _none_future(**_kwargs):
+        fut = asyncio.get_event_loop().create_future()
+        fut.set_result(None)
+        return fut
+
+    mock_producer.produce.side_effect = _none_future
+
+    assert await sink.send(_sample_delivery_error(), partition_id=0) is False
 
 
 async def test_dlq_message_serialization_cross_backend_golden():

@@ -164,16 +164,47 @@ class DLQSink(BaseSink[BaseModel]):
         )
         serialized = msg.serialize()
         try:
-            # Produce enqueues the message and returns a future that resolves
-            # on the delivery report. Awaiting the future alone is sufficient
-            # — the AIOProducer flushes its internal queue as needed. An
-            # explicit flush() would only mask delivery-report failures
-            # behind a generic "flush failed" exception with less context.
+            # Produce enqueues the message into the AIOProducer's own buffer
+            # and returns a future that resolves on the delivery report. The
+            # buffer is handed to librdkafka only once it holds ``batch_size``
+            # messages (1000) or its ``buffer_timeout`` inactivity timer
+            # (1.0s) expires — a DLQ write is a single message, so without
+            # this flush every send() waits out that timer. The DLQ sits on
+            # the hot failure paths (breaker open, retries exhausted, the
+            # handler's DLQ action, the ``dlq`` parse-error policy), so a
+            # second per write throttles the whole partition and eats the
+            # revoke drain budget. ``KafkaSink.deliver`` flushes for the
+            # same reason.
             future = await self._producer.produce(
                 topic=self._topic,
                 value=serialized,
             )
-            await future
+            remaining = await self._producer.flush()
+            if remaining:
+                await logger.acritical(
+                    'dlq_flush_incomplete',
+                    category='sink',
+                    dlq_topic=self._topic,
+                    remaining=remaining,
+                    action='ALERT: DLQ broker did not accept the message — offsets will stall',
+                )
+                dlq_send_failures.inc()
+                return False
+            report = await future
+            # A failed delivery is reported *in* the Message, not raised, so
+            # the future resolving is not on its own a confirmation. Reading
+            # it as one would commit the source offsets past payloads no
+            # broker ever accepted. Same check as ``KafkaSink.deliver``.
+            if report is None or report.error() is not None:
+                await logger.acritical(
+                    'dlq_delivery_report_failed',
+                    category='sink',
+                    dlq_topic=self._topic,
+                    error=str(report.error()) if report is not None else 'no delivery report',
+                    action='ALERT: DLQ write not confirmed — offsets will stall',
+                )
+                dlq_send_failures.inc()
+                return False
             sink_dlq_messages.inc()
             logger.info(
                 'dlq_message_sent',

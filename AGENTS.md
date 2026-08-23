@@ -90,8 +90,10 @@ parametrize).
      writes generated `_id`s back into documents, so a replay raises
      duplicate-key on an innocent document (this retired an `_id`-stripping
      workaround; do not reintroduce either half).
-   - The Kafka sink keeps its per-batch `flush()` — the producer buffers up to
-     1s, so dropping it stalls every delivery.
+   - The Kafka sink and the DLQ sink keep their per-write `flush()` — the
+     producer buffers up to 1s, so dropping it stalls every delivery. Both
+     also check the delivery report: a failed delivery arrives in
+     `Message.error()`, it is not raised.
 6. Errors are explicit, never silently swallowed. Structured logging via
    structlog, ECS-compatible.
 

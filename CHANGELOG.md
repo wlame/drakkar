@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Every DLQ write waited about one second: `DLQSink.send()` produced the
+  message but never flushed the producer, so the message sat in the client
+  buffer until its inactivity timer fired. The DLQ is on the hot failure
+  paths, so a sink outage throttled each partition to roughly one batch per
+  second and ate the rebalance drain budget. `send()` now flushes, and it
+  also checks the delivery report — a broker refusal arrives inside the
+  report rather than as an exception, so a failed DLQ write used to be
+  reported as confirmed and the source offsets committed past it.
+
 - A worker whose startup failed after the flight recorder or the cache had
   opened its SQLite connection stayed alive forever instead of exiting.
   The startup sequence now runs the same shutdown path as the poll loop,
