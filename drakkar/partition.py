@@ -61,6 +61,21 @@ StallCallback = Callable[[int], Awaitable[None]]
 MAX_RETRIES = 3  # default, overridden by config.executor.max_retries
 DRAIN_POLL_INTERVAL = 0.05  # seconds between checks when draining in-flight work
 
+# Offset-commit coalescing. A commit is a broker round trip, and it used to
+# happen once per finished message: with a low-fan-out handler that makes the
+# commit rate the bottleneck, and completions queue behind the partition's
+# commit lock waiting for it. Deferring is always safe for at-least-once —
+# it can only make the worker redo work after a crash, never skip it — so
+# the watermark, the tracker and the ordering guarantees are untouched;
+# only the frequency drops.
+#
+# Whichever trigger fires first wins. The count bounds how much work a crash
+# can cost; the delay bounds how long a quiet partition holds its progress.
+# Note that a commit carries ONE offset per partition (the watermark), so
+# the count is how far the watermark moved, not how big the request gets.
+COMMIT_BATCH_MAX_OFFSETS = 300
+COMMIT_BATCH_MAX_DELAY_SECONDS = 0.5
+
 # How many times a partition's processing loop is restarted after an
 # unexpected error before the partition is declared dead. One restart
 # absorbs a transient fault; a loop that dies twice is failing
@@ -213,9 +228,13 @@ class PartitionProcessor:
         self._queue: asyncio.Queue[SourceMessage] = asyncio.Queue()
         self._offset_tracker = OffsetTracker()
         # Serializes the read → commit → acknowledge sequence in
-        # _try_commit, which is called concurrently from every task
-        # completion as well as the run loop. See _try_commit's docstring.
+        # _commit_now, which is called concurrently from every task
+        # completion as well as the run loop. See _commit_now's docstring.
         self._commit_lock = asyncio.Lock()
+        # Pending coalesced-commit timer (see COMMIT_BATCH_MAX_OFFSETS). At
+        # most one is alive at a time; ``stop`` cancels it after the forced
+        # final commit has already flushed whatever it was waiting to send.
+        self._commit_flush_task: asyncio.Task | None = None
         self._pending_tasks: dict[str, ExecutorTask] = {}
         self._window_counter = 0
         self._running = False
@@ -329,6 +348,24 @@ class PartitionProcessor:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        # ``_run`` ends with a forced commit, so by here there is nothing a
+        # pending coalescing timer still needs to send — but the loop may
+        # have been cancelled before reaching it, and a processor that was
+        # never started has no ``_run`` at all. Flush, then retire the timer
+        # so it cannot outlive the processor.
+        await self._commit_now()
+        await self._cancel_commit_flush()
+
+    async def _cancel_commit_flush(self) -> None:
+        """Stop the pending coalescing timer and wait for it to unwind."""
+        task, self._commit_flush_task = self._commit_flush_task, None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     def suppress_deliveries(self) -> None:
         """Mark in-flight tasks as zombies: no further sink deliveries or
@@ -364,9 +401,19 @@ class PartitionProcessor:
         return self._offset_tracker.pending_count > len(self._stalled_offsets)
 
     async def drain(self) -> None:
-        """Wait for all in-flight work and queued messages to complete."""
+        """Wait for all in-flight work and queued messages to complete,
+        then commit the progress that work earned.
+
+        The commit is forced rather than coalesced. A caller drains because
+        it is about to give the partition up — a rebalance revoke, a
+        shutdown — and every offset left sitting in the coalescing window at
+        that moment is redelivered to the next owner for nothing. Draining
+        without committing would also make the wait pointless: the work is
+        done but no record of it survives.
+        """
         while self._queue.qsize() > 0 or self._has_drainable_pending() or self._inflight_count > 0:
             await asyncio.sleep(DRAIN_POLL_INTERVAL)
+        await self._commit_now()
 
     async def _run(self) -> None:
         log = logger.bind(partition=self._partition_id, category='partition')
@@ -377,7 +424,7 @@ class PartitionProcessor:
                 messages = await self._collect_window()
                 if not messages:
                     # retry any uncommitted offsets on idle iterations
-                    await self._try_commit()
+                    await self._note_commit_due()
                     continue
 
                 await self._process_window(messages)
@@ -401,8 +448,10 @@ class PartitionProcessor:
             while self._inflight_count > 0 or self._has_drainable_pending():
                 await asyncio.sleep(DRAIN_POLL_INTERVAL)
 
-            # final commit
-            await self._try_commit()
+            # Final commit — forced, not coalesced: this is the last chance
+            # to record progress before the partition is released, and any
+            # offset left uncommitted here is redelivered for nothing.
+            await self._commit_now()
         except asyncio.CancelledError:
             # Re-raise so the awaiting caller (stop()) sees the true
             # termination cause instead of a clean return.
@@ -525,7 +574,7 @@ class PartitionProcessor:
             accepted.append(msg)
         messages = accepted
         if not messages:
-            await self._try_commit()
+            await self._note_commit_due()
             return
 
         window = Window(
@@ -607,7 +656,7 @@ class PartitionProcessor:
                 await self._finalize_message_tracker(tracker)
 
         if not tasks:
-            await self._try_commit()
+            await self._note_commit_due()
             return
 
         for task in tasks:
@@ -714,7 +763,7 @@ class PartitionProcessor:
             sent = await self._dlq_send(error, self._partition_id)
         if sent:
             self._offset_tracker.complete(msg.offset)
-            await self._try_commit()
+            await self._note_commit_due()
         elif self._on_dlq_failure == 'stall':
             await self._stall_offset(msg.offset)
         else:
@@ -730,7 +779,7 @@ class PartitionProcessor:
                 action='ALERT: unparseable message dropped (dlq.on_send_failure=drop)',
             )
             self._offset_tracker.complete(msg.offset)
-            await self._try_commit()
+            await self._note_commit_due()
 
     async def _execute_and_track(self, task: ExecutorTask, window: Window, retry_count: int = 0) -> None:
         # Bind partition context for this async task — inherited by all user hooks called within
@@ -1115,7 +1164,7 @@ class PartitionProcessor:
             # Just make sure any outstanding commit attempt goes through in
             # case the last commit was blocked.
             offset_lag.labels(partition=str(self._partition_id)).set(self._offset_tracker.pending_count)
-            await self._try_commit()
+            await self._note_commit_due()
 
     async def _finalize_message_tracker(self, tracker: MessageTracker) -> None:
         """Fire ``on_message_complete`` for a fully-terminal message and
@@ -1241,12 +1290,66 @@ class PartitionProcessor:
         # in a later message does not pin offsets of already-finished ones.
         self._offset_tracker.complete(tracker.source_message.offset)
         offset_lag.labels(partition=str(self._partition_id)).set(self._offset_tracker.pending_count)
-        await self._try_commit()
+        await self._note_commit_due()
 
         # Release tracker memory once its offset is committable.
         self._message_trackers.pop(tracker.source_message.offset, None)
 
-    async def _try_commit(self) -> None:
+    async def _note_commit_due(self) -> None:
+        """A watermark advance happened; commit now or shortly.
+
+        The coalescing entry point. Every caller that merely *finished
+        something* goes through here; only the paths that must not leave
+        progress unsent — the drain's final commit — call ``_commit_now``
+        directly.
+
+        Deferring is safe in the direction that matters: a commit that
+        arrives late can only cause reprocessing after a crash, which
+        at-least-once already allows. Committing early is what would lose
+        messages, and nothing here does that.
+        """
+        if self._deliveries_suppressed:
+            # Zombie path: the partition belongs to another worker now.
+            return
+        advance = self._offset_tracker.uncommitted_advance()
+        if advance <= 0:
+            return
+        if advance >= COMMIT_BATCH_MAX_OFFSETS:
+            await self._commit_now()
+            return
+        self._schedule_commit_flush()
+
+    def _schedule_commit_flush(self) -> None:
+        """Ensure a timer is running that will flush the deferred commit.
+
+        One timer at a time: the first deferral after a commit starts it,
+        later ones ride along, so the delay is measured from the OLDEST
+        uncommitted advance rather than being pushed back by every new one.
+        """
+        if self._commit_flush_task is not None and not self._commit_flush_task.done():
+            return
+        self._commit_flush_task = asyncio.create_task(self._commit_after_delay())
+
+    async def _commit_after_delay(self) -> None:
+        """Sleep out the coalescing window, then commit whatever accumulated."""
+        try:
+            await asyncio.sleep(COMMIT_BATCH_MAX_DELAY_SECONDS)
+            await self._commit_now()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A failed deferred commit is not fatal: the offsets stay
+            # pending and the next completion (or the drain) retries. It
+            # must not, however, take the timer down silently.
+            logger.warning(
+                'commit_flush_failed',
+                category='kafka',
+                partition=self._partition_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+
+    async def _commit_now(self) -> None:
         """Commit offsets if the watermark has advanced.
 
         The whole read → commit → acknowledge sequence runs under

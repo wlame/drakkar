@@ -33,7 +33,38 @@ relative proportions hold.
 | **Sink delivery** | Send payloads to Kafka/Postgres/Mongo/etc. | ~0.5-5ms per sink (network I/O) |
 | **record_task_complete** | Buffer event | ~10us |
 | **Offset tracking** | Mark offsets complete, check committable watermark | ~5us |
-| **Offset commit** | `consumer.commit()` to Kafka | ~5-20ms (but async, non-blocking) |
+| **Offset commit** | `consumer.commit()` to Kafka | ~5-20ms, **synchronous** — coalesced, so it costs at most one round trip per partition per 500 ms (see below) |
+
+### Offset commits are batched
+
+A commit is a **synchronous** broker round trip on a consumer-thread-pool
+thread, serialized per partition by the commit lock. (An earlier version of
+this page called it asynchronous. It never was.)
+
+It does not, however, happen per message. Every completed message advances
+the per-partition watermark, and the commit is deferred until either
+
+- the watermark has moved **300 offsets**, or
+- **500 ms** have passed since the oldest uncommitted advance,
+
+whichever comes first. So the commit rate is bounded at ~2/s per partition
+regardless of message rate, instead of tracking it — which mattered most for
+low-fan-out handlers, where one message is one task and the commit rate was
+the message rate.
+
+Two things are deliberately **not** affected:
+
+- **At-least-once is unchanged.** Deferring a commit can only make a
+  restarted worker redo work it already did, which the guarantee already
+  allows. Losing a message would require committing *early*, and nothing
+  here does that.
+- **Giving up a partition always flushes.** A rebalance revoke, a drain and
+  a shutdown each force the pending commit before releasing the partition,
+  so batching never turns into redelivery at handover.
+
+The window bounds how much work a crash can cost: up to 500 ms of finished
+messages get reprocessed instead of up to one. Both backends use the same
+two thresholds.
 
 ### Where the time goes for a 30ms task
 

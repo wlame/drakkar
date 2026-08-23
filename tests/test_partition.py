@@ -723,10 +723,10 @@ async def test_full_shutdown_commits_queued_messages(echo_pool):
 
 async def test_commit_failure_preserves_offsets_for_retry(echo_pool):
     """When on_commit raises (e.g. during rebalance), offsets must stay
-    in the tracker so the next _try_commit retries them.
+    in the tracker so the next _commit_now retries them.
 
     Reproduces: one partition per worker retains lag after all work done.
-    Root cause was _handle_commit swallowing exceptions, making _try_commit
+    Root cause was _handle_commit swallowing exceptions, making _commit_now
     think the commit succeeded and calling acknowledge_commit.
     """
     commit_count = 0
@@ -1779,10 +1779,10 @@ async def test_on_task_complete_sink_exception_stall_mode_stalls_offset(echo_poo
     assert proc.offset_tracker.has_pending(), 'offset stays pending (stalled watermark)'
 
 
-async def test_concurrent_try_commit_does_not_resend_a_stale_watermark(echo_pool):
+async def test_concurrent_commit_now_does_not_resend_a_stale_watermark(echo_pool):
     """Two overlapping commits must not both send the same watermark.
 
-    ``_try_commit`` is read → RPC → acknowledge, and every task completion
+    ``_commit_now`` is read → RPC → acknowledge, and every task completion
     calls it concurrently with the run loop. Without a lock both callers read
     the same ``committable()`` before either acknowledges, so the identical
     offset is committed twice — and with two RPCs in flight at once the broker
@@ -1807,10 +1807,10 @@ async def test_concurrent_try_commit_does_not_resend_a_stale_watermark(echo_pool
     proc.offset_tracker.complete(0)
 
     # First commit parks inside the lock, mid-RPC.
-    first = asyncio.create_task(proc._try_commit())
+    first = asyncio.create_task(proc._commit_now())
     await wait_for(lambda: bool(commits), timeout=2)
     # Second arrives while the first is still in flight.
-    second = asyncio.create_task(proc._try_commit())
+    second = asyncio.create_task(proc._commit_now())
     await asyncio.sleep(0.05)
     release.set()
     await asyncio.gather(first, second)
@@ -3107,7 +3107,7 @@ async def test_raising_on_window_complete_still_records_and_commits(echo_pool):
 
     The hook runs inside a fire-and-forget task; before the fix its
     exception escaped, skipping the window's recorder event and the final
-    _try_commit and surfacing only as an unretrieved-task warning.
+    _commit_now and surfacing only as an unretrieved-task warning.
     """
     handler = RaisingWindowCompleteHandler()
     recorder = MagicMock()
@@ -3166,3 +3166,212 @@ async def test_shutdown_drain_chunks_backlog_into_window_size(echo_pool):
     window_sizes = [n for n, _ in handler.arrange_calls]
     assert all(n <= 5 for n in window_sizes), f'drain exceeded window_size: {window_sizes}'
     assert sum(window_sizes) == 15
+
+
+# ---------------------------------------------------------------------------
+# Offset-commit coalescing
+# ---------------------------------------------------------------------------
+
+
+class _CountingCommits:
+    """Records every commit the processor makes, in order."""
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    async def __call__(self, partition_id: int, offset: int) -> None:
+        self.calls.append(offset)
+
+
+async def test_finished_messages_share_one_commit_instead_of_one_each(echo_pool, monkeypatch):
+    """N messages finishing back-to-back must not cost N broker round trips.
+
+    Every completed message used to trigger a synchronous commit under the
+    partition's commit lock. With a low fan-out handler that is one round
+    trip per message, and completions queue behind the lock. Commits are now
+    coalesced by count or by a short timer, whichever comes first — the
+    watermark and the at-least-once guarantee are untouched, only the
+    frequency changes.
+    """
+    commits = _CountingCommits()
+    handler = EchoHandler()
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=commits,
+    )
+
+    message_count = 20
+    for offset in range(message_count):
+        proc.enqueue(make_msg(offset=offset))
+
+    proc.start()
+    await wait_for(lambda: len(handler.collect_calls) == message_count)
+    await proc.stop()
+
+    # The final drain commit is always forced, so at least one.
+    assert commits.calls, 'nothing was ever committed'
+    assert len(commits.calls) < message_count, (
+        f'{len(commits.calls)} commits for {message_count} messages — not coalescing'
+    )
+    # Nothing lost: the last commit covers every message.
+    assert commits.calls[-1] == message_count
+
+
+async def test_commit_is_forced_once_the_batch_size_is_reached(echo_pool, monkeypatch):
+    """The count trigger fires without waiting for the timer."""
+    monkeypatch.setattr('drakkar.partition.COMMIT_BATCH_MAX_OFFSETS', 5)
+    monkeypatch.setattr('drakkar.partition.COMMIT_BATCH_MAX_DELAY_SECONDS', 30.0)
+
+    commits = _CountingCommits()
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=EchoHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=commits,
+    )
+    for offset in range(5):
+        proc.enqueue(make_msg(offset=offset))
+
+    proc.start()
+    # The 30 s timer cannot have fired; only the count trigger can commit here.
+    await wait_for(lambda: commits.calls == [5])
+    await proc.stop()
+
+
+async def test_commit_is_forced_by_the_timer_below_the_batch_size(echo_pool, monkeypatch):
+    """A trickle of messages still commits promptly — it must not wait for
+    the batch to fill, or a quiet partition would never advance."""
+    monkeypatch.setattr('drakkar.partition.COMMIT_BATCH_MAX_OFFSETS', 10_000)
+    monkeypatch.setattr('drakkar.partition.COMMIT_BATCH_MAX_DELAY_SECONDS', 0.05)
+
+    commits = _CountingCommits()
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=EchoHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=commits,
+    )
+    proc.enqueue(make_msg(offset=0))
+
+    proc.start()
+    try:
+        await wait_for(lambda: commits.calls == [1])
+    finally:
+        await proc.stop()
+
+
+async def test_stop_flushes_a_deferred_commit(echo_pool, monkeypatch):
+    """Shutdown must not leave a coalesced commit unsent — those offsets
+    would be re-delivered to the next owner for no reason."""
+    monkeypatch.setattr('drakkar.partition.COMMIT_BATCH_MAX_OFFSETS', 10_000)
+    monkeypatch.setattr('drakkar.partition.COMMIT_BATCH_MAX_DELAY_SECONDS', 30.0)
+
+    commits = _CountingCommits()
+    handler = EchoHandler()
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=commits,
+    )
+    for offset in range(3):
+        proc.enqueue(make_msg(offset=offset))
+
+    proc.start()
+    await wait_for(lambda: len(handler.collect_calls) == 3)
+    assert commits.calls == [], 'the batch and timer thresholds should both still be far away'
+
+    await proc.stop()
+    assert commits.calls == [3]
+
+
+async def test_a_suppressed_partition_never_commits_on_the_timer(echo_pool, monkeypatch):
+    """A revoked partition belongs to another worker; a pending coalesced
+    commit must not fire and clobber the new owner's progress."""
+    monkeypatch.setattr('drakkar.partition.COMMIT_BATCH_MAX_DELAY_SECONDS', 0.01)
+
+    commits = _CountingCommits()
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=EchoHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=commits,
+    )
+    proc._offset_tracker.register(0)
+    proc._offset_tracker.complete(0)
+    proc._deliveries_suppressed = True
+
+    await proc._note_commit_due()
+    await asyncio.sleep(0.05)
+    assert commits.calls == []
+
+
+async def test_coalescing_never_loses_an_offset_across_a_drain(echo_pool, monkeypatch):
+    """The safety property the batching must not break.
+
+    With both triggers pushed out of reach, every commit in this test comes
+    from a forced flush. The watermark must still end at exactly the number
+    of messages processed — no offset may be skipped, and none may be
+    committed before its message finished.
+    """
+    monkeypatch.setattr('drakkar.partition.COMMIT_BATCH_MAX_OFFSETS', 10_000)
+    monkeypatch.setattr('drakkar.partition.COMMIT_BATCH_MAX_DELAY_SECONDS', 30.0)
+
+    commits = _CountingCommits()
+    handler = EchoHandler()
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=handler,
+        executor_pool=echo_pool,
+        window_size=4,
+        on_commit=commits,
+    )
+    message_count = 12
+    for offset in range(message_count):
+        proc.enqueue(make_msg(offset=offset))
+
+    proc.start()
+    await wait_for(lambda: len(handler.collect_calls) == message_count)
+    proc.signal_stop()
+    await proc.drain()
+
+    assert commits.calls[-1] == message_count
+    # A commit is a watermark, so the sequence must never go backwards.
+    assert commits.calls == sorted(commits.calls)
+
+
+async def test_deferred_commit_survives_a_failing_broker(echo_pool, monkeypatch):
+    """A failed coalesced commit leaves the offsets pending for the retry —
+    it must not acknowledge, and must not kill the timer for good."""
+    monkeypatch.setattr('drakkar.partition.COMMIT_BATCH_MAX_DELAY_SECONDS', 0.01)
+    attempts: list[int] = []
+
+    async def flaky_commit(partition_id: int, offset: int) -> None:
+        attempts.append(offset)
+        if len(attempts) == 1:
+            raise RuntimeError('broker unavailable')
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=EchoHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_commit=flaky_commit,
+    )
+    proc._offset_tracker.register(0)
+    proc._offset_tracker.complete(0)
+
+    await proc._note_commit_due()
+    await wait_for(lambda: len(attempts) >= 1)
+    assert proc._offset_tracker.last_committed is None  # the failure was not acknowledged
+
+    await proc._note_commit_due()
+    await wait_for(lambda: proc._offset_tracker.last_committed == 1)
+    await proc._cancel_commit_flush()

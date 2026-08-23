@@ -88,6 +88,24 @@ class OffsetTracker:
 
         return commit_up_to + 1
 
+    def uncommitted_advance(self) -> int:
+        """How many offsets the watermark would move if committed right now.
+
+        The input to commit coalescing: the pipeline defers a commit until
+        this reaches a batch size (or a short timer fires), instead of
+        making a broker round trip per finished message. Zero means a
+        commit would be a no-op, so there is nothing to defer either.
+
+        Before the first commit there is no ``_last_committed`` to measure
+        from, so the span starts at the oldest tracked offset — every
+        consecutive completed offset is new ground.
+        """
+        committable = self.committable()
+        if committable is None:
+            return 0
+        baseline = self._last_committed if self._last_committed is not None else self._sorted_offsets[0]
+        return max(committable - baseline, 0)
+
     def acknowledge_commit(self, committed_offset: int) -> None:
         """Clean up tracked offsets at or below committed_offset - 1.
 

@@ -34,6 +34,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Offset commits are coalesced.** A commit was made per completed
+  message: a synchronous broker round trip, serialized per partition by the
+  commit lock. With a low-fan-out handler — one task per message — that made
+  the commit rate the message rate, and completions queued behind the lock
+  waiting for it. A partition now sends when its watermark has moved 300
+  offsets or 500 ms after the oldest uncommitted advance, whichever comes
+  first, bounding the rate at about two per second per partition.
+
+  At-least-once is unchanged: deferring a commit can only make a restarted
+  worker redo work it already did, never skip it. The revoke, drain and
+  shutdown paths each force the pending commit before the partition is
+  released, so a handover never redelivers because of batching. Both
+  backends use the same thresholds. `docs/performance.md` — which described
+  the commit as asynchronous, which it never was — and `docs/data-flow.md`
+  are corrected.
+
 - **`PRAGMA synchronous=NORMAL` on every WAL writer** — the recorder
   (rotation included), the handler cache and the `.dbstats` cache. SQLite's
   default `FULL` fsyncs the write-ahead log on every commit, and these

@@ -477,9 +477,13 @@ If `on_message_complete()` returned a non-None `CollectResult`, it flows through
 
 ### 7.4 Offset Completion and Commit
 
-After `on_message_complete` returns (success or raise), the message's offset is marked complete on the partition's `OffsetTracker`, a commit is attempted, and the tracker entry is removed.
+After `on_message_complete` returns (success or raise), the message's offset is marked complete on the partition's `OffsetTracker`, a commit is scheduled, and the tracker entry is removed.
 
-This is **per-message commit granularity**: a fast-finishing message does not wait for slower messages in the same window. When a partition is revoked or the worker shuts down, offsets for already-finished messages are already committed; only in-flight messages' offsets remain uncommitted (expected, drives the at-least-once replay on restart).
+This is **per-message commit granularity**: a fast-finishing message does not wait for slower messages in the same window.
+
+**Commits are coalesced, not sent per message.** The commit itself is a synchronous broker round trip, so a completed message schedules one rather than making one: the partition sends when the watermark has moved 300 offsets, or 500 ms after the oldest uncommitted advance, whichever comes first. Deferring only ever costs redone work after a crash — the direction at-least-once already permits — and the revoke, drain and shutdown paths each force the pending commit before the partition is released, so a handover never redelivers because of batching. See [Performance](performance.md#offset-commits-are-batched).
+
+When a partition is revoked or the worker shuts down, offsets for already-finished messages are committed by that forced flush; only in-flight messages' offsets remain uncommitted (expected, drives the at-least-once replay on restart).
 
 ---
 

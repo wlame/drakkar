@@ -196,3 +196,50 @@ def test_pending_count_matches_a_full_recount_through_every_transition():
     tracker.clear()
     check('after clear')
     assert tracker.pending_count == 0
+
+
+# ---------------------------------------------------------------------------
+# uncommitted_advance — the input to commit coalescing
+# ---------------------------------------------------------------------------
+
+
+def test_uncommitted_advance_is_zero_with_nothing_completed():
+    tracker = OffsetTracker()
+    tracker.register(10)
+    tracker.register(11)
+    assert tracker.uncommitted_advance() == 0
+
+
+def test_uncommitted_advance_counts_from_the_first_offset_before_any_commit():
+    """No commit yet, so every consecutive completed offset is new ground."""
+    tracker = OffsetTracker()
+    for offset in (10, 11, 12):
+        tracker.register(offset)
+        tracker.complete(offset)
+    assert tracker.committable() == 13
+    assert tracker.uncommitted_advance() == 3
+
+
+def test_uncommitted_advance_counts_only_offsets_past_the_last_commit():
+    tracker = OffsetTracker()
+    for offset in range(5):
+        tracker.register(offset)
+        tracker.complete(offset)
+    tracker.acknowledge_commit(tracker.committable())
+    assert tracker.uncommitted_advance() == 0
+
+    for offset in (5, 6):
+        tracker.register(offset)
+        tracker.complete(offset)
+    assert tracker.uncommitted_advance() == 2
+
+
+def test_uncommitted_advance_stops_at_the_first_incomplete_offset():
+    """A gap pins the watermark, so later completions do not count."""
+    tracker = OffsetTracker()
+    for offset in range(5):
+        tracker.register(offset)
+    tracker.complete(0)
+    tracker.complete(1)
+    tracker.complete(4)  # 2 and 3 still pending
+    assert tracker.uncommitted_advance() == 2

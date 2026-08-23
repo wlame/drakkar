@@ -1476,11 +1476,11 @@ async def test_runner_does_not_mutate_live_cache_dirty_state():
 
 
 async def test_runner_never_reaches_offset_commit_path():
-    """PartitionProcessor._try_commit and OffsetTracker mutations must never fire.
+    """PartitionProcessor._commit_now and OffsetTracker mutations must never fire.
 
     The probe bypasses PartitionProcessor entirely, so its offset state
     machine (OffsetTracker.register / complete / acknowledge_commit)
-    and the committing coroutine (_try_commit) should remain cold.
+    and the committing coroutine (_commit_now) should remain cold.
     """
     handler = _HappyPathHandler(task_count=1)
     runner = DebugRunner(
@@ -1496,8 +1496,8 @@ async def test_runner_never_reaches_offset_commit_path():
     with (
         patch.object(
             drakkar.partition.PartitionProcessor,
-            '_try_commit',
-            side_effect=AssertionError('PartitionProcessor._try_commit called during probe'),
+            '_commit_now',
+            side_effect=AssertionError('PartitionProcessor._commit_now called during probe'),
         ),
         patch.object(
             drakkar.offsets.OffsetTracker,
@@ -1595,8 +1595,8 @@ async def test_runner_never_constructs_or_invokes_partition_processor():
         ),
         patch.object(
             drakkar.partition.PartitionProcessor,
-            '_try_commit',
-            side_effect=AssertionError('PartitionProcessor._try_commit called during probe'),
+            '_commit_now',
+            side_effect=AssertionError('PartitionProcessor._commit_now called during probe'),
         ),
     ):
         report = await runner.run(ProbeInput(value='x', offset=1))
