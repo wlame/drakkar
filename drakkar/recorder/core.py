@@ -121,6 +121,19 @@ logger = structlog.get_logger()
 _LIVE_RECORDERS: weakref.WeakSet[EventRecorder] = weakref.WeakSet()
 _LAST_BREATH_REGISTERED = False
 
+# Rows per ``executemany`` in one flush. Two jobs: it bounds how long the
+# loop is held building row tuples (one ``dict.get`` per column per event,
+# so an unchunked 30k-event flush stalls the loop for tens of milliseconds),
+# and it bounds what a flush that keeps failing can lose — a dropped chunk
+# instead of the whole buffer. 5k rows is ~4 ms of tuple building and, at 19
+# columns, 95k bind parameters, comfortably inside SQLite's limits.
+FLUSH_CHUNK_ROWS = 5_000
+
+# How often ``_flush_loop`` looks at the buffer while waiting out its
+# interval. Small enough that a burst does not sit until the next tick,
+# large enough to be invisible next to the workloads the recorder observes.
+FLUSH_POLL_SECONDS = 0.25
+
 
 def _last_breath_flush_all() -> None:
     """The single atexit hook: salvage every still-live recorder's buffer."""
@@ -2684,9 +2697,32 @@ class EventRecorder:
 
     # --- Internal flush/retention ---
 
+    async def _wait_until_flush_due(self) -> None:
+        """Wait out ``flush_interval_seconds``, or return early on a burst.
+
+        The interval alone is not enough at high event rates: a producer
+        filling the buffer faster than one interval's worth would reach
+        ``max_buffer`` and start evicting between ticks. Returning as soon as
+        the buffer is half full turns that into an early write instead of
+        lost events. Polling rather than an ``asyncio.Event`` because
+        ``_record`` is also reached from the webapp's own event loop, and
+        ``Event.set`` is not safe across loops.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._store.flush_interval_seconds
+        maxlen = self._buffer.maxlen
+        high_water = maxlen // 2 if maxlen is not None else None
+        while self._running:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(remaining, FLUSH_POLL_SECONDS))
+            if high_water is not None and len(self._buffer) >= high_water:
+                return
+
     async def _flush_loop(self) -> None:
         while self._running:
-            await asyncio.sleep(self._store.flush_interval_seconds)
+            await self._wait_until_flush_due()
             # Per-iteration guard: an unexpected raise here used to end the
             # task, so the recorder stopped persisting events for the rest
             # of the process lifetime with nothing in the log. Cancellation
@@ -2705,6 +2741,23 @@ class EventRecorder:
                 )
 
     async def _flush(self) -> None:
+        """Write the buffered events to the ``events`` table, in chunks.
+
+        Chunking is what keeps the flush off the loop's critical path. The
+        whole buffer used to be turned into row tuples in one comprehension:
+        at the target workload a 5 s interval holds tens of thousands of
+        events, each costing one ``dict.get`` per column, so the loop stalled
+        for tens of milliseconds every flush and runtime health reported it
+        as lag. Rows are now built one ``FLUSH_CHUNK_ROWS`` slice at a time,
+        and the ``await`` on each chunk's write hands the loop back in
+        between.
+
+        The chunk is also the unit of loss. A chunk that still fails after
+        ``max_flush_retries`` is dropped; before chunking that was the entire
+        buffer, so a fifteen-second SQLite hiccup on a network filesystem
+        could cost every event held. See ``docs/observability.md`` for the
+        ``max_buffer`` sizing rule.
+        """
         # The lock serializes concurrent flushes. Without it, the periodic
         # ``_flush_loop`` and a debug-endpoint-initiated flush could
         # interleave on the same deque and histogram — the second flush
@@ -2722,151 +2775,31 @@ class EventRecorder:
             db = self._db
             if not db or not self._buffer:
                 return
-            # Take a LOCAL snapshot of the rows to flush BEFORE the DB
-            # write. If the write fails (sqlite3.Error) or is interrupted
-            # (cancellation) we re-queue this exact list at the FRONT of the
-            # buffer so ordering is preserved and no events are lost. Using ``list(...)`` freezes
-            # the view — a concurrent ``_record`` append between here and
-            # the write would land at the END of the deque (because we
-            # drain via ``popleft`` below) and is unaffected by the snapshot.
-            batch: list[dict] = []
-            while self._buffer:
-                batch.append(self._buffer.popleft())
-            columns = [
-                'ts',
-                'dt',
-                'event',
-                'partition',
-                'offset',
-                'task_id',
-                'args',
-                'stdout_size',
-                'stdout',
-                'stderr',
-                'exit_code',
-                'duration',
-                'output_topic',
-                'metadata',
-                'pid',
-                'labels',
-                # Webapp-release columns.
-                # Default to ``origin='kafka'`` / NULL for the
-                # other two when the recording site doesn't populate
-                # them — matches the SQL DEFAULT and keeps the SQL
-                # statement future-proof if the same column list is
-                # used elsewhere (e.g., a future bulk-import path).
-                'origin',
-                'client_name',
-                'request_id',
-            ]
+            columns = list(EVENT_COLUMNS[1:])  # everything but the autoincrement id
             placeholders = ', '.join(['?'] * len(columns))
             col_names = ', '.join(columns)
             query = f'INSERT INTO events ({col_names}) VALUES ({placeholders})'
-            # ``origin`` is NOT NULL in the schema with a DEFAULT of
-            # ``'kafka'`` — but ``entry.get(col)`` would yield ``None``
-            # when the recording site didn't populate it (Kafka-path
-            # helpers below ``record_task_*`` such as ``record_consumed``,
-            # ``record_arranged``, ``record_committed``, etc., legitimately
-            # leave the new columns out). Coerce ``None`` -> ``'kafka'``
-            # at INSERT time so SQLite's column DEFAULT does not need to
-            # fight an explicit NULL.
-            rows = [
-                tuple('kafka' if (col == 'origin' and entry.get(col) is None) else entry.get(col) for col in columns)
-                for entry in batch
-            ]
-            # Observe the full flush body (executemany + commit) — the histogram
+
+            # Observe the full flush body across every chunk — the histogram
             # surfaces disk-I/O latency tail so operators can alert on p99
             # regressions before the buffer backs up enough to drop events.
             flush_start = time.monotonic()
-            # ``batch_settled`` flips once the popped batch has a final home:
-            # committed, re-queued for retry, or deliberately dropped at the
-            # retry cap. Any other exit — a CancelledError from a caller's
-            # timeout or from ``stop()`` cancelling the flush task, or an
-            # unexpected error — reaches the ``finally`` with the flag still
-            # False and re-queues the batch, so cancellation mid-write can
-            # never silently lose it. (No rollback is attempted there: the
-            # write may have landed in the connection's open transaction, so
-            # a retried batch can at worst duplicate rows — acceptable for a
-            # flight recorder, unlike silent loss.)
-            batch_settled = False
-            try:
-                await db.executemany(query, rows)
-                await db.commit()
-                batch_settled = True
-            except sqlite3.Error as exc:
-                # ``sqlite3.Error``, not just OperationalError: aiosqlite
-                # raises the stdlib sqlite3 exception classes, and the whole
-                # DatabaseError/IntegrityError/ProgrammingError family must
-                # go through the same retry/drop accounting rather than
-                # bypassing it.
-                #
-                # Transient DB errors (``database is locked``, ``disk I/O
-                # error``, ENOSPC, WAL corruption, etc.) should not cost us
-                # the batch. Re-queue the snapshot at the FRONT of the
-                # buffer and let the next flush tick retry.
-                #
-                # Rotation edge case: if ``_rotate`` ran BETWEEN a failed
-                # flush and the retry attempt, the re-queued rows end up
-                # written to the NEW DB. For a flight recorder this is
-                # acceptable — the rows' ``ts`` field records when they
-                # were observed, so their wall-clock position is preserved;
-                # only the file-level window association shifts. The
-                # alternative (dropping rows on rotation) would be
-                # strictly worse — silent data loss with no metric tick.
-                self._flush_failures += 1
-                recorder_flush_retries.inc()
-                if self._flush_failures >= self._store.max_flush_retries:
-                    # Give up on this batch: drop it, reset the counter so
-                    # the next batch starts from a clean slate, and tick
-                    # the drop metric. Without the reset, a transient
-                    # outage that eventually recovers would leave the
-                    # counter at N and the FIRST post-recovery failure
-                    # would immediately trip the drop path again.
-                    # Bookkeeping runs before the ``await`` on the logger so
-                    # a cancellation during the log cannot make the finally
-                    # re-queue a batch we decided to drop.
-                    batch_settled = True
-                    attempt = self._flush_failures
-                    self._flush_failures = 0
-                    recorder_flush_batches_dropped.inc()
-                    # Buffer state unchanged (batch already popped); reflect
-                    # the (possibly post-concurrent-append) depth.
-                    recorder_buffer_size.set(len(self._buffer))
-                    await logger.aerror(
-                        'recorder_flush_batch_dropped',
-                        category='recorder',
-                        attempt=attempt,
-                        batch_size=len(batch),
-                        error=str(exc),
-                    )
+            # Snapshot the depth: events appended while this flush awaits
+            # ride along on the next tick rather than extending this one
+            # indefinitely under a fast producer.
+            pending = len(self._buffer)
+            while pending > 0:
+                take = min(pending, FLUSH_CHUNK_ROWS)
+                pending -= take
+                # Take a LOCAL snapshot of the rows to flush BEFORE the DB
+                # write. If the write fails (sqlite3.Error) or is interrupted
+                # (cancellation) we re-queue this exact list at the FRONT of
+                # the buffer so ordering is preserved and no events are lost.
+                # A concurrent ``_record`` append lands at the END of the
+                # deque (we drain via ``popleft``) and is unaffected.
+                batch: list[dict] = [self._buffer.popleft() for _ in range(take)]
+                if not await self._write_chunk(db, query, columns, batch):
                     return
-                # Not yet at the retry cap — re-queue and let the next tick
-                # try again. Log at WARNING so the operator sees the retry
-                # trail before any drop happens. The re-queue itself is
-                # synchronous and flips ``batch_settled`` before the log
-                # await, so a cancellation during the log cannot re-queue
-                # the batch a second time in the finally.
-                self._requeue_front(batch)
-                batch_settled = True
-                await logger.awarning(
-                    'recorder_flush_retry',
-                    category='recorder',
-                    attempt=self._flush_failures,
-                    max_retries=self._store.max_flush_retries,
-                    batch_size=len(batch),
-                    error=str(exc),
-                )
-                return
-            finally:
-                if not batch_settled:
-                    # Interrupted mid-write — typically CancelledError from a
-                    # caller's timeout or from ``stop()`` cancelling the flush
-                    # task — with the transaction not committed. Put the batch
-                    # back so the next flush tick retries it, and let the
-                    # exception propagate. Everything here is synchronous:
-                    # awaiting during a cancellation unwind could be cancelled
-                    # again and skip the re-queue.
-                    self._requeue_front(batch)
             # Success path: reset the retry counter and record the histogram.
             self._flush_failures = 0
             recorder_flush_duration.observe(time.monotonic() - flush_start)
@@ -2874,6 +2807,123 @@ class EventRecorder:
             # zero, but a concurrent _record() during the await could have
             # appended in between — reading len(self._buffer) is the correct value.
             recorder_buffer_size.set(len(self._buffer))
+
+    async def _write_chunk(
+        self,
+        db: aiosqlite.Connection,
+        query: str,
+        columns: list[str],
+        batch: list[dict],
+    ) -> bool:
+        """Write one chunk; return whether the flush should keep going.
+
+        ``False`` means this chunk did not land: it was either re-queued for
+        the next tick or dropped at the retry cap. Either way the rest of the
+        buffer stays put — the events still in it are strictly newer, so
+        stopping here preserves order.
+        """
+        # ``origin`` is NOT NULL in the schema with a DEFAULT of
+        # ``'kafka'`` — but ``entry.get(col)`` would yield ``None``
+        # when the recording site didn't populate it (Kafka-path
+        # helpers below ``record_task_*`` such as ``record_consumed``,
+        # ``record_arranged``, ``record_committed``, etc., legitimately
+        # leave the new columns out). Coerce ``None`` -> ``'kafka'``
+        # at INSERT time so SQLite's column DEFAULT does not need to
+        # fight an explicit NULL.
+        rows = [
+            tuple('kafka' if (col == 'origin' and entry.get(col) is None) else entry.get(col) for col in columns)
+            for entry in batch
+        ]
+        # ``batch_settled`` flips once the popped batch has a final home:
+        # committed, re-queued for retry, or deliberately dropped at the
+        # retry cap. Any other exit — a CancelledError from a caller's
+        # timeout or from ``stop()`` cancelling the flush task, or an
+        # unexpected error — reaches the ``finally`` with the flag still
+        # False and re-queues the batch, so cancellation mid-write can
+        # never silently lose it. (No rollback is attempted there: the
+        # write may have landed in the connection's open transaction, so
+        # a retried batch can at worst duplicate rows — acceptable for a
+        # flight recorder, unlike silent loss.)
+        batch_settled = False
+        try:
+            await db.executemany(query, rows)
+            await db.commit()
+            batch_settled = True
+            return True
+        except sqlite3.Error as exc:
+            # ``sqlite3.Error``, not just OperationalError: aiosqlite
+            # raises the stdlib sqlite3 exception classes, and the whole
+            # DatabaseError/IntegrityError/ProgrammingError family must
+            # go through the same retry/drop accounting rather than
+            # bypassing it.
+            #
+            # Transient DB errors (``database is locked``, ``disk I/O
+            # error``, ENOSPC, WAL corruption, etc.) should not cost us
+            # the batch. Re-queue the snapshot at the FRONT of the
+            # buffer and let the next flush tick retry.
+            #
+            # Rotation edge case: if ``_rotate`` ran BETWEEN a failed
+            # flush and the retry attempt, the re-queued rows end up
+            # written to the NEW DB. For a flight recorder this is
+            # acceptable — the rows' ``ts`` field records when they
+            # were observed, so their wall-clock position is preserved;
+            # only the file-level window association shifts. The
+            # alternative (dropping rows on rotation) would be
+            # strictly worse — silent data loss with no metric tick.
+            self._flush_failures += 1
+            recorder_flush_retries.inc()
+            if self._flush_failures >= self._store.max_flush_retries:
+                # Give up on this chunk: drop it, reset the counter so
+                # the next chunk starts from a clean slate, and tick
+                # the drop metric. Without the reset, a transient
+                # outage that eventually recovers would leave the
+                # counter at N and the FIRST post-recovery failure
+                # would immediately trip the drop path again.
+                # Bookkeeping runs before the ``await`` on the logger so
+                # a cancellation during the log cannot make the finally
+                # re-queue a batch we decided to drop.
+                batch_settled = True
+                attempt = self._flush_failures
+                self._flush_failures = 0
+                recorder_flush_batches_dropped.inc()
+                # Buffer state unchanged (batch already popped); reflect
+                # the (possibly post-concurrent-append) depth.
+                recorder_buffer_size.set(len(self._buffer))
+                await logger.aerror(
+                    'recorder_flush_batch_dropped',
+                    category='recorder',
+                    attempt=attempt,
+                    batch_size=len(batch),
+                    error=str(exc),
+                )
+                return False
+            # Not yet at the retry cap — re-queue and let the next tick
+            # try again. Log at WARNING so the operator sees the retry
+            # trail before any drop happens. The re-queue itself is
+            # synchronous and flips ``batch_settled`` before the log
+            # await, so a cancellation during the log cannot re-queue
+            # the batch a second time in the finally.
+            self._requeue_front(batch)
+            batch_settled = True
+            await logger.awarning(
+                'recorder_flush_retry',
+                category='recorder',
+                attempt=self._flush_failures,
+                max_retries=self._store.max_flush_retries,
+                batch_size=len(batch),
+                error=str(exc),
+            )
+            return False
+        finally:
+            if not batch_settled:
+                # Interrupted mid-write — typically CancelledError from a
+                # caller's timeout or from ``stop()`` cancelling the flush
+                # task — with the transaction not committed. Put the batch
+                # back so the next flush tick retries it, and let the
+                # exception propagate. Everything here is synchronous:
+                # awaiting during a cancellation unwind could be cancelled
+                # again and skip the re-queue.
+                self._requeue_front(batch)
 
     def _requeue_front(self, batch: list[dict]) -> None:
         """Put a popped-but-unflushed batch back at the FRONT of the buffer.

@@ -827,6 +827,27 @@ event, and the `drakkar_recorder_buffer_size` gauge shows the current
 depth. Alert on sustained non-zero drops and raise `max_buffer` or
 shorten `flush_interval_seconds` when they appear.
 
+The buffer is written in chunks of 5000 rows, and the loop is handed back
+between chunks: building a row tuple costs one lookup per column, so an
+unchunked flush of tens of thousands of events would stall the loop for tens
+of milliseconds and show up as loop lag in
+[runtime health](runtime-health.md). A flush also starts early, before
+`flush_interval_seconds` elapses, once the buffer is half full — a burst is
+written out rather than left to reach `max_buffer` and evict.
+
+The chunk is also the unit of loss. A chunk that still fails after
+`max_flush_retries` consecutive attempts is dropped and
+`drakkar_recorder_flush_batches_dropped_total` ticks; the rest of the buffer
+stays and is retried on the next tick. Size `max_buffer` for how long a
+database stall you want to ride out:
+
+    max_buffer >= event_rate x flush_interval_seconds x (max_flush_retries + 1)
+
+At 5000 events/s with the defaults (5 s interval, 3 retries) that is 100 000,
+twice the default `max_buffer`. Raise it if your workers must survive a
+15-second SQLite stall — the usual cause is a network filesystem — without
+losing a chunk.
+
 Buffering happens only when the worker will actually write the events. In
 memory-only mode (`db_dir` empty) and with `store_events: false` there is no
 flush loop, so events are streamed to the live WebSocket view and not

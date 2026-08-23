@@ -13,7 +13,9 @@ from collections import deque
 import pytest
 
 from drakkar.recorder import EventRecorder, live_link_path
+from drakkar.recorder import core as core_mod
 from drakkar.recorder.core import _LIVE_RECORDERS
+from tests.conftest import wait_for
 from tests.test_recorder import (
     WORKER_NAME,
     _create_worker_db_with_labels,
@@ -231,5 +233,130 @@ async def test_cross_trace_by_label_respects_scan_budget(tmp_path, monkeypatch):
         monkeypatch.setattr(recorder_core, 'CROSS_TRACE_MAX_FILES', 0)
         events = await rec.cross_trace_by_label('request_id', 'req-remote')
         assert events == []
+    finally:
+        await rec.stop()
+
+
+# --- Chunked flush -----------------------------------------------------
+
+
+async def test_flush_writes_in_bounded_chunks(tmp_path, monkeypatch):
+    """The whole buffer used to become row tuples in one comprehension, so a
+    flush holding tens of thousands of events stalled the loop for tens of
+    milliseconds. Chunking bounds that work and hands the loop back on each
+    chunk's write.
+    """
+    monkeypatch.setattr(core_mod, 'FLUSH_CHUNK_ROWS', 100)
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    try:
+        for offset in range(250):
+            rec.record_committed(partition=0, offset=offset)
+
+        assert rec._db is not None
+        original = rec._db.executemany
+        chunk_sizes: list[int] = []
+
+        async def counting_executemany(query, rows):
+            rows = list(rows)
+            chunk_sizes.append(len(rows))
+            return await original(query, rows)
+
+        rec._db.executemany = counting_executemany  # type: ignore[method-assign]
+
+        await rec._flush()
+
+        assert chunk_sizes == [100, 100, 50]
+        assert len(rec._buffer) == 0
+        events = await rec.get_events(partition=0, limit=1000)
+        assert len(events) == 250
+    finally:
+        await rec.stop()
+
+
+async def test_flush_ignores_events_appended_while_it_runs(tmp_path, monkeypatch):
+    """The chunk loop works off the depth it saw on entry, so a producer
+    faster than the writer cannot hold one flush open indefinitely.
+    """
+    monkeypatch.setattr(core_mod, 'FLUSH_CHUNK_ROWS', 2)
+    config = make_debug_config(tmp_path)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    try:
+        for offset in range(4):
+            rec.record_committed(partition=0, offset=offset)
+
+        assert rec._db is not None
+        original = rec._db.executemany
+
+        async def appending_executemany(query, rows):
+            # A concurrent record() landing mid-flush, every chunk.
+            rec.record_committed(partition=1, offset=99)
+            return await original(query, rows)
+
+        rec._db.executemany = appending_executemany  # type: ignore[method-assign]
+
+        await rec._flush()
+
+        # Two chunks ran, each appending one event; both wait for the next tick.
+        assert len(rec._buffer) == 2
+    finally:
+        await rec.stop()
+
+
+async def test_flush_failure_drops_only_one_chunk(tmp_path, monkeypatch):
+    """The chunk is the unit of loss. Before chunking, a database that stayed
+    unavailable for ``max_flush_retries`` ticks cost the entire buffer at
+    once — on a busy worker that is every event held.
+    """
+    from drakkar.metrics import recorder_flush_batches_dropped
+
+    monkeypatch.setattr(core_mod, 'FLUSH_CHUNK_ROWS', 10)
+    config = make_debug_config(tmp_path, max_flush_retries=2)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    try:
+        for offset in range(30):
+            rec.record_committed(partition=0, offset=offset)
+
+        assert rec._db is not None
+
+        async def always_failing(query, rows):
+            raise sqlite3.OperationalError('disk I/O error')
+
+        rec._db.executemany = always_failing  # type: ignore[method-assign]
+        dropped_before = recorder_flush_batches_dropped._value.get()
+
+        # First failure: the chunk goes back, nothing is lost yet.
+        await rec._flush()
+        assert len(rec._buffer) == 30
+        assert recorder_flush_batches_dropped._value.get() == dropped_before
+
+        # Second failure hits the cap: exactly one chunk is dropped.
+        await rec._flush()
+        assert len(rec._buffer) == 20
+        assert recorder_flush_batches_dropped._value.get() == dropped_before + 1
+        # The oldest events went; the rest kept their order.
+        assert [event['offset'] for event in rec._buffer][:3] == [10, 11, 12]
+    finally:
+        await rec.stop()
+
+
+async def test_flush_loop_wakes_early_when_the_buffer_is_half_full(tmp_path):
+    """A burst must not sit in the buffer until the next interval — at a high
+    event rate the buffer would reach ``max_buffer`` and start evicting.
+    """
+    config = make_debug_config(tmp_path, flush_interval_seconds=600, max_buffer=1000)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    try:
+        for offset in range(600):
+            rec.record_committed(partition=0, offset=offset)
+
+        # Nothing has been written yet: the interval is ten minutes away.
+        await wait_for(lambda: len(rec._buffer) == 0, timeout=5.0, interval=0.05)
+        events = await rec.get_events(partition=0, limit=1000)
+        assert len(events) == 600
     finally:
         await rec.stop()

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The flight recorder writes its buffer in chunks of 5000 rows instead of
+  one statement per flush, and hands the event loop back between chunks.
+  Building the row tuples for a whole flush ran on the loop and stalled it
+  for tens of milliseconds at high event rates. The chunk is now also the
+  unit of loss: a chunk that keeps failing is dropped after
+  `max_flush_retries`, where previously the entire buffer was — a
+  fifteen-second SQLite stall could cost every event held.
+
+- The flight recorder starts a flush early, without waiting out
+  `flush_interval_seconds`, once its buffer is half full. A burst is written
+  out instead of filling `max_buffer` and evicting events.
+
 - An archive pass could merge and delete a *peer's* live database in a
   shared `db_dir`. Source selection excluded only symlinks and the pass's
   own database, and settledness read only the main file's mtime, which
