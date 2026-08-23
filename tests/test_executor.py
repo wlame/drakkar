@@ -5,6 +5,7 @@ import contextlib
 import os
 import sys
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -1656,3 +1657,46 @@ def test_task_env_still_overrides_the_cached_parent_env():
     assert second['PER_TASK'] == '1'
     # The earlier result must not have been mutated by the later call.
     assert first['FROM_CONFIG'] == 'cfg'
+
+
+# --- Per-task logging cost ---
+
+
+async def test_successful_task_emits_no_log_line():
+    """A completed task must not log.
+
+    ``structlog``'s async methods copy the context, set two ContextVars and
+    hop through the default thread pool *before* the level filter runs — so
+    a per-task ``await logger.adebug(...)`` costs a thread round trip even
+    with debug logging switched off. At the throughput this pool targets
+    that is over a thousand hops a second, competing with the ``to_thread``
+    users (dbstats, archive, FileSink) for the same executor. The flight
+    recorder already records ``task_completed`` with more detail.
+    """
+    pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
+    task = ExecutorTask(task_id='t-quiet', args=['hello'], source_offsets=[0])
+
+    with capture_logs() as cap:
+        result = await pool.execute(task)
+
+    assert result.exit_code == 0
+    executor_events = [entry for entry in cap if entry.get('category') == 'executor']
+    assert executor_events == [], f'per-task logging is back: {executor_events}'
+
+
+def test_no_async_debug_logging_anywhere_in_the_package():
+    """``logger.adebug`` is banned in this package.
+
+    Every async structlog variant pays the thread-pool hop before the level
+    filter, so a debug call that is switched off in production still costs a
+    context copy and a scheduling point. Sync ``logger.debug`` is ~8x cheaper
+    and has no scheduling point; use it instead.
+    """
+    package_root = Path(__file__).parent.parent / 'drakkar'
+    offenders = [
+        f'{path.relative_to(package_root)}:{lineno}'
+        for path in sorted(package_root.rglob('*.py'))
+        for lineno, line in enumerate(path.read_text().splitlines(), start=1)
+        if 'logger.adebug(' in line
+    ]
+    assert offenders == [], f'use the sync logger.debug instead: {offenders}'

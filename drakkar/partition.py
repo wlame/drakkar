@@ -654,7 +654,7 @@ class PartitionProcessor:
         and the message is redelivered after a restart or rebalance."""
         self._stalled_offsets.add(offset)
         delivery_stalled_offsets.labels(partition=str(self._partition_id)).inc()
-        await logger.aerror(
+        logger.error(
             'offset_stalled_on_delivery_failure',
             category='partition',
             partition=self._partition_id,
@@ -721,7 +721,7 @@ class PartitionProcessor:
             # 'drop': the unparseable message is lost (it had no parsed
             # payload to begin with); commit past it and keep moving.
             dlq_dropped_payloads.labels(partition=str(self._partition_id)).inc()
-            await logger.acritical(
+            logger.critical(
                 'dlq_failure_payloads_dropped',
                 category='partition',
                 partition=self._partition_id,
@@ -1160,7 +1160,7 @@ class PartitionProcessor:
         except Exception as e:
             # Log and move on — raising here would block the offset from
             # committing, stalling the partition behind a handler bug.
-            await logger.aerror(
+            logger.error(
                 'on_message_complete_failed',
                 category='handler',
                 partition=self._partition_id,
@@ -1204,7 +1204,7 @@ class PartitionProcessor:
                 # the DLQ-failure handler already logged + counted the
                 # loss and returned normally.
                 delivery_failed = True
-                await logger.aerror(
+                logger.error(
                     'on_message_complete_delivery_failed',
                     category='sink',
                     partition=self._partition_id,
@@ -1219,7 +1219,7 @@ class PartitionProcessor:
                 # cannot wedge the partition.
                 if self._on_dlq_failure == 'stall':
                     delivery_failed = True
-                await logger.aerror(
+                logger.error(
                     'on_message_complete_sink_delivery_failed',
                     category='handler',
                     partition=self._partition_id,

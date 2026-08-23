@@ -32,6 +32,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the payload count and states the re-application, and the sink and handler
   guides explain when to prefer `DLQ` instead.
 
+### Removed
+
+- The per-task `executor_task_completed` debug log. It fired once per
+  completed task — over a thousand times a second at the throughput the pool
+  targets — and because structlog's async methods hop through the default
+  thread pool *before* the level filter runs, it cost a thread round trip
+  even with debug logging off. The flight recorder already records
+  `task_completed` with more detail. Dropped in both backends so a mixed
+  fleet emits the same log vocabulary.
+
+### Changed
+
+- The remaining hot-path log statements — the sink circuit-open and
+  DLQ-drop paths, the per-message delivery failures in the partition
+  pipeline, and the idempotent transient-retry line — now use the
+  synchronous structlog methods instead of the `await logger.a*` variants,
+  the same rule the partition pipeline already applied to
+  `executor_task_failed`. The async variants cost roughly 8x the sync call
+  and add a scheduling point, and they fire exactly when the worker is
+  already struggling.
+
 ### Fixed
 
 - A circuit-open batch with no DLQ configured no longer drops silently. The

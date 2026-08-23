@@ -704,13 +704,14 @@ class ExecutorPool:
                     result=result,
                 )
 
-            await logger.adebug(
-                'executor_task_completed',
-                category='executor',
-                task_id=task.task_id,
-                duration=result.duration_seconds,
-                exit_code=result.exit_code,
-            )
+            # No per-task log line here on purpose. At the throughput this
+            # pool is built for it would fire ~1,200 times a second, and
+            # structlog's async variants copy the context and hop through the
+            # default thread pool BEFORE the level filter runs — so the cost
+            # is paid even with debug logging off, and it competes with the
+            # ``to_thread`` users (dbstats, archive, FileSink) for the same
+            # executor. The flight recorder already records ``task_completed``
+            # with more detail than this line carried.
             return result
 
         except TimeoutError:
@@ -780,7 +781,11 @@ class ExecutorPool:
                 os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:
                 # Child exited between our getpgid/killpg calls — that's fine.
-                await logger.adebug(
+                # Sync, not ``await logger.adebug``: the async variants hop
+                # through the default thread pool before the level filter
+                # runs, so they cost a thread round trip even when debug
+                # logging is off.
+                logger.debug(
                     'executor_killpg_race_noop',
                     category='executor',
                     pid=proc.pid,

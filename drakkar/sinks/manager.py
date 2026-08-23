@@ -651,7 +651,12 @@ class SinkManager:
                 # did your handler return RETRY" signal.
                 sink_delivery_retries.labels(sink_type=sink_type, sink_name=sink_name).inc()
                 backoff = _IDEMPOTENT_BACKOFF_BASE * (2**attempt_idx)
-                await logger.adebug(
+                # Sync, not ``await logger.adebug``: structlog's async
+                # variants copy the context and hop through the default
+                # thread pool BEFORE the level filter runs, so the cost is
+                # paid even with debug logging off. This fires per transient
+                # failure — exactly when the worker is already struggling.
+                logger.debug(
                     'sink_idempotent_transient_retry',
                     category='sink',
                     sink_type=sink_type,
@@ -749,7 +754,7 @@ class SinkManager:
                             reason='circuit open and DLQ send failed',
                         )
                     dlq_dropped_payloads.labels(partition=str(partition_id)).inc()
-                    await logger.acritical(
+                    logger.critical(
                         'dlq_failure_payloads_dropped',
                         category='sink',
                         sink_name=sink_name,
@@ -772,7 +777,7 @@ class SinkManager:
                     # Operator intent: drop, but a counted and named drop —
                     # same accounting as a SKIP against a live sink.
                     sink_deliveries_skipped.labels(sink_type=sink_type, sink_name=sink_name).inc()
-                    await logger.awarning(
+                    logger.warning(
                         'sink_delivery_skipped',
                         category='sink',
                         sink_type=sink_type,
@@ -796,7 +801,7 @@ class SinkManager:
                             reason=reason,
                         )
                     dlq_dropped_payloads.labels(partition=str(partition_id)).inc()
-                    await logger.acritical(
+                    logger.critical(
                         'dlq_failure_payloads_dropped',
                         category='sink',
                         sink_name=sink_name,
@@ -807,7 +812,7 @@ class SinkManager:
                         action='ALERT: payloads lost (dlq.on_send_failure=drop) — '
                         'configure a DLQ, or set dlq.on_send_failure=stall to prefer replay over loss',
                     )
-            await logger.awarning(
+            logger.warning(
                 'sink_delivery_circuit_open',
                 category='sink',
                 sink_type=sink_type,
@@ -1042,7 +1047,7 @@ class SinkManager:
                 reason='delivery retries exhausted and DLQ unavailable',
             )
         dlq_dropped_payloads.labels(partition=str(partition_id)).inc()
-        await logger.acritical(
+        logger.critical(
             'dlq_failure_payloads_dropped',
             category='sink',
             sink_name=error.sink_name,
