@@ -84,6 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Update dependencies: confluent-kafka 2.14.0 -> 2.15.0, pytest 9.0.3 ->
+  9.1.1 (floors raised to match).
 - Rewrite the README as a short GitHub-first overview: features, one
   quick-start example, and links into the docs site. Details that lived
   only in the README now live in the docs.
