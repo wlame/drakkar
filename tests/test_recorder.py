@@ -40,6 +40,8 @@ from drakkar.recorder import (
 from drakkar.recorder.core import (
     CROSS_TRACE_MAX_FILES,
     WSSubscriber,
+    _byte_len,
+    _capped_stdin,
     _ScanBudget,
 )
 from tests.conftest import make_ui_config, wait_for
@@ -5887,3 +5889,111 @@ class TestLastBreathFlush:
         gc.collect()
 
         assert ref() is None
+
+
+# ---------------------------------------------------------------------------
+# Stream sizing: no redundant encodes, byte counts match the Go backend
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ('stdout', 'expected_size'),
+    [
+        ('', 0),
+        ('plain ascii', 11),
+        ('héllo', 6),  # 5 chars, 6 bytes
+        (b'\xff\xfe ok'.decode(errors='replace'), 9),  # 2 x U+FFFD (3 bytes each) + ' ok'
+    ],
+)
+async def test_task_completed_stdout_size_counts_bytes_of_the_decoded_string(recorder, stdout, expected_size):
+    """``stdout_size`` is the UTF-8 length of the decoded capture.
+
+    Not the raw byte count: both backends replace each invalid byte with
+    U+FFFD before measuring (Python's ``errors='replace'``, Go's
+    ``decodeReplace``), so this is what keeps the two agreeing on output
+    that is not valid UTF-8. The ASCII fast path must not disturb it.
+    """
+    result = ExecutorResult(
+        exit_code=0,
+        stdout=stdout,
+        stderr='',
+        duration_seconds=0.1,
+        task=make_task('t-out'),
+    )
+    recorder.record_task_completed(result, partition=0)
+    assert recorder._buffer[-1]['stdout_size'] == expected_size
+
+
+@pytest.mark.parametrize(
+    ('stdin', 'expected_size', 'expected_lines'),
+    [
+        ('', 0, 0),
+        ('plain ascii\n', 12, 1),
+        ('a\nb\nc', 5, 3),
+        ('héllo wörld', 13, 1),  # non-ASCII: 11 chars, 13 bytes
+        ('ünicode\nlines\n', 15, 2),
+    ],
+)
+async def test_task_started_stdin_size_counts_bytes_not_characters(recorder, stdin, expected_size, expected_lines):
+    """The ASCII fast path must not change the recorded byte count."""
+    task = ExecutorTask(task_id='t-stdin', args=[], source_offsets=[0], stdin=stdin or None)
+    recorder.record_task_started(task, partition=0)
+    entry = recorder._buffer[-1]
+    assert entry['stdin_size'] == expected_size
+    assert entry['stdin_lines'] == expected_lines
+
+
+class _CountingStr(str):
+    """A ``str`` that records how often something encoded it.
+
+    Sizing stdin and stdout is per-task work on the event loop, so a stray
+    ``.encode()`` there is a full copy of the payload — hundreds of MB/s at
+    the throughput the executor pool targets. These tests pin the absence of
+    that copy, which no output assertion can show.
+    """
+
+    def __new__(cls, value: str):
+        obj = super().__new__(cls, value)
+        obj.encodes = 0
+        return obj
+
+    def encode(self, *args, **kwargs):
+        self.encodes += 1
+        return super().encode(*args, **kwargs)
+
+
+def test_byte_len_does_not_encode_ascii_text():
+    text = _CountingStr('plain ascii payload\n' * 100)
+    assert _byte_len(text) == len(text)
+    assert text.encodes == 0
+
+
+def test_byte_len_encodes_only_non_ascii_text():
+    text = _CountingStr('héllo')
+    assert _byte_len(text) == 6
+    assert text.encodes == 1
+
+
+@pytest.mark.parametrize('max_bytes', [0, -1])
+def test_capped_stdin_does_not_encode_when_uncapped(max_bytes):
+    text = _CountingStr('x' * 10_000)
+    stored, truncated = _capped_stdin(text, max_bytes)
+    assert stored == text
+    assert truncated is False
+    assert text.encodes == 0
+
+
+def test_capped_stdin_does_not_encode_ascii_text_that_already_fits():
+    text = _CountingStr('x' * 100)
+    stored, truncated = _capped_stdin(text, 1000)
+    assert stored == text
+    assert truncated is False
+    assert text.encodes == 0
+
+
+def test_capped_stdin_still_truncates_on_the_byte_boundary():
+    """The cap is bytes, and a character split by it is dropped, not mangled."""
+    stored, truncated = _capped_stdin('aé' + 'b' * 100, 3)  # 'a' + 2-byte 'é' = 3 bytes
+    assert (stored, truncated) == ('aé', True)
+    stored, truncated = _capped_stdin('aé' + 'b' * 100, 2)  # splits 'é'
+    assert (stored, truncated) == ('a', True)

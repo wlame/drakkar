@@ -34,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Sizing a task's stdin and stdout no longer encodes them. Both are measured
+  in bytes once per task on the event loop, and both did it by building a
+  full UTF-8 copy purely to take its length — at the throughput the executor
+  pool targets, hundreds of megabytes a second of copying and garbage. Text
+  that is ASCII (the common case for both streams) is now measured with a
+  flag check and a character count; non-ASCII text still pays one encode.
+  `ui.recorder.store_stdin` capping also stops encoding when there is no cap
+  or the text already fits. Recorded values are unchanged, and still equal
+  the Go backend's byte-for-byte — both replace each invalid byte with
+  U+FFFD before measuring.
+
 - **Contract v1.20** — `GET /api/v1/live/overview` reports `running_tasks`
   and `pending_tasks` as **counts** instead of maps keyed by task id. The
   maps carried one entry per in-flight task, `args` included, and the

@@ -321,16 +321,29 @@ def _line_count(text: str) -> int:
     return text.count('\n') + (0 if text.endswith('\n') else 1)
 
 
+def _byte_len(text: str) -> int:
+    """Length of ``text`` in UTF-8 bytes, without allocating when it is ASCII.
+
+    Sizing stdin and stdout runs on the loop once per task, and at the
+    throughput the pool targets a stray ``.encode()`` there is hundreds of
+    megabytes a second of pure copying. ``str.isascii()`` is a flag check on
+    CPython's compact-unicode representation, and for ASCII the byte length
+    is the character count. Non-ASCII text still pays one encode.
+    """
+    return len(text) if text.isascii() else len(text.encode())
+
+
 def _capped_stdin(stdin: str, max_bytes: int) -> tuple[str, bool]:
     """Cap stored stdin at ``max_bytes`` (0 = unlimited), UTF-8 safe.
 
     The cut happens on the encoded bytes, then decodes with errors ignored so
     a multi-byte character split by the cap is dropped rather than mangled.
+    Both early exits — no cap, and text that already fits — answer without
+    encoding at all.
     """
-    encoded = stdin.encode()
-    if max_bytes <= 0 or len(encoded) <= max_bytes:
+    if max_bytes <= 0 or _byte_len(stdin) <= max_bytes:
         return stdin, False
-    return encoded[:max_bytes].decode(errors='ignore'), True
+    return stdin.encode()[:max_bytes].decode(errors='ignore'), True
 
 
 def _failed_metadata(task: ExecutorTask, error: ExecutorError, stdin_max_bytes: int) -> dict:
@@ -1469,7 +1482,7 @@ class EventRecorder:
         stdin_lines = 0
         stdin_size = 0
         if task.stdin:
-            stdin_size = len(task.stdin.encode())
+            stdin_size = _byte_len(task.stdin)
             stdin_lines = _line_count(task.stdin)
         metadata: dict = {
             'source_offsets': task.source_offsets,
@@ -1583,7 +1596,10 @@ class EventRecorder:
             'task_id': result.task.task_id,
             'exit_code': result.exit_code,
             'duration': result.duration_seconds,
-            'stdout_size': len(result.stdout.encode()),
+            # Sized off the DECODED string, matching Go's len(result.Stdout):
+            # both backends replace each invalid byte with U+FFFD before
+            # measuring, so the two agree even on non-UTF-8 output.
+            'stdout_size': _byte_len(result.stdout),
             # WS-frame-only field, like task_started's stdin_lines/stdin_size:
             # not in the pinned events-table column list, so the DB insert
             # drops it and the row shape is unchanged.
