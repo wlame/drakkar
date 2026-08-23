@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The flight recorder no longer buffers events it can never write. In
+  memory-only mode (`db_dir` empty) and with `store_events: false` there is
+  no flush loop, so the ring buffer filled to `max_buffer` and then counted
+  every further event in `drakkar_recorder_dropped_events_total` — a
+  permanently firing alert, and up to `max_buffer` events of dead memory
+  holding whole subprocess stdout/stderr. The live WebSocket stream is
+  unaffected.
+
 - Every DLQ write waited about one second: `DLQSink.send()` produced the
   message but never flushed the producer, so the message sat in the client
   buffer until its inactivity timer fired. The DLQ is on the hot failure

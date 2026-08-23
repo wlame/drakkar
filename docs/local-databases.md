@@ -55,7 +55,7 @@ both backends:
 |---|---|
 | `ui.enabled: false` | No UI subsystem at all — no recorder files, no watchdog, no WS. The cache still runs if enabled and it can resolve a `db_dir`. |
 | `ui.recorder.db_dir: ''` | **Memory-only mode.** No recorder files, no watchdog file, no archives. Live WebSocket streaming (the Live page) keeps working — events broadcast before the DB gate — but everything DB-backed is off: History, Trace, Task Detail lookups, peer autodiscovery, the Databases tab, downloads. |
-| `ui.recorder.store_events: false` | The `events` table stays empty; the WS live view still streams. `worker_config` / `worker_state` are still written per their own flags. History, trace, and task queries return nothing. |
+| `ui.recorder.store_events: false` | The `events` table stays empty and events are not buffered; the WS live view still streams. `worker_config` / `worker_state` are still written per their own flags. History, trace, and task queries return nothing. |
 | `ui.recorder.store_config: false` | No `worker_config` row — this worker becomes invisible to peer autodiscovery and to cluster-scoped cache sync. |
 | `ui.recorder.store_state: false` | No periodic `worker_state` snapshots. |
 | `cache.enabled: false` *(default)* | No cache files. The handler cache API is a no-op. |

@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from structlog.testing import capture_logs
 
 from drakkar.config import UIConfig
+from drakkar.metrics import recorder_dropped_events
 from drakkar.models import (
     ExecutorError,
     ExecutorResult,
@@ -816,6 +817,58 @@ async def test_get_events_no_db():
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     events = await rec.get_events()
     assert events == []
+
+
+# --- Buffering when nothing will ever drain the buffer ---
+
+
+async def test_record_memory_only_does_not_buffer_or_count_drops():
+    """``db_dir: ''`` means no flush loop is ever created and ``_flush``
+    returns early, so an appended event is never drained. Buffering there
+    fills the deque to ``max_buffer`` and then counts every further event
+    as a drop — a permanently firing alert plus a large dead buffer, since
+    ``task_completed`` entries carry the whole subprocess stdout/stderr.
+    """
+    config = make_ui_config(enabled=True, db_dir='')
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    before = recorder_dropped_events._value.get()
+
+    for offset in range(64):
+        rec.record_committed(partition=0, offset=offset)
+
+    assert len(rec._buffer) == 0
+    assert recorder_dropped_events._value.get() == before
+
+
+async def test_record_memory_only_still_fans_out_to_websockets():
+    """Not buffering must not cost the live UI its events — the WS fan-out
+    is the whole point of memory-only mode.
+    """
+    config = make_ui_config(enabled=True, db_dir='')
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    sub = rec.subscribe()
+
+    rec.record_committed(partition=3, offset=9)
+
+    assert sub.queue.qsize() == 1
+    assert len(rec._buffer) == 0
+
+
+async def test_record_store_events_off_does_not_buffer(tmp_path):
+    """Same rule with a real ``db_dir``: ``store_events: false`` skips the
+    flush-loop creation, so the deque would fill and never drain.
+    """
+    config = make_debug_config(tmp_path, store_events=False)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    before = recorder_dropped_events._value.get()
+
+    for offset in range(64):
+        rec.record_committed(partition=0, offset=offset)
+
+    assert len(rec._buffer) == 0
+    assert recorder_dropped_events._value.get() == before
+    await rec.stop()
 
 
 # --- Rotation ---
@@ -2367,19 +2420,24 @@ async def test_store_events_false_no_events_table(tmp_path):
     await rec.stop()
 
 
-async def test_store_events_false_flush_clears_buffer(tmp_path):
-    """Buffer is cleared on flush even without events table."""
+async def test_store_events_false_flush_is_a_noop(tmp_path):
+    """With ``store_events`` off nothing is buffered in the first place, so
+    a flush has nothing to drain. Replaces an earlier test that asserted the
+    buffer filled and was cleared on flush — that pinned the leak in
+    ``_record``, and no flush loop is even created in this mode.
+    """
     config = make_debug_config(tmp_path, store_events=False)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
+    try:
+        rec.record_consumed(make_msg(offset=0))
+        rec.record_consumed(make_msg(offset=1))
+        assert len(rec._buffer) == 0
 
-    rec.record_consumed(make_msg(offset=0))
-    rec.record_consumed(make_msg(offset=1))
-    assert len(rec._buffer) == 2
-
-    await rec._flush()
-    assert len(rec._buffer) == 0
-    await rec.stop()
+        await rec._flush()
+        assert len(rec._buffer) == 0
+    finally:
+        await rec.stop()
 
 
 async def test_store_events_false_ws_broadcast_still_works(tmp_path):

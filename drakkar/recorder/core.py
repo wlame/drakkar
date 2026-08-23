@@ -362,6 +362,14 @@ class EventRecorder:
         self._worker_name = worker_name
         self._cluster_name = cluster_name
         self._buffer: deque[dict] = deque(maxlen=config.recorder.max_buffer)
+        # Whether an appended event will ever reach a table. The flush loop
+        # is created only when ``store_events`` is on (and only when there
+        # is a ``db_dir`` to open a DB in), and ``_flush`` returns early
+        # without one — so in the other configurations an append is a leak:
+        # the deque fills to ``max_buffer`` and every further event counts
+        # as a drop forever. Both inputs are process-lifetime constants, so
+        # this is resolved once here rather than re-read on every event.
+        self._persists_events: bool = bool(self._store.store_events and self._store.db_dir)
         self._db: aiosqlite.Connection | None = None
         # Dedicated reader connection used by the debug UI for SELECTs.
         # aiosqlite serializes ops per connection, so without this the UI
@@ -813,6 +821,13 @@ class EventRecorder:
     def _record(self, event: dict, *, skip_ws: bool = False, skip_db: bool = False) -> None:
         """Append event to buffer and broadcast to WS subscribers.
 
+        Buffering is skipped entirely when this recorder will never persist
+        events (memory-only ``db_dir: ''``, or ``store_events: false``):
+        nothing would ever drain the deque, so it would pin ``max_buffer``
+        events — ``task_completed`` carries the whole subprocess stdout and
+        stderr — and report every event after that as a drop. The WS
+        fan-out below still runs; the live UI is the point of those modes.
+
         Observability: when the deque is already at capacity, the next
         append will silently evict the oldest entry. We detect that case
         BEFORE the append (``len == maxlen``) and increment the drop
@@ -821,7 +836,7 @@ class EventRecorder:
         contention without scraping internal state.
         """
         event['dt'] = format_dt(event['ts'])
-        if not skip_db:
+        if not skip_db and self._persists_events:
             # deque(maxlen=N) accepts up to N items; when len == maxlen a
             # subsequent append drops the leftmost entry. We count one
             # drop per event lost — prometheus_client Counter.inc() is
@@ -2706,12 +2721,6 @@ class EventRecorder:
             # would discard the uncommitted transaction → data loss.
             db = self._db
             if not db or not self._buffer:
-                return
-            if not self._store.store_events:
-                self._buffer.clear()
-                # Reflect the drain in the gauge even when events aren't persisted —
-                # buffer length is what the gauge reports, not DB row count.
-                recorder_buffer_size.set(0)
                 return
             # Take a LOCAL snapshot of the rows to flush BEFORE the DB
             # write. If the write fails (sqlite3.Error) or is interrupted

@@ -200,8 +200,8 @@ ui:
 
 `self.annotate(...)` then becomes a no-op call your handler can keep making
 unconditionally. The same happens automatically when the recorder is not
-running or `ui.recorder.store_events` is false — with no flush loop,
-annotations would only fill the buffer and be evicted.
+running or `ui.recorder.store_events` is false — with no flush loop there is
+nowhere for an annotation to land, so building one buys nothing.
 
 ---
 

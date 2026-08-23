@@ -827,6 +827,12 @@ event, and the `drakkar_recorder_buffer_size` gauge shows the current
 depth. Alert on sustained non-zero drops and raise `max_buffer` or
 shorten `flush_interval_seconds` when they appear.
 
+Buffering happens only when the worker will actually write the events. In
+memory-only mode (`db_dir` empty) and with `store_events: false` there is no
+flush loop, so events are streamed to the live WebSocket view and not
+buffered at all: the buffer gauge stays at 0 and the drop counter never
+moves. A non-zero drop count therefore always means real flush pressure.
+
 On shutdown, the buffer is flushed one final time before closing the
 database.
 
