@@ -630,6 +630,83 @@ class TestDebugDownload:
         assert resp.status_code == 404
 
 
+class TestMemoryOnlyRecorderServesNoFiles:
+    """``ui.recorder.db_dir: ""`` is the documented memory-only mode.
+
+    With it, ``os.path.join('', name)`` is just ``name`` and
+    ``os.path.realpath('')`` is the worker's CWD, so the old
+    prefix-string containment check passed for **any** regular file in the
+    directory the worker was started in — including its own
+    ``drakkar.yaml`` with SASL passwords and sink DSNs. The UI is
+    unauthenticated by design, so that was reachable by anyone who could
+    reach the port.
+
+    There is no database directory in this mode, so these endpoints have
+    nothing legitimate to serve and must say so.
+    """
+
+    @staticmethod
+    def _app_in(cwd, monkeypatch, mock_recorder, mock_app):
+        monkeypatch.chdir(cwd)
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='')
+        return ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
+
+    async def test_download_cannot_read_a_file_from_the_working_directory(
+        self, tmp_path, monkeypatch, mock_recorder, mock_app
+    ):
+        (tmp_path / 'drakkar.yaml').write_text('kafka:\n  brokers: secret:9092\n')
+        transport = self._app_in(tmp_path, monkeypatch, mock_recorder, mock_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/debug/download/drakkar.yaml')
+        assert resp.status_code == 404
+        assert b'secret:9092' not in resp.content
+
+    async def test_download_of_a_plain_db_name_is_also_refused(self, tmp_path, monkeypatch, mock_recorder, mock_app):
+        (tmp_path / 'w1.db').write_bytes(b'fake-sqlite')
+        transport = self._app_in(tmp_path, monkeypatch, mock_recorder, mock_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/debug/download/w1.db')
+        assert resp.status_code == 404
+
+    async def test_merge_refuses_to_write_into_the_working_directory(
+        self, tmp_path, monkeypatch, mock_recorder, mock_app
+    ):
+        """The write half of the same hole: merge would have created its
+        output next to whatever the worker was started beside."""
+        for name in ('a.db', 'b.db'):
+            (tmp_path / name).write_bytes(b'fake-sqlite')
+        transport = self._app_in(tmp_path, monkeypatch, mock_recorder, mock_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post('/api/debug/merge', json={'filenames': ['a.db', 'b.db']})
+        assert resp.status_code == 404
+        assert not list(tmp_path.glob('merged-*.db'))
+
+    async def test_archive_download_is_refused(self, tmp_path, monkeypatch, mock_recorder, mock_app):
+        transport = self._app_in(tmp_path, monkeypatch, mock_recorder, mock_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/debug/archives/drakkar-c1-20260823__10_00_00-20260823__11_00_00.db.gz')
+        assert resp.status_code == 404
+
+
+class TestDownloadContainment:
+    """A resolved path must stay inside db_dir, whatever the name looks like."""
+
+    async def test_symlink_escaping_db_dir_is_refused(self, tmp_path, mock_recorder, mock_app):
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        (outside / 'secrets.db').write_bytes(b'not-yours')
+        db_dir = tmp_path / 'dbs'
+        db_dir.mkdir()
+        os.symlink(outside / 'secrets.db', db_dir / 'escape.db')
+
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(db_dir))
+        transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/debug/download/escape.db')
+        assert resp.status_code in (400, 404)
+        assert b'not-yours' not in resp.content
+
+
 # ---------------------------------------------------------------------------
 # 4b. Archive list + download endpoints
 # ---------------------------------------------------------------------------

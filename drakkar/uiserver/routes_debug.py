@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -61,6 +61,41 @@ def _has_unsafe_filename_char(filename: str) -> bool:
     dot-prefix traversal are checked separately by the callers.
     """
     return any(c in '";' or ord(c) < 0x20 or ord(c) == 0x7F for c in filename)
+
+
+def _db_root(db_dir: str) -> Path | None:
+    """The recorder directory as an absolute path, or None when there is none.
+
+    ``ui.recorder.db_dir: ""`` is the documented memory-only mode. It used
+    to be an arbitrary-file-read hole in every endpoint that joined a name
+    onto it: ``os.path.join('', name)`` is just ``name``, and
+    ``os.path.realpath('')`` is the worker's current directory, so a
+    prefix-string containment check passed for any regular file sitting
+    next to the process — its own ``drakkar.yaml``, with SASL passwords and
+    sink DSNs, included. Merge had the same hole in the write direction.
+
+    There is no directory to serve from in that mode, so callers answer 404
+    rather than trying to contain a path that has no root.
+    """
+    if not db_dir:
+        return None
+    return Path(db_dir).resolve()
+
+
+def _contained_db_path(root: Path, filename: str) -> Path | None:
+    """``filename`` resolved inside ``root``, or None when it is not contained.
+
+    Rejects path separators, dot-prefixed names and the characters that
+    would break out of the ``Content-Disposition`` header, then resolves
+    and checks containment against the real root — so a symlink inside
+    ``db_dir`` pointing outside it is refused too.
+    """
+    if '/' in filename or '\\' in filename or filename.startswith('.') or _has_unsafe_filename_char(filename):
+        return None
+    candidate = (root / filename).resolve()
+    if candidate == root or not candidate.is_relative_to(root):
+        return None
+    return candidate
 
 
 # ``/api/debug/probe`` request body — module-scope per the FastAPI
@@ -201,22 +236,25 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         if len(filenames) < 2:
             return JSONResponse({'error': 'Select at least 2 databases'}, status_code=400)
 
+        # Memory-only recorder: no directory to read sources from, and —
+        # the part that mattered — none to write the output into either.
+        root = _db_root(config.recorder.db_dir)
+        if root is None:
+            return JSONResponse({'error': 'No database directory configured'}, status_code=404)
+
         # resolve to full paths, validate they exist in db_dir
         db_paths = []
         for fn in filenames:
-            # prevent directory traversal and header-injection characters
-            if '/' in fn or '\\' in fn or fn.startswith('.') or _has_unsafe_filename_char(fn):
+            full = _contained_db_path(root, fn)
+            if full is None:
                 return JSONResponse({'error': f'Invalid filename: {fn}'}, status_code=400)
-            full = os.path.join(config.recorder.db_dir, fn)
-            if not os.path.realpath(full).startswith(os.path.realpath(config.recorder.db_dir) + os.sep):
-                return JSONResponse({'error': f'Invalid path: {fn}'}, status_code=400)
-            if not os.path.isfile(full):
+            if not full.is_file():
                 return JSONResponse({'error': f'File not found: {fn}'}, status_code=404)
-            db_paths.append(full)
+            db_paths.append(str(full))
 
         ts = datetime.now(tz=UTC).strftime('%Y-%m-%d__%H_%M_%S')
         output_name = f'merged-{ts}.db'
-        output_path = os.path.join(config.recorder.db_dir, output_name)
+        output_path = str(root / output_name)
 
         result = await asyncio.to_thread(merge_databases, db_paths, output_path)
 
@@ -360,16 +398,16 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
     @router.get('/debug/download/{filename}', dependencies=[Depends(deps.require_auth)])
     async def debug_download(filename: str):
         """Download a database file from db_dir."""
-        # prevent directory traversal and header-injection characters
-        if '/' in filename or '\\' in filename or filename.startswith('.') or _has_unsafe_filename_char(filename):
+        root = _db_root(config.recorder.db_dir)
+        if root is None:
+            return JSONResponse({'error': 'No database directory configured'}, status_code=404)
+        full = _contained_db_path(root, filename)
+        if full is None:
             return JSONResponse({'error': 'Invalid filename'}, status_code=400)
-        full = os.path.join(config.recorder.db_dir, filename)
-        if not os.path.realpath(full).startswith(os.path.realpath(config.recorder.db_dir) + os.sep):
-            return JSONResponse({'error': 'Invalid path'}, status_code=400)
-        if not os.path.isfile(full):
+        if not full.is_file():
             return JSONResponse({'error': 'File not found'}, status_code=404)
         return FileResponse(
-            path=full,
+            path=str(full),
             filename=filename,
             media_type='application/x-sqlite3',
             # The download URL may carry ?token= (browsers can't set headers
@@ -413,13 +451,14 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         # same belt-and-braces shape as debug_download above.
         if not ARCHIVE_NAME_RE.fullmatch(name):
             return JSONResponse({'error': 'Invalid archive name'}, status_code=404)
-        full = os.path.join(config.recorder.db_dir, name)
-        if not os.path.realpath(full).startswith(os.path.realpath(config.recorder.db_dir) + os.sep):
-            return JSONResponse({'error': 'Invalid path'}, status_code=404)
-        if not os.path.isfile(full):
+        root = _db_root(config.recorder.db_dir)
+        if root is None:
+            return JSONResponse({'error': 'No database directory configured'}, status_code=404)
+        full = _contained_db_path(root, name)
+        if full is None or not full.is_file():
             return JSONResponse({'error': 'File not found'}, status_code=404)
         return FileResponse(
-            path=full,
+            path=str(full),
             filename=name,
             media_type='application/gzip',
             headers={'Cache-Control': 'no-store, private'},

@@ -32,6 +32,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waiting. A timeout is now a transient delivery failure naming the sink and
   the budget.
 
+### Fixed
+
+- **Security (high, memory-only mode only): `ui.recorder.db_dir: ""` turned
+  the database download and merge endpoints into an arbitrary-file read and
+  write of the worker's working directory.** `os.path.join('', name)` is
+  just `name` and `os.path.realpath('')` is the current directory, so the
+  containment check passed for any regular, non-dotfile name sitting next
+  to the process — `GET /debug/download/drakkar.yaml` returned the
+  worker's own configuration, SASL passwords and sink DSNs included, and
+  merge wrote its output there too. The debug UI is unauthenticated by
+  design, so with a memory-only recorder this was reachable by anyone who
+  could reach the port.
+
+  There is no database directory in that mode, so download, merge and
+  archive download now answer **404** instead of trying to contain a path
+  with no root. Containment itself moved from a string-prefix comparison
+  to `Path.resolve()` + `is_relative_to()` against a non-empty absolute
+  root. The Go backend rejected these already, but only as a side effect
+  of `filepath.EvalSymlinks("")` returning `"."`; it now refuses
+  explicitly, with the same 404.
+
 ### Changed
 
 - A cache miss that falls through to SQLite costs **one** aiosqlite round
