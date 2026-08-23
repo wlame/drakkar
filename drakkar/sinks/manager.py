@@ -729,16 +729,14 @@ class SinkManager:
                 error=CIRCUIT_OPEN_ERROR,
                 payloads=payloads,
             )
-            # Force DLQ routing when we have a DLQ sink: the breaker has
-            # already decided the sink is unhealthy, so there's nothing for
-            # the handler's SKIP/RETRY/DLQ choice to usefully change.
-            # We do NOT invoke ``on_delivery_error`` on this path — the
-            # handler's job is to classify delivery failures against a
-            # live sink; a tripped breaker is an infrastructure signal
-            # outside that contract. Calling the handler here would also
-            # risk double-DLQ (typical app handlers route DLQ-action
-            # results back to the same DLQ sink), so we keep the path
-            # direct.
+            # With a DLQ sink, routing is forced and the handler is NOT
+            # invoked: the breaker has already decided the sink is
+            # unhealthy, the handler's job is to classify failures against
+            # a live sink, and calling it here would risk a double-DLQ
+            # (app handlers typically route a DLQ action back into this
+            # same sink). Without one there is nothing to force the
+            # payloads into, so the handler IS asked — and its answer is
+            # honoured; see the else-branch below.
             if self._dlq_sink is not None:
                 if not await self._dlq_sink.send(error, partition_id=partition_id):
                     # The breaker is open AND the DLQ write failed — the
@@ -763,9 +761,52 @@ class SinkManager:
                         'set dlq.on_send_failure=stall to prefer replay over loss',
                     )
             else:
-                # Legacy path: no DLQ sink wired. Fall back to handler-driven
-                # routing and hope the handler's DLQ plumbing lives upstream.
-                await on_delivery_error(error)
+                # No DLQ sink wired. The handler is asked — and its answer is
+                # honoured. It used to be discarded, so SKIP, RETRY and DLQ
+                # all ended the same way: payloads dropped, offset committed,
+                # nothing counted and nothing but the generic circuit-open
+                # warning in the log. That is silent loss on the one path
+                # where the operator explicitly asked what to do.
+                action = await on_delivery_error(error)
+                if action == DeliveryAction.SKIP:
+                    # Operator intent: drop, but a counted and named drop —
+                    # same accounting as a SKIP against a live sink.
+                    sink_deliveries_skipped.labels(sink_type=sink_type, sink_name=sink_name).inc()
+                    await logger.awarning(
+                        'sink_delivery_skipped',
+                        category='sink',
+                        sink_type=sink_type,
+                        sink_name=sink_name,
+                        payload_count=len(payloads),
+                        reason='circuit open, no DLQ configured',
+                    )
+                else:
+                    # DLQ: the handler wants these payloads kept and there is
+                    # no DLQ to keep them in.
+                    # RETRY: cannot be honoured — re-entering an open circuit
+                    # is what the breaker exists to prevent.
+                    # Both mean "do not drop this quietly", so both take the
+                    # configured dlq.on_send_failure route, exactly like the
+                    # DLQ-wired branch above when the DLQ write fails.
+                    reason = f'circuit open, no DLQ configured (handler returned {action.value})'
+                    if self._dlq_on_send_failure == 'stall':
+                        raise SinkDeliveryFailedError(
+                            sink_name=sink_name,
+                            sink_type=sink_type,
+                            reason=reason,
+                        )
+                    dlq_dropped_payloads.labels(partition=str(partition_id)).inc()
+                    await logger.acritical(
+                        'dlq_failure_payloads_dropped',
+                        category='sink',
+                        sink_name=sink_name,
+                        sink_type=sink_type,
+                        partition=partition_id,
+                        payload_count=len(payloads),
+                        reason=reason,
+                        action='ALERT: payloads lost (dlq.on_send_failure=drop) — '
+                        'configure a DLQ, or set dlq.on_send_failure=stall to prefer replay over loss',
+                    )
             await logger.awarning(
                 'sink_delivery_circuit_open',
                 category='sink',

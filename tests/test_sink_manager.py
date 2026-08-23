@@ -2496,3 +2496,92 @@ async def test_retry_redelivers_the_whole_group_and_says_so():
     assert len(retries) == 1
     assert retries[0]['payload_count'] == 3
     assert 'already applied' in retries[0]['note']
+
+
+# --- Circuit open with no DLQ wired ---
+
+
+def _trip_breaker(sink: BaseSink) -> None:
+    """Force a sink's breaker open without going through deliveries."""
+    for _ in range(10):
+        sink.record_failure()
+
+
+async def _deliver_once(mgr: SinkManager, on_error, partition_id: int = 0) -> None:
+    await mgr.deliver_all(
+        CollectResult(kafka=[KafkaPayload(data=SampleData())]),
+        on_delivery_error=on_error,
+        partition_id=partition_id,
+    )
+
+
+async def test_circuit_open_without_dlq_honours_a_skip():
+    """The handler's answer used to be discarded on this path — SKIP and
+    RETRY behaved the same as no answer at all: payloads dropped, offset
+    committed, nothing counted. A SKIP is operator intent, so it stays a
+    drop, but a counted and logged one.
+    """
+    from drakkar.metrics import sink_deliveries_skipped
+
+    mgr = _make_breaker_manager(failure_threshold=1, cooldown_seconds=30.0)
+    sink = FakeSink('out', sink_type='kafka')
+    mgr.register(sink)
+    _trip_breaker(sink)
+    before = sink_deliveries_skipped.labels(sink_type='kafka', sink_name='out')._value.get()
+
+    await _deliver_once(mgr, AsyncMock(return_value=DeliveryAction.SKIP))
+
+    assert sink_deliveries_skipped.labels(sink_type='kafka', sink_name='out')._value.get() == before + 1
+
+
+async def test_circuit_open_without_dlq_counts_a_dlq_action_as_lost():
+    """The handler asked for the DLQ and there is no DLQ. Under
+    ``dlq.on_send_failure=drop`` the payloads are lost — that must be
+    counted and CRITICAL-logged, not silent.
+    """
+    from drakkar.metrics import dlq_dropped_payloads
+
+    mgr = _make_breaker_manager(failure_threshold=1, cooldown_seconds=30.0)
+    sink = FakeSink('out', sink_type='kafka')
+    mgr.register(sink)
+    _trip_breaker(sink)
+    before = dlq_dropped_payloads.labels(partition='0')._value.get()
+
+    with capture_logs() as cap:
+        await _deliver_once(mgr, AsyncMock(return_value=DeliveryAction.DLQ))
+
+    assert dlq_dropped_payloads.labels(partition='0')._value.get() == before + 1
+    dropped = [e for e in cap if e['event'] == 'dlq_failure_payloads_dropped']
+    assert len(dropped) == 1
+    assert dropped[0]['log_level'] == 'critical'
+
+
+async def test_circuit_open_without_dlq_stalls_when_configured():
+    """``dlq.on_send_failure=stall`` must hold the offsets rather than lose
+    the payloads — the same rule the DLQ-wired branch already applied.
+    """
+    mgr = _make_breaker_manager(failure_threshold=1, cooldown_seconds=30.0)
+    mgr.attach_runtime(recorder=None, dlq_sink=None, dlq_on_send_failure='stall')
+    sink = FakeSink('out', sink_type='kafka')
+    mgr.register(sink)
+    _trip_breaker(sink)
+
+    with pytest.raises(SinkDeliveryFailedError):
+        await _deliver_once(mgr, AsyncMock(return_value=DeliveryAction.DLQ))
+
+
+async def test_circuit_open_without_dlq_does_not_retry_into_an_open_circuit():
+    """RETRY cannot be honoured while the breaker is open — hammering a
+    recovering downstream is exactly what the breaker exists to prevent — so
+    it is treated as "do not drop silently" and follows on_send_failure.
+    """
+    mgr = _make_breaker_manager(failure_threshold=1, cooldown_seconds=30.0)
+    mgr.attach_runtime(recorder=None, dlq_sink=None, dlq_on_send_failure='stall')
+    sink = FakeSink('out', sink_type='kafka')
+    mgr.register(sink)
+    _trip_breaker(sink)
+
+    with pytest.raises(SinkDeliveryFailedError):
+        await _deliver_once(mgr, AsyncMock(return_value=DeliveryAction.RETRY))
+
+    assert sink.delivered == [], 'the open circuit must not be re-entered'

@@ -34,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A circuit-open batch with no DLQ configured no longer drops silently. The
+  handler was asked what to do and its answer was discarded, so `SKIP`,
+  `RETRY` and `DLQ` all ended the same way: payloads dropped, offset
+  committed, nothing counted. Now `SKIP` is a counted drop, and `DLQ` and
+  `RETRY` follow `dlq.on_send_failure` — `stall` holds the offsets for
+  replay, `drop` counts `drakkar_dlq_dropped_payloads_total` and logs
+  CRITICAL.
+
 - The Postgres sink capped a multi-row `INSERT` at 65535 bind parameters,
   the wire-protocol limit, but asyncpg refuses a statement above 32767. Any
   batch past that failed and silently fell back to one statement per row —

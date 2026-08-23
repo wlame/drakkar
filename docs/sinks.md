@@ -377,7 +377,7 @@ exhausted, operator returned `DLQ`), so transient blips don't trip it.
 | State | Behavior | Transition |
 |-------|----------|------------|
 | `closed` | Every `deliver()` call goes through. Terminal failures increment `_consecutive_failures`; any success resets it to zero. | After `failure_threshold` consecutive failures → `open`. |
-| `open` | `deliver()` is skipped for the cooldown window. The batch routes **directly** to the DLQ — the handler's `on_delivery_error` is bypassed on this path (SKIP would silently drop data, RETRY would hammer the recovering downstream, neither is appropriate). | After `cooldown_seconds` elapsed, the next incoming batch promotes to `half_open`. |
+| `open` | `deliver()` is skipped for the cooldown window. With a DLQ configured the batch routes **directly** to it and `on_delivery_error` is bypassed (SKIP would silently drop data, RETRY would hammer the recovering downstream, neither is appropriate). With **no** DLQ configured the handler is asked and its answer is honoured — see below. | After `cooldown_seconds` elapsed, the next incoming batch promotes to `half_open`. |
 | `half_open` | A **single probe** delivery is allowed through. Parallel delivery attempts against the same sink observe the in-flight probe and skip — the `_probe_inflight` gate enforces single-flight semantics. | Probe success → `closed` with counters reset. Probe failure → `open` with a fresh cooldown. |
 
 **Operator-visible signals:**
@@ -401,6 +401,21 @@ budgets can lower the threshold so one persistent outage trips the
 breaker sooner; long-recovery downstreams may want a longer cooldown.
 See [Configuration → Circuit Breaker](configuration.md#circuit-breaker-sinkscircuit_breaker)
 for the full knobs.
+
+#### Circuit open with no DLQ configured
+
+When no DLQ is wired there is nothing to force the payloads into, so
+`on_delivery_error` **is** called and its answer decides:
+
+| Handler returns | Outcome |
+|-----------------|---------|
+| `SKIP` | Payloads dropped. Counted on `drakkar_sink_deliveries_skipped_total` and logged — operator intent, so it stays a drop. |
+| `DLQ` | There is no DLQ to write to, so `dlq.on_send_failure` applies: `stall` raises `SinkDeliveryFailedError` and holds the offsets for replay; `drop` counts `drakkar_dlq_dropped_payloads_total` and logs CRITICAL. |
+| `RETRY` | Cannot be honoured — re-entering an open circuit is what the breaker exists to prevent. Treated as "do not drop this quietly" and follows `dlq.on_send_failure` exactly like `DLQ`. |
+
+Configure a DLQ, or set `dlq.on_send_failure: stall`, if losing a batch while
+a sink is down is not acceptable. With neither, a batch that arrives during
+an open circuit is lost — loudly and counted, but lost.
 
 ### Retry contract
 
