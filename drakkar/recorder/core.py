@@ -2580,27 +2580,6 @@ class EventRecorder:
             rows = await cursor.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]
 
-    async def get_active_tasks(self) -> list[dict]:
-        """Get tasks that started but haven't completed or failed."""
-        await self._flush()
-        reader = self._reader_db or self._db
-        if not reader or not self._store.store_events:
-            return []
-        query = """
-            SELECT s.* FROM events s
-            WHERE s.event = 'task_started'
-            AND s.task_id NOT IN (
-                SELECT task_id FROM events
-                WHERE event IN ('task_completed', 'task_failed')
-                AND task_id IS NOT NULL
-            )
-            ORDER BY s.ts DESC
-        """
-        async with reader.execute(query) as cursor:
-            columns = [d[0] for d in cursor.description]
-            rows = await cursor.fetchall()
-            return [dict(zip(columns, row, strict=False)) for row in rows]
-
     async def get_stats(self) -> dict:
         """Get overall statistics from in-memory counters (accumulated since worker start)."""
         stats = dict(self._counters)

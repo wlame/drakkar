@@ -111,7 +111,6 @@ def mock_recorder():
     ]
     rec.get_trace.return_value = rec.get_events.return_value
     rec.cross_trace.return_value = [{**e, 'worker_name': 'test-worker'} for e in rec.get_events.return_value]
-    rec.get_active_tasks.return_value = []
     return rec
 
 
@@ -131,6 +130,9 @@ def mock_app():
     pool.active_count = 2
     pool.waiting_count = 0
     pool.max_executors = 8
+    # Real set, not a MagicMock: the live overview iterates it to split
+    # in-flight tasks into running vs pending.
+    pool.running_task_ids = set()
     app._executor_pool = pool
 
     app._consumer = None
@@ -1980,11 +1982,6 @@ class TestLivePageWithTasks:
     """Cover live page task processing (lines 350, 357-367, 383-384)."""
 
     async def test_live_page_with_active_and_pending_tasks(self, debug_config, mock_recorder, mock_app):
-        now = time.time()
-        mock_recorder.get_active_tasks.return_value = [
-            {'task_id': 'task-active-1', 'ts': now - 5, 'event': 'task_started'},
-        ]
-
         pending_task = MagicMock()
         pending_task.args = '["--fast"]'
         pending_task.source_offsets = [10, 11]
@@ -1996,6 +1993,7 @@ class TestLivePageWithTasks:
         proc._active_tasks = []
 
         mock_app.processors = {0: proc}
+        mock_app._executor_pool.running_task_ids = {'task-active-1'}
 
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
@@ -2006,7 +2004,6 @@ class TestLivePageWithTasks:
 
     async def test_live_page_with_arranging_processor(self, debug_config, mock_recorder, mock_app):
         now = time.time()
-        mock_recorder.get_active_tasks.return_value = []
 
         proc = MagicMock()
         proc.partition_id = 0

@@ -64,7 +64,6 @@ def mock_recorder():
     }
     rec.get_partition_summary.return_value = []
     rec.get_events.return_value = []
-    rec.get_active_tasks.return_value = []
     # default: no events DB (periodic endpoint short-circuits). The real
     # recorder exposes BOTH a writer (``_db``) and a reader (``_reader_db``
     # / ``reader_db``) connection; explicitly null them all so the
@@ -100,6 +99,9 @@ def _make_mock_app(cache_engine: CacheEngine | None = None):
     pool.active_count = 0
     pool.waiting_count = 0
     pool.max_executors = 4
+    # Real set, not a MagicMock: the live overview iterates it to split
+    # in-flight tasks into running vs pending.
+    pool.running_task_ids = set()
     app._executor_pool = pool
     app._consumer = None
 

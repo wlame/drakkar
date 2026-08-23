@@ -297,12 +297,29 @@ class ExecutorPool:
         self._max_stderr_bytes = max_stderr_bytes
         self._active_count = 0
         self._waiting_count = 0
+        # Task ids that currently hold a pool slot, i.e. are between
+        # ``task_started`` and completion. The live overview needs exactly
+        # this set to split its in-flight tasks into running vs pending;
+        # deriving it here costs one set insert/remove per task, while the
+        # SQL anti-join it replaced scanned every ``task_started`` row in
+        # the open recorder DB on each poll.
+        self._running_task_ids: set[str] = set()
         self._available_slots: list[int] = list(range(max_executors))
         heapq.heapify(self._available_slots)
 
     @property
     def active_count(self) -> int:
         return self._active_count
+
+    @property
+    def running_task_ids(self) -> set[str]:
+        """Snapshot of the task ids executing in a subprocess right now.
+
+        A copy, not the live set: callers read it from the main loop but
+        may iterate it after an await, and the pool mutates the original
+        on every task transition.
+        """
+        return set(self._running_task_ids)
 
     @property
     def waiting_count(self) -> int:
@@ -366,6 +383,7 @@ class ExecutorPool:
                 waiting_decremented = True
                 self._active_count += 1
                 slot = heapq.heappop(self._available_slots)
+                self._running_task_ids.add(task.task_id)
                 try:
                     if recorder:
                         recorder.record_task_started(
@@ -378,6 +396,10 @@ class ExecutorPool:
                         )
                     return await self._run_subprocess(task)
                 finally:
+                    # discard, not remove: two tasks sharing an id (a retry
+                    # reusing the original task_id) must not raise here and
+                    # strand the slot bookkeeping below.
+                    self._running_task_ids.discard(task.task_id)
                     heapq.heappush(self._available_slots, slot)
                     self._active_count -= 1
             finally:

@@ -94,35 +94,31 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         """The live view's server-side snapshot.
 
         Shared by the ``/live`` HTML page and ``GET /api/v1/live/overview``
-        so the page and the API never drift: running/pending task maps,
+        so the page and the API never drift: running/pending task counts,
         in-flight Arrange calls, pool occupancy, UI tuning knobs, handler
         hook flags, and the Kafka-UI deep-link config.
         """
-        # Bounded dispatch: when the main loop is wedged the overview must
-        # still answer (degraded) — it carries pool_max, which the UI header
-        # can get nowhere else, and a hung fetch left it rendering "0 slots".
-        active = await deps.dispatch_bounded(recorder.get_active_tasks(), default=[])
         now = time.time()
-        # split tasks: running (have task_started in DB) vs pending (no task_started yet)
         processors = drakkar_app.processors
-        active_task_ids = {t['task_id'] for t in active}
-        running_tasks: dict = {}
-        pending_tasks: dict = {}
+        pool = drakkar_app._executor_pool
 
         # ``proc._pending_tasks``, ``_arranging``, ``_arrange_start``, and
         # ``_arrange_labels`` are mutated exclusively on the main loop.
-        # Snapshot them via a small coroutine dispatched there so a list
-        # slice doesn't shear while the main loop mutates the underlying
-        # container.
+        # Snapshot them via a small coroutine dispatched there so a read
+        # doesn't shear while the main loop mutates the underlying container.
+        #
+        # Cost matters here: one source message can fan out to a thousand
+        # tasks, so anything per-in-flight-task runs up to six figures per
+        # poll. The running/pending split therefore iterates the POOL's
+        # running ids (bounded by ``max_executors``) and probes each
+        # processor's pending dict, rather than walking every in-flight task
+        # — and it counts instead of building a dict per task. Contract
+        # v1.20 turned both fields into integers for exactly this reason.
         async def _snapshot_processors():
-            snapshot: dict = {}
             arranging_data: list[dict] = []
+            in_flight = 0
             for proc in processors.values():
-                pending_items = list(proc._pending_tasks.items())
-                pid_entries: list[tuple[str, object, int, object]] = []
-                for tid, t in pending_items:
-                    pid_entries.append((tid, t.args, proc.partition_id, t.source_offsets))
-                snapshot[proc.partition_id] = pid_entries
+                in_flight += len(proc._pending_tasks)
                 if proc._arranging:
                     arranging_data.append(
                         {
@@ -132,21 +128,22 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
                             'labels': list(proc._arrange_labels[:10]),
                         }
                     )
-            return snapshot, arranging_data
+            # The webapp ingress shares this pool, so a running id is only
+            # partition work when some processor is tracking it. Counting
+            # every running id would push ``pending`` negative.
+            running = 0
+            if pool is not None:
+                for task_id in pool.running_task_ids:
+                    if any(task_id in proc._pending_tasks for proc in processors.values()):
+                        running += 1
+            return running, max(in_flight - running, 0), arranging_data
 
-        pending_snapshot, arranging = await deps.dispatch_bounded(_snapshot_processors(), default=({}, []))
-        for _pid, entries in pending_snapshot.items():
-            for tid, args, partition_id, source_offsets in entries:
-                entry = {
-                    'task_id': tid,
-                    'args': args,
-                    'partition': partition_id,
-                    'source_offsets': source_offsets,
-                }
-                if tid in active_task_ids:
-                    running_tasks[tid] = entry
-                else:
-                    pending_tasks[tid] = entry
+        # Bounded dispatch: when the main loop is wedged the overview must
+        # still answer (degraded) — it carries pool_max, which the UI header
+        # can get nowhere else, and a hung fetch left it rendering "0 slots".
+        running_tasks, pending_tasks, arranging = await deps.dispatch_bounded(
+            _snapshot_processors(), default=(0, 0, [])
+        )
 
         # ``partition_count`` powers the Arrange tab's "last N batches" cap
         # (3 x partition_count) so the live list stays stable-sized regardless

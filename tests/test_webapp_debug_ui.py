@@ -56,7 +56,6 @@ def _make_mock_recorder(events: list[dict] | None = None) -> AsyncMock:
     }
     rec.get_partition_summary.return_value = []
     rec.get_events.return_value = events or []
-    rec.get_active_tasks.return_value = []
     rec.get_task_events.return_value = events or []
     return rec
 

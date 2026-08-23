@@ -455,7 +455,6 @@ def mock_recorder():
     rec.get_stats.return_value = {'total_events': 0}
     rec.get_partition_summary.return_value = []
     rec.get_task_events.return_value = []
-    rec.get_active_tasks.return_value = []
     rec.discover_workers.side_effect = lambda: []
     return rec
 
@@ -476,6 +475,9 @@ def mock_app():
     pool.active_count = 0
     pool.waiting_count = 0
     pool.max_executors = 4
+    # Real set, not a MagicMock: the live overview iterates it to split
+    # in-flight tasks into running vs pending.
+    pool.running_task_ids = set()
     app._executor_pool = pool
 
     sink_mgr = MagicMock()

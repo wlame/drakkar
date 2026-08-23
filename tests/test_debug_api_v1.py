@@ -39,7 +39,6 @@ def mock_recorder():
     rec.get_stats.return_value = {'total_events': 3, 'consumed': 2, 'completed': 1}
     rec.get_partition_summary.return_value = []
     rec.get_task_events.return_value = []
-    rec.get_active_tasks.return_value = []
     # fresh list per call: the /api/workers handler appends the current
     # worker to whatever discover_workers returns
     rec.discover_workers.side_effect = lambda: []
@@ -76,6 +75,9 @@ def mock_app():
     pool.active_count = 2
     pool.waiting_count = 1
     pool.max_executors = 8
+    # Real set, not a MagicMock: the live overview iterates it to split
+    # in-flight tasks into running vs pending.
+    pool.running_task_ids = set()
     app._executor_pool = pool
 
     sink_mgr = MagicMock()
@@ -527,8 +529,8 @@ class TestApiV1LiveOverview:
         data = resp.json()
         assert set(data) == LIVE_OVERVIEW_KEYS
         assert data['worker_id'] == 'test-worker'
-        assert data['running_tasks'] == {}
-        assert data['pending_tasks'] == {}
+        assert data['running_tasks'] == 0
+        assert data['pending_tasks'] == 0
         assert data['arranging'] == []
         assert data['pool_active'] == 2
         assert data['pool_waiting'] == 1
@@ -561,11 +563,8 @@ class TestApiV1LiveOverview:
         data = resp.json()
         assert data['offload'] == {'running': 1, 'queued': 3, 'max_threads': 2}
 
-    async def test_running_pending_split_and_arranging(self, debug_config, mock_recorder, mock_app):
+    async def test_running_pending_counts_and_arranging(self, debug_config, mock_recorder, mock_app):
         now = time.time()
-        mock_recorder.get_active_tasks.return_value = [
-            {'task_id': 'task-run', 'ts': now - 5, 'event': 'task_started'},
-        ]
         pending_task = MagicMock()
         pending_task.args = '["--fast"]'
         pending_task.source_offsets = [10, 11]
@@ -577,19 +576,18 @@ class TestApiV1LiveOverview:
         proc._arrange_start = now - 2.5
         proc._arrange_labels = [f'label-{i}' for i in range(12)]
         mock_app.processors = {0: proc}
+        mock_app._executor_pool.running_task_ids = {'task-run'}
         mock_recorder.config = debug_config
 
         async with make_client(debug_config, mock_recorder, mock_app) as c:
             resp = await c.get('/api/v1/live/overview')
         data = resp.json()
-        assert set(data['running_tasks']) == {'task-run'}
-        assert set(data['pending_tasks']) == {'task-wait'}
-        assert data['running_tasks']['task-run'] == {
-            'task_id': 'task-run',
-            'args': '["--fast"]',
-            'partition': 0,
-            'source_offsets': [10, 11],
-        }
+        # Counts, not maps: the split comes from the executor pool's
+        # in-memory running set, never from an SQL anti-join.
+        assert data['running_tasks'] == 1
+        assert data['pending_tasks'] == 1
+        # The unbounded task_started anti-join is gone from the recorder API.
+        assert not hasattr(mock_recorder, 'get_active_tasks')
         assert len(data['arranging']) == 1
         arrange = data['arranging'][0]
         assert arrange['partition'] == 0
@@ -1079,7 +1077,7 @@ class TestDashboardLinks:
 
 async def test_live_overview_answers_degraded_when_main_loop_is_wedged(client, mock_app, monkeypatch):
     """A wedged main loop must not hang the overview: the endpoint answers
-    with empty task maps but REAL pool stats (read off-loop) — the UI
+    with zero task counts but REAL pool stats (read off-loop) — the UI
     header's pool_max has no other source during an incident."""
     from drakkar.uiserver.server import UIDeps
 
@@ -1093,8 +1091,8 @@ async def test_live_overview_answers_degraded_when_main_loop_is_wedged(client, m
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body['running_tasks'] == {}
-    assert body['pending_tasks'] == {}
+    assert body['running_tasks'] == 0
+    assert body['pending_tasks'] == 0
     assert body['pool_max'] == 8
     assert body['pool_active'] == 2
 
@@ -1114,3 +1112,55 @@ def test_register_v1_aliases_with_no_legacy_routes_fails_loudly():
 
     with pytest.raises(RuntimeError, match='no legacy API routes'):
         register_v1_aliases(FastAPI(), [])
+
+
+class TestApiV1LiveOverviewCounts:
+    """The overview snapshot must stay O(partitions + pool size).
+
+    Before contract v1.20 it materialised one dict per in-flight task —
+    including the task's ``args`` — and asked SQLite for the running/pending
+    split. At the target fan-out that is up to 100k dicts serialised per
+    poll, and an unbounded anti-join over every ``task_started`` row.
+    """
+
+    async def test_overview_does_not_touch_pending_task_attributes(self, debug_config, mock_recorder, mock_app):
+        """Counting must not read ``args`` or ``source_offsets`` off any task."""
+
+        class _Tripwire:
+            def __getattr__(self, name):
+                raise AssertionError(f'overview read {name!r} off a pending task')
+
+        proc = MagicMock()
+        proc.partition_id = 0
+        proc._pending_tasks = {f'task-{i}': _Tripwire() for i in range(50)}
+        proc._arranging = False
+        mock_app.processors = {0: proc}
+        mock_app._executor_pool.running_task_ids = {'task-0', 'task-1'}
+        mock_recorder.config = debug_config
+
+        async with make_client(debug_config, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/live/overview')
+        data = resp.json()
+        assert resp.status_code == 200
+        assert data['running_tasks'] == 2
+        assert data['pending_tasks'] == 48
+
+    async def test_running_count_ignores_pool_tasks_from_other_sources(self, debug_config, mock_recorder, mock_app):
+        """The webapp shares the executor pool; its tasks are not partition work.
+
+        Only ids the partition processors are actually tracking may count as
+        running, otherwise ``pending`` would go negative.
+        """
+        proc = MagicMock()
+        proc.partition_id = 0
+        proc._pending_tasks = {'partition-task': MagicMock()}
+        proc._arranging = False
+        mock_app.processors = {0: proc}
+        mock_app._executor_pool.running_task_ids = {'partition-task', 'webapp-task-1', 'webapp-task-2'}
+        mock_recorder.config = debug_config
+
+        async with make_client(debug_config, mock_recorder, mock_app) as c:
+            resp = await c.get('/api/v1/live/overview')
+        data = resp.json()
+        assert data['running_tasks'] == 1
+        assert data['pending_tasks'] == 0

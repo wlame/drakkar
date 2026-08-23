@@ -781,17 +781,6 @@ async def test_get_partition_summary(recorder):
     assert p0['last_committed_offset'] == 2
 
 
-async def test_get_active_tasks(recorder):
-    recorder.record_task_started(make_task('t1'), partition=0)
-    recorder.record_task_started(make_task('t2'), partition=0)
-    recorder.record_task_completed(make_result('t1'), partition=0)
-    await recorder._flush()
-
-    active = await recorder.get_active_tasks()
-    assert len(active) == 1
-    assert active[0]['task_id'] == 't2'
-
-
 async def test_get_stats(recorder):
     recorder.record_consumed(make_msg(offset=0))
     recorder.record_consumed(make_msg(offset=1))
@@ -1782,9 +1771,6 @@ async def test_rotation_queries_work_on_new_db(tmp_path):
     assert stats['committed'] == 1
     assert stats['total_events'] == 3  # consumed + completed + committed (task_started has no counter)
 
-    active = await rec.get_active_tasks()
-    assert len(active) == 0  # task was completed
-
     trace = await rec.get_trace(partition=0, msg_offset=100)
     assert len(trace) >= 1
 
@@ -2404,7 +2390,6 @@ async def test_store_events_false_queries_return_empty(tmp_path):
     assert await rec.get_events() == []
     assert await rec.get_trace(partition=0, msg_offset=0) == []
     assert await rec.get_partition_summary() == []
-    assert await rec.get_active_tasks() == []
     stats = await rec.get_stats()
     assert stats['consumed'] == 1  # in-memory counters work regardless of store_events
     assert stats['total_events'] == 1

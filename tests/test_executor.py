@@ -1700,3 +1700,47 @@ def test_no_async_debug_logging_anywhere_in_the_package():
         if 'logger.adebug(' in line
     ]
     assert offenders == [], f'use the sync logger.debug instead: {offenders}'
+
+
+async def test_running_task_ids_tracks_tasks_holding_a_pool_slot():
+    """The pool knows which task ids are inside a subprocess right now.
+
+    The live overview derives its running-vs-pending split from this set
+    instead of an SQL anti-join over the whole events table.
+    """
+    pool = ExecutorPool(binary_path=sys.executable, max_executors=2, task_timeout_seconds=10)
+    task = ExecutorTask(task_id='slow-1', args=['-c', 'import time; time.sleep(0.4)'], source_offsets=[0])
+
+    assert pool.running_task_ids == set()
+    running = asyncio.create_task(pool.execute(task))
+    await wait_for(lambda: pool.running_task_ids == {'slow-1'})
+    await running
+    assert pool.running_task_ids == set()
+
+
+async def test_running_task_ids_drops_the_task_when_it_is_cancelled():
+    """A cancelled task must not leak into the running set forever."""
+    pool = ExecutorPool(binary_path=sys.executable, max_executors=1, task_timeout_seconds=10)
+    task = ExecutorTask(task_id='cancel-me', args=['-c', 'import time; time.sleep(5)'], source_offsets=[0])
+
+    running = asyncio.create_task(pool.execute(task))
+    await wait_for(lambda: pool.running_task_ids == {'cancel-me'})
+    running.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await running
+    assert pool.running_task_ids == set()
+
+
+async def test_running_task_ids_excludes_tasks_still_waiting_for_a_slot():
+    """A queued task is 'pending', not 'running' — it holds no slot yet."""
+    pool = ExecutorPool(binary_path=sys.executable, max_executors=1, task_timeout_seconds=10)
+    first = ExecutorTask(task_id='holds-the-slot', args=['-c', 'import time; time.sleep(0.5)'], source_offsets=[0])
+    second = ExecutorTask(task_id='queued', args=['-c', 'pass'], source_offsets=[0])
+
+    t1 = asyncio.create_task(pool.execute(first))
+    await wait_for(lambda: pool.running_task_ids == {'holds-the-slot'})
+    t2 = asyncio.create_task(pool.execute(second))
+    await wait_for(lambda: pool.waiting_count == 1)
+    assert pool.running_task_ids == {'holds-the-slot'}
+    await asyncio.gather(t1, t2)
+    assert pool.running_task_ids == set()

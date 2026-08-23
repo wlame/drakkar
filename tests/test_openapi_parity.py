@@ -343,6 +343,7 @@ async def test_recent_tasks_degraded_read_keeps_the_documented_shape(monkeypatch
     app._config = DrakkarConfig()
     app.config_summary = '[degraded-worker]'
     app._executor_pool.max_executors = 4
+    app._executor_pool.running_task_ids = set()
 
     transport = ASGITransport(app=create_ui_app(cfg, recorder, app))
     async with AsyncClient(transport=transport, base_url='http://test') as client:

@@ -34,6 +34,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Contract v1.20** — `GET /api/v1/live/overview` reports `running_tasks`
+  and `pending_tasks` as **counts** instead of maps keyed by task id. The
+  maps carried one entry per in-flight task, `args` included, and the
+  running/pending split came from an SQL anti-join over every
+  `task_started` row in the open recorder DB — no time bound, no `LIMIT`,
+  and a forced recorder flush first. One source message can arrange a
+  thousand tasks, so opening or refreshing the Live page on a busy worker
+  could stall the event loop for seconds, and concurrent viewers stacked
+  those queries. The split now comes from in-memory pipeline state (the
+  executor pool's slot-holding task ids, probed against the partition
+  processors), which touches no database, so the Live page also keeps
+  answering while the recorder DB is wedged. No UI release ever read
+  either map, and `openapi-v1.yaml` already typed both fields as
+  integers.
+
 - `DeliveryAction.RETRY` is documented as at-least-once over the whole
   payload group: a retry re-delivers every payload, including any the failed
   attempt already applied. That was always the behaviour — partial
@@ -44,6 +59,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guides explain when to prefer `DLQ` instead.
 
 ### Removed
+
+- `EventRecorder.get_active_tasks()`. Its only caller was the live
+  overview, and the query it ran was the unbounded anti-join described
+  above.
 
 - The per-task `executor_task_completed` debug log. It fired once per
   completed task — over a thousand times a second at the throughput the pool
