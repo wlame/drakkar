@@ -19,7 +19,6 @@ read on an event, mutates the cache, then releases the read.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from pathlib import Path
 
 import aiosqlite
@@ -31,7 +30,7 @@ from drakkar.cache import SCHEMA_CACHE_ENTRIES, Cache, CacheScope, Op, _now_ms
 
 
 class _PausingReader:
-    """Proxy for the reader connection whose ``execute`` blocks on an event.
+    """Proxy for the reader connection whose read blocks on an event.
 
     ``entered`` is set once ``get()`` reaches the DB read; the read then
     waits for ``release`` before delegating to the real connection. This
@@ -43,15 +42,10 @@ class _PausingReader:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
 
-    def execute(self, sql: str, params):
-        @contextlib.asynccontextmanager
-        async def paused():
-            self.entered.set()
-            await self.release.wait()
-            async with self._inner.execute(sql, params) as cursor:
-                yield cursor
-
-        return paused()
+    async def execute_fetchall(self, sql: str, params):
+        self.entered.set()
+        await self.release.wait()
+        return await self._inner.execute_fetchall(sql, params)
 
 
 async def _seed_db(tmp_path: Path, *, key: str, value_json: str, updated_at_ms: int) -> Path:
@@ -197,3 +191,61 @@ async def test_get_without_race_still_warms_memory(tmp_path):
 # --- pytest configuration ---------------------------------------------------
 # All tests are async and use the project's auto asyncio_mode.
 _ = pytest
+
+
+# --- round-trip cost ----------------------------------------------------------
+
+
+class _CountingReader:
+    """Proxy that records which reader method the DB fallback used.
+
+    aiosqlite queues every call to its single worker thread and awaits a
+    future for the result, so ``execute`` / ``fetchone`` / cursor-close is
+    three round trips through that queue for one row.
+    ``execute_fetchall`` runs the execute AND the fetch inside one queued
+    call, which is what this pins.
+    """
+
+    def __init__(self, inner: aiosqlite.Connection) -> None:
+        self._inner = inner
+        self.calls: list[str] = []
+
+    def execute(self, sql: str, params):
+        self.calls.append('execute')
+        return self._inner.execute(sql, params)
+
+    async def execute_fetchall(self, sql: str, params):
+        self.calls.append('execute_fetchall')
+        return await self._inner.execute_fetchall(sql, params)
+
+
+async def test_db_fallback_costs_one_reader_round_trip(tmp_path):
+    """A cache miss that falls through to SQLite must be a single hop.
+
+    The reader connection is shared with the cache UI endpoints, and a
+    handler that reads the cache per task pays this on every miss.
+    """
+    db_path = await _seed_db(tmp_path, key='k', value_json='"db-value"', updated_at_ms=_now_ms())
+    reader = await aiosqlite.connect(f'file:{db_path}?mode=ro', uri=True)
+    counting = _CountingReader(reader)
+    cache = Cache(origin_worker_id='w1')
+    cache._reader_db = counting  # type: ignore[assignment]
+    try:
+        assert await cache.get('k') == 'db-value'
+        assert counting.calls == ['execute_fetchall']
+    finally:
+        await reader.close()
+
+
+async def test_db_fallback_miss_also_costs_one_round_trip(tmp_path):
+    """A miss is the common case for a cold key — it must not cost more."""
+    db_path = await _seed_db(tmp_path, key='present', value_json='"v"', updated_at_ms=_now_ms())
+    reader = await aiosqlite.connect(f'file:{db_path}?mode=ro', uri=True)
+    counting = _CountingReader(reader)
+    cache = Cache(origin_worker_id='w1')
+    cache._reader_db = counting  # type: ignore[assignment]
+    try:
+        assert await cache.get('absent') is None
+        assert counting.calls == ['execute_fetchall']
+    finally:
+        await reader.close()

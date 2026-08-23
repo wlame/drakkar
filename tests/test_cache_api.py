@@ -781,6 +781,9 @@ async def test_reader_used_for_gets_writer_used_for_writes(tmp_path):
         writer_original_execute = engine._writer_db.execute  # type: ignore[reportPrivateUsage]
         reader_original_executemany = engine._reader_db.executemany  # type: ignore[reportPrivateUsage]
         reader_original_execute = engine._reader_db.execute  # type: ignore[reportPrivateUsage]
+        # The read path uses ``execute_fetchall`` (one queued round trip
+        # instead of execute/fetch/close); spy on it as reader traffic too.
+        reader_original_fetchall = engine._reader_db.execute_fetchall  # type: ignore[reportPrivateUsage]
 
         # The spies are plain (non-async) functions that return aiosqlite's
         # own result object untouched — it is BOTH awaitable and an async
@@ -808,10 +811,16 @@ async def test_reader_used_for_gets_writer_used_for_writes(tmp_path):
             reader_execute_calls += 1
             return reader_original_execute(*args, **kwargs)
 
+        async def reader_spy_execute_fetchall(*args, **kwargs):
+            nonlocal reader_execute_calls
+            reader_execute_calls += 1
+            return await reader_original_fetchall(*args, **kwargs)
+
         engine._writer_db.executemany = writer_spy_executemany  # type: ignore[reportPrivateUsage,assignment]
         engine._writer_db.execute = writer_spy_execute  # type: ignore[reportPrivateUsage,assignment]
         engine._reader_db.executemany = reader_spy_executemany  # type: ignore[reportPrivateUsage,assignment]
         engine._reader_db.execute = reader_spy_execute  # type: ignore[reportPrivateUsage,assignment]
+        engine._reader_db.execute_fetchall = reader_spy_execute_fetchall  # type: ignore[reportPrivateUsage,assignment]
 
         # --- write path: flush should hit the writer only ---
         cache.set('k', 'v')
@@ -841,6 +850,7 @@ async def test_reader_used_for_gets_writer_used_for_writes(tmp_path):
         engine._writer_db.execute = writer_original_execute  # type: ignore[reportPrivateUsage,assignment]
         engine._reader_db.executemany = reader_original_executemany  # type: ignore[reportPrivateUsage,assignment]
         engine._reader_db.execute = reader_original_execute  # type: ignore[reportPrivateUsage,assignment]
+        engine._reader_db.execute_fetchall = reader_original_fetchall  # type: ignore[reportPrivateUsage,assignment]
     finally:
         await engine.stop()
 

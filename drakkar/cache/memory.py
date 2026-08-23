@@ -340,20 +340,28 @@ class Cache:
             return None
 
         now_ms = _now_ms()
-        # ``async with`` guarantees the cursor is closed even when the
-        # fetch raises — a bare execute/close pair would leak the cursor
-        # on exception.
-        async with self._reader_db.execute(
+        # ONE round trip, not three. aiosqlite queues every call onto its
+        # single worker thread and awaits a future for the result, so the
+        # natural ``execute`` → ``fetchone`` → cursor-close spelling costs
+        # three queue hops (~200-300 us) to read one row — on a connection
+        # the cache UI endpoints share. ``execute_fetchall`` runs the
+        # execute AND the fetch inside a single queued call.
+        #
+        # ``LIMIT 1`` keeps that fetch bounded: fetchall is only equivalent
+        # to fetchone because the query can match at most one row, and the
+        # limit says so rather than leaving it to the caller to know.
+        rows = await self._reader_db.execute_fetchall(
             # SELECT only the columns we need to reconstruct a CacheEntry;
             # the WHERE clause filters out expired rows at the DB layer so
             # we don't have to post-filter in Python.
             'SELECT key, scope, value, size_bytes, created_at_ms, '
             'updated_at_ms, expires_at_ms, origin_worker_id '
             'FROM cache_entries '
-            'WHERE key = ? AND (expires_at_ms IS NULL OR expires_at_ms > ?)',
+            'WHERE key = ? AND (expires_at_ms IS NULL OR expires_at_ms > ?) '
+            'LIMIT 1',
             (key, now_ms),
-        ) as cursor:
-            row = await cursor.fetchone()
+        )
+        row = next(iter(rows), None)
         if row is None:
             metrics.cache_misses.inc()
             return None

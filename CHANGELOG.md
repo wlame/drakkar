@@ -34,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A cache miss that falls through to SQLite costs **one** aiosqlite round
+  trip instead of three. `Cache.get()`'s DB fallback used the natural
+  `execute` / `fetchone` / cursor-close spelling, and aiosqlite queues each
+  of those onto its single worker thread and awaits a future — three hops
+  (~200-300 us) to read one row, on a connection the cache UI endpoints
+  share. It now uses `execute_fetchall`, which runs the execute and the
+  fetch inside a single queued call. A handler that reads the cache per
+  task and misses often was limited by this. The Go backend's
+  `QueryRowContext` was already a single round trip.
+
 - **Offset commits are coalesced.** A commit was made per completed
   message: a synchronous broker round trip, serialized per partition by the
   commit lock. With a low-fan-out handler — one task per message — that made
