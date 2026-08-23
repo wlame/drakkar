@@ -377,6 +377,16 @@ sink_payloads_delivered = Counter(
     ['sink_type', 'sink_name'],
 )
 
+# A batched statement that failed and was re-run one payload at a time. The
+# fallback is correct (the failed batch wrote nothing) but far slower, and it
+# used to be invisible: delivery kept succeeding, so a run silently degraded
+# from one statement to hundreds with nothing in the log or on a dashboard.
+sink_batch_fallbacks = Counter(
+    'drakkar_sink_batch_fallbacks_total',
+    'Batched sink statements that failed and were retried one payload at a time',
+    ['sink_type', 'sink_name'],
+)
+
 sink_delivery_retries = Counter(
     'drakkar_sink_delivery_retries_total',
     'Total sink delivery retry attempts',

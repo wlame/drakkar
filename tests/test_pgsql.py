@@ -59,8 +59,16 @@ def test_render_insert_single_column():
     assert sql == 'INSERT INTO "seen" ("key") VALUES ($1), ($2)'
 
 
-def test_max_insert_params_matches_wire_protocol_limit():
-    assert MAX_INSERT_PARAMS == 65535
+def test_max_insert_params_matches_the_driver_limit():
+    """asyncpg refuses a prepared statement with more than 32767 arguments
+    (``InterfaceError``), well below the Postgres wire protocol's own 65535.
+    The cap has to be the driver's, not the protocol's, or the sink builds
+    statements the driver will not send — and the sink's per-row fallback
+    then quietly turns every oversized batch into hundreds of single-row
+    inserts. This is a deliberate divergence from the Go backend, whose pgx
+    v5 driver does allow the full 65535.
+    """
+    assert MAX_INSERT_PARAMS == 32767
 
 
 def test_render_update_sets_then_filters():

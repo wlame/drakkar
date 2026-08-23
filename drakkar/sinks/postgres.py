@@ -16,7 +16,12 @@ import structlog
 from pydantic import BaseModel
 
 from drakkar.config import PostgresSinkConfig
-from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
+from drakkar.metrics import (
+    sink_batch_fallbacks,
+    sink_deliver_duration,
+    sink_deliver_errors,
+    sink_payloads_delivered,
+)
 from drakkar.models import PostgresOp, PostgresPayload
 from drakkar.pgsql import (
     MAX_INSERT_PARAMS,
@@ -399,10 +404,29 @@ class PostgresSink(BaseSink[PostgresPayload]):
             values = [v for unit in chunk for v in unit.values]
             try:
                 await conn.execute(query, *values)
-            except Exception:
+            except Exception as exc:
                 # Batch failed — fall back to per-row delivery so the error
                 # names the offending row (and to ride out a
-                # statement-level transient).
+                # statement-level transient). Safe only because a multi-row
+                # INSERT is atomic: the failed batch wrote nothing.
+                #
+                # Report it. The fallback keeps delivery correct but costs
+                # one round trip per payload, and it used to be silent — a
+                # run that degraded from one statement to hundreds looked
+                # exactly like a healthy one.
+                sink_batch_fallbacks.labels(sink_type=self.sink_type, sink_name=self._name).inc()
+                await logger.awarning(
+                    'sink_batch_fallback_per_row',
+                    category='sink',
+                    sink_type=self.sink_type,
+                    sink_name=self._name,
+                    rows=len(chunk),
+                    # Sink errors can carry a DSN with a password — same
+                    # redaction the manager applies before an error reaches
+                    # stats, the recorder or a DeliveryError.
+                    error=redact_url(str(exc)),
+                    error_type=type(exc).__name__,
+                )
                 for unit in chunk:
                     await self._exec_single(conn, unit)
 

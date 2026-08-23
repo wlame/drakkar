@@ -19,11 +19,21 @@ import re
 
 _IDENT_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
 
-# Caps the positional parameters in one multi-row INSERT — the Postgres
-# wire protocol limits a statement to 65535 bind parameters, so oversized
-# groups are chunked into multiple statements. Matches the Go backend's
-# ``maxInsertParams``.
-MAX_INSERT_PARAMS = 65535
+# Caps the positional parameters in one multi-row INSERT, so oversized
+# groups are chunked into multiple statements.
+#
+# The Postgres wire protocol allows 65535, but asyncpg refuses a prepared
+# statement with more than 32767 arguments (``InterfaceError``, its own
+# guard in ``protocol/prepared_stmt.pyx``), so the driver's limit is the
+# binding one. Rendering to the protocol limit would not raise anything
+# visible: the sink catches the failure and re-runs the group row by row,
+# turning one statement into hundreds without a word in the log.
+#
+# **Deliberate divergence from the Go backend**, which keeps 65535 in
+# ``internal/pgsql``: pgx v5 tops out at exactly ``math.MaxUint16``, so its
+# cap is already correct for its driver. The emitted SQL stays identical —
+# only the row count per statement differs, which no consumer can observe.
+MAX_INSERT_PARAMS = 32767
 
 
 def quote_ident(name: str) -> str:

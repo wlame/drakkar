@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Postgres sink capped a multi-row `INSERT` at 65535 bind parameters,
+  the wire-protocol limit, but asyncpg refuses a statement above 32767. Any
+  batch past that failed and silently fell back to one statement per row —
+  1000 rows of 33 columns is inside the fan-out this project targets, so
+  large batches quietly stopped being batches. The cap is now the driver's.
+  A batch that falls back is also reported: a `sink_batch_fallback_per_row`
+  warning carrying the batch error, and a
+  `drakkar_sink_batch_fallbacks_total` counter.
+
 - The flight recorder writes its buffer in chunks of 5000 rows instead of
   one statement per flush, and hands the event loop back between chunks.
   Building the row tuples for a whole flush ran on the loop and stalled it

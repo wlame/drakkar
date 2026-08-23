@@ -114,6 +114,7 @@ Prometheus needed for a quick read.
 | `drakkar_sink_deliver_duration_seconds` | Histogram | `sink_type`, `sink_name` | Duration of sink delivery operations. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5 |
 | `drakkar_sink_deliver_errors_total` | Counter | `sink_type`, `sink_name` | Total sink delivery failures |
 | `drakkar_sink_payloads_delivered_total` | Counter | `sink_type`, `sink_name` | Total payloads delivered to sinks |
+| `drakkar_sink_batch_fallbacks_total` | Counter | `sink_type`, `sink_name` | Batched statements that failed and were retried one payload at a time. Delivery stays correct -- a failed batch wrote nothing -- but costs one round trip per payload instead of one per batch. A climbing rate means batching is not working: check the batch error in the paired `sink_batch_fallback_per_row` warning. |
 | `drakkar_sink_delivery_retries_total` | Counter | `sink_type`, `sink_name` | Total sink delivery retry attempts |
 | `drakkar_sink_deliveries_skipped_total` | Counter | `sink_type`, `sink_name` | Deliveries skipped via `on_delivery_error` returning SKIP |
 | `drakkar_tasks_precomputed_total` | Counter | -- | Tasks whose result was supplied by the handler via `ExecutorTask.precomputed`, bypassing the subprocess. Framework is agnostic to the reason (cache hit, lookup, deterministic shortcut). Compare to `drakkar_executor_tasks_total{status="completed"}` for the short-circuit rate. |

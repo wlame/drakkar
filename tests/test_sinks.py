@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from pydantic import BaseModel, create_model
+from structlog.testing import capture_logs
 
 from drakkar.config import (
     FileSinkConfig,
@@ -938,6 +939,64 @@ async def test_postgres_sink_upsert_chunks_at_the_bind_parameter_cap(pg_sink_con
     assert mock_conn.execute.call_count == 3
     tuple_counts = [c[0][0].count('), (') for c in mock_conn.execute.call_args_list]
     assert tuple_counts == [1, 1, 0]
+
+
+async def test_postgres_sink_never_exceeds_the_driver_argument_limit(pg_sink_config):
+    """Boundary check with the real cap: a run whose rows x columns crosses
+    32767 must split, and no single statement may carry more arguments than
+    asyncpg accepts. 1000 rows x 33 columns = 33000 is inside the fan-out
+    this project targets, so this is not a theoretical size.
+    """
+    from drakkar.models import PostgresOp
+
+    # 33 columns, matching the ticket's worked example.
+    WideModel = create_model('WideModel', **{f'c{i}': (int, ...) for i in range(33)})
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+    payloads = [
+        PostgresPayload(op=PostgresOp.INSERT, table='wide', data=WideModel(**{f'c{i}': i for i in range(33)}))
+        for _ in range(1000)
+    ]
+
+    await sink.deliver(payloads)
+
+    assert mock_conn.execute.call_count > 1, 'an oversized run must be chunked'
+    for call in mock_conn.execute.call_args_list:
+        # call[0] is (query, *values) — everything after the query is a bind
+        # parameter, and asyncpg raises InterfaceError above 32767 of them.
+        assert len(call[0]) - 1 <= 32767
+
+
+async def test_postgres_sink_logs_when_a_batch_falls_back_to_per_row(pg_sink_config):
+    """The fallback used to swallow the batch error entirely, so a run that
+    silently degraded from one statement to hundreds looked identical to a
+    healthy one.
+    """
+    from drakkar.metrics import sink_batch_fallbacks
+    from drakkar.models import PostgresOp
+
+    sink, mock_conn, _ = _make_pg_sink(pg_sink_config)
+    calls = {'n': 0}
+
+    async def fail_the_batch(query, *values):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            raise RuntimeError('deadlock detected')
+        return None
+
+    mock_conn.execute.side_effect = fail_the_batch
+    payloads = [PostgresPayload(op=PostgresOp.INSERT, table='totals', data=DBResultModel(id=i)) for i in range(3)]
+    before = sink_batch_fallbacks.labels(sink_type='postgres', sink_name='main')._value.get()
+
+    with capture_logs() as cap:
+        await sink.deliver(payloads)
+
+    events = [entry for entry in cap if entry['event'] == 'sink_batch_fallback_per_row']
+    assert len(events) == 1
+    assert events[0]['log_level'] == 'warning'
+    assert events[0]['rows'] == 3
+    assert 'deadlock detected' in events[0]['error']
+    assert sink_batch_fallbacks.labels(sink_type='postgres', sink_name='main')._value.get() == before + 1
 
 
 async def test_postgres_sink_mixed_ops_execute_in_payload_order(pg_sink_config):

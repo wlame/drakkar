@@ -15,7 +15,6 @@ import pytest
 from drakkar.recorder import EventRecorder, live_link_path
 from drakkar.recorder import core as core_mod
 from drakkar.recorder.core import _LIVE_RECORDERS
-from tests.conftest import wait_for
 from tests.test_recorder import (
     WORKER_NAME,
     _create_worker_db_with_labels,
@@ -343,20 +342,36 @@ async def test_flush_failure_drops_only_one_chunk(tmp_path, monkeypatch):
         await rec.stop()
 
 
-async def test_flush_loop_wakes_early_when_the_buffer_is_half_full(tmp_path):
+async def test_flush_wait_returns_early_when_the_buffer_is_half_full(tmp_path):
     """A burst must not sit in the buffer until the next interval — at a high
     event rate the buffer would reach ``max_buffer`` and start evicting.
+
+    Asserts the wait itself rather than watching the buffer drain through the
+    flush loop: the loop resets its deadline after each flush, so a test that
+    polls for an empty buffer depends on every event landing before the first
+    early wake-up. That is true today but it is a race, not an invariant.
     """
     config = make_debug_config(tmp_path, flush_interval_seconds=600, max_buffer=1000)
     rec = EventRecorder(config, worker_name=WORKER_NAME)
-    await rec.start()
-    try:
-        for offset in range(600):
-            rec.record_committed(partition=0, offset=offset)
+    # Deliberately not started: the real flush loop calls this same method
+    # and would drain the buffer out from under the assertion.
+    rec._running = True
+    for offset in range(600):  # high water is max_buffer // 2
+        rec.record_committed(partition=0, offset=offset)
 
-        # Nothing has been written yet: the interval is ten minutes away.
-        await wait_for(lambda: len(rec._buffer) == 0, timeout=5.0, interval=0.05)
-        events = await rec.get_events(partition=0, limit=1000)
-        assert len(events) == 600
-    finally:
-        await rec.stop()
+    # Returns on the buffer depth, not on the ten-minute interval.
+    await asyncio.wait_for(rec._wait_until_flush_due(), timeout=5.0)
+
+
+async def test_flush_wait_holds_for_the_interval_below_the_high_water_mark(tmp_path):
+    """The early wake-up must not turn the flush loop into a busy writer:
+    below the mark the interval is still what decides.
+    """
+    config = make_debug_config(tmp_path, flush_interval_seconds=600, max_buffer=1000)
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    rec._running = True
+    for offset in range(100):
+        rec.record_committed(partition=0, offset=offset)
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(rec._wait_until_flush_due(), timeout=0.6)
