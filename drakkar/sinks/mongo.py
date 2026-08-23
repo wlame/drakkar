@@ -342,7 +342,16 @@ class MongoSink(BaseSink[MongoPayload]):
         """Create the PyMongo async client and get database reference."""
         from pymongo import AsyncMongoClient
 
-        self._client = AsyncMongoClient(self._config.uri)
+        # PyMongo leaves socketTimeoutMS unset by default, so a server that
+        # stops answering on a live connection blocks a delivery with no
+        # bound. Use the manager's delivery budget; URI options still win,
+        # so an operator can override per deployment.
+        timeout_ms = int(self._delivery_timeout_seconds * 1000)
+        self._client = AsyncMongoClient(
+            self._config.uri,
+            socketTimeoutMS=timeout_ms,
+            connectTimeoutMS=timeout_ms,
+        )
         self._db = self._client[self._config.database]
         # Compiling here rather than per delivery turns each write into a
         # document copy plus N assignments. Config validation already

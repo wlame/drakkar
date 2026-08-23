@@ -309,7 +309,15 @@ class RedisSink(BaseSink[RedisPayload]):
         """Create the Redis client from the configured URL."""
         import redis.asyncio as aioredis
 
-        self._client = aioredis.from_url(self._config.url)
+        # ``socket_timeout`` defaults to None in redis-py: a server that
+        # stops answering on a still-open connection would block a delivery
+        # with no bound at all. Use the manager's delivery budget for both
+        # the read and the connect.
+        self._client = aioredis.from_url(
+            self._config.url,
+            socket_timeout=self._delivery_timeout_seconds,
+            socket_connect_timeout=self._delivery_timeout_seconds,
+        )
         # register_script computes the SHA1 LOCALLY with no round trip, so
         # this stays cheap and does not fail when Redis is briefly away. The
         # script is not sent until first use, and redis-py handles the

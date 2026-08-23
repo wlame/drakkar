@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from drakkar.config import CircuitBreakerConfig
 from drakkar.metrics import dlq_dropped_payloads, sink_deliveries_skipped, sink_delivery_retries
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError, SinkDeliveryFailedError
-from drakkar.sinks.base import BaseSink
+from drakkar.sinks.base import DEFAULT_DELIVERY_TIMEOUT_SECONDS, BaseSink
 from drakkar.sinks.registry import SinkRegistry
 from drakkar.utils import redact_url
 
@@ -144,6 +144,7 @@ class SinkManager:
         circuit_breaker_config: CircuitBreakerConfig | None = None,
         recorder: EventRecorder | None = None,
         dlq_sink: DLQSink | None = None,
+        delivery_timeout_seconds: float = DEFAULT_DELIVERY_TIMEOUT_SECONDS,
     ) -> None:
         self._sinks: dict[tuple[str, str], BaseSink[Any]] = {}
         self._by_type: dict[str, list[BaseSink[Any]]] = defaultdict(list)
@@ -166,6 +167,11 @@ class SinkManager:
         # Strategy for circuit-open deliveries whose DLQ write fails.
         # Overridden via attach_runtime from DLQConfig.on_send_failure.
         self._dlq_on_send_failure: str = 'drop'
+        # Budget for one delivery and for one close. Without it a sink whose
+        # server stopped answering on a still-open TCP connection blocks its
+        # partition indefinitely: the breaker only counts a failure when a
+        # call returns, so /readyz stays green while the worker does nothing.
+        self._delivery_timeout_seconds: float = delivery_timeout_seconds
 
         # Run plugin discovery once at construction so any third-party
         # sinks installed via ``[project.entry-points."drakkar.sinks"]``
@@ -241,6 +247,7 @@ class SinkManager:
         # keeps a single documented API for thresholds — the manager never
         # reaches into BaseSink's private attributes.
         sink.configure_circuit_breaker(self._circuit_breaker_config)
+        sink.configure_delivery_timeout(self._delivery_timeout_seconds)
 
     def get_sink_info(self) -> list[dict]:
         """Return list of all configured sinks with their type, name, and optional UI URL."""
@@ -350,7 +357,18 @@ class SinkManager:
         """Close all registered sinks. Logs errors but doesn't raise."""
         for sink in self._sinks.values():
             try:
-                await sink.close()
+                # Bounded for the same reason delivery is: a close() against
+                # an unresponsive server would otherwise hold shutdown open
+                # past the drain budget, and every sink after it too.
+                await asyncio.wait_for(sink.close(), timeout=self._delivery_timeout_seconds)
+            except TimeoutError:
+                await logger.awarning(
+                    'sink_close_timeout',
+                    category='sink',
+                    sink_type=sink.sink_type,
+                    sink_name=sink.name,
+                    timeout_seconds=self._delivery_timeout_seconds,
+                )
             except Exception as e:
                 await logger.awarning(
                     'sink_close_error',
@@ -784,12 +802,33 @@ class SinkManager:
                     # Both paths count as ONE delivery attempt from the
                     # circuit breaker's perspective — the transient-retry
                     # loop is purely internal to this ``deliver`` call.
-                    await self._deliver_with_transient_retry(
-                        sink=sink,
-                        sink_type=sink_type,
-                        sink_name=sink_name,
-                        payloads=payloads,
-                    )
+                    # One budget for the whole attempt, transient retries
+                    # included, so a partition's wait on a wedged sink is
+                    # predictable rather than a multiple of the retry count.
+                    # A timeout cancels the sink coroutine: ``CancelledError``
+                    # is a ``BaseException``, so a sink's own ``except
+                    # Exception`` fallback (the Postgres per-row retry) does
+                    # not fire on it and the "failed batch wrote nothing"
+                    # premise is preserved.
+                    try:
+                        await asyncio.wait_for(
+                            self._deliver_with_transient_retry(
+                                sink=sink,
+                                sink_type=sink_type,
+                                sink_name=sink_name,
+                                payloads=payloads,
+                            ),
+                            timeout=self._delivery_timeout_seconds,
+                        )
+                    except TimeoutError as exc:
+                        # ``str(TimeoutError())`` is the empty string, and this
+                        # error is what reaches the handler, the DLQ entry and
+                        # the log — say what actually happened. Same class, so
+                        # it stays classified transient.
+                        raise TimeoutError(
+                            f'{sink_type} sink {sink_name!r} did not finish delivering '
+                            f'{len(payloads)} payload(s) within {self._delivery_timeout_seconds}s'
+                        ) from exc
                     duration = time.monotonic() - start
                     stats.delivered_count += 1
                     stats.delivered_payloads += len(payloads)

@@ -275,6 +275,15 @@ sinks:
         buffer_size: 500                               #   the dict through unvalidated
 ```
 
+### Delivery timeout (shared default)
+
+📚 [Deep details](configuration.md#delivery-timeout-sinksdelivery_timeout_seconds)
+
+```yaml
+sinks:
+  delivery_timeout_seconds: 30.0   # budget for one deliver() and one close(). env: DK_SINKS__DELIVERY_TIMEOUT_SECONDS  · reasonable: 10–120
+```
+
 ### Circuit breaker (shared default)
 
 📚 [Deep details](configuration.md#circuit-breaker-sinkscircuit_breaker) · [State machine](sinks.md#circuit-breaker)

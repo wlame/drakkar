@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import BaseModel
 
+from drakkar.config import CircuitBreakerConfig
 from drakkar.models import (
     CollectResult,
     CustomPayload,
@@ -58,6 +59,18 @@ class FakeSink(BaseSink):
 
     async def close(self) -> None:
         self.closed = True
+
+
+class HangingSink(FakeSink):
+    """A sink whose deliver / close never returns — a half-open TCP
+    connection to a server that stopped answering."""
+
+    async def deliver(self, payloads: list[BaseModel]) -> None:
+        await asyncio.Event().wait()
+
+    async def close(self) -> None:
+        self.closed = True
+        await asyncio.Event().wait()
 
 
 class FailCloseSink(FakeSink):
@@ -2345,3 +2358,95 @@ async def test_builtin_sinks_idempotent_attribute_declarations():
 
     # Idempotent by explicit declaration — Redis SET is write-replace.
     assert RedisSink.idempotent is True
+
+
+# --- Delivery timeouts ---
+
+
+async def test_hung_deliver_times_out_and_counts_as_a_failure():
+    """Without a bound, a sink whose server stopped answering but whose TCP
+    connection stays open blocks the partition forever: the breaker never
+    sees a failure, /readyz stays green, and every rebalance then burns the
+    whole drain budget on a sink that will never answer.
+    """
+    errors: list[DeliveryError] = []
+
+    async def on_error(error: DeliveryError) -> DeliveryAction:
+        errors.append(error)
+        return DeliveryAction.SKIP
+
+    mgr = SinkManager(delivery_timeout_seconds=0.05)
+    sink = HangingSink('results')
+    mgr.register(sink)
+
+    started = time.monotonic()
+    await mgr.deliver_all(
+        CollectResult(kafka=[KafkaPayload(data=SampleData())]),
+        on_delivery_error=on_error,
+        max_retries=0,
+        partition_id=0,
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5.0, 'delivery was not bounded by the timeout'
+    assert len(errors) == 1
+    # ``str(TimeoutError())`` is empty, so the manager substitutes a message —
+    # this error is what the handler, the DLQ entry and the log all carry.
+    assert 'did not finish delivering' in errors[0].error
+    assert '0.05s' in errors[0].error
+
+
+async def test_hung_deliver_opens_the_circuit_breaker():
+    """A timeout has to reach the breaker as a failure — that is what makes
+    a wedged sink visible on /readyz instead of silently absorbing work.
+    """
+
+    async def on_error(error: DeliveryError) -> DeliveryAction:
+        # DLQ, not SKIP: a SKIP is a deliberate "drop this batch" and is
+        # documented not to count against the breaker.
+        return DeliveryAction.DLQ
+
+    mgr = SinkManager(delivery_timeout_seconds=0.02)
+    sink = HangingSink('results')
+    mgr.register(sink)
+    sink.configure_circuit_breaker(CircuitBreakerConfig(failure_threshold=2, cooldown_seconds=60))
+
+    for _ in range(2):
+        await mgr.deliver_all(
+            CollectResult(kafka=[KafkaPayload(data=SampleData())]),
+            on_delivery_error=on_error,
+            max_retries=0,
+            partition_id=0,
+        )
+
+    assert sink.circuit_state == 'open'
+
+
+async def test_close_all_is_bounded_by_the_delivery_timeout():
+    """``close_all`` awaited each sink without a bound, so one unresponsive
+    server could hold worker shutdown open past the drain budget.
+    """
+    mgr = SinkManager(delivery_timeout_seconds=0.05)
+    hanging = HangingSink('slow')
+    healthy = FakeSink('fast', sink_type='postgres')
+    mgr.register(hanging)
+    mgr.register(healthy)
+
+    started = time.monotonic()
+    await mgr.close_all()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5.0, 'close_all was not bounded'
+    # The hung sink must not stop the ones after it from closing.
+    assert healthy.closed is True
+    assert hanging.is_connected is False
+
+
+def test_register_pushes_the_delivery_timeout_onto_the_sink():
+    """Sinks use the same budget for their own transport timeouts, so the
+    driver errors with a useful message before the outer wait_for fires."""
+    mgr = SinkManager(delivery_timeout_seconds=12.5)
+    sink = FakeSink('results')
+    mgr.register(sink)
+
+    assert sink.delivery_timeout_seconds == 12.5

@@ -421,6 +421,10 @@ async def test_postgres_sink_connect(pg_sink_config):
             dsn='postgresql://localhost/testdb',
             min_size=2,
             max_size=10,
+            # The delivery budget doubles as the driver's command timeout so
+            # a wedged server raises asyncpg's own error, naming the query,
+            # rather than being cancelled anonymously by the manager.
+            command_timeout=30.0,
         )
     assert sink.pool is mock_pool
 
@@ -1117,7 +1121,12 @@ async def test_mongo_sink_connect(mongo_sink_config):
         sink = MongoSink('analytics', mongo_sink_config)
         await sink.connect()
 
-        mock_cls.assert_called_once_with('mongodb://localhost:27017')
+        # PyMongo leaves socketTimeoutMS unset by default — unbounded.
+        mock_cls.assert_called_once_with(
+            'mongodb://localhost:27017',
+            socketTimeoutMS=30000,
+            connectTimeoutMS=30000,
+        )
         assert sink._db is mock_db
 
 
@@ -1971,7 +1980,12 @@ async def test_redis_sink_connect(redis_sink_config):
         sink = RedisSink('cache', redis_sink_config)
         await sink.connect()
 
-        mock_from_url.assert_called_once_with('redis://localhost:6379/0')
+        # redis-py leaves socket_timeout at None by default — unbounded.
+        mock_from_url.assert_called_once_with(
+            'redis://localhost:6379/0',
+            socket_timeout=30.0,
+            socket_connect_timeout=30.0,
+        )
         assert sink._client is mock_client
 
 

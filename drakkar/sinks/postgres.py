@@ -207,6 +207,10 @@ class PostgresSink(BaseSink[PostgresPayload]):
             dsn=self._config.dsn,
             min_size=self._config.pool_min,
             max_size=self._config.pool_max,
+            # Same budget the manager gives one delivery, so a wedged server
+            # produces asyncpg's own timeout — which names the query — a
+            # moment before the manager's outer wait_for would cancel it.
+            command_timeout=self._delivery_timeout_seconds,
         )
         await logger.ainfo(
             'postgres_sink_connected',

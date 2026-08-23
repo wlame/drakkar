@@ -15,6 +15,10 @@ from pydantic import BaseModel
 from drakkar.config import CircuitBreakerConfig
 from drakkar.metrics import sink_circuit_open, sink_circuit_trips
 
+# Mirrors ``SinksConfig.delivery_timeout_seconds``' default, for sinks
+# constructed outside a ``SinkManager`` (tests, standalone use).
+DEFAULT_DELIVERY_TIMEOUT_SECONDS = 30.0
+
 PayloadT = TypeVar('PayloadT', bound=BaseModel)
 
 # Discrete circuit breaker states. `closed` is normal operation,
@@ -116,6 +120,14 @@ class BaseSink(ABC, Generic[PayloadT]):
         # (``/readyz`` in the debug server).
         self._is_connected: bool = False
 
+        # Budget for one delivery, pushed in by ``SinkManager.register`` from
+        # ``sinks.delivery_timeout_seconds``. Sinks whose driver takes a
+        # socket or command timeout read it in ``connect()`` so the driver
+        # raises a specific error before the manager's outer budget expires.
+        # The default matches the config default, so a sink registered
+        # outside a manager still has a sane bound.
+        self._delivery_timeout_seconds: float = DEFAULT_DELIVERY_TIMEOUT_SECONDS
+
         # Circuit breaker state. Starts closed (0.0 on the gauge) — the
         # per-sink gauge is initialized eagerly so a freshly-registered sink
         # appears in Prometheus scrape output as "closed" rather than absent.
@@ -155,6 +167,20 @@ class BaseSink(ABC, Generic[PayloadT]):
         whether a neutral release is needed on non-terminal exits).
         """
         return self._probe_inflight
+
+    @property
+    def delivery_timeout_seconds(self) -> float:
+        """Budget for one ``deliver()`` / ``close()`` call, in seconds."""
+        return self._delivery_timeout_seconds
+
+    def configure_delivery_timeout(self, seconds: float) -> None:
+        """Set the per-delivery budget — called by SinkManager.register.
+
+        Same shape as :meth:`configure_circuit_breaker`: the manager owns the
+        operator-configured value and pushes it through a named public API
+        rather than assigning a private attribute.
+        """
+        self._delivery_timeout_seconds = seconds
 
     def configure_circuit_breaker(self, config: CircuitBreakerConfig) -> None:
         """Replace the breaker's thresholds — called by SinkManager.register.

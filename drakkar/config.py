@@ -532,6 +532,20 @@ class SinksConfig(BaseModel):
             'defined config passed verbatim to the sink class constructor.'
         ),
     )
+    delivery_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            'Budget for one sink delivery, including the framework-internal '
+            'transient retries. A sink whose server stops answering while the '
+            'TCP connection stays open would otherwise block its partition '
+            'forever: the circuit breaker only sees a failure when a call '
+            'returns. Sinks whose driver supports it also use this value for '
+            'their own socket/command timeout, so the driver reports a '
+            'specific error before this outer budget expires. Applies to '
+            'close() during shutdown as well.'
+        ),
+    )
     circuit_breaker: CircuitBreakerConfig = Field(
         default_factory=CircuitBreakerConfig,
         description=(

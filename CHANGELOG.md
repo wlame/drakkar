@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `sinks.delivery_timeout_seconds` (default 30.0): a budget for one sink
+  delivery — framework-internal transient retries included — and for one
+  sink close during shutdown. Sinks whose driver accepts one also apply it
+  as their own transport timeout (asyncpg `command_timeout`, redis-py
+  `socket_timeout`, PyMongo `socketTimeoutMS`), which were all unset. A sink
+  whose server stopped answering on a still-open TCP connection previously
+  blocked its partition forever: the circuit breaker only counts a failure
+  when a call returns, so `/readyz` kept reporting ready while the worker
+  did no work, and every rebalance then spent the whole drain budget
+  waiting. A timeout is now a transient delivery failure naming the sink and
+  the budget.
+
 ### Fixed
 
 - The Postgres sink capped a multi-row `INSERT` at 65535 bind parameters,

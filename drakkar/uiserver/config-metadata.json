@@ -817,6 +817,16 @@
           "group": "sinks"
         },
         {
+          "path": "sinks.delivery_timeout_seconds",
+          "env": "DK_SINKS__DELIVERY_TIMEOUT_SECONDS",
+          "description": "Budget for one sink delivery, including the framework-internal transient retries.",
+          "full_description": "Budget for one sink delivery, including the framework-internal transient retries. A sink whose server stops answering while the TCP connection stays open would otherwise block its partition forever: the circuit breaker only sees a failure when a call returns. Sinks whose driver supports it also use this value for their own socket/command timeout, so the driver reports a specific error before this outer budget expires. Applies to close() during shutdown as well.",
+          "type": "number",
+          "default": 30.0,
+          "secret": false,
+          "group": "sinks"
+        },
+        {
           "path": "sinks.circuit_breaker.failure_threshold",
           "env": "DK_SINKS__CIRCUIT_BREAKER__FAILURE_THRESHOLD",
           "description": "Consecutive delivery failures before the circuit trips open.",

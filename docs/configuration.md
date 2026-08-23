@@ -476,6 +476,38 @@ sinks:
       base_path: /data/archive
 ```
 
+### Delivery Timeout (`sinks.delivery_timeout_seconds`)
+
+One budget for one `deliver()` call, framework-internal transient retries
+included, and for one `close()` during shutdown. Without it a sink whose
+server stops answering while the TCP connection stays open blocks its
+partition indefinitely: the circuit breaker only counts a failure when a
+call *returns*, so `/readyz` keeps reporting ready while the worker does no
+work, and every rebalance then spends the whole drain budget waiting.
+
+A timeout is reported as a transient delivery failure, so it reaches
+`on_delivery_error`, counts toward the circuit breaker, and carries a message
+naming the sink and the budget.
+
+Sinks whose driver accepts one also apply this value as their own transport
+timeout — asyncpg `command_timeout`, redis-py `socket_timeout` /
+`socket_connect_timeout`, PyMongo `socketTimeoutMS` / `connectTimeoutMS` —
+so the driver raises a specific error just before the outer budget expires.
+The HTTP sink keeps its own `timeout_seconds`, which is per request.
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `delivery_timeout_seconds` | `float` | `30.0` | > 0 | Budget for one sink delivery and one sink close. Also used as the driver-level socket/command timeout where the driver supports it. |
+
+```yaml
+sinks:
+  delivery_timeout_seconds: 30.0
+```
+
+Keep it below `executor.drain_timeout_seconds`: a rebalance drain waits on
+in-flight deliveries, so a delivery budget larger than the drain budget
+guarantees drain timeouts when a sink goes unresponsive.
+
 ### Circuit Breaker (`sinks.circuit_breaker`)
 
 Every registered sink has a per-instance circuit breaker. The breaker

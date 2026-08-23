@@ -152,6 +152,7 @@ class DrakkarApp:
         # installed on each registered sink honors operator thresholds.
         self._sink_manager: SinkManager = SinkManager(
             circuit_breaker_config=self._config.sinks.circuit_breaker,
+            delivery_timeout_seconds=self._config.sinks.delivery_timeout_seconds,
         )
         self._dlq_sink: DLQSink | None = None
         self._recorder: EventRecorder | None = None
