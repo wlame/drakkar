@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
 from drakkar.config import CircuitBreakerConfig
 from drakkar.models import (
@@ -2450,3 +2451,48 @@ def test_register_pushes_the_delivery_timeout_onto_the_sink():
     mgr.register(sink)
 
     assert sink.delivery_timeout_seconds == 12.5
+
+
+# --- RETRY semantics ---
+
+
+async def test_retry_redelivers_the_whole_group_and_says_so():
+    """``RETRY`` re-calls ``deliver()`` with the *original* payload list.
+
+    Partial application before the raise is normal — the HTTP sink POSTs
+    sequentially, Kafka acks some messages, Postgres and Mongo commit
+    earlier adjacent runs in autocommit — so a retry re-applies whatever
+    already landed. That is deliberate and consistent with the framework's
+    at-least-once posture (a rebalance replays the whole window anyway), but
+    it has to be visible in the log rather than inferred from the source.
+    """
+    delivered_groups: list[list[BaseModel]] = []
+
+    class CountingSink(FakeSink):
+        async def deliver(self, payloads: list[BaseModel]) -> None:
+            delivered_groups.append(list(payloads))
+            if len(delivered_groups) == 1:
+                raise RuntimeError('partial: first two of three applied')
+
+    mgr = SinkManager()
+    sink = CountingSink('results')
+    mgr.register(sink)
+    on_error = AsyncMock(return_value=DeliveryAction.RETRY)
+
+    payloads = [KafkaPayload(data=SampleData(value=i)) for i in range(3)]
+    with capture_logs() as cap:
+        await mgr.deliver_all(
+            CollectResult(kafka=payloads),
+            on_delivery_error=on_error,
+            max_retries=2,
+            partition_id=0,
+        )
+
+    # The retry carried the same three payloads, not the unapplied tail.
+    assert len(delivered_groups) == 2
+    assert [p.data.value for p in delivered_groups[1]] == [0, 1, 2]
+
+    retries = [entry for entry in cap if entry['event'] == 'sink_delivery_retry']
+    assert len(retries) == 1
+    assert retries[0]['payload_count'] == 3
+    assert 'already applied' in retries[0]['note']

@@ -567,12 +567,18 @@ failed.
 | Return value           | Behavior                                           |
 |------------------------|----------------------------------------------------|
 | `DeliveryAction.DLQ`   | Write to [dead letter queue](sinks.md#dead-letter-queue) (default) |
-| `DeliveryAction.RETRY` | Retry delivery (up to `max_retries` from config)   |
+| `DeliveryAction.RETRY` | Re-deliver the whole group (up to `max_retries` from config) |
 | `DeliveryAction.SKIP`  | Drop the payloads, continue                        |
+
+`RETRY` re-delivers the **entire** payload group, including any payload the
+failed attempt already applied — see
+[RETRY is at-least-once over the whole group](sinks.md#retry-is-at-least-once-over-the-whole-group).
+Return it when re-applying is harmless; prefer `DLQ` for operations that
+count.
 
 ```python
 async def on_delivery_error(self, error):
-    if error.sink_type in ('http', 'redis'):
+    if error.sink_type == 'redis':  # SETs are safe to re-apply
         return dk.DeliveryAction.RETRY
     return dk.DeliveryAction.DLQ
 ```

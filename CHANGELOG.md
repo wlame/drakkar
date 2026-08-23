@@ -21,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waiting. A timeout is now a transient delivery failure naming the sink and
   the budget.
 
+### Changed
+
+- `DeliveryAction.RETRY` is documented as at-least-once over the whole
+  payload group: a retry re-delivers every payload, including any the failed
+  attempt already applied. That was always the behaviour — partial
+  application before an exception is normal for the HTTP, Kafka, Postgres,
+  Mongo and filesystem sinks — but nothing said so, and the docs recommended
+  `RETRY` for the HTTP sink. The `sink_delivery_retry` warning now carries
+  the payload count and states the re-application, and the sink and handler
+  guides explain when to prefer `DLQ` instead.
+
 ### Fixed
 
 - The Postgres sink capped a multi-row `INSERT` at 65535 bind parameters,

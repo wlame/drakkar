@@ -884,6 +884,20 @@ class SinkManager:
                         raise
 
                     if action == DeliveryAction.RETRY and attempt < max_retries:
+                        # The retry re-delivers the WHOLE original group, not
+                        # the unapplied tail. Partial application before the
+                        # raise is normal — the HTTP sink POSTs sequentially,
+                        # the Kafka sink has acks for some messages, Postgres
+                        # and Mongo commit earlier adjacent runs in autocommit
+                        # — so payloads that already landed land again.
+                        #
+                        # That is deliberate: the framework is at-least-once
+                        # end to end (a revoke or a crash replays the whole
+                        # window and re-delivers everything), so a RETRY that
+                        # tried to be exactly-once would promise something the
+                        # layer above cannot keep. See docs/sinks.md. The log
+                        # says it explicitly so an operator choosing RETRY for
+                        # a non-idempotent sink can see the cost.
                         stats.retry_count += 1
                         sink_delivery_retries.labels(sink_type=sink_type, sink_name=sink_name).inc()
                         logger.warning(
@@ -892,6 +906,8 @@ class SinkManager:
                             sink_type=sink_type,
                             sink_name=sink_name,
                             attempt=attempt,
+                            payload_count=len(payloads),
+                            note='whole group re-delivered; payloads already applied are applied again',
                         )
                         continue
                     elif action == DeliveryAction.SKIP:

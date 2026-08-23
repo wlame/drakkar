@@ -331,10 +331,39 @@ Your hook returns a `DeliveryAction`:
 | Action | Behavior |
 |--------|----------|
 | `DeliveryAction.DLQ` | Write the failed payloads to the dead letter queue (default) |
-| `DeliveryAction.RETRY` | Retry delivery, up to `executor.max_retries` attempts |
+| `DeliveryAction.RETRY` | Re-deliver **the whole group**, up to `executor.max_retries` attempts — at-least-once, see below |
 | `DeliveryAction.SKIP` | Drop the payloads and continue processing |
 
 If `RETRY` is returned but retries are exhausted, the framework falls through to DLQ.
+
+#### `RETRY` is at-least-once over the whole group
+
+A retry re-calls `deliver()` with the **original payload list**, not with
+whatever part of it had not been applied yet. Partial application before the
+raise is the normal case, not an edge case:
+
+- the HTTP sink POSTs sequentially — the first N requests already succeeded;
+- the Kafka sink already has broker acks for some of the messages;
+- Postgres and Mongo commit earlier adjacent runs in autocommit before a
+  later run fails;
+- the filesystem sink has already appended the earlier lines.
+
+So a retried group re-applies whatever landed the first time. Every retry
+logs `sink_delivery_retry` with the payload count and a note saying so.
+
+This is deliberate, and it matches the guarantee the layer above already
+gives: Drakkar is **at-least-once end to end**. A partition revoke, a drain
+timeout or a crash replays the whole message and re-delivers every payload
+in it. A `RETRY` that tried to resume from the first unapplied payload would
+promise an exactness that a rebalance would break a moment later.
+
+**What that means for your handler.** Return `RETRY` when re-applying a
+payload is harmless — an idempotent upsert, a keyed Kafka topic a consumer
+dedups, a `SET` in Redis. For an operation that counts (`INCRBY`, `LPUSH`,
+an append, a webhook that charges a card), prefer `DLQ`: the payloads are
+preserved for a deliberate replay instead of being re-applied blindly. See
+[Idempotency](#idempotency) for the related per-sink `idempotent` flag,
+which governs the framework's own internal fast-retry.
 
 ### Circuit Breaker
 
@@ -468,8 +497,10 @@ class StripeWebhookSink(HttpSink):
 
 ```python
 async def on_delivery_error(self, error: dk.DeliveryError) -> dk.DeliveryAction:
-    # Retry transient failures for HTTP and Redis
-    if error.sink_type in ('http', 'redis'):
+    # Retry only where re-applying the whole group is harmless. Redis SETs
+    # are; an HTTP POST that charges a card is not — see "RETRY is
+    # at-least-once over the whole group" above.
+    if error.sink_type == 'redis':
         return dk.DeliveryAction.RETRY
 
     # Skip filesystem errors (non-critical logging)
