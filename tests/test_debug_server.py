@@ -8,6 +8,7 @@ import time
 import typing
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import quote
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -705,6 +706,68 @@ class TestDownloadContainment:
             resp = await c.get('/debug/download/escape.db')
         assert resp.status_code in (400, 404)
         assert b'not-yours' not in resp.content
+
+
+class TestDownloadServesRecorderFilesOnly:
+    """The endpoint exists to hand over recorder databases, nothing else.
+
+    ``db_dir`` defaults to ``/tmp``, which is shared with every other
+    program on the host, and the debug UI is unauthenticated by design.
+    Checking only for separators and header-injection characters meant any
+    readable file in that directory could be fetched by exact name.
+    """
+
+    @pytest.mark.parametrize(
+        'name',
+        [
+            'other-app-export.json',
+            'id_rsa',
+            'notes.txt',
+            'archive.db.gz',  # archives have their own route + regex
+            'backup.db.bak',
+            'w1.dbx',
+        ],
+    )
+    async def test_non_database_names_are_refused(self, tmp_path, mock_recorder, mock_app, name):
+        (tmp_path / name).write_bytes(b'not-a-recorder-file')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/debug/download/' + quote(name, safe=''))
+        assert resp.status_code in (400, 404), name
+        assert b'not-a-recorder-file' not in resp.content
+
+    @pytest.mark.parametrize(
+        'name',
+        [
+            'worker-1-2026-03-16__14_55_00.db',  # make_db_path
+            'worker-1-live.db',  # live symlink
+            'worker-1-cache.db',  # handler-cache symlink
+            'merged-2026-03-16__14_55_00.db',  # merge output
+            'w1.db',
+        ],
+    )
+    async def test_recorder_database_names_are_served(self, tmp_path, mock_recorder, mock_app, name):
+        (tmp_path / name).write_bytes(b'fake-sqlite')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/debug/download/' + quote(name, safe=''))
+        assert resp.status_code == 200, name
+        assert resp.content == b'fake-sqlite'
+
+    async def test_merge_sources_are_restricted_the_same_way(self, tmp_path, mock_recorder, mock_app):
+        """Merge reads its sources through the same gate — otherwise the
+        contents of an arbitrary file could be pulled into a merged DB and
+        downloaded from there."""
+        (tmp_path / 'a.db').write_bytes(b'fake-sqlite')
+        (tmp_path / 'secrets.json').write_bytes(b'{}')
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post('/api/debug/merge', json={'filenames': ['a.db', 'secrets.json']})
+        assert resp.status_code == 400
+        assert 'secrets.json' in resp.json()['error']
 
 
 # ---------------------------------------------------------------------------

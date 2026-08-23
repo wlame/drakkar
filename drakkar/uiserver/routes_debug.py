@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -63,6 +64,26 @@ def _has_unsafe_filename_char(filename: str) -> bool:
     return any(c in '";' or ord(c) < 0x20 or ord(c) == 0x7F for c in filename)
 
 
+# Names the database download and merge endpoints will act on.
+#
+# They exist to hand over recorder artifacts: the timestamped DBs
+# ``make_db_path`` writes, the ``-live.db`` / ``-cache.db`` symlinks and the
+# ``merged-*.db`` output. ``db_dir`` defaults to ``/tmp`` — shared with
+# every other program on the host — and the debug UI is unauthenticated by
+# design, so checking only for separators and header-injection characters
+# let any readable file there be fetched by exact name.
+#
+# Archives are NOT matched here: they are ``.db.gz`` and have their own
+# route guarded by ``ARCHIVE_NAME_RE``.
+#
+# Note the character class: a worker whose name contains something outside
+# ``[\w.-]`` (a space, say) would not be able to serve its own database
+# through this endpoint. Worker names are not validated anywhere, so that is
+# possible — but such a name already makes for awkward filenames, and
+# widening this pattern to accommodate it would defeat its purpose.
+DB_DOWNLOAD_NAME_RE = re.compile(r'[\w.-]+\.db')
+
+
 def _db_root(db_dir: str) -> Path | None:
     """The recorder directory as an absolute path, or None when there is none.
 
@@ -82,13 +103,17 @@ def _db_root(db_dir: str) -> Path | None:
     return Path(db_dir).resolve()
 
 
-def _contained_db_path(root: Path, filename: str) -> Path | None:
+def _contained_path(root: Path, filename: str) -> Path | None:
     """``filename`` resolved inside ``root``, or None when it is not contained.
 
     Rejects path separators, dot-prefixed names and the characters that
     would break out of the ``Content-Disposition`` header, then resolves
     and checks containment against the real root — so a symlink inside
     ``db_dir`` pointing outside it is refused too.
+
+    Containment only. Callers decide WHICH names they are willing to act
+    on: ``_contained_db_path`` for database files, ``ARCHIVE_NAME_RE`` for
+    the ``.db.gz`` archives.
     """
     if '/' in filename or '\\' in filename or filename.startswith('.') or _has_unsafe_filename_char(filename):
         return None
@@ -96,6 +121,16 @@ def _contained_db_path(root: Path, filename: str) -> Path | None:
     if candidate == root or not candidate.is_relative_to(root):
         return None
     return candidate
+
+
+def _contained_db_path(root: Path, filename: str) -> Path | None:
+    """A contained path that is also a recorder DATABASE name.
+
+    See ``DB_DOWNLOAD_NAME_RE`` for why the name policy exists at all.
+    """
+    if not DB_DOWNLOAD_NAME_RE.fullmatch(filename):
+        return None
+    return _contained_path(root, filename)
 
 
 # ``/api/debug/probe`` request body — module-scope per the FastAPI
@@ -454,7 +489,9 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         root = _db_root(config.recorder.db_dir)
         if root is None:
             return JSONResponse({'error': 'No database directory configured'}, status_code=404)
-        full = _contained_db_path(root, name)
+        # ARCHIVE_NAME_RE above is this route's name policy (archives are
+        # ``.db.gz``, not ``.db``), so only containment is left to check.
+        full = _contained_path(root, name)
         if full is None or not full.is_file():
             return JSONResponse({'error': 'File not found'}, status_code=404)
         return FileResponse(

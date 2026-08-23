@@ -34,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security: the database download and merge endpoints now serve recorder
+  database files only.** They checked the requested name for path
+  separators, a leading dot and header-injection characters, then served
+  whatever it pointed at — so with the default `ui.recorder.db_dir` of
+  `/tmp`, any readable file there could be fetched by exact name, including
+  files belonging to other programs. Names must now match
+  `[\w.-]+\.db`, which covers every shape the recorder and the merge
+  endpoint produce (timestamped DBs, the `-live.db` / `-cache.db` symlinks,
+  `merged-*.db`). Archives are unaffected — they are `.db.gz` and keep
+  their own route and pattern. Matched in the Go backend.
+
 - **Security (high, memory-only mode only): `ui.recorder.db_dir: ""` turned
   the database download and merge endpoints into an arbitrary-file read and
   write of the worker's working directory.** `os.path.join('', name)` is
