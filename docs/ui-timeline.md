@@ -94,6 +94,10 @@ together, so a rule needs every condition to hold, not just one.
 | `yellow` | `#fbbf24` | | `purple` | `#a78bfa` |
 | `blue` | `#60a5fa` | | `orange` | `#fb923c` |
 
+Every rule shows up in the toolbar's color key — a row of small swatches (the three status
+colors first, then one per rule). The swatches carry no text; hover one to read its name
+(the rule's `name`, or its generated condition text when unnamed).
+
 ### Implicit fallback
 
 When no configured rule matches, the bar falls back to a status color: **HTTP-origin tasks**
@@ -147,7 +151,7 @@ task — tasks without the bound label simply skip that role.
 
 Each viewer can override or disable any role for their own browser, independent of the
 backend's `ui.timeline.labels` config and independent of other viewers. Click the gear icon
-in the timeline toolbar to open the role picker: it lists every label key seen across
+in the timeline toolbar to open the timeline settings; the role picker there lists every label key seen across
 currently-loaded tasks, plus whichever key the backend currently binds to that role (kept
 selectable even if no visible task currently carries it), so a bound key never disappears
 from the picker. Choosing "(none)" explicitly disables a role even if the backend binds one;

@@ -11,8 +11,8 @@ first-class, opt-in concept:
   a computed score of your own.
 - **speed** — per task: `cost / duration`, in cost-units per second.
 - **throughput** — per worker: the sum of the cost of tasks completed in
-  the last N seconds divided by N, maintained for five sliding windows
-  (1, 5, 30, 60, 300 s) side by side, with the matching **task rate**
+  the last N seconds divided by N, maintained for three sliding windows
+  (1, 5, 30 s) side by side, with the matching **task rate**
   (tasks per second).
 
 Everything is observational — nothing schedules, prioritizes, or throttles
@@ -88,37 +88,38 @@ zeroed.
 timeline's task hover.
 
 **Live, per second** — a broadcast-only `throughput` WebSocket frame
-(never persisted, like `net_io`) carries all five windows every second:
+(never persisted) carries all three windows every second:
 
 ```json
 {"event": "throughput", "metadata": {"windows": {
   "1":   {"throughput": 41250000.0, "task_rate": 9.0, "tasks": 9},
   "5":   {"throughput": 38700000.0, "task_rate": 8.4, "tasks": 42},
-  "30":  {"...": "..."}, "60": {"...": "..."}, "300": {"...": "..."}
+  "30":  {"...": "..."}
 }}}
 ```
 
 Quiet windows report zeros, so an idle or stalled worker draws as a real
 dip on the UI's throughput track rather than a gap. The Live page renders
-the track under the timeline, sharing its time axis; the window chips
-switch between the five widths instantly because every frame carries all
-of them.
+the track under the timeline, sharing its time axis, drawing the 5 s
+window by default; the window chips (`1s` / `5s` / `30s`) and the current
+reading sit in the timeline's gear popover, and switching is instant
+because every frame carries all three windows.
 
 **Prometheus**:
 
 | Metric | Type | Meaning |
 |---|---|---|
 | `drakkar_task_speed` | histogram | per-task speed of counted completions |
-| `drakkar_throughput{window="1|5|30|60|300"}` | gauge | windowed throughput, refreshed each second |
+| `drakkar_throughput{window="1|5|30"}` | gauge | windowed throughput, refreshed each second |
 | `drakkar_task_rate{window=...}` | gauge | windowed completion rate (counted tasks only) |
 
-Example queries: `drakkar_throughput{window="60"}` for the smoothed live
+Example queries: `drakkar_throughput{window="30"}` for the smoothed live
 rate; `histogram_quantile(0.5, rate(drakkar_task_speed_bucket[10m]))` for
 the median per-task speed over ten minutes — a falling median at constant
 cost mix is the "same work, slower host" signal.
 
 **worker_state** — each state-sync tick (default 10 s) snapshots the
-five-window object as JSON into the new nullable `throughput` column.
+three-window object as JSON into the new nullable `throughput` column.
 Because worker_state rows are an append-only time series, a rotated,
 archived, or merged fleet database replays throughput history with one
 query — no event replay needed. NULL means the feature was off.

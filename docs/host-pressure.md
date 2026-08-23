@@ -98,5 +98,4 @@ were running at the time. See [Local Databases](local-databases.md).
 
 - [Runtime Health](runtime-health.md) — the event-loop side of the same
   incidents: lag, stalls, episodes, verdicts.
-- [Observability](observability.md) — the full event-type table and the
-  `net_io` WebSocket heartbeat (byte rates that pair with the RTT here).
+- [Observability](observability.md) — the full event-type table.

@@ -58,8 +58,6 @@ from drakkar.hostinfo import (
     detect_network_fs,
     read_cpu_throttle,
     read_loadavg,
-    read_net_io_bytes,
-    read_nfs_io_bytes,
     read_nfs_mount_stats,
     read_open_fd_count,
     read_pressure,
@@ -379,7 +377,7 @@ class EventRecorder:
         self._flush_task: asyncio.Task | None = None
         self._rotation_task: asyncio.Task | None = None
         self._state_task: asyncio.Task | None = None
-        self._netio_task: asyncio.Task | None = None
+        self._host_sample_task: asyncio.Task | None = None
         # Databases-page stats cache (drakkar.dbstats). Constructed in
         # start() when db_dir is set; the warmer loop keeps it filled and
         # _rotate feeds it the freshly-immutable file. None in memory-only
@@ -390,15 +388,6 @@ class EventRecorder:
         # mid-flight and can be awaited nowhere (their failure only costs
         # a later warmer scan).
         self._dbstats_rotate_tasks: set[asyncio.Task] = set()
-        # Previous /proc/net/dev totals + monotonic read time; the pair a
-        # net_io sample diffs against. None until the loop primes it.
-        self._netio_prev: tuple[int, int] | None = None
-        self._netio_prev_t: float = 0.0
-        # NFS byte counters (mountstats) ride the same tick as net_io but
-        # keep their own prev pair: mounts can appear/vanish independently
-        # of the interface counters, and a missing NFS sample must not
-        # break the RX/TX diff (or vice versa).
-        self._nfsio_prev: tuple[int, int] | None = None
         # Previous (self_cpu_seconds, children_cpu_seconds, monotonic) for
         # the resource sampler's CPU-percent deltas. None until primed —
         # the first resource_sample carries no CPU fields.
@@ -662,11 +651,10 @@ class EventRecorder:
                     hint='raw recorder database files are never deleted automatically; '
                     'prune db_dir yourself or set ui.recorder.archive_enabled: true',
                 )
-        # Outside the db_dir branch on purpose: the net_io heartbeat is
-        # WS-only and resource samples still feed WS subscribers, so both
-        # should run in memory-only mode too.
-        self._netio_task = asyncio.create_task(self._host_sample_loop())
-        self._watch_background_task(self._netio_task, 'host_sample')
+        # Outside the db_dir branch on purpose: resource samples still feed
+        # WS subscribers, so the sampler runs in memory-only mode too.
+        self._host_sample_task = asyncio.create_task(self._host_sample_loop())
+        self._watch_background_task(self._host_sample_task, 'host_sample')
         # Armed for the whole run, disarmed by a clean stop(): if the
         # interpreter exits any other way (startup failure after this
         # point, an unhandled exception, sys.exit), the last-breath hook
@@ -1018,32 +1006,19 @@ class EventRecorder:
             await asyncio.sleep(self._store.dbstats_warm_interval_seconds)
 
     async def _host_sample_loop(self) -> None:
-        """Per-tick host sampling: the ``net_io`` WS heartbeat + one
-        ``resource_sample`` event.
+        """Per-tick host sampling: one ``resource_sample`` event per
+        state-sync interval.
 
         Runs whenever the recorder runs — memory-only mode included (the
         events then only feed WS subscribers; nothing touches the DB from
-        here). On platforms without ``/proc/net/dev`` (macOS) the network
-        half announces itself unavailable once and stays silent; the
-        resource half still samples what the platform offers (CPU, fds).
+        here). Each sampler is best-effort: a platform without a given
+        ``/proc`` source simply omits that field.
         """
-        initial = read_net_io_bytes()
-        if initial is None:
-            await logger.ainfo(
-                'recorder_netio_unavailable',
-                category='recorder',
-                detail='/proc/net/dev is not readable on this platform; network rates will not stream to the UI',
-            )
-        else:
-            self._netio_prev = initial
-            self._netio_prev_t = time.monotonic()
         while self._running:
             await asyncio.sleep(self._store.state_sync_interval_seconds)
             # Same per-iteration guard as the other loops: one bad sample
-            # must not end the heartbeat for the rest of the run.
+            # must not end the sampler for the rest of the run.
             try:
-                if initial is not None:
-                    self._netio_sample()
                 self._resource_sample()
             except asyncio.CancelledError:
                 raise
@@ -1055,75 +1030,12 @@ class EventRecorder:
                     error_type=type(exc).__name__,
                 )
 
-    def _netio_sample(self) -> None:
-        """Diff the interface counters and broadcast one ``net_io`` frame.
-
-        The frame is broadcast-only (never buffered to the DB), so the
-        pinned events-table row shape is untouched. Rates are host-wide by
-        nature: ``/proc/net/dev`` counts the whole network namespace — this
-        process and its subprocesses, plus any neighbours sharing it.
-        """
-        counters = read_net_io_bytes()
-        nfs_counters = read_nfs_io_bytes()
-        now = time.monotonic()
-        if counters is None:
-            return
-        prev, prev_t = self._netio_prev, self._netio_prev_t
-        nfs_prev = self._nfsio_prev
-        # Re-prime unconditionally so a skipped frame (below) still measures
-        # the NEXT interval from here, not across the gap.
-        self._netio_prev, self._netio_prev_t = counters, now
-        self._nfsio_prev = nfs_counters
-        if prev is None:
-            return
-        elapsed = now - prev_t
-        rx_delta = counters[0] - prev[0]
-        tx_delta = counters[1] - prev[1]
-        if elapsed <= 0 or rx_delta < 0 or tx_delta < 0:
-            # A negative delta means an interface counter reset (interface
-            # bounce, netns change) — drop this interval rather than
-            # broadcasting a nonsense rate.
-            return
-        ts = time.time()
-        mib = 1024 * 1024
-        metadata = {
-            'rx_mib_s': round(rx_delta / elapsed / mib, 3),
-            'tx_mib_s': round(tx_delta / elapsed / mib, 3),
-            'rx_bytes_total': counters[0],
-            'tx_bytes_total': counters[1],
-            'interval_s': round(elapsed, 1),
-        }
-        # NFS rates (contract v1.11, optional keys): the interface counters
-        # above cannot see kernel-NFS traffic from inside a container's
-        # network namespace — the host's NFS client moves the bytes through
-        # the HOST's interfaces. mountstats counters follow the mount
-        # namespace instead, so they do see it. Fields appear only when an
-        # NFS mount is visible on both ends of the interval and its
-        # counters didn't go backwards (remount) — clients hide the readout
-        # when the keys are absent.
-        if nfs_counters is not None and nfs_prev is not None:
-            nfs_read_delta = nfs_counters[0] - nfs_prev[0]
-            nfs_write_delta = nfs_counters[1] - nfs_prev[1]
-            if nfs_read_delta >= 0 and nfs_write_delta >= 0:
-                metadata['nfs_read_mib_s'] = round(nfs_read_delta / elapsed / mib, 3)
-                metadata['nfs_write_mib_s'] = round(nfs_write_delta / elapsed / mib, 3)
-                metadata['nfs_read_bytes_total'] = nfs_counters[0]
-                metadata['nfs_write_bytes_total'] = nfs_counters[1]
-        self._broadcast_ws(
-            {
-                'ts': ts,
-                'dt': format_dt(ts),
-                'event': 'net_io',
-                'metadata': encode_json_str(metadata),
-            }
-        )
-
     def broadcast_throughput(self, windows: dict) -> None:
         """Broadcast one ``throughput`` WS frame (contract v1.16).
 
-        Broadcast-only like ``net_io`` — never buffered to the DB, so the
-        pinned events-table row shape is untouched. ``windows`` is the
-        five-window aggregate from the throughput tracker.
+        Broadcast-only — never buffered to the DB, so the pinned
+        events-table row shape is untouched. ``windows`` is the
+        three-window aggregate from the throughput tracker.
         """
         ts = time.time()
         self._broadcast_ws(
@@ -1140,8 +1052,8 @@ class EventRecorder:
 
         The row rides the ordinary events table (metadata JSON, no schema
         change), so rotation, archiving, and the WS stream all carry it —
-        an archive alone can answer "what were RSS / CPU / fds / network
-        doing at 04:12" long after the process is gone.
+        an archive alone can answer "what were RSS / CPU / fds doing at
+        04:12" long after the process is gone.
 
         Field notes:
 
@@ -1172,9 +1084,6 @@ class EventRecorder:
         open_fds = read_open_fd_count()
         if open_fds is not None:
             meta['open_fds'] = open_fds
-        counters = read_net_io_bytes()
-        if counters is not None:
-            meta['rx_bytes_total'], meta['tx_bytes_total'] = counters
         if prev is not None:
             elapsed = now - prev[2]
             if elapsed > 0:
@@ -1312,10 +1221,10 @@ class EventRecorder:
                 await self._state_task
             except asyncio.CancelledError:
                 pass
-        if self._netio_task:
-            self._netio_task.cancel()
+        if self._host_sample_task:
+            self._host_sample_task.cancel()
             try:
-                await self._netio_task
+                await self._host_sample_task
             except asyncio.CancelledError:
                 pass
         if self._dbstats_warm_task:

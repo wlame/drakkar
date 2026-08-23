@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- The `net_io` WebSocket heartbeat: the worker no longer samples network
+  RX/TX rates (`/proc/net/dev`) or NFS read/write byte rates
+  (`/proc/self/mountstats` `bytes:`), and `resource_sample` no longer
+  carries `rx_bytes_total` / `tx_bytes_total`. Per-mount NFS RTT and
+  retransmit health in `resource_sample` is unchanged (contract v1.19).
+
+### Changed
+
+- Throughput windows are now 1, 5, and 30 seconds only — the 60 s and
+  300 s windows are gone from the `throughput` WS frame, the
+  `worker_state.throughput` JSON, and the `window` label of
+  `drakkar_throughput` / `drakkar_task_rate`. The Live timeline draws the
+  5 s window by default (contract v1.19).
+
 ## [1.17.1] - 2026-08-23
 
 ### Changed

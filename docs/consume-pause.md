@@ -41,8 +41,10 @@ Three pause actors share the consumer, with strict precedence rules:
 
 ## The Live page control
 
-With the feature enabled, the Live page shows a **Pause consuming** row
-with one button per configured preset. While paused, a banner replaces it:
+With the feature enabled, the Live page header gains a small **Pause
+consuming** button next to the Live/Frozen toggle; opening it shows one
+button per configured preset. While paused, a banner replaces it under the
+header, visible from every tab:
 
 > ⏸ **Consuming paused** — resumes in 0:42 (asked for 1m) · *The consumer
 > group is untouched — no rebalance; lag grows while paused.* — **Resume now**

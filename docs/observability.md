@@ -497,33 +497,6 @@ Real-time view of the processing pipeline, fed by WebSocket (`/ws`). Organized i
 
 Pool utilization bar shows active, waiting, and available slot counts.
 
-The page header also shows a **network throughput readout** (`Net: RX x.x ·
-TX x.x MiB/s`), fed by a WS-only `net_io` frame the recorder broadcasts every
-`state_sync_interval_seconds`. The rates come from `/proc/net/dev`, summed
-across all non-loopback interfaces — **host-wide per network namespace**:
-they cover the worker and its subprocesses, plus anything else sharing the
-namespace (per-process network accounting does not exist without root/eBPF;
-in a container with its own network namespace this is effectively the app's
-own traffic). The frame is never written to the events table. On platforms
-without `/proc/net/dev` (macOS) no frames are sent and the readout stays
-hidden; in cluster view, each peer strip shows its own host's rates.
-
-**The namespace caveat cuts both ways: kernel-NFS traffic is invisible
-here.** When a containerized worker reads task inputs from an NFS mount
-(bind-mounted into the container), the actual RPC traffic is moved by the
-*host* kernel's NFS client through the *host's* interfaces — the
-container's counters never move, so `Net: RX` can sit near zero while the
-host transfers a GiB/s. For that case the same frame carries an optional
-**NFS readout** (`NFS: R x.x · W x.x MiB/s`, contract v1.11), sampled from
-`/proc/self/mountstats` — the server-read/server-write byte columns summed
-across every visible NFS mount. `mountstats` follows the *mount* namespace,
-so it sees bind-mounted NFS volumes from inside a container; page-cache
-hits are excluded (only bytes actually transferred to/from the servers
-count). Caveat in the other direction: the counters are per *mount*, so
-other host processes using the same mount contribute to them. The readout
-hides itself when no NFS mount is visible. The Go backend does not sample
-mountstats yet and simply omits the keys.
-
 #### `/history` -- Event Browser
 
 Filterable, paginated event browser across all partitions:
@@ -658,7 +631,7 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 | `runtime_stall` | Event loop resumed after a stall; carries the stack traces sampled while it lasted | `duration`, `metadata` (duration_ms, stacks: [{stack, location, count}], dropped_stacks, unit_count) |
 | `runtime_lag_episode` | A degraded/stalled span ended (or hit `runtime_health.episode_max_seconds`); carries stacks aggregated across the whole span and a verdict — see [Runtime Health](runtime-health.md#lag-episodes-and-verdicts) | `duration`, `metadata` (duration_ms, peak_lag_ms, lag_sum_ms, cpu_ms, cpu_ratio, verdict: blocked/cpu_bound/starved/inconclusive, stall_count, sample_count, stacks, dropped_stacks, unit_count, plus optional evidence: cpu_throttled_ms, psi_cpu_some_avg10, load1) |
 | `runtime_probe` | Opt-in stack probe (`runtime_health.probe_interval_seconds > 0`) — a flight-recorder profiler sample, recorded regardless of health state | `metadata` (lag_ms, unit_count, stacks: [{stack, location, count}]) |
-| `resource_sample` | Periodic snapshot of what the worker consumed — and what the host is fighting over ([Host Pressure](host-pressure.md)) — every `state_sync_interval_seconds` | `metadata` (rss_bytes, threads, open_fds, cpu_self_pct, cpu_children_pct, rx_bytes_total, tx_bytes_total, interval_s, load1, load5, psi_cpu_some_avg10, psi_io_some_avg10, psi_io_full_avg10, psi_mem_some_avg10, psi_mem_full_avg10, cpu_throttled_periods, cpu_throttled_ms, nfs_mounts: [{mount, ops, rtt_ms, retrans}] — each omitted when its source is unavailable; `cpu_children_pct` counts *reaped* subprocesses, so it is bursty; the first sample carries no cpu or delta fields) |
+| `resource_sample` | Periodic snapshot of what the worker consumed — and what the host is fighting over ([Host Pressure](host-pressure.md)) — every `state_sync_interval_seconds` | `metadata` (rss_bytes, threads, open_fds, cpu_self_pct, cpu_children_pct, interval_s, load1, load5, psi_cpu_some_avg10, psi_io_some_avg10, psi_io_full_avg10, psi_mem_some_avg10, psi_mem_full_avg10, cpu_throttled_periods, cpu_throttled_ms, nfs_mounts: [{mount, ops, rtt_ms, retrans}] — each omitted when its source is unavailable; `cpu_children_pct` counts *reaped* subprocesses, so it is bursty; the first sample carries no cpu or delta fields) |
 | `offload` | One `handler.offload()` call completed — CPU-bound hook work run on the offload thread pool; see [Offload](offload.md) | `partition` (NULL outside hooks), `offset` / `task_id` (annotation-style anchoring), `duration`, `metadata` (hook, function, queued, status: ok/error/cancelled, window_id, offsets, error) |
 | `periodic_run` | Periodic task execution completes | `task_id` (task name), `duration`, `exit_code` (0=ok, 1=error), `metadata` (status, error) |
 | `webapp_request_received` | One HTTP request passed auth + rate-limit + body parsing and is about to dispatch to T1 | `origin='http'`, `client_name`, `request_id`, `metadata` (started_at, body_bytes) |

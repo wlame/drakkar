@@ -8,7 +8,7 @@ computed score, any unit. From it the framework derives:
   the ``task_completed`` event and the recent-tasks API;
 - sliding-window **throughput** = sum(cost completed in the last N seconds)
   / N, plus **task_rate** (count / N) and **tasks** (count), for the fixed
-  window set N in {1, 5, 30, 60, 300} — pushed once per second as a
+  window set N in {1, 5, 30} — pushed once per second as a
   broadcast-only ``throughput`` WS frame, exported as Prometheus gauges,
   and snapshotted into worker_state rows.
 
@@ -41,9 +41,9 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 # The fixed window set (seconds). Every WS frame and worker_state snapshot
-# carries all five, so the UI can switch windows client-side with no
+# carries all three, so the UI can switch windows client-side with no
 # reconfiguration; the contract pins the keys.
-WINDOW_SECONDS = (1, 5, 30, 60, 300)
+WINDOW_SECONDS = (1, 5, 30)
 _MAX_WINDOW = WINDOW_SECONDS[-1]
 
 # The emit loop's cadence: the 1 s window needs 1 Hz to mean anything.
@@ -117,7 +117,7 @@ class ThroughputTracker:
             self._completions.popleft()
 
     def window_stats(self, now: float | None = None) -> dict[str, dict[str, Any]]:
-        """The five-window aggregate, keyed by the window's seconds as a string.
+        """The three-window aggregate, keyed by the window's seconds as a string.
 
         Quiet windows report zeros rather than disappearing: an idle or
         stalled worker must draw as a real dip on the UI track, not a gap.
@@ -127,8 +127,8 @@ class ThroughputTracker:
         self._evict(now)
         stats: dict[str, dict[str, Any]] = {}
         # One pass per window over an already-bounded deque; at the target
-        # rate (~1k tasks/s x 300 s) this is a few hundred thousand float
-        # compares per second in C — negligible next to the pipeline.
+        # rate (~1k tasks/s x 30 s) this is a few tens of thousands of
+        # float compares per second in C — negligible next to the pipeline.
         for window in WINDOW_SECONDS:
             cutoff = now - window
             cost_sum = 0.0

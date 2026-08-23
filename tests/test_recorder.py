@@ -5401,194 +5401,52 @@ class TestBackgroundLoopResilience:
         assert [e for e in cap if e['event'] == 'recorder_background_task_died'] == []
 
 
-# --- net_io WS heartbeat ---
+# --- host sampler ---
 
 
 MIB = 1024 * 1024
 
 
-class TestNetIOSample:
-    """The pure diff-and-broadcast step behind the net_io WS heartbeat.
-
-    ``_netio_sample`` needs no started recorder: it only reads counters and
-    broadcasts, so these tests construct an EventRecorder without start()
-    and subscribe directly.
-    """
-
-    def make_rec(self, tmp_path):
-        from drakkar.recorder import core as recorder_core
-
-        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
-        return rec, recorder_core
-
-    def test_first_sample_primes_baseline_without_frame(self, tmp_path, monkeypatch):
-        rec, core_mod = self.make_rec(tmp_path)
-        sub = rec.subscribe()
-        monkeypatch.setattr(core_mod, 'read_net_io_bytes', lambda: (10 * MIB, 5 * MIB))
-
-        rec._netio_sample()
-
-        assert sub.empty()
-        assert rec._netio_prev == (10 * MIB, 5 * MIB)
-
-    def test_second_sample_broadcasts_rates_in_mib_s(self, tmp_path, monkeypatch):
-        rec, core_mod = self.make_rec(tmp_path)
-        sub = rec.subscribe()
-        monkeypatch.setattr(core_mod, 'read_net_io_bytes', lambda: (3 * MIB, 1 * MIB))
-        rec._netio_prev = (1 * MIB, 0)
-        rec._netio_prev_t = 100.0
-        monkeypatch.setattr(core_mod.time, 'monotonic', lambda: 102.0)
-
-        rec._netio_sample()
-
-        frame = sub.get_nowait()
-        assert frame['event'] == 'net_io'
-        meta = json.loads(frame['metadata'])
-        assert meta['rx_mib_s'] == 1.0  # 2 MiB over 2 s
-        assert meta['tx_mib_s'] == 0.5
-        assert meta['rx_bytes_total'] == 3 * MIB
-        assert meta['tx_bytes_total'] == 1 * MIB
-        assert meta['interval_s'] == 2.0
-
-    def test_counter_reset_skips_frame_and_reprimes(self, tmp_path, monkeypatch):
-        """An interface bounce makes counters go backwards — no nonsense rate."""
-        rec, core_mod = self.make_rec(tmp_path)
-        sub = rec.subscribe()
-        monkeypatch.setattr(core_mod, 'read_net_io_bytes', lambda: (1 * MIB, 0))
-        rec._netio_prev = (5 * MIB, 2 * MIB)
-        rec._netio_prev_t = 100.0
-        monkeypatch.setattr(core_mod.time, 'monotonic', lambda: 110.0)
-
-        rec._netio_sample()
-
-        assert sub.empty()
-        # The baseline moved to the new counters, so the NEXT interval measures
-        # from the reset point instead of spanning the gap.
-        assert rec._netio_prev == (1 * MIB, 0)
-
-    def test_unavailable_counters_are_a_noop(self, tmp_path, monkeypatch):
-        rec, core_mod = self.make_rec(tmp_path)
-        sub = rec.subscribe()
-        monkeypatch.setattr(core_mod, 'read_net_io_bytes', lambda: None)
-        rec._netio_prev = (1 * MIB, 0)
-
-        rec._netio_sample()
-
-        assert sub.empty()
-        assert rec._netio_prev == (1 * MIB, 0)  # baseline untouched
-
-    def test_filtered_subscriber_does_not_receive_net_io(self, tmp_path, monkeypatch):
-        rec, core_mod = self.make_rec(tmp_path)
-        sub = rec.subscribe(event_types=['task_started'])
-        monkeypatch.setattr(core_mod, 'read_net_io_bytes', lambda: (3 * MIB, 1 * MIB))
-        rec._netio_prev = (1 * MIB, 0)
-        rec._netio_prev_t = 100.0
-        monkeypatch.setattr(core_mod.time, 'monotonic', lambda: 102.0)
-
-        rec._netio_sample()
-
-        assert sub.empty()
-
-    # --- NFS rates riding the net_io frame (contract v1.11) ---
-
-    def _primed_rec(self, tmp_path, monkeypatch, *, nfs):
-        """Recorder with net counters primed for a 2-second, 2/0.5 MiB/s tick."""
-        rec, core_mod = self.make_rec(tmp_path)
-        monkeypatch.setattr(core_mod, 'read_net_io_bytes', lambda: (3 * MIB, 1 * MIB))
-        monkeypatch.setattr(core_mod, 'read_nfs_io_bytes', lambda: nfs)
-        rec._netio_prev = (1 * MIB, 0)
-        rec._netio_prev_t = 100.0
-        monkeypatch.setattr(core_mod.time, 'monotonic', lambda: 102.0)
-        return rec
-
-    def test_no_nfs_mounts_means_no_nfs_keys(self, tmp_path, monkeypatch):
-        rec = self._primed_rec(tmp_path, monkeypatch, nfs=None)
-        sub = rec.subscribe()
-
-        rec._netio_sample()
-
-        meta = json.loads(sub.get_nowait()['metadata'])
-        assert 'nfs_read_mib_s' not in meta
-        assert 'nfs_read_bytes_total' not in meta
-
-    def test_first_nfs_sample_primes_without_fields(self, tmp_path, monkeypatch):
-        rec = self._primed_rec(tmp_path, monkeypatch, nfs=(10 * MIB, 2 * MIB))
-        sub = rec.subscribe()
-        assert rec._nfsio_prev is None
-
-        rec._netio_sample()
-
-        meta = json.loads(sub.get_nowait()['metadata'])
-        # rx/tx present, NFS not yet — no previous NFS counters to diff.
-        assert meta['rx_mib_s'] == 1.0
-        assert 'nfs_read_mib_s' not in meta
-        assert rec._nfsio_prev == (10 * MIB, 2 * MIB)
-
-    def test_nfs_rates_ride_the_net_io_frame(self, tmp_path, monkeypatch):
-        rec = self._primed_rec(tmp_path, monkeypatch, nfs=(10 * MIB, 2 * MIB))
-        rec._nfsio_prev = (6 * MIB, 1 * MIB)
-        sub = rec.subscribe()
-
-        rec._netio_sample()
-
-        meta = json.loads(sub.get_nowait()['metadata'])
-        assert meta['nfs_read_mib_s'] == 2.0  # 4 MiB over 2 s
-        assert meta['nfs_write_mib_s'] == 0.5
-        assert meta['nfs_read_bytes_total'] == 10 * MIB
-        assert meta['nfs_write_bytes_total'] == 2 * MIB
-        # The interface rates are untouched by the NFS addition.
-        assert meta['rx_mib_s'] == 1.0
-        assert meta['tx_mib_s'] == 0.5
-
-    def test_nfs_counter_reset_drops_only_the_nfs_fields(self, tmp_path, monkeypatch):
-        """A remount makes mount counters restart — rx/tx must still stream."""
-        rec = self._primed_rec(tmp_path, monkeypatch, nfs=(1 * MIB, 0))
-        rec._nfsio_prev = (10 * MIB, 2 * MIB)
-        sub = rec.subscribe()
-
-        rec._netio_sample()
-
-        meta = json.loads(sub.get_nowait()['metadata'])
-        assert meta['rx_mib_s'] == 1.0
-        assert 'nfs_read_mib_s' not in meta
-        # Baseline moved to the post-reset counters for the next interval.
-        assert rec._nfsio_prev == (1 * MIB, 0)
-
-
 class TestHostSampleLoop:
-    async def test_unavailable_counters_log_once_and_never_prime(self, tmp_path, monkeypatch):
-        """macOS / exotic containers: the network half stays silent."""
-        from drakkar.recorder import core as recorder_core
-
-        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
-        rec._running = False  # loop body skipped — only the priming step runs
-        monkeypatch.setattr(recorder_core, 'read_net_io_bytes', lambda: None)
-
-        with capture_logs() as cap:
-            await rec._host_sample_loop()
-
-        assert any(e['event'] == 'recorder_netio_unavailable' for e in cap)
-        assert rec._netio_prev is None
-
     async def test_start_creates_and_stop_ends_the_sampler_task(self, tmp_path):
         config = make_debug_config(tmp_path)
         rec = EventRecorder(config, worker_name=WORKER_NAME)
         await rec.start()
-        assert rec._netio_task is not None
+        assert rec._host_sample_task is not None
         await rec.stop()
-        assert rec._netio_task.done()
+        assert rec._host_sample_task.done()
+
+    async def test_one_failed_sample_does_not_end_the_loop(self, tmp_path, monkeypatch):
+        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
+        rec._store.state_sync_interval_seconds = 0
+        calls = 0
+
+        def sample():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError('boom')
+            rec._running = False
+
+        monkeypatch.setattr(rec, '_resource_sample', sample)
+        rec._running = True
+
+        with capture_logs() as cap:
+            await rec._host_sample_loop()
+
+        assert calls == 2
+        assert any(e['event'] == 'recorder_host_sample_failed' for e in cap)
 
 
 class TestResourceSample:
     """The per-tick resource snapshot (resource_sample events)."""
 
-    def make_rec(self, tmp_path, monkeypatch, *, rss=256 * MIB, threads=20, fds=42, net=(1000, 2000)):
+    def make_rec(self, tmp_path, monkeypatch, *, rss=256 * MIB, threads=20, fds=42):
         from drakkar.recorder import core as recorder_core
 
         rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
         monkeypatch.setattr(recorder_core, 'read_self_stats', lambda: (rss, threads))
         monkeypatch.setattr(recorder_core, 'read_open_fd_count', lambda: fds)
-        monkeypatch.setattr(recorder_core, 'read_net_io_bytes', lambda: net)
         # Host-pressure sources default to "unavailable" so tests never read
         # the real /proc of the machine running them.
         monkeypatch.setattr(recorder_core, 'read_loadavg', lambda: None)
@@ -5611,8 +5469,7 @@ class TestResourceSample:
         assert meta['rss_bytes'] == 256 * MIB
         assert meta['threads'] == 20
         assert meta['open_fds'] == 42
-        assert meta['rx_bytes_total'] == 1000
-        assert meta['tx_bytes_total'] == 2000
+        assert 'rx_bytes_total' not in meta  # network rates are not sampled
 
     def test_first_sample_has_no_cpu_percent(self, tmp_path, monkeypatch):
         rec, _ = self.make_rec(tmp_path, monkeypatch)
@@ -5653,12 +5510,11 @@ class TestResourceSample:
         rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
         monkeypatch.setattr(recorder_core, 'read_self_stats', lambda: (None, None))
         monkeypatch.setattr(recorder_core, 'read_open_fd_count', lambda: None)
-        monkeypatch.setattr(recorder_core, 'read_net_io_bytes', lambda: None)
 
         rec._resource_sample()
 
         meta = self.sample_meta(rec)
-        for key in ('rss_bytes', 'threads', 'open_fds', 'rx_bytes_total', 'tx_bytes_total'):
+        for key in ('rss_bytes', 'threads', 'open_fds'):
             assert key not in meta
 
 
@@ -5671,7 +5527,6 @@ class TestResourceSampleHostPressure:
         rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
         monkeypatch.setattr(recorder_core, 'read_self_stats', lambda: (None, None))
         monkeypatch.setattr(recorder_core, 'read_open_fd_count', lambda: None)
-        monkeypatch.setattr(recorder_core, 'read_net_io_bytes', lambda: None)
         monkeypatch.setattr(recorder_core, 'read_loadavg', lambda: None)
         monkeypatch.setattr(recorder_core, 'read_pressure', lambda: None)
         monkeypatch.setattr(recorder_core, 'read_cpu_throttle', lambda: None)
