@@ -442,6 +442,7 @@ class DrakkarApp:
             brokers=resolved.brokers,
             security=resolved.security,
             client_config=resolved.client_config,
+            flush_timeout_seconds=self._config.dlq.flush_timeout_seconds,
         )
 
     def _total_queued(self) -> int:

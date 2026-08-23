@@ -156,6 +156,8 @@ sinks:
       security: {}                 # only consulted when `brokers` is set above; same fields as
                                    #   kafka.security. Leaving brokers empty is the usual choice.
       client_config: {}            # raw librdkafka overrides for this sink
+      flush_timeout_seconds: 30.0  # bound on the per-batch producer flush. env: DK_SINKS__KAFKA__RESULTS__FLUSH_TIMEOUT_SECONDS
+                                   #   reasonable: 10-60; a last resort, not a latency target
 ```
 
 ### PostgreSQL sink
@@ -320,6 +322,7 @@ dlq:
   #           keep the pipeline moving; the payloads are lost (default)
   #   stall — leave the offset uncommitted and pause the partition; messages are
   #           redelivered after restart/rebalance (no loss, at the cost of lag)
+  flush_timeout_seconds: 30.0      # bound on the per-write producer flush. env: DK_DLQ__FLUSH_TIMEOUT_SECONDS
   on_send_failure: drop            # env: DK_DLQ__ON_SEND_FAILURE
 ```
 

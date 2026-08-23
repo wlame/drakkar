@@ -129,10 +129,22 @@ class KafkaSink(BaseSink[KafkaPayload]):
             # smaller than 1000 (window_size defaults to 100), so every
             # delivery would wait out that one-second inactivity timer
             # before its futures resolved — and ``deliver`` blocks on them.
-            remaining = await self._producer.flush()
+            # Bounded on purpose. ``flush()`` with no argument becomes
+            # librdkafka's ``flush(-1)``: it blocks until every in-flight
+            # message resolves, which against a wedged broker means
+            # ``message.timeout.ms`` (300s by default). Worse, the wait
+            # occupies one of the AIOProducer's executor threads, so a
+            # handful of stuck deliveries starve every other delivery on the
+            # same producer. The outer delivery timeout cannot rescue this:
+            # cancelling the await does not stop the thread.
+            remaining = await self._producer.flush(self._config.flush_timeout_seconds)
             if remaining and remaining > 0:
-                raise RuntimeError(
-                    f'Kafka flush incomplete: {remaining} message(s) still in queue '
+                # TimeoutError, not RuntimeError: the manager classifies it
+                # as transient, so the breaker sees the outage and an
+                # idempotent sink gets its fast-retry.
+                raise TimeoutError(
+                    f'Kafka flush timed out after {self._config.flush_timeout_seconds}s: '
+                    f'{remaining} message(s) still in queue '
                     f'(topic={self._config.topic!r}, sink={self._name!r})'
                 )
             results = await asyncio.gather(*futures)

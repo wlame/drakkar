@@ -23,6 +23,10 @@ from drakkar.utils import redact_url
 
 logger = structlog.get_logger()
 
+# Mirrors ``DLQConfig.flush_timeout_seconds``' default, for a DLQSink built
+# outside a ``DrakkarApp`` (tests, the replay tool).
+DEFAULT_FLUSH_TIMEOUT_SECONDS = 30.0
+
 
 class DLQMessage:
     """Wraps a failed payload with error metadata for the dead letter queue.
@@ -101,10 +105,17 @@ class DLQSink(BaseSink[BaseModel]):
         brokers: str,
         security: KafkaSecurityConfig | None = None,
         client_config: Mapping[str, str] | None = None,
+        flush_timeout_seconds: float = DEFAULT_FLUSH_TIMEOUT_SECONDS,
     ) -> None:
         super().__init__('dlq')
         self._topic = topic
         self._brokers = brokers
+        # Bound on the per-write flush. Unbounded, librdkafka waits out
+        # ``message.timeout.ms`` (300s) against a wedged broker while holding
+        # a producer executor thread — and the DLQ is the last resort, so a
+        # write that blocks that long stalls the partition it was meant to
+        # rescue.
+        self._flush_timeout_seconds = flush_timeout_seconds
         # Already resolved by the caller (DrakkarApp._build_dlq), which
         # applies the same empty-brokers-inherits rule the Kafka sinks use.
         self._security = security or KafkaSecurityConfig()
@@ -179,13 +190,14 @@ class DLQSink(BaseSink[BaseModel]):
                 topic=self._topic,
                 value=serialized,
             )
-            remaining = await self._producer.flush()
+            remaining = await self._producer.flush(self._flush_timeout_seconds)
             if remaining:
                 await logger.acritical(
                     'dlq_flush_incomplete',
                     category='sink',
                     dlq_topic=self._topic,
                     remaining=remaining,
+                    flush_timeout_seconds=self._flush_timeout_seconds,
                     action='ALERT: DLQ broker did not accept the message — offsets will stall',
                 )
                 dlq_send_failures.inc()

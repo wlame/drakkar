@@ -144,6 +144,22 @@ class KafkaSinkConfig(BaseModel):
     security: KafkaSecurityConfig = Field(default_factory=KafkaSecurityConfig)
     client_config: dict[str, str] = Field(default_factory=dict)
 
+    flush_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            'Bound on the producer flush that ends every delivery. Without '
+            'one, librdkafka flushes with no deadline and a wedged broker '
+            'blocks the call until message.timeout.ms (300s by default) — '
+            'and it blocks a producer executor thread while doing it, so a '
+            'few stuck deliveries starve every other delivery on the same '
+            'producer. On expiry the delivery fails with a transient error, '
+            'which is what lets the circuit breaker see the outage. Kept '
+            'deliberately generous: this is a last resort, not a latency '
+            'target.'
+        ),
+    )
+
     @field_validator('client_config')
     @classmethod
     def _reject_reserved_client_keys(cls, v: dict[str, str]) -> dict[str, str]:
@@ -605,6 +621,19 @@ class DLQConfig(BaseModel):
     # Only consulted when ``brokers`` is set; see ``KafkaSinkConfig.security``.
     security: KafkaSecurityConfig = Field(default_factory=KafkaSecurityConfig)
     client_config: dict[str, str] = Field(default_factory=dict)
+
+    flush_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            'Bound on the producer flush that ends every DLQ write. Same '
+            'rationale as KafkaSinkConfig.flush_timeout_seconds, and it '
+            'matters more here: the DLQ is the last resort, so a DLQ write '
+            'that blocks for message.timeout.ms stalls the partition it was '
+            'meant to rescue. On expiry the write is reported as unconfirmed '
+            'and the affected offsets stall.'
+        ),
+    )
 
     @field_validator('client_config')
     @classmethod

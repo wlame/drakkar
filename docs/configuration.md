@@ -319,6 +319,24 @@ Produces messages to a Kafka topic.
 | `security` | `KafkaSecurityConfig` | PLAINTEXT | Transport authentication and encryption for this sink. Only consulted when `brokers` is set; an inheriting sink uses the consumer's security instead. Same shape as [Kafka security](#kafka-security-kafkasecurity). |
 | `client_config` | `dict[str, str]` | `{}` | Raw librdkafka properties for this sink, merged after `security`. Only consulted when `brokers` is set. Same rules as [the escape hatch](#raw-librdkafka-overrides-client_config). |
 | `ui_url` | `str` | `''` | URL to a web UI for this sink (e.g., Kafka UI, Kowl). Displayed as a link in the operator UI dashboard. |
+| `flush_timeout_seconds` | `float` | `30.0` | Bound on the producer flush that ends every delivery (see below). |
+
+Every batch ends with a producer flush — the `AIOProducer` hands messages to
+librdkafka only once its internal buffer fills or its one-second inactivity
+timer expires, so without the flush every delivery would wait out that timer.
+`flush_timeout_seconds` bounds that flush. Unbounded, it becomes librdkafka's
+`flush(-1)`, which against a wedged broker blocks until `message.timeout.ms`
+(300 s by default) — and it blocks one of the producer's executor threads
+while it waits, so a handful of stuck deliveries starve every other delivery
+on the same producer. The outer
+[`sinks.delivery_timeout_seconds`](#delivery-timeout-sinksdelivery_timeout_seconds)
+cannot rescue that: cancelling the await does not stop the thread, so the
+bound has to reach librdkafka itself.
+
+On expiry the delivery fails with a `TimeoutError`, which the sink manager
+classifies as transient — so the circuit breaker sees the outage and an
+idempotent sink still gets its fast-retry. Keep the value generous: it is a
+last resort, not a latency target.
 
 ### PostgreSQL Sink (`sinks.postgres.<name>`)
 
@@ -547,12 +565,14 @@ Failed sink deliveries can be routed to a [DLQ](sinks.md#dead-letter-queue) Kafk
 | `brokers` | `str` | `''` | Kafka brokers for the DLQ. If empty, inherits from `kafka.brokers` — and with them `kafka.security` and `kafka.client_config`, on the same same-cluster-means-same-credentials rule the Kafka sinks follow. |
 | `security` | `KafkaSecurityConfig` | PLAINTEXT | Transport authentication and encryption for the DLQ producer. Only consulted when `brokers` is set. Same shape as [Kafka security](#kafka-security-kafkasecurity). |
 | `client_config` | `dict[str, str]` | `{}` | Raw librdkafka properties for the DLQ producer, merged after `security`. Only consulted when `brokers` is set. Same rules as [the escape hatch](#raw-librdkafka-overrides-client_config). |
+| `flush_timeout_seconds` | `float` | `30.0` | Bound on the producer flush that ends every DLQ write. Same rationale as [the Kafka sink's](#kafka-sink-sinkskafkaname), and it matters more here: the DLQ is the last resort, so a write that blocks for `message.timeout.ms` stalls the partition it was meant to rescue. On expiry the write is reported as unconfirmed and the affected offsets stall. |
 | `on_send_failure` | `'drop'` \| `'stall'` | `'drop'` | Strategy when the DLQ write itself fails. `drop`: log + count the loss, commit the offset, keep the pipeline moving. `stall`: leave the offset uncommitted and pause the partition until restart — no loss, at the cost of consumer lag. See [When the DLQ itself fails](sinks.md#when-the-dlq-itself-fails). |
 
 ```yaml
 dlq:
   topic: failed-events
   brokers: kafka-prod:9092
+  flush_timeout_seconds: 30.0
   on_send_failure: drop
 ```
 

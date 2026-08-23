@@ -252,7 +252,10 @@ async def test_kafka_sink_collects_futures_when_flush_reports_remaining():
     sink._producer = producer
 
     payloads = [KafkaPayload(data=_Out(v='a')), KafkaPayload(data=_Out(v='b'))]
-    with pytest.raises(RuntimeError, match='flush incomplete'):
+    # TimeoutError, not RuntimeError: a flush that leaves messages queued is a
+    # broker problem, and the sink manager classifies TimeoutError as transient
+    # so the circuit breaker sees it.
+    with pytest.raises(TimeoutError, match='flush timed out'):
         await sink.deliver(payloads)
     # The finally block gathered the outstanding futures — nothing left
     # unretrieved, and the call completed without hanging.

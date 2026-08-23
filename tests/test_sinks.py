@@ -269,8 +269,14 @@ def test_kafka_sink_topic_property(kafka_sink_config):
 
 
 @patch('drakkar.sinks.kafka.AIOProducer')
-async def test_kafka_sink_deliver_flush_incomplete_raises(mock_cls, kafka_sink_config):
-    """Delivery fails if flush() reports undelivered messages."""
+async def test_kafka_sink_deliver_flush_incomplete_raises_timeout(mock_cls, kafka_sink_config):
+    """A flush that leaves messages queued is a transient failure.
+
+    ``TimeoutError``, not ``RuntimeError``: the sink manager classifies it
+    as transient, so the circuit breaker sees the broker outage and an
+    idempotent sink still gets its fast-retry. A ``RuntimeError`` would look
+    like a payload bug and skip both.
+    """
     from drakkar.sinks.kafka import KafkaSink
 
     mock_producer = AsyncMock()
@@ -281,8 +287,31 @@ async def test_kafka_sink_deliver_flush_incomplete_raises(mock_cls, kafka_sink_c
     sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
     await sink.connect()
 
-    with pytest.raises(RuntimeError, match=r'flush incomplete.*3 message'):
+    with pytest.raises(TimeoutError, match=r'flush timed out.*3 message'):
         await sink.deliver([KafkaPayload(data=SampleOutput())])
+
+
+@patch('drakkar.sinks.kafka.AIOProducer')
+async def test_kafka_sink_flush_is_bounded_by_the_configured_timeout(mock_cls, kafka_sink_config):
+    """``flush()`` with no argument is librdkafka's ``flush(-1)``: it blocks
+    until ``message.timeout.ms`` (300s by default) against a wedged broker,
+    holding one of the producer's executor threads while it waits. The outer
+    delivery timeout cannot rescue that — cancelling the await does not stop
+    the thread — so the bound has to reach librdkafka itself.
+    """
+    from drakkar.sinks.kafka import KafkaSink
+
+    mock_producer = AsyncMock()
+    mock_producer.produce.side_effect = lambda **kw: _make_future()
+    mock_producer.flush.return_value = 0
+    mock_cls.return_value = mock_producer
+
+    cfg = kafka_sink_config.model_copy(update={'flush_timeout_seconds': 12.5})
+    sink = KafkaSink('results', cfg, brokers_fallback='localhost:9092')
+    await sink.connect()
+    await sink.deliver([KafkaPayload(data=SampleOutput())])
+
+    mock_producer.flush.assert_called_once_with(12.5)
 
 
 @patch('drakkar.sinks.kafka.AIOProducer')
@@ -3777,3 +3806,21 @@ async def test_mongo_sink_reraises_a_bulk_error_carrying_no_write_errors(mongo_s
                 MongoPayload(collection='results', data=SampleOutput(request_id='r2')),
             ]
         )
+
+
+async def test_dlq_sink_flush_is_bounded_by_the_configured_timeout():
+    """Same reasoning as the Kafka sink, and it matters more here: a DLQ
+    write that blocks for ``message.timeout.ms`` stalls the partition it was
+    meant to rescue.
+    """
+    from drakkar.sinks.dlq import DLQSink
+
+    mock_producer = AsyncMock()
+    mock_producer.produce.side_effect = lambda **kw: _make_future()
+    mock_producer.flush.return_value = 0
+    sink = DLQSink(topic='test-dlq', brokers='localhost:9092', flush_timeout_seconds=7.5)
+    sink._producer = mock_producer
+
+    assert await sink.send(_sample_delivery_error(), partition_id=0) is True
+
+    mock_producer.flush.assert_called_once_with(7.5)

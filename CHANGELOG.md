@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `sinks.kafka.<name>.flush_timeout_seconds` and `dlq.flush_timeout_seconds`
+  (both default 30.0): a bound on the producer flush that ends every Kafka
+  delivery and every DLQ write. Unbounded, `flush()` is librdkafka's
+  `flush(-1)` — against a wedged broker it blocks until `message.timeout.ms`
+  (300 s by default), and it holds one of the producer's executor threads
+  while it waits, so a handful of stuck deliveries starve every other
+  delivery on the same producer. `sinks.delivery_timeout_seconds` cannot
+  rescue that: cancelling the await does not stop the thread. A flush that
+  leaves messages queued now raises `TimeoutError` — classified transient, so
+  the circuit breaker sees the outage — instead of `RuntimeError`.
+
 - `sinks.delivery_timeout_seconds` (default 30.0): a budget for one sink
   delivery — framework-internal transient retries included — and for one
   sink close during shutdown. Sinks whose driver accepts one also apply it
