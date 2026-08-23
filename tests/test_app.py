@@ -408,6 +408,57 @@ async def test_app_no_sinks_raises(test_config_no_sinks):
         await app._lifecycle._async_run()
 
 
+async def test_async_run_startup_failure_tears_down_started_subsystems(test_config, monkeypatch):
+    """A startup step that raises after the recorder opened must still run ``_shutdown``.
+
+    The recorder and the cache own aiosqlite connections whose worker
+    threads are non-daemon: leaving them open makes interpreter exit hang
+    on ``threading._shutdown`` instead of crashing the worker.
+    """
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    lifecycle = app._lifecycle
+
+    recorder = AsyncMock()
+    cache_engine = AsyncMock()
+    app._recorder = recorder
+    app._cache_engine = cache_engine
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    for name in (
+        '_setup_watchdog',
+        '_report_kafka_security',
+        '_build_executor_pool',
+        '_start_observability',
+        '_start_ui_and_recorder',
+        '_start_cache',
+        '_connect_sinks',
+        '_start_webapp',
+    ):
+        monkeypatch.setattr(lifecycle, name, _noop)
+    for name in (
+        '_start_runtime_health',
+        '_start_throughput',
+        '_wire_annotator',
+        '_wire_io_executor',
+        '_wire_offload_pool',
+    ):
+        monkeypatch.setattr(lifecycle, name, lambda *args, **kwargs: None)
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError('broker unreachable')
+
+    monkeypatch.setattr(lifecycle, '_start_consumer', _boom)
+
+    with pytest.raises(RuntimeError, match='broker unreachable'):
+        await lifecycle._async_run()
+
+    recorder.stop.assert_awaited_once()
+    cache_engine.stop.assert_awaited_once()
+    assert app.is_ready is False
+
+
 # --- Shutdown ---
 
 

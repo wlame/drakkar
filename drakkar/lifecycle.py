@@ -113,9 +113,10 @@ class AppLifecycle:
     async def _async_run(self) -> None:
         """Full async startup → poll-loop → shutdown sequence.
 
-        Mirrors the previous ``DrakkarApp._async_run`` byte-for-byte,
-        with each ``self.X`` rewritten to ``self._app.X`` so the app
-        remains the single source of truth for instance state.
+        Every ``self.X`` is written ``self._app.X`` so the app remains the
+        single source of truth for instance state. Startup and the poll
+        loop are both guarded: whichever one fails, ``_shutdown`` runs
+        before the exception leaves this coroutine.
         """
         app = self._app
 
@@ -125,71 +126,96 @@ class AppLifecycle:
 
         log = logger.bind(worker_id=app._worker_id)
 
-        await self._setup_watchdog()
+        # Every startup step below allocates something that must be released:
+        # the recorder and the cache open aiosqlite connections whose worker
+        # threads are non-daemon, so an exception escaping startup would leave
+        # the interpreter blocked in ``threading._shutdown`` — the process stays
+        # alive with liveness green, the atexit last-breath flush never runs, and
+        # no orchestrator restarts it. Any startup failure therefore runs the
+        # same ``_shutdown`` the poll loop uses, then re-raises so the worker
+        # exits non-zero. ``_shutdown`` is written to tolerate partial state.
+        try:
+            await self._setup_watchdog()
 
-        bind_contextvars(hook='on_startup')
-        app._config = await app._handler.on_startup(app._config)
-        unbind_contextvars('hook')
+            bind_contextvars(hook='on_startup')
+            app._config = await app._handler.on_startup(app._config)
+            unbind_contextvars('hook')
 
-        app._config_summary = app._config.config_summary(
-            worker_id=app._worker_id,
-            cluster_name=app._cluster_name,
-        )
-        await log.ainfo('drakkar_starting', category='lifecycle', config=app._config_summary)
-        await self._report_kafka_security()
-
-        # validate at least one sink is configured
-        if app._config.sinks.is_empty:
-            raise SinkNotConfiguredError('No sinks configured. Add at least one sink to the sinks: section in config.')
-
-        await self._build_executor_pool()
-        await self._start_observability()
-        await self._start_ui_and_recorder()
-        self._start_runtime_health()
-        self._start_throughput()
-        self._wire_annotator()
-        self._wire_io_executor()
-        self._wire_offload_pool()
-        await self._start_cache()
-        await self._connect_sinks()
-        await self._start_webapp()
-        await self._start_consumer()
-
-        # Stagger startup: sleep until the next wall-clock alignment
-        # boundary so a fleet of workers in a rolling deploy converges
-        # on a single Kafka consumer-group rebalance instead of N. See
-        # KafkaConfig.startup_align_* for tuning and rationale.
-        if app._config.kafka.startup_align_enabled:
-            min_wait = app._config.kafka.startup_min_wait_seconds
-            interval = app._config.kafka.startup_align_interval_seconds
-            target_wall = math.ceil((time.time() + min_wait) / interval) * interval
-            await log.ainfo(
-                'startup_align_waiting',
-                category='lifecycle',
-                min_wait_seconds=min_wait,
-                align_interval_seconds=interval,
-                target_wall_unix=target_wall,
-                target_wall_iso=format_rfc3339_micro(datetime.fromtimestamp(target_wall, tz=UTC)),
+            app._config_summary = app._config.config_summary(
+                worker_id=app._worker_id,
+                cluster_name=app._cluster_name,
             )
-            slept = await wait_for_aligned_startup(min_wait, interval)
-            await log.ainfo('startup_align_done', category='lifecycle', slept_seconds=round(slept, 3))
+            await log.ainfo('drakkar_starting', category='lifecycle', config=app._config_summary)
+            await self._report_kafka_security()
 
-        assert app._consumer is not None
-        await app._consumer.subscribe()
+            # validate at least one sink is configured
+            if app._config.sinks.is_empty:
+                raise SinkNotConfiguredError(
+                    'No sinks configured. Add at least one sink to the sinks: section in config.'
+                )
 
-        # Claim the watchdog slot for this run NOW — only once we're
-        # committed to running. See ``_claim_watchdog_slot`` for the
-        # OSError-tolerance contract; deferring the call to this point
-        # ensures a startup-stage exception (above) leaves any previous
-        # watchdog state untouched and never falsely flags the next
-        # startup as OOM-killed.
-        await self._claim_watchdog_slot()
+            await self._build_executor_pool()
+            await self._start_observability()
+            await self._start_ui_and_recorder()
+            self._start_runtime_health()
+            self._start_throughput()
+            self._wire_annotator()
+            self._wire_io_executor()
+            self._wire_offload_pool()
+            await self._start_cache()
+            await self._connect_sinks()
+            await self._start_webapp()
+            await self._start_consumer()
 
-        app._running = True
+            # Stagger startup: sleep until the next wall-clock alignment
+            # boundary so a fleet of workers in a rolling deploy converges
+            # on a single Kafka consumer-group rebalance instead of N. See
+            # KafkaConfig.startup_align_* for tuning and rationale.
+            if app._config.kafka.startup_align_enabled:
+                min_wait = app._config.kafka.startup_min_wait_seconds
+                interval = app._config.kafka.startup_align_interval_seconds
+                target_wall = math.ceil((time.time() + min_wait) / interval) * interval
+                await log.ainfo(
+                    'startup_align_waiting',
+                    category='lifecycle',
+                    min_wait_seconds=min_wait,
+                    align_interval_seconds=interval,
+                    target_wall_unix=target_wall,
+                    target_wall_iso=format_rfc3339_micro(datetime.fromtimestamp(target_wall, tz=UTC)),
+                )
+                slept = await wait_for_aligned_startup(min_wait, interval)
+                await log.ainfo('startup_align_done', category='lifecycle', slept_seconds=round(slept, 3))
 
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, self._handle_signal)
+            assert app._consumer is not None
+            await app._consumer.subscribe()
+
+            # Claim the watchdog slot for this run NOW — only once we're
+            # committed to running. See ``_claim_watchdog_slot`` for the
+            # OSError-tolerance contract; deferring the call to this point
+            # ensures a startup-stage exception (above) leaves any previous
+            # watchdog state untouched and never falsely flags the next
+            # startup as OOM-killed.
+            await self._claim_watchdog_slot()
+
+            app._running = True
+
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, self._handle_signal)
+        except BaseException:
+            # A teardown failure must never mask the startup failure that
+            # caused it — the latter is what the operator has to fix.
+            try:
+                await self._shutdown()
+            except Exception as teardown_exc:
+                await log.aerror(
+                    'startup_teardown_failed',
+                    category='lifecycle',
+                    error=str(teardown_exc),
+                    exc_type=type(teardown_exc).__name__,
+                    exc_info=True,
+                )
+            raise
 
         try:
             await self._poll_loop()

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A worker whose startup failed after the flight recorder or the cache had
+  opened its SQLite connection stayed alive forever instead of exiting.
+  The startup sequence now runs the same shutdown path as the poll loop,
+  so an unreachable broker or sink makes the process exit non-zero and the
+  orchestrator restart it.
+
 ### Removed
 
 - The `net_io` WebSocket heartbeat: the worker no longer samples network
