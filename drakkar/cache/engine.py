@@ -35,7 +35,7 @@ from drakkar.cache.sql import (
     PEER_CLUSTER_CACHE_TTL_SECONDS,
     SCHEMA_CACHE_ENTRIES,
 )
-from drakkar.dbfiles import DB_DIR_MODE, secure_db_file
+from drakkar.dbfiles import DB_DIR_MODE, WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 
 # Imported at module scope for the same monkeypatch reason — tests replace
 # this helper with a fake that yields canned ``(worker_name, target_path)``
@@ -363,6 +363,9 @@ class CacheEngine:
         # and peer-opened ephemeral connections will see WAL files
         # already on disk.
         await self._writer_db.execute('PRAGMA journal_mode = WAL')
+        # One fsync per checkpoint instead of one per commit — see
+        # WAL_SYNCHRONOUS_PRAGMA for the durability trade.
+        await self._writer_db.execute(WAL_SYNCHRONOUS_PRAGMA)
         # Explicit busy_timeout mirroring the Go engine's writer DSN, so
         # lock contention on a shared cache DB behaves identically.
         await self._writer_db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')

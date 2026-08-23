@@ -267,8 +267,33 @@ Both backends follow the same connection discipline:
   The cache's own connections wait longer so a checkpoint can't fail a
   local flush; **peer** reads time out fast so a lock-wedged peer stays
   inside the per-peer failure isolation.
-- No explicit WAL checkpoints, no `VACUUM`, driver-default `synchronous`
-  and `foreign_keys` — on both backends.
+- **`synchronous=NORMAL` on every WAL writer**, in both backends — the
+  recorder (including the connection rotation opens), the handler cache and
+  the `.dbstats` cache.
+
+  SQLite's default is `FULL`, which fsyncs the WAL on **every commit**.
+  These stores commit often — the recorder on its flush interval, on each
+  state sync and on any UI poll that forces a flush; the cache on its own
+  flush interval — and a `db_dir` is routinely a network mount, where one
+  fsync costs tens of milliseconds and reads on the same connection queue
+  behind it. `NORMAL` is the level SQLite's own documentation recommends
+  under WAL: the WAL is synced at checkpoints instead.
+
+  What you give up: `NORMAL` remains **fully safe across an application
+  crash** — the process being killed, an OOM, a failed deploy — because the
+  WAL is still written and replayed on the next open. It can lose the most
+  recently committed transactions only when the **host** dies mid-write: a
+  power cut or a kernel panic. For a flight recorder, a derived stats cache
+  and a last-writer-wins cache, none of which is a system of record, that is
+  the correct trade. If your deployment needs stricter durability from these
+  files, they are the wrong place to keep that data.
+
+  Note that `synchronous` is per-**connection** and, unlike `journal_mode`,
+  is not stored in the database header. Python sets it on each writer
+  connection; Go sets it as a DSN pragma, because `database/sql` may reopen
+  a pooled connection and it would otherwise revert to the default.
+- No explicit WAL checkpoints, no `VACUUM`, driver-default `foreign_keys` —
+  on both backends.
 
 ## Encodings
 

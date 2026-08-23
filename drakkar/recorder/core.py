@@ -54,7 +54,7 @@ import structlog
 from pydantic import BaseModel
 
 from drakkar.config import UIConfig
-from drakkar.dbfiles import secure_db_file
+from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.hostinfo import (
     detect_network_fs,
     read_cpu_throttle,
@@ -623,6 +623,9 @@ class EventRecorder:
                 # Applied per-connection (SQLite stores the mode in the DB
                 # header; the reader picks it up automatically on open).
                 await self._db.execute('PRAGMA journal_mode=WAL')
+                # One fsync per checkpoint instead of one per commit — see
+                # WAL_SYNCHRONOUS_PRAGMA for the durability trade.
+                await self._db.execute(WAL_SYNCHRONOUS_PRAGMA)
                 # Explicit busy_timeout so shared-db_dir contention behaves
                 # identically to the Go backend (which has no driver default).
                 await self._db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
@@ -3045,6 +3048,9 @@ class EventRecorder:
         new_db = await aiosqlite.connect(new_path)
         try:
             await new_db.execute('PRAGMA journal_mode=WAL')
+            # Re-applied per connection: unlike journal_mode, synchronous is
+            # not stored in the database header.
+            await new_db.execute(WAL_SYNCHRONOUS_PRAGMA)
             await new_db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
             await self._create_schema(new_db)
         except Exception:

@@ -59,7 +59,7 @@ from dataclasses import dataclass, field, replace
 
 import structlog
 
-from drakkar.dbfiles import secure_db_file
+from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
 from drakkar.merge import DbStats, _dict_factory, _table_exists, scan_db
 
 logger = structlog.get_logger()
@@ -175,6 +175,7 @@ class DbStatsCache:
         db = sqlite3.connect(self._path, timeout=BUSY_TIMEOUT_MS / 1000)
         try:
             db.execute('PRAGMA journal_mode=WAL')
+            db.execute(WAL_SYNCHRONOUS_PRAGMA)
             db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
             db.executescript(SCHEMA_DBSTATS)
         except Exception:

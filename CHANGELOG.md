@@ -34,6 +34,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`PRAGMA synchronous=NORMAL` on every WAL writer** — the recorder
+  (rotation included), the handler cache and the `.dbstats` cache. SQLite's
+  default `FULL` fsyncs the write-ahead log on every commit, and these
+  stores commit often: the recorder on its flush interval, on each state
+  sync and on any UI poll that forces a flush. On a network-mounted
+  `db_dir` each fsync costs tens of milliseconds and reads queue behind it.
+  `NORMAL` syncs at checkpoints instead. It stays fully safe across an
+  application crash and can lose only the most recent transactions if the
+  **host** loses power — the right trade for a flight recorder and two
+  caches, none of which is a system of record. Documented in
+  `docs/local-databases.md`; matched in the Go backend, which sets it as a
+  DSN pragma so pooled reconnects keep it.
+
 - The databases-page stats warmer refreshes only the worker's **own** live
   database. Every worker sharing a `db_dir` used to delta-scan every other
   worker's live database on each sweep (default: once a minute), and those

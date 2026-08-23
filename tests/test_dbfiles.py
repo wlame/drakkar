@@ -232,3 +232,74 @@ async def test_cache_leaves_an_operator_owned_db_dir_alone(tmp_path, pre_existin
         assert_db_files_owner_only(engine._db_path)
     finally:
         await engine.stop()
+
+
+# ---------------------------------------------------------------------------
+# WAL durability level
+# ---------------------------------------------------------------------------
+
+# SQLite's PRAGMA synchronous values.
+_SYNCHRONOUS_NORMAL = 1
+
+
+async def test_recorder_writer_uses_normal_synchronous(tmp_path):
+    """WAL writers run at synchronous=NORMAL, not SQLite's default FULL.
+
+    FULL fsyncs the WAL on every commit. The recorder commits on its flush
+    interval, on every state sync, and on every UI poll that forces a flush;
+    on a network-mounted ``db_dir`` each fsync is tens of milliseconds on the
+    aiosqlite thread, and reads queue behind it. NORMAL is the standard WAL
+    choice: still safe across an application crash, and it can only lose the
+    most recent transactions on a host power loss — acceptable for a flight
+    recorder. See docs/local-databases.md.
+    """
+    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME)
+    await rec.start()
+    try:
+        async with rec._db.execute('PRAGMA synchronous') as cur:
+            assert (await cur.fetchone())[0] == _SYNCHRONOUS_NORMAL
+    finally:
+        await rec.stop()
+
+
+async def test_rotated_recorder_writer_uses_normal_synchronous(tmp_path):
+    """``synchronous`` is per-connection and not stored in the DB header, so
+    rotation has to set it again on the new writer."""
+    rec = EventRecorder(make_recorder_config(tmp_path), worker_name=WORKER_NAME)
+    await rec.start()
+    try:
+        await rec._rotate()
+        async with rec._db.execute('PRAGMA synchronous') as cur:
+            assert (await cur.fetchone())[0] == _SYNCHRONOUS_NORMAL
+    finally:
+        await rec.stop()
+
+
+async def test_cache_writer_uses_normal_synchronous(tmp_path):
+    """Same reasoning for the handler cache's WAL writer."""
+    db_dir = tmp_path / 'cache'
+    db_dir.mkdir()
+    engine = CacheEngine(
+        config=CacheConfig(enabled=True, db_dir=str(db_dir)),
+        ui_config=make_recorder_config(tmp_path),
+        worker_id='w1',
+        cluster_name='',
+        recorder=None,
+    )
+    await engine.start()
+    try:
+        async with engine._writer_db.execute('PRAGMA synchronous') as cur:
+            assert (await cur.fetchone())[0] == _SYNCHRONOUS_NORMAL
+    finally:
+        await engine.stop()
+
+
+def test_dbstats_cache_uses_normal_synchronous(tmp_path):
+    """The stats cache holds only derived data — stronger durability is waste."""
+    from drakkar.dbstats import DbStatsCache
+
+    db = DbStatsCache(str(tmp_path))._connect()
+    try:
+        assert db.execute('PRAGMA synchronous').fetchone()[0] == _SYNCHRONOUS_NORMAL
+    finally:
+        db.close()

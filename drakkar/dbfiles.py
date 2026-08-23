@@ -30,6 +30,30 @@ DB_DIR_MODE = 0o700
 _WAL_SUFFIXES = ('-wal', '-shm')
 
 
+# Durability level for every WAL writer this framework opens.
+#
+# SQLite defaults to ``synchronous=FULL``, which fsyncs the WAL on every
+# single commit. These stores commit often — the recorder on its flush
+# interval, on each state sync and on any UI poll that forces a flush; the
+# handler cache on its own flush interval — and a ``db_dir`` is routinely a
+# network mount, where one fsync is tens of milliseconds during which reads
+# on the same connection queue behind it.
+#
+# NORMAL is the standard choice for WAL and the one SQLite's own
+# documentation recommends there: the WAL is synced at checkpoints rather
+# than per commit. It remains fully safe across an application crash — the
+# process dying, an OOM kill, a failed deploy — and gives up only the last
+# transactions in the event of a host power loss or kernel panic. For a
+# flight recorder, a derived stats cache and a last-writer-wins cache, that
+# is the right trade; none of them is a system of record.
+#
+# ``synchronous`` is per-connection and, unlike ``journal_mode``, is NOT
+# stored in the database header — so every writer connection must set it,
+# including the one rotation opens. The Go backend applies the same level as
+# a DSN pragma (its pooled connections would otherwise each start at FULL).
+WAL_SYNCHRONOUS_PRAGMA = 'PRAGMA synchronous=NORMAL'
+
+
 def secure_db_file(db_path: str) -> None:
     """Create ``db_path`` owner-only, or tighten it and its WAL sidecars.
 
