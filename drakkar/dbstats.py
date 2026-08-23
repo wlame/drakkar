@@ -420,16 +420,31 @@ def _resolve_row(
     budget: list[int],
     *,
     display_name: str | None = None,
+    may_read: bool = True,
 ) -> DbRow:
     """Produce one page row: cached / delta-scanned / fully-scanned / pending.
 
     ``budget`` is a single-element mutable list so the caller's inline
     full-scan allowance is shared across recorder and cache rows alike.
     A ``budget[0] < 0`` means unlimited (the warmer's sweep).
+
+    ``may_read=False`` forbids opening the file at all: the row comes back
+    from the cache as it stands, or pending when nothing is cached. The
+    warmer uses it for other workers' live databases — see ``collect``.
     """
     entry = cached.get(path)
     if entry is not None and entry.mtime_ns == mtime_ns and entry.size_bytes == size:
         return _finish(entry.stats, display_name)
+
+    if not may_read:
+        # Stale but honest, and — crucially — still a row, so the caller's
+        # purge pass keeps this path's cached statistics.
+        if entry is not None:
+            return _finish(entry.stats, display_name)
+        return DbRow(
+            stats=DbStats(path=path, filename=display_name or os.path.basename(path), size_bytes=size, kind='unknown'),
+            stats_pending=True,
+        )
 
     if entry is not None:
         # Changed file with a usable cursor — the live DB path. Delta cost
@@ -468,12 +483,28 @@ def _finish(stats: DbStats, display_name: str | None) -> DbRow:
     return DbRow(stats=stats)
 
 
-def collect(db_dir: str, cache: DbStatsCache, *, inline_scan_limit: int) -> list[DbRow]:
+def collect(
+    db_dir: str,
+    cache: DbStatsCache,
+    *,
+    inline_scan_limit: int,
+    own_live_db: str = '',
+    skip_peer_live: bool = False,
+) -> list[DbRow]:
     """Build the databases page: live listing + cached/derived statistics.
 
     ``inline_scan_limit`` caps how many cold files a single call may fully
     scan; ``-1`` means unlimited (the warmer). Rows beyond the cap come
     back with ``stats_pending=True``.
+
+    ``skip_peer_live`` leaves every live database except ``own_live_db``
+    unread, serving whatever the shared cache holds. This is for the
+    background warmer only: a live file changes constantly, so every worker
+    sharing a ``db_dir`` was re-reading every other worker's growing DB on
+    every sweep — N-squared reads across the fleet, over a directory that is
+    typically network-mounted, for a page nobody may have open. Each worker
+    warms its own file into the shared cache instead. Request-path callers
+    leave it off and see fresh numbers for every row.
     """
     # Before touching the cache: with no directory there is nothing to
     # list AND nothing to cache — opening the cache here would create a
@@ -487,8 +518,10 @@ def collect(db_dir: str, cache: DbStatsCache, *, inline_scan_limit: int) -> list
 
     live_workers = set(listing.live_targets.values())
 
+    own = os.path.realpath(own_live_db) if own_live_db else ''
     for path, mtime_ns, size in listing.files:
-        row = _resolve_row(path, mtime_ns, size, cached, cache, budget)
+        peers_live = skip_peer_live and path in listing.live_targets and path != own
+        row = _resolve_row(path, mtime_ns, size, cached, cache, budget, may_read=not peers_live)
         row.live_for = listing.live_targets.get(path, '')
         rows.append(row)
 
@@ -530,14 +563,25 @@ def scan_and_store(path: str, cache: DbStatsCache) -> None:
     cache.store(stats, mtime_ns=st.st_mtime_ns, size_bytes=st.st_size)
 
 
-def warm_directory(db_dir: str, cache: DbStatsCache) -> tuple[int, int]:
+def warm_directory(db_dir: str, cache: DbStatsCache, *, own_live_db: str = '') -> tuple[int, int]:
     """The warmer sweep: scan everything missing, purge everything gone.
 
     Returns ``(rows_now_cached, purged)`` for the caller's logging. Uses
     an unlimited budget — this runs on a background thread on a periodic
     schedule, never on a request path.
+
+    ``own_live_db`` is the caller's own live database path. Given one, the
+    sweep re-reads only that live file and leaves other workers' live
+    databases to their own warmers (see ``collect``). Without one — the
+    merge CLI, tests — every file is refreshed as before.
     """
-    rows = collect(db_dir, cache, inline_scan_limit=-1)
+    rows = collect(
+        db_dir,
+        cache,
+        inline_scan_limit=-1,
+        own_live_db=own_live_db,
+        skip_peer_live=bool(own_live_db),
+    )
     listing_paths = {row.stats.path for row in rows}
     # The cache file must survive its own purge pass; it is dot-prefixed
     # so it never appears in rows.

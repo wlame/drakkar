@@ -34,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The databases-page stats warmer refreshes only the worker's **own** live
+  database. Every worker sharing a `db_dir` used to delta-scan every other
+  worker's live database on each sweep (default: once a minute), and those
+  rows carry stdout/stderr, so each scan touches many pages. Across a fleet
+  that is N x N reads a minute over a directory that is usually
+  network-mounted, for a page nobody may have open. The `.dbstats` cache is
+  shared, so each worker warming its own file keeps the whole page warm. A
+  peer's row can lag by up to that peer's warm interval in the background;
+  opening the Databases page still refreshes every row on demand.
+
 - Sizing a task's stdin and stdout no longer encodes them. Both are measured
   in bytes once per task on the event loop, and both did it by building a
   full UTF-8 copy purely to take its length — at the throughput the executor

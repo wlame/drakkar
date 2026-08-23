@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import functools
 import glob
 import json
 import os
@@ -1020,12 +1021,29 @@ class EventRecorder:
         a short interval is fine. The first sweep runs immediately, so a
         worker booting over a pre-existing directory starts warming
         before anyone opens the page.
+
+        The sweep re-reads only THIS worker's live database. Live files
+        change constantly, so a sweep that refreshed every live file made
+        each worker read every co-located worker's growing DB once a
+        minute — N-squared reads across the fleet, over a directory that
+        is typically network-mounted, for a page nobody may have open.
+        Those rows carry stdout/stderr, so each scan touches many pages.
+        The stats cache is shared, so every worker warming its own file is
+        enough to keep the whole page warm; a page request still refreshes
+        every row on demand.
         """
         from drakkar.dbstats import warm_directory
 
         while self._running:
             try:
-                _scanned, purged = await asyncio.to_thread(warm_directory, self._store.db_dir, self._dbstats)
+                _scanned, purged = await asyncio.to_thread(
+                    functools.partial(
+                        warm_directory,
+                        self._store.db_dir,
+                        self._dbstats,
+                        own_live_db=self._db_path,
+                    )
+                )
                 if purged:
                     await logger.ainfo(
                         'recorder_dbstats_purged',

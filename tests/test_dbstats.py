@@ -294,3 +294,116 @@ class TestCacheResilience:
         monkeypatch.setattr(dbstats_mod, 'scan_db', lambda path: (_ for _ in ()).throw(AssertionError('scan')))
         rows = collect(str(tmp_path), cache, inline_scan_limit=-1)
         assert rows[0].stats.event_count == 1
+
+
+class TestWarmerLeavesPeerLiveDatabasesAlone:
+    """The warmer refreshes only the worker's OWN live database.
+
+    Every worker sharing a ``db_dir`` used to delta-scan every other
+    worker's live DB on each sweep. Those rows carry stdout/stderr, so a
+    sweep touches many pages, and the cost is N-squared across the fleet
+    for a page nobody may open — over a shared or NFS-mounted directory
+    that is a lot of network reads per minute. Each worker now contributes
+    its own file's statistics to the shared cache; peers read them from
+    there.
+    """
+
+    @staticmethod
+    def _live_pair(tmp_path, worker: str, events: int) -> str:
+        """A recorder DB plus the ``<worker>-live.db`` symlink marking it in use."""
+        target = str(tmp_path / f'{worker}-2026-08-23__10_00_00.db')
+        make_recorder_db(target, worker=worker, events=[('consumed', float(i + 1)) for i in range(events)])
+        os.symlink(target, str(tmp_path / f'{worker}-live.db'))
+        return target
+
+    def _grow(self, path: str, events: int) -> None:
+        db = sqlite3.connect(path)
+        add_events(db, [('consumed', 99.0) for _ in range(events)])
+        db.commit()
+        db.close()
+
+    def test_sweep_delta_scans_only_the_own_live_db(self, tmp_path, monkeypatch):
+        import drakkar.dbstats as dbstats_mod
+
+        cache = DbStatsCache(str(tmp_path))
+        mine = self._live_pair(tmp_path, 'me', 2)
+        peer = self._live_pair(tmp_path, 'peer', 2)
+        warm_directory(str(tmp_path), cache)  # no own db yet: full sweep caches both
+
+        # Both files grow, so both would otherwise be re-read next sweep.
+        self._grow(mine, 3)
+        self._grow(peer, 3)
+
+        touched: list[str] = []
+        real_delta = dbstats_mod._delta_scan
+        monkeypatch.setattr(
+            dbstats_mod,
+            '_delta_scan',
+            lambda path, cached: (touched.append(path), real_delta(path, cached))[1],
+        )
+        monkeypatch.setattr(
+            dbstats_mod, 'scan_db', lambda path: (_ for _ in ()).throw(AssertionError(f'scanned {path}'))
+        )
+
+        warm_directory(str(tmp_path), cache, own_live_db=mine)
+        assert touched == [mine]
+
+    def test_peer_rows_survive_the_purge_pass(self, tmp_path):
+        """A skipped peer must still count as present, or its cached stats
+        would be purged and the next page load would full-scan it."""
+        cache = DbStatsCache(str(tmp_path))
+        mine = self._live_pair(tmp_path, 'me', 1)
+        peer = self._live_pair(tmp_path, 'peer', 1)
+        warm_directory(str(tmp_path), cache)
+
+        self._grow(peer, 5)
+        cached_count, purged = warm_directory(str(tmp_path), cache, own_live_db=mine)
+        assert purged == 0
+        assert cached_count == 2
+        assert peer in cache.load_all()
+
+    def test_page_load_still_refreshes_peer_rows_on_demand(self, tmp_path):
+        """Only the background sweep skips peers; a viewer gets fresh counts."""
+        cache = DbStatsCache(str(tmp_path))
+        self._live_pair(tmp_path, 'me', 1)
+        peer = self._live_pair(tmp_path, 'peer', 1)
+        warm_directory(str(tmp_path), cache)
+
+        self._grow(peer, 4)
+        rows = collect(str(tmp_path), cache, inline_scan_limit=-1)
+        peer_row = next(r for r in rows if r.stats.path == peer)
+        assert peer_row.stats.event_count == 5
+
+    def test_without_an_own_db_the_sweep_refreshes_everything(self, tmp_path):
+        """Default behaviour is unchanged — the merge CLI and tests rely on it."""
+        cache = DbStatsCache(str(tmp_path))
+        peer = self._live_pair(tmp_path, 'peer', 1)
+        warm_directory(str(tmp_path), cache)
+
+        self._grow(peer, 4)
+        warm_directory(str(tmp_path), cache)
+        assert cache.load_all()[peer].stats.event_count == 5
+
+    def test_an_uncached_peer_live_db_is_left_pending_not_scanned(self, tmp_path, monkeypatch):
+        """A peer this worker has never seen waits for that peer's own warmer.
+
+        The row still appears (the directory is the source of truth), so the
+        purge pass keeps it and a page load fills it in.
+        """
+        import drakkar.dbstats as dbstats_mod
+
+        cache = DbStatsCache(str(tmp_path))
+        mine = self._live_pair(tmp_path, 'me', 1)
+        peer = self._live_pair(tmp_path, 'peer', 3)
+
+        monkeypatch.setattr(
+            dbstats_mod,
+            'scan_db',
+            lambda path: (
+                (_ for _ in ()).throw(AssertionError(f'scanned peer {path}')) if path == peer else scan_db(path)
+            ),
+        )
+        cached_count, purged = warm_directory(str(tmp_path), cache, own_live_db=mine)
+        assert cached_count == 2
+        assert purged == 0
+        assert peer not in cache.load_all()

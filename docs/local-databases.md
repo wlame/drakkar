@@ -526,6 +526,15 @@ backends; a mixed fleet shares the file):
 - **Live DBs are delta-scanned**: the events table is append-only with a
   monotonic `id`, so refreshing the file a worker is writing costs only
   its new rows, not a full `GROUP BY`.
+- **Each worker warms only its own live DB.** A live file changes
+  constantly, so a sweep that refreshed every live file made each worker
+  re-read every co-located worker's growing database once a minute —
+  N&nbsp;&times;&nbsp;N reads across the fleet, over a directory that is
+  usually network-mounted, for a page nobody may have open. Because the
+  cache is shared, every worker refreshing its own file keeps the whole
+  page warm. A peer's row can therefore lag by up to that peer's warm
+  interval in the background; **opening the page still refreshes every
+  row on demand**, so what you look at is current.
 - **Disposable and self-healing**: delete `.dbstats.db` and everything
   rescans; a corrupt file is discarded and rebuilt automatically. Writes
   are idempotent, so concurrent workers share it with WAL + busy-timeout
