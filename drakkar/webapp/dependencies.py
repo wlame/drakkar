@@ -150,7 +150,18 @@ def _extract_bearer_token(request: Request) -> tuple[str, bool]:
         # Header present but malformed or non-Bearer — caller must
         # 401 even if there is an anonymous slot configured.
         return '', True
-    return parts[1].strip(), True
+    token = parts[1].strip()
+    if not token.isascii():
+        # ``hmac.compare_digest`` raises TypeError on non-ASCII ``str``
+        # operands, so without this a single strange character in the
+        # header turned an unauthenticated request into a 500 with an
+        # ERROR-level traceback and no metrics — free error amplification
+        # for anyone who can reach the ingress. Configured tokens are
+        # validated ASCII (WebClientConfig), so a non-ASCII one cannot
+        # match anything anyway; the honest answer is 401. Same guard the
+        # UI server already had.
+        return '', True
+    return token, True
 
 
 def make_authenticate(

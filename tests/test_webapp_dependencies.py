@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from drakkar.config import WebAppConfig, WebClientConfig
 from drakkar.handler import BaseDrakkarHandler
@@ -489,3 +489,67 @@ def test_post_anonymous_without_auth_admitted_under_cap():
     assert response.status_code == 200
     body = response.json()
     assert body['client'] == 'anonymous'
+
+
+def _request_with_auth(header_value: str) -> Request:
+    """A minimal ASGI Request carrying one Authorization header."""
+    return Request(
+        {
+            'type': 'http',
+            'method': 'POST',
+            'path': '/',
+            'headers': [(b'authorization', header_value.encode())],
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Non-ASCII bearer tokens
+# ---------------------------------------------------------------------------
+
+
+async def test_non_ascii_bearer_token_is_a_clean_401():
+    """``hmac.compare_digest`` raises TypeError on non-ASCII ``str`` operands.
+
+    Unguarded, that made every ``Authorization: Bearer é`` an unhandled
+    exception: HTTP 500 with a traceback at ERROR level, and the request's
+    metrics skipped. The ingress is reachable by anyone who can send a
+    request, so it was free error amplification. The UI server already had
+    this guard; the webapp did not.
+    """
+    config = WebAppConfig(clients=[WebClientConfig(name='tenant-a', token='real-token', rpm=10)])
+    authenticate = make_authenticate(config)
+
+    request = _request_with_auth('Bearer é')
+    with pytest.raises(WebappAuthError):
+        await authenticate(request)
+
+
+@pytest.mark.parametrize(
+    'header',
+    [
+        'Bearer tôken',
+        'Bearer 密码',
+        'Bearer real-tokenü',  # a valid token with one non-ASCII char appended
+    ],
+)
+async def test_non_ascii_variants_never_raise_type_error(header):
+    config = WebAppConfig(clients=[WebClientConfig(name='tenant-a', token='real-token', rpm=10)])
+    authenticate = make_authenticate(config)
+    with pytest.raises(WebappAuthError):
+        await authenticate(_request_with_auth(header))
+
+
+async def test_ascii_token_still_authenticates():
+    """The guard must not break the normal path."""
+    config = WebAppConfig(clients=[WebClientConfig(name='tenant-a', token='real-token', rpm=10)])
+    authenticate = make_authenticate(config)
+    client = await authenticate(_request_with_auth('Bearer real-token'))
+    assert client.name == 'tenant-a'
+
+
+def test_non_ascii_configured_token_is_rejected_at_config_load():
+    """A non-ASCII token in YAML would otherwise lock every client out with
+    500s at runtime — catch it where the operator can still fix it."""
+    with pytest.raises(ValidationError, match='ASCII'):
+        WebClientConfig(name='tenant-a', token='tôken', rpm=10)

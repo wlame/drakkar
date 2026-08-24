@@ -1806,6 +1806,20 @@ class WebClientConfig(BaseModel):
             raise ValueError('webapp client name must be a non-empty string')
         return v
 
+    @field_validator('token')
+    @classmethod
+    def _validate_token_is_ascii(cls, v: str) -> str:
+        """Bearer tokens are compared with ``hmac.compare_digest``, which
+        raises on non-ASCII ``str`` operands — so a non-ASCII token here
+        would lock every client out at runtime. Fail at config load, where
+        the operator can still fix it."""
+        if not v.isascii():
+            raise ValueError(
+                'webapp client token must be ASCII: bearer tokens are compared byte-wise, '
+                'and a non-ASCII token cannot be sent in an Authorization header'
+            )
+        return v
+
 
 class WebAppConfig(BaseModel):
     """Configuration for the optional synchronous-HTTP webapp pipeline.

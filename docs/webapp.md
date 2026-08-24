@@ -142,7 +142,7 @@ Each entry defines one tenant with its bearer token and rpm cap.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | `str` | required | Tenant name. Used in metric labels (`drakkar_webapp_requests_total{client=...}`), recorder rows, and the response body. Must be non-empty. |
-| `token` | `str` | `''` | Bearer token presented in the `Authorization: Bearer <token>` header. **Empty token = anonymous slot** (matches requests with no `Authorization` header). At most one client may have an empty token; non-empty tokens must be unique across clients. |
+| `token` | `str` | `''` | Bearer token presented in the `Authorization: Bearer <token>` header. **Empty token = anonymous slot** (matches requests with no `Authorization` header). At most one client may have an empty token; non-empty tokens must be unique across clients. Must be **ASCII** — tokens are compared byte-wise against the header, which cannot carry non-ASCII reliably, so a non-ASCII token is rejected at config load rather than failing every request at runtime. A request whose header carries a non-ASCII token gets a plain `401`. |
 | `rpm` | `int` | `4` | Per-client requests-per-minute cap, enforced on a 60-second sliding window. Must be > 0. |
 
 ```yaml

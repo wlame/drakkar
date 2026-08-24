@@ -34,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security: a non-ASCII bearer token no longer turns a webapp request
+  into a 500.** `hmac.compare_digest` raises `TypeError` on non-ASCII `str`
+  operands, so `Authorization: Bearer é` produced an unhandled exception —
+  HTTP 500 with an ERROR-level traceback and the request's metrics skipped
+  — for anyone who could reach the ingress. Such a token is now a plain
+  `401`, the same guard the UI server already had. A non-ASCII token in the
+  **configuration** is rejected at load with a message saying why, instead
+  of locking every client out at runtime; the Go backend, whose byte-wise
+  comparison never raised, gained the same config validation so both
+  backends accept the same YAML.
+
 - **Security: `executor.env` and every `*.client_config` are masked in
   `GET /api/v1/config-reference`.** `executor.env` is the documented way to
   hand credentials to the handler binary, and `client_config` is librdkafka
