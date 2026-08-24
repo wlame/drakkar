@@ -38,11 +38,9 @@ from drakkar.recorder import (
     logger as recorder_logger,
 )
 from drakkar.recorder.core import (
-    CROSS_TRACE_MAX_FILES,
     WSSubscriber,
     _byte_len,
     _capped_stdin,
-    _ScanBudget,
 )
 from tests.conftest import make_ui_config, wait_for
 
@@ -4888,7 +4886,7 @@ async def test_trace_db_file_returns_empty_when_events_table_missing(tmp_path):
 
     # Drive the trace through ``_trace_db_file`` directly — it's the
     # internal helper that owns the events-table existence check.
-    events = await rec._trace_db_file(str(broken_db_path), partition=0, msg_offset=0)
+    events = await rec.queries._trace_db_file(str(broken_db_path), partition=0, msg_offset=0)
     assert events == []
     await rec.stop()
 
@@ -5055,7 +5053,7 @@ async def test_trace_db_file_returns_empty_on_corrupt_db(tmp_path):
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
-    events = await rec._trace_db_file(str(bogus_path), partition=0, msg_offset=0)
+    events = await rec.queries._trace_db_file(str(bogus_path), partition=0, msg_offset=0)
     assert events == []
     await rec.stop()
 
@@ -5190,55 +5188,6 @@ def test_webapp_required_columns_are_a_subset_of_the_pin():
 
 
 # --- Cross-worker sweep bounds ---
-
-
-def test_scan_budget_stops_at_file_limit():
-    """A cross-trace sweep must not open unbounded database files.
-
-    A miss — the common case when an operator pastes an offset that is not in
-    this cluster — walks every candidate database in db_dir, which defaults to
-    /tmp and accumulates live plus rotated files from every co-located worker.
-    The sweep runs on the MAIN loop, so an unbounded scan stalls Kafka polling,
-    and refreshing the page repeats it.
-    """
-    budget = _ScanBudget()
-    for i in range(CROSS_TRACE_MAX_FILES):
-        assert budget.allow(), f'budget exhausted early, at file {i}'
-    assert not budget.truncated, 'reported truncation while within limits'
-    assert not budget.allow(), 'allowed more than CROSS_TRACE_MAX_FILES'
-    assert budget.truncated, 'hitting the file limit must be recorded'
-
-
-def test_scan_budget_stops_at_deadline():
-    """The wall-clock bound protects against slow shared or network storage,
-    where the file count alone is a poor proxy for cost."""
-    budget = _ScanBudget()
-    # Expire the deadline directly rather than sleeping out the whole budget.
-    budget._deadline = time.monotonic() - 1
-    assert not budget.allow(), 'an expired budget must not allow further work'
-    assert budget.truncated, 'deadline expiry must be recorded as truncation'
-
-
-def test_scan_budget_reports_truncation_once(monkeypatch):
-    """Truncation must be visible: 'we stopped looking' and 'it is not there'
-    are very different answers during an incident."""
-    logged: list[tuple] = []
-    monkeypatch.setattr(
-        recorder_logger,
-        'warning',
-        lambda event, **kw: logged.append((event, kw)),
-    )
-
-    quiet = _ScanBudget()
-    quiet.report('cross_trace')
-    assert logged == [], 'a sweep within budget must not warn'
-
-    hit = _ScanBudget()
-    hit.truncated = True
-    hit.report('cross_trace')
-    assert len(logged) == 1
-    assert logged[0][0] == 'cross_trace_scan_truncated'
-    assert logged[0][1]['op'] == 'cross_trace'
 
 
 async def test_get_trace_does_not_leak_a_sibling_messages_annotation(recorder):

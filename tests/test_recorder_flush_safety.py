@@ -214,7 +214,7 @@ async def test_stop_completes_teardown_when_state_sync_fails(tmp_path):
 async def test_cross_trace_by_label_respects_scan_budget(tmp_path, monkeypatch):
     """A zero-file scan budget stops the peer sweep before any DB is opened,
     even when a peer holds a matching label."""
-    from drakkar.recorder import core as recorder_core
+    from drakkar.recorder import queries as recorder_queries
 
     peer_db_path = tmp_path / 'other-worker-2026-03-25__10_00_00.db'
     await _create_worker_db_with_labels(
@@ -229,7 +229,7 @@ async def test_cross_trace_by_label_respects_scan_budget(tmp_path, monkeypatch):
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
     try:
-        monkeypatch.setattr(recorder_core, 'CROSS_TRACE_MAX_FILES', 0)
+        monkeypatch.setattr(recorder_queries, 'CROSS_TRACE_MAX_FILES', 0)
         events = await rec.cross_trace_by_label('request_id', 'req-remote')
         assert events == []
     finally:
