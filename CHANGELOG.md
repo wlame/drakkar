@@ -34,6 +34,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security: `executor.env` and every `*.client_config` are masked in
+  `GET /api/v1/config-reference`.** `executor.env` is the documented way to
+  hand credentials to the handler binary, and `client_config` is librdkafka
+  passthrough where only four keys are reserved — so `sasl.password` and
+  `ssl.key.password` belong there. Both were returned verbatim by the
+  configuration page, which is unauthenticated by design. The recorder
+  already sanitized the *same* `executor.env` by key name before storing
+  it, so the two surfaces disagreed about what counts as a secret; they now
+  share one function. Values under a secret-looking key name are replaced
+  with `***`, other values have URL credentials stripped, and everything
+  else stays readable — the page is an operator tool. Matched in the Go
+  backend.
+
 - **Security: the database download and merge endpoints now serve recorder
   database files only.** They checked the requested name for path
   separators, a leading dot and header-injection characters, then served

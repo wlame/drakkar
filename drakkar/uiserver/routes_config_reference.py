@@ -28,12 +28,14 @@ top-level flag.
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from drakkar.configmeta import ConfigFieldMeta, _to_jsonable, build_config_metadata, walk_model_fields
+from drakkar.recorder.helpers import sanitize_env_value
 
 if TYPE_CHECKING:
     from drakkar.uiserver.server import UIDeps
@@ -46,10 +48,6 @@ if TYPE_CHECKING:
 # passwords — pydantic already masks those in model_dump(mode='json'), but
 # with its own placeholder, so this normalizes both cases to one contract).
 SECRET_MASK = '•' * 6  # '••••••'
-
-# The one metadata path whose secret material (WebClientConfig.token) has
-# no per-element path to carry a `secret` flag — see module docstring.
-_WEBAPP_CLIENTS_PATH = 'webapp.clients'
 
 
 class ConfigReferenceEntry(BaseModel):
@@ -144,16 +142,53 @@ def _mask_webapp_clients(clients: Any) -> Any:
     return masked
 
 
+def _mask_env_dict(values: Any) -> Any:
+    """Mask a ``{name: value}`` config map the way the recorder masks env.
+
+    ``executor.env`` is the documented way to hand credentials to the
+    handler binary, and ``*.client_config`` is librdkafka passthrough where
+    only four keys are reserved — so ``sasl.password`` and
+    ``ssl.key.password`` can and do appear. Both are plain dict leaves, so
+    the metadata's per-field ``secret`` flag cannot describe them: the
+    secret is one key inside the value, not the value itself.
+
+    Delegating to :func:`sanitize_env_value` is the point. The recorder
+    already sanitizes the SAME ``executor.env`` by key name before storing
+    it (``recorder/core.py``), so the two surfaces used to disagree about
+    what counts as a secret. Now one function decides for both: redact
+    fully on a secret-looking key name, otherwise strip credentials out of
+    URL-shaped values.
+    """
+    if not isinstance(values, dict):
+        return values
+    return {
+        name: sanitize_env_value(name, value) if isinstance(value, str) else value for name, value in values.items()
+    }
+
+
+# Fields whose secret lives BELOW the leaf, so the metadata's ``secret``
+# flag cannot express it and a dedicated masker has to. Keyed by the
+# metadata path, wildcards included — matched against ``field_meta.path``,
+# which is the un-expanded template.
+_DEEP_MASKERS: dict[str, Callable[[Any], Any]] = {
+    'webapp.clients': _mask_webapp_clients,
+    'executor.env': _mask_env_dict,
+    'kafka.client_config': _mask_env_dict,
+    'dlq.client_config': _mask_env_dict,
+    'sinks.kafka.*.client_config': _mask_env_dict,
+}
+
+
 def _build_entries(field_meta: ConfigFieldMeta, config_dump: dict[str, Any]) -> list[ConfigReferenceEntry]:
     """Join one metadata field against the live config, returning 1+ response entries."""
     segments = field_meta.path.split('.')
     is_dynamic = '*' in segments
-    if field_meta.path == _WEBAPP_CLIENTS_PATH:
-        # Defense-in-depth: the default is an empty-token anonymous client
-        # today, so this is a no-op in practice — but route it through the
-        # same per-element masking as the live value so a future non-empty
-        # default token can't leak unmasked.
-        masked_default = _mask_webapp_clients(field_meta.default)
+    deep_masker = _DEEP_MASKERS.get(field_meta.path)
+    if deep_masker is not None:
+        # Defense-in-depth: these defaults are empty today, so this is a
+        # no-op in practice — but route the default through the same masker
+        # as the live value so a future non-empty default cannot leak.
+        masked_default = deep_masker(field_meta.default)
     else:
         masked_default = _mask(field_meta.default, field_meta.secret)
 
@@ -178,12 +213,8 @@ def _build_entries(field_meta: ConfigFieldMeta, config_dump: dict[str, Any]) -> 
 
     matches = _expand_path(config_dump, segments)
     for concrete_segments, raw_value in matches:
-        if field_meta.path == _WEBAPP_CLIENTS_PATH:
-            is_default = raw_value == field_meta.default
-            value = _mask_webapp_clients(raw_value)
-        else:
-            is_default = raw_value == field_meta.default
-            value = _mask(raw_value, field_meta.secret)
+        is_default = raw_value == field_meta.default
+        value = deep_masker(raw_value) if deep_masker is not None else _mask(raw_value, field_meta.secret)
         entries.append(
             ConfigReferenceEntry(
                 path='.'.join(concrete_segments),

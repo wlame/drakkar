@@ -14,6 +14,7 @@ config is a real (in-memory) ``DrakkarConfig`` built directly in each test.
 import time
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel, Field, SecretStr
 
@@ -175,6 +176,80 @@ class TestMasking:
         tokens = [c['token'] for c in entry['value']]
         assert tokens == [SECRET_MASK, '']
         assert 'tenant-a-bearer-token' not in body_as_text(body)
+
+    async def test_executor_env_values_are_masked_by_key_name(self):
+        """``executor.env`` is the documented way to hand credentials to the
+        handler binary, and the config page returned it verbatim.
+
+        The recorder already sanitizes the SAME env by key name before
+        storing it, so the two surfaces disagreed about what is secret.
+        """
+        config = DrakkarConfig()
+        config.executor.env = {
+            'MY_API_KEY': 'sk-live-abcdef',
+            'DB_PASSWORD': 'hunter2',
+            'AWS_SECRET_ACCESS_KEY': 'wJalrXUtnFEMI',
+            'LOG_LEVEL': 'debug',
+        }
+        body = await get_config_reference(config)
+        entry = entries_by_path(body, 'executor.env')[0]
+        assert entry['value']['MY_API_KEY'] == '***'
+        assert entry['value']['DB_PASSWORD'] == '***'
+        assert entry['value']['AWS_SECRET_ACCESS_KEY'] == '***'
+        # Non-secret keys stay readable — the page is an operator tool.
+        assert entry['value']['LOG_LEVEL'] == 'debug'
+        text = body_as_text(body)
+        for secret in ('sk-live-abcdef', 'hunter2', 'wJalrXUtnFEMI'):
+            assert secret not in text
+
+    async def test_executor_env_url_credentials_are_redacted(self):
+        """A key name that looks innocent can still hold a DSN."""
+        config = DrakkarConfig()
+        config.executor.env = {'UPSTREAM': 'postgres://user:s3cr3t@db:5432/app'}
+        body = await get_config_reference(config)
+        entry = entries_by_path(body, 'executor.env')[0]
+        assert 's3cr3t' not in entry['value']['UPSTREAM']
+        assert 's3cr3t' not in body_as_text(body)
+
+    @pytest.mark.parametrize(
+        'path',
+        ['kafka.client_config', 'dlq.client_config'],
+    )
+    async def test_client_config_secrets_are_masked(self, path):
+        """librdkafka passthrough can carry sasl.password / ssl.key.password
+        — only four keys are reserved, so anything may appear here."""
+        config = DrakkarConfig()
+        section = config.kafka if path.startswith('kafka') else config.dlq
+        section.client_config = {
+            'sasl.password': 'broker-secret',
+            'ssl.key.password': 'key-secret',
+            'socket.timeout.ms': '5000',
+        }
+        body = await get_config_reference(config)
+        entry = entries_by_path(body, path)[0]
+        assert entry['value']['sasl.password'] == '***'
+        assert entry['value']['ssl.key.password'] == '***'
+        assert entry['value']['socket.timeout.ms'] == '5000'
+        text = body_as_text(body)
+        assert 'broker-secret' not in text
+        assert 'key-secret' not in text
+
+    async def test_kafka_sink_client_config_secrets_are_masked(self):
+        """The dynamic (wildcard) path must be covered too."""
+        from drakkar.config import KafkaSinkConfig
+
+        config = DrakkarConfig()
+        config.sinks.kafka = {
+            'primary_output_topic': KafkaSinkConfig(
+                topic='out',
+                client_config={'sasl.password': 'sink-secret', 'acks': 'all'},
+            )
+        }
+        body = await get_config_reference(config)
+        entry = entries_by_path(body, 'sinks.kafka.primary_output_topic.client_config')[0]
+        assert entry['value']['sasl.password'] == '***'
+        assert entry['value']['acks'] == 'all'
+        assert 'sink-secret' not in body_as_text(body)
 
     async def test_configured_kafka_sink_password_is_masked(self):
         from pydantic import SecretStr
