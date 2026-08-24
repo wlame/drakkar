@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from pydantic import BaseModel
 
-from drakkar.config import CircuitBreakerConfig
+from drakkar.config import CircuitBreakerConfig, SinksConfig
 from drakkar.metrics import dlq_dropped_payloads, sink_deliveries_skipped, sink_delivery_retries
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError, SinkDeliveryFailedError
 from drakkar.sinks.base import DEFAULT_DELIVERY_TIMEOUT_SECONDS, BaseSink
@@ -145,15 +145,29 @@ class SinkManager:
         recorder: EventRecorder | None = None,
         dlq_sink: DLQSink | None = None,
         delivery_timeout_seconds: float = DEFAULT_DELIVERY_TIMEOUT_SECONDS,
+        sinks_config: Callable[[], SinksConfig] | None = None,
     ) -> None:
         self._sinks: dict[tuple[str, str], BaseSink[Any]] = {}
         self._by_type: dict[str, list[BaseSink[Any]]] = defaultdict(list)
         self._stats: dict[tuple[str, str], SinkStats] = {}
-        # The circuit breaker config is pushed onto each sink via register().
-        # None => default CircuitBreakerConfig (5 failures / 30s cooldown).
-        # Callers that build a SinkManager without a config (tests, standalone
-        # usage) get the default behavior automatically.
-        self._circuit_breaker_config: CircuitBreakerConfig = circuit_breaker_config or CircuitBreakerConfig()
+        # Reads the live ``sinks:`` section, when the app has one.
+        #
+        # A callable rather than the section itself, for two reasons that
+        # both come from ``DrakkarApp`` building this manager in its
+        # constructor while ``on_startup`` — the documented point where a
+        # handler may change the config — runs later: a handler may mutate
+        # the section in place, and it may return a whole new
+        # ``DrakkarConfig``, which rebinds ``app._config`` and leaves any
+        # captured section object stale. Going through the app on each read
+        # follows both. The Go backend never had this problem because it
+        # builds its sinks after the hook.
+        #
+        # ``None`` for a manager built standalone (tests, plugin authors),
+        # which then uses the two explicit arguments.
+        self._sinks_config: Callable[[], SinksConfig] | None = sinks_config
+        # Fallbacks for a manager with no config section. None => default
+        # CircuitBreakerConfig (5 failures / 30s cooldown).
+        self._circuit_breaker_default: CircuitBreakerConfig = circuit_breaker_config or CircuitBreakerConfig()
         # Recorder + DLQ sink are owned by the app but accessed on every
         # delivery. Holding references here keeps the ``deliver_all`` hot
         # path signature minimal and removes the per-call plumbing from
@@ -171,7 +185,7 @@ class SinkManager:
         # server stopped answering on a still-open TCP connection blocks its
         # partition indefinitely: the breaker only counts a failure when a
         # call returns, so /readyz stays green while the worker does nothing.
-        self._delivery_timeout_seconds: float = delivery_timeout_seconds
+        self._delivery_timeout_default: float = delivery_timeout_seconds
 
         # Run plugin discovery once at construction so any third-party
         # sinks installed via ``[project.entry-points."drakkar.sinks"]``
@@ -179,6 +193,20 @@ class SinkManager:
         # idempotent — repeated SinkManager construction (in tests, in
         # restart loops) does not re-walk the entry-point table.
         SinkRegistry.discover()
+
+    @property
+    def _circuit_breaker_config(self) -> CircuitBreakerConfig:
+        """Breaker thresholds, read live from the config section when there is one."""
+        if self._sinks_config is not None:
+            return self._sinks_config().circuit_breaker
+        return self._circuit_breaker_default
+
+    @property
+    def _delivery_timeout_seconds(self) -> float:
+        """Per-delivery budget, read live from the config section when there is one."""
+        if self._sinks_config is not None:
+            return self._sinks_config().delivery_timeout_seconds
+        return self._delivery_timeout_default
 
     def resolve_sink_class(self, type_name: str) -> type[BaseSink[Any]] | None:
         """Look up a sink class by its registered type name.

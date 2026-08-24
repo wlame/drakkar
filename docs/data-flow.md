@@ -21,7 +21,7 @@ When `DrakkarApp.run()` is called, the framework:
    - If `cluster_name_env` is set and the corresponding env var is non-empty, uses that.
    - Otherwise falls back to `cluster_name` (default: `''`).
 3. Configures **structured logging** via structlog using `logging.level` (default: `'INFO'`) and `logging.format` (default: `'json'`, also accepts `'console'`). The worker_id, consumer_group, and framework version are bound as context variables to every log line.
-4. Calls the handler's `on_startup(config)` hook, which receives the full `DrakkarConfig` and may return a modified copy. This is the only point where the user can mutate configuration before the framework wires everything up. A few settings are consumed earlier, while `DrakkarApp` is constructed (the `app:` section, `sinks.circuit_breaker`, `sinks.delivery_timeout_seconds`, and the worker/cluster name resolution above), so changing those here has no effect and the worker logs one `on_startup_config_change_ignored` warning naming them -- see [Handler](handler.md#on_startup).
+4. Calls the handler's `on_startup(config)` hook, which receives the full `DrakkarConfig` and may return a modified copy. This is the only point where the user can mutate configuration before the framework wires everything up. A few settings are consumed earlier, while `DrakkarApp` is constructed (the `app:` section and the worker/cluster name resolution above), so changing those here has no effect and the worker logs one `on_startup_config_change_ignored` warning naming them -- see [Handler](handler.md#on_startup).
 
 ### 0.2 Component Construction
 

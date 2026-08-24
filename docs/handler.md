@@ -128,8 +128,6 @@ point where config can be changed at runtime.
     | setting | what already consumed it |
     |---|---|
     | `app` | the handler's app-config model (see [Application config](app-config.md)) |
-    | `sinks.circuit_breaker` | the sink manager |
-    | `sinks.delivery_timeout_seconds` | the sink manager |
     | `cluster_name`, `cluster_name_env` | the worker's resolved cluster name |
     | `worker_name_env` | the worker's resolved id |
 
@@ -138,9 +136,10 @@ point where config can be changed at runtime.
     one `on_startup_config_change_ignored` warning naming every setting it
     dropped, so the gap is visible rather than silent.
 
-    Everything else — `executor`, `kafka`, the sink instances themselves,
-    `ui`, `webapp`, `dlq`, `cache`, `logging`, `metrics` — is read after
-    the hook and a change to it takes effect.
+    Everything else — `executor`, `kafka`, `sinks` (the instances, the
+    circuit breaker and the delivery timeout alike), `ui`, `webapp`, `dlq`,
+    `cache`, `logging`, `metrics` — is read after the hook and a change to
+    it takes effect.
 
 ```python
 import os

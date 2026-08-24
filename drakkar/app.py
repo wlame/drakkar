@@ -91,14 +91,6 @@ SETTINGS_CONSUMED_BEFORE_ON_STARTUP: tuple[ConsumedSetting, ...] = (
         '(set it in YAML or through the handler app_env_prefix env vars)',
     ),
     ConsumedSetting(
-        'sinks.circuit_breaker',
-        'the sink manager is constructed with it in DrakkarApp.__init__',
-    ),
-    ConsumedSetting(
-        'sinks.delivery_timeout_seconds',
-        'the sink manager is constructed with it in DrakkarApp.__init__',
-    ),
-    ConsumedSetting(
         'cluster_name',
         'the worker resolves its cluster name in DrakkarApp.__init__',
     ),
@@ -246,12 +238,13 @@ class DrakkarApp:
 
         self._executor_pool: ExecutorPool | None = None
         self._consumer: KafkaConsumer | None = None
-        # SinkManager receives the circuit breaker default so the breaker
-        # installed on each registered sink honors operator thresholds.
-        self._sink_manager: SinkManager = SinkManager(
-            circuit_breaker_config=self._config.sinks.circuit_breaker,
-            delivery_timeout_seconds=self._config.sinks.delivery_timeout_seconds,
-        )
+        # The manager reads the ``sinks:`` section through a callable rather
+        # than being handed its values now: this constructor runs before
+        # ``on_startup``, and a handler that tunes ``sinks.circuit_breaker``
+        # or ``sinks.delivery_timeout_seconds`` there must be honoured. The
+        # sinks themselves are registered later (``_build_sinks``, after the
+        # hook), so every sink gets the post-hook values.
+        self._sink_manager: SinkManager = SinkManager(sinks_config=lambda: self._config.sinks)
         self._dlq_sink: DLQSink | None = None
         self._recorder: EventRecorder | None = None
         self._ui_server = None

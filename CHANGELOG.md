@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`on_startup` can now tune `sinks.circuit_breaker` and
+  `sinks.delivery_timeout_seconds`.** `DrakkarApp.__init__` built the
+  `SinkManager` from copies of those two values, and it runs before the
+  hook — so a handler that tuned them there was silently ignored, while the
+  same handler worked on a Go worker (Go builds its sinks after the hook).
+  The manager now reads the live `sinks:` section instead of copies, and
+  the sinks are registered after the hook, so both backends behave the
+  same. The two settings are gone from the
+  `on_startup_config_change_ignored` warning, which now lists the same set
+  on both backends.
+
 ### Changed
 
 - The debug UI's event queries and the folds that turn their rows into

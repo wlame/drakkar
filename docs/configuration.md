@@ -1004,14 +1004,9 @@ ignored and what consumed it.
 The full list and the working alternative are on the
 [Handler](handler.md#on_startup) page.
 
-**Cross-backend divergence.** The Go backend builds its sinks in `Run`,
-*after* `OnStartup`, so a Go handler *can* change
-`sinks.circuit_breaker` and `sinks.delivery_timeout_seconds` in the hook.
-The Python backend constructs its `SinkManager` in `DrakkarApp.__init__`
-and therefore cannot. Both backends emit the same warning event, with the
-Python list carrying those two extra rows. Set both in the config file or
-through their `DK_` env overrides and the two backends behave
-identically — which is what a mixed fleet needs.
+Both backends list the same settings and emit the same
+`on_startup_config_change_ignored` event, so a handler behaves identically
+on a Python and a Go worker.
 
 ---
 

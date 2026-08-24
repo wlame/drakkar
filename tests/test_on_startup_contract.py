@@ -64,9 +64,9 @@ class TestChangeDetection:
         config = make_config()
         before = snapshot_consumed_settings(config)
 
-        config.sinks.circuit_breaker.failure_threshold += 1
+        config.cluster_name = 'renamed-in-on_startup'
 
-        assert changed_consumed_settings(before, config) == ['sinks.circuit_breaker']
+        assert changed_consumed_settings(before, config) == ['cluster_name']
 
     def test_a_change_the_framework_honours_is_not_reported(self):
         """`executor` is read long after the hook — changing it is the
@@ -91,39 +91,34 @@ class TestChangeDetection:
         config = make_config()
         before = snapshot_consumed_settings(config)
 
-        config.sinks.delivery_timeout_seconds = 99.0
-        config.cluster_name = 'renamed-in-on_startup'
+        config.worker_name_env = 'OTHER_WORKER'
+        config.app = {'priority_threshold': 1}
 
         # Table order, not alphabetical — deterministic so the warning text
-        # is stable and the Go backend can emit the same list.
-        assert changed_consumed_settings(before, config) == [
-            'sinks.delivery_timeout_seconds',
-            'cluster_name',
-        ]
+        # is stable and the Go backend emits the same list.
+        assert changed_consumed_settings(before, config) == ['app', 'worker_name_env']
 
 
 class TestLifecycleWarning:
     """The warning is emitted by the lifecycle, right after the hook returns."""
 
     async def test_changing_a_consumed_setting_warns(self):
-        class TunesTheBreaker(NoopHandler):
+        class RenamesTheCluster(NoopHandler):
             async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
-                config.sinks.circuit_breaker.failure_threshold = 42
+                config.cluster_name = 'renamed-in-on_startup'
                 return config
 
-        app = DrakkarApp(handler=TunesTheBreaker(), config=make_config())
+        app = DrakkarApp(handler=RenamesTheCluster(), config=make_config())
 
         with capture_logs() as cap:
             await app._lifecycle._run_on_startup()
 
         (warning,) = [entry for entry in cap if entry['event'] == 'on_startup_config_change_ignored']
-        assert warning['settings'] == ['sinks.circuit_breaker']
+        assert warning['settings'] == ['cluster_name']
         assert warning['log_level'] == 'warning'
         # The operator needs to know what consumed it, not just that the
         # change was dropped.
-        assert warning['reasons'] == [
-            'sinks.circuit_breaker — the sink manager is constructed with it in DrakkarApp.__init__'
-        ]
+        assert warning['reasons'] == ['cluster_name — the worker resolves its cluster name in DrakkarApp.__init__']
         assert 'config file or environment' in warning['hint']
 
     async def test_a_quiet_hook_warns_about_nothing(self):
@@ -147,3 +142,72 @@ class TestLifecycleWarning:
         await app._lifecycle._run_on_startup()
 
         assert app._config.executor.max_executors == 17
+
+
+class TestSinkSettingsAreHonoured:
+    """`sinks.circuit_breaker` and `sinks.delivery_timeout_seconds` are read
+    when the sinks are built, which happens after the hook — so tuning them
+    in `on_startup` works, and matches the Go backend.
+    """
+
+    def test_the_manager_reads_the_live_config_not_a_snapshot(self):
+        config = make_config()
+        app = DrakkarApp(handler=NoopHandler(), config=config)
+
+        config.sinks.circuit_breaker.failure_threshold = 42
+        config.sinks.delivery_timeout_seconds = 7.5
+
+        assert app._sink_manager._circuit_breaker_config.failure_threshold == 42
+        assert app._sink_manager._delivery_timeout_seconds == 7.5
+
+    def test_a_sink_registered_after_the_hook_gets_the_new_values(self):
+        from tests.test_sink_manager import FakeSink
+
+        config = make_config()
+        app = DrakkarApp(handler=NoopHandler(), config=config)
+        config.sinks.circuit_breaker.failure_threshold = 42
+        config.sinks.delivery_timeout_seconds = 7.5
+
+        sink = FakeSink('after-the-hook')
+        app._sink_manager.register(sink)
+
+        assert sink._circuit_config.failure_threshold == 42
+        assert sink._delivery_timeout_seconds == 7.5
+
+    async def test_tuning_the_breaker_in_on_startup_no_longer_warns(self):
+        """It is honoured now, so warning about it would be wrong."""
+
+        class TunesTheBreaker(NoopHandler):
+            async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
+                config.sinks.circuit_breaker.failure_threshold = 42
+                config.sinks.delivery_timeout_seconds = 7.5
+                return config
+
+        app = DrakkarApp(handler=TunesTheBreaker(), config=make_config())
+
+        with capture_logs() as cap:
+            await app._lifecycle._run_on_startup()
+
+        assert not [entry for entry in cap if entry['event'] == 'on_startup_config_change_ignored']
+        assert app._sink_manager._circuit_breaker_config.failure_threshold == 42
+
+    async def test_a_replaced_config_object_is_followed_too(self):
+        """A handler may return a fresh DrakkarConfig rather than mutating."""
+
+        class ReplacesTheConfig(NoopHandler):
+            async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
+                return make_config(sinks={'delivery_timeout_seconds': 3.0})
+
+        app = DrakkarApp(handler=ReplacesTheConfig(), config=make_config())
+
+        await app._lifecycle._run_on_startup()
+
+        assert app._sink_manager._delivery_timeout_seconds == 3.0
+
+    def test_the_table_no_longer_claims_the_sink_settings_are_consumed_early(self):
+        """Both backends must list the same settings — Go builds its sinks
+        after the hook too."""
+        paths = {setting.path for setting in SETTINGS_CONSUMED_BEFORE_ON_STARTUP}
+
+        assert 'sinks.circuit_breaker' not in paths
+        assert 'sinks.delivery_timeout_seconds' not in paths
