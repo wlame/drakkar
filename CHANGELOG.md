@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The debug UI's event queries and the folds that turn their rows into
+  what a page renders now live in `drakkar/recorder/queries.py` instead of
+  inside the route closures in `drakkar/uiserver/routes_live.py` and
+  `routes_pages.py`. No behaviour change; the aggregations (the timeline's
+  retry grouping, the per-task state fold, the task-detail reconstruction)
+  are now unit-testable without building a FastAPI app, and the Go backend
+  has one file to diff its own queries against. Mirrored there as
+  `internal/uiserver/readmodel.go`.
+
 ### Fixed
 
 - **The `<worker>-live.db` link stopped refreshing after one crash.** The
