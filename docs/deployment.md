@@ -1,5 +1,22 @@
 # Deployment
 
+## Network exposure
+
+Before anything below: **a Drakkar worker belongs on a trusted, private
+network.** It serves up to three HTTP ports — the operator UI
+(`ui.port`, default 8080), the optional webapp ingress
+(`webapp.port`, default 8090) and the optional Prometheus exporter
+(`metrics.port`, default 9090) — and none of them is designed to face an
+untrusted network. Bind them where only your own infrastructure can reach
+them, and put a reverse proxy in front of anything that must travel
+further.
+
+Only `/healthz` and `/readyz` on the UI port are meant to be reachable
+without a token, because kubelet needs them.
+
+See [Security posture](security.md) for what Drakkar's own controls do and
+do not cover.
+
 This page covers operational topics that apply when running Drakkar in a
 production environment: Kubernetes probes, rolling restarts, and the
 interaction between the UI server and cluster health checks.

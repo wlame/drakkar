@@ -48,6 +48,7 @@ theme:
 
 nav:
   - Home: index.md
+  - Security Posture (read before deploying): security.md
   - Handler: handler.md
   - Cache: cache.md
   - Fan-out (one message → many tasks): fan-out.md

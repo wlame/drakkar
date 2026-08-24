@@ -4,6 +4,15 @@
 
 Drakkar consumes messages from Kafka, runs CPU-intensive external binaries in a managed subprocess pool, and delivers results to any combination of six sink types. Workers are the Drakkars, executors are the Vikings.
 
+!!! danger "Drakkar is an internal tool"
+
+    Its operator UI and API are built for a **trusted, private network**
+    and must not be exposed to an untrusted one. The authentication, rate
+    limiting and input checks Drakkar ships are defence in depth, not a
+    security perimeter — the perimeter is your network and the application
+    you build on top. **[Read the security posture](security.md)** before
+    you deploy.
+
 ## Architecture
 
 <div class="diagram-light" markdown>

@@ -514,6 +514,10 @@ client never reaches the worker at all.
 The same applies to the debug UI port (`ui.port`) and, if enabled, the
 Prometheus exporter.
 
+This is one piece of a broader posture: the webapp's per-client tokens and
+rpm limits are defence in depth, not a security perimeter, and the ingress
+belongs on a trusted network. See [Security posture](security.md).
+
 ## Load balancer caveat
 
 Webapp state is **per-worker**, not per-cluster:

@@ -16,9 +16,22 @@ on this repository, or contact the maintainer directly.
 Include the affected version, what an attacker can achieve, and a
 reproduction if you have one. Expect an acknowledgement within a week.
 
+## Intended deployment
+
+Drakkar is an **internal tool**. Its operator UI, its `/api/v1` JSON and
+WebSocket surface, and its optional HTTP ingress are built for a trusted,
+private network and are not intended to be exposed to an untrusted one.
+
+The framework ships authentication, rate limiting and input checks, and
+they are worth enabling — but they are **defence in depth, not a security
+perimeter**. The perimeter is the operator's network and the application
+built on top of Drakkar. [Security posture](docs/security.md) states this
+in full, including what the framework deliberately does not provide.
+
 ## Trust model — please read before reporting
 
-Drakkar documents explicit trust boundaries in the
+Drakkar documents explicit trust boundaries in
+[Security posture](docs/security.md) and the
 [FAQ](docs/faq.md#security-and-trust-model). These are **design
 assumptions, not vulnerabilities**, and reports resting on them will be
 closed with a pointer here:

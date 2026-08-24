@@ -25,6 +25,11 @@ flowchart LR
 
 **[Documentation](https://wlame.github.io/drakkar)** — full guides for every feature below.
 
+> [!IMPORTANT]
+> **Drakkar is an internal tool.** Its operator UI and API are built for a trusted,
+> private network and must not be exposed to an untrusted one. See
+> [Security posture](#security-posture) below.
+
 ## Features
 
 - **Per-partition pipelines** with watermark offset tracking — commits happen only after every sink confirmed
@@ -137,6 +142,41 @@ docker compose up --build
 ```
 
 Then open `http://localhost:8081` for the first worker's UI. See the [integration guide](https://wlame.github.io/drakkar/integration/).
+
+## Security posture
+
+**Drakkar is built to run inside a system you own.** The operator UI, the
+`/api/v1` JSON and WebSocket surface, and the optional HTTP ingress assume a
+trusted, private network. Do not expose them to the public internet, to a
+shared corporate network you do not control, or to a user population wider
+than the engineers operating the service.
+
+Drakkar does ship security controls — an opt-in UI bearer token with a
+WebSocket origin check, per-client tokens and rate limits on the HTTP
+ingress, path containment so the download endpoint can only ever serve
+recorder databases, secret masking in the config view and the flight
+recorder, and bounds on request size, header size and connection lifetime.
+Turn them on. But treat every one of them as **defence in depth, not a
+security perimeter**: they exist to reduce blast radius and catch mistakes,
+not to withstand a determined attacker who already has network access.
+
+A worker has no user model, no roles and no tenancy. Anyone who can reach a
+port and present the one configured token is an operator of that worker. The
+real boundary sits where the context is:
+
+- **your network** decides who reaches the ports at all — this is the control that matters;
+- **your ingress** owns TLS, SSO or mTLS, and connection-level limits;
+- **your application** authorises your end users and validates their input;
+- **Drakkar** avoids shipping footguns behind that line.
+
+Even inside a private network the UI is an operator tool that shows task
+output, arguments, redacted environment, cache contents and live event
+streams — worth a token, or a bastion, if any of that is sensitive.
+
+Full detail, including what Drakkar deliberately does **not** provide (TLS,
+CSRF protection, an audit trail, a handler sandbox):
+**[Security posture](https://wlame.github.io/drakkar/security/)**. To report
+a vulnerability, see [`SECURITY.md`](SECURITY.md).
 
 ## Development
 

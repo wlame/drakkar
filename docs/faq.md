@@ -253,6 +253,8 @@ See [Observability — Operator UI](observability.md#operator-ui) for the endpoi
 
 ### Is the UI safe to expose to a team of operators?
 
+To a team of operators on a trusted network, yes -- that is what it is for. To anything wider, no: see [Security posture](security.md).
+
 Auth is **opt-in by default**. No endpoint stops a worker, replays Kafka messages, mutates sinks, or commits offsets, and Drakkar is intended to run inside a private contour, so the framework starts unauthenticated when `ui.auth_token` is empty (the default) and emits a structured `ui_unauthenticated` warning at startup naming the host:port and the two opt-in paths (`ui.auth_token` in YAML or `DK_UI__AUTH_TOKEN` env var).
 
 Most endpoints are read-only, but two are not: `POST /api/debug/probe` runs caller-supplied bytes through the live handler, and `POST /api/debug/merge` writes a file that nothing reclaims. Set `ui.probe_enabled: false` / `ui.merge_enabled: false` to close them — independently of `auth_token`, so this works both when you cannot set a token and when you have one and want defence in depth. The startup warning names whichever is still enabled.
@@ -397,6 +399,8 @@ They're separate SQLite files with separate schemas and separate reader/writer c
 ## Security and trust model
 
 Drakkar makes five explicit trust assumptions -- each one an architectural trust boundary, not a latent bug. Read this before a production deploy.
+
+The short version, and where the boundary actually sits, is on its own page: **[Security posture](security.md)**. Drakkar is an internal tool; its UI and API belong on a trusted network, and the controls below are defence in depth rather than a perimeter. This section covers the individual assumptions in detail.
 
 ### Why is the handler binary trusted?
 
