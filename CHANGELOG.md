@@ -34,6 +34,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security: the HTTP servers now bound what a client can hold open.**
+  Neither uvicorn config set any transport limit, so a client that dribbled
+  bytes — or simply opened connections and left them — could pin
+  connections, tasks and memory in the process that also runs the pipeline
+  and answers the Kubernetes probes. The Go backend has carried these on
+  its `http.Server` since it was hardened; Python had none of them. Now,
+  matching Go's values:
+
+  - keep-alive connections idle for 120 s are reaped, and the request
+    header section is capped at 64 KiB, on **both** the webapp and the
+    debug UI server;
+  - the webapp's body **read** is bounded in time
+    (`request_timeout_seconds` + 30 s → **408** `request_timeout`). The
+    size cap alone was never a slow-loris defence: a client can stay under
+    `max_body_bytes` indefinitely by sending one byte at a time. Go gets
+    this bound from `http.Server.WriteTimeout`; uvicorn has no equivalent;
+  - the debug UI server rejects a declared body over 10 MB with **413**
+    before anything buffers it (the probe's own limit is a pydantic field
+    constraint, which fires only after the whole body is in memory);
+  - `POST /api/v1/debug/probe` sheds past 16 queued probes with **429**
+    and `Retry-After: 1` (contract v1.20) instead of growing an unbounded
+    queue of pinned requests;
+  - one Kafka read-stream request is capped at 120 s end-to-end, so a
+    window that can never close — its offsets compacted or aged out — no
+    longer spins holding a consumer and a connection.
+
+  `docs/webapp.md` gains a "Front it with a proxy" section: these are
+  backstops, not a replacement for a reverse proxy owning connection-level
+  concerns.
+
 - **Security: a non-ASCII bearer token no longer turns a webapp request
   into a 500.** `hmac.compare_digest` raises `TypeError` on non-ASCII `str`
   operands, so `Authorization: Bearer é` produced an unhandled exception —

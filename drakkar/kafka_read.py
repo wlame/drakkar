@@ -64,6 +64,16 @@ METADATA_TIMEOUT_SECONDS = 5.0
 FETCH_DEADLINE_SECONDS = 10.0
 POLL_TIMEOUT_SECONDS = 1.0
 
+# End-to-end cap on ONE stream request. The per-poll timeout bounds each
+# librdkafka call, but not the loop around them: a partition whose window
+# never closes — the messages between the start offset and the high
+# watermark were compacted or aged out, so the offsets simply do not
+# arrive — leaves ``active`` non-empty and ``remaining`` positive forever,
+# and the request spins holding a consumer, a connection and a task.
+# Generous, because a legitimate wide window over a slow cluster is a real
+# use; the client gets whatever was emitted before the deadline.
+STREAM_DEADLINE_SECONDS = 120.0
+
 # Hard cap on messages one stream request may emit. Protects the worker
 # (and the reader's sanity) from an unbounded window over a large topic;
 # a client that needs more traverses in windows using the last message's
@@ -386,7 +396,20 @@ async def stream_messages(
         await consumer.assign(assignments)
 
         active = {tp.partition for tp in assignments}
+        loop = asyncio.get_running_loop()
+        stream_deadline = loop.time() + STREAM_DEADLINE_SECONDS
         while active and remaining > 0:
+            if loop.time() >= stream_deadline:
+                logger.warning(
+                    'kafka_read_stream_deadline',
+                    category='debug',
+                    topic=target.topic,
+                    partitions=sorted(active),
+                    remaining=remaining,
+                    deadline_seconds=STREAM_DEADLINE_SECONDS,
+                    hint='window did not close in time (compacted or aged-out offsets?); returning a partial stream',
+                )
+                return
             msgs = await consumer.consume(num_messages=min(remaining, 500), timeout=POLL_TIMEOUT_SECONDS)
             for msg in msgs:
                 if msg.error():

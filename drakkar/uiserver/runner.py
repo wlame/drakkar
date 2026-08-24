@@ -91,6 +91,25 @@ if TYPE_CHECKING:
     from drakkar.handler import BaseDrakkarHandler
 
 
+# How many probe requests may wait for the single probe lock before the
+# rest are shed. Probes run the user's handler, so they are slow by nature
+# and serialize by design; queueing them without a bound lets a refreshed
+# page or a script stack waiters that each pin a request's memory and
+# connection on the server that also answers the Kubernetes probes.
+#
+# Generous on purpose: this is a backstop against unbounded growth, not a
+# throughput control. An operator hitting it is doing something unusual.
+MAX_PROBE_WAITERS = 16
+
+
+class ProbeBusyError(RuntimeError):
+    """Too many probes are already queued — the caller answers 429."""
+
+    def __init__(self, max_waiters: int) -> None:
+        super().__init__(f'too many probe requests queued (limit {max_waiters}); retry shortly')
+        self.max_waiters = max_waiters
+
+
 class DebugCacheProxy:
     """Read-forwarding, write-suppressing wrapper around a live Cache / NoOpCache.
 
@@ -699,6 +718,13 @@ class DebugRunner:
         # process-wide, so two overlapping probes would clobber each
         # other's restore step without this lock.
         self._probe_lock = asyncio.Lock()
+        # Waiters parked on that lock. Serializing is right, but queueing
+        # without a bound is not: probes are slow by nature (they run the
+        # handler), so a page held open on refresh — or a script — could
+        # stack arbitrarily many waiters, each holding its request's memory
+        # and connection, on the server that also answers the Kubernetes
+        # probes. Past the cap a probe is shed with 429 instead.
+        self._probe_waiters = 0
 
     def _make_run_state(self, probe_input: ProbeInput) -> RunState:
         """Build a fresh ``RunState`` for one probe invocation.
@@ -751,8 +777,14 @@ class DebugRunner:
         object as a plain parameter so no mutable attribute lives on
         the runner for the endpoint path.
         """
-        async with self._probe_lock:
-            return await self._run_locked(state)
+        if self._probe_waiters >= MAX_PROBE_WAITERS:
+            raise ProbeBusyError(MAX_PROBE_WAITERS)
+        self._probe_waiters += 1
+        try:
+            async with self._probe_lock:
+                return await self._run_locked(state)
+        finally:
+            self._probe_waiters -= 1
 
     async def _run_locked(self, state: RunState) -> DebugReport:
         """Body of run() executed under the probe lock.

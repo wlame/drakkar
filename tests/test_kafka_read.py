@@ -435,3 +435,28 @@ async def test_stream_early_close_still_closes_the_consumer(fake_consumer):
     assert first.offset == 0
     await agen.aclose()
     assert fake_consumer.closed
+
+
+async def test_stream_stops_at_the_wall_clock_deadline(fake_consumer, monkeypatch):
+    """A window that never closes must not spin forever.
+
+    The per-poll timeout bounds each librdkafka call, not the loop around
+    them: if the offsets between the start and the high watermark were
+    compacted or aged out they simply never arrive, so the partition stays
+    active and ``remaining`` positive. The request would hold a consumer, a
+    connection and a task indefinitely.
+    """
+    monkeypatch.setattr(kafka_read, 'STREAM_DEADLINE_SECONDS', 0.05)
+
+    fake_consumer.topic = 'orders'
+    fake_consumer.partition_ids = [0]
+    fake_consumer.start_offsets = {0: 2}
+    fake_consumer.watermarks = {0: (0, 100)}
+    # Every poll comes back empty: the window can never close on its own.
+    fake_consumer.batches = []
+
+    got = await _collect(stream_messages(_target(), from_ts_ms=1_000))
+
+    assert got == []
+    # It returned rather than looping, and cleaned up on the way out.
+    assert fake_consumer.closed

@@ -34,7 +34,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from drakkar.concurrency import dispatch_to_loop
-from drakkar.uiserver.runner import DebugRunner, ProbeInput
+from drakkar.uiserver.runner import DebugRunner, ProbeBusyError, ProbeInput
 
 if TYPE_CHECKING:
     from drakkar.uiserver.server import UIDeps
@@ -82,6 +82,20 @@ def _has_unsafe_filename_char(filename: str) -> bool:
 # possible — but such a name already makes for awkward filenames, and
 # widening this pattern to accommodate it would defeat its purpose.
 DB_DOWNLOAD_NAME_RE = re.compile(r'[\w.-]+\.db')
+
+
+def _probe_busy_response(exc: ProbeBusyError) -> JSONResponse:
+    """429 for a probe shed because too many are already queued.
+
+    ``Retry-After: 1`` is a hint, not a promise — probes serialize on one
+    lock and the queue in front of the caller is short by construction
+    (see ``MAX_PROBE_WAITERS``).
+    """
+    return JSONResponse(
+        {'error': str(exc), 'max_waiters': exc.max_waiters},
+        status_code=429,
+        headers={'Retry-After': '1'},
+    )
 
 
 def _db_root(db_dir: str) -> Path | None:
@@ -608,6 +622,8 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
                 run_future.cancel()
                 await asyncio.sleep(0.1)
                 report = state.to_report(truncated=True)
+            except ProbeBusyError as exc:
+                return _probe_busy_response(exc)
         else:
             # Same-loop: plain asyncio. ``wait_for`` already awaits the
             # cancelled task's ``finally`` before raising, so the cache
@@ -617,6 +633,8 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
                 report = await asyncio.wait_for(run_task, timeout=timeout)
             except TimeoutError:
                 report = state.to_report(truncated=True)
+            except ProbeBusyError as exc:
+                return _probe_busy_response(exc)
         return JSONResponse(report.model_dump(mode='json'))
 
     return router

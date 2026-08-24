@@ -36,8 +36,11 @@ from urllib.parse import quote
 import structlog
 import uvicorn
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.base import RequestResponseEndpoint
+from starlette.responses import Response
 
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.config import UIConfig
@@ -70,6 +73,32 @@ logger = structlog.get_logger()
 # enough that a merely busy loop still answers, short enough that a browser
 # tab never appears frozen.
 MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS = 5.0
+
+# HTTP transport limits. The Go backend has carried these on its
+# ``http.Server`` since it was hardened; Python set none of them, so a
+# client that dribbled bytes — or simply opened connections and left them —
+# could pin connections and memory in the process that also runs the
+# pipeline AND answers the Kubernetes probes. Values mirror
+# ``internal/uiserver/server.go`` exactly, so a mixed fleet behaves the same.
+#
+# Note that ``/ws`` is exempt from the keep-alive reaper: an upgraded
+# WebSocket is not a keep-alive HTTP connection.
+
+# Reaps keep-alive connections idle between requests, so an operator
+# leaving a dashboard tab open does not pin connections forever.
+# Go: uiIdleTimeout.
+KEEP_ALIVE_TIMEOUT_SECONDS = 120
+
+# Caps the request header section. Go: uiMaxHeaderBytes.
+MAX_HEADER_BYTES = 64 * 1024
+
+# Caps a request body before it is buffered. The UI server takes a body on
+# exactly two routes (the message probe and the merge request), and the
+# probe's own 10 MB limit is a pydantic field constraint — it fires only
+# AFTER the whole body has been read into memory, which is the wrong end of
+# the problem. Rejecting at this size is what keeps an oversized POST from
+# being buffered at all.
+MAX_BODY_BYTES = 10 * 1024 * 1024
 
 TEMPLATES_DIR = Path(__file__).parent.parent / 'templates'
 
@@ -594,6 +623,31 @@ def create_ui_app(
     # contract surface is served instead by routes_openapi.py, which vendors
     # the spec and is auth-gated like the rest of its route class.
     app = FastAPI(title='Drakkar UI', docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.middleware('http')
+    async def _reject_oversized_bodies(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """Reject an over-long request body before anything buffers it.
+
+        Declared size only — a body arriving without ``Content-Length``
+        (chunked) is not counted here, because reading it to find out is
+        exactly the buffering this exists to avoid. The two routes that
+        take a body validate their own content afterwards; this is the
+        cheap outer bound, and ``MAX_BODY_BYTES`` explains why the probe's
+        pydantic-level limit was not enough on its own.
+        """
+        declared = request.headers.get('content-length')
+        if declared is not None:
+            try:
+                length = int(declared)
+            except ValueError:
+                return JSONResponse({'error': 'Invalid Content-Length'}, status_code=400)
+            if length > MAX_BODY_BYTES:
+                return JSONResponse(
+                    {'error': 'Request body too large', 'max_bytes': MAX_BODY_BYTES},
+                    status_code=413,
+                )
+        return await call_next(request)
+
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.autoescape = True
     templates.env.globals['format_ts'] = format_ts  # ty: ignore[invalid-assignment]
@@ -698,6 +752,10 @@ class UIServer:
             host=self._config.host,
             port=self._config.port,
             log_level='warning',
+            # See the module constants: mirrors the Go backend's
+            # http.Server hardening, which Python was missing entirely.
+            timeout_keep_alive=KEEP_ALIVE_TIMEOUT_SECONDS,
+            h11_max_incomplete_event_size=MAX_HEADER_BYTES,
         )
         self._server = uvicorn.Server(uvi_config)
         self._thread = threading.Thread(

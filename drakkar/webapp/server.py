@@ -124,6 +124,34 @@ KAFKA_FALLBACK_HINT = (
 # horizontal-scale-out / Kafka-fallback covers everything else.
 _SEMAPHORE_ACQUIRE_PROBE_SECONDS = 0.001
 
+# HTTP transport limits. The Go backend has carried these on its
+# ``http.Server`` since it was hardened; Python set none of them, so a
+# client that dribbled bytes — or simply opened connections and left them —
+# could pin connections, tasks and memory in the process that also runs the
+# pipeline. Values mirror ``internal/webapp/server.go`` exactly, so a mixed
+# fleet behaves the same.
+#
+# Constants rather than config: there is nothing here for an operator to
+# trade off, and the one dimension that IS deployment-specific — how large
+# a body to accept — is already ``webapp.max_body_bytes``.
+
+# Reaps keep-alive connections idle between requests, so abandoned clients
+# cannot pin connections (and file descriptors) forever. Go: idleTimeout.
+KEEP_ALIVE_TIMEOUT_SECONDS = 120
+
+# Caps the request header section. 64 KiB is generous: the only meaningful
+# headers the webapp reads are the bearer token and the optional
+# request-id header. Go: maxHeaderBytes.
+MAX_HEADER_BYTES = 64 * 1024
+
+# Added on top of the configurable ``request_timeout_seconds`` to bound the
+# BODY READ. Go gets this from http.Server.WriteTimeout, whose window opens
+# at the end of the headers and spans the body read; uvicorn has no
+# equivalent, so the read is wrapped explicitly. Without it the body cap
+# alone is not a slow-loris defence: a client can stay under
+# ``max_body_bytes`` forever by sending one byte a minute.
+BODY_READ_TIMEOUT_MARGIN_SECONDS = 30
+
 
 class ConfigurationError(RuntimeError):
     """Raised at webapp startup when required handler types are missing.
@@ -290,6 +318,10 @@ class WebApp:
             port=self._config.port,
             log_config=None,
             log_level='warning',
+            # See the module constants: mirrors the Go backend's
+            # http.Server hardening, which Python was missing entirely.
+            timeout_keep_alive=KEEP_ALIVE_TIMEOUT_SECONDS,
+            h11_max_incomplete_event_size=MAX_HEADER_BYTES,
         )
         self._uvicorn_server = uvicorn.Server(uvi_config)
         self._thread = threading.Thread(
@@ -672,12 +704,37 @@ class WebApp:
             chunks: list[bytes] = []
             received = 0
             too_large = False
-            async for chunk in request.stream():
-                received += len(chunk)
-                if received > max_body:
-                    too_large = True
-                    break
-                chunks.append(chunk)
+            # The size cap alone is not a slow-loris defence — a client can
+            # stay under it indefinitely by sending one byte at a time — so
+            # the read is also bounded in TIME. Go gets this from
+            # http.Server.WriteTimeout; uvicorn has no equivalent.
+            read_budget = self._config.request_timeout_seconds + BODY_READ_TIMEOUT_MARGIN_SECONDS
+            try:
+                async with asyncio.timeout(read_budget):
+                    async for chunk in request.stream():
+                        received += len(chunk)
+                        if received > max_body:
+                            too_large = True
+                            break
+                        chunks.append(chunk)
+            except TimeoutError:
+                logger.warning(
+                    'webapp_request_body_read_timeout',
+                    category='webapp',
+                    client=metric_client,
+                    received_bytes=received,
+                    timeout_seconds=read_budget,
+                    hint='client stopped sending mid-body; front the webapp with a proxy that enforces read timeouts',
+                )
+                self._observe_outcome(request=request, client=metric_client, status='error')
+                return JSONResponse(
+                    status_code=408,
+                    content={
+                        'error': 'request_timeout',
+                        'request_id': gate_request_id,
+                        'hint': 'the request body was not delivered in time',
+                    },
+                )
             if too_large:
                 self._observe_outcome(request=request, client=metric_client, status='error')
                 # 413 (not the parse gate's 422): the payload was never

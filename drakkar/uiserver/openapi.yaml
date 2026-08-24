@@ -718,6 +718,23 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/DebugReport'}
         '422': {$ref: '#/components/responses/ValidationError'}
+        '429':
+          description: >-
+            Too many probes are already queued. Probes serialize on a single
+            lock; past 16 queued requests the rest are shed rather than
+            joining the queue. Retry — this is not a probe failure.
+          headers:
+            Retry-After:
+              schema: {type: string}
+              description: Seconds to wait before retrying (a hint).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: {type: string}
+                  max_waiters: {type: integer}
+                required: [error, max_waiters]
         '503':
           description: Executor pool not ready.
           content:

@@ -1164,3 +1164,22 @@ class TestApiV1LiveOverviewCounts:
         data = resp.json()
         assert data['running_tasks'] == 1
         assert data['pending_tasks'] == 0
+
+
+async def test_probe_endpoint_sheds_excess_waiters_with_429(debug_config, mock_recorder, mock_app, monkeypatch):
+    """The queue in front of the probe lock is bounded; past it the endpoint
+    answers 429 rather than growing a queue of pinned requests."""
+    from drakkar.uiserver import runner as runner_module
+
+    monkeypatch.setattr(runner_module, 'MAX_PROBE_WAITERS', 0)
+    mock_recorder.config = debug_config
+
+    async with make_client(debug_config, mock_recorder, mock_app) as c:
+        resp = await c.post('/api/v1/debug/probe', json={'value': '{}'})
+
+    assert resp.status_code == 429
+    body = resp.json()
+    assert body['max_waiters'] == 0
+    assert resp.headers['Retry-After'] == '1'
+    # The error names the condition rather than leaking internals.
+    assert 'queued' in body['error']

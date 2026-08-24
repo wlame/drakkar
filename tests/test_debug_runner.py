@@ -24,7 +24,7 @@ import contextlib
 import time
 from contextlib import ExitStack
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -3660,3 +3660,54 @@ async def test_probe_report_argv_defaults_to_empty_for_a_task_without_args():
 
     assert report.tasks[0].args == []
     assert report.tasks[0].binary_path is None
+
+
+# ---------------------------------------------------------------------------
+# Probe queue cap
+# ---------------------------------------------------------------------------
+
+
+async def test_probe_waiters_are_capped_and_shed_with_a_busy_error(monkeypatch):
+    """Probes serialize on one lock by design, but queueing is unbounded.
+
+    A probe runs the user's handler, so it is slow by nature. A refreshed
+    page — or a script — could stack arbitrarily many waiters, each pinning
+    its request's memory and connection on the server that also answers the
+    Kubernetes probes.
+    """
+    from drakkar.uiserver import runner as runner_module
+    from drakkar.uiserver.runner import ProbeBusyError
+
+    monkeypatch.setattr(runner_module, 'MAX_PROBE_WAITERS', 2)
+
+    runner = DebugRunner(
+        handler=_HappyPathHandler(task_count=1),
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+    release = asyncio.Event()
+    finished: list[str] = []
+
+    async def _blocked_run(state):
+        await release.wait()
+        finished.append('done')
+        return MagicMock()
+
+    monkeypatch.setattr(runner, '_run_locked', _blocked_run)
+
+    # One holds the lock, one queues behind it — both within the cap.
+    running = [asyncio.create_task(runner._run_with_state(MagicMock())) for _ in range(2)]
+    await wait_for(lambda: runner._probe_waiters == 2)
+
+    # The third finds the queue full and is shed instead of joining it.
+    with pytest.raises(ProbeBusyError) as exc_info:
+        await runner._run_with_state(MagicMock())
+    assert exc_info.value.max_waiters == 2
+
+    release.set()
+    await asyncio.gather(*running)
+    assert runner._probe_waiters == 0
+
+    # Capacity is returned, not permanently consumed.
+    release.set()
+    await runner._run_with_state(MagicMock())

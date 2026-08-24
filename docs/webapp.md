@@ -442,6 +442,7 @@ topic for higher throughput and worker-restart resilience.
 | 413 | n/a (`error: request_too_large`) | Body exceeds `max_body_bytes` (enforced before parsing; identical on both backends) | `{"error": "request_too_large", "request_id": "req-...", "details": "request body exceeds webapp.max_body_bytes (10485760 bytes)"}` |
 | 422 | n/a (legacy `error: invalid_request`) | Body is missing or fails Pydantic validation against `HttpRequestT` | `{"error": "invalid_request", "request_id": "req-...", "details": [{"loc": ["query"], "msg": "Field required", "type": "missing"}]}` |
 | 429 | n/a (`error: rate_limited`) | Per-client rpm window is full (rejected at the gate, before the runner; the response also carries a `Retry-After` header with the wait rounded up to whole seconds) | `{"error": "rate_limited", "client": "tenant-a", "rpm_limit": 60, "retry_after_seconds": 1.7, "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
+| 408 | n/a (`error: request_timeout`) | The request body was not delivered within `request_timeout_seconds` + 30 s. The size cap alone is not a slow-loris defence — a client can stay under it indefinitely by sending one byte at a time — so the body read is bounded in time too | `{"error": "request_timeout", "request_id": "req-...", "hint": "the request body was not delivered in time"}` |
 | 503 | `capacity` | `max_concurrent` semaphore is full at request time | `{"status": "capacity", "error": "webapp is over capacity; request rejected", "request_id": "req-...", "max_concurrent": 64, "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
 | 503 | `shutdown` | The worker is in the drain phase and refusing new requests | `{"status": "shutdown", "error": "webapp is shutting down; request rejected", "request_id": "req-...", "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
 | 503 | `not_ready` | The webapp accepted the connection but the main pipeline has not yet completed startup | `{"status": "not_ready", "error": "webapp is starting; main pipeline is not yet ready", "request_id": "req-...", "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
@@ -492,6 +493,26 @@ requests during that startup window also receive 503 with the
 Kafka-fallback hint.
 
 ---
+
+## Front it with a proxy
+
+Drakkar bounds what it can bound in-process: the body size
+(`max_body_bytes`), the body **read** time (`request_timeout_seconds` +
+30 s → `408`), keep-alive idle time (120 s), and the request header
+section (64 KiB). Those are backstops against a client that misbehaves by
+accident, and against one that is deliberately slow.
+
+They are **not** a substitute for a reverse proxy. This port is served by
+the same process that runs the pipeline, so anything that consumes
+connections there competes with real work. In any deployment reachable
+beyond a trusted network, put nginx / Envoy / a cloud load balancer in
+front and let it own connection-level concerns: per-client connection
+limits, its own read and header timeouts, request-rate limiting, TLS
+termination and body-size rejection at the edge — so a slow or hostile
+client never reaches the worker at all.
+
+The same applies to the debug UI port (`ui.port`) and, if enabled, the
+Prometheus exporter.
 
 ## Load balancer caveat
 

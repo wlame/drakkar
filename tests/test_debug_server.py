@@ -5691,3 +5691,76 @@ def test_backend_version_falls_back_to_package_dunder(monkeypatch):
     monkeypatch.setattr(importlib.metadata, 'version', _not_installed)
 
     assert backend_version() == __version__
+
+
+# ---------------------------------------------------------------------------
+# HTTP transport limits
+# ---------------------------------------------------------------------------
+
+
+class TestUIServerBodyLimit:
+    """The UI server takes a body on exactly two routes, and the probe's own
+    10 MB limit is a pydantic field constraint — it fires only AFTER the whole
+    body has been buffered, which is the wrong end of the problem.
+    """
+
+    async def test_oversized_declared_body_is_rejected_before_buffering(self, tmp_path, mock_recorder, mock_app):
+        from drakkar.uiserver.server import MAX_BODY_BYTES
+
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post(
+                '/api/debug/probe',
+                content=b'{}',
+                headers={'content-length': str(MAX_BODY_BYTES + 1), 'content-type': 'application/json'},
+            )
+        assert resp.status_code == 413
+        assert resp.json()['max_bytes'] == MAX_BODY_BYTES
+
+    async def test_malformed_content_length_is_a_400(self, tmp_path, mock_recorder, mock_app):
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.post(
+                '/api/debug/probe',
+                content=b'{}',
+                headers={'content-length': 'not-a-number', 'content-type': 'application/json'},
+            )
+        assert resp.status_code == 400
+
+    async def test_normal_requests_pass_through(self, tmp_path, mock_recorder, mock_app):
+        """The middleware must not disturb ordinary traffic."""
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/healthz')
+        assert resp.status_code == 200
+
+    async def test_uvicorn_config_carries_the_transport_limits(self, debug_config, mock_recorder, mock_app):
+        """Mirrors the Go backend's http.Server hardening, which the Python
+        UI server was missing entirely — on the process that also answers
+        the Kubernetes probes."""
+        from unittest.mock import patch
+
+        from drakkar.uiserver.server import KEEP_ALIVE_TIMEOUT_SECONDS, MAX_HEADER_BYTES, UIServer
+
+        server = UIServer(debug_config, mock_recorder, mock_app)
+        fake_uvicorn = MagicMock()
+        fake_uvicorn.started = True
+        fake_uvicorn.run = MagicMock()
+
+        with (
+            patch('drakkar.uiserver.server.uvicorn.Server', return_value=fake_uvicorn),
+            patch('drakkar.uiserver.server.uvicorn.Config') as mock_uvi_config,
+            patch('drakkar.uiserver.server.logger') as mock_logger,
+        ):
+            mock_uvi_config.return_value = MagicMock()
+            mock_logger.ainfo = AsyncMock()
+            await server.start()
+            if server._thread is not None:
+                server._thread.join(timeout=2.0)
+
+        kwargs = mock_uvi_config.call_args.kwargs
+        assert kwargs['timeout_keep_alive'] == KEEP_ALIVE_TIMEOUT_SECONDS
+        assert kwargs['h11_max_incomplete_event_size'] == MAX_HEADER_BYTES

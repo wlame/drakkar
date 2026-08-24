@@ -570,3 +570,56 @@ def test_request_id_resolution_failure_returns_flat_500():
         assert any(e['event'] == 'webapp_request_id_resolution_failed' for e in cap)
     finally:
         webapp.stop(drain_timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# HTTP transport limits
+# ---------------------------------------------------------------------------
+
+
+def test_uvicorn_config_carries_the_transport_limits():
+    """The Go backend has carried these on its http.Server since it was
+    hardened; Python set none of them, so a client that dribbled bytes — or
+    simply opened connections and left them — could pin connections and
+    memory in the process that also runs the pipeline."""
+    from drakkar.webapp.server import KEEP_ALIVE_TIMEOUT_SECONDS, MAX_HEADER_BYTES
+
+    webapp = WebApp(_make_app_stub(_RaisingWebHandler(), is_ready=True), _make_config(port=_free_port()))
+    try:
+        webapp.start_in_thread()
+        webapp.wait_until_ready(timeout=5.0)
+        config = webapp._uvicorn_server.config
+        assert config.timeout_keep_alive == KEEP_ALIVE_TIMEOUT_SECONDS
+        assert config.h11_max_incomplete_event_size == MAX_HEADER_BYTES
+    finally:
+        webapp.stop(drain_timeout=2.0)
+
+
+async def test_slow_request_body_is_answered_with_408():
+    """The size cap alone is not a slow-loris defence — a client can stay
+    under it forever by sending one byte at a time. Go gets this bound from
+    http.Server.WriteTimeout; uvicorn has no equivalent, so the body read is
+    wrapped explicitly."""
+    import drakkar.webapp.server as webapp_server
+
+    config = _make_config(port=_free_port())
+    config.request_timeout_seconds = 0.05
+    webapp = WebApp(_make_app_stub(_WebHandler(), is_ready=True), config)
+
+    original_margin = webapp_server.BODY_READ_TIMEOUT_MARGIN_SECONDS
+    webapp_server.BODY_READ_TIMEOUT_MARGIN_SECONDS = 0.0
+    try:
+
+        async def _dribble():
+            """One chunk, then silence — the shape of a slow-loris body."""
+            yield b'{"value":'
+            await asyncio.sleep(5)
+            yield b'"never"}'
+
+        transport = httpx.ASGITransport(app=webapp._fastapi_app)
+        async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
+            resp = await client.post(config.path, content=_dribble(), headers={'content-type': 'application/json'})
+        assert resp.status_code == 408
+        assert resp.json()['error'] == 'request_timeout'
+    finally:
+        webapp_server.BODY_READ_TIMEOUT_MARGIN_SECONDS = original_margin
