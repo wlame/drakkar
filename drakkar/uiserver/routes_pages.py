@@ -25,7 +25,6 @@ shared state through ``deps``.
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from typing import TYPE_CHECKING
 
@@ -33,6 +32,7 @@ from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisc
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from drakkar.concurrency import dispatch_to_loop
+from drakkar.recorder import queries
 from drakkar.uiserver.server_helpers import backend_version, origin_allowed
 
 if TYPE_CHECKING:
@@ -156,37 +156,16 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
         except Exception:
             inflight_count = 0
 
-        success_60s = 0
-        error_60s = 0
-        rejected_60s = 0
         since = time.time() - 60.0
-        success_query = "SELECT COUNT(*) FROM events WHERE event = 'webapp_request_completed' AND ts >= ?"
-        error_query = (
-            'SELECT COUNT(*) FROM events '
-            "WHERE event IN ('webapp_request_timeout', 'webapp_request_dropped_after_timeout') "
-            'AND ts >= ?'
-        )
-        rejected_query = (
-            'SELECT COUNT(*) FROM events '
-            "WHERE event IN ('webapp_request_rate_limited', 'webapp_request_auth_failed') "
-            'AND ts >= ?'
-        )
+        tiles = dict.fromkeys((key for key, _ in queries.WEBAPP_RATE_TILES), 0)
         try:
-            success_result = await deps.flush_and_select(success_query, [since])
-            if success_result is not None:
-                _cols, rows = success_result
-                if rows:
-                    success_60s = int(rows[0][0] or 0)
-            error_result = await deps.flush_and_select(error_query, [since])
-            if error_result is not None:
-                _cols, rows = error_result
-                if rows:
-                    error_60s = int(rows[0][0] or 0)
-            rejected_result = await deps.flush_and_select(rejected_query, [since])
-            if rejected_result is not None:
-                _cols, rows = rejected_result
-                if rows:
-                    rejected_60s = int(rows[0][0] or 0)
+            for key, event_names in queries.WEBAPP_RATE_TILES:
+                query, params = queries.event_count_query(event_names=event_names, since=since)
+                result = await deps.flush_and_select(query, params)
+                if result is not None:
+                    _cols, rows = result
+                    if rows:
+                        tiles[key] = int(rows[0][0] or 0)
         except Exception:
             # Recorder may not be ready in startup-edge windows; surface
             # the tile with zeros rather than 500ing the dashboard.
@@ -195,9 +174,7 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
         return {
             'inflight_count': inflight_count,
             'clients': [{'name': c.name, 'rpm_limit': c.rpm} for c in webapp_cfg.clients],
-            'success_60s': success_60s,
-            'error_60s': error_60s,
-            'rejected_60s': rejected_60s,
+            **tiles,
             'host': webapp_cfg.host,
             'port': webapp_cfg.port,
             'path': webapp_cfg.path,
@@ -379,105 +356,15 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
         ``task_id`` is echoed back as requested; the recorder lookup strips
         the ``:r…`` retry composite-key suffix to the base id.
         """
-        # Strip retry composite key suffix (e.g. "task-abc:r1234567.89" → "task-abc")
-        base_id = task_id.split(':r')[0] if ':r' in task_id else task_id
-        events = await dispatch_to_loop(recorder.get_task_events(base_id), deps.drakkar_app.main_loop)
-        started = next((e for e in events if e['event'] == 'task_started'), None)
-        completed = next((e for e in events if e['event'] == 'task_completed'), None)
-        failed = next((e for e in events if e['event'] == 'task_failed'), None)
-        finished = completed or failed
-        duration = finished['duration'] if finished and finished.get('duration') else None
-        if not duration and started and finished:
-            duration = finished['ts'] - started['ts']
-
-        source_offsets = None
-        task_env = None
-        if started and started.get('metadata'):
-            try:
-                meta = json.loads(started['metadata'])
-                source_offsets = meta.get('source_offsets')
-                task_env = meta.get('env')
-            except (json.JSONDecodeError, TypeError):
-                pass
-        args = None
-        if started and started.get('args'):
-            try:
-                args = json.loads(started['args'])
-            except (json.JSONDecodeError, TypeError):
-                args = started['args']
-        labels = None
-        if started and started.get('labels'):
-            try:
-                labels = json.loads(started['labels'])
-            except (json.JSONDecodeError, TypeError):
-                pass
-        pid = (completed or failed or {}).get('pid') or (started or {}).get('pid')
-
-        # ``origin`` is part of every event row; HTTP-origin tasks carry the
-        # ``client_name`` / ``request_id`` columns too. The template uses
-        # these to swap the Partition/Offset header for Client/Request ID.
-        origin_value = 'kafka'
-        client_name = None
-        request_id = None
-        for ev in events:
-            ev_origin = ev.get('origin')
-            if ev_origin:
-                origin_value = ev_origin
-            if ev.get('client_name'):
-                client_name = ev['client_name']
-            if ev.get('request_id'):
-                request_id = ev['request_id']
-        # Pull the truncated webapp-request body (≤ 4KB) and the final
-        # response, when the recorder captured them. Both come from the
-        # ``webapp_request_received`` / ``webapp_request_completed`` rows'
-        # metadata. ``body_bytes`` is the original size; when the recorder
-        # only captured the size (current behavior — see
-        # ``EventRecorder._compute_body_bytes``) we surface the size and a
-        # "request body not recorded" notice via a ``None`` payload.
-        webapp_request_body = None
-        webapp_response_body = None
-        if origin_value == 'http':
-            for ev in events:
-                if ev['event'] == 'webapp_request_received' and ev.get('metadata'):
-                    try:
-                        body_meta = json.loads(ev['metadata'])
-                        webapp_request_body = body_meta.get('body')
-                        if webapp_request_body is None and body_meta.get('body_bytes') is not None:
-                            # Recorder logged the size but not the payload.
-                            webapp_request_body = {
-                                'body_bytes': body_meta['body_bytes'],
-                                'recorded': False,
-                            }
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                elif ev['event'] == 'webapp_request_completed' and ev.get('metadata'):
-                    try:
-                        resp_meta = json.loads(ev['metadata'])
-                        webapp_response_body = resp_meta.get('response')
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-
-        return {
-            'task_id': task_id,
-            'events': events,
-            'started': started,
-            'completed': completed,
-            'failed': failed,
-            'duration': duration,
-            'source_offsets': source_offsets,
-            'args': args,
-            'labels': labels,
-            'task_env': task_env,
-            'partition': started['partition'] if started else None,
-            'pid': pid,
-            'exit_code': finished.get('exit_code') if finished else None,
-            'binary_path': drakkar_app._config.executor.binary_path,
-            'origin': origin_value,
-            'client_name': client_name,
-            'request_id': request_id,
-            'webapp_request_body': webapp_request_body,
-            'webapp_response_body': webapp_response_body,
-        }
+        events = await dispatch_to_loop(
+            recorder.get_task_events(queries.base_task_id(task_id)),
+            deps.drakkar_app.main_loop,
+        )
+        detail = queries.build_task_detail(task_id, events)
+        # The configured binary is app state, not recorder state, so it is
+        # added here rather than inside the reconstruction.
+        detail['binary_path'] = drakkar_app._config.executor.binary_path
+        return detail
 
     @html.get('/task/{task_id}', response_class=HTMLResponse)
     async def task_detail(request: Request, task_id: str):

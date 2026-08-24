@@ -18,7 +18,6 @@ model is treated as a query parameter and surfaces as 422 errors.
 
 from __future__ import annotations
 
-import json
 import time
 from typing import TYPE_CHECKING
 
@@ -27,6 +26,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from drakkar.concurrency import dispatch_to_loop
+from drakkar.recorder import queries
 from drakkar.uiserver.server_helpers import hook_flags
 
 if TYPE_CHECKING:
@@ -237,24 +237,12 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             ) from None
         type_list = [t.strip() for t in event_types.split(',') if t.strip()] if event_types else None
 
-        conditions = []
-        params: list = []
-        if part_list:
-            placeholders = ','.join(['?'] * len(part_list))
-            conditions.append(f'partition IN ({placeholders})')
-            params.extend(part_list)
-        if type_list:
-            placeholders = ','.join(['?'] * len(type_list))
-            conditions.append(f'event IN ({placeholders})')
-            params.extend(type_list)
-        if after_id > 0:
-            conditions.append('id > ?')
-            params.append(after_id)
-
-        where = f'WHERE {" AND ".join(conditions)}' if conditions else ''
-        query = f'SELECT * FROM events {where} ORDER BY id DESC LIMIT ?'
-        params.append(limit)
-
+        query, params = queries.events_query(
+            partitions=part_list,
+            event_types=type_list,
+            after_id=after_id,
+            limit=limit,
+        )
         result = await deps.flush_and_select(query, params)
         if result is None:
             return JSONResponse([])
@@ -311,18 +299,8 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         event_limit = limit * 3
 
         since = time.time() - (minutes * 60)
-        query = """
-            SELECT * FROM (
-                SELECT ts, event, partition, task_id, args, duration, metadata,
-                       pid, labels, origin, client_name, request_id, stdout_size
-                FROM events
-                WHERE event IN ('task_started', 'task_completed', 'task_failed')
-                AND ts >= ?
-                ORDER BY ts DESC
-                LIMIT ?
-            ) ORDER BY ts ASC
-        """
-        result = await deps.flush_and_select(query, [since, event_limit])
+        query, params = queries.recent_tasks_query(since=since, event_limit=event_limit)
+        result = await deps.flush_and_select(query, params)
         if result is None:
             # Degraded read (no reader connection, or the bounded main-loop
             # dispatch timed out). Keep the documented object shape — a bare
@@ -336,110 +314,11 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         # so rather than letting the UI present a partial window as complete.
         truncated = len(events) >= event_limit
 
-        # group events into timeline entries — one entry per execution attempt.
-        # retries (same task_id with multiple task_started) produce separate entries:
-        # previous attempts get composite keys (task_id:r{ts}), the latest keeps
-        # the original task_id so WS events can match it.
-        tasks: dict[str, dict] = {}
-        for e in events:
-            tid = e.get('task_id')
-            if not tid:
-                continue
-
-            if e['event'] == 'task_started':
-                # if this task_id already has a current entry, archive it as a retry
-                if tid in tasks:
-                    old = tasks[tid]
-                    archive_key = tid + ':r' + str(old['start_ts'])
-                    tasks[archive_key] = old
-                    old['task_id'] = archive_key
-                    if old['end_ts'] is None:
-                        old['end_ts'] = e['ts']
-                        old['status'] = 'failed'
-
-                slot = None
-                meta = None
-                if e.get('metadata'):
-                    try:
-                        meta = json.loads(e['metadata'])
-                        slot = meta.get('slot')
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                labels = None
-                if e.get('labels'):
-                    try:
-                        labels = json.loads(e['labels'])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                task_env = meta.get('env') if meta else None
-                tasks[tid] = {
-                    'task_id': tid,
-                    'partition': e.get('partition'),
-                    'start_ts': e['ts'],
-                    'end_ts': None,
-                    'duration': None,
-                    'status': 'running',
-                    'args': e.get('args'),
-                    'pid': e.get('pid'),
-                    # Populated from the task_completed event below; stays
-                    # null for running/failed tasks.
-                    'stdout_size': None,
-                    'slot': slot,
-                    'labels': labels,
-                    'env': task_env,
-                    # Webapp-pipeline columns: ``origin`` defaults to
-                    # ``'kafka'`` at the schema level, so the absence of
-                    # the column on older recorder rows still yields a
-                    # sensible value here. ``client_name`` /
-                    # ``request_id`` are NULL for Kafka tasks.
-                    'origin': e.get('origin') or 'kafka',
-                    'client_name': e.get('client_name'),
-                    'request_id': e.get('request_id'),
-                }
-
-            elif e['event'] in ('task_completed', 'task_failed'):
-                if tid in tasks:
-                    t = tasks[tid]
-                    t['end_ts'] = e['ts']
-                    t['status'] = 'completed' if e['event'] == 'task_completed' else 'failed'
-                    t['duration'] = e.get('duration')
-                    if e.get('pid'):
-                        t['pid'] = e['pid']
-                    if e['event'] == 'task_completed':
-                        t['stdout_size'] = e.get('stdout_size')
-                        # Contract v1.16: throughput-counted completions
-                        # carry cost/speed in their metadata; surface them
-                        # on the row so the timeline shows per-task speed
-                        # without re-deriving. Absent for excluded tasks.
-                        if e.get('metadata'):
-                            try:
-                                completed_meta = json.loads(e['metadata'])
-                                if 'speed' in completed_meta:
-                                    t['cost'] = completed_meta.get('cost')
-                                    t['speed'] = completed_meta.get('speed')
-                            except (json.JSONDecodeError, TypeError):
-                                pass
-
-        # Apply ws_min_duration_ms filtering: hide fast completed tasks
-        # from the live UI, same as the WebSocket path. Running tasks
-        # (duration unknown) and failed tasks (always visible) are kept.
-        ws_threshold_s = recorder.config.ws_min_duration_ms / 1000.0
-        tasks_result = []
-        for t in tasks.values():
-            if not t['start_ts']:
-                continue
-            if t['status'] == 'completed' and t['duration'] is not None and t['duration'] < ws_threshold_s:
-                continue
-            tasks_result.append(t)
-
-        # ``limit`` bounds the response to the newest tasks by start time,
-        # independent of the row-count-based ``event_limit`` cap above (that
-        # one can drop an OLDER task's matching event out of the query
-        # window entirely; this one trims the grouped, filtered result).
-        trimmed = len(tasks_result) > limit
-        if trimmed:
-            tasks_result.sort(key=lambda t: t['start_ts'])
-            tasks_result = tasks_result[-limit:]
+        tasks_result, trimmed = queries.group_timeline_tasks(
+            events,
+            ws_min_duration_seconds=recorder.config.ws_min_duration_ms / 1000.0,
+            limit=limit,
+        )
 
         return JSONResponse(
             {
@@ -470,94 +349,20 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         if not task_ids:
             return JSONResponse({})
 
-        placeholders = ','.join(['?'] * len(task_ids))
-        query = f"""
-            SELECT task_id, event, ts, duration, partition, metadata,
-                   exit_code, pid, args, labels,
-                   origin, client_name, request_id
-            FROM events
-            WHERE task_id IN ({placeholders})
-              AND event IN ('task_started', 'task_completed', 'task_failed')
-            ORDER BY task_id, id ASC
-        """
-
         # Short-circuit when recorder event storage is disabled — no point
         # flushing + SELECTing against an empty table. ``flush_and_select``
         # would still dispatch to the main loop and return rows, but they'd
         # always be empty.
         if not recorder.config.recorder.store_events:
             return JSONResponse({})
-        query_result = await deps.flush_and_select(query, task_ids)
+
+        query, params = queries.task_state_query(task_ids)
+        query_result = await deps.flush_and_select(query, params)
         if query_result is None:
             return JSONResponse({})
         columns, rows = query_result
         events = [dict(zip(columns, row, strict=False)) for row in rows]
-
-        # ``by_id`` aggregates event rows per task_id — one entry per task.
-        by_id: dict[str, dict] = {}
-        for e in events:
-            tid = e['task_id']
-            t = by_id.setdefault(
-                tid,
-                {
-                    'task_id': tid,
-                    'status': 'unknown',
-                    'start_ts': None,
-                    'end_ts': None,
-                    'duration': None,
-                    'partition': None,
-                    'source_offsets': None,
-                    'pid': None,
-                    'args': None,
-                    'labels': None,
-                    'exit_code': None,
-                    # Webapp-pipeline columns. The first event row to
-                    # populate them wins (origin is NOT NULL with default
-                    # 'kafka', so it's always set; client_name /
-                    # request_id are NULL for Kafka tasks).
-                    'origin': 'kafka',
-                    'client_name': None,
-                    'request_id': None,
-                },
-            )
-            if e['event'] == 'task_started':
-                t['start_ts'] = e['ts']
-                # ``running`` is provisional — overwritten on the next row
-                # if a completion event exists for the same task_id.
-                if t['status'] == 'unknown':
-                    t['status'] = 'running'
-                t['partition'] = e.get('partition')
-                t['pid'] = e.get('pid')
-                t['args'] = e.get('args')
-                # Origin / client_name / request_id propagate from the
-                # task_started row (every recorder write site populates
-                # them). Last write wins on retries within the batch,
-                # matching the existing convention for ``pid`` etc.
-                if e.get('origin'):
-                    t['origin'] = e['origin']
-                if e.get('client_name'):
-                    t['client_name'] = e['client_name']
-                if e.get('request_id'):
-                    t['request_id'] = e['request_id']
-                if e.get('metadata'):
-                    try:
-                        meta = json.loads(e['metadata'])
-                        t['source_offsets'] = meta.get('source_offsets')
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                if e.get('labels'):
-                    try:
-                        t['labels'] = json.loads(e['labels'])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-            elif e['event'] in ('task_completed', 'task_failed'):
-                t['end_ts'] = e['ts']
-                t['status'] = 'completed' if e['event'] == 'task_completed' else 'failed'
-                t['duration'] = e.get('duration')
-                t['exit_code'] = e.get('exit_code')
-                if e.get('pid'):
-                    t['pid'] = e['pid']
-
+        by_id = queries.group_task_states(events)
         return JSONResponse(by_id)
 
     # ------------------------------------------------------------------
@@ -580,24 +385,14 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         """
         if not recorder.config.recorder.store_events:
             return []
-        query = (
-            'SELECT ts, task_id, partition, offset, duration, metadata '
-            'FROM events WHERE event = ? ORDER BY id DESC LIMIT ?'
-        )
-        result = await deps.flush_and_select(query, (event_name, limit))
+        query, params = queries.hook_events_query(event_name=event_name, limit=limit)
+        result = await deps.flush_and_select(query, params)
         if result is None:
             return []
         columns, rows = result
         return [dict(zip(columns, row, strict=False)) for row in rows]
 
-    def _parse_meta(raw: str | None) -> dict:
-        if not raw:
-            return {}
-        try:
-            parsed = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
+    _parse_meta = queries.parse_json_object
 
     @router.get('/api/live/task-results')
     async def api_live_task_results(limit: int = Query(default=200, ge=0, le=5000)):
@@ -610,43 +405,23 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         # task_completed/task_failed carry the subprocess exit status.
         aux_by_id: dict[str, dict] = {}
         if task_ids and recorder.reader_db:
-            placeholders = ','.join(['?'] * len(task_ids))
-            q = (
-                f'SELECT task_id, event, duration, exit_code, metadata '
-                f'FROM events WHERE task_id IN ({placeholders}) '
-                f"AND event IN ('task_started', 'task_completed', 'task_failed')"
-            )
+            query, params = queries.task_exec_state_query(task_ids)
 
-            # The aiosqlite connection lives on the main loop, so run
-            # the SELECT + fetchall there and return plain Python data.
-            # Routes through the reader connection so UI lookups don't
-            # queue behind writer flushes.
+            # The aiosqlite connection lives on the main loop, so run the
+            # SELECT + fetchall there and return plain Python data. Routes
+            # through the reader connection so UI lookups don't queue
+            # behind writer flushes.
             async def _read_aux():
                 reader = recorder.reader_db
                 if not reader:
                     return [], []
-                async with reader.execute(q, task_ids) as cur:
+                async with reader.execute(query, params) as cur:
                     cols = [d[0] for d in cur.description]
                     aux_rows = await cur.fetchall()
                 return cols, aux_rows
 
             cols, aux_rows = await dispatch_to_loop(_read_aux(), deps.drakkar_app.main_loop)
-            for row in aux_rows:
-                ex = dict(zip(cols, row, strict=False))
-                entry = aux_by_id.setdefault(
-                    ex['task_id'],
-                    {'exec_duration': None, 'status': None, 'exit_code': None, 'source_offsets': None},
-                )
-                if ex['event'] == 'task_started':
-                    started_meta = _parse_meta(ex.get('metadata'))
-                    so = started_meta.get('source_offsets')
-                    if isinstance(so, list):
-                        entry['source_offsets'] = so
-                else:
-                    # Last-write-wins on retries within the batch.
-                    entry['exec_duration'] = ex.get('duration')
-                    entry['status'] = 'completed' if ex['event'] == 'task_completed' else 'failed'
-                    entry['exit_code'] = ex.get('exit_code')
+            aux_by_id = queries.group_task_exec_state([dict(zip(cols, row, strict=False)) for row in aux_rows])
         result = []
         for e in events:
             meta = _parse_meta(e.get('metadata'))
@@ -692,38 +467,27 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
                 if e.get('partition') is not None and e.get('offset') is not None
             }
             if pairs:
-                partitions = sorted({p for p, _ in pairs})
-                offsets = sorted({o for _, o in pairs})
-                pp = ','.join(['?'] * len(partitions))
-                oo = ','.join(['?'] * len(offsets))
-                q = (
-                    f'SELECT partition, offset, ts FROM events '
-                    f"WHERE event = 'consumed' "
-                    f'AND partition IN ({pp}) AND offset IN ({oo})'
-                )
-                params: list = [*partitions, *offsets]
+                query, params = queries.consumed_timestamps_query(sorted(pairs))
 
                 async def _read_consumed():
                     reader = recorder.reader_db
                     if not reader:
                         return []
-                    async with reader.execute(q, params) as cur:
+                    async with reader.execute(query, params) as cur:
                         return await cur.fetchall()
 
-                for row in await dispatch_to_loop(_read_consumed(), deps.drakkar_app.main_loop):
-                    consumed_by_key.setdefault((row[0], row[1]), []).append(row[2])
+                consumed_by_key = queries.index_consumed_timestamps(
+                    await dispatch_to_loop(_read_consumed(), deps.drakkar_app.main_loop)
+                )
 
         result = []
         for e in events:
             meta = _parse_meta(e.get('metadata'))
-            end_to_end = None
-            candidates = consumed_by_key.get((e.get('partition'), e.get('offset')))
-            if candidates:
-                mc_ts = e['ts']
-                # Most recent consumed_ts that's <= message_complete ts.
-                best = max((c for c in candidates if c <= mc_ts), default=None)
-                if best is not None:
-                    end_to_end = round(mc_ts - best, 4)
+            elapsed = queries.end_to_end_seconds(
+                consumed_by_key.get((e.get('partition'), e.get('offset'))),
+                e['ts'],
+            )
+            end_to_end = None if elapsed is None else round(elapsed, 4)
             result.append(
                 {
                     'ts': e['ts'],
@@ -775,22 +539,11 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             return JSONResponse({})
         if not recorder.config.recorder.store_events:
             return JSONResponse({})
-        placeholders = ','.join(['?'] * len(req.offsets))
-        q = (
-            f'SELECT output_topic, COUNT(*) as n FROM events '
-            f"WHERE event = 'produced' AND partition = ? "
-            f'AND offset IN ({placeholders}) GROUP BY output_topic'
-        )
-        params: list = [req.partition, *req.offsets]
-
-        result = await deps.flush_and_select(q, params)
+        query, params = queries.sink_breakdown_query(partition=req.partition, offsets=req.offsets)
+        result = await deps.flush_and_select(query, params)
         if result is None:
             return JSONResponse({})
         _columns, rows = result
-        out: dict[str, int] = {}
-        for row in rows:
-            topic = row[0] or '(unknown)'
-            out[topic] = int(row[1])
-        return JSONResponse(out)
+        return JSONResponse(queries.count_by_topic(rows))
 
     return router

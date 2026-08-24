@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import json
 import os
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import aiosqlite
 import structlog
@@ -487,3 +489,534 @@ class EventQueries:
                 )
                 continue
         return workers
+
+
+# ---------------------------------------------------------------------------
+# UI read model
+#
+# The debug UI answers questions the recorder's own API does not: "what was
+# on the timeline in the last two minutes", "what is the state of these
+# forty task ids", "how many payloads did this offset produce per sink".
+# Each is a SELECT over the same ``events`` table plus a fold of the rows
+# into the shape a page renders.
+#
+# Both halves live here rather than inside the route closures in
+# ``drakkar/uiserver/routes_*``. Three reasons: the aggregation can then be
+# tested against known rows without building a FastAPI app; schema
+# knowledge stops leaking into the presentation layer; and the Go backend
+# has one module to diff its own queries against instead of hunting them
+# through 900-line closures.
+#
+# The route keeps what is genuinely its own — parsing query parameters,
+# dispatching the read to the main loop, and shaping the JSON response.
+#
+# The SQL builders return ``(sql, params)`` rather than executing, because
+# the UI reads run through ``deps.flush_and_select``: a flush, then a
+# SELECT on the recorder's reader connection, dispatched to the main loop
+# with a timeout. That execution path belongs to the UI server; the query
+# text does not.
+# ---------------------------------------------------------------------------
+
+# Events that describe one execution attempt. Every timeline and task-state
+# view is a fold over these three.
+TASK_LIFECYCLE_EVENTS = ('task_started', 'task_completed', 'task_failed')
+
+# Columns the timeline needs. Deliberately not ``SELECT *``: ``stdout`` and
+# ``stderr`` hold captured subprocess output that no timeline renders, and
+# pulling them made the response size track total task output rather than
+# task count.
+_TIMELINE_COLUMNS = (
+    'ts, event, partition, task_id, args, duration, metadata, pid, labels, origin, client_name, request_id, stdout_size'
+)
+
+# Columns the task-state lookup needs — the timeline set plus exit_code,
+# minus the size fields no caller of that endpoint reads.
+_TASK_STATE_COLUMNS = (
+    'task_id, event, ts, duration, partition, metadata, exit_code, pid, args, labels, origin, client_name, request_id'
+)
+
+
+def _placeholders(values: Sequence[Any]) -> str:
+    """``?,?,?`` for an IN clause. Never interpolates the values themselves."""
+    return ','.join(['?'] * len(values))
+
+
+def events_query(
+    *,
+    partitions: Sequence[int] | None = None,
+    event_types: Sequence[str] | None = None,
+    after_id: int = 0,
+    limit: int = 100,
+) -> tuple[str, list[Any]]:
+    """The ``/api/v1/events`` listing: newest first, optionally filtered.
+
+    ``after_id`` supports the UI's incremental poll — "everything since the
+    id I last saw" — and is ignored when zero.
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+    if partitions:
+        conditions.append(f'partition IN ({_placeholders(partitions)})')
+        params.extend(partitions)
+    if event_types:
+        conditions.append(f'event IN ({_placeholders(event_types)})')
+        params.extend(event_types)
+    if after_id > 0:
+        conditions.append('id > ?')
+        params.append(after_id)
+    where = f'WHERE {" AND ".join(conditions)}' if conditions else ''
+    params.append(limit)
+    return f'SELECT * FROM events {where} ORDER BY id DESC LIMIT ?', params
+
+
+def recent_tasks_query(*, since: float, event_limit: int) -> tuple[str, list[Any]]:
+    """Lifecycle events since ``since``, capped at the ``event_limit`` newest.
+
+    The inner query orders DESC to take the most recent rows, and the outer
+    re-sorts ASC because the retry grouping in :func:`group_timeline_tasks`
+    depends on chronological order.
+    """
+    query = f"""
+            SELECT * FROM (
+                SELECT {_TIMELINE_COLUMNS}
+                FROM events
+                WHERE event IN ('task_started', 'task_completed', 'task_failed')
+                AND ts >= ?
+                ORDER BY ts DESC
+                LIMIT ?
+            ) ORDER BY ts ASC
+        """
+    return query, [since, event_limit]
+
+
+def task_state_query(task_ids: Sequence[str]) -> tuple[str, list[Any]]:
+    """Every lifecycle event for the named tasks, oldest first per task."""
+    query = f"""
+            SELECT {_TASK_STATE_COLUMNS}
+            FROM events
+            WHERE task_id IN ({_placeholders(task_ids)})
+              AND event IN ('task_started', 'task_completed', 'task_failed')
+            ORDER BY task_id, id ASC
+        """
+    return query, list(task_ids)
+
+
+def hook_events_query(*, event_name: str, limit: int) -> tuple[str, list[Any]]:
+    """The most recent completion-hook events of one kind, newest first."""
+    query = (
+        'SELECT ts, task_id, partition, offset, duration, metadata FROM events WHERE event = ? ORDER BY id DESC LIMIT ?'
+    )
+    return query, [event_name, limit]
+
+
+def sink_breakdown_query(*, partition: int, offsets: Sequence[int]) -> tuple[str, list[Any]]:
+    """``produced`` counts per output topic for one partition's offsets."""
+    query = (
+        f'SELECT output_topic, COUNT(*) as n FROM events '
+        f"WHERE event = 'produced' AND partition = ? "
+        f'AND offset IN ({_placeholders(offsets)}) GROUP BY output_topic'
+    )
+    return query, [partition, *offsets]
+
+
+def parse_json_object(raw: str | None) -> dict:
+    """Decode a recorder metadata/labels column, or ``{}``.
+
+    Recorder columns are written by this framework, but a database can be
+    hand-edited, truncated mid-write, or written by an older version — and
+    a decode failure on one row must not blank a whole page.
+    """
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _new_timeline_entry(event: dict) -> dict:
+    """One timeline row, built from a ``task_started`` event."""
+    metadata = parse_json_object(event.get('metadata'))
+    return {
+        'task_id': event['task_id'],
+        'partition': event.get('partition'),
+        'start_ts': event['ts'],
+        'end_ts': None,
+        'duration': None,
+        'status': 'running',
+        'args': event.get('args'),
+        'pid': event.get('pid'),
+        # Populated from the task_completed event; stays null for
+        # running and failed tasks.
+        'stdout_size': None,
+        'slot': metadata.get('slot'),
+        'labels': parse_json_object(event.get('labels')) or None,
+        'env': metadata.get('env'),
+        # Webapp-pipeline columns: ``origin`` defaults to ``'kafka'`` at the
+        # schema level, so its absence on an older recorder row still yields
+        # a sensible value. ``client_name`` / ``request_id`` are NULL for
+        # Kafka tasks.
+        'origin': event.get('origin') or 'kafka',
+        'client_name': event.get('client_name'),
+        'request_id': event.get('request_id'),
+    }
+
+
+def group_timeline_tasks(
+    events: Sequence[dict], *, ws_min_duration_seconds: float, limit: int
+) -> tuple[list[dict], bool]:
+    """Fold lifecycle events into one timeline row per execution attempt.
+
+    ``events`` must be in chronological order.
+
+    Retries produce separate rows: when a second ``task_started`` arrives
+    for a task that already has an open row, the earlier attempt is
+    archived under a composite key (``<task_id>:r<start_ts>``) and the
+    latest attempt keeps the plain ``task_id``, so a live WebSocket event
+    still matches the row the UI is drawing. An archived attempt with no
+    completion is closed as failed at the moment the retry started —
+    without that it would draw as a bar that never ends.
+
+    Fast completed tasks are dropped, matching what the live WebSocket
+    stream suppresses at ``ws_min_duration_ms``: a task nobody saw start
+    must not appear finishing. Running tasks (duration unknown) and failed
+    tasks (always visible) are kept whatever their duration.
+
+    Returns ``(rows, trimmed)`` — ``trimmed`` says the newest ``limit``
+    rows by start time were kept and older ones dropped, so the caller can
+    tell the UI its window is partial instead of letting it present a
+    partial window as complete.
+    """
+    tasks: dict[str, dict] = {}
+    for event in events:
+        task_id = event.get('task_id')
+        if not task_id:
+            continue
+
+        if event['event'] == 'task_started':
+            open_attempt = tasks.get(task_id)
+            if open_attempt is not None:
+                archive_key = f'{task_id}:r{open_attempt["start_ts"]}'
+                tasks[archive_key] = open_attempt
+                open_attempt['task_id'] = archive_key
+                if open_attempt['end_ts'] is None:
+                    open_attempt['end_ts'] = event['ts']
+                    open_attempt['status'] = 'failed'
+            tasks[task_id] = _new_timeline_entry(event)
+
+        elif event['event'] in ('task_completed', 'task_failed'):
+            entry = tasks.get(task_id)
+            if entry is None:
+                continue
+            entry['end_ts'] = event['ts']
+            entry['status'] = 'completed' if event['event'] == 'task_completed' else 'failed'
+            entry['duration'] = event.get('duration')
+            if event.get('pid'):
+                entry['pid'] = event['pid']
+            if event['event'] == 'task_completed':
+                entry['stdout_size'] = event.get('stdout_size')
+                # Contract v1.16: throughput-counted completions carry
+                # cost/speed in their metadata; surface them on the row so
+                # the timeline shows per-task speed without re-deriving.
+                # Absent for excluded tasks.
+                metadata = parse_json_object(event.get('metadata'))
+                if 'speed' in metadata:
+                    entry['cost'] = metadata.get('cost')
+                    entry['speed'] = metadata.get('speed')
+
+    rows = [
+        entry
+        for entry in tasks.values()
+        if entry['start_ts']
+        and not (
+            entry['status'] == 'completed'
+            and entry['duration'] is not None
+            and entry['duration'] < ws_min_duration_seconds
+        )
+    ]
+
+    trimmed = len(rows) > limit
+    if trimmed:
+        rows.sort(key=lambda row: row['start_ts'])
+        rows = rows[-limit:]
+    return rows, trimmed
+
+
+def _new_task_state(task_id: str) -> dict:
+    return {
+        'task_id': task_id,
+        'status': 'unknown',
+        'start_ts': None,
+        'end_ts': None,
+        'duration': None,
+        'partition': None,
+        'source_offsets': None,
+        'pid': None,
+        'args': None,
+        'labels': None,
+        'exit_code': None,
+        # Webapp-pipeline columns. The first event row to populate them
+        # wins (origin is NOT NULL with default 'kafka', so it is always
+        # set; client_name / request_id are NULL for Kafka tasks).
+        'origin': 'kafka',
+        'client_name': None,
+        'request_id': None,
+    }
+
+
+def group_task_states(events: Sequence[dict]) -> dict[str, dict]:
+    """Fold lifecycle events into one current-state row per task id.
+
+    Unlike :func:`group_timeline_tasks` this collapses retries: a task that
+    was retried reports the outcome of its latest attempt, because the
+    caller asked "what is the state of this task", not "draw me every
+    attempt". Tasks with no events are simply absent from the result —
+    callers treat a missing key as "not in the database yet".
+    """
+    by_id: dict[str, dict] = {}
+    for event in events:
+        task_id = event['task_id']
+        state = by_id.setdefault(task_id, _new_task_state(task_id))
+
+        if event['event'] == 'task_started':
+            state['start_ts'] = event['ts']
+            # ``running`` is provisional — overwritten below if a
+            # completion event exists for the same task id.
+            if state['status'] == 'unknown':
+                state['status'] = 'running'
+            state['partition'] = event.get('partition')
+            state['pid'] = event.get('pid')
+            state['args'] = event.get('args')
+            # Origin / client_name / request_id propagate from the
+            # task_started row (every recorder write site populates them).
+            # Last write wins on retries, matching ``pid``.
+            for column in ('origin', 'client_name', 'request_id'):
+                if event.get(column):
+                    state[column] = event[column]
+            state['source_offsets'] = parse_json_object(event.get('metadata')).get('source_offsets')
+            state['labels'] = parse_json_object(event.get('labels')) or None
+
+        elif event['event'] in ('task_completed', 'task_failed'):
+            state['end_ts'] = event['ts']
+            state['status'] = 'completed' if event['event'] == 'task_completed' else 'failed'
+            state['duration'] = event.get('duration')
+            state['exit_code'] = event.get('exit_code')
+            if event.get('pid'):
+                state['pid'] = event['pid']
+    return by_id
+
+
+def count_by_topic(rows: Sequence[Sequence[Any]]) -> dict[str, int]:
+    """Fold ``(output_topic, count)`` rows into a map, naming the unnamed.
+
+    A ``produced`` event with no ``output_topic`` predates per-sink
+    attribution; it is counted under ``(unknown)`` rather than dropped, so
+    the totals still add up.
+    """
+    counts: dict[str, int] = {}
+    for topic, count in rows:
+        counts[topic or '(unknown)'] = int(count)
+    return counts
+
+
+def task_exec_state_query(task_ids: Sequence[str]) -> tuple[str, list[Any]]:
+    """The execution facts the completion-hook feeds pair with each row.
+
+    One query across all three lifecycle events: ``task_started`` carries
+    ``source_offsets`` in its metadata (what the UI renders as the message
+    source), while the completion events carry the subprocess outcome.
+    """
+    query = (
+        f'SELECT task_id, event, duration, exit_code, metadata '
+        f'FROM events WHERE task_id IN ({_placeholders(task_ids)}) '
+        f"AND event IN ('task_started', 'task_completed', 'task_failed')"
+    )
+    return query, list(task_ids)
+
+
+def group_task_exec_state(events: Sequence[dict]) -> dict[str, dict]:
+    """Fold :func:`task_exec_state_query` rows into one summary per task id.
+
+    Retries collapse last-write-wins, matching the rest of the UI's
+    "current state of this task" views.
+    """
+    by_id: dict[str, dict] = {}
+    for event in events:
+        entry = by_id.setdefault(
+            event['task_id'],
+            {'exec_duration': None, 'status': None, 'exit_code': None, 'source_offsets': None},
+        )
+        if event['event'] == 'task_started':
+            source_offsets = parse_json_object(event.get('metadata')).get('source_offsets')
+            if isinstance(source_offsets, list):
+                entry['source_offsets'] = source_offsets
+        else:
+            entry['exec_duration'] = event.get('duration')
+            entry['status'] = 'completed' if event['event'] == 'task_completed' else 'failed'
+            entry['exit_code'] = event.get('exit_code')
+    return by_id
+
+
+def base_task_id(task_id: str) -> str:
+    """Strip the timeline's retry composite key: ``t-abc:r1234.5`` -> ``t-abc``.
+
+    The timeline archives earlier attempts under a composite key (see
+    :func:`group_timeline_tasks`), and the UI links to those keys — but
+    the recorder only ever wrote the base id.
+    """
+    return task_id.split(':r')[0]
+
+
+def _parse_json_value(raw: str | None, fallback: Any = None) -> Any:
+    """Decode a JSON column that may hold any type, or return ``fallback``."""
+    if not raw:
+        return fallback
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return fallback
+
+
+def build_task_detail(task_id: str, events: Sequence[dict]) -> dict:
+    """Reconstruct one task's lifecycle from every event recorded for it.
+
+    ``task_id`` is echoed back exactly as asked for — the caller may have
+    passed a retry composite key — while the events are whatever the
+    recorder holds for the base id.
+
+    Duration prefers the recorded value and falls back to the gap between
+    the start and the finish, so a task whose completion row predates the
+    duration column still shows a span.
+    """
+    started = next((event for event in events if event['event'] == 'task_started'), None)
+    completed = next((event for event in events if event['event'] == 'task_completed'), None)
+    failed = next((event for event in events if event['event'] == 'task_failed'), None)
+    finished = completed or failed
+
+    duration = finished['duration'] if finished and finished.get('duration') else None
+    if not duration and started and finished:
+        duration = finished['ts'] - started['ts']
+
+    start_metadata = parse_json_object(started.get('metadata')) if started else {}
+    # ``args`` is a JSON list, but an older row may hold the raw string —
+    # show it rather than nothing.
+    args = _parse_json_value(started.get('args'), fallback=started.get('args')) if started else None
+
+    # ``origin`` is on every event row; HTTP-origin tasks carry the
+    # ``client_name`` / ``request_id`` columns too. The page uses these to
+    # swap the Partition/Offset header for Client/Request ID. Last non-empty
+    # value wins.
+    origin = 'kafka'
+    client_name = None
+    request_id = None
+    for event in events:
+        origin = event.get('origin') or origin
+        client_name = event.get('client_name') or client_name
+        request_id = event.get('request_id') or request_id
+
+    webapp_request_body, webapp_response_body = _webapp_bodies(events) if origin == 'http' else (None, None)
+
+    return {
+        'task_id': task_id,
+        'events': list(events),
+        'started': started,
+        'completed': completed,
+        'failed': failed,
+        'duration': duration,
+        'source_offsets': start_metadata.get('source_offsets'),
+        'args': args,
+        'labels': parse_json_object(started.get('labels')) or None if started else None,
+        'task_env': start_metadata.get('env'),
+        'partition': started.get('partition') if started else None,
+        'pid': (completed or failed or {}).get('pid') or (started or {}).get('pid'),
+        'exit_code': finished.get('exit_code') if finished else None,
+        'origin': origin,
+        'client_name': client_name,
+        'request_id': request_id,
+        'webapp_request_body': webapp_request_body,
+        'webapp_response_body': webapp_response_body,
+    }
+
+
+def _webapp_bodies(events: Sequence[dict]) -> tuple[Any, Any]:
+    """The captured request and response bodies of an HTTP-origin task.
+
+    Both come from the ``webapp_request_received`` /
+    ``webapp_request_completed`` rows. When the recorder logged only the
+    request size and not the payload, the request half reports that size
+    with ``recorded: False`` so the page can say "body not recorded"
+    rather than showing nothing at all.
+    """
+    request_body = None
+    response_body = None
+    for event in events:
+        if event['event'] == 'webapp_request_received':
+            metadata = parse_json_object(event.get('metadata'))
+            request_body = metadata.get('body')
+            if request_body is None and metadata.get('body_bytes') is not None:
+                request_body = {'body_bytes': metadata['body_bytes'], 'recorded': False}
+        elif event['event'] == 'webapp_request_completed':
+            response_body = parse_json_object(event.get('metadata')).get('response')
+    return request_body, response_body
+
+
+def consumed_timestamps_query(pairs: Sequence[tuple[int, int]]) -> tuple[str, list[Any]]:
+    """``consumed`` timestamps for a set of ``(partition, offset)`` pairs.
+
+    Filters on the two dimensions separately rather than on the pairs
+    themselves — SQLite has no row-value IN — so the result is a superset
+    that :func:`index_consumed_timestamps` narrows by exact key. That is
+    still far cheaper than a query per pair, which is what a page showing
+    200 message rows would otherwise issue.
+    """
+    partitions = sorted({partition for partition, _ in pairs})
+    offsets = sorted({offset for _, offset in pairs})
+    query = (
+        f'SELECT partition, offset, ts FROM events '
+        f"WHERE event = 'consumed' "
+        f'AND partition IN ({_placeholders(partitions)}) AND offset IN ({_placeholders(offsets)})'
+    )
+    return query, [*partitions, *offsets]
+
+
+def index_consumed_timestamps(rows: Sequence[Sequence[Any]]) -> dict[tuple[int, int], list[float]]:
+    """Group ``(partition, offset, ts)`` rows by their exact key.
+
+    A message can be consumed more than once (redelivery after a restart or
+    a rebalance), so each key holds a list — the caller picks the right
+    one, see :func:`end_to_end_seconds`.
+    """
+    by_key: dict[tuple[int, int], list[float]] = {}
+    for partition, offset, ts in rows:
+        by_key.setdefault((partition, offset), []).append(ts)
+    return by_key
+
+
+def end_to_end_seconds(consumed_timestamps: Sequence[float] | None, completed_ts: float) -> float | None:
+    """How long this delivery of the message took, or None if unknown.
+
+    Picks the most recent consume at or before the completion. Anything
+    later belongs to a redelivery that has not finished yet, and pairing
+    with it would report a negative duration.
+    """
+    if not consumed_timestamps:
+        return None
+    started = max((ts for ts in consumed_timestamps if ts <= completed_ts), default=None)
+    return None if started is None else completed_ts - started
+
+
+# ``(result key, event names)`` for the webapp dashboard's 60-second tiles.
+# One row per tile so a new outcome class is one entry, not another
+# copy-pasted query/unpack pair.
+WEBAPP_RATE_TILES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ('success_60s', ('webapp_request_completed',)),
+    ('error_60s', ('webapp_request_timeout', 'webapp_request_dropped_after_timeout')),
+    ('rejected_60s', ('webapp_request_rate_limited', 'webapp_request_auth_failed')),
+)
+
+
+def event_count_query(*, event_names: Sequence[str], since: float) -> tuple[str, list[Any]]:
+    """How many of the named events landed since ``since``."""
+    query = f'SELECT COUNT(*) FROM events WHERE event IN ({_placeholders(event_names)}) AND ts >= ?'
+    return query, [*event_names, since]
