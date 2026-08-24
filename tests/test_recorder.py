@@ -1360,7 +1360,7 @@ async def test_subscribe_receives_events(tmp_path):
     await rec.start()
 
     queue = rec.subscribe()
-    assert len(rec._ws_subscribers) == 1
+    assert len(rec.fanout.subscribers) == 1
 
     rec.record_consumed(make_msg(partition=5, offset=99))
 
@@ -1370,7 +1370,7 @@ async def test_subscribe_receives_events(tmp_path):
     assert event['offset'] == 99
 
     rec.unsubscribe(queue)
-    assert len(rec._ws_subscribers) == 0
+    assert len(rec.fanout.subscribers) == 0
     await rec.stop()
 
 
@@ -1381,7 +1381,7 @@ async def test_broadcast_to_multiple_subscribers(tmp_path):
 
     q1 = rec.subscribe()
     q2 = rec.subscribe()
-    assert len(rec._ws_subscribers) == 2
+    assert len(rec.fanout.subscribers) == 2
 
     rec.record_committed(partition=3, offset=42)
 
@@ -1431,7 +1431,7 @@ async def test_record_survives_subscriber_added_during_fanout(tmp_path):
 
     opened: list = []
     sub = _mutating_subscriber(lambda: opened.append(rec.subscribe()))
-    rec._ws_subscribers.add(sub)
+    rec.fanout.subscribers.add(sub)
 
     rec.record_committed(partition=1, offset=7)
 
@@ -1448,12 +1448,12 @@ async def test_record_survives_subscriber_removed_during_fanout(tmp_path):
 
     victim = rec.subscribe()
     sub = _mutating_subscriber(lambda: rec.unsubscribe(victim))
-    rec._ws_subscribers.add(sub)
+    rec.fanout.subscribers.add(sub)
 
     rec.record_committed(partition=2, offset=11)
 
     assert len(sub.queue.events) == 1
-    assert victim not in rec._ws_subscribers
+    assert victim not in rec.fanout.subscribers
     await rec.stop()
 
 
@@ -1466,7 +1466,7 @@ async def test_broadcast_drops_on_full_queue(tmp_path):
     import queue as queue_mod
 
     sub = WSSubscriber(queue=queue_mod.Queue(maxsize=2))
-    rec._ws_subscribers.add(sub)
+    rec.fanout.subscribers.add(sub)
 
     # fill the queue
     rec.record_consumed(make_msg(offset=0))
@@ -1476,7 +1476,7 @@ async def test_broadcast_drops_on_full_queue(tmp_path):
 
     assert sub.qsize() == 2  # only 2 fit
 
-    rec._ws_subscribers.discard(sub)
+    rec.fanout.subscribers.discard(sub)
     await rec.stop()
 
 
@@ -1494,7 +1494,7 @@ async def test_drop_count_is_reported_then_cleared(tmp_path):
     import queue as queue_mod
 
     sub = WSSubscriber(queue=queue_mod.Queue(maxsize=1))
-    rec._ws_subscribers.add(sub)
+    rec.fanout.subscribers.add(sub)
 
     rec.record_consumed(make_msg(offset=0))  # fits
     rec.record_consumed(make_msg(offset=1))  # dropped
@@ -1504,7 +1504,7 @@ async def test_drop_count_is_reported_then_cleared(tmp_path):
     assert sub.take_dropped() == 2
     assert sub.take_dropped() == 0, 'the count must clear once reported'
 
-    rec._ws_subscribers.discard(sub)
+    rec.fanout.subscribers.discard(sub)
     await rec.stop()
 
 
@@ -1573,7 +1573,7 @@ async def test_no_broadcast_without_subscribers(tmp_path):
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
-    assert len(rec._ws_subscribers) == 0
+    assert len(rec.fanout.subscribers) == 0
     rec.record_consumed(make_msg(offset=0))  # should not raise
     await rec._flush()
 
@@ -3149,11 +3149,11 @@ async def test_ws_deferred_cleanup_on_stop(tmp_path):
 
     task = make_task('t-pending')
     rec.record_task_started(task, partition=0)
-    assert len(rec._deferred_ws) == 1
+    assert len(rec.fanout.deferred) == 1
 
     await rec.stop()
-    assert len(rec._deferred_ws) == 0
-    assert rec._deferred_sweep is None, 'the sweep timer must be disarmed on stop'
+    assert len(rec.fanout.deferred) == 0
+    assert rec.fanout.sweep_handle is None, 'the sweep timer must be disarmed on stop'
 
 
 async def test_deferred_starts_share_one_sweep_timer(tmp_path):
@@ -3171,13 +3171,13 @@ async def test_deferred_starts_share_one_sweep_timer(tmp_path):
     for i in range(200):
         rec.record_task_started(make_task(f't-{i}'), partition=0)
 
-    assert len(rec._deferred_ws) == 200
-    assert rec._deferred_sweep is not None
-    handle = rec._deferred_sweep
+    assert len(rec.fanout.deferred) == 200
+    assert rec.fanout.sweep_handle is not None
+    handle = rec.fanout.sweep_handle
 
     # More tasks must reuse the outstanding timer rather than arm a new one.
     rec.record_task_started(make_task('t-extra'), partition=0)
-    assert rec._deferred_sweep is handle
+    assert rec.fanout.sweep_handle is handle
 
     await rec.stop()
 
@@ -3196,7 +3196,7 @@ async def test_deferred_sweep_broadcasts_expired_starts(tmp_path):
     event = sub.get_nowait()
     assert event['event'] == 'task_started'
     assert event['task_id'] == 't-slow'
-    assert not rec._deferred_ws, 'the expired entry must be removed'
+    assert not rec.fanout.deferred, 'the expired entry must be removed'
 
     rec.unsubscribe(sub)
     await rec.stop()
@@ -3209,9 +3209,9 @@ async def test_deferred_sweep_rearms_only_while_entries_remain(tmp_path):
     await rec.start()
 
     rec.record_task_started(make_task('t-1'), partition=0)
-    await wait_for(lambda: not rec._deferred_ws, timeout=2.0)
+    await wait_for(lambda: not rec.fanout.deferred, timeout=2.0)
     # The sweep that drained the last entry must not re-arm itself.
-    await wait_for(lambda: rec._deferred_sweep is None, timeout=2.0)
+    await wait_for(lambda: rec.fanout.sweep_handle is None, timeout=2.0)
 
     await rec.stop()
 

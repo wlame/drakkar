@@ -1139,7 +1139,7 @@ async def test_websocket_reports_dropped_events(debug_config, mock_recorder, moc
     with TestClient(fastapi_app) as tc, tc.websocket_connect('/ws') as ws:
         # Shrink the connected subscriber's queue so overflow is deterministic
         # rather than a matter of how fast the sender coroutine drains.
-        (sub,) = list(real_recorder._ws_subscribers)
+        (sub,) = list(real_recorder.fanout.subscribers)
         sub.queue = queue_mod.Queue(maxsize=1)
 
         real_recorder._record({'ts': time.time(), 'event': 'kept', 'partition': 0})
@@ -1158,14 +1158,14 @@ async def test_websocket_cleanup_on_disconnect(debug_config, mock_recorder, mock
 
     fastapi_app = create_ui_app(debug_config, real_recorder, mock_app)
 
-    assert len(real_recorder._ws_subscribers) == 0
+    assert len(real_recorder.fanout.subscribers) == 0
 
     with TestClient(fastapi_app) as tc, tc.websocket_connect('/ws') as ws:
-        assert len(real_recorder._ws_subscribers) == 1
+        assert len(real_recorder.fanout.subscribers) == 1
         real_recorder._record({'ts': time.time(), 'event': 'test'})
         ws.receive_text()
 
-    assert len(real_recorder._ws_subscribers) == 0
+    assert len(real_recorder.fanout.subscribers) == 0
 
 
 # --- /api/live/arrange-tasks (Arrange tab state lookup) ---
