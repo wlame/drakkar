@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The flight recorder is now four focused modules instead of one 3,000-line
+  class. `drakkar.recorder.fanout` owns the live `/ws` fan-out,
+  `drakkar.recorder.queries` every SELECT it answers,
+  `drakkar.recorder.writer` the `record_*` event builders, and
+  `drakkar.hostinfo.HostSampler` the per-tick host snapshot;
+  `drakkar.recorder.core.EventRecorder` keeps the storage lifecycle and
+  stays the single public entry point, so no call site changes. The layout
+  now matches the Go backend's `internal/recorder` file for file. Direct
+  importers of private names from `drakkar.recorder.core` (`WSSubscriber`,
+  `LiveEvent`, `_ScanBudget`, `CROSS_TRACE_MAX_FILES`, `_byte_len`,
+  `_capped_stdin`) import them from the new modules.
+
 ## [1.18.0] - 2026-08-24
 
 ### Added
