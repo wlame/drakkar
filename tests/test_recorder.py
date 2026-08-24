@@ -5484,228 +5484,33 @@ class TestHostSampleLoop:
 
 
 class TestResourceSample:
-    """The per-tick resource snapshot (resource_sample events)."""
+    """The recorder's side of the per-tick host snapshot.
 
-    def make_rec(self, tmp_path, monkeypatch, *, rss=256 * MIB, threads=20, fds=42):
-        from drakkar.recorder import core as recorder_core
+    What each field means and how the rate fields are derived is
+    :class:`drakkar.hostinfo.HostSampler`'s contract — see
+    ``tests/test_hostsampler.py``. All the recorder owes is: call the
+    sampler once, write what it returned as one ``resource_sample`` event.
+    """
 
+    def test_records_whatever_the_sampler_returned(self, tmp_path, monkeypatch):
         rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
-        monkeypatch.setattr(recorder_core, 'read_self_stats', lambda: (rss, threads))
-        monkeypatch.setattr(recorder_core, 'read_open_fd_count', lambda: fds)
-        # Host-pressure sources default to "unavailable" so tests never read
-        # the real /proc of the machine running them.
-        monkeypatch.setattr(recorder_core, 'read_loadavg', lambda: None)
-        monkeypatch.setattr(recorder_core, 'read_pressure', lambda: None)
-        monkeypatch.setattr(recorder_core, 'read_cpu_throttle', lambda: None)
-        monkeypatch.setattr(recorder_core, 'read_nfs_mount_stats', lambda: None)
-        return rec, recorder_core
+        monkeypatch.setattr(rec._host_sampler, 'sample', lambda: {'rss_bytes': 7, 'load1': 1.5})
 
-    def sample_meta(self, rec) -> dict:
+        rec._resource_sample()
+
         event = rec._buffer[-1]
         assert event['event'] == 'resource_sample'
-        return json.loads(event['metadata'])
+        assert json.loads(event['metadata']) == {'rss_bytes': 7, 'load1': 1.5}
 
-    def test_records_platform_facts(self, tmp_path, monkeypatch):
-        rec, _ = self.make_rec(tmp_path, monkeypatch)
-
-        rec._resource_sample()
-
-        meta = self.sample_meta(rec)
-        assert meta['rss_bytes'] == 256 * MIB
-        assert meta['threads'] == 20
-        assert meta['open_fds'] == 42
-        assert 'rx_bytes_total' not in meta  # network rates are not sampled
-
-    def test_first_sample_has_no_cpu_percent(self, tmp_path, monkeypatch):
-        rec, _ = self.make_rec(tmp_path, monkeypatch)
-
-        rec._resource_sample()
-
-        meta = self.sample_meta(rec)
-        assert 'cpu_self_pct' not in meta
-        assert 'cpu_children_pct' not in meta
-
-    def test_second_sample_reports_cpu_deltas_as_percent(self, tmp_path, monkeypatch):
-        from types import SimpleNamespace
-
-        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
-        usages = iter(
-            [
-                SimpleNamespace(ru_utime=1.0, ru_stime=0.0),  # self, tick 1
-                SimpleNamespace(ru_utime=2.0, ru_stime=0.0),  # children, tick 1
-                SimpleNamespace(ru_utime=2.0, ru_stime=0.0),  # self, tick 2 (+1s cpu)
-                SimpleNamespace(ru_utime=5.0, ru_stime=1.0),  # children, tick 2 (+4s cpu)
-            ]
-        )
-        monkeypatch.setattr(core_mod.resource, 'getrusage', lambda _which: next(usages))
-        clock = iter([100.0, 110.0])  # 10 s apart
-        monkeypatch.setattr(core_mod.time, 'monotonic', lambda: next(clock))
-
-        rec._resource_sample()
-        rec._resource_sample()
-
-        meta = self.sample_meta(rec)
-        assert meta['cpu_self_pct'] == 10.0  # 1 cpu-second over 10 s
-        assert meta['cpu_children_pct'] == 40.0  # 4 cpu-seconds over 10 s
-        assert meta['interval_s'] == 10.0
-
-    def test_unavailable_sources_are_omitted_not_zeroed(self, tmp_path, monkeypatch):
-        from drakkar.recorder import core as recorder_core
-
+    def test_one_sampler_instance_is_reused_across_ticks(self, tmp_path):
+        """The rate fields depend on the previous tick — a fresh sampler per
+        tick would report nothing but first-sample values forever."""
         rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
-        monkeypatch.setattr(recorder_core, 'read_self_stats', lambda: (None, None))
-        monkeypatch.setattr(recorder_core, 'read_open_fd_count', lambda: None)
 
+        first = rec._host_sampler
         rec._resource_sample()
 
-        meta = self.sample_meta(rec)
-        for key in ('rss_bytes', 'threads', 'open_fds'):
-            assert key not in meta
-
-
-class TestResourceSampleHostPressure:
-    """The host-pressure keys added to resource_sample (contract v1.15)."""
-
-    def make_rec(self, tmp_path, monkeypatch):
-        from drakkar.recorder import core as recorder_core
-
-        rec = EventRecorder(make_debug_config(tmp_path), worker_name=WORKER_NAME)
-        monkeypatch.setattr(recorder_core, 'read_self_stats', lambda: (None, None))
-        monkeypatch.setattr(recorder_core, 'read_open_fd_count', lambda: None)
-        monkeypatch.setattr(recorder_core, 'read_loadavg', lambda: None)
-        monkeypatch.setattr(recorder_core, 'read_pressure', lambda: None)
-        monkeypatch.setattr(recorder_core, 'read_cpu_throttle', lambda: None)
-        monkeypatch.setattr(recorder_core, 'read_nfs_mount_stats', lambda: None)
-        return rec, recorder_core
-
-    def sample_meta(self, rec) -> dict:
-        event = rec._buffer[-1]
-        assert event['event'] == 'resource_sample'
-        return json.loads(event['metadata'])
-
-    def test_load_and_psi_reported_as_read(self, tmp_path, monkeypatch):
-        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
-        monkeypatch.setattr(core_mod, 'read_loadavg', lambda: (4.21, 3.05, 2.0))
-        monkeypatch.setattr(core_mod, 'read_pressure', lambda: {'cpu_some_avg10': 12.5, 'io_full_avg10': 3.1})
-
-        rec._resource_sample()
-
-        meta = self.sample_meta(rec)
-        assert meta['load1'] == 4.21
-        assert meta['load5'] == 3.05
-        assert meta['psi_cpu_some_avg10'] == 12.5
-        assert meta['psi_io_full_avg10'] == 3.1
-
-    def test_throttle_first_tick_primes_second_reports_delta(self, tmp_path, monkeypatch):
-        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
-        readings = iter([(100, 500_000), (103, 750_000)])
-        monkeypatch.setattr(core_mod, 'read_cpu_throttle', lambda: next(readings))
-
-        rec._resource_sample()
-        first = self.sample_meta(rec)
-        rec._resource_sample()
-        second = self.sample_meta(rec)
-
-        assert 'cpu_throttled_periods' not in first
-        assert second['cpu_throttled_periods'] == 3
-        assert second['cpu_throttled_ms'] == 250.0
-
-    def test_throttle_zero_delta_is_reported_as_zero(self, tmp_path, monkeypatch):
-        # Zero throttling under a quota is a real answer ("we were NOT
-        # gated"), distinct from "no cgroup limit" which omits the keys.
-        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
-        monkeypatch.setattr(core_mod, 'read_cpu_throttle', lambda: (42, 987_000))
-
-        rec._resource_sample()
-        rec._resource_sample()
-
-        meta = self.sample_meta(rec)
-        assert meta['cpu_throttled_periods'] == 0
-        assert meta['cpu_throttled_ms'] == 0.0
-
-    def test_throttle_counter_reset_skips_interval_and_reprimes(self, tmp_path, monkeypatch):
-        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
-        readings = iter([(100, 500_000), (2, 1_000), (4, 3_000)])
-        monkeypatch.setattr(core_mod, 'read_cpu_throttle', lambda: next(readings))
-
-        rec._resource_sample()
-        rec._resource_sample()  # counters went backwards — no keys
-        reset_meta = self.sample_meta(rec)
-        rec._resource_sample()  # measured from the re-primed values
-        final_meta = self.sample_meta(rec)
-
-        assert 'cpu_throttled_periods' not in reset_meta
-        assert final_meta['cpu_throttled_periods'] == 2
-        assert final_meta['cpu_throttled_ms'] == 2.0
-
-    def test_nfs_mounts_report_interval_ops_rtt_retrans(self, tmp_path, monkeypatch):
-        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
-        readings = iter(
-            [
-                {'/mnt/data': (1000, 1010, 40_000), '/mnt/logs': (500, 500, 1_000)},
-                {'/mnt/data': (1100, 1130, 90_000), '/mnt/logs': (500, 500, 1_000)},
-            ]
-        )
-        monkeypatch.setattr(core_mod, 'read_nfs_mount_stats', lambda: next(readings))
-
-        rec._resource_sample()
-        first = self.sample_meta(rec)
-        rec._resource_sample()
-        second = self.sample_meta(rec)
-
-        assert 'nfs_mounts' not in first  # nothing to diff yet
-        # /mnt/data: 100 ops, (1130-1010)-(1100-1000)=20 retrans,
-        # 50000 ms rtt over 100 ops = 500 ms/op. /mnt/logs was quiet — no row.
-        assert second['nfs_mounts'] == [{'mount': '/mnt/data', 'ops': 100, 'rtt_ms': 500.0, 'retrans': 20}]
-
-    def test_nfs_counter_reset_drops_mount_for_the_interval(self, tmp_path, monkeypatch):
-        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
-        readings = iter(
-            [
-                {'/mnt/data': (1000, 1000, 40_000)},
-                {'/mnt/data': (10, 10, 100)},  # remount — counters reset
-                {'/mnt/data': (60, 62, 600)},
-            ]
-        )
-        monkeypatch.setattr(core_mod, 'read_nfs_mount_stats', lambda: next(readings))
-
-        rec._resource_sample()
-        rec._resource_sample()
-        reset_meta = self.sample_meta(rec)
-        rec._resource_sample()
-        final_meta = self.sample_meta(rec)
-
-        assert 'nfs_mounts' not in reset_meta
-        assert final_meta['nfs_mounts'] == [{'mount': '/mnt/data', 'ops': 50, 'rtt_ms': 10.0, 'retrans': 2}]
-
-    def test_retrans_without_ops_still_reports_the_mount(self, tmp_path, monkeypatch):
-        # A server that stopped answering: retransmissions climb while no
-        # operation completes — the most important interval to report.
-        rec, core_mod = self.make_rec(tmp_path, monkeypatch)
-        readings = iter(
-            [
-                {'/mnt/data': (1000, 1000, 40_000)},
-                {'/mnt/data': (1000, 1025, 40_000)},
-            ]
-        )
-        monkeypatch.setattr(core_mod, 'read_nfs_mount_stats', lambda: next(readings))
-
-        rec._resource_sample()
-        rec._resource_sample()
-
-        meta = self.sample_meta(rec)
-        assert meta['nfs_mounts'] == [{'mount': '/mnt/data', 'ops': 0, 'rtt_ms': 0.0, 'retrans': 25}]
-
-    def test_all_pressure_sources_unavailable_add_no_keys(self, tmp_path, monkeypatch):
-        rec, _ = self.make_rec(tmp_path, monkeypatch)
-
-        rec._resource_sample()
-        rec._resource_sample()
-
-        meta = self.sample_meta(rec)
-        for key in ('load1', 'load5', 'cpu_throttled_periods', 'cpu_throttled_ms', 'nfs_mounts'):
-            assert key not in meta
-        assert not any(key.startswith('psi_') for key in meta)
+        assert rec._host_sampler is first
 
 
 class TestRuntimeEpisodeAndProbeRows:

@@ -25,7 +25,6 @@ import contextlib
 import functools
 import glob
 import os
-import resource
 
 # ``socket`` is re-imported here so test patches like
 # ``patch('drakkar.recorder.socket.socket', ...)`` still find the module on
@@ -47,15 +46,7 @@ from pydantic import BaseModel
 
 from drakkar.config import UIConfig
 from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
-from drakkar.hostinfo import (
-    detect_network_fs,
-    read_cpu_throttle,
-    read_loadavg,
-    read_nfs_mount_stats,
-    read_open_fd_count,
-    read_pressure,
-    read_self_stats,
-)
+from drakkar.hostinfo import HostSampler, detect_network_fs
 from drakkar.metrics import (
     recorder_buffer_size,
     recorder_dropped_events,
@@ -302,18 +293,9 @@ class EventRecorder:
         # mid-flight and can be awaited nowhere (their failure only costs
         # a later warmer scan).
         self._dbstats_rotate_tasks: set[asyncio.Task] = set()
-        # Previous (self_cpu_seconds, children_cpu_seconds, monotonic) for
-        # the resource sampler's CPU-percent deltas. None until primed —
-        # the first resource_sample carries no CPU fields.
-        self._res_prev: tuple[float, float, float] | None = None
-        # Previous cumulative cgroup throttling counters
-        # (nr_throttled, throttled_usec); the sample reports deltas, so the
-        # first tick after start emits nothing for them.
-        self._throttle_prev: tuple[int, int] | None = None
-        # Previous per-mount NFS op counters {mount: (ops, trans, rtt_ms)}
-        # for the per-interval RTT/retransmit derivation. Mounts appear and
-        # vanish independently, so this is keyed per mount, not one pair.
-        self._nfs_ops_prev: dict[str, tuple[int, int, int]] | None = None
+        # Host resource sampling (RSS/CPU/fds/pressure/NFS) with the
+        # previous-tick state its rate fields need.
+        self._host_sampler = HostSampler()
         self._running = False
         # Live-stream fan-out (subscribers, per-client queues, deferred
         # start events) — see :mod:`drakkar.recorder.fanout`.
@@ -876,121 +858,19 @@ class EventRecorder:
         )
 
     def _resource_sample(self) -> None:
-        """Record one ``resource_sample`` event: what this worker consumed.
+        """Record one ``resource_sample`` event from the host sampler.
 
-        The row rides the ordinary events table (metadata JSON, no schema
-        change), so rotation, archiving, and the WS stream all carry it —
-        an archive alone can answer "what were RSS / CPU / fds doing at
-        04:12" long after the process is gone.
-
-        Field notes:
-
-        - ``cpu_children_pct`` comes from ``RUSAGE_CHILDREN``, which only
-          counts *reaped* subprocesses — a task's CPU lands in the sample
-          for the interval its process exited in, so the series is bursty
-          by nature and best read as an average over a few ticks.
-        - ``rss_bytes`` / ``threads`` need ``/proc`` and are absent on
-          macOS; every field is optional and simply omitted when its
-          source is unavailable.
-        - The first sample after start carries no ``cpu_*_pct`` — percents
-          are deltas and there is nothing to diff against yet.
+        The recorder's whole job here is the write: reading the host and
+        deriving the rate fields lives in
+        :class:`drakkar.hostinfo.HostSampler`.
         """
-        now = time.monotonic()
-        self_ru = resource.getrusage(resource.RUSAGE_SELF)
-        child_ru = resource.getrusage(resource.RUSAGE_CHILDREN)
-        cpu_self = self_ru.ru_utime + self_ru.ru_stime
-        cpu_children = child_ru.ru_utime + child_ru.ru_stime
-        prev = self._res_prev
-        self._res_prev = (cpu_self, cpu_children, now)
-
-        meta: dict[str, Any] = {}
-        rss_bytes, threads = read_self_stats()
-        if rss_bytes is not None:
-            meta['rss_bytes'] = rss_bytes
-        if threads is not None:
-            meta['threads'] = threads
-        open_fds = read_open_fd_count()
-        if open_fds is not None:
-            meta['open_fds'] = open_fds
-        if prev is not None:
-            elapsed = now - prev[2]
-            if elapsed > 0:
-                meta['cpu_self_pct'] = round(100 * (cpu_self - prev[0]) / elapsed, 1)
-                meta['cpu_children_pct'] = round(100 * (cpu_children - prev[1]) / elapsed, 1)
-                meta['interval_s'] = round(elapsed, 1)
-
-        # Host-pressure keys (contract v1.15): which resource is the host
-        # fighting for. All best-effort and optional, like everything above.
-        loadavg = read_loadavg()
-        if loadavg is not None:
-            meta['load1'], meta['load5'] = round(loadavg[0], 2), round(loadavg[1], 2)
-        pressure = read_pressure()
-        if pressure is not None:
-            for key, value in pressure.items():
-                meta[f'psi_{key}'] = value
-        throttle = read_cpu_throttle()
-        throttle_prev = self._throttle_prev
-        self._throttle_prev = throttle
-        if throttle is not None and throttle_prev is not None:
-            periods_delta = throttle[0] - throttle_prev[0]
-            usec_delta = throttle[1] - throttle_prev[1]
-            # Negative delta = cgroup replaced (container restart in place);
-            # skip the interval, the re-prime above already happened.
-            if periods_delta >= 0 and usec_delta >= 0:
-                meta['cpu_throttled_periods'] = periods_delta
-                meta['cpu_throttled_ms'] = round(usec_delta / 1000, 1)
-        meta.update(self._nfs_mount_deltas())
-
         self._record(
             {
                 'ts': time.time(),
                 'event': 'resource_sample',
-                'metadata': encode_json_str(meta),
+                'metadata': encode_json_str(self._host_sampler.sample()),
             }
         )
-
-    def _nfs_mount_deltas(self) -> dict[str, Any]:
-        """Per-interval NFS health per mount: ``{'nfs_mounts': [...]}`` or ``{}``.
-
-        Diffs the cumulative mountstats op counters against the previous
-        tick and derives, per mount: operations completed, average server
-        round-trip per operation (the shared-storage-contention signal —
-        RTT multiplies under server load while byte throughput can look
-        normal), and retransmissions (``trans - ops`` — the "server not
-        answering" signal). Quiet mounts (no ops, no retrans) are skipped;
-        a counter that went backwards (remount) drops the mount for this
-        interval and re-primes.
-        """
-        current = read_nfs_mount_stats()
-        prev = self._nfs_ops_prev
-        self._nfs_ops_prev = current
-        if current is None or prev is None:
-            return {}
-
-        mounts: list[dict[str, Any]] = []
-        for mount, (ops, trans, rtt_ms) in sorted(current.items()):
-            prev_counters = prev.get(mount)
-            if prev_counters is None:
-                continue  # mount appeared mid-interval — first full interval counts
-            ops_delta = ops - prev_counters[0]
-            trans_delta = trans - prev_counters[1]
-            rtt_delta = rtt_ms - prev_counters[2]
-            if ops_delta < 0 or trans_delta < 0 or rtt_delta < 0:
-                continue  # counter reset (remount)
-            retrans = trans_delta - ops_delta
-            if ops_delta == 0 and retrans <= 0:
-                continue  # quiet mount — no signal, no row
-            mounts.append(
-                {
-                    'mount': mount,
-                    'ops': ops_delta,
-                    'rtt_ms': round(rtt_delta / ops_delta, 1) if ops_delta else 0.0,
-                    'retrans': max(0, retrans),
-                }
-            )
-        if not mounts:
-            return {}
-        return {'nfs_mounts': mounts}
 
     async def _sync_state(self) -> None:
         if not self._db or not self._store.store_state:
