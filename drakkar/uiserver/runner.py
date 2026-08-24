@@ -1298,7 +1298,6 @@ class DebugRunner:
                 terminal_errors=terminal_errors,
                 all_terminal_results=all_terminal_results,
                 all_scheduled_tasks=all_scheduled_tasks,
-                first_exec_error=exec_error,
             )
             return
 
@@ -1354,9 +1353,8 @@ class DebugRunner:
         terminal_errors: list[ExecutorError],
         all_terminal_results: list[ExecutorResult],
         all_scheduled_tasks: list[ExecutorTask],
-        first_exec_error: ExecutorTaskError,
     ) -> None:
-        """Re-execute ``task`` up to ``max_retries`` times, recording each attempt.
+        """Re-execute ``task``, recording each attempt.
 
         Called after the FIRST attempt has already failed and on_error
         returned RETRY. ``max_retries`` is the total retry budget — a
@@ -1372,10 +1370,9 @@ class DebugRunner:
             else, the loop exits and that branch is handled inline so
             the retry entry gets the correct terminal status.
 
-        ``first_exec_error`` carries the originally-failed attempt's
-        error so that if we end up exhausting retries (budget gone but
-        handler still wants RETRY), we can append the final failure to
-        the terminal lists.
+        At least one attempt always runs: the caller only reaches this
+        method when the shared budget check already answered RETRY, so a
+        zero budget never gets here.
 
         Success-only ``successful_terminal_results`` is touched by
         ``_execute_and_record_task`` on the happy path; terminal-failure
@@ -1385,7 +1382,6 @@ class DebugRunner:
         shape.
         """
         retry_count = 0
-        last_exec_error: ExecutorTaskError = first_exec_error
         while True:
             retry_count += 1
             retry_entry, exec_error = await self._execute_and_record_task(
@@ -1404,7 +1400,6 @@ class DebugRunner:
                 # its CollectResult into the sink collector via
                 # ``_execute_and_record_task``.
                 return
-            last_exec_error = exec_error
             # Retry failed. Ask the handler what to do next — the budget
             # check is the one production runs, so "retries exhausted"
             # lands on the same attempt in both.
@@ -1434,8 +1429,8 @@ class DebugRunner:
                 # SKIP, an unrecognised action, an on_error that raised, or
                 # a spent budget (production's "max_retries_exceeded").
                 # retry_entry stays 'failed'.
-                all_terminal_results.append(last_exec_error.result)
-                terminal_errors.append(last_exec_error.error)
+                all_terminal_results.append(exec_error.result)
+                terminal_errors.append(exec_error.error)
                 return
             # RETRY again and the budget allows → next loop iteration.
 

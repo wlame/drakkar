@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The rules that decide what happens to a failed task — what an `on_error`
+  list return means, when the retry budget is spent, how a replacement is
+  linked to its parent, what a raising `on_task_complete` synthesizes — now
+  live in one place, `drakkar/taskflow.py`, instead of once in the
+  production pipeline and again in the message probe. The probe exists to
+  answer "what would production do with this message", so a divergence
+  there was a silent wrong answer; now both call the same functions. No
+  behaviour change, and the Go backend's `internal/taskflow` mirrors it.
+
 - The flight recorder is now four focused modules instead of one 3,000-line
   class. `drakkar.recorder.fanout` owns the live `/ws` fan-out,
   `drakkar.recorder.queries` every SELECT it answers,
