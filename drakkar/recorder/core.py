@@ -43,7 +43,7 @@ import aiosqlite
 import structlog
 
 from drakkar.config import UIConfig
-from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, secure_db_file
+from drakkar.dbfiles import WAL_SYNCHRONOUS_PRAGMA, atomic_symlink, remove_symlink, secure_db_file
 from drakkar.hostinfo import HostSampler, detect_network_fs
 from drakkar.metrics import (
     recorder_buffer_size,
@@ -537,25 +537,16 @@ class EventRecorder(EventWriter):
         """Create or update the {worker}-live.db symlink to the current DB."""
         if not self._store.db_dir or not self._db_path:
             return
-        link = live_link_path(self._store.db_dir, self._worker_name)
-        target = os.path.basename(self._db_path)
-        try:
-            tmp = link + '.tmp'
-            os.symlink(target, tmp)
-            os.replace(tmp, link)
-        except OSError:
-            pass
+        atomic_symlink(
+            live_link_path(self._store.db_dir, self._worker_name),
+            os.path.basename(self._db_path),
+        )
 
     def _remove_live_link(self) -> None:
         """Remove the live symlink on graceful shutdown."""
         if not self._store.db_dir:
             return
-        link = live_link_path(self._store.db_dir, self._worker_name)
-        try:
-            if os.path.islink(link):
-                os.remove(link)
-        except OSError:
-            pass
+        remove_symlink(live_link_path(self._store.db_dir, self._worker_name))
 
     # --- Worker config (autodiscovery) ---
 

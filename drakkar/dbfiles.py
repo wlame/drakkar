@@ -1,8 +1,11 @@
-"""Filesystem permissions for the SQLite files Drakkar writes.
+"""Filesystem handling for the SQLite files Drakkar writes.
 
-A leaf module (no Drakkar imports) shared by the flight recorder and the
-cache engine, so both stores tighten their files identically and the Go
-backend has a single behaviour to mirror.
+Two jobs, both shared by the flight recorder and the cache engine so the
+two stores behave identically and the Go backend has one behaviour to
+mirror: tightening file permissions, and publishing the "this is my current
+database" symlink that peer discovery and the UI resolve workers through.
+
+A leaf module — it imports nothing from Drakkar.
 
 Both stores hold message-derived data — the recorder persists task args
 and subprocess stdout/stderr, the cache persists handler results — so the
@@ -16,6 +19,10 @@ from __future__ import annotations
 
 import contextlib
 import os
+
+import structlog
+
+logger = structlog.get_logger()
 
 # Owner-only for the DB files themselves. SQLite creates them 0644 & ~umask.
 DB_FILE_MODE = 0o600
@@ -115,3 +122,72 @@ def _chmod_no_follow(path: str) -> None:
         pass
     finally:
         os.close(fd)
+
+
+# Links already reported as unpublishable, so a filesystem that cannot do
+# symlinks costs one warning rather than one per rotation. Keyed by link
+# path: two different links (the recorder's and the cache's) each get their
+# own line, which is what an operator needs to see.
+_WARNED_LINKS: set[str] = set()
+
+
+def atomic_symlink(link: str, target: str) -> bool:
+    """Point ``link`` at ``target``, replacing any existing link atomically.
+
+    Both SQLite stores publish a "this is my current database" symlink —
+    the recorder's ``<worker>-live.db`` and the cache's
+    ``<worker>-cache.db`` — that peer discovery, cross-worker traces and
+    the UI resolve workers through. Writing it in place would leave a
+    window where a peer scan sees no link at all, so the link is built
+    under a ``.tmp`` name and ``os.replace``d into position, which is
+    atomic within a filesystem.
+
+    A leftover ``.tmp`` is removed first. Without that, one crash between
+    the ``symlink`` and the ``replace`` wedges the link permanently:
+    ``os.symlink`` then raises ``FileExistsError`` on every later call, and
+    peers keep resolving this worker to whatever database it had rotated
+    away from at the moment it died.
+
+    ``target`` is relative (a bare filename) so the link stays valid if the
+    directory is moved or mounted elsewhere.
+
+    Returns True when the link was published. A failure is **not** fatal —
+    on a filesystem without symlink support the missing link only means
+    peers cannot discover this worker — but it is reported once per link
+    rather than swallowed, because "no peers found" and "we never published
+    ourselves" look identical from the outside.
+    """
+    tmp = link + '.tmp'
+    try:
+        # lexists/remove rather than unlink(missing_ok=True) semantics: the
+        # leftover may be a dangling symlink, which os.path.exists() denies.
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(tmp)
+        os.symlink(target, tmp)
+        os.replace(tmp, link)
+    except OSError as exc:
+        if link not in _WARNED_LINKS:
+            _WARNED_LINKS.add(link)
+            logger.warning(
+                'db_live_link_failed',
+                category='storage',
+                link=link,
+                target=target,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                hint='peers and the UI cannot resolve this worker until the link can be written',
+            )
+        return False
+    _WARNED_LINKS.discard(link)
+    return True
+
+
+def remove_symlink(link: str) -> None:
+    """Remove ``link`` on graceful shutdown, tolerating its absence.
+
+    Only removes an actual symlink: a regular file sitting at that path was
+    not published by this worker and is not this worker's to delete.
+    """
+    with contextlib.suppress(OSError):
+        if os.path.islink(link):
+            os.remove(link)

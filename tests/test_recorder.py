@@ -2824,6 +2824,26 @@ async def test_stop_removes_live_link(tmp_path):
     assert not os.path.exists(link)
 
 
+async def test_live_link_updates_after_a_crash_left_a_stale_tmp(tmp_path):
+    """A crash between symlink() and replace() must not wedge the link.
+
+    Before the shared helper, the leftover ``.tmp`` made every later
+    ``os.symlink`` raise FileExistsError inside a bare ``except OSError:
+    pass`` — so peers and the UI kept resolving this worker to whichever
+    database it had rotated away from when it died.
+    """
+    config = make_debug_config(tmp_path)
+    link = live_link_path(str(tmp_path), WORKER_NAME)
+    os.symlink('a-database-from-the-crashed-run.db', link + '.tmp')
+
+    rec = EventRecorder(config, worker_name=WORKER_NAME)
+    await rec.start()
+    try:
+        assert os.readlink(link) == os.path.basename(rec.db_path)
+    finally:
+        await rec.stop()
+
+
 # --- cross_trace ---
 
 

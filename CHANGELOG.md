@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `<worker>-live.db` link stopped refreshing after one crash.** The
+  recorder publishes that symlink through a `.tmp` and an `os.replace`, so
+  peer discovery never sees a half-created link — but it did not clear a
+  leftover `.tmp`. A worker that died between the two syscalls left one
+  behind, and from then on every `os.symlink` raised `FileExistsError`
+  inside a bare `except OSError: pass`: peers, cross-worker traces and the
+  UI kept resolving that worker to whatever database it had rotated away
+  from at the moment it died. The cache engine's copy of the same code
+  already cleared the stale `.tmp`; the two are now one helper
+  (`drakkar.dbfiles.atomic_symlink`) used by both. A link that genuinely
+  cannot be published now logs one `db_live_link_failed` warning per link
+  instead of nothing at all. Same fix on the Go backend.
+
 ### Added
 
 - `on_startup_config_change_ignored`: a startup warning naming every config

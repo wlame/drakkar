@@ -35,7 +35,7 @@ from drakkar.cache.sql import (
     PEER_CLUSTER_CACHE_TTL_SECONDS,
     SCHEMA_CACHE_ENTRIES,
 )
-from drakkar.dbfiles import DB_DIR_MODE, WAL_SYNCHRONOUS_PRAGMA, secure_db_file
+from drakkar.dbfiles import DB_DIR_MODE, WAL_SYNCHRONOUS_PRAGMA, atomic_symlink, remove_symlink, secure_db_file
 
 # Imported at module scope for the same monkeypatch reason — tests replace
 # this helper with a fake that yields canned ``(worker_name, target_path)``
@@ -303,48 +303,28 @@ class CacheEngine:
     def _update_live_link(self) -> None:
         """Create/refresh the ``<worker>-cache.db`` symlink pointing at the DB file.
 
-        Uses the atomic-rename pattern (write ``.tmp`` symlink, os.replace
-        into place) mirrored from the recorder's ``_update_live_link`` —
-        this avoids windows where a concurrent peer discovery scan sees
-        a half-created link.
-
-        Silently swallows ``OSError`` — on filesystems that don't support
-        symlinks (rare on Linux, possible on exotic mounts) the missing
-        link just means peers can't discover us, not a fatal error.
+        Same helper the recorder publishes its ``-live.db`` link with — see
+        :func:`drakkar.dbfiles.atomic_symlink` for why the link is written
+        through a ``.tmp`` and why a leftover one is cleared first.
         """
         if not self._db_path:
             return
         db_dir = os.path.dirname(self._db_path)
-        link = self._cache_link_path(db_dir, self._worker_id)
-        target = os.path.basename(self._db_path)
-        try:
-            tmp = link + '.tmp'
-            # clean up stale tmp leftover from a crashed prior run
-            try:
-                os.remove(tmp)
-            except FileNotFoundError:
-                pass
-            os.symlink(target, tmp)
-            os.replace(tmp, link)
-        except OSError:
-            pass
+        atomic_symlink(
+            self._cache_link_path(db_dir, self._worker_id),
+            os.path.basename(self._db_path),
+        )
 
     def _remove_live_link(self) -> None:
         """Remove the peer-discovery symlink on graceful shutdown.
 
         Mirrors the recorder's shutdown hygiene so peers don't keep trying
-        to pull from a shut-down worker's cache DB. Safe to call when the
-        link doesn't exist or the filesystem doesn't support symlinks.
+        to pull from a shut-down worker's cache DB.
         """
         if not self._db_path:
             return
         db_dir = os.path.dirname(self._db_path)
-        link = self._cache_link_path(db_dir, self._worker_id)
-        try:
-            if os.path.islink(link):
-                os.remove(link)
-        except OSError:
-            pass
+        remove_symlink(self._cache_link_path(db_dir, self._worker_id))
 
     async def _create_schema(self) -> None:
         """Apply the cache schema to the writer connection.
