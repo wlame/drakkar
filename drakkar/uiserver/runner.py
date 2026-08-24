@@ -48,11 +48,11 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel
 
 import drakkar.probe as probe_module
+import drakkar.taskflow as taskflow
 from drakkar.cache import CacheScope
 from drakkar.executor import ExecutorTaskError
 from drakkar.models import (
     CollectResult,
-    ErrorAction,
     ExecutorError,
     ExecutorResult,
     ExecutorTask,
@@ -1260,47 +1260,36 @@ class DebugRunner:
         results`` is NOT touched here — only ``_execute_and_record_task``
         touches it on the happy path.
         """
-        action = await self._invoke_on_error(state=state, task=task, exec_error=exec_error)
-        if action is None:
-            # on_error itself raised — ProbeError already recorded.
-            # Terminal failure: feed the ExecutorResult into the
-            # window-level list (mirrors ``window.results``) AND the
-            # ExecutorError into the tracker-level error list (mirrors
-            # ``tracker.errors``). Does NOT touch the success-only list.
-            all_terminal_results.append(exec_error.result)
-            terminal_errors.append(exec_error.error)
-            return
+        decision = await self._decide_after_failure(
+            state=state,
+            task=task,
+            exec_error=exec_error,
+            msg=msg,
+            retry_count=0,
+        )
 
         # Replacement list: original → 'replaced', recurse for each new task.
         # on_error's contract (see BaseDrakkarHandler.on_error) guarantees
         # list members are ExecutorTask instances.
-        if isinstance(action, list):
+        if decision.outcome is taskflow.TaskOutcome.REPLACE:
             failed_entry.status = 'replaced'
-            for replacement in action:
-                # Auto-link replacement to the parent, matching production
-                # (see drakkar/partition.py:437). User handlers rarely set
-                # this explicitly; keeping the auto-link preserves the
-                # replacement lineage in the probe report.
-                if replacement.parent_task_id is None:
-                    replacement.parent_task_id = task.task_id
-                all_scheduled_tasks.append(replacement)
-                await self._process_task(
-                    state=state,
-                    task=replacement,
-                    msg=msg,
-                    successful_terminal_results=successful_terminal_results,
-                    terminal_errors=terminal_errors,
-                    all_terminal_results=all_terminal_results,
-                    all_scheduled_tasks=all_scheduled_tasks,
-                    replacement_for=task.task_id,
-                )
+            await self._process_replacements(
+                state=state,
+                task=task,
+                replacements=decision.replacements,
+                msg=msg,
+                successful_terminal_results=successful_terminal_results,
+                terminal_errors=terminal_errors,
+                all_terminal_results=all_terminal_results,
+                all_scheduled_tasks=all_scheduled_tasks,
+            )
             return
 
-        # RETRY path: re-execute up to max_retries more attempts, each as a
-        # fresh ProbeTaskEntry with retry_of=<original task_id>. The loop
-        # stops on the first success OR when max_retries is reached OR when
-        # on_error stops returning RETRY.
-        if action == ErrorAction.RETRY:
+        # RETRY path: re-execute more attempts, each as a fresh
+        # ProbeTaskEntry with retry_of=<original task_id>. The loop stops on
+        # the first success OR when the budget is spent OR when on_error
+        # stops returning RETRY.
+        if decision.outcome is taskflow.TaskOutcome.RETRY:
             await self._run_retry_loop(
                 state=state,
                 task=task,
@@ -1313,12 +1302,47 @@ class DebugRunner:
             )
             return
 
-        # SKIP or any unrecognized action → leave the failed entry as-is.
-        # This matches production's "else: window.results.append(e.result)"
-        # branch in PartitionProcessor._execute_and_track. Also append to
-        # terminal_errors so MessageGroup.errors mirrors production.
+        # Terminal failure — SKIP, an unrecognised action, a spent retry
+        # budget, or an on_error that raised. Mirrors production's
+        # ``else: window.results.append(e.result)`` branch in
+        # ``PartitionProcessor._execute_and_track``: the ExecutorResult feeds
+        # the window-level list and the ExecutorError feeds the
+        # tracker-level error list, so ``MessageGroup.errors`` matches.
+        # The success-only list is never touched here.
         all_terminal_results.append(exec_error.result)
         terminal_errors.append(exec_error.error)
+
+    async def _process_replacements(
+        self,
+        *,
+        state: RunState,
+        task: ExecutorTask,
+        replacements: tuple[ExecutorTask, ...],
+        msg: SourceMessage,
+        successful_terminal_results: list[ExecutorResult],
+        terminal_errors: list[ExecutorError],
+        all_terminal_results: list[ExecutorResult],
+        all_scheduled_tasks: list[ExecutorTask],
+    ) -> None:
+        """Schedule the tasks ``on_error`` returned in place of ``task``.
+
+        The parent auto-link comes from
+        :func:`drakkar.taskflow.link_replacements` — the same call
+        production makes — so the replacement lineage in the probe report
+        is the lineage production would build.
+        """
+        for replacement in taskflow.link_replacements(task, list(replacements)):
+            all_scheduled_tasks.append(replacement)
+            await self._process_task(
+                state=state,
+                task=replacement,
+                msg=msg,
+                successful_terminal_results=successful_terminal_results,
+                terminal_errors=terminal_errors,
+                all_terminal_results=all_terminal_results,
+                all_scheduled_tasks=all_scheduled_tasks,
+                replacement_for=task.task_id,
+            )
 
     async def _run_retry_loop(
         self,
@@ -1360,10 +1384,9 @@ class DebugRunner:
         ``tracker.errors``) to keep the three lists in the production
         shape.
         """
-        max_retries = self._app_config.executor.max_retries
         retry_count = 0
-        last_exec_error: ExecutorTaskError | None = first_exec_error
-        while retry_count < max_retries:
+        last_exec_error: ExecutorTaskError = first_exec_error
+        while True:
             retry_count += 1
             retry_entry, exec_error = await self._execute_and_record_task(
                 state=state,
@@ -1382,76 +1405,83 @@ class DebugRunner:
                 # ``_execute_and_record_task``.
                 return
             last_exec_error = exec_error
-            # Retry failed. Ask the handler what to do next.
-            action = await self._invoke_on_error(state=state, task=task, exec_error=exec_error)
-            if action is None:
-                # on_error itself raised — ProbeError already recorded.
-                all_terminal_results.append(exec_error.result)
-                terminal_errors.append(exec_error.error)
-                return
-            if isinstance(action, list):
+            # Retry failed. Ask the handler what to do next — the budget
+            # check is the one production runs, so "retries exhausted"
+            # lands on the same attempt in both.
+            decision = await self._decide_after_failure(
+                state=state,
+                task=task,
+                exec_error=exec_error,
+                msg=msg,
+                retry_count=retry_count,
+            )
+            if decision.outcome is taskflow.TaskOutcome.REPLACE:
                 # Replacement path off a retry — retry_entry becomes
-                # 'replaced' and we recurse on the replacements. Auto-
-                # link parent_task_id as in ``_handle_task_failure``.
+                # 'replaced' and we recurse on the replacements.
                 retry_entry.status = 'replaced'
-                for replacement in action:
-                    if replacement.parent_task_id is None:
-                        replacement.parent_task_id = task.task_id
-                    all_scheduled_tasks.append(replacement)
-                    await self._process_task(
-                        state=state,
-                        task=replacement,
-                        msg=msg,
-                        successful_terminal_results=successful_terminal_results,
-                        terminal_errors=terminal_errors,
-                        all_terminal_results=all_terminal_results,
-                        all_scheduled_tasks=all_scheduled_tasks,
-                        replacement_for=task.task_id,
-                    )
+                await self._process_replacements(
+                    state=state,
+                    task=task,
+                    replacements=decision.replacements,
+                    msg=msg,
+                    successful_terminal_results=successful_terminal_results,
+                    terminal_errors=terminal_errors,
+                    all_terminal_results=all_terminal_results,
+                    all_scheduled_tasks=all_scheduled_tasks,
+                )
                 return
-            if action != ErrorAction.RETRY:
-                # SKIP or unknown → stop, retry_entry stays 'failed'.
-                all_terminal_results.append(exec_error.result)
-                terminal_errors.append(exec_error.error)
+            if decision.outcome is taskflow.TaskOutcome.FAIL:
+                # SKIP, an unrecognised action, an on_error that raised, or
+                # a spent budget (production's "max_retries_exceeded").
+                # retry_entry stays 'failed'.
+                all_terminal_results.append(last_exec_error.result)
+                terminal_errors.append(last_exec_error.error)
                 return
-            # RETRY again and budget allows → next loop iteration.
-        # Loop exited because retry_count hit max_retries — retries
-        # exhausted. Append the last attempt's failure (mirrors
-        # production's "max_retries_exceeded" branch).
-        if last_exec_error is not None:
-            all_terminal_results.append(last_exec_error.result)
-            terminal_errors.append(last_exec_error.error)
+            # RETRY again and the budget allows → next loop iteration.
 
-    async def _invoke_on_error(
+    async def _decide_after_failure(
         self,
         *,
         state: RunState,
         task: ExecutorTask,
         exec_error: ExecutorTaskError,
-    ) -> str | list[ExecutorTask] | None:
-        """Call ``handler.on_error`` with error capture.
+        msg: SourceMessage,
+        retry_count: int,
+    ) -> taskflow.ErrorDecision:
+        """Ask ``handler.on_error`` what to do, and map the answer to a decision.
 
-        Returns ``None`` when on_error itself raises (the ProbeError has
-        already been appended). Otherwise returns the action verbatim so
-        the caller can pattern-match on RETRY / list / SKIP / other.
+        Both halves come from :mod:`drakkar.taskflow`, the same functions
+        production calls, so the probe cannot drift from production on the
+        rules an operator is asking it about: what a returned list means,
+        when the retry budget is spent, what an unrecognised return
+        degrades to.
 
-        The return type uses ``str`` (not ``ErrorAction``) because
-        ``ErrorAction`` is a ``StrEnum`` — user handlers are free to
-        return the raw string ``'retry'`` / ``'skip'`` instead of the
-        enum member. The caller uses ``action == ErrorAction.RETRY`` to
-        treat both cases identically (StrEnum equality matches the
-        underlying str).
+        The probe's own policy is only what happens when the hook *raises*.
+        Production degrades that to a terminal failure and counts a
+        ``handler_hook_errors`` metric; the probe reports the exception to
+        the operator as a ``ProbeError`` and settles the task as a terminal
+        failure — the same outcome, surfaced instead of counted. A debug
+        run deliberately stays out of the production metric series.
         """
         stage = f'on_error:{task.task_id}'
         with _stage(stage):
-            try:
-                return await self._handler.on_error(task, exec_error.error)
-            except Exception as exc:
-                self._record_error(
-                    state=state,
-                    error=self._build_probe_error(state=state, stage=stage, exc=exc),
-                )
-                return None
+            call = await taskflow.call_on_error(
+                self._handler,
+                task,
+                exec_error.error,
+                partition=msg.partition,
+            )
+        if call.exception is not None:
+            self._record_error(
+                state=state,
+                error=self._build_probe_error(state=state, stage=stage, exc=call.exception),
+            )
+            return taskflow.ErrorDecision(outcome=taskflow.TaskOutcome.FAIL)
+        return taskflow.decide_after_on_error(
+            call.action,
+            retry_count=retry_count,
+            max_retries=self._app_config.executor.max_retries,
+        )
 
     async def _execute_and_record_task(
         self,
@@ -1552,25 +1582,13 @@ class DebugRunner:
             successful_terminal_results.append(exec_result)
             all_terminal_results.append(exec_result)
         else:
-            # on_task_complete raised — production's catch-all at
-            # partition.py:476-495 synthesizes a failure ExecutorResult
-            # for window.results + an ExecutorError for tracker.errors.
-            # The success-only list is NOT touched here (in production,
+            # on_task_complete raised — production synthesizes a failure
+            # ExecutorResult for window.results plus an ExecutorError for
+            # tracker.errors; the same call builds both here. The
+            # success-only list is NOT touched (in production
             # ``task_result`` stays None on this path, so tracker.results
-            # never sees an append at partition.py:525-526).
-            synthesized_result = ExecutorResult(
-                exit_code=-1,
-                stdout='',
-                stderr=str(tc_exception),
-                duration_seconds=0,
-                task=task,
-            )
-            synthesized_error = ExecutorError(
-                task=task,
-                kind='internal',
-                exception=str(tc_exception),
-                stderr=str(tc_exception),
-            )
+            # never sees an append).
+            synthesized_result, synthesized_error = taskflow.synthesize_internal_failure(task, tc_exception)
             all_terminal_results.append(synthesized_result)
             terminal_errors.append(synthesized_error)
 

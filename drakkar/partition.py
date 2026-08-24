@@ -4,10 +4,12 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
+from drakkar import taskflow
 from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.hookctx import bind_hook_context, clear_hook_context
@@ -933,58 +935,56 @@ class PartitionProcessor:
             log.warning('executor_task_failed', error=str(e))
 
             bind_contextvars(hook='on_error', task_id=task.task_id)
-            hook_token = bind_hook_context(
-                hook='on_error',
-                partition=self._partition_id,
-                window_id=window.window_id,
-                task_id=task.task_id,
-            )
-            on_error_start = time.monotonic()
             try:
-                action = await self._handler.on_error(task, e.error)
-            except Exception as hook_exc:
-                # A broken on_error must never wedge the partition. This
-                # call sits inside an ``except`` clause, so a raise here is
-                # NOT caught by the sibling ``except Exception`` below —
-                # Python only matches sibling handlers against exceptions
-                # from the ``try`` body. The escaping exception would skip
-                # the tracker-settling loop after this try/finally, leaving
-                # the offset PENDING forever; because ``committable()``
-                # stops at the first incomplete offset, that freezes the
-                # whole partition's commit watermark and every later
-                # message replays on restart.
+                call = await taskflow.call_on_error(
+                    self._handler,
+                    task,
+                    e.error,
+                    partition=self._partition_id,
+                    window_id=window.window_id,
+                )
+            finally:
+                # ``hook``/``task_id`` would otherwise leak into every later
+                # log line emitted by this coroutine. (``call_on_error``
+                # owns the hook context and the timing; these are structlog's
+                # separate store — see drakkar/hookctx.py on why both exist.)
+                unbind_contextvars('hook', 'task_id')
+            handler_duration.labels(hook='on_error').observe(call.duration_seconds)
+            if call.failed:
+                # A broken on_error must never wedge the partition. The hook
+                # is invoked from inside this ``except`` clause, so an
+                # escaping exception would skip the tracker-settling loop
+                # below, leaving the offset PENDING forever; because
+                # ``committable()`` stops at the first incomplete offset,
+                # that freezes the whole partition's commit watermark and
+                # every later message replays on restart. ``call_on_error``
+                # therefore returns the exception instead of raising it.
                 #
                 # Degrade to SKIP: the task settles as a terminal failure,
                 # the tracker completes, the watermark keeps advancing.
                 # At-least-once holds either way. Matches the Go backend,
                 # which contains the equivalent hook error the same way.
-                action = ErrorAction.SKIP
+                action: Any = ErrorAction.SKIP
                 handler_hook_errors.labels(hook='on_error').inc()
                 await log.aerror(
                     'on_error_hook_failed',
-                    error=str(hook_exc),
-                    error_type=type(hook_exc).__name__,
+                    error=str(call.exception),
+                    error_type=type(call.exception).__name__,
                     action='treating as skip (terminal failure)',
-                    exc_info=True,
+                    exc_info=call.exception,
                 )
-            finally:
-                # In a ``finally`` so a raising hook still records its
-                # latency and still releases the bound contextvars —
-                # otherwise ``hook``/``task_id`` leak into every later log
-                # line emitted by this coroutine.
-                handler_duration.labels(hook='on_error').observe(time.monotonic() - on_error_start)
-                unbind_contextvars('hook', 'task_id')
-                clear_hook_context(hook_token)
-            if isinstance(action, list):
+            else:
+                action = call.action
+            decision = taskflow.decide_after_on_error(
+                action,
+                retry_count=retry_count,
+                max_retries=self._max_retries,
+            )
+            if decision.outcome is taskflow.TaskOutcome.REPLACE:
                 # Replacement: the original task is "replaced" (not a
                 # terminal failure of the group). Decrement its contribution
                 # to every message tracker; add the replacements.
-                for new_task in action:
-                    # Auto-link the replacement back to its parent unless
-                    # the handler explicitly set a different parent_task_id.
-                    # Lets on_message_complete walk the replacement chain.
-                    if new_task.parent_task_id is None:
-                        new_task.parent_task_id = task.task_id
+                for new_task in taskflow.link_replacements(task, list(decision.replacements)):
                     self._pending_tasks[new_task.task_id] = new_task
                     window.tasks.append(new_task)
                     window.total_tasks += 1
@@ -1001,7 +1001,7 @@ class PartitionProcessor:
                     t = asyncio.create_task(self._execute_and_track(new_task, window))
                     self._active_tasks.add(t)
                     t.add_done_callback(self._active_tasks.discard)
-            elif action == ErrorAction.RETRY and retry_count < self._max_retries:
+            elif decision.outcome is taskflow.TaskOutcome.RETRY:
                 task_retries.inc()
                 # The retry coroutine reuses this invocation's inflight slot,
                 # pending_tasks entry, AND message-tracker slot — the finally
@@ -1013,7 +1013,7 @@ class PartitionProcessor:
                 t.add_done_callback(self._active_tasks.discard)
                 return
             else:
-                if action == ErrorAction.RETRY:
+                if decision.retries_exhausted:
                     await log.awarning(
                         'max_retries_exceeded',
                         task_id=task.task_id,
@@ -1024,25 +1024,12 @@ class PartitionProcessor:
 
         except Exception as e:
             await log.aerror('unexpected_error_in_task', error=str(e), exc_info=True)
-            # still count as completed so the window can progress
-            window.results.append(
-                ExecutorResult(
-                    exit_code=-1,
-                    stdout='',
-                    stderr=str(e),
-                    duration_seconds=0,
-                    task=task,
-                )
-            )
-            # Synthesize an ExecutorError so the message tracker sees a
+            # Still count as completed so the window can progress, and
+            # synthesize an ExecutorError so the message tracker sees a
             # terminal failure for this task (the group treats unexpected
             # exceptions like retries-exhausted failures).
-            task_error = ExecutorError(
-                task=task,
-                kind='internal',
-                exception=str(e),
-                stderr=str(e),
-            )
+            synthesized_result, task_error = taskflow.synthesize_internal_failure(task, e)
+            window.results.append(synthesized_result)
 
         finally:
             if not handed_off_to_retry:
