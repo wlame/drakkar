@@ -45,6 +45,11 @@ from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import __version__
 from drakkar.annotations import Annotator
+from drakkar.app import (
+    changed_consumed_settings,
+    reasons_for_settings,
+    snapshot_consumed_settings,
+)
 from drakkar.app_security import warn_if_ui_unauthenticated
 from drakkar.cache import Cache, CacheEngine
 from drakkar.consumer import KafkaConsumer
@@ -110,6 +115,39 @@ class AppLifecycle:
         # via ``app._lifecycle._watchdog``.
         self._watchdog: WatchdogFile | None = None
 
+    async def _run_on_startup(self) -> None:
+        """Run the handler's ``on_startup`` and adopt the config it returned.
+
+        Most of the config is read after this point, so a change the hook
+        makes lands. A handful of settings were already consumed while
+        ``DrakkarApp`` was constructed — the sink manager, the handler's app
+        config, the worker and cluster names — and changing those here
+        changes nothing. Rather than silently dropping such a change (the
+        old behaviour) or moving construction out of ``__init__``, the
+        ignored settings are named in one table
+        (``app.SETTINGS_CONSUMED_BEFORE_ON_STARTUP``) and reported at
+        warning level with what to do instead. ``docs/handler.md``
+        documents the same boundary.
+        """
+        app = self._app
+        before = snapshot_consumed_settings(app._config)
+
+        bind_contextvars(hook='on_startup')
+        try:
+            app._config = await app._handler.on_startup(app._config)
+        finally:
+            unbind_contextvars('hook')
+
+        ignored = changed_consumed_settings(before, app._config)
+        if ignored:
+            await logger.awarning(
+                'on_startup_config_change_ignored',
+                category='lifecycle',
+                settings=ignored,
+                reasons=reasons_for_settings(ignored),
+                hint='these settings are read before on_startup runs; set them in the config file or environment',
+            )
+
     async def _async_run(self) -> None:
         """Full async startup → poll-loop → shutdown sequence.
 
@@ -137,9 +175,7 @@ class AppLifecycle:
         try:
             await self._setup_watchdog()
 
-            bind_contextvars(hook='on_startup')
-            app._config = await app._handler.on_startup(app._config)
-            unbind_contextvars('hook')
+            await self._run_on_startup()
 
             app._config_summary = app._config.config_summary(
                 worker_id=app._worker_id,

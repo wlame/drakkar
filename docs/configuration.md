@@ -992,6 +992,29 @@ When every configured client has an empty token, the worker logs a `webapp_unaut
 
 ---
 
+## Settings `on_startup` cannot change
+
+`DrakkarApp.__init__` builds a few things straight from the config it is
+given, before the `on_startup` hook ever runs. A hook that changes one of
+those settings changes nothing — the object built from the old value
+already exists. Rather than dropping the change silently, the worker logs
+one `on_startup_config_change_ignored` warning naming every setting it
+ignored and what consumed it.
+
+The full list and the working alternative are on the
+[Handler](handler.md#on_startup) page.
+
+**Cross-backend divergence.** The Go backend builds its sinks in `Run`,
+*after* `OnStartup`, so a Go handler *can* change
+`sinks.circuit_breaker` and `sinks.delivery_timeout_seconds` in the hook.
+The Python backend constructs its `SinkManager` in `DrakkarApp.__init__`
+and therefore cannot. Both backends emit the same warning event, with the
+Python list carrying those two extra rows. Set both in the config file or
+through their `DK_` env overrides and the two backends behave
+identically — which is what a mixed fleet needs.
+
+---
+
 ## Annotated `drakkar.yaml` example
 
 A copy-paste-ready YAML showing **every** field with one-line comments and the matching `DK_*` env-var override sits on its own page: **[Config Reference](config-reference.md)**. Use this page (Configuration) for the deep tables and prose; use the Reference for a quick scan of "what can I change here?"

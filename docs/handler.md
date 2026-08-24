@@ -114,10 +114,33 @@ no-op defaults, so you only override what you need.
 async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig
 ```
 
-Called once, before any components (sinks, executor, consumer) are
-created. Receives the loaded config and **must return** a (possibly
-modified) `DrakkarConfig`. This is the only point where config can be
-changed at runtime.
+Called once, before the sinks, the executor pool, the consumer, the
+recorder and the HTTP servers are created. Receives the loaded config and
+**must return** a (possibly modified) `DrakkarConfig`. This is the only
+point where config can be changed at runtime.
+
+!!! warning "A few settings are already consumed by then"
+
+    `DrakkarApp.__init__` runs before this hook and builds some things from
+    the config it was given. Changing these in `on_startup` has **no
+    effect**, because the object built from the old value already exists:
+
+    | setting | what already consumed it |
+    |---|---|
+    | `app` | the handler's app-config model (see [Application config](app-config.md)) |
+    | `sinks.circuit_breaker` | the sink manager |
+    | `sinks.delivery_timeout_seconds` | the sink manager |
+    | `cluster_name`, `cluster_name_env` | the worker's resolved cluster name |
+    | `worker_name_env` | the worker's resolved id |
+
+    Set those in the config file or through their `DK_` environment
+    overrides instead. The worker does not fail on such a change — it logs
+    one `on_startup_config_change_ignored` warning naming every setting it
+    dropped, so the gap is visible rather than silent.
+
+    Everything else — `executor`, `kafka`, the sink instances themselves,
+    `ui`, `webapp`, `dlq`, `cache`, `logging`, `metrics` — is read after
+    the hook and a change to it takes effect.
 
 ```python
 import os

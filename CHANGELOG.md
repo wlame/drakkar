@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `on_startup_config_change_ignored`: a startup warning naming every config
+  setting an `on_startup` hook changed that the worker had already
+  consumed. `DrakkarApp.__init__` builds the sink manager, the handler's
+  app config and the worker/cluster names before the hook can run, so
+  changing `app`, `sinks.circuit_breaker`, `sinks.delivery_timeout_seconds`,
+  `cluster_name`, `cluster_name_env` or `worker_name_env` in the hook did
+  nothing and said nothing. It still does nothing — that is now documented
+  in `docs/handler.md` and reported, with what consumed each setting. The
+  Go backend emits the same event; its list is shorter because it builds
+  sinks after the hook (see `docs/configuration.md`).
+
 ### Changed
 
 - The rules that decide what happens to a failed task — what an `on_error`

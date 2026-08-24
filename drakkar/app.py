@@ -15,10 +15,12 @@ import asyncio
 import os
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 import structlog
+from pydantic import BaseModel
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import __version__
@@ -56,6 +58,102 @@ logger = structlog.get_logger()
 # imports of the form ``from drakkar.app import warn_if_ui_unauthenticated``
 # continue to work via this re-export.
 from drakkar.app_security import warn_if_ui_unauthenticated as warn_if_ui_unauthenticated  # noqa: E402
+
+
+@dataclass(frozen=True)
+class ConsumedSetting:
+    """One config setting that ``DrakkarApp.__init__`` reads for good.
+
+    ``path`` is dotted from the config root; ``reason`` says what already
+    consumed it, so the warning tells an operator where to set the value
+    instead of just that their change was dropped.
+    """
+
+    path: str
+    reason: str
+
+
+# Settings ``DrakkarApp.__init__`` consumes into a component or a derived
+# value. ``on_startup`` runs later (``AppLifecycle._async_run``), so a hook
+# that changes one of these changes nothing — the object built from the old
+# value is already there. Every other section of the config is read after
+# the hook and a change to it lands.
+#
+# A table rather than checks scattered through ``__init__``: it is the
+# documented contract (``docs/handler.md``), it is what the warning below
+# iterates, and a test asserts every path still resolves — so a setting
+# that stops being consumed early cannot quietly keep warning, and one that
+# starts being consumed early is a single row.
+SETTINGS_CONSUMED_BEFORE_ON_STARTUP: tuple[ConsumedSetting, ...] = (
+    ConsumedSetting(
+        'app',
+        'the handler app-config model is built from it in DrakkarApp.__init__ '
+        '(set it in YAML or through the handler app_env_prefix env vars)',
+    ),
+    ConsumedSetting(
+        'sinks.circuit_breaker',
+        'the sink manager is constructed with it in DrakkarApp.__init__',
+    ),
+    ConsumedSetting(
+        'sinks.delivery_timeout_seconds',
+        'the sink manager is constructed with it in DrakkarApp.__init__',
+    ),
+    ConsumedSetting(
+        'cluster_name',
+        'the worker resolves its cluster name in DrakkarApp.__init__',
+    ),
+    ConsumedSetting(
+        'cluster_name_env',
+        'the worker resolves its cluster name in DrakkarApp.__init__',
+    ),
+    ConsumedSetting(
+        'worker_name_env',
+        'the worker id is resolved in DrakkarApp.__init__',
+    ),
+)
+
+
+def _read_path(config: DrakkarConfig, path: str) -> Any:
+    """Read a dotted config path (``sinks.circuit_breaker``)."""
+    value: Any = config
+    for part in path.split('.'):
+        value = getattr(value, part)
+    return value
+
+
+def snapshot_consumed_settings(config: DrakkarConfig) -> dict[str, Any]:
+    """Copy the values of every early-consumed setting, for later comparison.
+
+    Pydantic models are deep-copied: a handler that mutates the config in
+    place (the documented style) would otherwise leave the "before" value
+    pointing at the object it just changed, and every comparison would say
+    "unchanged".
+    """
+    snapshot: dict[str, Any] = {}
+    for setting in SETTINGS_CONSUMED_BEFORE_ON_STARTUP:
+        value = _read_path(config, setting.path)
+        snapshot[setting.path] = value.model_copy(deep=True) if isinstance(value, BaseModel) else value
+    return snapshot
+
+
+def changed_consumed_settings(before: dict[str, Any], config: DrakkarConfig) -> list[str]:
+    """Paths whose value differs from ``before`` — the ignored changes.
+
+    Compared by value, so a handler that returns a freshly built
+    ``DrakkarConfig`` rather than mutating the one it was given is judged
+    on content, not identity.
+    """
+    return [
+        setting.path
+        for setting in SETTINGS_CONSUMED_BEFORE_ON_STARTUP
+        if _read_path(config, setting.path) != before[setting.path]
+    ]
+
+
+def reasons_for_settings(paths: list[str]) -> list[str]:
+    """The ``path — reason`` lines the warning shows for ``paths``."""
+    by_path = {setting.path: setting.reason for setting in SETTINGS_CONSUMED_BEFORE_ON_STARTUP}
+    return [f'{path} — {by_path[path]}' for path in paths]
 
 
 class DrakkarApp:
