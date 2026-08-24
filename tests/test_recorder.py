@@ -34,14 +34,9 @@ from drakkar.recorder import (
     live_link_path,
     make_db_path,
 )
-from drakkar.recorder import (
-    logger as recorder_logger,
-)
-from drakkar.recorder.core import (
-    WSSubscriber,
-    _byte_len,
-    _capped_stdin,
-)
+from drakkar.recorder.fanout import WSSubscriber
+from drakkar.recorder.writer import _byte_len, _capped_stdin
+from drakkar.recorder.writer import logger as writer_logger
 from tests.conftest import make_ui_config, wait_for
 
 
@@ -356,7 +351,7 @@ async def test_record_task_completed_carries_stdout_lines_on_ws_entry_only(recor
     ],
 )
 def test_line_count_counts_trailing_unterminated_line(text, expected):
-    from drakkar.recorder.core import _line_count
+    from drakkar.recorder.writer import _line_count
 
     assert _line_count(text) == expected
 
@@ -3496,7 +3491,7 @@ async def test_log_threshold_logs_slow_task(tmp_path):
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
-    with patch.object(recorder_logger, 'info') as mock_log:
+    with patch.object(writer_logger, 'info') as mock_log:
         rec.record_task_completed(make_slow_result(), partition=0)
         mock_log.assert_called_once()
         assert mock_log.call_args[0][0] == 'slow_task_completed'
@@ -3512,7 +3507,7 @@ async def test_log_threshold_skips_fast_task(tmp_path):
     rec = EventRecorder(config, worker_name=WORKER_NAME)
     await rec.start()
 
-    with patch.object(recorder_logger, 'info') as mock_log:
+    with patch.object(writer_logger, 'info') as mock_log:
         rec.record_task_completed(make_fast_result(), partition=0)
         mock_log.assert_not_called()
 
@@ -3645,7 +3640,7 @@ async def test_log_threshold_failed_slow_task(tmp_path):
     task = make_task('t-slow')
     error = ExecutorError(task=task, exit_code=1, stderr='err')
 
-    with patch.object(recorder_logger, 'info') as mock_log:
+    with patch.object(writer_logger, 'info') as mock_log:
         rec.record_task_failed(task, error, partition=0, duration_seconds=1.5)
         mock_log.assert_called_once()
         assert mock_log.call_args[0][0] == 'slow_task_failed'
@@ -3664,7 +3659,7 @@ async def test_log_threshold_failed_fast_task_no_log(tmp_path):
     task = make_task('t-fast')
     error = ExecutorError(task=task, exit_code=1, stderr='err')
 
-    with patch.object(recorder_logger, 'info') as mock_log:
+    with patch.object(writer_logger, 'info') as mock_log:
         rec.record_task_failed(task, error, partition=0, duration_seconds=0.1)
         mock_log.assert_not_called()
 
