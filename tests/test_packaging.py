@@ -111,3 +111,19 @@ def test_justfile_does_not_select_a_dev_extra() -> None:
     justfile = (REPO_ROOT / 'justfile').read_text()
     offenders = [line.strip() for line in justfile.splitlines() if '--extra=dev' in line]
     assert not offenders, 'recipes still select the removed dev extra: ' + '; '.join(offenders)
+
+
+def test_agents_md_directory_map_matches_the_tree() -> None:
+    """AGENTS.md is a committed deliverable an agent reads before the code.
+
+    A map naming a directory that no longer exists (``templates/`` survived
+    its v1.19 deletion here) sends a reader looking for something that is
+    not there.
+    """
+    agents = (REPO_ROOT / 'AGENTS.md').read_text()
+    block = re.search(r'^drakkar/\n(.*?)^```', agents, re.S | re.M)
+    assert block, 'AGENTS.md has no drakkar/ directory map'
+    listed = re.findall(r'^  ([a-z_]+(?:\.py)?/?)', block.group(1), re.M)
+    assert listed, 'directory map parsed as empty — did its format change?'
+    missing = [entry for entry in listed if not (REPO_ROOT / 'drakkar' / entry.rstrip('/')).exists()]
+    assert not missing, f'AGENTS.md maps paths that do not exist: {missing}'

@@ -7,7 +7,7 @@ WORKDIR /app
 RUN uv pip install --system --no-cache-dir \
     confluent-kafka pydantic pydantic-settings asyncpg \
     prometheus-client structlog pyyaml \
-    aiosqlite fastapi 'uvicorn[standard]' jinja2 \
+    aiosqlite fastapi 'uvicorn[standard]' \
     pymongo httpx redis
 
 COPY drakkar/ /app/drakkar/

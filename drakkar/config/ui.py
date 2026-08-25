@@ -99,7 +99,7 @@ class UIRecorderConfig(BaseModel):
         default=4,
         ge=0,
         description=(
-            'How many cold (uncached) database files one /api/debug/databases '
+            'How many cold (uncached) database files one /api/v1/debug/databases '
             'request may fully scan inline. Files beyond the cap return '
             'immediately with stats_pending=true and fill in as the warmer '
             'catches up. 0 = requests never scan; matters only on a cold '
@@ -383,7 +383,7 @@ class UIConsumePauseConfig(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
-            'Serve the consume-pause API (``/api/debug/consume-pause``) and '
+            'Serve the consume-pause API (``/api/v1/debug/consume-pause``) and '
             'show the pause control on the Live page. Off by default: pausing '
             'stops message intake for the chosen duration, which is a '
             'production-affecting act — enable it deliberately, for '
@@ -485,7 +485,7 @@ class UIConfig(BaseModel):
     probe_enabled: bool = Field(
         default=True,
         description=(
-            'Serve ``POST /api/debug/probe``. This is the one UI endpoint that '
+            'Serve ``POST /api/v1/debug/probe``. This is the one UI endpoint that '
             'runs caller-supplied bytes through the live handler and the real '
             'executor subprocess pool, so it is neither read-only nor free: it '
             'competes with production traffic for executor slots. Set to false '
@@ -499,7 +499,7 @@ class UIConfig(BaseModel):
     merge_enabled: bool = Field(
         default=True,
         description=(
-            'Serve ``POST /api/debug/merge``. This is the one UI endpoint that '
+            'Serve ``POST /api/v1/debug/merge``. This is the one UI endpoint that '
             'writes to disk: each call creates a new ``merged-<ts>.db`` in '
             '``ui.recorder.db_dir`` and nothing reclaims it, so repeated calls '
             'grow unbounded. Set to false to serve 403 instead — independently '
@@ -509,7 +509,7 @@ class UIConfig(BaseModel):
     kafka_read_enabled: bool = Field(
         default=True,
         description=(
-            'Serve ``GET /api/debug/kafka/*`` — ad-hoc reads of the configured '
+            'Serve ``GET /api/v1/debug/kafka/*`` — ad-hoc reads of the configured '
             'topics (source, dlq, and each Kafka sink by instance name; never '
             'an arbitrary topic). Reads use assign()-only consumers that join '
             'no consumer group and commit no offsets, so they are invisible to '

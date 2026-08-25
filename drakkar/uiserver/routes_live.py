@@ -1,14 +1,16 @@
-"""Live view page + ``/api/live/*`` endpoints + ``/api/recent-tasks`` + ``/api/events``.
+"""Live-view JSON: ``/api/v1/live/*``, ``/api/v1/recent-tasks``, ``/api/v1/events``.
+
+These back the drakkar-ui Live page; the page itself is served by
+``routes_spa`` from the bundle, not rendered here.
 
 Routes:
-  * ``/live``                          — live view HTML page.
-  * ``/api/events``                    — paginated event JSON feed.
-  * ``/api/recent-tasks``              — last-N-minutes timeline view.
-  * ``/api/live/arrange-tasks``        — per-task lookup by task_id list.
-  * ``/api/live/task-results``         — completion-hook task feed.
-  * ``/api/live/message-results``      — completion-hook message feed.
-  * ``/api/live/window-results``       — completion-hook window feed.
-  * ``/api/live/sink-breakdown``       — per-sink output count for a task.
+  * ``/api/v1/events``                    — paginated event JSON feed.
+  * ``/api/v1/recent-tasks``              — last-N-minutes timeline view.
+  * ``/api/v1/live/arrange-tasks``        — per-task lookup by task_id list.
+  * ``/api/v1/live/task-results``         — completion-hook task feed.
+  * ``/api/v1/live/message-results``      — completion-hook message feed.
+  * ``/api/v1/live/window-results``       — completion-hook window feed.
+  * ``/api/v1/live/sink-breakdown``       — per-sink output count for a task.
 
 The request-body Pydantic models (``_ArrangeTaskLookupRequest``,
 ``_SinkBreakdownRequest``) MUST be at module scope for FastAPI's
@@ -33,7 +35,7 @@ if TYPE_CHECKING:
     from drakkar.uiserver.server import UIDeps
 
 
-# ``/api/live/arrange-tasks`` request body — kept at module scope so
+# ``/api/v1/live/arrange-tasks`` request body — kept at module scope so
 # FastAPI's automatic "single Pydantic param = request body" detection
 # fires. Nested class definitions inside a route factory would not
 # trigger the same heuristic and would end up being treated as query
@@ -42,7 +44,7 @@ class _ArrangeTaskLookupRequest(BaseModel):
     task_ids: list[str] = Field(default_factory=list, max_length=5000)
 
 
-# ``/api/live/sink-breakdown`` request body — also at module scope for
+# ``/api/v1/live/sink-breakdown`` request body — also at module scope for
 # the same reason. Aggregates ``produced`` events by ``output_topic``
 # (sink name) for a given (partition, offsets[]) tuple.
 class _SinkBreakdownRequest(BaseModel):
@@ -50,7 +52,7 @@ class _SinkBreakdownRequest(BaseModel):
     offsets: list[int] = Field(default_factory=list, max_length=5000)
 
 
-# Ceiling on the ``/api/recent-tasks?minutes=`` query parameter — kept in
+# Ceiling on the ``/api/v1/recent-tasks?minutes=`` query parameter — kept in
 # sync with ``UITimelineConfig.max_age_minutes``'s own ceiling (24h) so a
 # caller sees FastAPI's validation error rather than a silent downstream
 # clamp. The handler clamps further down to ``config.timeline.max_age_minutes``
@@ -59,7 +61,7 @@ class _SinkBreakdownRequest(BaseModel):
 # query viable on a high-fan-out worker even at the full window.
 RECENT_TASKS_MAX_MINUTES = 1440
 
-# Ceiling on ``/api/recent-tasks?limit=`` — shared with the *derived*
+# Ceiling on ``/api/v1/recent-tasks?limit=`` — shared with the *derived*
 # default (``history_factor x max_executors``), which has no ceiling of its
 # own at the config layer (both factors are operator-set positive ints with
 # no upper bound). Without this shared cap a misconfigured
@@ -85,8 +87,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
     async def _live_overview_data() -> dict:
         """The live view's server-side snapshot.
 
-        Shared by the ``/live`` HTML page and ``GET /api/v1/live/overview``
-        so the page and the API never drift: running/pending task counts,
+        Backs ``GET /api/v1/live/overview``: running/pending task counts,
         in-flight Arrange calls, pool occupancy, UI tuning knobs, handler
         hook flags, and the Kafka-UI deep-link config.
         """
@@ -176,7 +177,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
             overview['offload'] = drakkar_app._offload_pool.snapshot()
         return overview
 
-    # v1-only contract endpoint (no legacy alias): the live page's
+    # v1-only contract endpoint: the live page's
     # server-side snapshot as JSON for the static SPA.
     @router.get('/api/v1/live/overview')
     async def api_live_overview():
@@ -299,7 +300,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
             }
         )
 
-    # Lookup-by-task-ID endpoint for the Arrange tab. Unlike /api/recent-tasks
+    # Lookup-by-task-ID endpoint for the Arrange tab. Unlike /api/v1/recent-tasks
     # this does NOT filter by ``minutes`` and does NOT apply the
     # ``ws_min_duration_ms`` threshold — callers pass exactly the task_ids
     # they want state for, and we return whatever the recorder has within
@@ -344,7 +345,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
     # Each endpoint returns the most recent N rows ordered by ts DESC.
     # No joins: all the user-visible columns are already in the event's
     # metadata JSON (see recorder.record_task_complete etc.). Sink-type
-    # breakdown is fetched lazily by the sidebar via /api/live/sink-breakdown.
+    # breakdown is fetched lazily by the sidebar via /api/v1/live/sink-breakdown.
     # ------------------------------------------------------------------
 
     async def _fetch_events(event_name: str, limit: int) -> list[dict]:

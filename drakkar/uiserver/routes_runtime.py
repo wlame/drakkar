@@ -5,7 +5,7 @@ Routes:
                                    recent stalls. Answers from monitor
                                    memory without touching the main event
                                    loop, so it works DURING a stall.
-  * ``/api/debug/runtime/units`` — census of live concurrency units
+  * ``/api/v1/debug/runtime/units`` — census of live concurrency units
                                    (asyncio tasks here) grouped by
                                    coroutine + suspension point. Runs on
                                    the main loop; a dispatch timeout maps

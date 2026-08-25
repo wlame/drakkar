@@ -619,7 +619,7 @@ def cache_gauge_snapshot() -> dict[str, int]:
 
     Provides a stable, library-internals-free interface for callers that
     need to read gauge values (notably the debug server's
-    ``/api/debug/cache/stats`` endpoint). Iterates the gauge's sample
+    ``/api/v1/debug/cache/stats`` endpoint). Iterates the gauge's sample
     collection via prometheus_client's public ``collect()`` API rather
     than reaching into ``_value``, so a prometheus_client upgrade that
     changes the private representation will not silently break callers.

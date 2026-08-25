@@ -1,9 +1,9 @@
-"""Ad-hoc Kafka read JSON API: ``/api/debug/kafka/*``.
+"""Ad-hoc Kafka read JSON API: ``/api/v1/debug/kafka/*``.
 
 Routes:
-  * ``/api/debug/kafka/topics``            — the readable aliases (never raw topic names).
-  * ``/api/debug/kafka/{alias}/message``   — one message by (partition, offset).
-  * ``/api/debug/kafka/{alias}/messages``  — NDJSON stream of a time window.
+  * ``/api/v1/debug/kafka/topics``            — the readable aliases (never raw topic names).
+  * ``/api/v1/debug/kafka/{alias}/message``   — one message by (partition, offset).
+  * ``/api/v1/debug/kafka/{alias}/messages``  — NDJSON stream of a time window.
 
 The read logic lives in ``drakkar.kafka_read``; this module only maps it
 onto HTTP. Reads join no consumer group and commit no offsets — see that
@@ -65,7 +65,7 @@ def _disabled_response() -> JSONResponse:
 
 
 def create_kafka_read_router(deps: UIDeps) -> APIRouter:
-    """Build the router that owns ``/api/debug/kafka/*`` endpoints."""
+    """Build the router that owns ``/api/v1/debug/kafka/*`` endpoints."""
     # Kafka reads expose message contents — gate the whole router behind
     # require_auth (no-op without a token), like the cache router.
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
@@ -197,6 +197,6 @@ def _warn_if_exposed_without_ui_auth(
         category='kafka',
         aliases=exposed,
         reason='Kafka security is configured for these topics but ui.auth_token is empty: '
-        'their messages are readable through /api/debug/kafka/* without any credential. '
+        'their messages are readable through /api/v1/debug/kafka/* without any credential. '
         'Set ui.auth_token to gate the API, or ui.kafka_read_enabled=false to close it.',
     )

@@ -7,34 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Removed
-
-- **The `dev` extra.** `pip install py-drakkar[dev]` no longer exists — it
-  published the test runner and the linter to anyone installing the library.
-  Every development tool now lives in `[dependency-groups].dev`, which `uv`
-  installs by default and never publishes, so the two lists that had to be
-  kept equal by hand are one list. `perf` (orjson) stays as the only
-  published extra, since that is a genuine runtime opt-in. The justfile
-  recipes drop their `--extra=dev` selections, which also removes the
-  venv-eviction hazard the old comment described: recipes no longer differ
-  in which selection they pass, so nothing re-syncs between them.
-
-- **The unused `httpx2` dev dependency.** Nothing in the repository imports
-  it. (`httpx` itself is a runtime dependency and is unaffected.)
-
-### Changed
-
-- **CI/release workflow hardening.** Every workflow now declares
-  `permissions: {contents: read}` (only `docs.yml` did; the rest inherited
-  whatever the repository default granted), a `concurrency` group, and
-  `timeout-minutes` on each job so a hung test fails instead of holding a
-  runner for six hours. CI cancels a superseded run; release and integration
-  never cancel one in flight. `setup-uv` is pinned to an explicit version
-  instead of floating to `latest`. The release `publish` job now repeats
-  `contents: read` alongside its `id-token: write` — a job-level
-  `permissions` block replaces the workflow-level one rather than merging
-  with it, so `actions/checkout` was relying on the inherited default.
-
 ### Added
 
 - **A `LICENSE` file.** `pyproject.toml` and the README have always said
@@ -53,9 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one shared fixture, `tests/fixtures/event_vocabulary.json` (regenerate
   with `just gen-event-vocabulary`; the Go repo vendors a byte-identical
   copy). The fixture also records which backend emits each name —
-  `offload` is Python-only. No wire change: `StrEnum` members are the same
-  strings in SQL, in JSON and in a `/ws` frame. Documented in
-  `drakkar-ui/docs/api-contract-v1.md`.
+  `offload` is Python-only — and which are stored in `events` versus
+  broadcast on `/ws` only (`throughput`). No wire change: `StrEnum`
+  members are the same strings in SQL, in JSON and in a `/ws` frame.
+  Documented in `drakkar-ui/docs/api-contract-v1.md`.
 
 - **`drakkar/config.py` is now a `drakkar/config/` package**, split per
   domain: `kafka`, `sinks`, `runtime`, `ui`, `cache`, `webapp` and the
@@ -74,6 +47,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged — `from drakkar.sinks import SinkManager` and
   `SinkRegistry.all_names()` answer exactly as before.
 
+- **CI/release workflow hardening.** Every workflow now declares
+  `permissions: {contents: read}` (only `docs.yml` did; the rest inherited
+  whatever the repository default granted), a `concurrency` group, and
+  `timeout-minutes` on each job so a hung test fails instead of holding a
+  runner for six hours. CI cancels a superseded run; release and integration
+  never cancel one in flight. `setup-uv` is pinned to an explicit version
+  instead of floating to `latest`. The release `publish` job now repeats
+  `contents: read` alongside its `id-token: write` — a job-level
+  `permissions` block replaces the workflow-level one rather than merging
+  with it, so `actions/checkout` was relying on the inherited default.
+
+### Fixed
+
+- **The chaos-test harness called a removed endpoint.** `integration/chaos-test.sh`
+  polled `/api/dashboard`, which went away with the legacy unprefixed
+  routes in 1.19. Every curl there ends in `|| echo "0"`, so each worker
+  read as "zero tasks completed" and the whole scenario reported
+  plausible-looking nonsense instead of failing. Now `/api/v1/dashboard`,
+  with a unit test pinning every path the harness calls against the
+  vendored OpenAPI artifact. The same fix landed on the Go harness.
+
+- **Documentation that still described the pre-1.19 UI.** The route-module
+  docstrings advertised the removed server-rendered pages (`/`, `/live`,
+  `/history`, `/debug`) and the unprefixed `/api/*` aliases; `AGENTS.md`
+  mapped a `drakkar/templates/` directory that was deleted; and
+  `docs/features.md` told air-gapped operators that "the built-in pages
+  serve everything the SPA does", which is no longer true — the correct
+  answer is to stage a bundle with `drakkar-ui fetch` or mirror
+  `ui.release.repo`. Tests now pin the docstrings against the served route
+  table and the `AGENTS.md` map against the tree.
+
 ### Removed
 
 - **The pre-1.0 migration guards for retired config keys.** The `debug.*`
@@ -84,6 +88,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error. They are unknown keys now: a stale `debug:` section fails as an
   unknown top-level section, and the nested ones are ignored. Delete them
   from your config. Both backends dropped these guards together.
+
+- **The `dev` extra.** `pip install py-drakkar[dev]` no longer exists — it
+  published the test runner and the linter to anyone installing the library.
+  Every development tool now lives in `[dependency-groups].dev`, which `uv`
+  installs by default and never publishes, so the two lists that had to be
+  kept equal by hand are one list. `perf` (orjson) stays as the only
+  published extra, since that is a genuine runtime opt-in. The justfile
+  recipes drop their `--extra=dev` selections, which also removes the
+  venv-eviction hazard the old comment described: recipes no longer differ
+  in which selection they pass, so nothing re-syncs between them.
+
+- **The unused `httpx2` dev dependency.** Nothing in the repository imports
+  it. (`httpx` itself is a runtime dependency and is unaffected.)
+
+- **`jinja2` from the integration worker images.** The framework dropped
+  the Jinja templates in 1.19; the images kept installing the package.
 
 ## [1.19.0] - 2026-08-25
 

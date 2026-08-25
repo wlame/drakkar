@@ -2,7 +2,7 @@
 
 Why this exists
 ---------------
-``GET /api/debug/databases`` used to open every ``.db`` file in ``db_dir``
+``GET /api/v1/debug/databases`` used to open every ``.db`` file in ``db_dir``
 and run ``COUNT(*)`` / ``MIN`` / ``MAX`` / ``GROUP BY`` over its whole
 events table on every page load. With hourly rotation and a shared
 ``db_dir`` that is dozens of full table scans per click — the page took

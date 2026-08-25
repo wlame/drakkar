@@ -1,18 +1,20 @@
-"""Debug page + ``/api/debug/*`` (databases, trace, metrics, periodic, probe, download).
+"""Debug JSON: ``/api/v1/debug/*`` (databases, trace, metrics, periodic, probe, download).
+
+These back the drakkar-ui Debug page; the page itself is served by
+``routes_spa`` from the bundle, not rendered here.
 
 Routes:
-  * ``/debug``                       — debug HTML page.
-  * ``/api/debug/databases``         — list of debug DB files.
-  * ``/api/debug/merge``             — merge multiple DB files.
-  * ``/debug/download/{filename}``   — download a single DB file.
-  * ``/api/debug/archives``          — list of compressed archive files.
-  * ``/api/debug/archives/{name}``   — download a single archive file.
-  * ``/api/debug/trace``             — cross-worker trace for one (partition, offset).
-  * ``/api/debug/label-keys``        — distinct label keys across events.
-  * ``/api/debug/trace-by-label``    — cross-worker trace by (key, value).
-  * ``/api/debug/metrics``           — Prometheus metric snapshot as JSON.
-  * ``/api/debug/periodic``          — periodic-task run history.
-  * ``/api/debug/probe``             — single-message probe through the live handler.
+  * ``/api/v1/debug/databases``         — list of debug DB files.
+  * ``/api/v1/debug/merge``             — merge multiple DB files.
+  * ``/api/v1/debug/download/{filename}`` — download a single DB file.
+  * ``/api/v1/debug/archives``          — list of compressed archive files.
+  * ``/api/v1/debug/archives/{name}``   — download a single archive file.
+  * ``/api/v1/debug/trace``             — cross-worker trace for one (partition, offset).
+  * ``/api/v1/debug/label-keys``        — distinct label keys across events.
+  * ``/api/v1/debug/trace-by-label``    — cross-worker trace by (key, value).
+  * ``/api/v1/debug/metrics``           — Prometheus metric snapshot as JSON.
+  * ``/api/v1/debug/periodic``          — periodic-task run history.
+  * ``/api/v1/debug/probe``             — single-message probe through the live handler.
 
 The request-body Pydantic model ``_ProbeRequest`` MUST be at module
 scope for FastAPI's "single Pydantic param = request body" heuristic to
@@ -48,7 +50,7 @@ if TYPE_CHECKING:
 PROBE_TIMEOUT_HEADROOM_SECONDS: float = 30.0
 
 
-# Kafka partitions are non-negative int32; ``/api/debug/trace`` rejects
+# Kafka partitions are non-negative int32; ``/api/v1/debug/trace`` rejects
 # values that would silently truncate when narrowed to the recorder's
 # int32 partition column (contract v1).
 _INT32_MAX = 2**31 - 1
@@ -148,7 +150,7 @@ def _contained_db_path(root: Path, filename: str) -> Path | None:
     return _contained_path(root, filename)
 
 
-# ``/api/debug/probe`` request body — module-scope per the FastAPI
+# ``/api/v1/debug/probe`` request body — module-scope per the FastAPI
 # "single Pydantic param = body" heuristic: an imported model is
 # treated as a query parameter and surfaces as 422 errors. Mirrors
 # ``ProbeInput`` from ``drakkar.uiserver.runner``.
@@ -178,7 +180,7 @@ def _disabled_response(endpoint: str, config_key: str) -> JSONResponse:
 
 
 def create_debug_router(deps: UIDeps) -> APIRouter:
-    """Build the router that owns the debug page + ``/api/debug/*`` endpoints (excluding cache).
+    """Build the router that owns the debug page + ``/api/v1/debug/*`` endpoints (excluding cache).
 
     The file download at ``/debug/download/{filename}`` lives here too.
     """

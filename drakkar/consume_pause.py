@@ -78,7 +78,7 @@ class ConsumePauseController:
         return self._resume_at_ms is not None
 
     def state(self) -> dict[str, Any]:
-        """The wire-shape state served by GET/POST /api/debug/consume-pause."""
+        """The wire-shape state served by GET/POST /api/v1/debug/consume-pause."""
         cfg = self._app.config.ui.consume_pause
         return {
             'enabled': cfg.enabled,

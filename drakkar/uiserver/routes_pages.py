@@ -1,20 +1,21 @@
-"""HTML pages, health probes, top-level JSON APIs, and WebSocket endpoint.
+"""Health probes, top-level JSON APIs, and the WebSocket endpoint.
 
 Routes:
-  * ``/healthz``                 — Kubernetes liveness probe.
-  * ``/readyz``                  — Kubernetes readiness probe.
-  * ``/``                        — dashboard page.
-  * ``/partitions``              — partition list page.
-  * ``/partitions/{partition_id}`` — partition detail page.
-  * ``/task/{task_id}``          — task detail page.
-  * ``/history``                 — events history page.
-  * ``/sinks``                   — sinks summary page.
-  * ``/api/dashboard``           — dashboard JSON for JS refresh.
-  * ``/api/sinks``               — sink config + delivery stats JSON.
-  * ``/api/workers``             — peer-worker discovery JSON.
-  * ``/api/debug/processors``    — partition-processor diagnostics JSON.
-  * ``/api/v1/identity``         — worker identity + config summary (v1-only).
-  * ``/ws``                      — recorder-event WebSocket stream.
+  * ``/healthz``                    — Kubernetes liveness probe (public).
+  * ``/readyz``                     — Kubernetes readiness probe (public).
+  * ``/ws``                         — recorder-event WebSocket stream (public).
+  * ``/api/v1/dashboard``           — dashboard JSON.
+  * ``/api/v1/partitions``          — partition list JSON.
+  * ``/api/v1/task/{task_id}``      — task detail JSON.
+  * ``/api/v1/identity``            — worker identity + config summary.
+  * ``/api/v1/sinks``               — sink config + delivery stats JSON.
+  * ``/api/v1/workers``             — peer-worker discovery JSON.
+  * ``/api/v1/debug/processors``    — partition-processor diagnostics JSON.
+
+The server-rendered pages this module used to hold (``/``, ``/partitions``,
+``/history``, ``/sinks``) and the unprefixed ``/api/*`` aliases they called
+were removed in v1.19: the UI is one versioned drakkar-ui bundle, served by
+``routes_spa``, and every JSON endpoint lives under ``/api/v1``.
 
 The factory ``create_pages_router(deps)`` returns two leaf ``APIRouter``s
 (public probes/WS + auth-gated everything else) that the server module

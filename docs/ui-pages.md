@@ -1,6 +1,6 @@
 # Declared UI Pages
 
-The debug UI ships with a fixed set of built-in pages — Dashboard, Live,
+The drakkar-ui bundle ships with a fixed set of pages — Dashboard, Live,
 History, Debug. Sometimes that's not the view an operator actually wants:
 a page showing just this handler's orders, or just its retry queue, laid
 out exactly the way the domain calls for. **Declared UI pages** are that
@@ -217,7 +217,7 @@ placeholders instead of failing silently:
 ## Routing and navigation
 
 Each declared page routes at `/p/<slug>` and gets one nav entry
-(`title`, linking to `/p/<slug>`), appended after the built-in pages in
+(`title`, linking to `/p/<slug>`), appended after the bundle's own pages in
 declaration order. A slug with no matching page — never declared, or
 removed since the UI last loaded — renders the same not-found page as any
 other unmatched route.

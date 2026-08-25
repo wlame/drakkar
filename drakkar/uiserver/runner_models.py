@@ -8,7 +8,7 @@ contextvar lives here so both the cache proxy and the runtime can import a
 single shared symbol without circular dependencies.
 
 These models are the on-wire JSON shape of the report returned by the
-``/api/debug/probe`` endpoint, mirrored 1:1 in the Message Probe UI panels.
+``/api/v1/debug/probe`` endpoint, mirrored 1:1 in the Message Probe UI panels.
 """
 
 from __future__ import annotations

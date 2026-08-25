@@ -1,10 +1,10 @@
-"""Consume-pause JSON API: ``/api/debug/consume-pause`` (contract v1.14).
+"""Consume-pause JSON API: ``/api/v1/debug/consume-pause`` (contract v1.14).
 
 Routes:
-  * ``GET  /api/debug/consume-pause``   — current state (always 200; carries
+  * ``GET  /api/v1/debug/consume-pause``   — current state (always 200; carries
     ``enabled`` so the Live page can hide the control without a probe dance).
-  * ``POST /api/debug/consume-pause``   — pause consuming for N seconds.
-  * ``POST /api/debug/consume-resume``  — resume now (idempotent).
+  * ``POST /api/v1/debug/consume-pause``   — pause consuming for N seconds.
+  * ``POST /api/v1/debug/consume-resume``  — resume now (idempotent).
 
 The mechanics — why this never rebalances, and how it coordinates with
 backpressure and stall pauses — live in ``drakkar.consume_pause``. This
@@ -35,7 +35,7 @@ logger = structlog.get_logger()
 
 
 class ConsumePauseRequest(BaseModel):
-    """POST body for /api/debug/consume-pause.
+    """POST body for /api/v1/debug/consume-pause.
 
     Module-scope on purpose: FastAPI resolves body models by reference, and
     a model nested inside the factory would defeat schema generation.

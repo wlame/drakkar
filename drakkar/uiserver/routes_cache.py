@@ -1,9 +1,9 @@
-"""Cache JSON API: ``/api/debug/cache/*``.
+"""Cache JSON API: ``/api/v1/debug/cache/*``.
 
 Routes:
-  * ``/api/debug/cache/entries``      — paginated cache entry listing.
-  * ``/api/debug/cache/entry/{key}``  — single entry by exact key.
-  * ``/api/debug/cache/stats``        — gauge snapshot for the four cache metrics.
+  * ``/api/v1/debug/cache/entries``      — paginated cache entry listing.
+  * ``/api/v1/debug/cache/entry/{key}``  — single entry by exact key.
+  * ``/api/v1/debug/cache/stats``        — gauge snapshot for the four cache metrics.
 
 All routes 404 when the cache is disabled (``cache_engine`` is None).
 This keeps stale bookmarks / open browser tabs from rendering a
@@ -32,7 +32,7 @@ logger = structlog.get_logger()
 
 
 def create_cache_router(deps: UIDeps) -> APIRouter:
-    """Build the router that owns ``/api/debug/cache/*`` endpoints."""
+    """Build the router that owns ``/api/v1/debug/cache/*`` endpoints."""
     # Cache routes expose key/value contents — gate the whole router
     # behind require_auth (no-op without a token).
     router = APIRouter(dependencies=[Depends(deps.require_auth)])

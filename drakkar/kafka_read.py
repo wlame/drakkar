@@ -1,6 +1,6 @@
 """Ad-hoc Kafka reads with zero consumer-group side effects.
 
-Backs the UI server's ``/api/debug/kafka/*`` endpoints: fetch one message
+Backs the UI server's ``/api/v1/debug/kafka/*`` endpoints: fetch one message
 by (alias, partition, offset), or stream a time window of messages. The
 logic lives here rather than in the routes module so it can be exercised
 without FastAPI and reused by future surfaces (CLI, MCP).

@@ -1117,8 +1117,8 @@ def test_warn_if_ui_unauthenticated_names_the_side_effecting_endpoints(config_wi
 @pytest.mark.parametrize(
     ('probe_enabled', 'merge_enabled', 'expected_routes'),
     [
-        (True, False, ['POST /api/debug/probe']),
-        (False, True, ['POST /api/debug/merge']),
+        (True, False, ['POST /api/v1/debug/probe']),
+        (False, True, ['POST /api/v1/debug/merge']),
     ],
 )
 def test_warn_if_ui_unauthenticated_names_only_live_endpoints(

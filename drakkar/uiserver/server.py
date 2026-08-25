@@ -1,16 +1,25 @@
 """Debug web UI for Drakkar workers — a FastAPI JSON API plus the SPA.
 
-The route handlers are split across four sibling modules to keep this
-factory thin:
+The route handlers are split across sibling modules to keep this factory
+thin. Every JSON endpoint lives under ``/api/v1``; the pages are served by
+the drakkar-ui bundle through ``routes_spa``, not rendered here.
 
-  * ``routes_pages``  — HTML pages, health probes, WebSocket, top-level
-    JSON APIs (dashboard, sinks, workers, processors).
-  * ``routes_live``   — ``/live`` page + ``/api/live/*`` + ``/api/recent-tasks``
-    + ``/api/events``.
-  * ``routes_debug``  — ``/debug`` page + ``/api/debug/*`` (databases,
-    trace, metrics, periodic, probe, download).
-  * ``routes_cache``  — ``/api/debug/cache/*`` endpoints.
-  * ``routes_config_reference`` — ``/api/v1/config-reference`` (v1-only).
+  * ``routes_pages``  — health probes, WebSocket, and the top-level JSON
+    APIs (dashboard, partitions, task, identity, sinks, workers,
+    processors).
+  * ``routes_live``   — ``/api/v1/live/*``, ``/api/v1/recent-tasks``,
+    ``/api/v1/events``.
+  * ``routes_debug``  — ``/api/v1/debug/*`` (databases, trace, metrics,
+    periodic, probe, download, archives).
+  * ``routes_cache``  — ``/api/v1/debug/cache/*``.
+  * ``routes_kafka_read``    — ``/api/v1/debug/kafka/*``.
+  * ``routes_consume_pause`` — ``/api/v1/debug/consume-pause``.
+  * ``routes_runtime``       — ``/api/v1/debug/runtime/*``.
+  * ``routes_renderers``     — ``/api/v1/ui/renderers.js``.
+  * ``routes_config_reference`` — ``/api/v1/config-reference``.
+  * ``routes_openapi``       — the vendored OpenAPI artifact + Swagger UI.
+  * ``routes_spa``           — the drakkar-ui bundle, with an
+    ``index.html`` fallback for client-side routes.
 
 Each routes module defines a ``create_*_router(deps)`` factory that
 returns an ``APIRouter`` and is mounted into the app via
@@ -551,7 +560,7 @@ def create_ui_app(
     # Disabling docs_url/redoc_url alone still leaves ``GET /openapi.json``
     # served, and that route is created by FastAPI itself so it carries none
     # of our auth dependencies — it answered 200 with the full route table
-    # (including every /api/debug/* path) even with ui.auth_token set. The
+    # (including every /api/v1/debug/* path) even with ui.auth_token set. The
     # contract surface is served instead by routes_openapi.py, which vendors
     # the spec and is auth-gated like the rest of its route class.
     app = FastAPI(title='Drakkar UI', docs_url=None, redoc_url=None, openapi_url=None)

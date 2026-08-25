@@ -34,7 +34,7 @@ class SideEffectingEndpoint(NamedTuple):
 # "the UI is read-only" claim drifted out of true.
 SIDE_EFFECTING_ENDPOINTS: tuple[SideEffectingEndpoint, ...] = (
     SideEffectingEndpoint(
-        route='POST /api/debug/probe',
+        route='POST /api/v1/debug/probe',
         field='probe_enabled',
         effect=(
             'runs caller-supplied bytes through the live handler and competes '
@@ -42,7 +42,7 @@ SIDE_EFFECTING_ENDPOINTS: tuple[SideEffectingEndpoint, ...] = (
         ),
     ),
     SideEffectingEndpoint(
-        route='POST /api/debug/merge',
+        route='POST /api/v1/debug/merge',
         field='merge_enabled',
         effect='writes a new merged-<ts>.db into ui.recorder.db_dir that nothing reclaims',
     ),

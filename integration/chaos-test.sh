@@ -50,7 +50,7 @@ get_completed() {
     local total=0
     for port in 8081 8082 8083; do
         local val
-        val=$(curl -s --connect-timeout 2 --max-time 3 "http://localhost:${port}/api/dashboard" 2>/dev/null \
+        val=$(curl -s --connect-timeout 2 --max-time 3 "http://localhost:${port}/api/v1/dashboard" 2>/dev/null \
             | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['stats']['completed'])" 2>/dev/null) || continue
         total=$((total + val))
     done
@@ -60,14 +60,14 @@ get_completed() {
 # Get completed tasks for a specific worker
 get_worker_completed() {
     local port=$1
-    curl -s --connect-timeout 2 --max-time 3 "http://localhost:${port}/api/dashboard" 2>/dev/null \
+    curl -s --connect-timeout 2 --max-time 3 "http://localhost:${port}/api/v1/dashboard" 2>/dev/null \
         | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['stats']['completed'])" 2>/dev/null || echo "0"
 }
 
 # Get partition count for a specific worker
 get_worker_partitions() {
     local port=$1
-    curl -s --connect-timeout 2 --max-time 3 "http://localhost:${port}/api/dashboard" 2>/dev/null \
+    curl -s --connect-timeout 2 --max-time 3 "http://localhost:${port}/api/v1/dashboard" 2>/dev/null \
         | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['partition_count'])" 2>/dev/null || echo "?"
 }
 
@@ -138,7 +138,7 @@ echo ""
 log "waiting for workers to become reachable..."
 for port in 8081 8082 8083; do
     retries=0
-    while ! curl -s --connect-timeout 2 --max-time 3 "http://localhost:${port}/api/dashboard" > /dev/null 2>&1; do
+    while ! curl -s --connect-timeout 2 --max-time 3 "http://localhost:${port}/api/v1/dashboard" > /dev/null 2>&1; do
         retries=$((retries + 1))
         if [ "$retries" -ge 24 ]; then
             fail "worker on :${port} not reachable after 120s — is docker-compose up?"

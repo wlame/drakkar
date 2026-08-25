@@ -24,7 +24,7 @@ Per-feature guides: [Configuration](configuration.md) ·
 | Consume pause | `ui.consume_pause.enabled` | **off** | Timed Live-page pause of message intake (auto-resume); off because pausing is production-affecting |
 | Recorder persistence | `ui.recorder.db_dir` | `/tmp` | Where event history and worker metadata live; empty = memory-only |
 | Recorder archiving | `ui.recorder.archive_enabled` | **on** | Fold rotated-out DB files into per-cluster `.db.gz` window archives; off = raw files are never deleted automatically |
-| Decoupled UI bundle | `ui.release.enabled` | **on** | Fetch + serve the drakkar-ui SPA release (falls back to built-in pages) |
+| Decoupled UI bundle | `ui.release.enabled` | **on** | Fetch + serve the drakkar-ui SPA release; with no bundle cached the worker is API-only and page requests answer 503 |
 | Prometheus panel + links | `ui.prometheus_url` | off (empty) | Dashboard deep-links into a Prometheus instance |
 | Cross-worker fleet view | shared `ui.recorder.db_dir` | — | Worker autodiscovery, workers list, cross-tracing |
 | Handler cache | `cache.enabled` | **off** | LWW key/value store for handler code |
@@ -201,5 +201,8 @@ in your handler (rule 8).
   `cluster`-scoped keys.
 - Webapp 500s at the first request? → it can't: both backends now
   reject a hook-less handler at startup (rule 8).
-- Air-gapped? → `ui.release.enabled: false`; the built-in pages serve
-  everything the SPA does, more plainly.
+- Air-gapped? → stage the bundle once with
+  `drakkar-ui fetch --version=vX.Y.Z` into a cache the workers share, or
+  point `ui.release.repo` at an internal mirror. `ui.release.enabled: false`
+  turns the UI off rather than substituting anything — the worker then
+  serves `/api/v1` and the probes only.
