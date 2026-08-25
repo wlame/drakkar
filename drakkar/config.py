@@ -7,7 +7,7 @@ Use DK_ prefix with __ for nesting (e.g., DK_KAFKA__BROKERS).
 import os
 import re
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import structlog
@@ -978,47 +978,6 @@ class LoggingConfig(BaseModel):
 
 # --- UI config (server + recorder + release bundle) ---
 
-# Old debug.* key → new ui.* home. Data-driven so the migration error and
-# any future tooling render from one table instead of hand-written prose.
-_DEBUG_KEY_MAP: dict[str, str] = {
-    'enabled': 'ui.enabled',
-    'host': 'ui.host',
-    'port': 'ui.port',
-    'auth_token': 'ui.auth_token',
-    'allowed_ws_origins': 'ui.allowed_ws_origins',
-    'debug_url': 'ui.public_url',
-    'expose_env_vars': 'ui.expose_env_vars',
-    'max_ui_rows': 'ui.max_rows',
-    'ws_min_duration_ms': 'ui.ws_min_duration_ms',
-    'log_min_duration_ms': 'ui.log_min_duration_ms',
-    'prometheus_url': 'ui.prometheus_url',
-    'prometheus_rate_interval': 'ui.prometheus_rate_interval',
-    'prometheus_worker_label': 'ui.prometheus_worker_label',
-    'prometheus_cluster_label': 'ui.prometheus_cluster_label',
-    'custom_links': 'ui.custom_links',
-    'db_dir': 'ui.recorder.db_dir',
-    'store_events': 'ui.recorder.store_events',
-    'store_config': 'ui.recorder.store_config',
-    'store_state': 'ui.recorder.store_state',
-    'state_sync_interval_seconds': 'ui.recorder.state_sync_interval_seconds',
-    'rotation_interval_minutes': 'ui.recorder.rotation_interval_hours',
-    'store_output': 'ui.recorder.store_output',
-    'flush_interval_seconds': 'ui.recorder.flush_interval_seconds',
-    'max_buffer': 'ui.recorder.max_buffer',
-    'max_flush_retries': 'ui.recorder.max_flush_retries',
-    'event_min_duration_ms': 'ui.recorder.event_min_duration_ms',
-    'output_min_duration_ms': 'ui.recorder.output_min_duration_ms',
-}
-
-# Old flat ui.* fetch key → new ui.release.* home (the pre-merge UI section
-# held only bundle-fetch settings at the top level).
-_UI_FLAT_KEY_MAP: dict[str, str] = {
-    'release_repo': 'ui.release.repo',
-    'pinned_version': 'ui.release.pinned_version',
-    'cache_dir': 'ui.release.cache_dir',
-    'check_update': 'ui.release.check_update',
-}
-
 
 class UIRecorderConfig(BaseModel):
     """Flight-recorder persistence settings — the UI's data store.
@@ -1033,31 +992,6 @@ class UIRecorderConfig(BaseModel):
     Any combination is valid — e.g. ``store_config=true`` with everything
     else ``false`` gives autodiscovery without event or state logging.
     """
-
-    @model_validator(mode='before')
-    @classmethod
-    def _reject_removed_recorder_keys(cls, values: object) -> object:
-        """Hard break: rotation's unit changed and pruning was replaced by archiving.
-
-        Detecting the old keys here (instead of letting them vanish as
-        ignored extras) prevents a config that still says
-        ``rotation_interval_minutes: 60`` from silently rotating hourly
-        instead of every minute, and a config that still sets
-        ``retention_hours``/``retention_max_events`` from silently losing
-        the pruning it thought it had configured.
-        """
-        if isinstance(values, dict):
-            if 'rotation_interval_minutes' in values:
-                raise ValueError(
-                    'ui.recorder.rotation_interval_minutes was renamed to rotation_interval_hours (1 = 1 hour)'
-                )
-            removed = sorted(key for key in ('retention_hours', 'retention_max_events') if key in values)
-            if removed:
-                names = ', '.join(f'ui.recorder.{key}' for key in removed)
-                raise ValueError(
-                    f'{names} removed — archiving replaces deletion; see archive_enabled/archive_window_hours'
-                )
-        return values
 
     @model_validator(mode='after')
     def _validate_archive_window_vs_rotation(self) -> 'UIRecorderConfig':
@@ -1574,22 +1508,6 @@ class UIConfig(BaseModel):
             return v.strip()
         return v
 
-    @model_validator(mode='before')
-    @classmethod
-    def _reject_old_flat_release_keys(cls, values: object) -> object:
-        """Hard break: the pre-merge flat fetch keys moved under ``ui.release``.
-
-        Detecting them here (instead of letting them vanish as ignored
-        extras) prevents the nastiest failure mode of the section merge — a
-        config that still says ``ui.release_repo`` silently reverting to the
-        default repo.
-        """
-        if isinstance(values, dict):
-            moved = sorted(f'ui.{key} -> {new}' for key, new in _UI_FLAT_KEY_MAP.items() if key in values)
-            if moved:
-                raise ValueError('old flat ui.* bundle keys were moved under ui.release.*; update: ' + ', '.join(moved))
-        return values
-
     public_url: str = Field(
         default='',
         description=(
@@ -1937,39 +1855,6 @@ class DrakkarConfig(BaseSettings):
         env_prefix='DK_',
         env_nested_delimiter='__',
     )
-
-    @model_validator(mode='before')
-    @classmethod
-    def _reject_retired_debug_section(cls, values: object) -> object:
-        """Hard break: the ``debug.*`` section merged into ``ui.*``.
-
-        Fails loudly with the exact old→new key mapping instead of letting
-        an unrecognized ``debug`` key be ignored — a stale config would
-        otherwise silently run with defaults (wrong port, wrong db_dir).
-        Checks the raw input dict (YAML/kwargs path) and the environment
-        (``DK_DEBUG__*`` would silently match no field at all).
-        """
-        if isinstance(values, dict) and 'debug' in values:
-            section = cast('dict[str, object]', values)['debug']
-            if isinstance(section, dict):
-                keys = sorted(str(key) for key in section)
-                moved = [f'debug.{key} -> {_DEBUG_KEY_MAP[key]}' for key in keys if key in _DEBUG_KEY_MAP]
-                unknown = [f'debug.{key}' for key in keys if key not in _DEBUG_KEY_MAP]
-                # Sorted key order keeps this message byte-comparable with the
-                # Go backend's twin guard.
-                detail = ', '.join(moved + unknown) or 'debug -> ui'
-            else:
-                detail = 'debug -> ui'
-            raise ValueError(
-                'the debug.* config section was replaced by the first-class ui.* section; update: ' + detail
-            )
-        stale_env = sorted(name for name in os.environ if name.startswith('DK_DEBUG__'))
-        if stale_env:
-            raise ValueError(
-                'DK_DEBUG__* environment overrides target the retired debug.* section '
-                '(now merged into ui.*); rename: ' + ', '.join(stale_env)
-            )
-        return values
 
     @model_validator(mode='before')
     @classmethod

@@ -469,16 +469,13 @@ job against them).
 
 | Old key (removed) | Replaced by | Notes |
 |---|---|---|
-| `rotation_interval_minutes` | `rotation_interval_hours` | Renamed **and** the unit changed: `1` now means 1 hour, not 1 minute. A config still setting the old key fails to load, naming the replacement. |
-| `retention_hours` | `archive_enabled`, `archive_window_hours`, `archive_retention_days` | Age-based deletion is gone; archiving replaces it. A config still setting the old key fails to load, naming the replacement fields. |
-| `retention_max_events` | *(no replacement)* | Count-based deletion is gone entirely. A config still setting the old key fails to load. |
+| `rotation_interval_minutes` | `rotation_interval_hours` | Renamed **and** the unit changed: `1` now means 1 hour, not 1 minute. |
+| `retention_hours` | `archive_enabled`, `archive_window_hours`, `archive_retention_days` | Age-based deletion is gone; archiving replaces it. |
+| `retention_max_events` | *(no replacement)* | Count-based deletion is gone entirely. |
 
-The two backends catch a removed key differently: Python rejects the
-key's mere *presence*, any value included, while Go's catcher fires only
-on a *non-zero* value — a contrived `retention_hours: 0` loads silently
-on Go instead of failing. This is not a real gap: the old schema required
-`>= 1` on both backends, so no config that ever validated could have
-carried a zero there.
+These keys no longer exist in either backend, and neither backend carries
+a migration guard for them any more: a config that still sets one is an
+unknown key inside `ui.recorder` and is ignored. Delete them.
 
 ### Copy-pasteable config
 

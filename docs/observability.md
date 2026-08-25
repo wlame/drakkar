@@ -775,9 +775,10 @@ version:
   log line (`recorder_archiving_disabled`) says so.
 - **Renamed key:** `rotation_interval_minutes` is now
   `rotation_interval_hours`, with a unit change (`1` = 1 hour, not 1
-  minute). A config still setting `rotation_interval_minutes`,
-  `retention_hours`, or `retention_max_events` fails to load, naming the
-  replacement.
+  minute). `rotation_interval_minutes`, `retention_hours` and
+  `retention_max_events` are gone from both backends and are ignored if
+  still present — see [Renamed and removed
+  keys](local-databases.md#renamed-and-removed-keys).
 
 ```yaml
 ui:

@@ -1,9 +1,7 @@
 """Tests for the merged first-class ``ui.*`` config section.
 
-Covers the three-tier shape (server / ``ui.recorder`` / ``ui.release``),
-nested ``DK_UI__*`` env overrides, and the hard-break migration guards that
-reject the retired ``debug.*`` section and the old flat ``ui.*`` fetch keys
-with errors that name the new home of every offending key.
+Covers the three-tier shape (server / ``ui.recorder`` / ``ui.release``)
+and nested ``DK_UI__*`` env overrides.
 """
 
 import pytest
@@ -84,31 +82,11 @@ def test_recorder_archive_window_shorter_than_rotation_is_fatal():
         UIRecorderConfig(archive_window_hours=1, rotation_interval_hours=2)
 
 
-def test_recorder_rotation_interval_minutes_is_fatal():
-    with pytest.raises(ValidationError, match='renamed to rotation_interval_hours \\(1 = 1 hour\\)'):
-        UIRecorderConfig(rotation_interval_minutes=60)
-
-
-def test_recorder_retention_hours_is_fatal():
-    with pytest.raises(
-        ValidationError, match='removed — archiving replaces deletion; see archive_enabled/archive_window_hours'
-    ):
-        UIRecorderConfig(retention_hours=24)
-
-
-def test_recorder_retention_max_events_is_fatal():
-    with pytest.raises(
-        ValidationError, match='removed — archiving replaces deletion; see archive_enabled/archive_window_hours'
-    ):
-        UIRecorderConfig(retention_max_events=100_000)
-
-
-def test_recorder_both_removed_retention_keys_named_together():
-    with pytest.raises(ValidationError) as excinfo:
-        UIRecorderConfig(retention_hours=24, retention_max_events=100_000)
-    message = str(excinfo.value)
-    assert 'ui.recorder.retention_hours' in message
-    assert 'ui.recorder.retention_max_events' in message
+def test_retired_recorder_keys_are_ignored_extras():
+    """The pre-1.0 migration guards are gone: the removed keys are plain unknown keys now."""
+    rec = UIRecorderConfig(rotation_interval_minutes=60, retention_hours=24, retention_max_events=100_000)
+    assert rec.rotation_interval_hours == 1
+    assert not hasattr(rec, 'retention_hours')
 
 
 def test_annotation_defaults():
@@ -172,34 +150,16 @@ def test_env_nested_override(monkeypatch):
     assert cfg.ui.port == 9001
 
 
-def test_old_debug_section_is_fatal_with_mapping():
-    with pytest.raises(ValidationError, match=r'debug\.port.*ui\.port'):
+def test_unknown_top_level_section_is_still_fatal():
+    """The bespoke debug.* guard is gone, but the root model forbids unknown sections."""
+    with pytest.raises(ValidationError, match='Extra inputs are not permitted'):
         DrakkarConfig(debug={'port': 9999})
 
 
-def test_old_debug_section_lists_only_present_keys():
-    with pytest.raises(ValidationError) as excinfo:
-        DrakkarConfig(debug={'db_dir': '/x', 'max_ui_rows': 10})
-    message = str(excinfo.value)
-    assert 'debug.db_dir -> ui.recorder.db_dir' in message
-    assert 'debug.max_ui_rows -> ui.max_rows' in message
-    assert 'debug.port' not in message
-
-
-def test_old_dk_debug_env_is_fatal(monkeypatch):
-    monkeypatch.setenv('DK_DEBUG__PORT', '9999')
-    with pytest.raises(ValidationError, match='DK_DEBUG__PORT'):
-        DrakkarConfig()
-
-
-def test_old_flat_ui_keys_are_fatal():
-    with pytest.raises(ValidationError, match=r'ui\.release_repo -> ui\.release\.repo'):
-        DrakkarConfig(ui={'release_repo': 'a/b'})
-
-
-def test_old_flat_ui_check_update_is_fatal():
-    with pytest.raises(ValidationError, match=r'ui\.check_update -> ui\.release\.check_update'):
-        DrakkarConfig(ui={'check_update': False})
+def test_retired_flat_ui_keys_are_ignored_extras():
+    cfg = DrakkarConfig(ui={'release_repo': 'a/b', 'check_update': False})
+    assert cfg.ui.release.repo == 'wlame/drakkar-ui'
+    assert cfg.ui.release.check_update is True
 
 
 def test_config_summary_uses_ui_token():

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The pre-1.0 migration guards for retired config keys.** The `debug.*`
+  section, the `DK_DEBUG__*` env scan, the flat `ui.*` bundle keys
+  (`release_repo`, `pinned_version`, `cache_dir`, `check_update`) and the
+  three retired recorder keys (`rotation_interval_minutes`,
+  `retention_hours`, `retention_max_events`) no longer produce a migration
+  error. They are unknown keys now: a stale `debug:` section fails as an
+  unknown top-level section, and the nested ones are ignored. Delete them
+  from your config. Both backends dropped these guards together.
+
 ## [1.19.0] - 2026-08-25
 
 ### Removed
