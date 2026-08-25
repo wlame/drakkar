@@ -91,7 +91,7 @@ class ConfigFieldMeta(BaseModel):
 
     secret: bool
     """True when the field was marked ``json_schema_extra={'drakkar_secret': True}``
-    in ``drakkar/config.py`` / ``drakkar/kafka_security.py`` — the field can
+    in ``drakkar/config/`` / ``drakkar/kafka_security.py`` — the field can
     carry a credential and a UI should mask or omit its value."""
 
     group: str
@@ -161,7 +161,7 @@ def _mkdocs_anchor(heading_text: str) -> str:
 
 # --- env-var override decision for dynamic-instance (`*`) paths ---------
 #
-# ``load_config`` (drakkar/config.py) builds env overrides by lower-casing
+# ``load_config`` (drakkar/config/root.py) builds env overrides by lower-casing
 # each `__`-delimited segment and deep-merging the result onto the parsed
 # YAML dict, matched by literal dict key — see `_parse_env_overrides` and
 # `_deep_merge`. There is no key-normalisation step for map keys. That
@@ -388,7 +388,7 @@ def _walk(
     is one un-decomposed leaf, ``ConfigFieldMeta.secret`` is never set for
     it, even though its elements are ``WebClientConfig`` and
     ``WebClientConfig.token`` IS marked secret at the model level (see
-    ``drakkar/config.py``). A value-rendering endpoint must special-case
+    ``drakkar/config/``). A value-rendering endpoint must special-case
     masking inside the ``webapp.clients`` array (mask each element's
     ``token``) rather than trusting the top-level ``secret`` flag to cover
     it — this module's tree has no per-list-element path to hang a flag on.

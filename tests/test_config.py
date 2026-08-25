@@ -1044,3 +1044,60 @@ def test_mongo_sink_config_statements_from_env(minimal_config_dict, tmp_path, mo
 
     cfg = load_config(cfg_file)
     assert cfg.sinks.mongo['main'].statements['claim_job'].collection == 'archived_jobs'
+
+
+def test_config_package_reexports_every_public_model():
+    """``from drakkar.config import X`` must keep working after the split.
+
+    The models live in per-domain modules now (``kafka``, ``sinks``,
+    ``runtime``, ``ui``, ``cache``, ``webapp``, ``root``). This pins the
+    façade: every name in ``__all__`` resolves, and every model a config
+    section is built from is reachable through it.
+    """
+    import drakkar.config as config
+
+    missing = [name for name in config.__all__ if not hasattr(config, name)]
+    assert not missing, f'__all__ names not importable: {missing}'
+
+    # Every nested model type reachable from the root config must be
+    # re-exported, so a new section cannot be added without a façade entry.
+    from pydantic import BaseModel
+
+    def _model_names(model: type[BaseModel], seen: set[str]) -> set[str]:
+        for field in model.model_fields.values():
+            annotation = field.annotation
+            for candidate in (annotation, *getattr(annotation, '__args__', ())):
+                is_model = isinstance(candidate, type) and issubclass(candidate, BaseModel)
+                if is_model and candidate.__name__ not in seen:
+                    seen.add(candidate.__name__)
+                    _model_names(candidate, seen)
+        return seen
+
+    reachable = _model_names(config.DrakkarConfig, set())
+    # KafkaSecurityConfig lives in drakkar.kafka_security, not this package.
+    reachable.discard('KafkaSecurityConfig')
+    unexported = sorted(reachable - set(config.__all__))
+    assert not unexported, f'models not re-exported from drakkar.config: {unexported}'
+
+
+def test_config_domain_modules_layer_without_cycles():
+    """Each domain module must be importable on its own, in any order."""
+    import importlib
+    import subprocess
+    import sys
+
+    modules = ['kafka', 'sinks', 'runtime', 'ui', 'cache', 'webapp', 'root']
+    for name in modules:
+        assert importlib.import_module(f'drakkar.config.{name}') is not None
+
+    # A fresh interpreter importing a leaf module first is the case an
+    # accidental cycle would break; the in-process loop above cannot see it
+    # because drakkar.config is already fully imported by then.
+    for name in modules:
+        result = subprocess.run(
+            [sys.executable, '-c', f'import drakkar.config.{name}'],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, f'drakkar.config.{name}: {result.stderr}'

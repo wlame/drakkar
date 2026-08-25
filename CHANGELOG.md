@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`drakkar/config.py` is now a `drakkar/config/` package**, split per
+  domain: `kafka`, `sinks`, `runtime`, `ui`, `cache`, `webapp` and the
+  `root` model with the loader. Every name is re-exported from
+  `drakkar.config`, so no import changes.
+
 - **The pure SQL/MQL/HTTP-body template helpers moved next to the sinks
   that use them**: `drakkar.pgsql` → `drakkar.sinks.pgsql`, `drakkar.mql` →
   `drakkar.sinks.mql`, `drakkar.http_encoding` →

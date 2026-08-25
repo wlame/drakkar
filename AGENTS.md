@@ -140,7 +140,8 @@ drakkar/
   webapp/                  synchronous HTTP ingress pipeline
   uihost/                  drakkar-ui bundle fetch/cache/serve engine
   templates/               built-in fallback UI (Jinja)
-  config.py                pydantic-settings config (YAML + DK_ env overrides)
+  config/                  pydantic-settings config (YAML + DK_ env overrides),
+                           split per domain and re-exported from the package
 integration/               docker-compose harness
 docs/                      mkdocs documentation site
 ```
