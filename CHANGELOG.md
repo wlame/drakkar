@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI/release workflow hardening.** Every workflow now declares
+  `permissions: {contents: read}` (only `docs.yml` did; the rest inherited
+  whatever the repository default granted), a `concurrency` group, and
+  `timeout-minutes` on each job so a hung test fails instead of holding a
+  runner for six hours. CI cancels a superseded run; release and integration
+  never cancel one in flight. `setup-uv` is pinned to an explicit version
+  instead of floating to `latest`. The release `publish` job now repeats
+  `contents: read` alongside its `id-token: write` — a job-level
+  `permissions` block replaces the workflow-level one rather than merging
+  with it, so `actions/checkout` was relying on the inherited default.
+
 ### Added
 
 - **A `LICENSE` file.** `pyproject.toml` and the README have always said

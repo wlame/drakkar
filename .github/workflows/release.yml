@@ -7,15 +7,27 @@ on:
   release:
     types: [published]
 
+# Least privilege: only the publish job needs a token with any write scope,
+# and it declares its own id-token: write below.
+permissions:
+  contents: read
+
+# Never cancel a release in flight — doing the work twice is cheaper than
+# stopping midway through a publish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: "0.11.32"
 
       - uses: extractions/setup-just@v4
 
@@ -27,6 +39,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: lint
     strategy:
       matrix:
@@ -36,7 +49,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: "0.11.32"
 
       - uses: extractions/setup-just@v4
 
@@ -55,13 +68,14 @@ jobs:
 
   verify-tag:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: test
     steps:
       - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: "0.11.32"
 
       - uses: extractions/setup-just@v4
 
@@ -79,16 +93,21 @@ jobs:
 
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: verify-tag
     environment: pypi
+    # A job-level block REPLACES the workflow-level one rather than merging
+    # with it, so contents: read has to be repeated here — actions/checkout
+    # needs it. id-token: write is what PyPI trusted publishing exchanges.
     permissions:
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: "0.11.32"
 
       - uses: extractions/setup-just@v4
 

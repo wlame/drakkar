@@ -10,6 +10,15 @@ on:
     - cron: '0 3 * * *'
   workflow_dispatch:
 
+# Least privilege: the harness only reads the repository.
+permissions:
+  contents: read
+
+# One harness at a time — two would fight over the same host ports.
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   harness:
     runs-on: ubuntu-latest

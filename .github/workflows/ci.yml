@@ -9,15 +9,26 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: nothing here writes to the repository. Widen per job if
+# that ever changes, never here.
+permissions:
+  contents: read
+
+# A new push to the same ref makes the previous run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: "0.11.32"
 
       - uses: extractions/setup-just@v4
 
@@ -29,12 +40,13 @@ jobs:
 
   security:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: "0.11.32"
 
       - uses: extractions/setup-just@v4
 
@@ -43,6 +55,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: lint
     strategy:
       matrix:
@@ -52,7 +65,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: "0.11.32"
 
       - uses: extractions/setup-just@v4
 
