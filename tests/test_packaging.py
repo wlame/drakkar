@@ -39,6 +39,26 @@ def test_declared_license_matches_the_file() -> None:
     assert PYPROJECT['project']['license'] == 'MIT'
 
 
+def test_security_policy_covers_the_current_release() -> None:
+    """The supported-versions table must name the series we actually ship.
+
+    It said ``1.0.x`` at version 1.19.0, so read literally the policy covered
+    nothing anyone was running — and that table is the first thing a reporter
+    checks before filing. ``drakkar/__init__.py`` is the single source of the
+    version (hatchling reads it too), so the table is pinned to that.
+    """
+    version = re.search(r"__version__ = '([^']+)'", (REPO_ROOT / 'drakkar' / '__init__.py').read_text())
+    assert version, 'no __version__ in drakkar/__init__.py'
+    major, minor, *_ = version.group(1).split('.')
+    series = f'{major}.{minor}'
+
+    policy = (REPO_ROOT / 'SECURITY.md').read_text()
+    assert f'| {series}.x' in policy, (
+        f'SECURITY.md does not mark {series}.x supported (current version is '
+        f'{version.group(1)}); update the supported-versions table when cutting a minor'
+    )
+
+
 def test_uv_exclude_newer_is_set() -> None:
     """The supply-chain pin must be live, not a comment describing one.
 

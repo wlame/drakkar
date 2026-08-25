@@ -60,6 +60,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The security policy covered no released version.** The
+  supported-versions table still said `1.0.x` while the project was on
+  1.19.0, so a reporter checking whether their version was in scope got no
+  answer from the document that exists to tell them. It names the current
+  series now, says plainly that fixes land on the latest minor only, and a
+  test pins the table to `__version__` so it cannot fall behind again. The
+  Go backend had the same table and the same gap.
+
 - **The `uv exclude-newer` supply-chain pin was commented out.** It was added
   deliberately, then disabled, and the comment explaining what it protects
   was left in place — so `pyproject.toml` described a mitigation that was not

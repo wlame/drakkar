@@ -2,10 +2,14 @@
 
 ## Supported versions
 
+Fixes land on the latest minor release only. There are no maintenance
+branches: report against the newest release, and upgrade to it before
+reporting if you are behind.
+
 | Version | Supported |
 |---------|-----------|
-| 1.0.x   | yes       |
-| < 1.0   | no        |
+| 1.19.x  | yes       |
+| < 1.19  | no        |
 
 ## Reporting a vulnerability
 
