@@ -33,6 +33,15 @@ without tests will trip the gate almost immediately, so add tests
 alongside the code that needs them rather than planning to backfill
 later.
 
+## Dependencies
+
+`[tool.uv] exclude-newer` in `pyproject.toml` refuses to resolve anything
+published after the date it names, so a package compromised today cannot
+reach a build here before the yank catches it. Upgrading a dependency
+therefore means bumping that date — keep it roughly a week behind the day
+you bump — and re-running `uv lock`, so the change shows up in the lockfile
+diff. Two tests fail if the pin goes missing or lands in the future.
+
 ## Cross-backend parity
 
 Drakkar has two implementations: this one and `drakkar-go`. The following

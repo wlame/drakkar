@@ -140,9 +140,14 @@ venv = ".venv"
 
 [tool.uv]
 # Supply-chain mitigation: do not resolve packages published after this date.
-# Bump this when intentionally upgrading dependencies (keep ~7 days behind
-# today so freshly published, possibly malicious packages do not sneak in).
-# exclude-newer = "2026-04-13"
+# A compromised release typically gets yanked within days, so refusing to
+# resolve anything newer than roughly a week means an attack has to survive
+# public scrutiny before it can reach a build here.
+#
+# Bump this deliberately when upgrading dependencies — keep it ~7 days behind
+# the day you bump — and re-run `uv lock` so the change is visible in the
+# lockfile diff rather than happening silently on someone's machine.
+exclude-newer = "2026-08-18"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN"]

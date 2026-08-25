@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import tomllib
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,29 @@ def test_license_is_the_mit_text_naming_the_copyright_holder() -> None:
 
 def test_declared_license_matches_the_file() -> None:
     assert PYPROJECT['project']['license'] == 'MIT'
+
+
+def test_uv_exclude_newer_is_set() -> None:
+    """The supply-chain pin must be live, not a comment describing one.
+
+    ``exclude-newer`` refuses to resolve anything published after the given
+    day, so a package compromised today cannot reach a build here before the
+    yank catches it. It spent a while commented out with the explanatory
+    comment left in place, which reads as protection that is not there —
+    this fails instead of letting that recur.
+    """
+    excluded = PYPROJECT.get('tool', {}).get('uv', {}).get('exclude-newer')
+    assert excluded, (
+        '[tool.uv] exclude-newer is not set. It is the supply-chain pin — '
+        'set it to roughly a week before today and re-run `uv lock`.'
+    )
+
+
+def test_uv_exclude_newer_is_a_past_date() -> None:
+    """A future date silently disables the pin it looks like it enforces."""
+    excluded = PYPROJECT['tool']['uv']['exclude-newer']
+    parsed = date.fromisoformat(excluded)
+    assert parsed <= date.today(), f'exclude-newer is in the future ({excluded}); it pins nothing'
 
 
 def test_license_file_is_declared_for_the_build_backend() -> None:

@@ -60,6 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `uv exclude-newer` supply-chain pin was commented out.** It was added
+  deliberately, then disabled, and the comment explaining what it protects
+  was left in place — so `pyproject.toml` described a mitigation that was not
+  in force, and the pinned date had gone four months stale. It is live again
+  at a date about a week behind today; re-resolving against it changed no
+  package version, only the `[options]` marker `uv.lock` now records. Two
+  tests fail if it goes missing or lands in the future, and `CONTRIBUTING.md`
+  says to bump it when upgrading a dependency.
+
 - **The vendored OpenAPI spec had drifted from the canonical one.** Both
   backends served an `origin` query parameter on `GET /api/v1/events` that
   `drakkar-ui/docs/openapi-v1.yaml` did not describe, so the published
