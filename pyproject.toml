@@ -37,17 +37,12 @@ dependencies = [
 # backend's cmd/drakkar-ui (same subcommands, flags, output, exit codes).
 drakkar-ui = "drakkar.uihost.cli:main"
 
-# Two dev lists by design: `just test` resolves from this extra, `just typecheck`
-# from [dependency-groups]. Keep the shared pins identical across both.
+# `perf` is the only published extra: an extra is something a CONSUMER of the
+# library can opt into, and orjson is exactly that (a faster JSON encoder for
+# the recorder). Development tooling lives in [dependency-groups] below,
+# which is not published at all — `pip install py-drakkar[dev]` should not
+# be a thing.
 [project.optional-dependencies]
-dev = [
-    "pytest>=9.1.1",
-    "pytest-asyncio>=1.3.0",
-    "pytest-cov>=7.1.0",
-    "httpx>=0.27.0",
-    "httpx2>=2.9.1",
-    "ruff>=0.11.0",
-]
 perf = [
     "orjson>=3.9",
 ]
@@ -106,23 +101,25 @@ ignore = [
 [tool.ruff.format]
 quote-style = "single"
 
+# Every development tool, in one list. `uv run` and `uv sync` install this
+# group by default, so each recipe gets the same environment without passing
+# any selection flags — which is what keeps `just typecheck` and `just test`
+# from re-syncing the venv against each other.
 [dependency-groups]
 dev = [
+    "jsonschema>=4.23.0",
     "mkdocs>=1.6.1",
     "mkdocs-material>=9.7.6",
-    # Runtime-optional (users opt in via the `perf` extra), but pinned here so
-    # the DEVELOPMENT environment always resolves it. `uv run` installs this
-    # group unconditionally while `--extra=` selections vary per recipe —
-    # fmt-check and lint pass `--extra=dev`, which re-syncs the venv and would
-    # otherwise evict orjson before `typecheck` runs. Without this the import
-    # in recorder/helpers.py resolves or not depending on which recipe ran
-    # last, so no `ty: ignore` choice can be right in both cases.
+    # Runtime-optional — users opt in via the `perf` extra — but pinned here
+    # so the DEVELOPMENT environment always resolves it. Without it the
+    # import in recorder/helpers.py resolves or not depending on which recipe
+    # ran last, so no `ty: ignore` choice could be right in both cases.
     "orjson>=3.9",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.1.0",
+    "ruff>=0.11.0",
     "ty>=0.0.24",
-    "jsonschema>=4.23.0",
 ]
 
 [tool.ty.src]

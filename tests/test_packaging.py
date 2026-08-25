@@ -59,3 +59,55 @@ def test_license_section_links_to_the_file(document: str) -> None:
         pytest.skip(f'{document} has no License section')
     section = text[text.index('## License') :]
     assert 'LICENSE' in section, f'{document} License section does not link to the LICENSE file'
+
+
+# Tools that only ever run during development. None of them belongs in a
+# published extra: `pip install py-drakkar[dev]` should not exist, because a
+# consumer of the library has no use for the test runner or the linter.
+DEV_ONLY_TOOLS = frozenset(
+    {'pytest', 'pytest-asyncio', 'pytest-cov', 'ruff', 'ty', 'mkdocs', 'mkdocs-material', 'jsonschema'}
+)
+
+
+def _requirement_names(specifiers: list[str]) -> set[str]:
+    """Strip version specifiers and extras from a dependency list."""
+    return {re.split(r'[<>=!~\[; ]', spec)[0].strip().lower() for spec in specifiers}
+
+
+def test_published_extras_carry_nothing_dev_only() -> None:
+    """Extras are installable by end users; dependency-groups are not."""
+    for name, specifiers in PYPROJECT['project'].get('optional-dependencies', {}).items():
+        leaked = _requirement_names(specifiers) & DEV_ONLY_TOOLS
+        assert not leaked, f'extra {name!r} publishes dev-only tools: {sorted(leaked)}'
+
+
+def test_perf_is_the_only_published_extra() -> None:
+    """One runtime opt-in (orjson); everything else is a dependency group."""
+    assert set(PYPROJECT['project'].get('optional-dependencies', {})) == {'perf'}
+
+
+def test_dev_tooling_is_not_duplicated_between_extras_and_groups() -> None:
+    """Two lists of the same tools have to be kept equal by hand."""
+    extras = set()
+    for specifiers in PYPROJECT['project'].get('optional-dependencies', {}).values():
+        extras |= _requirement_names(specifiers)
+    groups = _requirement_names(PYPROJECT.get('dependency-groups', {}).get('dev', []))
+    overlap = extras & groups
+    # orjson is legitimately in both: the `perf` extra is a user-facing
+    # runtime opt-in, and the dev group pins it so the development
+    # environment always resolves it.
+    assert overlap <= {'orjson'}, f'duplicated between extras and dependency-groups: {sorted(overlap)}'
+
+
+def test_dev_group_carries_every_tool_the_recipes_need() -> None:
+    """`uv run` installs the dev group by default — it must be complete."""
+    group = _requirement_names(PYPROJECT['dependency-groups']['dev'])
+    missing = DEV_ONLY_TOOLS - group
+    assert not missing, f'dev dependency-group is missing: {sorted(missing)}'
+
+
+def test_justfile_does_not_select_a_dev_extra() -> None:
+    """A recipe passing --extra=dev re-syncs the venv and evicts group-only packages."""
+    justfile = (REPO_ROOT / 'justfile').read_text()
+    offenders = [line.strip() for line in justfile.splitlines() if '--extra=dev' in line]
+    assert not offenders, 'recipes still select the removed dev extra: ' + '; '.join(offenders)

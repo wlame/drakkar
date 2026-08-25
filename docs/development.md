@@ -12,7 +12,7 @@ Everything in this repo runs through [`just`](https://github.com/casey/just) —
 
 ```bash
 git clone https://github.com/wlame/drakkar && cd drakkar
-just install        # uv sync with the dev + perf extras
+just install        # uv sync --extra=perf; the dev dependency-group installs by default
 ```
 
 ## Everyday recipes

@@ -15,9 +15,9 @@ default:
 # Setup
 # ---------------------------------------------------------------------------
 
-# Install/sync all dependencies (dev + perf extras, dev group)
+# Install/sync all dependencies (the dev group is installed by default)
 install:
-    uv sync --extra=dev --extra=perf
+    uv sync --extra=perf
 
 # ---------------------------------------------------------------------------
 # Quality gates
@@ -25,19 +25,19 @@ install:
 
 # Format code with ruff
 fmt:
-    uv run --extra=dev ruff format drakkar/ tests/
+    uv run ruff format drakkar/ tests/
 
 # Verify formatting without modifying files (CI gate)
 fmt-check:
-    uv run --extra=dev ruff format --check drakkar/ tests/
+    uv run ruff format --check drakkar/ tests/
 
 # Lint with ruff
 lint:
-    uv run --extra=dev ruff check drakkar/ tests/
+    uv run ruff check drakkar/ tests/
 
 # Lint and auto-fix what ruff can fix safely
 lint-fix:
-    uv run --extra=dev ruff check --fix drakkar/ tests/
+    uv run ruff check --fix drakkar/ tests/
 
 # Type-check with ty (tests/ and integration/ excluded via pyproject)
 typecheck:
@@ -56,11 +56,11 @@ audit:
 
 # Run the unit test suite; extra pytest args pass through (just test -k cache)
 test *args:
-    uv run --extra=dev pytest {{ args }}
+    uv run pytest {{ args }}
 
 # Run tests with the coverage gate (fail_under from pyproject) + CI artifacts
 cover:
-    uv run --extra=dev pytest --cov=drakkar --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
+    uv run pytest --cov=drakkar --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
 
 # Regenerate the Python-written cross-backend DB fixtures consumed by
 # drakkar-go's interop tests (commit the result in that repo)

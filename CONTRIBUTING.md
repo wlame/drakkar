@@ -3,7 +3,7 @@
 ## Setup
 
 ```bash
-just install     # uv sync --extra=dev --extra=perf
+just install     # uv sync --extra=perf (the dev dependency-group installs by default)
 just ci           # what CI enforces: fmt-check, lint, typecheck, cover
 ```
 

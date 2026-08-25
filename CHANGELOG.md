@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The `dev` extra.** `pip install py-drakkar[dev]` no longer exists — it
+  published the test runner and the linter to anyone installing the library.
+  Every development tool now lives in `[dependency-groups].dev`, which `uv`
+  installs by default and never publishes, so the two lists that had to be
+  kept equal by hand are one list. `perf` (orjson) stays as the only
+  published extra, since that is a genuine runtime opt-in. The justfile
+  recipes drop their `--extra=dev` selections, which also removes the
+  venv-eviction hazard the old comment described: recipes no longer differ
+  in which selection they pass, so nothing re-syncs between them.
+
+- **The unused `httpx2` dev dependency.** Nothing in the repository imports
+  it. (`httpx` itself is a runtime dependency and is unaffected.)
+
 ### Changed
 
 - **CI/release workflow hardening.** Every workflow now declares
