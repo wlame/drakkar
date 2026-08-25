@@ -157,7 +157,8 @@ def test_docs_only_reference_real_just_recipes() -> None:
     does not have to derive the project from source. The existing directory-map
     test covers the map only, so a prose reference like that one slipped past.
 
-    Only backticked ``\`just x\``` counts: "just the events table" is prose.
+    Only a backticked reference counts, because "just the events table" is
+    prose and would otherwise read as a recipe named "the".
     """
     recipes = _declared_recipes()
     assert recipes, 'parsed no recipes from the justfile — did its format change?'
