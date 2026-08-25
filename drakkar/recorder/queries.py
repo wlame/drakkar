@@ -33,7 +33,7 @@ import structlog
 
 from drakkar.config import UIConfig, UIRecorderConfig
 from drakkar.peer_discovery import discover_peer_dbs
-from drakkar.recorder.schema import _LABEL_TRACE_QUERY, _TRACE_QUERY
+from drakkar.recorder.schema import _LABEL_TRACE_QUERY, _TRACE_QUERY, EventType
 
 logger = structlog.get_logger()
 
@@ -385,15 +385,15 @@ class EventQueries:
         reader = self._readable()
         if reader is None:
             return []
-        query = """
+        query = f"""
             SELECT
                 partition,
-                MAX(CASE WHEN event = 'consumed' THEN ts END) as last_consumed,
-                MAX(CASE WHEN event = 'committed' THEN ts END) as last_committed,
-                MAX(CASE WHEN event = 'committed' THEN offset END) as last_committed_offset,
-                COUNT(CASE WHEN event = 'consumed' THEN 1 END) as consumed_count,
-                COUNT(CASE WHEN event = 'task_completed' THEN 1 END) as completed_count,
-                COUNT(CASE WHEN event = 'task_failed' THEN 1 END) as failed_count
+                MAX(CASE WHEN event = '{EventType.CONSUMED}' THEN ts END) as last_consumed,
+                MAX(CASE WHEN event = '{EventType.COMMITTED}' THEN ts END) as last_committed,
+                MAX(CASE WHEN event = '{EventType.COMMITTED}' THEN offset END) as last_committed_offset,
+                COUNT(CASE WHEN event = '{EventType.CONSUMED}' THEN 1 END) as consumed_count,
+                COUNT(CASE WHEN event = '{EventType.TASK_COMPLETED}' THEN 1 END) as completed_count,
+                COUNT(CASE WHEN event = '{EventType.TASK_FAILED}' THEN 1 END) as failed_count
             FROM events
             WHERE partition IS NOT NULL
             GROUP BY partition
@@ -519,7 +519,13 @@ class EventQueries:
 
 # Events that describe one execution attempt. Every timeline and task-state
 # view is a fold over these three.
-TASK_LIFECYCLE_EVENTS = ('task_started', 'task_completed', 'task_failed')
+TASK_LIFECYCLE_EVENTS = (EventType.TASK_STARTED, EventType.TASK_COMPLETED, EventType.TASK_FAILED)
+
+# The same three names as a quoted SQL list. Rendered once from the tuple
+# above so a query and the fold that consumes its rows can never disagree
+# about which events count as a lifecycle event. Safe to interpolate: the
+# values are enum members, never caller input.
+_TASK_LIFECYCLE_SQL = ', '.join(f"'{event}'" for event in TASK_LIFECYCLE_EVENTS)
 
 # Columns the timeline needs. Deliberately not ``SELECT *``: ``stdout`` and
 # ``stderr`` hold captured subprocess output that no timeline renders, and
@@ -586,7 +592,7 @@ def recent_tasks_query(*, since: float, event_limit: int) -> tuple[str, list[Any
             SELECT * FROM (
                 SELECT {_TIMELINE_COLUMNS}
                 FROM events
-                WHERE event IN ('task_started', 'task_completed', 'task_failed')
+                WHERE event IN ({_TASK_LIFECYCLE_SQL})
                 AND ts >= ?
                 ORDER BY ts DESC
                 LIMIT ?
@@ -601,7 +607,7 @@ def task_state_query(task_ids: Sequence[str]) -> tuple[str, list[Any]]:
             SELECT {_TASK_STATE_COLUMNS}
             FROM events
             WHERE task_id IN ({_placeholders(task_ids)})
-              AND event IN ('task_started', 'task_completed', 'task_failed')
+              AND event IN ({_TASK_LIFECYCLE_SQL})
             ORDER BY task_id, id ASC
         """
     return query, list(task_ids)
@@ -619,7 +625,7 @@ def sink_breakdown_query(*, partition: int, offsets: Sequence[int]) -> tuple[str
     """``produced`` counts per output topic for one partition's offsets."""
     query = (
         f'SELECT output_topic, COUNT(*) as n FROM events '
-        f"WHERE event = 'produced' AND partition = ? "
+        f"WHERE event = '{EventType.PRODUCED}' AND partition = ? "
         f'AND offset IN ({_placeholders(offsets)}) GROUP BY output_topic'
     )
     return query, [partition, *offsets]
@@ -700,7 +706,7 @@ def group_timeline_tasks(
         if not task_id:
             continue
 
-        if event['event'] == 'task_started':
+        if event['event'] == EventType.TASK_STARTED:
             open_attempt = tasks.get(task_id)
             if open_attempt is not None:
                 archive_key = f'{task_id}:r{open_attempt["start_ts"]}'
@@ -711,16 +717,16 @@ def group_timeline_tasks(
                     open_attempt['status'] = 'failed'
             tasks[task_id] = _new_timeline_entry(event)
 
-        elif event['event'] in ('task_completed', 'task_failed'):
+        elif event['event'] in (EventType.TASK_COMPLETED, EventType.TASK_FAILED):
             entry = tasks.get(task_id)
             if entry is None:
                 continue
             entry['end_ts'] = event['ts']
-            entry['status'] = 'completed' if event['event'] == 'task_completed' else 'failed'
+            entry['status'] = 'completed' if event['event'] == EventType.TASK_COMPLETED else 'failed'
             entry['duration'] = event.get('duration')
             if event.get('pid'):
                 entry['pid'] = event['pid']
-            if event['event'] == 'task_completed':
+            if event['event'] == EventType.TASK_COMPLETED:
                 entry['stdout_size'] = event.get('stdout_size')
                 # Contract v1.16: throughput-counted completions carry
                 # cost/speed in their metadata; surface them on the row so
@@ -785,7 +791,7 @@ def group_task_states(events: Sequence[dict]) -> dict[str, dict]:
         task_id = event['task_id']
         state = by_id.setdefault(task_id, _new_task_state(task_id))
 
-        if event['event'] == 'task_started':
+        if event['event'] == EventType.TASK_STARTED:
             state['start_ts'] = event['ts']
             # ``running`` is provisional — overwritten below if a
             # completion event exists for the same task id.
@@ -803,9 +809,9 @@ def group_task_states(events: Sequence[dict]) -> dict[str, dict]:
             state['source_offsets'] = parse_json_object(event.get('metadata')).get('source_offsets')
             state['labels'] = parse_json_object(event.get('labels')) or None
 
-        elif event['event'] in ('task_completed', 'task_failed'):
+        elif event['event'] in (EventType.TASK_COMPLETED, EventType.TASK_FAILED):
             state['end_ts'] = event['ts']
-            state['status'] = 'completed' if event['event'] == 'task_completed' else 'failed'
+            state['status'] = 'completed' if event['event'] == EventType.TASK_COMPLETED else 'failed'
             state['duration'] = event.get('duration')
             state['exit_code'] = event.get('exit_code')
             if event.get('pid'):
@@ -836,7 +842,7 @@ def task_exec_state_query(task_ids: Sequence[str]) -> tuple[str, list[Any]]:
     query = (
         f'SELECT task_id, event, duration, exit_code, metadata '
         f'FROM events WHERE task_id IN ({_placeholders(task_ids)}) '
-        f"AND event IN ('task_started', 'task_completed', 'task_failed')"
+        f'AND event IN ({_TASK_LIFECYCLE_SQL})'
     )
     return query, list(task_ids)
 
@@ -853,13 +859,13 @@ def group_task_exec_state(events: Sequence[dict]) -> dict[str, dict]:
             event['task_id'],
             {'exec_duration': None, 'status': None, 'exit_code': None, 'source_offsets': None},
         )
-        if event['event'] == 'task_started':
+        if event['event'] == EventType.TASK_STARTED:
             source_offsets = parse_json_object(event.get('metadata')).get('source_offsets')
             if isinstance(source_offsets, list):
                 entry['source_offsets'] = source_offsets
         else:
             entry['exec_duration'] = event.get('duration')
-            entry['status'] = 'completed' if event['event'] == 'task_completed' else 'failed'
+            entry['status'] = 'completed' if event['event'] == EventType.TASK_COMPLETED else 'failed'
             entry['exit_code'] = event.get('exit_code')
     return by_id
 
@@ -895,9 +901,9 @@ def build_task_detail(task_id: str, events: Sequence[dict]) -> dict:
     the start and the finish, so a task whose completion row predates the
     duration column still shows a span.
     """
-    started = next((event for event in events if event['event'] == 'task_started'), None)
-    completed = next((event for event in events if event['event'] == 'task_completed'), None)
-    failed = next((event for event in events if event['event'] == 'task_failed'), None)
+    started = next((event for event in events if event['event'] == EventType.TASK_STARTED), None)
+    completed = next((event for event in events if event['event'] == EventType.TASK_COMPLETED), None)
+    failed = next((event for event in events if event['event'] == EventType.TASK_FAILED), None)
     finished = completed or failed
 
     duration = finished['duration'] if finished and finished.get('duration') else None
@@ -957,12 +963,12 @@ def _webapp_bodies(events: Sequence[dict]) -> tuple[Any, Any]:
     request_body = None
     response_body = None
     for event in events:
-        if event['event'] == 'webapp_request_received':
+        if event['event'] == EventType.WEBAPP_REQUEST_RECEIVED:
             metadata = parse_json_object(event.get('metadata'))
             request_body = metadata.get('body')
             if request_body is None and metadata.get('body_bytes') is not None:
                 request_body = {'body_bytes': metadata['body_bytes'], 'recorded': False}
-        elif event['event'] == 'webapp_request_completed':
+        elif event['event'] == EventType.WEBAPP_REQUEST_COMPLETED:
             response_body = parse_json_object(event.get('metadata')).get('response')
     return request_body, response_body
 
@@ -980,7 +986,7 @@ def consumed_timestamps_query(pairs: Sequence[tuple[int, int]]) -> tuple[str, li
     offsets = sorted({offset for _, offset in pairs})
     query = (
         f'SELECT partition, offset, ts FROM events '
-        f"WHERE event = 'consumed' "
+        f"WHERE event = '{EventType.CONSUMED}' "
         f'AND partition IN ({_placeholders(partitions)}) AND offset IN ({_placeholders(offsets)})'
     )
     return query, [*partitions, *offsets]
@@ -1016,9 +1022,9 @@ def end_to_end_seconds(consumed_timestamps: Sequence[float] | None, completed_ts
 # One row per tile so a new outcome class is one entry, not another
 # copy-pasted query/unpack pair.
 WEBAPP_RATE_TILES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ('success_60s', ('webapp_request_completed',)),
-    ('error_60s', ('webapp_request_timeout', 'webapp_request_dropped_after_timeout')),
-    ('rejected_60s', ('webapp_request_rate_limited', 'webapp_request_auth_failed')),
+    ('success_60s', (EventType.WEBAPP_REQUEST_COMPLETED,)),
+    ('error_60s', (EventType.WEBAPP_REQUEST_TIMEOUT, EventType.WEBAPP_REQUEST_DROPPED_AFTER_TIMEOUT)),
+    ('rejected_60s', (EventType.WEBAPP_REQUEST_RATE_LIMITED, EventType.WEBAPP_REQUEST_AUTH_FAILED)),
 )
 
 

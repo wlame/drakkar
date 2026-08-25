@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The recorder's 30 event names are one `EventType` enum**
+  (`drakkar.recorder.schema.EventType`) instead of a string literal at
+  every write and every comparison. The names are a cross-backend
+  contract, so both backends now declare them once and pin them against
+  one shared fixture, `tests/fixtures/event_vocabulary.json` (regenerate
+  with `just gen-event-vocabulary`; the Go repo vendors a byte-identical
+  copy). The fixture also records which backend emits each name —
+  `offload` is Python-only. No wire change: `StrEnum` members are the same
+  strings in SQL, in JSON and in a `/ws` frame. Documented in
+  `drakkar-ui/docs/api-contract-v1.md`.
+
 - **`drakkar/config.py` is now a `drakkar/config/` package**, split per
   domain: `kafka`, `sinks`, `runtime`, `ui`, `cache`, `webapp` and the
   `root` model with the loader. Every name is re-exported from

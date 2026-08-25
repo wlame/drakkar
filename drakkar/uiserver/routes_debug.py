@@ -34,6 +34,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from drakkar.concurrency import dispatch_to_loop
+from drakkar.recorder.schema import EventType
 from drakkar.uiserver.runner import DebugRunner, ProbeBusyError, ProbeInput
 
 if TYPE_CHECKING:
@@ -358,10 +359,10 @@ def create_debug_router(deps: UIDeps) -> APIRouter:
         Groups events by task name and returns the latest run, total counts,
         and recent history for each task.
         """
-        query = """
+        query = f"""
             SELECT ts, task_id, duration, exit_code, metadata
             FROM events
-            WHERE event = 'periodic_run'
+            WHERE event = '{EventType.PERIODIC_RUN}'
             ORDER BY ts DESC
             LIMIT 500
         """

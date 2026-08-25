@@ -32,6 +32,7 @@ from drakkar.models import (
 )
 from drakkar.recorder.fanout import WSFanout, WSSubscriber
 from drakkar.recorder.helpers import encode_json_str, format_dt, sanitize_env_value
+from drakkar.recorder.schema import EventType
 from drakkar.timefmt import format_rfc3339_micro
 
 if TYPE_CHECKING:
@@ -151,7 +152,7 @@ class EventWriter:
             {
                 'ts': ts,
                 'dt': format_dt(ts),
-                'event': 'throughput',
+                'event': EventType.THROUGHPUT,
                 'metadata': encode_json_str({'windows': windows}),
             }
         )
@@ -161,7 +162,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'consumed',
+                'event': EventType.CONSUMED,
                 'partition': msg.partition,
                 'offset': msg.offset,
             }
@@ -179,7 +180,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'arranged',
+                'event': EventType.ARRANGED,
                 'partition': partition,
                 'duration': round(duration, 4),
                 'message_count': len(messages),
@@ -225,7 +226,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'annotation',
+                'event': EventType.ANNOTATION,
                 'partition': partition,
                 'offset': offset,
                 'task_id': task_id,
@@ -299,7 +300,7 @@ class EventWriter:
         resolved_request_id = request_id if request_id is not None else getattr(task, 'request_id', None)
         entry = {
             'ts': time.time(),
-            'event': 'task_started',
+            'event': EventType.TASK_STARTED,
             'partition': partition,
             'task_id': task.task_id,
             'args': encode_json_str(task.args),
@@ -359,7 +360,7 @@ class EventWriter:
         resolved_request_id = request_id if request_id is not None else getattr(task_obj, 'request_id', None)
         entry: dict = {
             'ts': time.time(),
-            'event': 'task_completed',
+            'event': EventType.TASK_COMPLETED,
             'partition': partition,
             'task_id': result.task.task_id,
             'exit_code': result.exit_code,
@@ -451,7 +452,7 @@ class EventWriter:
         resolved_request_id = request_id if request_id is not None else getattr(task, 'request_id', None)
         entry: dict = {
             'ts': time.time(),
-            'event': 'task_failed',
+            'event': EventType.TASK_FAILED,
             'partition': partition,
             'task_id': task.task_id,
             'exit_code': error.exit_code,
@@ -499,7 +500,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'task_complete',
+                'event': EventType.TASK_COMPLETE,
                 'task_id': task_id,
                 'partition': partition,
                 'duration': round(duration, 4),
@@ -531,7 +532,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'message_complete',
+                'event': EventType.MESSAGE_COMPLETE,
                 'partition': partition,
                 'offset': offset,
                 'duration': round(duration, 4),
@@ -559,7 +560,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'window_complete',
+                'event': EventType.WINDOW_COMPLETE,
                 'partition': partition,
                 'duration': round(duration, 4),
                 'metadata': encode_json_str(
@@ -589,7 +590,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'runtime_health',
+                'event': EventType.RUNTIME_HEALTH,
                 'metadata': encode_json_str(
                     {
                         'kind': kind,
@@ -618,7 +619,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'runtime_stall',
+                'event': EventType.RUNTIME_STALL,
                 'duration': round(duration_ms / 1000, 4),
                 'metadata': encode_json_str(
                     {
@@ -677,7 +678,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'runtime_lag_episode',
+                'event': EventType.RUNTIME_LAG_EPISODE,
                 'duration': round(duration_ms / 1000, 4),
                 'metadata': encode_json_str(meta),
             }
@@ -693,7 +694,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'runtime_probe',
+                'event': EventType.RUNTIME_PROBE,
                 'metadata': encode_json_str(
                     {
                         'lag_ms': lag_ms,
@@ -714,7 +715,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'produced',
+                'event': EventType.PRODUCED,
                 'partition': source_partition,
                 'offset': source_offset,
                 'output_topic': getattr(payload, 'sink', ''),
@@ -731,7 +732,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'sink_delivered',
+                'event': EventType.SINK_DELIVERED,
                 'metadata': encode_json_str(
                     {
                         'sink_type': sink_type,
@@ -753,7 +754,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'sink_error',
+                'event': EventType.SINK_ERROR,
                 'metadata': encode_json_str(
                     {
                         'sink_type': sink_type,
@@ -770,7 +771,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'committed',
+                'event': EventType.COMMITTED,
                 'partition': partition,
                 'offset': offset,
             }
@@ -781,7 +782,7 @@ class EventWriter:
             self._record(
                 {
                     'ts': time.time(),
-                    'event': 'assigned',
+                    'event': EventType.ASSIGNED,
                     'partition': p,
                 }
             )
@@ -791,7 +792,7 @@ class EventWriter:
             self._record(
                 {
                     'ts': time.time(),
-                    'event': 'revoked',
+                    'event': EventType.REVOKED,
                     'partition': p,
                 }
             )
@@ -802,7 +803,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'partition_stalled',
+                'event': EventType.PARTITION_STALLED,
                 'partition': partition,
             }
         )
@@ -851,7 +852,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'offload',
+                'event': EventType.OFFLOAD,
                 'partition': partition,
                 'offset': offset,
                 'task_id': task_id,
@@ -887,7 +888,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'periodic_run',
+                'event': EventType.PERIODIC_RUN,
                 'task_id': name,
                 'duration': duration,
                 'exit_code': 0 if status == 'ok' else 1,
@@ -925,7 +926,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'webapp_request_received',
+                'event': EventType.WEBAPP_REQUEST_RECEIVED,
                 'partition': -1,  # synthetic partition for HTTP origin
                 'origin': 'http',
                 'client_name': ctx.client_name,
@@ -950,7 +951,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'webapp_request_completed',
+                'event': EventType.WEBAPP_REQUEST_COMPLETED,
                 'partition': -1,
                 'origin': 'http',
                 'client_name': ctx.client_name,
@@ -982,7 +983,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'webapp_request_timeout',
+                'event': EventType.WEBAPP_REQUEST_TIMEOUT,
                 'partition': -1,
                 'origin': 'http',
                 'client_name': ctx.client_name,
@@ -1008,7 +1009,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'webapp_request_rate_limited',
+                'event': EventType.WEBAPP_REQUEST_RATE_LIMITED,
                 'partition': -1,
                 'origin': 'http',
                 'client_name': client,
@@ -1033,7 +1034,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'webapp_request_auth_failed',
+                'event': EventType.WEBAPP_REQUEST_AUTH_FAILED,
                 'partition': -1,
                 'origin': 'http',
                 # No matched client; leave client_name NULL.
@@ -1055,7 +1056,7 @@ class EventWriter:
         self._record(
             {
                 'ts': time.time(),
-                'event': 'webapp_request_dropped_after_timeout',
+                'event': EventType.WEBAPP_REQUEST_DROPPED_AFTER_TIMEOUT,
                 'partition': -1,
                 'origin': 'http',
                 'client_name': ctx.client_name,

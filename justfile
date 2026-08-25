@@ -67,6 +67,12 @@ cover:
 gen-db-fixtures:
     uv run python scripts/gen_db_fixtures.py --out=../drakkar-go/internal/crossbackend/testdata/python-db
 
+# Regenerate the shared recorder event-type vocabulary fixture from
+# drakkar.recorder.schema.EventType, here and in the Go repo's testdata
+gen-event-vocabulary:
+    uv run python scripts/gen_event_vocabulary.py
+    uv run python scripts/gen_event_vocabulary.py --out=../drakkar-go/internal/recorder/testdata
+
 # ---------------------------------------------------------------------------
 # CI / pre-push
 # ---------------------------------------------------------------------------

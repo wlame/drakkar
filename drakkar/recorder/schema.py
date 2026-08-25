@@ -36,6 +36,76 @@ for the full upgrade story.
 
 from __future__ import annotations
 
+from enum import StrEnum
+
+
+class EventType(StrEnum):
+    """Every event name the flight recorder can write to ``events.event``.
+
+    This vocabulary is a **cross-backend contract**, not an internal
+    detail: the Go backend writes the same strings into the same column,
+    the drakkar-ui SPA matches on them, and a merged database mixes rows
+    from both. ``tests/fixtures/event_vocabulary.json`` vendors the list
+    for the parity tests in both repos, and
+    ``drakkar-ui/docs/api-contract-v1.md`` documents it for UI authors.
+
+    ``StrEnum`` rather than plain constants so a member is a ``str``
+    everywhere it matters — SQLite parameter binding, ``json.dumps`` on a
+    ``/ws`` frame, and ``==`` against a row value all behave exactly as the
+    bare literals did. The gain is that a typo is now an ``AttributeError``
+    at import time instead of a row nobody ever queries.
+
+    Member values are always the lowercased member name; a test pins that
+    so the two can never drift.
+    """
+
+    # --- Kafka source and message lifecycle ---
+    CONSUMED = 'consumed'
+    ARRANGED = 'arranged'
+    ASSIGNED = 'assigned'
+    REVOKED = 'revoked'
+    COMMITTED = 'committed'
+    PARTITION_STALLED = 'partition_stalled'
+    MESSAGE_COMPLETE = 'message_complete'
+    WINDOW_COMPLETE = 'window_complete'
+
+    # --- Task lifecycle (subprocess pool) ---
+    TASK_STARTED = 'task_started'
+    TASK_COMPLETED = 'task_completed'
+    TASK_FAILED = 'task_failed'
+    TASK_COMPLETE = 'task_complete'
+
+    # --- Delivery ---
+    PRODUCED = 'produced'
+    SINK_DELIVERED = 'sink_delivered'
+    SINK_ERROR = 'sink_error'
+
+    # --- Worker health, sampling and throughput ---
+    RUNTIME_HEALTH = 'runtime_health'
+    RUNTIME_STALL = 'runtime_stall'
+    RUNTIME_LAG_EPISODE = 'runtime_lag_episode'
+    RUNTIME_PROBE = 'runtime_probe'
+    RESOURCE_SAMPLE = 'resource_sample'
+    THROUGHPUT = 'throughput'
+
+    # --- Handler extension points ---
+    ANNOTATION = 'annotation'
+    PERIODIC_RUN = 'periodic_run'
+    # Python-only: the Go backend accepts ``offload.*`` config but does not
+    # run the pool yet, so it never writes this row. Declared here (and in
+    # the shared fixture, flagged python-only) so the vocabulary itself
+    # stays one list across both backends.
+    OFFLOAD = 'offload'
+
+    # --- Webapp (synchronous HTTP ingress) ---
+    WEBAPP_REQUEST_RECEIVED = 'webapp_request_received'
+    WEBAPP_REQUEST_COMPLETED = 'webapp_request_completed'
+    WEBAPP_REQUEST_TIMEOUT = 'webapp_request_timeout'
+    WEBAPP_REQUEST_RATE_LIMITED = 'webapp_request_rate_limited'
+    WEBAPP_REQUEST_AUTH_FAILED = 'webapp_request_auth_failed'
+    WEBAPP_REQUEST_DROPPED_AFTER_TIMEOUT = 'webapp_request_dropped_after_timeout'
+
+
 # Column names that the webapp-release recorder schema requires on the
 # ``events`` table. Used by ``EventRecorder.start()`` /
 # ``EventRecorder._rotate()`` to validate at-open that the DB is
@@ -195,18 +265,18 @@ CREATE INDEX IF NOT EXISTS idx_worker_state_updated ON worker_state(updated_at);
 # every trace.
 #
 # Parameter order: partition, offset, partition, offset, partition, offset.
-_TRACE_QUERY = """
+_TRACE_QUERY = f"""
     SELECT * FROM events
     WHERE partition = ? AND (
         offset = ?
         OR task_id IN (
             SELECT e.task_id FROM events e, json_each(json_extract(e.metadata, '$.source_offsets')) j
-            WHERE e.partition = ? AND e.event = 'task_started'
+            WHERE e.partition = ? AND e.event = '{EventType.TASK_STARTED}'
             AND j.value = ?
         )
         OR id IN (
             SELECT a.id FROM events a, json_each(json_extract(a.metadata, '$.offsets')) k
-            WHERE a.partition = ? AND a.event IN ('annotation', 'offload')
+            WHERE a.partition = ? AND a.event IN ('{EventType.ANNOTATION}', '{EventType.OFFLOAD}')
             AND k.value = ?
         )
     )

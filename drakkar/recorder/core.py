@@ -71,6 +71,7 @@ from drakkar.recorder.schema import (
     SCHEMA_WORKER_CONFIG,
     SCHEMA_WORKER_STATE,
     WEBAPP_REQUIRED_EVENT_COLUMNS,
+    EventType,
     RecorderSchemaError,
 )
 from drakkar.recorder.writer import EventWriter
@@ -709,7 +710,7 @@ class EventRecorder(EventWriter):
         self._record(
             {
                 'ts': time.time(),
-                'event': 'resource_sample',
+                'event': EventType.RESOURCE_SAMPLE,
                 'metadata': encode_json_str(self._host_sampler.sample()),
             }
         )

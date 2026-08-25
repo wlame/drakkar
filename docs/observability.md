@@ -644,6 +644,14 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 | `webapp_request_auth_failed` | `Authorization` header missing or naming a non-configured token; client received a 401 | `origin='http'`, `metadata` (token_prefix -- redacted to first 4 chars) |
 | `webapp_request_dropped_after_timeout` | T1 reached a cancellation gate after T2 had already 504'd. Marks pipeline work the framework managed to skip thanks to cooperative cancellation. | `origin='http'`, `client_name`, `request_id` |
 
+The `/ws` stream additionally carries a **`throughput`** frame — the
+three-window cost/speed aggregate behind the [throughput](throughput.md)
+strips. It is broadcast only and never written to `events`, so it has no row
+above: buffering a periodic aggregate would grow the table with rows no
+query reads back. Both backends pin the full vocabulary, stored and
+broadcast-only alike, against one shared fixture — see
+`drakkar-ui/docs/api-contract-v1.md`, "Recorder event-type vocabulary".
+
 For HTTP-origin rows, `partition=-1` is used as a synthetic partition value so they remain distinct from any real Kafka partition without requiring a separate table. Filter by `origin='http'` to see all webapp activity, or by `request_id=...` to walk the full lifecycle of one HTTP request (received → task_started → task_completed → completed/timeout/dropped).
 
 Fields subject to [duration thresholds](#duration-thresholds): `args`, `stdout`, `stderr` are omitted for fast tasks below `output_min_duration_ms`. Events below `event_min_duration_ms` are not stored at all. Stdin content is gated by `store_stdin` / `stdin_max_bytes` rather than by duration — failed tasks always store it. See [Local Databases](local-databases.md#what-the-events-table-stores-and-the-knobs-that-trim-it) for the full retention-knob table.
