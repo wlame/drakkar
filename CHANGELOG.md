@@ -114,6 +114,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   references a `just` recipe the justfile does not declare, which is how
   `just embed-ui` outlived its own deletion.
 
+  The docs landing page carried the same claim from the other direction —
+  it sold the operator UI with "built-in fallback pages when offline",
+  contradicting `docs/features.md` two pages away. It is the first thing a
+  new reader learns about the UI, and it set an expectation that fails
+  exactly during an outage.
+
 ### Removed
 
 - **The pre-1.0 migration guards for retired config keys.** The `debug.*`
