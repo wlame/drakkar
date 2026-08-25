@@ -60,6 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The vendored OpenAPI spec had drifted from the canonical one.** Both
+  backends served an `origin` query parameter on `GET /api/v1/events` that
+  `drakkar-ui/docs/openapi-v1.yaml` did not describe, so the published
+  contract was wrong for anyone generating a client from it. The route-parity
+  test compares the path inventory only, so it could not see a parameter
+  added to a vendored copy in place. `just sync-openapi` now records
+  `drakkar/uiserver/openapi-v1.sha256` beside the copy it installs and a new
+  test pins it, so editing the vendored spec instead of the canonical one
+  fails here. The Go backend carries the same guard.
+
 - **The merged debug database was world-readable.**
   `POST /api/v1/debug/merge` writes `merged-<ts>.db` into `ui.recorder.db_dir`,
   a shared volume. `merge_databases()` let SQLite create that file, so it

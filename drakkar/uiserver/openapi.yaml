@@ -4,7 +4,9 @@
 # vendor it byte-identically (drakkar/drakkar/uiserver/openapi.yaml and
 # drakkar-go/internal/uiserver/openapi.yaml — sync with `just sync-openapi`)
 # and each pins a unit test asserting its served route set equals `paths`
-# below. Shapes are transcribed from the prose contract; when the two
+# below, plus the checksum `sync-openapi` records beside the copy — so a
+# hand-edited vendored spec fails that backend's suite instead of drifting
+# silently. `just check-openapi-sync` verifies both copies from this repo. Shapes are transcribed from the prose contract; when the two
 # documents disagree, fix BOTH — the prose doc stays normative for
 # semantics, this file for the path inventory.
 openapi: 3.1.0

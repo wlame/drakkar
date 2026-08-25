@@ -1,15 +1,22 @@
 """Route-parity pin: the served surface must equal the vendored OpenAPI spec.
 
-The spec (``drakkar/uiserver/openapi.yaml``) is the byte-identical vendored
-copy of ``drakkar-ui/docs/openapi-v1.yaml`` — the canonical description of
-the contract surface. This test walks the live FastAPI route table and
-asserts set-equality with the spec's ``paths``, so any endpoint added,
-removed, or renamed on only one side fails CI here (the Go backend pins the
-same spec with its own copy of this test). Legacy unprefixed ``/api/*``
-aliases, ``/ws``, ``/docs``, and the SPA catch-all are deliberately outside
-the pinned surface.
+The spec (``drakkar/uiserver/openapi.yaml``) is the vendored copy of
+``drakkar-ui/docs/openapi-v1.yaml`` — the canonical description of the
+contract surface. This test walks the live FastAPI route table and asserts
+set-equality with the spec's ``paths``, so any endpoint added, removed, or
+renamed on only one side fails CI here (the Go backend pins the same spec
+with its own copy of this test). Legacy unprefixed ``/api/*`` aliases,
+``/ws``, ``/docs``, and the SPA catch-all are deliberately outside the
+pinned surface.
+
+That comparison covers the path inventory only — not parameters, not
+schemas — so it cannot see a vendored copy that was edited in place. The
+checksum pin below closes that gap: ``just sync-openapi`` in the UI repo
+writes ``openapi-v1.sha256`` next to the copy it installs, and a spec
+edited here instead of upstream no longer matches it.
 """
 
+import hashlib
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -24,6 +31,27 @@ from drakkar.uiserver.server import create_ui_app
 from tests.conftest import make_ui_config
 
 _HTTP_METHODS = {'get', 'post', 'put', 'delete', 'patch'}
+
+
+SPEC_SHA_PATH = SPEC_PATH.parent / 'openapi-v1.sha256'
+
+
+def test_vendored_spec_matches_the_recorded_canonical_checksum() -> None:
+    """The vendored spec must be the one ``just sync-openapi`` installed.
+
+    The canonical file lives in the drakkar-ui repo, which CI cannot see, so
+    this pins the checksum that repo recorded when it last synced instead.
+    Editing this copy to make the route-parity test pass — rather than
+    editing the canonical spec and re-syncing — is exactly how the two fell
+    out of step before, and it now fails here.
+    """
+    recorded = SPEC_SHA_PATH.read_text().strip()
+    actual = hashlib.sha256(SPEC_PATH.read_bytes()).hexdigest()
+    assert actual == recorded, (
+        'drakkar/uiserver/openapi.yaml does not match the checksum recorded by '
+        'the UI repo. Edit drakkar-ui/docs/openapi-v1.yaml and re-run '
+        "'just sync-openapi' there rather than editing this copy."
+    )
 
 
 def _spec_routes() -> set[tuple[str, str]]:
