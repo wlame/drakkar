@@ -21,6 +21,8 @@ from pathlib import Path
 
 import structlog
 
+from drakkar.dbfiles import secure_db_file
+
 logger = structlog.get_logger()
 
 MERGED_SCHEMA = """
@@ -350,6 +352,11 @@ def merge_databases(db_paths: list[str], output_path: str) -> MergeResult:
     if os.path.exists(output_path):
         os.remove(output_path)
 
+    # Owner-only BEFORE connect, not after: the WAL pragma below makes SQLite
+    # create -wal/-shm copying the main file's mode, so tightening afterwards
+    # would leave both sidecars world-readable. Same ordering the recorder's
+    # archive merge uses.
+    secure_db_file(output_path)
     out = sqlite3.connect(output_path)
     out.execute('PRAGMA journal_mode=WAL')
     out.execute('PRAGMA foreign_keys=ON')

@@ -43,7 +43,9 @@ Rules:
   also the documented upgrade path for schema changes (below).
 - The merge tool output (`drakkar-merge` / the merge library) is a derived
   offline artifact with its own tables (`workers`, `events`,
-  `worker_states`) and is not part of this runtime spec.
+  `worker_states`) and is not part of this runtime spec. It still lands in
+  `db_dir` and still carries fleet-wide event data, so it is created `0600`
+  like every other database here.
 
 ## Modes: which files exist when
 

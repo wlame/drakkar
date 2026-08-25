@@ -60,6 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The merged debug database was world-readable.**
+  `POST /api/v1/debug/merge` writes `merged-<ts>.db` into `ui.recorder.db_dir`,
+  a shared volume. `merge_databases()` let SQLite create that file, so it
+  landed at the umask default (0644) instead of 0600, and the `-wal`/`-shm`
+  sidecars copied the same mode. The file holds the recorder events of every
+  worker in the fleet, so any local user could read them. It is now secured
+  before the driver opens it, the way the recorder, the cache and the archive
+  merge already do.
+
 - **The chaos-test harness called a removed endpoint.** `integration/chaos-test.sh`
   polled `/api/dashboard`, which went away with the legacy unprefixed
   routes in 1.19. Every curl there ends in `|| echo "0"`, so each worker

@@ -11,6 +11,7 @@ from drakkar.merge import (
     scan_directory,
 )
 from drakkar.recorder import SCHEMA_EVENTS, SCHEMA_WORKER_CONFIG, SCHEMA_WORKER_STATE, format_dt
+from tests.test_dbfiles import assert_db_files_owner_only
 
 
 def _create_source_db(
@@ -285,6 +286,24 @@ def test_merge_creates_output_file(tmp_path):
 
     assert os.path.isfile(output)
     assert result.output_path == output
+
+
+def test_merge_output_is_owner_only(tmp_path):
+    """The merged database must be 0600 like every other store Drakkar writes.
+
+    It aggregates the recorder events of every worker in the fleet — task
+    args, stdout/stderr, config — into ``db_dir``, which is a shared volume,
+    and nothing reclaims it. Letting SQLite create it at the umask default
+    would publish fleet-wide operational data to anyone with a shell on the
+    host.
+    """
+    db1 = tmp_path / 'w1.db'
+    _create_source_db(db1, worker_name='worker-1')
+    output = str(tmp_path / 'merged.db')
+
+    merge_databases([str(db1)], output)
+
+    assert_db_files_owner_only(output)
 
 
 def test_merge_reports_the_sources_that_contributed(tmp_path):
