@@ -17,13 +17,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from drakkar.kafka_security import KafkaSecurityConfig, validate_client_config
 
-# Safe because ``drakkar.pgsql`` imports nothing from ``drakkar``. Importing
-# the compiler from under ``drakkar/sinks/`` instead would execute
-# ``sinks/__init__.py``, which imports every sink, each of which imports this
-# module — a partially-initialized-module ImportError at config load.
+# Safe because these two helpers import nothing from ``drakkar`` and
+# ``drakkar/sinks/__init__.py`` imports nothing at module scope — see the note
+# there. Either half breaking would close a cycle back into this module and
+# fail config load with a partially-initialized-module ImportError.
 from drakkar.models import MongoOp
-from drakkar.mql import compile_template
-from drakkar.pgsql import compile_named_statement
+from drakkar.sinks.mql import compile_template
+from drakkar.sinks.pgsql import compile_named_statement
 
 # Module-scope logger for config-time warnings (field/model validators).
 # These fire once per process at config load, so the sync structlog API
@@ -247,7 +247,7 @@ class MongoStatementConfig(BaseModel):
     to review.
 
     Values reach the document through ``":name"`` placeholders bound from the
-    payload's ``params``, and never by interpolation — see ``drakkar.mql``
+    payload's ``params``, and never by interpolation — see ``drakkar.sinks.mql``
     for the four substitution rules.
     """
 

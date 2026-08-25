@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, RootModel
 
-from drakkar.http_encoding import (
+from drakkar.sinks.http_encoding import (
     FORM_CONTENT_TYPE,
     JSON_CONTENT_TYPE,
     HttpEncodingError,

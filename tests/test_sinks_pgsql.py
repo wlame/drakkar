@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from drakkar.pgsql import (
+from drakkar.sinks.pgsql import (
     MAX_INSERT_PARAMS,
     compile_named_statement,
     quote_ident,

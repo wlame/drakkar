@@ -1,4 +1,4 @@
-"""Unit tests for drakkar.mql — MQL template compilation and binding.
+"""Unit tests for drakkar.sinks.mql — MQL template compilation and binding.
 
 Pure functions, so no database, no mocks, and no sink. The vectors that must
 stay identical to the Go backend live in tests/fixtures/mongo_statements.json
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from drakkar.mql import compile_template, substitute
+from drakkar.sinks.mql import compile_template, substitute
 
 
 def _compiled(document):

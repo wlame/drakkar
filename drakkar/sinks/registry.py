@@ -3,9 +3,12 @@
 The :class:`SinkRegistry` is a process-wide name → ``BaseSink`` subclass
 table. Two populations land in it:
 
-1.  The built-in sinks (Kafka, Postgres, Mongo, Http, Redis, Filesystem)
-    register themselves under their canonical ``sink_type`` strings the
-    first time the registry is consulted.
+1.  The built-in sinks (Kafka, Postgres, Mongo, Http, Redis, Filesystem),
+    declared in the :data:`BUILTIN_SINKS` table as import paths and
+    resolved to classes the first time each name is looked up. They are
+    NOT imported eagerly: see the note in ``drakkar/sinks/__init__.py``
+    for why importing a sink class from this package's ``__init__`` would
+    break ``drakkar.config``.
 2.  Third-party packages declare new sink types via the
     ``[project.entry-points."drakkar.sinks"]`` stanza in their
     ``pyproject.toml``. ``SinkRegistry.discover()`` loads those entry
@@ -28,6 +31,7 @@ Why a registry?
 from __future__ import annotations
 
 import inspect
+from importlib import import_module
 from importlib.metadata import entry_points
 from typing import ClassVar
 
@@ -40,6 +44,20 @@ logger = structlog.get_logger()
 # The entry-point group third-party packages target. Stable, public —
 # treat changes here as a breaking API change for plugin authors.
 ENTRY_POINT_GROUP = 'drakkar.sinks'
+
+# Built-in sink type name → ``module:ClassName`` import path. Kept as data
+# rather than imports so the registry stays importable without dragging in
+# asyncpg/pymongo/redis/confluent-kafka, and so the type→class wiring is one
+# table to read. Names match the ``DrakkarConfig.sinks.<field>`` keys
+# consumed by ``DrakkarApp._build_sinks``.
+BUILTIN_SINKS: dict[str, str] = {
+    'kafka': 'drakkar.sinks.kafka:KafkaSink',
+    'postgres': 'drakkar.sinks.postgres:PostgresSink',
+    'mongo': 'drakkar.sinks.mongo:MongoSink',
+    'http': 'drakkar.sinks.http:HttpSink',
+    'redis': 'drakkar.sinks.redis:RedisSink',
+    'filesystem': 'drakkar.sinks.filesystem:FileSink',
+}
 
 
 class SinkRegistry:
@@ -184,29 +202,59 @@ class SinkRegistry:
     def get(cls, name: str) -> type[BaseSink] | None:
         """Return the registered sink class for ``name`` or ``None`` if absent.
 
+        An explicit registration always wins over the built-in table, so a
+        plugin shipping a drop-in replacement for ``kafka`` keeps working.
+        A built-in name is imported here, on first lookup, and cached as a
+        normal registration from then on.
+
         Never raises — returning ``None`` keeps caller logic simple
         (``cls or fallback`` style) and avoids forcing every lookup site
-        to wrap in ``try/except KeyError``.
+        to wrap in ``try/except KeyError``. That includes a built-in whose
+        driver package is not installed: the ImportError is logged and the
+        lookup misses, exactly as an unknown name would.
         """
-        return cls._registered.get(name)
+        registered = cls._registered.get(name)
+        if registered is not None:
+            return registered
+
+        path = BUILTIN_SINKS.get(name)
+        if path is None:
+            return None
+        module_name, _, class_name = path.partition(':')
+        try:
+            sink_cls = getattr(import_module(module_name), class_name)
+        except Exception as exc:
+            logger.warning(
+                'sink_registry_builtin_import_failed',
+                category='sink',
+                name=name,
+                path=path,
+                error=str(exc),
+            )
+            return None
+        cls.register(name, sink_cls)
+        return sink_cls
 
     @classmethod
     def all_names(cls) -> list[str]:
-        """Return all registered type names in sorted order.
+        """Return all known type names in sorted order.
 
-        Sorting is stable across calls so log output and debug-UI dumps
+        Covers the built-in table as well as explicit registrations, so the
+        answer does not depend on which names happen to have been looked up
+        yet. Sorting is stable across calls so log output and debug-UI dumps
         remain deterministic regardless of registration order.
         """
-        return sorted(cls._registered)
+        return sorted(set(cls._registered) | set(BUILTIN_SINKS))
 
     @classmethod
     def _clear(cls) -> None:
-        """Reset the registry to empty — test-only helper.
+        """Reset explicit registrations — test-only helper.
 
         Production code never calls this; the registry is meant to be
         populated once and read many times. Tests use it to keep cases
         independent (one test's registration must not bleed into the
-        next).
+        next). The built-in table is a module constant and is deliberately
+        untouched, so the six canonical type names survive a clear.
         """
         cls._registered.clear()
         cls._discovered = False

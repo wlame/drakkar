@@ -25,7 +25,7 @@ from pydantic import BaseModel
 from drakkar.sinks import SinkRegistry
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.manager import SinkManager
-from drakkar.sinks.registry import ENTRY_POINT_GROUP
+from drakkar.sinks.registry import BUILTIN_SINKS, ENTRY_POINT_GROUP
 
 
 class _Payload(BaseModel):
@@ -69,11 +69,10 @@ def isolated_registry() -> Any:
     """Snapshot and restore the class-level registry state between tests.
 
     We do NOT use ``SinkRegistry._clear`` here unconditionally — clearing
-    would also wipe the built-in registrations performed at
-    ``drakkar.sinks`` import time, which other test modules running in
-    the same process implicitly depend on. Snapshot-and-restore preserves
-    whatever state the test inherited and rolls back any mutations the
-    test made.
+    would wipe whatever a plugin-override case installed, and would drop
+    the built-in classes each lookup caches back into ``_registered``.
+    Snapshot-and-restore preserves whatever state the test inherited and
+    rolls back any mutations the test made.
     """
     snapshot = dict(SinkRegistry._registered)
     discovered = SinkRegistry._discovered
@@ -136,14 +135,16 @@ def test_all_names_returns_sorted_list() -> None:
     SinkRegistry.register('alpha', _CustomSink)
     SinkRegistry.register('mid', _CustomSink)
 
-    assert SinkRegistry.all_names() == ['alpha', 'mid', 'zeta']
+    # The built-in table is a module constant, not a registration, so it is
+    # always part of the answer — sorted in with the explicit names.
+    assert SinkRegistry.all_names() == sorted({'alpha', 'mid', 'zeta'} | set(BUILTIN_SINKS))
 
 
-def test_clear_resets_registry() -> None:
+def test_clear_resets_explicit_registrations_only() -> None:
     SinkRegistry.register('x', _CustomSink)
     SinkRegistry._clear()
     assert SinkRegistry.get('x') is None
-    assert SinkRegistry.all_names() == []
+    assert SinkRegistry.all_names() == sorted(BUILTIN_SINKS)
 
 
 class _FakeEntryPoint:
@@ -300,12 +301,57 @@ def test_sink_manager_resolve_sink_class_returns_none_for_unknown() -> None:
     assert mgr.resolve_sink_class('definitely_not_a_real_sink_type') is None
 
 
-def test_builtin_sinks_are_pre_registered() -> None:
-    """Importing ``drakkar.sinks`` registers the built-in types under
-    their canonical names. This guards against accidental removal of
-    those registrations.
+@pytest.mark.parametrize('name', sorted(BUILTIN_SINKS))
+def test_builtin_sink_resolves_lazily_through_the_registry(name: str) -> None:
+    cls = SinkRegistry.get(name)
+    assert cls is not None and issubclass(cls, BaseSink)
+
+
+def test_builtin_names_survive_a_registry_clear() -> None:
+    """``_clear`` drops explicit registrations; the built-in table is a constant."""
+    snapshot = dict(SinkRegistry._registered)
+    discovered = SinkRegistry._discovered
+    try:
+        SinkRegistry._clear()
+        assert SinkRegistry.get('kafka') is not None
+        assert set(SinkRegistry.all_names()) >= set(BUILTIN_SINKS)
+    finally:
+        SinkRegistry._registered = snapshot
+        SinkRegistry._discovered = discovered
+
+
+def test_explicit_registration_beats_the_builtin_table() -> None:
+    """A plugin may ship a drop-in replacement for a built-in type name."""
+
+    class _Replacement(BaseSink[object]):
+        sink_type = 'kafka'
+
+        async def connect(self) -> None: ...
+
+        async def deliver(self, payloads: list[object]) -> None: ...  # pragma: no cover - never called
+
+        async def close(self) -> None: ...
+
+    snapshot = dict(SinkRegistry._registered)
+    try:
+        SinkRegistry.register('kafka', _Replacement)
+        assert SinkRegistry.get('kafka') is _Replacement
+    finally:
+        SinkRegistry._registered = snapshot
+
+
+def test_builtin_table_covers_every_canonical_type_name() -> None:
+    """Guards against a built-in silently dropping out of the table."""
+    assert set(BUILTIN_SINKS) == {'kafka', 'postgres', 'mongo', 'http', 'redis', 'filesystem'}
+
+
+def test_unknown_builtin_module_misses_instead_of_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A built-in whose driver is not installed looks like an unknown name.
+
+    ``get`` must never raise: ``_build_sinks`` turns a miss into a sourced
+    startup error naming the known types, which is far more useful than an
+    ImportError from deep inside the registry.
     """
-    for name in ('kafka', 'postgres', 'mongo', 'http', 'redis', 'filesystem'):
-        cls = SinkRegistry.get(name)
-        assert cls is not None, f'built-in {name!r} sink missing from registry'
-        assert issubclass(cls, BaseSink)
+    monkeypatch.setitem(BUILTIN_SINKS, 'kafka', 'drakkar.sinks.does_not_exist:Nope')
+    SinkRegistry._clear()
+    assert SinkRegistry.get('kafka') is None

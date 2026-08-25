@@ -613,7 +613,7 @@ async def test_postgres_sink_sql_injection_column():
     the pure module; this keeps a sink-level smoke check so the injection
     defence stays visibly wired into the sink's own test file.
     """
-    from drakkar.pgsql import quote_ident
+    from drakkar.sinks.pgsql import quote_ident
 
     assert quote_ident('valid_name') == '"valid_name"'
     with pytest.raises(ValueError):
@@ -648,7 +648,7 @@ def pg_stmt_config():
 
 def _make_pg_sink_with_statements(config):
     """Sink with mocked pool AND compiled statements, bypassing connect()."""
-    from drakkar.pgsql import compile_named_statement
+    from drakkar.sinks.pgsql import compile_named_statement
 
     sink, mock_conn, mock_pool = _make_pg_sink(config)
     sink._statements = {name: compile_named_statement(sql) for name, sql in config.statements.items()}
@@ -3367,7 +3367,7 @@ def test_postgres_rendered_sql_corpus(pg_sink_config, case):
 
 @pytest.mark.parametrize('name', _RENDERED_SQL_CORPUS['identifiers']['valid'])
 def test_postgres_rendered_sql_corpus_valid_identifiers(name):
-    from drakkar.pgsql import quote_ident
+    from drakkar.sinks.pgsql import quote_ident
 
     assert quote_ident(name) == f'"{name}"'
 
@@ -3375,7 +3375,7 @@ def test_postgres_rendered_sql_corpus_valid_identifiers(name):
 @pytest.mark.parametrize('name', _RENDERED_SQL_CORPUS['identifiers']['invalid'])
 def test_postgres_rendered_sql_corpus_invalid_identifiers(name):
     """The injection defence is a parity surface — it must not diverge."""
-    from drakkar.pgsql import quote_ident
+    from drakkar.sinks.pgsql import quote_ident
 
     with pytest.raises(ValueError, match='Invalid SQL identifier'):
         quote_ident(name)

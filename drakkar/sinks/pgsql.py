@@ -5,11 +5,9 @@ imports from the ``drakkar`` package.
 
 That last rule is load-bearing rather than stylistic. ``drakkar.config``
 needs these helpers to validate operator-authored statements at config
-load, and importing anything under ``drakkar/sinks/`` executes
-``drakkar/sinks/__init__.py``, which imports every sink, each of which
-imports ``drakkar.config`` — so housing them under ``sinks/`` makes config
-load fail with a partially-initialized-module ImportError. Living at the
-top level alongside ``timefmt``/``dbfiles``/``merge`` avoids the cycle.
+load, so an import back into the package here would close a cycle. It is
+the same reason ``drakkar/sinks/__init__.py`` imports nothing at module
+scope — see the note there.
 
 Keeping the module dependency-free also means every rendering rule is
 unit-testable with no database and no mocks.

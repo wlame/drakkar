@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The pure SQL/MQL/HTTP-body template helpers moved next to the sinks
+  that use them**: `drakkar.pgsql` → `drakkar.sinks.pgsql`, `drakkar.mql` →
+  `drakkar.sinks.mql`, `drakkar.http_encoding` →
+  `drakkar.sinks.http_encoding`. They lived at the package root only
+  because `drakkar/sinks/__init__.py` imported every sink class eagerly,
+  and each sink imports `drakkar.config`, which needs the helpers. That
+  package now imports nothing at module scope: the re-exports resolve
+  lazily and the built-in sinks are a table of import paths that
+  `SinkRegistry.get()` resolves on first lookup. Public behaviour is
+  unchanged — `from drakkar.sinks import SinkManager` and
+  `SinkRegistry.all_names()` answer exactly as before.
+
 ### Removed
 
 - **The pre-1.0 migration guards for retired config keys.** The `debug.*`

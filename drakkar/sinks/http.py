@@ -11,10 +11,10 @@ import httpx
 import structlog
 
 from drakkar.config import HttpSinkConfig
-from drakkar.http_encoding import encode_body
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
 from drakkar.models import HttpPayload
 from drakkar.sinks.base import BaseSink
+from drakkar.sinks.http_encoding import encode_body
 
 logger = structlog.get_logger()
 

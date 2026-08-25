@@ -23,8 +23,8 @@ from pydantic import BaseModel
 from drakkar.config import MongoSinkConfig
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
 from drakkar.models import MongoOp, MongoPayload
-from drakkar.mql import CompiledTemplate, compile_template, substitute
 from drakkar.sinks.base import BaseSink
+from drakkar.sinks.mql import CompiledTemplate, compile_template, substitute
 from drakkar.utils import redact_url
 
 if TYPE_CHECKING:

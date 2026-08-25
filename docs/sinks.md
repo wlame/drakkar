@@ -802,11 +802,13 @@ A plugin package registers a `BaseSink` subclass under the
 `SinkManager` is constructed) loads it automatically — no monkey-patches,
 no fork of Drakkar.
 
-The same registry holds the built-in sinks. `SinkRegistry.get(name)`
-returns the class registered under that name, whether it shipped with
-Drakkar or arrived through a plugin. A plugin may override a built-in by
-re-registering the same name (for example, a custom `kafka` sink with
-extra metrics).
+The same registry holds the built-in sinks, as a table of import paths
+that resolve to classes on first lookup rather than at import time.
+`SinkRegistry.get(name)` returns the class registered under that name,
+whether it shipped with Drakkar or arrived through a plugin. An explicit
+registration always wins over the built-in table, so a plugin may override
+a built-in by re-registering the same name (for example, a custom `kafka`
+sink with extra metrics).
 
 ### BaseSink contract
 

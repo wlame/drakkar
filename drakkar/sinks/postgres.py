@@ -3,7 +3,7 @@
 Wraps an asyncpg connection pool. A PostgresPayload's ``op`` selects what
 the sink builds: an INSERT, an UPDATE, or an upsert, each from the
 payload's own models serialized via ``model_dump()``. SQL construction
-itself lives in ``drakkar.pgsql``, which has no I/O and no drakkar
+itself lives in ``drakkar.sinks.pgsql``, which has no I/O and no drakkar
 imports, so every emitted statement is testable without a database.
 """
 
@@ -23,7 +23,8 @@ from drakkar.metrics import (
     sink_payloads_delivered,
 )
 from drakkar.models import PostgresOp, PostgresPayload
-from drakkar.pgsql import (
+from drakkar.sinks.base import BaseSink
+from drakkar.sinks.pgsql import (
     MAX_INSERT_PARAMS,
     compile_named_statement,
     quote_ident,
@@ -31,7 +32,6 @@ from drakkar.pgsql import (
     render_update,
     render_upsert,
 )
-from drakkar.sinks.base import BaseSink
 from drakkar.utils import redact_url
 
 logger = structlog.get_logger()

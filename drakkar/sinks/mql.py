@@ -3,14 +3,11 @@
 Every function here transforms plain documents: no pymongo, no I/O, and no
 imports from the ``drakkar`` package.
 
-That last rule is load-bearing rather than stylistic, for the same verified
-reason it is in ``pgsql.py``. ``drakkar.config`` needs these helpers to
-validate operator-authored statements at config load, and importing
-anything under ``drakkar/sinks/`` executes ``drakkar/sinks/__init__.py``,
-which imports every sink, each of which imports ``drakkar.config`` — so
-housing them under ``sinks/`` makes config load fail with a
-partially-initialized-module ImportError. Living at the top level alongside
-``timefmt``/``dbfiles``/``pgsql`` avoids the cycle.
+That last rule is load-bearing rather than stylistic, for the same reason
+it is in ``pgsql.py``: ``drakkar.config`` needs these helpers to validate
+operator-authored statements at config load, so an import back into the
+package here would close a cycle. See the note in
+``drakkar/sinks/__init__.py``.
 
 Keeping the module dependency-free also means the whole substitution
 mechanism is unit-testable with no database and no mocks.
