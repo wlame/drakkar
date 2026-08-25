@@ -368,7 +368,7 @@ docker-compose up --build -d
 | t1 + 510s | worker-3 starts | w1, w2, w3 |
 
 Total runtime: ~10 minutes. The script polls each worker's
-`/api/dashboard` every 5 seconds and prints per-worker completed
+`/api/v1/dashboard` every 5 seconds and prints per-worker completed
 task counts and partition counts, so you can watch rebalancing happen.
 
 **What to observe:**

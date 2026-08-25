@@ -26,7 +26,6 @@ from pydantic import ValidationError
 from drakkar.config import DrakkarConfig, UIConfig, UIReleaseConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uihost import (
-    EMBEDDED_BUNDLE_DIR,
     ResolvedBundle,
     default_cache_root,
     newest_cached_version,
@@ -317,8 +316,7 @@ def test_traversal_member_rejected_and_incoming_cleaned(stub_github, tmp_path):
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
-    assert bundle is not None
-    assert bundle.source == 'embedded'
+    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
     assert not (tmp_path / 'cache' / 'evil.txt').exists()
     assert not (tmp_path / 'cache' / 'v1.0.0').exists()
     assert not (tmp_path / 'cache' / 'v1.0.0.incoming').exists()
@@ -343,8 +341,7 @@ def test_oversize_extraction_rejected(stub_github, tmp_path, monkeypatch):
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
-    assert bundle is not None
-    assert bundle.source == 'embedded'
+    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
     assert not (tmp_path / 'cache' / 'v1.0.0.incoming').exists()
 
 
@@ -355,8 +352,7 @@ def test_oversize_download_rejected(stub_github, tmp_path, monkeypatch):
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
-    assert bundle is not None
-    assert bundle.source == 'embedded'
+    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
 
 
 def test_bundle_without_index_rejected(stub_github, tmp_path):
@@ -365,8 +361,7 @@ def test_bundle_without_index_rejected(stub_github, tmp_path):
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
-    assert bundle is not None
-    assert bundle.source == 'embedded'
+    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
     assert not (tmp_path / 'cache' / 'v1.0.0').exists()
     assert not (tmp_path / 'cache' / 'v1.0.0.incoming').exists()
 
@@ -380,8 +375,7 @@ def test_release_without_tarball_asset_rejected(stub_github, tmp_path):
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
-    assert bundle is not None
-    assert bundle.source == 'embedded'
+    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
 
 
 def test_empty_release_repo_disables_fetching(stub_github, tmp_path):
@@ -389,13 +383,19 @@ def test_empty_release_repo_disables_fetching(stub_github, tmp_path):
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
-    assert bundle is not None
-    assert bundle.source == 'embedded'
+    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
     assert stub_github.requests == []
 
 
-def test_embedded_fallback_is_packaged():
-    assert (EMBEDDED_BUNDLE_DIR / 'index.html').is_file()
+def test_nothing_resolvable_returns_none_rather_than_a_baked_in_bundle(tmp_path):
+    """No cache and no reachable release source is not an error.
+
+    There is deliberately no bundle baked into the package: one download at
+    any point in a worker's life fills a cache that every later start — and
+    every co-located worker of either backend — reads. Until then the worker
+    runs API-only and the UI server says how to supply a bundle.
+    """
+    assert resolve(ui_config(tmp_path, repo='')) is None
 
 
 def test_default_cache_root_honors_xdg(monkeypatch, tmp_path):
@@ -540,7 +540,7 @@ async def test_spa_mode_keeps_json_api(spa_client):
     payload = resp.json()
     assert 'stats' in payload
     # the legacy alias keeps working too
-    legacy = await spa_client.get('/api/dashboard')
+    legacy = await spa_client.get('/api/v1/dashboard')
     assert legacy.status_code == 200
 
 
@@ -555,7 +555,7 @@ async def test_spa_mode_keeps_download_precedence(tmp_path, mock_recorder, mock_
     cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
     mock_recorder.config = cfg
     async with make_client(cfg, mock_recorder, mock_app, ui_root=ui_bundle_dir) as c:
-        resp = await c.get('/debug/download/w1.db')
+        resp = await c.get('/api/v1/debug/download/w1.db')
     assert resp.status_code == 200
     assert resp.content == b'sqlite-bytes'
 
@@ -574,23 +574,29 @@ async def test_spa_mode_auth_gates_pages_like_html(tmp_path, mock_recorder, mock
         assert (await c.get('/healthz')).status_code == 200
 
 
-async def test_spa_mode_drops_jinja_pages(spa_client):
-    # Jinja pages would render server-side HTML with the worker id; in SPA
-    # mode every page path serves the bundle's index.html instead.
+async def test_spa_owns_every_page_path(spa_client):
+    """The SPA's client-side router owns navigation, so every page path —
+    known or not — serves the bundle shell with a 200."""
     for path in ('/', '/partitions', '/history', '/sinks', '/live', '/debug'):
         resp = await spa_client.get(path)
         assert resp.content == BUNDLE_FILES['index.html'], path
 
 
-async def test_ui_disabled_app_unchanged(tmp_path, mock_recorder, mock_app):
+async def test_without_a_bundle_pages_report_503_and_the_api_still_answers(tmp_path, mock_recorder, mock_app):
+    """No bundle is not an outage. There is no built-in HTML fallback, so
+    page requests say what is missing while everything else keeps working."""
     cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
     mock_recorder.config = cfg
     async with make_client(cfg, mock_recorder, mock_app) as c:
         page = await c.get('/')
-        assert page.status_code == 200
-        assert 'test-worker' in page.text  # Jinja dashboard, not the SPA shell
-        # unknown paths 404 (no History-API fallback without the SPA)
-        assert (await c.get('/no/such/route')).status_code == 404
+        assert page.status_code == 503
+        body = page.json()
+        assert body['error'] == 'UI bundle not available'
+        assert any('drakkar-ui fetch' in remedy for remedy in body['remedies'])
+        # Every non-API path answers the same way — there is nothing to 404 on.
+        assert (await c.get('/no/such/route')).status_code == 503
+        # The probe surface is untouched.
+        assert (await c.get('/healthz')).status_code == 200
 
 
 async def test_ui_server_resolve_ui_bundle_disabled_returns_none(tmp_path, mock_recorder, mock_app):
@@ -705,8 +711,7 @@ def test_resolve_pinned_fetch_failure_stays_strict(stub_github, tmp_path):
 
     bundle = resolve(cfg, api_base=stub_github.base_url)
 
-    assert bundle is not None
-    assert bundle.source == 'embedded'
+    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
 
 
 def test_resolve_pinned_cached_beats_unfetchable_latest(stub_github, tmp_path):
@@ -725,29 +730,6 @@ def test_resolve_pinned_cached_beats_unfetchable_latest(stub_github, tmp_path):
     assert bundle is not None
     assert bundle.source == 'cache'
     assert bundle.root == tmp_path / 'cache' / 'v1.0.0'
-
-
-def test_embedded_bundle_is_a_real_release_with_version(tmp_path):
-    """The package-baked bundle is a REAL drakkar-ui release, tag included.
-
-    ``just embed-ui vX.Y.Z`` writes the release into drakkar/uihost/bundle
-    plus a VERSION file; the resolver's last rung serves it (and reports
-    the tag through identity) instead of falling back to built-in pages.
-    """
-    from drakkar.uihost import EMBEDDED_BUNDLE_DIR, embedded_bundle_version
-
-    version = embedded_bundle_version()
-    assert version is not None and version.startswith('v')
-    assert version == (EMBEDDED_BUNDLE_DIR / 'VERSION').read_text().strip()
-    # A built SPA references its hashed assets — the retired stub did not.
-    assert 'assets/' in (EMBEDDED_BUNDLE_DIR / 'index.html').read_text()
-
-    # The offline ladder (empty cache, no repo configured) lands on the
-    # embedded rung and carries the version through.
-    bundle = resolve(ui_config(tmp_path, repo=''))
-    assert bundle is not None
-    assert bundle.source == 'embedded'
-    assert bundle.version == version
 
 
 # --- sha256 checksum sidecar verification ----------------------------------
@@ -775,16 +757,15 @@ def test_fetch_verifies_published_checksum(stub_github, tmp_path):
 def test_fetch_rejects_checksum_mismatch(stub_github, tmp_path):
     """A present-but-wrong digest aborts the install before extraction.
 
-    resolve() degrades to the embedded rung and nothing lands in the
-    cache — a tampered or corrupted asset must never be served.
+    resolve() reports nothing usable and nothing lands in the cache — a
+    tampered or corrupted asset must never be served.
     """
     stub_github.add_direct_release('wlame/drakkar-ui', 'v1.0.0', make_tar_gz(BUNDLE_FILES))
     stub_github.add_direct_checksum('wlame/drakkar-ui', 'v1.0.0', ('f' * 64 + '\n').encode())
 
     bundle = resolve(ui_config(tmp_path, pinned_version='v1.0.0'), api_base=stub_github.base_url)
 
-    assert bundle is not None
-    assert bundle.source == 'embedded'
+    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
     assert not (tmp_path / 'cache' / 'v1.0.0').exists()
 
 
@@ -794,8 +775,7 @@ def test_fetch_rejects_malformed_checksum_asset(stub_github, tmp_path):
 
     bundle = resolve(ui_config(tmp_path, pinned_version='v1.0.0'), api_base=stub_github.base_url)
 
-    assert bundle is not None
-    assert bundle.source == 'embedded'
+    assert bundle is None, 'nothing usable resolved — the worker runs API-only'
     assert not (tmp_path / 'cache' / 'v1.0.0').exists()
 
 

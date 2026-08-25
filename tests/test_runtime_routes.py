@@ -70,7 +70,7 @@ async def test_health_endpoint_reports_stalled_without_touching_the_loop(client,
 async def test_units_endpoint_returns_census(client):
     # mock_app.main_loop is a MagicMock, so dispatch_to_loop falls back to
     # awaiting inline on the test loop — the census sees this test's tasks.
-    resp = await client.get('/api/debug/runtime/units')
+    resp = await client.get('/api/v1/debug/runtime/units')
     assert resp.status_code == 200
     body = resp.json()
     assert body['unit_label'] == 'tasks'

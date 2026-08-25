@@ -28,8 +28,8 @@ import asyncio
 import time
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.recorder import queries
@@ -89,8 +89,8 @@ def _timeline_wire(cfg: UITimelineConfig) -> dict[str, object]:
     }
 
 
-def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRouter, APIRouter]:
-    """Build the routers that own HTML pages, top-level APIs, and the WS endpoint.
+def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
+    """Build the routers that own the top-level APIs and the WS endpoint.
 
     Returns two leaf routers — ``(public, gated)`` — for the app to include
     directly. Every gated route goes through ``require_auth`` (a no-op when
@@ -98,26 +98,17 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
     the WebSocket runs its own auth handshake inside the endpoint so it can
     reply with a proper 4401 close code.
 
-    ``include_html=False`` (SPA mode — ``ui.enabled`` with a resolved
-    drakkar-ui bundle) drops the Jinja page routes so the SPA catch-all owns
-    every non-API path; the JSON APIs, probes, and WS are unaffected.
-
     The two routers are deliberately NOT combined behind a wrapper
     ``include_router``: newer FastAPI includes routers lazily, so a nesting
-    router exposes no ``APIRoute`` entries for the ``/api/v1`` alias walk
-    in ``server.py``.
+    router would hide its routes from the app-level table.
     """
     # Public router: probes + WS (WS authenticates internally).
     public = APIRouter()
     # Everything else requires auth when a token is configured.
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
-    # HTML page routes register on ``html``: the gated router normally, or a
-    # throwaway router (never mounted) when the SPA owns the page surface.
-    html = router if include_html else APIRouter()
     config = deps.config
     recorder = deps.recorder
     drakkar_app = deps.drakkar_app
-    templates = deps.templates
 
     async def _build_webapp_tile() -> dict | None:
         """Compose the dashboard "WebApp" tile, or ``None`` when webapp is off.
@@ -230,49 +221,6 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
             return JSONResponse({'status': 'not_ready', 'reasons': reasons}, status_code=503)
         return JSONResponse({'status': 'ready'})
 
-    # --- HTML pages ---
-
-    @html.get('/', response_class=HTMLResponse)
-    async def dashboard(request: Request):
-        stats = await recorder.get_stats()
-        processors = drakkar_app.processors
-        pool = drakkar_app._executor_pool
-        partition_ids = sorted(processors.keys())
-        total_lag = await deps.get_total_lag(partition_ids)
-        # Expand custom link URL templates
-        custom_links = []
-        if config.custom_links:
-            tpl_vars = {
-                'worker_id': drakkar_app._worker_id,
-                'cluster_name': drakkar_app._cluster_name or '',
-                'metrics_port': str(drakkar_app._config.metrics.port),
-                'debug_port': str(config.port),
-            }
-            for link in config.custom_links:
-                url = link.get('url', '')
-                for key, val in tpl_vars.items():
-                    url = url.replace('{' + key + '}', val)
-                custom_links.append({'name': link.get('name', url), 'url': url})
-
-        webapp_tile = await _build_webapp_tile()
-        return templates.TemplateResponse(
-            request,
-            'dashboard.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'uptime': time.monotonic() - drakkar_app._start_time,
-                'stats': stats,
-                'partition_count': len(processors),
-                'partitions': partition_ids,
-                'pool_active': pool.active_count if pool else 0,
-                'pool_max': pool.max_executors if pool else 0,
-                'total_lag': total_lag,
-                'prom': deps.build_prometheus_links(),
-                'custom_links': custom_links,
-                'webapp_tile': webapp_tile,
-            },
-        )
-
     async def _partitions_data() -> list[dict]:
         """Per-partition summary rows enriched with live processor state and lag.
 
@@ -300,53 +248,12 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
         summary.sort(key=lambda s: s['partition'])
         return summary
 
-    @html.get('/partitions', response_class=HTMLResponse)
-    async def partitions(request: Request):
-        summary = await _partitions_data()
-        webapp_tile = await _build_webapp_tile()
-        return templates.TemplateResponse(
-            request,
-            'partitions.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'summary': summary,
-                'webapp_tile': webapp_tile,
-            },
-        )
-
     # v1-only contract endpoint (no legacy alias): the partitions table as
     # JSON for the static SPA. ``[]`` when nothing has been recorded.
     @router.get('/api/v1/partitions')
     async def api_partitions():
         """Per-partition summary rows as JSON, sorted by partition."""
         return JSONResponse(await _partitions_data())
-
-    @html.get('/partitions/{partition_id}', response_class=HTMLResponse)
-    async def partition_detail(
-        request: Request,
-        partition_id: int,
-        page: int = Query(default=0, ge=0),
-    ):
-        limit = 50
-        events = await dispatch_to_loop(
-            recorder.get_events(
-                partition=partition_id,
-                limit=limit,
-                offset=page * limit,
-            ),
-            deps.drakkar_app.main_loop,
-        )
-        return templates.TemplateResponse(
-            request,
-            'partition_detail.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'partition_id': partition_id,
-                'events': events,
-                'page': page,
-                'has_next': len(events) == limit,
-            },
-        )
 
     async def _task_detail_data(task_id: str) -> dict:
         """One task's reconstructed lifecycle from its recorded events.
@@ -366,93 +273,12 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
         detail['binary_path'] = drakkar_app._config.executor.binary_path
         return detail
 
-    @html.get('/task/{task_id}', response_class=HTMLResponse)
-    async def task_detail(request: Request, task_id: str):
-        detail = await _task_detail_data(task_id)
-        return templates.TemplateResponse(
-            request,
-            'task_detail.html',
-            {'worker_id': drakkar_app._worker_id, **detail},
-        )
-
     # v1-only contract endpoint (no legacy alias): one task's full lifecycle
     # as JSON for the static SPA. stdout/stderr live inside the event rows.
     @router.get('/api/v1/task/{task_id}')
     async def api_task_detail(task_id: str):
         """Single-task detail as JSON; ``:r…`` retry suffixes resolve to the base task."""
         return JSONResponse(await _task_detail_data(task_id))
-
-    @html.get('/history', response_class=HTMLResponse)
-    async def history(
-        request: Request,
-        partition: str | None = Query(default=None),
-        event_type: str | None = Query(default=None),
-        origin: str = Query(default='all'),
-        page: int = Query(default=0, ge=0),
-    ):
-        part_int = int(partition) if partition and partition.strip() else None
-        evt_type = event_type if event_type and event_type.strip() else None
-        # ``origin`` is a small enum (kafka/http/all). Default ``all`` keeps
-        # historical behavior; any other value collapses to ``all`` so a
-        # malformed query string can't 500 the page.
-        origin_filter = origin if origin in ('kafka', 'http') else 'all'
-        limit = 100
-        events = await dispatch_to_loop(
-            recorder.get_events(
-                partition=part_int,
-                event_type=evt_type,
-                origin=origin_filter if origin_filter != 'all' else None,
-                limit=limit,
-                offset=page * limit,
-            ),
-            deps.drakkar_app.main_loop,
-        )
-        return templates.TemplateResponse(
-            request,
-            'history.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'events': events,
-                'page': page,
-                'has_next': len(events) == limit,
-                'filter_partition': part_int,
-                'filter_event_type': evt_type,
-                'filter_origin': origin_filter,
-                'partitions': sorted(drakkar_app.processors.keys()),
-                'max_ui_rows': config.max_rows,
-            },
-        )
-
-    @html.get('/sinks', response_class=HTMLResponse)
-    async def sinks_page(request: Request):
-        mgr = drakkar_app.sink_manager
-        info = mgr.get_sink_info()
-        all_stats = mgr.get_all_stats()
-        sinks_data = []
-        for item in info:
-            key = (item['sink_type'], item['name'])
-            stats = all_stats.get(key)
-            sinks_data.append(
-                {
-                    **item,
-                    'delivered_count': stats.delivered_count if stats else 0,
-                    'delivered_payloads': stats.delivered_payloads if stats else 0,
-                    'error_count': stats.error_count if stats else 0,
-                    'retry_count': stats.retry_count if stats else 0,
-                    'last_delivery_ts': stats.last_delivery_ts if stats else None,
-                    'last_delivery_duration': stats.last_delivery_duration if stats else None,
-                    'last_error': stats.last_error if stats else None,
-                    'last_error_ts': stats.last_error_ts if stats else None,
-                }
-            )
-        return templates.TemplateResponse(
-            request,
-            'sinks.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'sinks': sinks_data,
-            },
-        )
 
     # --- Top-level JSON APIs ---
 
@@ -470,7 +296,7 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
             return None
         return {**deps.build_prometheus_links(), 'custom_links': config.custom_links}
 
-    @router.get('/api/dashboard')
+    @router.get('/api/v1/dashboard')
     async def api_dashboard():
         """Dashboard data as JSON for JS refresh."""
         stats = await recorder.get_stats()
@@ -521,7 +347,7 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
             }
         )
 
-    @router.get('/api/sinks')
+    @router.get('/api/v1/sinks')
     async def api_sinks():
         """Sink configuration and live delivery stats."""
         mgr = drakkar_app.sink_manager
@@ -546,7 +372,7 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
             )
         return JSONResponse(result)
 
-    @router.get('/api/debug/processors')
+    @router.get('/api/v1/debug/processors')
     async def api_debug_processors():
         """Dump internal state of all partition processors for diagnostics."""
 
@@ -618,7 +444,7 @@ def create_pages_router(deps: UIDeps, include_html: bool = True) -> tuple[APIRou
 
     # --- Workers autodiscovery API ---
 
-    @router.get('/api/workers')
+    @router.get('/api/v1/workers')
     async def api_workers():
         """Discover live workers sharing the same db_dir, including self.
 

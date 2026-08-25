@@ -1,4 +1,4 @@
-"""Debug web UI for Drakkar workers — FastAPI + Jinja2 templates.
+"""Debug web UI for Drakkar workers — a FastAPI JSON API plus the SPA.
 
 The route handlers are split across four sibling modules to keep this
 factory thin:
@@ -35,10 +35,8 @@ from urllib.parse import quote
 
 import structlog
 import uvicorn
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from fastapi.routing import APIRoute
-from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
@@ -52,10 +50,6 @@ from drakkar.uihost import ResolvedBundle
 # without changes; ``noqa: F401`` keeps the re-exports visible without
 # tripping ruff's unused-import check.
 from drakkar.uiserver.server_helpers import (
-    format_ts,
-    format_ts_full,
-    format_ts_ms,
-    format_uptime,
     hook_flags,  # noqa: F401  (re-exported for tests)
     origin_allowed,  # noqa: F401  (re-exported for tests)
     worker_group,  # noqa: F401  (re-exported for tests)
@@ -100,8 +94,6 @@ MAX_HEADER_BYTES = 64 * 1024
 # being buffered at all.
 MAX_BODY_BYTES = 10 * 1024 * 1024
 
-TEMPLATES_DIR = Path(__file__).parent.parent / 'templates'
-
 # A degraded recorder read repeats on every poll of every open page, so the
 # cause is logged at most once per interval per cause rather than per
 # request — enough for an operator to see WHY the UI is empty without the
@@ -127,8 +119,8 @@ def _warn_degraded_read(event: str, hint: str) -> None:
 class UIDeps:
     """Shared dependencies + helpers passed to each route-module factory.
 
-    Routes don't capture ``drakkar_app`` / ``recorder`` / ``config`` /
-    ``templates`` directly; they reach them through this object. Pure
+    Routes don't capture ``drakkar_app`` / ``recorder`` / ``config``
+    directly; they reach them through this object. Pure
     helpers that need access to the live app/config (auth, kafka-UI URL
     builder, prometheus-link builder, cross-thread dispatch) are methods
     here so the router factories don't have to plumb them individually.
@@ -139,21 +131,19 @@ class UIDeps:
         config: UIConfig,
         recorder: EventRecorder,
         drakkar_app: DrakkarApp,
-        templates: Jinja2Templates,
         ui_version: str | None = None,
-        ui_source: str = 'builtin',
+        ui_source: str = 'release',
     ) -> None:
         self.config = config
         self.recorder = recorder
         self.drakkar_app = drakkar_app
-        self.templates = templates
-        # Identity v1.2: which drakkar-ui bundle this server actually
-        # serves — 'release' + tag in SPA mode, 'builtin' + None when the
-        # server-rendered fallback pages are active.
+        # Identity v1.2: which drakkar-ui bundle this server serves — the
+        # release tag, or ``None`` when no bundle could be resolved and the
+        # server is running API-only.
         self.ui_version = ui_version
         self.ui_source = ui_source
 
-    # --- Sink-UI / Kafka-UI helpers (also wired into Jinja globals) ---
+    # --- Sink-UI / Kafka-UI helpers ---
 
     def get_sink_ui_links(self) -> list[dict[str, str]]:
         """Return deduplicated sink UI links for the nav header."""
@@ -190,7 +180,7 @@ class UIDeps:
         """Build a Kafka-UI deep-link URL for a single message.
 
         Returns '' when ``kafka.ui_url`` or ``kafka.ui_cluster_name`` is
-        absent, so callers (Jinja templates and JS) can treat it as a
+        absent, so callers can treat it as a
         feature toggle. The ``%3A%3A`` literal is the URL-encoded form of
         ``::`` that Kafka-UI expects in the seekTo parameter.
         """
@@ -514,64 +504,6 @@ class UIDeps:
 # get a versioned alias (contract v1). Everything under ``/api/`` maps by the
 # strip-``/api``-prefix rule in ``_v1_alias_path``; this table carries the
 # irregular ones.
-_V1_EXTRA_ALIASES: dict[str, str] = {
-    '/debug/download/{filename}': '/api/v1/debug/download/{filename}',
-}
-
-
-def _v1_alias_path(path: str) -> str | None:
-    """Map a legacy route path to its ``/api/v1`` alias, or ``None`` for no alias.
-
-    HTML pages, the probes (``/healthz``/``/readyz``), the WebSocket, and
-    routes already under ``/api/v1`` (the v1-only contract endpoints) get no
-    alias.
-    """
-    if path.startswith('/api/v1/'):
-        return None
-    if path.startswith('/api/'):
-        return '/api/v1/' + path.removeprefix('/api/')
-    return _V1_EXTRA_ALIASES.get(path)
-
-
-def register_v1_aliases(app: FastAPI, routers: Sequence[APIRouter]) -> None:
-    """Register every legacy JSON API route under ``/api/v1/...`` as well.
-
-    The UI contract (v1) versions the JSON surface behind an ``/api/v1``
-    prefix while the legacy unprefixed paths keep working during the
-    transition. Rather than duplicating handler registrations per module,
-    this walks the given routers and re-registers each qualifying route on
-    the app under its computed alias — same endpoint function, same
-    dependency list (router-level ``Depends`` are merged into each route at
-    registration time, so auth gating is identical on both prefixes).
-
-    The walk deliberately reads ``router.routes`` (where ``@router.get``
-    registrations live as ``APIRoute`` objects on every FastAPI version)
-    rather than ``app.routes``: newer FastAPI includes routers lazily, so
-    the app-level table no longer exposes ``APIRoute`` entries.
-    """
-    registered = 0
-    for router in routers:
-        for route in router.routes:
-            if not isinstance(route, APIRoute):
-                continue
-            alias = _v1_alias_path(route.path)
-            if alias is None:
-                continue
-            app.add_api_route(
-                alias,
-                route.endpoint,
-                methods=sorted(route.methods or []),
-                dependencies=route.dependencies,
-                name=f'{route.name}_v1',
-                response_class=route.response_class,
-            )
-            registered += 1
-    if registered == 0:
-        # Serving without the /api/v1 surface would silently break the UI
-        # contract — fail at startup instead.
-        raise RuntimeError('v1 alias registration found no legacy API routes; FastAPI routing internals changed')
-
-
 def create_ui_app(
     config: UIConfig,
     recorder: EventRecorder,
@@ -582,21 +514,21 @@ def create_ui_app(
 ) -> FastAPI:
     """Create the FastAPI UI application.
 
-    Wires up Jinja templates with the format helpers + sink-link / kafka-UI
-    helpers, then mounts the four route modules onto the app. Each route
-    module receives a single ``UIDeps`` parameter that exposes shared
-    state and helpers.
+    Mounts the route modules onto the app; each receives a single
+    ``UIDeps`` parameter exposing the shared state and helpers.
 
-    ``ui_root`` is the resolved drakkar-ui bundle directory (SPA mode, from
-    ``ui.release.enabled``): the Jinja page routes are dropped and a catch-all
-    registered LAST serves the SPA — bundle files as-is, ``index.html`` with
-    a 200 for every unknown path — auth-gated exactly like the HTML pages.
-    The probes, ``/ws``, all ``/api*`` JSON routes (legacy and ``/api/v1``),
-    and ``/debug/download/{filename}`` keep precedence over the catch-all.
-    ``None`` (default) keeps the built-in server-rendered HTML pages.
+    ``ui_root`` is the resolved drakkar-ui bundle directory. A catch-all
+    registered LAST serves it — bundle files as-is, ``index.html`` with a
+    200 for every unknown path — auth-gated exactly like the API. The
+    probes, ``/ws`` and every ``/api/v1/*`` route keep precedence over it.
+
+    ``None`` means no bundle could be resolved (or ``ui.release.enabled``
+    is off): the worker then serves its API, probes and WebSocket as
+    normal, and the catch-all answers every page request with a 503 saying
+    how to supply a bundle. There is no built-in HTML fallback.
 
     ``ui_version`` is the release tag ``ui_root`` holds (identity v1.2's
-    ``ui_version`` field); it is meaningful only in SPA mode.
+    ``ui_version`` field), or ``None`` when there is no bundle.
     """
     # Local imports break a routes_* → server module cycle: each routes
     # module imports ``UIDeps`` from this module, and this module
@@ -648,51 +580,25 @@ def create_ui_app(
                 )
         return await call_next(request)
 
-    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-    templates.env.autoescape = True
-    templates.env.globals['format_ts'] = format_ts  # ty: ignore[invalid-assignment]
-    templates.env.globals['format_ts_ms'] = format_ts_ms  # ty: ignore[invalid-assignment]
-    templates.env.globals['format_ts_full'] = format_ts_full  # ty: ignore[invalid-assignment]
-    templates.env.globals['format_uptime'] = format_uptime  # ty: ignore[invalid-assignment]
-
     deps = UIDeps(
         config=config,
         recorder=recorder,
         drakkar_app=drakkar_app,
-        templates=templates,
-        ui_version=ui_version if ui_root is not None else None,
-        # Identity's ui_source contract value: 'release'/'embedded' in SPA
-        # mode (whatever the caller resolved), 'builtin' when the Jinja
-        # pages serve.
-        ui_source=ui_source if ui_root is not None else 'builtin',
+        ui_version=ui_version,
+        ui_source=ui_source,
     )
 
-    # Jinja globals that need access to the live app/config — bound
-    # methods on ``deps`` so config changes (e.g. cache engine swapped
-    # in/out at runtime in tests) are reflected on the next render.
-    templates.env.globals['get_sink_ui_links'] = deps.get_sink_ui_links  # ty: ignore[invalid-assignment]
-    templates.env.globals['is_cache_enabled'] = deps.is_cache_enabled  # ty: ignore[invalid-assignment]
-    templates.env.globals['kafka_ui_message_url'] = deps.kafka_ui_message_url  # ty: ignore[invalid-assignment]
-    templates.env.globals['kafka_source_topic'] = drakkar_app._config.kafka.source_topic  # ty: ignore[invalid-assignment]
-    # The JS-rendered pages (history, live) need to build these URLs too.
-    # Expose the raw bits so the templates can inject them into a JS
-    # constants block once and let the renderers compose URLs per-row.
-    templates.env.globals['kafka_ui_base'] = drakkar_app._config.kafka.ui_url.rstrip('/')  # ty: ignore[invalid-assignment]
-    templates.env.globals['kafka_ui_cluster'] = drakkar_app._config.kafka.ui_cluster_name  # ty: ignore[invalid-assignment]
-
-    # Mount the four route modules. Order doesn't matter for correctness
-    # among them (FastAPI matches by path), but grouping reads naturally as
-    # pages → live → debug → cache. Only leaf routers land here — the
-    # /api/v1 alias walk below cannot see through nested include_router
-    # calls on newer FastAPI. In SPA mode (``ui_root``) the Jinja page
-    # routes are dropped so the catch-all below owns the page surface.
-    include_html = ui_root is None
-    pages_public, pages_gated = create_pages_router(deps, include_html=include_html)
+    # Mount the route modules. Order doesn't matter for correctness among
+    # them (FastAPI matches by path), but grouping reads naturally as
+    # pages → live → debug → cache. Only leaf routers land here: newer
+    # FastAPI includes routers lazily, so a nesting ``include_router``
+    # would hide its routes from the app-level table.
+    pages_public, pages_gated = create_pages_router(deps)
     routers = (
         pages_public,
         pages_gated,
-        create_live_router(deps, include_html=include_html),
-        create_debug_router(deps, include_html=include_html),
+        create_live_router(deps),
+        create_debug_router(deps),
         create_cache_router(deps),
         create_consume_pause_router(deps),
         create_kafka_read_router(deps),
@@ -705,13 +611,12 @@ def create_ui_app(
     for router in routers:
         app.include_router(router)
 
-    # Contract v1: every legacy JSON route is also served under /api/v1.
-    register_v1_aliases(app, routers)
-
     # SPA catch-all LAST: Starlette matches in registration order, so every
-    # route above (probes, /ws, /api*, downloads) keeps precedence.
-    if ui_root is not None:
-        app.include_router(create_spa_router(deps, ui_root))
+    # route above (probes, /ws, /api/v1/*) keeps precedence. With no bundle
+    # resolved there is no page surface at all — see ``create_spa_router``,
+    # which then answers every non-API path with a 503 explaining how to
+    # supply one. The JSON API, the probes and the WebSocket are unaffected.
+    app.include_router(create_spa_router(deps, ui_root))
 
     return app
 
@@ -743,9 +648,6 @@ class UIServer:
             self._drakkar_app,
             ui_root=bundle.root if bundle else None,
             ui_version=bundle.version if bundle else None,
-            # Contract v1.2 label: cache/fetched bundles are a 'release';
-            # the package-baked copy reports 'embedded'.
-            ui_source='embedded' if bundle and bundle.source == 'embedded' else 'release',
         )
         uvi_config = uvicorn.Config(
             app=fastapi_app,
@@ -811,13 +713,14 @@ class UIServer:
         provenance + version) so the identity endpoint can report which UI
         release this worker serves.
 
-        The resolution (cache → GitHub fetch → embedded fallback) runs in a
-        worker thread so a slow network fetch never blocks the main loop; it
-        is bounded internally by ``UI_RESOLVE_TIMEOUT_SECONDS`` and is never
-        fatal. The ladder always lands somewhere: an offline host with an
-        empty cache serves the release embedded in the package. Only a
-        resolution *error* (or ``ui.release.enabled=false``) leaves the
-        server on its built-in HTML pages.
+        The resolution (cache → GitHub fetch) runs in a worker thread so a
+        slow network fetch never blocks the main loop; it is bounded
+        internally by ``UI_RESOLVE_TIMEOUT_SECONDS`` and is never fatal.
+
+        Returns ``None`` when ``ui.release.enabled`` is off, when resolution
+        errored, or when nothing could be resolved at all — an offline host
+        whose cache is still empty. The worker then runs API-only; see
+        :mod:`drakkar.uiserver.routes_spa`.
         """
         from drakkar.config import UIConfig
         from drakkar.uihost import resolve
@@ -834,10 +737,6 @@ class UIServer:
             return None
         if bundle is None:
             return None
-        # 'embedded' is the real drakkar-ui release baked into the package
-        # (``just embed-ui``) — a first-class rung of the ladder, served
-        # like any other bundle. The built-in Jinja pages remain only for
-        # ``ui.release.enabled=false`` and resolution errors.
         await logger.ainfo(
             'ui_bundle_resolved', category='ui', source=bundle.source, version=bundle.version, dir=str(bundle.root)
         )

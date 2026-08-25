@@ -26,7 +26,6 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
-    "jinja2>=3.1.0",
     "pymongo>=4.16.0",
     "httpx>=0.27.0",
     "redis>=5.2.0",
@@ -61,7 +60,7 @@ path = "drakkar/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["drakkar"]
-artifacts = ["drakkar/templates/**", "drakkar/uihost/bundle/**", "drakkar/uiserver/openapi.yaml", "drakkar/uiserver/swagger/**"]
+artifacts = ["drakkar/uiserver/openapi.yaml", "drakkar/uiserver/swagger/**"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

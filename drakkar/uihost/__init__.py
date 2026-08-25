@@ -16,12 +16,15 @@ Resolution order (graceful degradation, never fatal):
 3. otherwise fetch that version from GitHub Releases into the cache; on a
    fetch failure a stale cached copy of that version still serves;
 4. with no resolvable version at all, the newest previously cached version
-   (semver order, lexicographic fallback) serves;
-5. finally the drakkar-ui release embedded as package data (refreshed with
-   ``just embed-ui vX.Y.Z``), so the SPA works fully offline.
+   (semver order, lexicographic fallback) serves.
 
-A fetch failure is never fatal — the worker still starts and serves whatever
-bundle is available (cache or embedded).
+A fetch failure is never fatal — the worker still starts, and serves
+whatever the cache holds. There is deliberately no bundle baked into the
+package: one download, at any point in the worker's life, fills a cache
+that every later start (and every co-located worker of either backend)
+reads. When nothing can be resolved the worker runs API-only and the UI
+server explains how to supply a bundle — see
+:mod:`drakkar.uiserver.routes_spa`.
 """
 
 from __future__ import annotations
@@ -68,26 +71,17 @@ __all__ = [
 logger = structlog.get_logger()
 
 # Identifies which bundle ``resolve`` selected — surfaced in logs.
-Source = Literal['embedded', 'cache', 'fetched']
+Source = Literal['cache', 'fetched']
 
 # Bounds the whole startup-time resolution (update check + fetch), matching
 # the Go backend's uiResolveTimeout. Resolution failures degrade to a cached
-# or embedded bundle; they never delay worker startup past this budget.
+# a cached bundle; they never delay worker startup past this budget.
 UI_RESOLVE_TIMEOUT_SECONDS = 30.0
 
 # The drakkar-ui release baked into the package (``just embed-ui vX.Y.Z``
 # refreshes it) so SPA mode works fully offline out of the box — mirrors
 # Go's go:embed fallback bundle. The bundled release tag lives in the
 # VERSION file the embed recipe writes alongside index.html.
-EMBEDDED_BUNDLE_DIR = Path(__file__).parent / 'bundle'
-
-
-def embedded_bundle_version() -> str | None:
-    """Release tag of the embedded bundle, or None for a pre-embed stub."""
-    try:
-        return (EMBEDDED_BUNDLE_DIR / 'VERSION').read_text().strip() or None
-    except OSError:
-        return None
 
 
 # Cached bundle directories are named after release tags (``v1.2.0``).
@@ -98,10 +92,9 @@ _SEMVER_TAG_RE = re.compile(r'^v(\d+)\.(\d+)\.(\d+)$')
 class ResolvedBundle:
     """The UI bundle ``resolve`` selected: directory, provenance, version.
 
-    ``version`` is the release tag the directory holds (``v1.2.0``; the
-    embedded bundle's tag comes from its VERSION file), or ``None`` when
-    no tag is known — surfaced by the identity endpoint so operators can
-    see which UI a backend actually serves.
+    ``version`` is the release tag the directory holds (``v1.2.0``), or
+    ``None`` when no tag is known — surfaced by the identity endpoint so
+    operators can see which UI a backend actually serves.
     """
 
     root: Path
@@ -170,9 +163,9 @@ def resolve(
 
     Never raises for fetch/cache problems — it degrades along the resolution
     order in the module docstring and logs a structured event for each step.
-    Returns ``None`` only when even the embedded fallback is missing (a
-    packaging problem), in which case the caller keeps the built-in Jinja
-    pages.
+    Returns ``None`` when nothing could be resolved — no cache, and no
+    reachable release source. The worker then runs API-only; see
+    :mod:`drakkar.uiserver.routes_spa`.
 
     ``api_base`` overrides the GitHub API base (GitHub Enterprise, or a stub
     server in tests); when it is overridden and ``download_base`` is not,
@@ -230,23 +223,26 @@ def resolve(
                 return ResolvedBundle(root=pinned_dir, source='cache', version=config.pinned_version)
 
     # 4. Newest cached bundle — for UNPINNED workers only: with no pin there
-    # is no contract guarantee to protect, so the last-fetched release beats
-    # the embedded placeholder both when no version was resolvable (offline
-    # restart) and when the resolved latest failed to download. A worker
-    # whose PIN cannot be fetched deliberately does NOT fall back to a
-    # different cached version.
+    # is no contract guarantee to protect, so the last-fetched release
+    # serves both when no version was resolvable (offline restart) and when
+    # the resolved latest failed to download. A worker whose PIN cannot be
+    # fetched deliberately does NOT fall back to a different cached version.
     if not config.pinned_version:
         newest = newest_cached_version(root)
         if newest is not None:
             logger.info('ui_served_from_cache', category='ui', version=newest, dir=str(root / newest))
             return ResolvedBundle(root=root / newest, source='cache', version=newest)
 
-    # 5. Embedded fallback — the drakkar-ui release baked into the package.
-    if dir_has_index(EMBEDDED_BUNDLE_DIR):
-        version = embedded_bundle_version()
-        logger.info('ui_served_from_embedded_fallback', category='ui', version=version)
-        return ResolvedBundle(root=EMBEDDED_BUNDLE_DIR, source='embedded', version=version)
-    logger.warning('ui_embedded_fallback_missing', category='ui', dir=str(EMBEDDED_BUNDLE_DIR))
+    # Nothing resolvable and nothing cached. Not fatal: the worker serves
+    # its API, probes and WebSocket, and the UI server answers page
+    # requests with a 503 naming the ways to supply a bundle.
+    logger.warning(
+        'ui_bundle_unavailable',
+        category='ui',
+        cache_root=str(root),
+        repo=config.repo,
+        hint='no cached bundle and no reachable release source; the worker runs API-only',
+    )
     return None
 
 
@@ -274,7 +270,9 @@ class Status:
     pinned_cached: bool
     fallback_version: str | None
     fallback_dir: Path | None
-    source: Source
+    #: What would serve today, or ``None`` when the cache is empty and
+    #: the worker would run API-only.
+    source: Source | None
 
 
 @dataclass(frozen=True)
@@ -298,10 +296,10 @@ def inspect_cache(config: UIReleaseConfig) -> Status:
             pinned_cached=pinned_cached,
             fallback_version=None,
             fallback_dir=None,
-            source='cache' if pinned_cached else 'embedded',
+            source='cache' if pinned_cached else None,
         )
     # No pinned version: resolve (offline) would serve the newest cached
-    # bundle before degrading to the embedded fallback — report the same.
+    # bundle, or nothing at all — report the same.
     newest = newest_cached_version(root)
     return Status(
         cache_root=root,
@@ -310,7 +308,7 @@ def inspect_cache(config: UIReleaseConfig) -> Status:
         pinned_cached=False,
         fallback_version=newest,
         fallback_dir=root / newest if newest else None,
-        source='cache' if newest else 'embedded',
+        source='cache' if newest else None,
     )
 
 

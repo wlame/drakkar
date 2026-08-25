@@ -188,7 +188,11 @@ async def test_framework_openapi_route_is_not_served():
     app._config = DrakkarConfig()
     transport = ASGITransport(app=create_ui_app(cfg, recorder, app))
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        assert (await client.get('/openapi.json')).status_code == 404
+        # Not a route, so it falls through to the page catch-all — which is
+        # itself token-gated. Either way it must never serve the schema.
+        framework_route = await client.get('/openapi.json')
+        assert framework_route.status_code != 200
+        assert 'paths' not in framework_route.text
         # The gated route still exists and still demands the token.
         assert (await client.get('/api/v1/openapi.json')).status_code == 401
 

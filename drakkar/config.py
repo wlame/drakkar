@@ -1202,28 +1202,32 @@ class UIReleaseConfig(BaseModel):
     The UI ships as its own versioned bundle (the separate drakkar-ui repo,
     published to GitHub Releases) so every backend on a host serves the same
     UI and looks identical. When ``enabled``, the worker resolves that bundle
-    through :mod:`drakkar.uihost` (cache → fetch) and serves it in place of
-    the built-in server-rendered HTML pages.
+    through :mod:`drakkar.uihost` (cache → fetch) and serves it.
 
     Default-ON with an update check: on startup the worker resolves the
-    latest release (or serves the shared cache) and falls back to the
-    built-in Jinja pages when nothing is fetchable and the cache is empty —
-    a fetch failure is never fatal, so the default is safe offline too.
+    latest release, or serves the shared cache. A fetch failure is never
+    fatal — release tags are immutable, so a bundle downloaded once serves
+    from the cache on every later start, offline ones included. There is no
+    HTML fallback baked into the package: with nothing cached the worker
+    runs API-only and page requests answer 503 naming how to supply a
+    bundle.
     """
 
     enabled: bool = Field(
         default=True,
         description=(
-            'Resolve and serve the drakkar-ui bundle. Off pins the built-in '
-            'server-rendered pages unconditionally (no fetch, no cache read).'
+            'Resolve and serve the drakkar-ui bundle. Off means no UI at all '
+            '(no fetch, no cache read): the JSON API, the health probes and '
+            'the event WebSocket keep working, and page requests answer 503.'
         ),
     )
     repo: str = Field(
         default='wlame/drakkar-ui',
         description=(
             'The "owner/name" GitHub repo that publishes UI bundles. '
-            'Empty disables fetching — only a cached bundle or the embedded '
-            'fallback is served.'
+            'Empty disables fetching — only an already-cached bundle is '
+            'served, which is how an air-gapped deployment pins itself to a '
+            'bundle staged with the drakkar-ui CLI.'
         ),
     )
     pinned_version: str = Field(

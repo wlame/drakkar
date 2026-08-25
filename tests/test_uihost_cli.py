@@ -51,12 +51,12 @@ def test_fetch_requires_version():
 # --- where (offline cache introspection) ------------------------------------
 
 
-def test_where_empty_cache_reports_embedded(tmp_path):
+def test_where_empty_cache_reports_nothing(tmp_path):
     code, out, _ = invoke('where', f'--cache-dir={tmp_path}')
     assert code == 0
     assert f'cache root:     {tmp_path}' in out
     assert 'pinned version: (none)' in out
-    assert 'would serve:    embedded' in out
+    assert 'would serve:    nothing' in out
     assert 'newest cached:' not in out
 
 
@@ -83,7 +83,7 @@ def test_where_pinned_but_not_cached(tmp_path):
     code, out, _ = invoke('where', f'--cache-dir={tmp_path}', '--version=v9.9.9')
     assert code == 0
     assert 'cached:         false' in out
-    assert 'would serve:    embedded' in out
+    assert 'would serve:    nothing' in out
 
 
 # --- fetch / update (network, against the stub) ------------------------------

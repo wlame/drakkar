@@ -21,8 +21,8 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from drakkar.concurrency import dispatch_to_loop
@@ -73,22 +73,14 @@ RECENT_TASKS_MAX_LIMIT = 100_000
 DEFAULT_LANE_COUNT = 8
 
 
-def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
-    """Build the router that owns the live view + completion-hook feeds.
-
-    ``include_html=False`` (SPA mode) drops the ``/live`` Jinja page so the
-    SPA catch-all owns it; the JSON feeds are unaffected.
-    """
+def create_live_router(deps: UIDeps) -> APIRouter:
+    """Build the router that owns the live view + completion-hook feeds."""
     # All live-data routes expose task args/output and partition state —
     # gate the whole router behind require_auth (no-op without a token).
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
-    # HTML page routes register on ``html``: the real router normally, or a
-    # throwaway router (never mounted) when the SPA owns the page surface.
-    html = router if include_html else APIRouter()
     config = deps.config
     recorder = deps.recorder
     drakkar_app = deps.drakkar_app
-    templates = deps.templates
 
     async def _live_overview_data() -> dict:
         """The live view's server-side snapshot.
@@ -184,33 +176,6 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             overview['offload'] = drakkar_app._offload_pool.snapshot()
         return overview
 
-    @html.get('/live', response_class=HTMLResponse)
-    async def live(request: Request):
-        overview = await _live_overview_data()
-
-        # Recent-finished rows are page-only (the SPA reads live feeds over
-        # /api/events and the WS instead); both queries batch into a single
-        # cross-thread dispatch.
-        async def _read_finished():
-            finished_rows = await recorder.get_events(
-                event_type='task_completed',
-                limit=config.max_rows,
-            )
-            failed_rows = await recorder.get_events(
-                event_type='task_failed',
-                limit=1000,
-            )
-            return finished_rows, failed_rows
-
-        finished, failed = await dispatch_to_loop(_read_finished(), deps.drakkar_app.main_loop)
-        recent_finished = sorted(finished + failed, key=lambda e: e.get('ts', 0), reverse=True)[: config.max_rows]
-
-        return templates.TemplateResponse(
-            request,
-            'live.html',
-            {**overview, 'recent_finished': recent_finished},
-        )
-
     # v1-only contract endpoint (no legacy alias): the live page's
     # server-side snapshot as JSON for the static SPA.
     @router.get('/api/v1/live/overview')
@@ -218,14 +183,19 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         """Live overview snapshot: tasks, arranging, pool, UI knobs, hook flags."""
         return JSONResponse(await _live_overview_data())
 
-    @router.get('/api/events')
+    @router.get('/api/v1/events')
     async def api_events(
         partitions: str | None = Query(default=None),
         event_types: str | None = Query(default=None),
+        origin: str | None = Query(default=None),
         after_id: int = Query(default=0),
         limit: int = Query(default=200, le=10000),
     ):
-        """Get events as JSON. Supports multiple partitions/types as comma-separated."""
+        """Get events as JSON. Supports multiple partitions/types as comma-separated.
+
+        ``origin`` (``kafka`` / ``http``) splits Kafka-origin tasks from
+        webapp requests — the History page's origin radio.
+        """
         # A malformed partitions CSV is a caller error, not a server bug —
         # reply 422 with the minimal FastAPI-style envelope (contract v1).
         try:
@@ -240,6 +210,7 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         query, params = queries.events_query(
             partitions=part_list,
             event_types=type_list,
+            origin=origin,
             after_id=after_id,
             limit=limit,
         )
@@ -249,7 +220,7 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         columns, rows = result
         return JSONResponse([dict(zip(columns, row, strict=False)) for row in rows])
 
-    @router.get('/api/recent-tasks')
+    @router.get('/api/v1/recent-tasks')
     async def api_recent_tasks(
         minutes: int = Query(default=2, ge=1, le=RECENT_TASKS_MAX_MINUTES),
         limit: int | None = Query(
@@ -335,7 +306,7 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
     # its retention window (default 24h). This fills the gap where batches
     # in the Arrange tab are older than the 10-min timeline window but
     # their task state is still authoritative in the DB.
-    @router.post('/api/live/arrange-tasks')
+    @router.post('/api/v1/live/arrange-tasks')
     async def api_live_arrange_tasks(req: _ArrangeTaskLookupRequest):
         """Return the current state of specific task_ids as a map.
 
@@ -394,7 +365,7 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
 
     _parse_meta = queries.parse_json_object
 
-    @router.get('/api/live/task-results')
+    @router.get('/api/v1/live/task-results')
     async def api_live_task_results(limit: int = Query(default=200, ge=0, le=5000)):
         """Latest N ``task_complete`` events with their matching exec state."""
         events = await _fetch_events('task_complete', limit)
@@ -441,7 +412,7 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             )
         return JSONResponse(result)
 
-    @router.get('/api/live/message-results')
+    @router.get('/api/v1/live/message-results')
     async def api_live_message_results(limit: int = Query(default=200, ge=0, le=5000)):
         """Latest N ``message_complete`` events.
 
@@ -504,7 +475,7 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             )
         return JSONResponse(result)
 
-    @router.get('/api/live/window-results')
+    @router.get('/api/v1/live/window-results')
     async def api_live_window_results(limit: int = Query(default=200, ge=0, le=5000)):
         """Latest N ``window_complete`` events. Metadata carries
         window_id, task_count, output_message_count."""
@@ -524,7 +495,7 @@ def create_live_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             )
         return JSONResponse(result)
 
-    @router.post('/api/live/sink-breakdown')
+    @router.post('/api/v1/live/sink-breakdown')
     async def api_live_sink_breakdown(req: _SinkBreakdownRequest):
         """Group ``produced`` events by ``output_topic`` (sink name) for
         a given (partition, offsets) filter.

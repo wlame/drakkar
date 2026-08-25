@@ -42,6 +42,11 @@ DEFAULT_REPO = 'wlame/drakkar-ui'
 # Bounds a single fetch/update network round-trip (matches the Go CLI).
 FETCH_TIMEOUT_SECONDS = 60.0
 
+# What ``where`` prints when nothing would serve. An empty cache is a normal
+# state, not an error: the worker runs API-only until a bundle is fetched.
+# One word, so the Go CLI's output stays byte-identical.
+NOTHING_CACHED = 'nothing'
+
 USAGE_TEXT = f"""drakkar-ui — manage the decoupled drakkar-ui static bundle.
 
 Usage:
@@ -103,8 +108,8 @@ def _run_where(argv: list[str], stdout: IO[str]) -> int:
     print(f'cache root:     {status.cache_root}', file=stdout)
     if not status.pinned_version:
         print('pinned version: (none)', file=stdout)
-        # With no pin, the resolver falls back to the newest cached bundle
-        # before the embedded placeholder — report which one that would be.
+        # With no pin, the resolver serves the newest cached bundle —
+        # report which one that would be.
         if status.fallback_version:
             print(f'newest cached:  {status.fallback_version}', file=stdout)
             print(f'version dir:    {status.fallback_dir}', file=stdout)
@@ -113,7 +118,7 @@ def _run_where(argv: list[str], stdout: IO[str]) -> int:
         print(f'version dir:    {status.pinned_dir}', file=stdout)
         # Lowercase booleans keep the report byte-identical to the Go CLI.
         print(f'cached:         {str(status.pinned_cached).lower()}', file=stdout)
-    print(f'would serve:    {status.source}', file=stdout)
+    print(f'would serve:    {status.source or NOTHING_CACHED}', file=stdout)
     return 0
 
 

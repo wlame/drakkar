@@ -184,7 +184,7 @@ self.annotate(msg, 'full_dump', {'cache_key': key})
 ```
 
 The annotation stays small and always present; the payload expires on its
-own TTL and is browsable at `/api/debug/cache/entry/{key}`. Note the
+own TTL and is browsable at `/api/v1/debug/cache/entry/{key}`. Note the
 trade-off: the two expire on different clocks, so a trace older than the
 TTL will show the key with nothing behind it.
 

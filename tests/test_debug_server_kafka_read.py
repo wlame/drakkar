@@ -99,7 +99,7 @@ def _message(**overrides) -> KafkaReadMessage:
 
 async def test_topics_lists_aliases_without_raw_topic_names():
     async with _client() as client:
-        resp = await client.get('/api/debug/kafka/topics')
+        resp = await client.get('/api/v1/debug/kafka/topics')
     assert resp.status_code == 200
     body = resp.json()
     aliases = {t['alias']: t['kind'] for t in body['topics']}
@@ -123,9 +123,9 @@ async def test_topics_served_under_v1_alias():
 @pytest.mark.parametrize(
     'path',
     [
-        '/api/debug/kafka/topics',
-        '/api/debug/kafka/source/message?partition=0&offset=0',
-        '/api/debug/kafka/source/messages?from_ts=0',
+        '/api/v1/debug/kafka/topics',
+        '/api/v1/debug/kafka/source/message?partition=0&offset=0',
+        '/api/v1/debug/kafka/source/messages?from_ts=0',
     ],
 )
 async def test_kafka_read_disabled_serves_403(path):
@@ -137,8 +137,8 @@ async def test_kafka_read_disabled_serves_403(path):
 
 async def test_kafka_read_requires_token_when_configured():
     async with _client(make_ui_config(enabled=True, auth_token='secret-t')) as client:
-        anonymous = await client.get('/api/debug/kafka/topics')
-        authed = await client.get('/api/debug/kafka/topics', headers={'Authorization': 'Bearer secret-t'})
+        anonymous = await client.get('/api/v1/debug/kafka/topics')
+        authed = await client.get('/api/v1/debug/kafka/topics', headers={'Authorization': 'Bearer secret-t'})
     assert anonymous.status_code == 401
     assert authed.status_code == 200
 
@@ -150,7 +150,7 @@ async def test_kafka_read_requires_token_when_configured():
 
 async def test_message_unknown_alias_404_names_valid_aliases():
     async with _client() as client:
-        resp = await client.get('/api/debug/kafka/nope/message?partition=0&offset=0')
+        resp = await client.get('/api/v1/debug/kafka/nope/message?partition=0&offset=0')
     assert resp.status_code == 404
     assert 'source' in resp.json()['detail']
 
@@ -159,7 +159,7 @@ async def test_message_returns_fetched_record(monkeypatch):
     fetched = _message()
     monkeypatch.setattr(routes_kafka_read, 'fetch_message', AsyncMock(return_value=fetched))
     async with _client() as client:
-        resp = await client.get('/api/debug/kafka/source/message?partition=0&offset=7')
+        resp = await client.get('/api/v1/debug/kafka/source/message?partition=0&offset=7')
     assert resp.status_code == 200
     assert resp.json() == fetched.model_dump()
 
@@ -168,7 +168,7 @@ async def test_message_passes_resolved_target_and_coordinates(monkeypatch):
     fetch = AsyncMock(return_value=_message())
     monkeypatch.setattr(routes_kafka_read, 'fetch_message', fetch)
     async with _client() as client:
-        await client.get('/api/debug/kafka/search-results-kafka-sink/message?partition=2&offset=9')
+        await client.get('/api/v1/debug/kafka/search-results-kafka-sink/message?partition=2&offset=9')
     target, partition, offset = fetch.await_args.args
     assert isinstance(target, AliasTarget)
     assert target.topic == 'search-results'
@@ -185,7 +185,7 @@ async def test_message_passes_resolved_target_and_coordinates(monkeypatch):
 async def test_message_maps_reader_errors_to_http(monkeypatch, exc, status):
     monkeypatch.setattr(routes_kafka_read, 'fetch_message', AsyncMock(side_effect=exc))
     async with _client() as client:
-        resp = await client.get('/api/debug/kafka/source/message?partition=0&offset=7')
+        resp = await client.get('/api/v1/debug/kafka/source/message?partition=0&offset=7')
     assert resp.status_code == status
     assert resp.json()['detail'] == str(exc)
 
@@ -215,7 +215,7 @@ async def test_messages_streams_ndjson_lines(monkeypatch):
     msgs = [_message(offset=1), _message(offset=2)]
     monkeypatch.setattr(routes_kafka_read, 'stream_messages', _stream_stub(msgs))
     async with _client() as client:
-        resp = await client.get('/api/debug/kafka/source/messages?from_ts=0')
+        resp = await client.get('/api/v1/debug/kafka/source/messages?from_ts=0')
     assert resp.status_code == 200
     assert resp.headers['content-type'].startswith('application/x-ndjson')
     lines = [json.loads(line) for line in resp.text.splitlines()]
@@ -225,7 +225,7 @@ async def test_messages_streams_ndjson_lines(monkeypatch):
 async def test_messages_empty_window_is_empty_200(monkeypatch):
     monkeypatch.setattr(routes_kafka_read, 'stream_messages', _stream_stub([]))
     async with _client() as client:
-        resp = await client.get('/api/debug/kafka/source/messages?from_ts=0')
+        resp = await client.get('/api/v1/debug/kafka/source/messages?from_ts=0')
     assert resp.status_code == 200
     assert resp.text == ''
 
@@ -235,7 +235,7 @@ async def test_messages_first_item_error_maps_to_http_status(monkeypatch):
         routes_kafka_read, 'stream_messages', _stream_stub([KafkaReadNotFound('Partition 7 does not exist')])
     )
     async with _client() as client:
-        resp = await client.get('/api/debug/kafka/source/messages?from_ts=0&partition=7')
+        resp = await client.get('/api/v1/debug/kafka/source/messages?from_ts=0&partition=7')
     assert resp.status_code == 404
 
 
@@ -246,7 +246,7 @@ async def test_messages_mid_stream_failure_emits_error_line(monkeypatch):
         _stream_stub([_message(offset=1), _message(offset=2), KafkaReadUnavailable('brokers went away')]),
     )
     async with _client() as client:
-        resp = await client.get('/api/debug/kafka/source/messages?from_ts=0')
+        resp = await client.get('/api/v1/debug/kafka/source/messages?from_ts=0')
     assert resp.status_code == 200  # headers were committed before the failure
     lines = [json.loads(line) for line in resp.text.splitlines()]
     assert [line.get('offset') for line in lines[:2]] == [1, 2]
@@ -255,7 +255,7 @@ async def test_messages_mid_stream_failure_emits_error_line(monkeypatch):
 
 async def test_messages_to_ts_before_from_ts_is_422():
     async with _client() as client:
-        resp = await client.get('/api/debug/kafka/source/messages?from_ts=100&to_ts=50')
+        resp = await client.get('/api/v1/debug/kafka/source/messages?from_ts=100&to_ts=50')
     assert resp.status_code == 422
     assert resp.json()['detail'][0]['loc'] == ['query', 'to_ts']
 

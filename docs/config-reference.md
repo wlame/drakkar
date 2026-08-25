@@ -460,11 +460,11 @@ ui:
   allowed_ws_origins: []           # WebSocket Origin allowlist. env: DK_UI__ALLOWED_WS_ORIGINS (JSON list)
 
   # --- Side-effecting endpoints (gated independently of auth_token) ---
-  probe_enabled: true              # POST /api/debug/probe; runs caller bytes through the live handler
+  probe_enabled: true              # POST /api/v1/debug/probe; runs caller bytes through the live handler
                                    # and takes executor slots. false = 403. env: DK_UI__PROBE_ENABLED
-  merge_enabled: true              # POST /api/debug/merge; writes merged-<ts>.db into recorder.db_dir,
+  merge_enabled: true              # POST /api/v1/debug/merge; writes merged-<ts>.db into recorder.db_dir,
                                    # never reclaimed. false = 403. env: DK_UI__MERGE_ENABLED
-  kafka_read_enabled: true         # GET /api/debug/kafka/*; ad-hoc reads of the configured topics
+  kafka_read_enabled: true         # GET /api/v1/debug/kafka/*; ad-hoc reads of the configured topics
                                    # (source/dlq/sink aliases only). false = 403. env: DK_UI__KAFKA_READ_ENABLED
 
   # --- Timed consume pause (Live page; OPT-IN — pausing stops message intake) ---
@@ -525,7 +525,7 @@ ui:
     # --- Databases-page stats cache (see docs/local-databases.md#the-databases-page-stats-cache) ---
     dbstats_warm_interval_seconds: 60 # background sweep filling the .dbstats cache + purging deleted files.
                                       # env: DK_UI__RECORDER__DBSTATS_WARM_INTERVAL_SECONDS
-    dbstats_inline_scan_limit: 4      # max cold files one /api/debug/databases request scans inline;
+    dbstats_inline_scan_limit: 4      # max cold files one /api/v1/debug/databases request scans inline;
                                       # the rest return stats_pending. env: DK_UI__RECORDER__DBSTATS_INLINE_SCAN_LIMIT
 
     # --- Output (stdout/stderr) capture ---
@@ -549,7 +549,7 @@ ui:
     annotation_log_max_bytes: 2048   # cap on the payload copy in the drop-warning log line.
                                      # env: DK_UI__RECORDER__ANNOTATION_LOG_MAX_BYTES
 
-  # --- drakkar-ui bundle fetching (never fatal; offline falls back to the embedded bundle, then built-in pages) ---
+  # --- drakkar-ui bundle fetching (never fatal; with nothing cached the worker runs API-only) ---
   release:
     enabled: true                    # resolve + serve the drakkar-ui bundle. env: DK_UI__RELEASE__ENABLED
     repo: wlame/drakkar-ui           # "owner/name" GitHub repo publishing UI bundles. env: DK_UI__RELEASE__REPO

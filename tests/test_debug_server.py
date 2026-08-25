@@ -22,10 +22,6 @@ from drakkar.uiserver import routes_live
 from drakkar.uiserver.server import (
     UIDeps,
     create_ui_app,
-    format_ts,
-    format_ts_full,
-    format_ts_ms,
-    format_uptime,
     origin_allowed,
     worker_group,
 )
@@ -182,69 +178,8 @@ async def client(debug_config, mock_recorder, mock_app):
 
 
 # ---------------------------------------------------------------------------
-# 1. Pure utility functions: format_ts
+# 1. Pure utility helpers
 # ---------------------------------------------------------------------------
-
-
-class TestFormatTs:
-    def test_format_ts_none_returns_empty(self):
-        assert format_ts(None) == ''
-
-    def test_format_ts_returns_hms(self):
-        result = format_ts(1000.0)
-        assert result != ''
-        assert re.match(r'\d{2}:\d{2}:\d{2}$', result)
-
-    def test_format_ts_ms_none_returns_empty(self):
-        assert format_ts_ms(None) == ''
-
-    def test_format_ts_ms_returns_hms_millis(self):
-        result = format_ts_ms(1000.0)
-        assert result != ''
-        assert re.match(r'\d{2}:\d{2}:\d{2}\.\d{3}$', result)
-
-    def test_format_ts_full_none_returns_empty(self):
-        assert format_ts_full(None) == ''
-
-    def test_format_ts_full_returns_datetime_millis(self):
-        result = format_ts_full(1000.0)
-        assert result != ''
-        assert re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$', result)
-
-
-class TestFormatUptime:
-    def test_seconds(self):
-        assert format_uptime(0) == '0s'
-        assert format_uptime(45) == '45s'
-        assert format_uptime(59) == '59s'
-
-    def test_minutes(self):
-        assert format_uptime(60) == '1m 0s'
-        assert format_uptime(90) == '1m 30s'
-        assert format_uptime(3599) == '59m 59s'
-
-    def test_hours(self):
-        assert format_uptime(3600) == '1h 0m'
-        assert format_uptime(7200 + 1800) == '2h 30m'
-        assert format_uptime(86399) == '23h 59m'
-
-    def test_days(self):
-        assert format_uptime(86400) == '1d 0h'
-        assert format_uptime(86400 * 3 + 3600 * 5) == '3d 5h'
-        assert format_uptime(86400 * 29 + 3600 * 23) == '29d 23h'
-
-    def test_months(self):
-        assert format_uptime(86400 * 30) == '1mo 0d'
-        assert format_uptime(86400 * 75) == '2mo 15d'
-        assert format_uptime(86400 * 364) == '12mo 4d'
-
-    def test_years(self):
-        assert format_uptime(86400 * 365) == '1y 0mo'
-        assert format_uptime(86400 * 365 * 2 + 86400 * 90) == '2y 3mo'
-
-    def test_fractional_seconds_truncated(self):
-        assert format_uptime(45.7) == '45s'
-        assert format_uptime(90.999) == '1m 30s'
 
 
 # ---------------------------------------------------------------------------
@@ -292,20 +227,35 @@ class TestWorkerGroup:
 # ---------------------------------------------------------------------------
 
 
+def _all_link_urls(payload) -> list[str]:
+    """Every string in a dashboard ``links`` payload.
+
+    The three groups have different shapes — ``card_links`` is a flat map,
+    the worker/cluster groups are lists of ``{category, links: [[name, url]]}``
+    — and the tests here care about which URLs appear, not where.
+    """
+    if isinstance(payload, str):
+        return [payload]
+    if isinstance(payload, dict):
+        return [url for value in payload.values() for url in _all_link_urls(value)]
+    if isinstance(payload, list | tuple):
+        return [url for item in payload for url in _all_link_urls(item)]
+    return []
+
+
 class TestBuildPrometheusLinks:
-    async def test_empty_prometheus_url_returns_empty_dicts(self, mock_recorder, mock_app):
+    async def test_empty_prometheus_url_omits_the_links_key(self, mock_recorder, mock_app):
+        """Key presence is the feature flag — an unconfigured Prometheus
+        must not produce an empty ``links`` object for the UI to render."""
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', prometheus_url='')
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
 
-        # The dashboard endpoint invokes _build_prometheus_links via the
-        # template context. We hit /api/dashboard which does NOT include prom
-        # links, so we test via the HTML dashboard that renders them.
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/')
+            resp = await c.get('/api/v1/dashboard')
+
         assert resp.status_code == 200
-        # no prometheus links should appear in the page
-        assert 'prometheus' not in resp.text.lower() or 'graph?g0' not in resp.text
+        assert 'links' not in resp.json()
 
     async def test_prometheus_url_set_returns_links(self, mock_recorder, mock_app):
         cfg = make_ui_config(
@@ -319,10 +269,11 @@ class TestBuildPrometheusLinks:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/')
+            resp = await c.get('/api/v1/dashboard')
+
         assert resp.status_code == 200
-        # prometheus graph links should be in the rendered HTML
-        assert 'http://prom:9090/graph' in resp.text
+        links = resp.json()['links']
+        assert any('http://prom:9090/graph' in url for url in _all_link_urls(links))
 
     async def test_prometheus_links_card_keys(self, mock_recorder, mock_app):
         """Verify _build_prometheus_links returns expected card/worker/cluster keys."""
@@ -338,17 +289,17 @@ class TestBuildPrometheusLinks:
         # We do this by creating the app and finding the inner function.
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
 
-        # The function is used inside the dashboard route. We can verify its
-        # output by checking the rendered dashboard contains links for each card.
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/')
-        body = resp.text
-        # card links contain metric names
-        assert 'drakkar_offset_lag' in body
-        assert 'drakkar_messages_consumed_total' in body
+            resp = await c.get('/api/v1/dashboard')
+
+        links = resp.json()['links']
+        assert set(links) >= {'card_links', 'worker_links', 'cluster_links'}
+        urls = ' '.join(_all_link_urls(links))
+        assert 'drakkar_offset_lag' in urls
+        assert 'drakkar_messages_consumed_total' in urls
         # cluster links are present when prometheus_cluster_label is set
-        assert 'cluster' in body
+        assert links['cluster_links']
 
     async def test_prometheus_links_no_cluster_label(self, mock_recorder, mock_app):
         """When prometheus_cluster_label is empty, cluster_links should be empty."""
@@ -377,7 +328,7 @@ class TestBuildPrometheusLinks:
 
 class TestApiDashboard:
     async def test_returns_200_with_stats(self, client):
-        resp = await client.get('/api/dashboard')
+        resp = await client.get('/api/v1/dashboard')
         assert resp.status_code == 200
         data = resp.json()
         assert 'stats' in data
@@ -387,12 +338,12 @@ class TestApiDashboard:
         assert data['stats']['total_events'] == 42
 
     async def test_uptime_is_positive(self, client):
-        resp = await client.get('/api/dashboard')
+        resp = await client.get('/api/v1/dashboard')
         data = resp.json()
         assert data['uptime'] > 0
 
     async def test_pool_info(self, client):
-        resp = await client.get('/api/dashboard')
+        resp = await client.get('/api/v1/dashboard')
         data = resp.json()
         assert data['pool_active'] == 2
         assert data['pool_max'] == 8
@@ -400,14 +351,14 @@ class TestApiDashboard:
 
 class TestApiSinks:
     async def test_returns_200_json_list(self, client):
-        resp = await client.get('/api/sinks')
+        resp = await client.get('/api/v1/sinks')
         assert resp.status_code == 200
         data = resp.json()
         assert isinstance(data, list)
         assert len(data) == 2
 
     async def test_kafka_sink_stats(self, client):
-        resp = await client.get('/api/sinks')
+        resp = await client.get('/api/v1/sinks')
         data = resp.json()
         kafka_sink = next(s for s in data if s['sink_type'] == 'kafka')
         assert kafka_sink['name'] == 'results'
@@ -418,7 +369,7 @@ class TestApiSinks:
         assert kafka_sink['last_delivery_duration'] == 0.012
 
     async def test_postgres_sink_stats(self, client):
-        resp = await client.get('/api/sinks')
+        resp = await client.get('/api/v1/sinks')
         data = resp.json()
         pg_sink = next(s for s in data if s['sink_type'] == 'postgres')
         assert pg_sink['name'] == 'main-db'
@@ -433,7 +384,7 @@ class TestApiDebugDatabases:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/databases')
+            resp = await c.get('/api/v1/debug/databases')
         assert resp.status_code == 200
         assert resp.json() == []
 
@@ -469,7 +420,7 @@ class TestApiDebugDatabases:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/databases')
+            resp = await c.get('/api/v1/debug/databases')
 
         assert resp.status_code == 200
         data = resp.json()
@@ -509,7 +460,7 @@ class TestApiDebugDatabases:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/databases')
+            resp = await c.get('/api/v1/debug/databases')
 
         rows = {r['filename']: r for r in resp.json()}
         # The recorder DB currently written by worker-1 is highlighted.
@@ -526,7 +477,7 @@ class TestApiDebugDatabases:
 
 class TestApiDebugProcessors:
     async def test_returns_200_with_empty_processors(self, client):
-        resp = await client.get('/api/debug/processors')
+        resp = await client.get('/api/v1/debug/processors')
         assert resp.status_code == 200
         data = resp.json()
         assert 'processors' in data
@@ -559,7 +510,7 @@ class TestApiDebugProcessors:
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/processors')
+            resp = await c.get('/api/v1/debug/processors')
 
         assert resp.status_code == 200
         data = resp.json()
@@ -575,7 +526,7 @@ class TestApiDebugProcessors:
 class TestApiWorkers:
     async def test_returns_200_with_current_worker(self, client, mock_recorder):
         mock_recorder.discover_workers.return_value = []
-        resp = await client.get('/api/workers')
+        resp = await client.get('/api/v1/workers')
         assert resp.status_code == 200
         data = resp.json()
         assert isinstance(data, list)
@@ -587,7 +538,7 @@ class TestApiWorkers:
         mock_recorder.discover_workers.return_value = [
             {'worker_name': 'worker-2', 'ip_address': '10.0.0.2', 'debug_port': 8080},
         ]
-        resp = await client.get('/api/workers')
+        resp = await client.get('/api/v1/workers')
         data = resp.json()
         assert len(data) == 2
         names = [w['worker_name'] for w in data]
@@ -609,7 +560,7 @@ class TestDebugDownload:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/debug/download/test.db')
+            resp = await c.get('/api/v1/debug/download/test.db')
 
         assert resp.status_code == 200
         assert resp.content == b'fake-sqlite'
@@ -619,15 +570,19 @@ class TestDebugDownload:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/debug/download/../etc/passwd')
-        assert resp.status_code in (400, 404)
+            resp = await c.get('/api/v1/debug/download/../etc/passwd')
+
+        # The client normalises the ``..`` before sending, so the request
+        # reaches no download route at all — whatever answers it, nothing
+        # outside db_dir may come back.
+        assert resp.status_code != 200
 
     async def test_download_nonexistent_file(self, tmp_path, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/debug/download/nonexistent.db')
+            resp = await c.get('/api/v1/debug/download/nonexistent.db')
         assert resp.status_code == 404
 
 
@@ -658,7 +613,7 @@ class TestMemoryOnlyRecorderServesNoFiles:
         (tmp_path / 'drakkar.yaml').write_text('kafka:\n  brokers: secret:9092\n')
         transport = self._app_in(tmp_path, monkeypatch, mock_recorder, mock_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/debug/download/drakkar.yaml')
+            resp = await c.get('/api/v1/debug/download/drakkar.yaml')
         assert resp.status_code == 404
         assert b'secret:9092' not in resp.content
 
@@ -666,7 +621,7 @@ class TestMemoryOnlyRecorderServesNoFiles:
         (tmp_path / 'w1.db').write_bytes(b'fake-sqlite')
         transport = self._app_in(tmp_path, monkeypatch, mock_recorder, mock_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/debug/download/w1.db')
+            resp = await c.get('/api/v1/debug/download/w1.db')
         assert resp.status_code == 404
 
     async def test_merge_refuses_to_write_into_the_working_directory(
@@ -678,14 +633,14 @@ class TestMemoryOnlyRecorderServesNoFiles:
             (tmp_path / name).write_bytes(b'fake-sqlite')
         transport = self._app_in(tmp_path, monkeypatch, mock_recorder, mock_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.post('/api/debug/merge', json={'filenames': ['a.db', 'b.db']})
+            resp = await c.post('/api/v1/debug/merge', json={'filenames': ['a.db', 'b.db']})
         assert resp.status_code == 404
         assert not list(tmp_path.glob('merged-*.db'))
 
     async def test_archive_download_is_refused(self, tmp_path, monkeypatch, mock_recorder, mock_app):
         transport = self._app_in(tmp_path, monkeypatch, mock_recorder, mock_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/archives/drakkar-c1-20260823__10_00_00-20260823__11_00_00.db.gz')
+            resp = await c.get('/api/v1/debug/archives/drakkar-c1-20260823__10_00_00-20260823__11_00_00.db.gz')
         assert resp.status_code == 404
 
 
@@ -703,7 +658,7 @@ class TestDownloadContainment:
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(db_dir))
         transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/debug/download/escape.db')
+            resp = await c.get('/api/v1/debug/download/escape.db')
         assert resp.status_code in (400, 404)
         assert b'not-yours' not in resp.content
 
@@ -733,7 +688,7 @@ class TestDownloadServesRecorderFilesOnly:
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/debug/download/' + quote(name, safe=''))
+            resp = await c.get('/api/v1/debug/download/' + quote(name, safe=''))
         assert resp.status_code in (400, 404), name
         assert b'not-a-recorder-file' not in resp.content
 
@@ -752,7 +707,7 @@ class TestDownloadServesRecorderFilesOnly:
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/debug/download/' + quote(name, safe=''))
+            resp = await c.get('/api/v1/debug/download/' + quote(name, safe=''))
         assert resp.status_code == 200, name
         assert resp.content == b'fake-sqlite'
 
@@ -765,7 +720,7 @@ class TestDownloadServesRecorderFilesOnly:
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.post('/api/debug/merge', json={'filenames': ['a.db', 'secrets.json']})
+            resp = await c.post('/api/v1/debug/merge', json={'filenames': ['a.db', 'secrets.json']})
         assert resp.status_code == 400
         assert 'secrets.json' in resp.json()['error']
 
@@ -781,7 +736,7 @@ class TestDebugArchivesList:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/archives')
+            resp = await c.get('/api/v1/debug/archives')
         assert resp.status_code == 200
         assert resp.json() == {'archives': []}
 
@@ -798,7 +753,7 @@ class TestDebugArchivesList:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/archives')
+            resp = await c.get('/api/v1/debug/archives')
 
         assert resp.status_code == 200
         body = resp.json()
@@ -836,7 +791,7 @@ class TestDebugArchivesList:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/archives')
+            resp = await c.get('/api/v1/debug/archives')
 
         assert resp.status_code == 200
         names = [entry['name'] for entry in resp.json()['archives']]
@@ -853,7 +808,7 @@ class TestDebugArchivesDownload:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get(f'/api/debug/archives/{name}')
+            resp = await c.get(f'/api/v1/debug/archives/{name}')
 
         assert resp.status_code == 200
         assert resp.content == b'gzip-bytes'
@@ -865,7 +820,7 @@ class TestDebugArchivesDownload:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/archives/not-a-valid-archive-name.db.gz')
+            resp = await c.get('/api/v1/debug/archives/not-a-valid-archive-name.db.gz')
         assert resp.status_code == 404
 
     async def test_download_traversal_attempt_returns_404(self, tmp_path, mock_recorder, mock_app):
@@ -880,8 +835,12 @@ class TestDebugArchivesDownload:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/archives/../db.gz')
-        assert resp.status_code == 404
+            resp = await c.get('/api/v1/debug/archives/../db.gz')
+
+        # Normalised away by the client before it is sent, so no archive
+        # route sees it — the file outside db_dir must not come back.
+        assert resp.status_code != 200
+        assert b'secret' not in resp.content
 
     async def test_download_missing_file_returns_404(self, tmp_path, mock_recorder, mock_app):
         end = datetime(2026, 8, 9, 0, 0, 0, tzinfo=UTC).timestamp()
@@ -891,52 +850,13 @@ class TestDebugArchivesDownload:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get(f'/api/debug/archives/{name}')
+            resp = await c.get(f'/api/v1/debug/archives/{name}')
         assert resp.status_code == 404
 
 
 # ---------------------------------------------------------------------------
 # Existing coverage: HTML pages, WebSocket, sinks, workers
 # ---------------------------------------------------------------------------
-
-
-async def test_dashboard_returns_200(client):
-    resp = await client.get('/')
-    assert resp.status_code == 200
-    assert 'Drakkar' in resp.text
-    assert 'test-worker' in resp.text
-
-
-async def test_dashboard_shows_stats(client):
-    resp = await client.get('/')
-    assert '42' in resp.text  # total_events
-    assert '20' in resp.text  # consumed
-    assert '2 / 8' in resp.text  # pool usage
-
-
-async def test_partitions_page(client):
-    resp = await client.get('/partitions')
-    assert resp.status_code == 200
-    assert 'Partitions' in resp.text
-
-
-async def test_partition_detail_page(client):
-    resp = await client.get('/partitions/0')
-    assert resp.status_code == 200
-    assert 'Partition 0' in resp.text
-    assert 'consumed' in resp.text
-
-
-async def test_partition_detail_pagination(client):
-    resp = await client.get('/partitions/0?page=1')
-    assert resp.status_code == 200
-
-
-async def test_live_page(client):
-    resp = await client.get('/live')
-    assert resp.status_code == 200
-    assert 'Live Pipeline' in resp.text
-    assert '2 / 8' in resp.text
 
 
 @pytest.mark.parametrize('path', ['/', '/partitions', '/sinks', '/live', '/history', '/debug'])
@@ -960,74 +880,10 @@ async def test_shared_helper_is_defined_before_it_is_called(client, path, helper
 
 
 async def test_debug_trace_api(client):
-    resp = await client.get('/api/debug/trace?partition=0&offset=42')
+    resp = await client.get('/api/v1/debug/trace?partition=0&offset=42')
     assert resp.status_code == 200
     data = resp.json()
     assert isinstance(data, list)
-
-
-async def test_history_page(client):
-    resp = await client.get('/history')
-    assert resp.status_code == 200
-    assert 'Event History' in resp.text
-
-
-async def test_history_with_filters(client):
-    resp = await client.get('/history?partition=0&event_type=consumed')
-    assert resp.status_code == 200
-
-
-async def test_history_pagination(client):
-    resp = await client.get('/history?page=2')
-    assert resp.status_code == 200
-
-
-async def test_dashboard_no_partitions(client, mock_recorder):
-    mock_recorder.get_stats.return_value = {'total_events': 0}
-    resp = await client.get('/')
-    assert resp.status_code == 200
-
-
-async def test_partitions_page_with_live_processors(debug_config, mock_recorder, mock_app):
-    """Partitions page enriches data with live processor state."""
-    proc = MagicMock()
-    proc.queue_size = 5
-    proc.offset_tracker.pending_count = 3
-    mock_app.processors = {0: proc}
-
-    fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
-    transport = ASGITransport(app=fastapi_app)
-    async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/partitions')
-    assert resp.status_code == 200
-
-
-async def test_live_page_has_tabs_and_ws(debug_config, mock_recorder, mock_app):
-    """Live page has tab panels, JS targets, and WebSocket code.
-
-    The three completion-hook tabs (task/message/window results) render
-    conditionally based on hook_flags; mock_app's MagicMock handler
-    auto-reports all three as "implemented" (class-level getattr returns
-    ``None`` which is not identical to the base class's method), so the
-    default context renders all three — this test verifies the full set.
-    """
-    fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
-    transport = ASGITransport(app=fastapi_app)
-    async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/live')
-    assert resp.status_code == 200
-    # Always-on tabs
-    assert 'panel-arrange' in resp.text
-    assert 'panel-execute' in resp.text
-    # Old Collect tab was removed — replaced by completion-hook tabs
-    assert 'panel-collect' not in resp.text
-    # Completion-hook tabs (visible because mock handler appears to
-    # override all three — see docstring)
-    assert 'panel-task-results' in resp.text
-    assert 'panel-message-results' in resp.text
-    assert 'panel-window-results' in resp.text
-    assert 'allTasks' in resp.text
-    assert '/ws' in resp.text
 
 
 # --- WebSocket tests ---
@@ -1196,7 +1052,7 @@ async def test_arrange_tasks_empty_ids_returns_empty_map(mock_recorder, mock_app
     fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.post('/api/live/arrange-tasks', json={'task_ids': []})
+        resp = await c.post('/api/v1/live/arrange-tasks', json={'task_ids': []})
     assert resp.status_code == 200
     assert resp.json() == {}
 
@@ -1217,7 +1073,7 @@ async def test_arrange_tasks_returns_running_state(tmp_path, mock_app, debug_con
         fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.post('/api/live/arrange-tasks', json={'task_ids': ['rg-running-1']})
+            resp = await c.post('/api/v1/live/arrange-tasks', json={'task_ids': ['rg-running-1']})
         body = resp.json()
         assert 'rg-running-1' in body
         t = body['rg-running-1']
@@ -1250,7 +1106,7 @@ async def test_arrange_tasks_returns_completed_state(tmp_path, mock_app, debug_c
         fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.post('/api/live/arrange-tasks', json={'task_ids': ['rg-done-1']})
+            resp = await c.post('/api/v1/live/arrange-tasks', json={'task_ids': ['rg-done-1']})
         body = resp.json()
         t = body['rg-done-1']
         assert t['status'] == 'completed'
@@ -1282,7 +1138,7 @@ async def test_arrange_tasks_returns_failed_state(tmp_path, mock_app, debug_conf
         fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.post('/api/live/arrange-tasks', json={'task_ids': ['rg-fail-1']})
+            resp = await c.post('/api/v1/live/arrange-tasks', json={'task_ids': ['rg-fail-1']})
         body = resp.json()
         t = body['rg-fail-1']
         assert t['status'] == 'failed'
@@ -1300,7 +1156,7 @@ async def test_arrange_tasks_unknown_id_absent_from_response(tmp_path, mock_app,
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post(
-                '/api/live/arrange-tasks',
+                '/api/v1/live/arrange-tasks',
                 json={'task_ids': ['never-recorded-1', 'never-recorded-2']},
             )
         assert resp.status_code == 200
@@ -1336,7 +1192,7 @@ async def test_arrange_tasks_batch_lookup_mixed_states(tmp_path, mock_app, debug
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post(
-                '/api/live/arrange-tasks',
+                '/api/v1/live/arrange-tasks',
                 json={
                     'task_ids': ['rg-mix-running', 'rg-mix-ok', 'rg-mix-fail', 'rg-mix-missing'],
                 },
@@ -1377,7 +1233,7 @@ async def test_task_results_returns_latest_n(tmp_path, mock_app, debug_config):
         fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/live/task-results?limit=10')
+            resp = await c.get('/api/v1/live/task-results?limit=10')
         body = resp.json()
         assert isinstance(body, list)
         assert len(body) == 1
@@ -1415,7 +1271,7 @@ async def test_task_results_missing_exec_pair_surfaces_null_status(
         fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/live/task-results')
+            resp = await c.get('/api/v1/live/task-results')
         body = resp.json()
         assert len(body) == 1
         assert body[0]['status'] is None
@@ -1442,7 +1298,7 @@ async def test_message_results_returns_latest_n(tmp_path, mock_app, debug_config
         fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/live/message-results')
+            resp = await c.get('/api/v1/live/message-results')
         body = resp.json()
         assert len(body) == 1
         row = body[0]
@@ -1492,7 +1348,7 @@ async def test_message_results_end_to_end_duration_paired_from_consumed(
         fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/live/message-results')
+            resp = await c.get('/api/v1/live/message-results')
         body = resp.json()
         assert len(body) == 1
         row = body[0]
@@ -1536,7 +1392,7 @@ async def test_message_results_end_to_end_picks_most_recent_prior_consumed(
         fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/live/message-results')
+            resp = await c.get('/api/v1/live/message-results')
         body = resp.json()
         row = body[0]
         # If pairing picked the oldest consumed it would report 5.25s.
@@ -1560,7 +1416,7 @@ async def test_window_results_returns_latest_n(tmp_path, mock_app, debug_config)
         fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/live/window-results')
+            resp = await c.get('/api/v1/live/window-results')
         body = resp.json()
         assert len(body) == 1
         row = body[0]
@@ -1581,9 +1437,9 @@ async def test_completion_endpoints_empty_when_no_events(tmp_path, mock_app, deb
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             for url in (
-                '/api/live/task-results',
-                '/api/live/message-results',
-                '/api/live/window-results',
+                '/api/v1/live/task-results',
+                '/api/v1/live/message-results',
+                '/api/v1/live/window-results',
             ):
                 resp = await c.get(url)
                 assert resp.status_code == 200, url
@@ -1610,7 +1466,7 @@ async def test_completion_endpoints_ordered_desc_and_limited(tmp_path, mock_app,
         fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/live/message-results?limit=3')
+            resp = await c.get('/api/v1/live/message-results?limit=3')
         body = resp.json()
         assert len(body) == 3
         # Newest first — offsets 4, 3, 2
@@ -1663,7 +1519,7 @@ async def test_sink_breakdown_groups_by_output_topic(tmp_path, mock_app, debug_c
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post(
-                '/api/live/sink-breakdown',
+                '/api/v1/live/sink-breakdown',
                 json={'partition': 7, 'offsets': [10, 11]},
             )
         body = resp.json()
@@ -1683,7 +1539,7 @@ async def test_sink_breakdown_empty_offsets_returns_empty_map(
         fastapi_app = create_ui_app(debug_config, rec, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.post('/api/live/sink-breakdown', json={'partition': 0, 'offsets': []})
+            resp = await c.post('/api/v1/live/sink-breakdown', json={'partition': 0, 'offsets': []})
         assert resp.status_code == 200
         assert resp.json() == {}
     finally:
@@ -1733,37 +1589,6 @@ def test_hook_flags_detects_overrides():
 # --- Sinks page and API ---
 
 
-async def test_sinks_page_returns_200(client):
-    resp = await client.get('/sinks')
-    assert resp.status_code == 200
-    assert 'Sinks' in resp.text
-
-
-async def test_sinks_page_shows_configured_sinks(client):
-    resp = await client.get('/sinks')
-    assert 'kafka' in resp.text
-    assert 'results' in resp.text
-    assert 'postgres' in resp.text
-    assert 'main-db' in resp.text
-
-
-async def test_sinks_page_shows_stats(client):
-    resp = await client.get('/sinks')
-    assert '100' in resp.text  # delivered_count
-    assert '250' in resp.text  # delivered_payloads
-
-
-async def test_sinks_page_shows_errors(client):
-    resp = await client.get('/sinks')
-    assert '2' in resp.text
-
-
-async def test_sinks_nav_link(client):
-    """Sinks link appears in the navigation bar."""
-    resp = await client.get('/')
-    assert 'href="/sinks"' in resp.text
-
-
 # --- Workers autodiscovery API ---
 
 
@@ -1772,7 +1597,7 @@ async def test_api_workers_includes_current(client, mock_recorder):
     mock_recorder.discover_workers.return_value = [
         {'worker_name': 'worker-2', 'ip_address': '10.0.0.2', 'debug_port': 8080},
     ]
-    resp = await client.get('/api/workers')
+    resp = await client.get('/api/v1/workers')
     assert resp.status_code == 200
     data = resp.json()
     assert len(data) == 2
@@ -1784,7 +1609,7 @@ async def test_api_workers_includes_current(client, mock_recorder):
 async def test_api_workers_only_self_when_no_others(client, mock_recorder):
     """Even with no discovered workers, current worker appears."""
     mock_recorder.discover_workers.return_value = []
-    resp = await client.get('/api/workers')
+    resp = await client.get('/api/v1/workers')
     assert resp.status_code == 200
     data = resp.json()
     assert len(data) == 1
@@ -1797,7 +1622,7 @@ async def test_api_workers_uses_debug_url(client, mock_recorder):
     mock_recorder.discover_workers.return_value = [
         {'worker_name': 'w-1', 'ip_address': '10.0.0.2', 'debug_port': 8080, 'debug_url': 'http://localhost:8081/'},
     ]
-    resp = await client.get('/api/workers')
+    resp = await client.get('/api/v1/workers')
     data = resp.json()
     w1 = next(w for w in data if w['worker_name'] == 'w-1')
     assert w1['url'] == 'http://localhost:8081/'
@@ -1808,7 +1633,7 @@ async def test_api_workers_falls_back_to_ip_port(client, mock_recorder):
     mock_recorder.discover_workers.return_value = [
         {'worker_name': 'w-1', 'ip_address': '10.0.0.5', 'debug_port': 9090, 'debug_url': None},
     ]
-    resp = await client.get('/api/workers')
+    resp = await client.get('/api/v1/workers')
     data = resp.json()
     w1 = next(w for w in data if w['worker_name'] == 'w-1')
     assert w1['url'] == 'http://10.0.0.5:9090/'
@@ -1823,7 +1648,7 @@ async def test_api_workers_grouped_by_cluster(client, mock_recorder, mock_app):
         {'worker_name': 'w-lone', 'ip_address': '10.0.0.9', 'debug_port': 8080, 'cluster_name': None},
         {'worker_name': 'w-2', 'ip_address': '10.0.0.2', 'debug_port': 8080, 'cluster_name': 'alpha'},
     ]
-    resp = await client.get('/api/workers')
+    resp = await client.get('/api/v1/workers')
     data = resp.json()
     names = [w['worker_name'] for w in data]
     clusters = [w['cluster'] for w in data]
@@ -1838,7 +1663,7 @@ async def test_api_workers_unclustered_at_end(client, mock_recorder, mock_app):
         {'worker_name': 'z-worker', 'ip_address': '10.0.0.1', 'debug_port': 8080, 'cluster_name': None},
         {'worker_name': 'a-worker', 'ip_address': '10.0.0.2', 'debug_port': 8080, 'cluster_name': 'prod'},
     ]
-    resp = await client.get('/api/workers')
+    resp = await client.get('/api/v1/workers')
     data = resp.json()
     names = [w['worker_name'] for w in data]
     assert names == ['a-worker', 'test-worker', 'z-worker']
@@ -1848,7 +1673,7 @@ async def test_api_workers_current_worker_always_online(client, mock_recorder):
     """The current worker reports online=True with last_seen_ts = now."""
     mock_recorder.discover_workers.return_value = []
     before = time.time()
-    resp = await client.get('/api/workers')
+    resp = await client.get('/api/v1/workers')
     after = time.time()
     me = resp.json()[0]
     assert me['is_current'] is True
@@ -1874,7 +1699,7 @@ async def test_api_workers_passes_through_peer_liveness_fields(client, mock_reco
             'online': True,
         },
     ]
-    resp = await client.get('/api/workers')
+    resp = await client.get('/api/v1/workers')
     data = {w['worker_name']: w for w in resp.json()}
     assert data['w-crashed']['online'] is False
     assert data['w-crashed']['last_seen_ts'] is None
@@ -1895,13 +1720,6 @@ async def debug_client(tmp_path, mock_recorder, mock_app):
         yield c
 
 
-async def test_debug_page_returns_200(debug_client):
-    resp = await debug_client.get('/debug')
-    assert resp.status_code == 200
-    assert 'Message Trace' in resp.text
-    assert 'Databases' in resp.text
-
-
 async def test_api_debug_databases_skips_symlinks(tmp_path, mock_recorder, mock_app):
     import sqlite3
 
@@ -1918,7 +1736,7 @@ async def test_api_debug_databases_skips_symlinks(tmp_path, mock_recorder, mock_
     fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/api/debug/databases')
+        resp = await c.get('/api/v1/debug/databases')
 
     data = resp.json()
     filenames = [d['filename'] for d in data]
@@ -1957,7 +1775,7 @@ async def test_api_debug_merge(tmp_path, mock_recorder, mock_app):
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post(
-            '/api/debug/merge',
+            '/api/v1/debug/merge',
             json={'filenames': ['w1.db', 'w2.db']},
         )
 
@@ -1972,7 +1790,7 @@ async def test_api_debug_merge(tmp_path, mock_recorder, mock_app):
 
 async def test_api_debug_merge_rejects_single_file(debug_client):
     resp = await debug_client.post(
-        '/api/debug/merge',
+        '/api/v1/debug/merge',
         json={'filenames': ['only-one.db']},
     )
     assert resp.status_code == 400
@@ -1980,7 +1798,7 @@ async def test_api_debug_merge_rejects_single_file(debug_client):
 
 async def test_api_debug_merge_rejects_traversal(debug_client):
     resp = await debug_client.post(
-        '/api/debug/merge',
+        '/api/v1/debug/merge',
         json={'filenames': ['../etc/passwd', 'a.db']},
     )
     assert resp.status_code == 400
@@ -1996,29 +1814,27 @@ class TestGetSinkUiLinksEmpty:
 
     async def test_no_sink_manager_returns_no_links(self, debug_config, mock_recorder, mock_app):
         mock_app.sink_manager = None
-        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/')
-        assert resp.status_code == 200
+        deps = UIDeps(config=debug_config, recorder=mock_recorder, drakkar_app=mock_app)
+
+        assert deps.get_sink_ui_links() == []
 
 
 class TestGetSinkUiLinksWithUrls:
     """Cover _get_sink_ui_links filtering/deduplication (lines 91-92)."""
 
-    async def test_sinks_with_ui_url_appear_in_nav(self, debug_config, mock_recorder, mock_app):
+    async def test_sinks_sharing_a_ui_url_are_deduplicated(self, debug_config, mock_recorder, mock_app):
+        """Two Kafka sinks pointing at one Kafka-UI must produce one link."""
         sink_mgr = mock_app.sink_manager
         sink_mgr.get_sink_info.return_value = [
             {'sink_type': 'kafka', 'name': 'results', 'ui_url': 'http://kafka-ui:8080'},
             {'sink_type': 'kafka', 'name': 'results2', 'ui_url': 'http://kafka-ui:8080'},
             {'sink_type': 'postgres', 'name': 'main-db'},
         ]
-        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/')
-        assert resp.status_code == 200
-        assert 'http://kafka-ui:8080' in resp.text
+        deps = UIDeps(config=debug_config, recorder=mock_recorder, drakkar_app=mock_app)
+
+        links = deps.get_sink_ui_links()
+
+        assert [link['ui_url'] for link in links] == ['http://kafka-ui:8080']
 
 
 class TestGetLagWithConsumer:
@@ -2039,7 +1855,7 @@ class TestGetLagWithConsumer:
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/partitions')
+            resp = await c.get('/api/v1/partitions')
         assert resp.status_code == 200
         consumer.get_partition_lag.assert_awaited_once()
 
@@ -2056,7 +1872,7 @@ class TestGetLagWithConsumer:
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/partitions')
+            resp = await c.get('/api/v1/partitions')
         assert resp.status_code == 200
 
 
@@ -2074,9 +1890,10 @@ class TestDashboardTotalLag:
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/')
+            resp = await c.get('/api/v1/dashboard')
+
         assert resp.status_code == 200
-        assert '1234' in resp.text or '1,234' in resp.text
+        assert resp.json()['total_lag'] == 1234
 
     async def test_dashboard_total_lag_exception_shows_zero(self, debug_config, mock_recorder, mock_app):
         consumer = AsyncMock()
@@ -2089,212 +1906,10 @@ class TestDashboardTotalLag:
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/')
+            resp = await c.get('/api/v1/dashboard')
+
         assert resp.status_code == 200
-
-
-class TestDashboardCustomLinks:
-    """Cover custom_links template expansion (lines 268-278)."""
-
-    async def test_custom_links_rendered(self, mock_recorder, mock_app):
-        cfg = make_ui_config(
-            enabled=True,
-            port=8080,
-            db_dir='/tmp',
-            custom_links=[
-                {'name': 'Grafana', 'url': 'http://grafana/{worker_id}'},
-                {'name': 'Logs', 'url': 'http://logs/{cluster_name}'},
-            ],
-        )
-        mock_app._worker_id = 'worker-7'
-        mock_app._cluster_name = 'prod'
-
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/')
-        assert resp.status_code == 200
-        assert 'http://grafana/worker-7' in resp.text
-        assert 'http://logs/prod' in resp.text
-
-
-class TestLivePageWithTasks:
-    """Cover live page task processing (lines 350, 357-367, 383-384)."""
-
-    async def test_live_page_with_active_and_pending_tasks(self, debug_config, mock_recorder, mock_app):
-        pending_task = MagicMock()
-        pending_task.args = '["--fast"]'
-        pending_task.source_offsets = [10, 11]
-
-        proc = MagicMock()
-        proc.partition_id = 0
-        proc._pending_tasks = {'task-active-1': pending_task, 'task-pending-1': pending_task}
-        proc._arranging = False
-        proc._active_tasks = []
-
-        mock_app.processors = {0: proc}
-        mock_app._executor_pool.running_task_ids = {'task-active-1'}
-
-        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/live')
-        assert resp.status_code == 200
-        assert 'Live Pipeline' in resp.text
-
-    async def test_live_page_with_arranging_processor(self, debug_config, mock_recorder, mock_app):
-        now = time.time()
-
-        proc = MagicMock()
-        proc.partition_id = 0
-        proc._pending_tasks = {}
-        proc._arranging = True
-        proc._arrange_start = now - 2.5
-        proc._arrange_labels = ['label-a', 'label-b']
-        proc._active_tasks = []
-
-        mock_app.processors = {0: proc}
-
-        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/live')
-        assert resp.status_code == 200
-        assert 'Arrange' in resp.text
-
-
-class TestTaskDetailPage:
-    """Cover /task/{task_id} page (lines 412-437)."""
-
-    async def test_task_detail_with_events(self, debug_config, mock_recorder, mock_app):
-        now = time.time()
-        mock_recorder.get_task_events.return_value = [
-            {
-                'id': 1,
-                'ts': now - 10,
-                'event': 'task_started',
-                'partition': 0,
-                'offset': None,
-                'task_id': 'task-abc',
-                'args': '["--input", "f.txt"]',
-                'stdout_size': 0,
-                'stdout': None,
-                'stderr': None,
-                'exit_code': None,
-                'duration': None,
-                'output_topic': None,
-                'pid': 1234,
-                'metadata': json.dumps({'source_offsets': [10, 11], 'slot': 2}),
-            },
-            {
-                'id': 2,
-                'ts': now - 5,
-                'event': 'task_completed',
-                'partition': 0,
-                'offset': None,
-                'task_id': 'task-abc',
-                'args': None,
-                'stdout_size': 512,
-                'stdout': 'output data',
-                'stderr': None,
-                'exit_code': 0,
-                'duration': 5.0,
-                'output_topic': None,
-                'pid': 1234,
-                'metadata': None,
-            },
-        ]
-
-        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/task/task-abc')
-        assert resp.status_code == 200
-        assert 'task-abc' in resp.text
-        assert '5.0' in resp.text or '5.00' in resp.text
-
-    async def test_task_detail_retry_key_strips_suffix(self, debug_config, mock_recorder, mock_app):
-        mock_recorder.get_task_events.return_value = []
-
-        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/task/task-abc:r1234567.89')
-        assert resp.status_code == 200
-        mock_recorder.get_task_events.assert_awaited_with('task-abc')
-
-    async def test_task_detail_no_started_event(self, debug_config, mock_recorder, mock_app):
-        now = time.time()
-        mock_recorder.get_task_events.return_value = [
-            {
-                'id': 1,
-                'ts': now - 5,
-                'event': 'task_failed',
-                'partition': 0,
-                'offset': None,
-                'task_id': 'task-xyz',
-                'args': None,
-                'stdout_size': 0,
-                'stdout': None,
-                'stderr': 'error msg',
-                'exit_code': 1,
-                'duration': None,
-                'output_topic': None,
-                'pid': 5678,
-                'metadata': None,
-            },
-        ]
-
-        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/task/task-xyz')
-        assert resp.status_code == 200
-
-    async def test_task_detail_duration_computed_from_timestamps(self, debug_config, mock_recorder, mock_app):
-        now = time.time()
-        mock_recorder.get_task_events.return_value = [
-            {
-                'id': 1,
-                'ts': now - 10,
-                'event': 'task_started',
-                'partition': 0,
-                'offset': None,
-                'task_id': 'task-dur',
-                'args': None,
-                'stdout_size': 0,
-                'stdout': None,
-                'stderr': None,
-                'exit_code': None,
-                'duration': None,
-                'output_topic': None,
-                'pid': None,
-                'metadata': None,
-            },
-            {
-                'id': 2,
-                'ts': now - 3,
-                'event': 'task_completed',
-                'partition': 0,
-                'offset': None,
-                'task_id': 'task-dur',
-                'args': None,
-                'stdout_size': 0,
-                'stdout': None,
-                'stderr': None,
-                'exit_code': 0,
-                'duration': None,
-                'output_topic': None,
-                'pid': None,
-                'metadata': None,
-            },
-        ]
-
-        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/task/task-dur')
-        assert resp.status_code == 200
+        assert resp.json()['total_lag'] == 0, 'a lag lookup failure reports zero, not an error'
 
 
 class TestMergeEndpointDotPrefixed:
@@ -2306,7 +1921,7 @@ class TestMergeEndpointDotPrefixed:
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post(
-                '/api/debug/merge',
+                '/api/v1/debug/merge',
                 json={'filenames': ['.hidden.db', 'normal.db']},
             )
         assert resp.status_code == 400
@@ -2324,7 +1939,7 @@ class TestMergeEndpointFileNotFound:
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post(
-                '/api/debug/merge',
+                '/api/v1/debug/merge',
                 json={'filenames': ['exists.db', 'missing.db']},
             )
         assert resp.status_code == 404
@@ -2338,7 +1953,7 @@ class TestApiDebugMetrics:
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/metrics')
+            resp = await c.get('/api/v1/debug/metrics')
         assert resp.status_code == 200
         data = resp.json()
         assert isinstance(data, list)
@@ -2364,7 +1979,7 @@ class TestDownloadRealpathTraversal:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/debug/download/escape.db')
+            resp = await c.get('/api/v1/debug/download/escape.db')
         assert resp.status_code == 400
 
 
@@ -2379,7 +1994,7 @@ class TestDownloadDotPrefixed:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/debug/download/.secret.db')
+            resp = await c.get('/api/v1/debug/download/.secret.db')
         assert resp.status_code == 400
 
 
@@ -2422,7 +2037,7 @@ class TestApiEvents:
     async def test_events_no_filter(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_db(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/events')
+            resp = await c.get('/api/v1/events')
         assert resp.status_code == 200
         data = resp.json()
         assert len(data) == 5
@@ -2431,7 +2046,7 @@ class TestApiEvents:
     async def test_events_filter_by_partition(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_db(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/events?partitions=0')
+            resp = await c.get('/api/v1/events?partitions=0')
         assert resp.status_code == 200
         data = resp.json()
         assert all(e['partition'] == 0 for e in data)
@@ -2440,7 +2055,7 @@ class TestApiEvents:
     async def test_events_filter_by_event_type(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_db(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/events?event_types=consumed')
+            resp = await c.get('/api/v1/events?event_types=consumed')
         assert resp.status_code == 200
         data = resp.json()
         assert all(e['event'] == 'consumed' for e in data)
@@ -2449,7 +2064,7 @@ class TestApiEvents:
     async def test_events_filter_by_after_id(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_db(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/events?after_id=3')
+            resp = await c.get('/api/v1/events?after_id=3')
         assert resp.status_code == 200
         data = resp.json()
         assert all(e['id'] > 3 for e in data)
@@ -2464,7 +2079,7 @@ class TestApiEvents:
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/events')
+            resp = await c.get('/api/v1/events')
         assert resp.status_code == 200
         assert resp.json() == []
 
@@ -2549,7 +2164,7 @@ class TestApiRecentTasks:
     async def test_recent_tasks_returns_task_entries(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=5')
+            resp = await c.get('/api/v1/recent-tasks?minutes=5')
         assert resp.status_code == 200
         data = resp.json()
         assert 'tasks' in data
@@ -2562,7 +2177,7 @@ class TestApiRecentTasks:
     async def test_recent_tasks_completed_status(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=5')
+            resp = await c.get('/api/v1/recent-tasks?minutes=5')
         data = resp.json()
         tasks_by_id = {t['task_id']: t for t in data['tasks']}
         assert tasks_by_id['task-1']['status'] == 'completed'
@@ -2587,7 +2202,7 @@ class TestApiRecentTasks:
         await db.commit()
 
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=5')
+            resp = await c.get('/api/v1/recent-tasks?minutes=5')
 
         tasks_by_id = {t['task_id']: t for t in resp.json()['tasks']}
         assert tasks_by_id['task-5']['cost'] == 8388608.0
@@ -2598,7 +2213,7 @@ class TestApiRecentTasks:
     async def test_recent_tasks_running_status(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=5')
+            resp = await c.get('/api/v1/recent-tasks?minutes=5')
         data = resp.json()
         tasks_by_id = {t['task_id']: t for t in data['tasks']}
         assert tasks_by_id['task-2']['status'] == 'running'
@@ -2608,7 +2223,7 @@ class TestApiRecentTasks:
     async def test_recent_tasks_failed_status(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=5')
+            resp = await c.get('/api/v1/recent-tasks?minutes=5')
         data = resp.json()
         tasks_by_id = {t['task_id']: t for t in data['tasks']}
         assert tasks_by_id['task-4']['status'] == 'failed'
@@ -2617,7 +2232,7 @@ class TestApiRecentTasks:
     async def test_recent_tasks_retry_creates_archive_entry(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=5')
+            resp = await c.get('/api/v1/recent-tasks?minutes=5')
         data = resp.json()
         task_ids = [t['task_id'] for t in data['tasks']]
         # The retry should create an archived entry with :r prefix
@@ -2640,7 +2255,7 @@ class TestApiRecentTasks:
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/recent-tasks')
+            resp = await c.get('/api/v1/recent-tasks')
         assert resp.status_code == 200
         assert resp.json() == {
             'tasks': [],
@@ -2652,7 +2267,7 @@ class TestApiRecentTasks:
     async def test_recent_tasks_slot_extracted_from_metadata(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=5')
+            resp = await c.get('/api/v1/recent-tasks?minutes=5')
         data = resp.json()
         tasks_by_id = {t['task_id']: t for t in data['tasks']}
         assert tasks_by_id['task-1']['slot'] == 1
@@ -2661,7 +2276,7 @@ class TestApiRecentTasks:
     async def test_recent_tasks_stdout_size_present_on_completion(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=5')
+            resp = await c.get('/api/v1/recent-tasks?minutes=5')
         data = resp.json()
         tasks_by_id = {t['task_id']: t for t in data['tasks']}
         assert tasks_by_id['task-1']['stdout_size'] == 2048
@@ -2673,7 +2288,7 @@ class TestApiRecentTasks:
         handler must not surface that as a real byte count."""
         client, db = await self._make_client_with_task_events(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=5')
+            resp = await c.get('/api/v1/recent-tasks?minutes=5')
         data = resp.json()
         tasks_by_id = {t['task_id']: t for t in data['tasks']}
         assert tasks_by_id['task-4']['status'] == 'failed'
@@ -2735,7 +2350,7 @@ class TestApiRecentTasksDepthAndWindow:
         client, db = await self._make_client(tmp_path, mock_recorder, mock_app)
         await self._seed_sequential_tasks(db, 12)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=60&limit=5')
+            resp = await c.get('/api/v1/recent-tasks?minutes=60&limit=5')
         data = resp.json()
         assert {t['task_id'] for t in data['tasks']} == {f'task-{i}' for i in range(8, 13)}
         assert data['truncated'] is True
@@ -2745,7 +2360,7 @@ class TestApiRecentTasksDepthAndWindow:
         client, db = await self._make_client(tmp_path, mock_recorder, mock_app)
         await self._seed_sequential_tasks(db, 3)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=60&limit=5')
+            resp = await c.get('/api/v1/recent-tasks?minutes=60&limit=5')
         data = resp.json()
         assert len(data['tasks']) == 3
         assert data['truncated'] is False
@@ -2757,7 +2372,7 @@ class TestApiRecentTasksDepthAndWindow:
         client, db = await self._make_client(tmp_path, mock_recorder, mock_app, timeline=timeline, pool_present=False)
         await self._seed_sequential_tasks(db, 10)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=60')
+            resp = await c.get('/api/v1/recent-tasks?minutes=60')
         data = resp.json()
         assert len(data['tasks']) == 8
         assert {t['task_id'] for t in data['tasks']} == {f'task-{i}' for i in range(3, 11)}
@@ -2771,7 +2386,7 @@ class TestApiRecentTasksDepthAndWindow:
         client, db = await self._make_client(tmp_path, mock_recorder, mock_app, timeline=timeline)
         await self._seed_sequential_tasks(db, 10)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=60')
+            resp = await c.get('/api/v1/recent-tasks?minutes=60')
         data = resp.json()
         assert len(data['tasks']) == 6
         assert {t['task_id'] for t in data['tasks']} == {f'task-{i}' for i in range(5, 11)}
@@ -2794,7 +2409,7 @@ class TestApiRecentTasksDepthAndWindow:
         client, db = await self._make_client(tmp_path, mock_recorder, mock_app, timeline=timeline, pool_present=False)
         await self._seed_sequential_tasks(db, 3)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=60')
+            resp = await c.get('/api/v1/recent-tasks?minutes=60')
         assert resp.status_code == 200
         # The derived limit (1_000_000 x 8) must have been clamped to
         # RECENT_TASKS_MAX_LIMIT before becoming the query's row cap.
@@ -2807,14 +2422,14 @@ class TestApiRecentTasksDepthAndWindow:
     async def test_minutes_1440_is_accepted(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=1440')
+            resp = await c.get('/api/v1/recent-tasks?minutes=1440')
         assert resp.status_code == 200
         await db.close()
 
     async def test_minutes_above_1440_rejected(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=99999')
+            resp = await c.get('/api/v1/recent-tasks?minutes=99999')
         assert resp.status_code == 422
         await db.close()
 
@@ -2846,7 +2461,7 @@ class TestApiRecentTasksDepthAndWindow:
         )
         await db.commit()
         async with client as c:
-            resp = await c.get('/api/recent-tasks?minutes=120')
+            resp = await c.get('/api/v1/recent-tasks?minutes=120')
         data = resp.json()
         task_ids = {t['task_id'] for t in data['tasks']}
         assert 'recent-task' in task_ids
@@ -2868,7 +2483,7 @@ class TestApiDashboardWithConsumerLag:
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/dashboard')
+            resp = await c.get('/api/v1/dashboard')
         assert resp.status_code == 200
         data = resp.json()
         assert data['total_lag'] == 42
@@ -2901,7 +2516,7 @@ class TestProcessorDiagnosticsArrangeAndStuck:
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/processors')
+            resp = await c.get('/api/v1/debug/processors')
         assert resp.status_code == 200
         data = resp.json()
         p = data['processors']['0']
@@ -2944,7 +2559,7 @@ class TestProcessorDiagnosticsArrangeAndStuck:
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/processors')
+            resp = await c.get('/api/v1/debug/processors')
         assert resp.status_code == 200
         data = resp.json()
         p = data['processors']['0']
@@ -2952,89 +2567,6 @@ class TestProcessorDiagnosticsArrangeAndStuck:
         assert len(p['stuck_tasks']) == 1
         assert p['stuck_tasks'][0]['name'] == 'stuck-task-1'
         assert '/app/worker.py:42 in process_message' in p['stuck_tasks'][0]['stack'][0]
-
-
-class TestDebugPage:
-    """Cover debug page with config_summary."""
-
-    async def test_debug_page_shows_config_summary(self, tmp_path, mock_recorder, mock_app):
-        mock_app.config_summary = 'worker=test-worker topic=events group=drakkar'
-        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/debug')
-        assert resp.status_code == 200
-        assert 'worker=test-worker' in resp.text
-
-    async def test_probe_tab_rendered_in_debug_html(self, tmp_path, mock_recorder, mock_app):
-        """``GET /debug`` → HTML includes the Message Probe tab button, panel,
-        the visible header, the results container id, AND the rendering
-        helpers (``renderProbeReport`` + section markers).
-        Keeps the UI work honest without depending on a JS test stack — the
-        endpoint behavior itself is covered by the probe endpoint tests above.
-        """
-        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/debug')
-        assert resp.status_code == 200
-        html = resp.text
-        # Tab button + panel pair keep the tab switcher working.
-        assert 'data-tab="probe"' in html
-        assert 'data-tab-panel="probe"' in html
-        # Visible header + results container id — anchors for later task
-        # rendering.
-        assert 'Message Probe' in html
-        assert 'probe-result' in html
-        # Rendering helpers must be present so the client can turn
-        # a DebugReport into A/B/C cards. These are inline-script markers,
-        # so a substring check is enough to prove the functions were
-        # injected.
-        assert 'renderProbeReport' in html
-        assert 'renderProbeSectionInput' in html
-        assert 'renderProbeSectionArrange' in html
-        assert 'renderProbeSectionTasks' in html
-        # Section wrapper ids are used by the tests and also by future
-        # Task-8 cross-linking (replacement_for / retry_of scroll targets).
-        assert 'probe-section-input' in html
-        assert 'probe-section-arrange' in html
-        assert 'probe-section-tasks' in html
-        # The right-side task-detail sidebar and its helpers.
-        # The sidebar container is rendered once in the probe tab panel.
-        assert 'id="probe-task-sidebar"' in html
-        # openTaskSidebar is the real (non-stub) implementation — its name
-        # is referenced both by the row onclick and by the scroll-to-row
-        # helper.
-        assert 'openTaskSidebar' in html
-        # ESC-close marker: a document-level keydown listener that dismisses
-        # the sidebar. The function name is the simplest stable marker.
-        assert 'closeTaskSidebar' in html
-        # Section helpers and wrapper ids for on_message_complete /
-        # on_window_complete / Planned sink outputs. Presence of the
-        # function names proves the helpers were injected; the section ids
-        # prove ``renderProbeReport`` wires them in.
-        assert 'renderProbeSectionOnMessageComplete' in html
-        assert 'renderProbeSectionOnWindowComplete' in html
-        assert 'renderProbeSectionSinks' in html
-        assert 'probe-section-message-complete' in html
-        assert 'probe-section-window-complete' in html
-        assert 'probe-section-sinks' in html
-        # Cache calls / Timeline / Errors sections + the toolbar +
-        # the input-form chip polish. All surfaces are script-injected so a
-        # substring check is enough — the endpoint behavior is covered by
-        # the probe endpoint tests below.
-        assert 'renderProbeSectionCacheCalls' in html
-        assert 'renderProbeSectionTimeline' in html
-        assert 'renderProbeSectionErrors' in html
-        assert 'renderProbeToolbar' in html
-        assert 'probe-section-cache-calls' in html
-        assert 'probe-section-timeline' in html
-        assert 'probe-section-errors' in html
-        assert 'probe-result-toolbar' in html
-        assert 'collapseProbeFormToChip' in html
-        assert 'probe-form-chip' in html
 
 
 class TestUIServerClass:
@@ -3161,100 +2693,6 @@ class TestUIServerClass:
 # ---------------------------------------------------------------------------
 
 
-class TestTaskDetailEdgeCases:
-    """Cover JSON decode exception paths in task_detail (lines 428-429, 434-435)."""
-
-    async def test_task_detail_invalid_metadata_json(self, debug_config, mock_recorder, mock_app):
-        now = time.time()
-        mock_recorder.get_task_events.return_value = [
-            {
-                'id': 1,
-                'ts': now - 10,
-                'event': 'task_started',
-                'partition': 0,
-                'offset': None,
-                'task_id': 'task-bad-meta',
-                'args': '["ok"]',
-                'stdout_size': 0,
-                'stdout': None,
-                'stderr': None,
-                'exit_code': None,
-                'duration': None,
-                'output_topic': None,
-                'pid': None,
-                'metadata': 'not-valid-json{{{',
-            },
-            {
-                'id': 2,
-                'ts': now - 5,
-                'event': 'task_completed',
-                'partition': 0,
-                'offset': None,
-                'task_id': 'task-bad-meta',
-                'args': None,
-                'stdout_size': 0,
-                'stdout': None,
-                'stderr': None,
-                'exit_code': 0,
-                'duration': 5.0,
-                'output_topic': None,
-                'pid': None,
-                'metadata': None,
-            },
-        ]
-
-        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/task/task-bad-meta')
-        assert resp.status_code == 200
-
-    async def test_task_detail_invalid_args_json(self, debug_config, mock_recorder, mock_app):
-        now = time.time()
-        mock_recorder.get_task_events.return_value = [
-            {
-                'id': 1,
-                'ts': now - 10,
-                'event': 'task_started',
-                'partition': 0,
-                'offset': None,
-                'task_id': 'task-bad-args',
-                'args': 'not-json!!!',
-                'stdout_size': 0,
-                'stdout': None,
-                'stderr': None,
-                'exit_code': None,
-                'duration': None,
-                'output_topic': None,
-                'pid': None,
-                'metadata': None,
-            },
-            {
-                'id': 2,
-                'ts': now - 5,
-                'event': 'task_completed',
-                'partition': 0,
-                'offset': None,
-                'task_id': 'task-bad-args',
-                'args': None,
-                'stdout_size': 0,
-                'stdout': None,
-                'stderr': None,
-                'exit_code': 0,
-                'duration': 5.0,
-                'output_topic': None,
-                'pid': None,
-                'metadata': None,
-            },
-        ]
-
-        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/task/task-bad-args')
-        assert resp.status_code == 200
-
-
 class TestApiRecentTasksEdgeCases:
     """Cover edge cases in api_recent_tasks (lines 697, 715-716)."""
 
@@ -3292,7 +2730,7 @@ class TestApiRecentTasksEdgeCases:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/recent-tasks?minutes=5')
+            resp = await c.get('/api/v1/recent-tasks?minutes=5')
         assert resp.status_code == 200
         data = resp.json()
         task_ids = [t['task_id'] for t in data['tasks']]
@@ -3327,7 +2765,7 @@ class TestApiRecentTasksEdgeCases:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/recent-tasks?minutes=5')
+            resp = await c.get('/api/v1/recent-tasks?minutes=5')
         assert resp.status_code == 200
         data = resp.json()
         tasks_by_id = {t['task_id']: t for t in data['tasks']}
@@ -3351,10 +2789,12 @@ class TestPrometheusWorkerLabel:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/')
+            resp = await c.get('/api/v1/dashboard')
+
         assert resp.status_code == 200
-        assert 'worker-42' in resp.text
-        assert 'http://prom:9090/graph' in resp.text
+        urls = ' '.join(_all_link_urls(resp.json()['links']))
+        assert 'worker-42' in urls, 'the {worker_id} placeholder must be expanded'
+        assert 'http://prom:9090/graph' in urls
 
 
 class TestApiDashboardLagException:
@@ -3371,7 +2811,7 @@ class TestApiDashboardLagException:
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/dashboard')
+            resp = await c.get('/api/v1/dashboard')
         assert resp.status_code == 200
         data = resp.json()
         assert data['total_lag'] == 0
@@ -3386,10 +2826,10 @@ class TestAuthToken:
     """Test auth_token protection on sensitive endpoints."""
 
     PROTECTED_ROUTES: typing.ClassVar[list[tuple[str, str]]] = [
-        ('GET', '/api/debug/databases'),
-        ('GET', '/debug/download/test.db'),
-        ('GET', '/api/debug/archives'),
-        ('GET', '/api/debug/archives/test-2026-08-08_00-00__2026-08-09_00-00.db.gz'),
+        ('GET', '/api/v1/debug/databases'),
+        ('GET', '/api/v1/debug/download/test.db'),
+        ('GET', '/api/v1/debug/archives'),
+        ('GET', '/api/v1/debug/archives/test-2026-08-08_00-00__2026-08-09_00-00.db.gz'),
     ]
 
     async def test_protected_routes_require_token(self, mock_recorder, mock_app):
@@ -3409,7 +2849,7 @@ class TestAuthToken:
         transport = ASGITransport(app=fastapi_app)
         headers = {'Authorization': 'Bearer secret-123'}
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/databases', headers=headers)
+            resp = await c.get('/api/v1/debug/databases', headers=headers)
             assert resp.status_code == 200
 
     async def test_protected_routes_accept_query_param(self, mock_recorder, mock_app):
@@ -3418,7 +2858,7 @@ class TestAuthToken:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/databases?token=secret-123')
+            resp = await c.get('/api/v1/debug/databases?token=secret-123')
             assert resp.status_code == 200
 
     async def test_archives_list_accepts_bearer_header(self, mock_recorder, mock_app):
@@ -3427,7 +2867,7 @@ class TestAuthToken:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/archives', headers={'Authorization': 'Bearer secret-123'})
+            resp = await c.get('/api/v1/debug/archives', headers={'Authorization': 'Bearer secret-123'})
             assert resp.status_code == 200
 
     async def test_archives_list_accepts_query_param(self, mock_recorder, mock_app):
@@ -3436,7 +2876,7 @@ class TestAuthToken:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/archives?token=secret-123')
+            resp = await c.get('/api/v1/debug/archives?token=secret-123')
             assert resp.status_code == 200
 
     async def test_wrong_token_returns_401(self, mock_recorder, mock_app):
@@ -3445,7 +2885,7 @@ class TestAuthToken:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/databases', headers={'Authorization': 'Bearer wrong'})
+            resp = await c.get('/api/v1/debug/databases', headers={'Authorization': 'Bearer wrong'})
             assert resp.status_code == 401
 
     async def test_no_auth_when_token_empty(self, mock_recorder, mock_app):
@@ -3454,12 +2894,17 @@ class TestAuthToken:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/databases')
+            resp = await c.get('/api/v1/debug/databases')
             assert resp.status_code == 200
 
     async def test_all_ui_routes_require_token_when_configured(self, mock_recorder, mock_app):
         """With auth_token set, every UI/API route is gated — only the
-        Kubernetes probes stay public."""
+        Kubernetes probes stay public.
+
+        The page paths reach the SPA catch-all, which carries the same
+        gate: without a token they must 401 rather than reveal whether a
+        bundle exists.
+        """
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='secret-123')
         mock_recorder.config = cfg
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
@@ -3469,7 +2914,7 @@ class TestAuthToken:
                 resp = await c.get(path)
                 assert resp.status_code == 401, f'{path} should require auth when token is set'
                 resp = await c.get(path, headers={'Authorization': 'Bearer secret-123'})
-                assert resp.status_code == 200, f'{path} should be accessible with the token'
+                assert resp.status_code != 401, f'{path} should be reachable with the token'
 
     async def test_probes_stay_public_with_token_configured(self, mock_recorder, mock_app):
         """/healthz and /readyz must remain unauthenticated — Kubernetes
@@ -3492,7 +2937,7 @@ class TestAuthToken:
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             for path in ['/', '/partitions', '/sinks', '/live', '/history', '/debug']:
                 resp = await c.get(path)
-                assert resp.status_code == 200, f'{path} should be open when no token is configured'
+                assert resp.status_code != 401, f'{path} should be open when no token is configured'
 
     async def test_merge_requires_token(self, tmp_path, mock_recorder, mock_app):
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), auth_token='secret-123')
@@ -3500,17 +2945,17 @@ class TestAuthToken:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.post('/api/debug/merge', json={'filenames': []})
+            resp = await c.post('/api/v1/debug/merge', json={'filenames': []})
             assert resp.status_code == 401
             resp = await c.post(
-                '/api/debug/merge',
+                '/api/v1/debug/merge',
                 json={'filenames': []},
                 headers={'Authorization': 'Bearer secret-123'},
             )
             assert resp.status_code != 401
 
     async def test_probe_requires_token(self, mock_recorder, _probe_mock_app):
-        """/api/debug/probe is sensitive — no auth → 401, with auth → 200.
+        """/api/v1/debug/probe is sensitive — no auth → 401, with auth → 200.
 
         Regression for code review phase 1 iteration 3 issue 1: the
         probe endpoint runs user handlers with a real executor-pool slot
@@ -3526,11 +2971,11 @@ class TestAuthToken:
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             # No auth header → 401.
-            resp = await c.post('/api/debug/probe', json={'value': 'x'})
+            resp = await c.post('/api/v1/debug/probe', json={'value': 'x'})
             assert resp.status_code == 401
             # Correct bearer token → 200.
             resp = await c.post(
-                '/api/debug/probe',
+                '/api/v1/debug/probe',
                 json={'value': 'x'},
                 headers={'Authorization': 'Bearer secret-123'},
             )
@@ -3543,7 +2988,7 @@ class TestAuthToken:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.post('/api/debug/merge', json={'filenames': ['a.db', 'b.db']})
+            resp = await c.post('/api/v1/debug/merge', json={'filenames': ['a.db', 'b.db']})
             assert resp.status_code == 403
             assert 'ui.merge_enabled' in resp.json()['error']
 
@@ -3560,7 +3005,7 @@ class TestAuthToken:
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post(
-                '/api/debug/merge',
+                '/api/v1/debug/merge',
                 content=b'not json at all',
                 headers={'Content-Type': 'application/json'},
             )
@@ -3574,7 +3019,7 @@ class TestAuthToken:
         fastapi_app = create_ui_app(cfg, mock_recorder, _probe_mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.post('/api/debug/probe', json={'value': 'x'})
+            resp = await c.post('/api/v1/debug/probe', json={'value': 'x'})
             assert resp.status_code == 403
             assert 'ui.probe_enabled' in resp.json()['error']
 
@@ -3592,7 +3037,7 @@ class TestAuthToken:
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post(
-                '/api/debug/probe',
+                '/api/v1/debug/probe',
                 json={'value': 'x'},
                 headers={'Authorization': 'Bearer secret-123'},
             )
@@ -3608,9 +3053,9 @@ class TestAuthToken:
         fastapi_app = create_ui_app(cfg, mock_recorder, _probe_mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            assert (await c.post('/api/debug/probe', json={'value': 'x'})).status_code == 200
+            assert (await c.post('/api/v1/debug/probe', json={'value': 'x'})).status_code == 200
             # Two non-existent files: past the gate, into ordinary validation.
-            resp = await c.post('/api/debug/merge', json={'filenames': ['a.db', 'b.db']})
+            resp = await c.post('/api/v1/debug/merge', json={'filenames': ['a.db', 'b.db']})
             assert resp.status_code == 404
 
     async def test_non_ascii_bearer_token_returns_401_not_500(self, mock_recorder, mock_app):
@@ -3639,7 +3084,7 @@ class TestAuthToken:
             # reaches starlette's header decoder as a raw byte sequence,
             # which then surfaces as a non-ASCII str in ``request.headers``.
             resp = await c.get(
-                '/api/debug/databases',
+                '/api/v1/debug/databases',
                 headers={'Authorization': b'Bearer t\xc3\xb4ken'},
             )
             assert resp.status_code == 401, f'non-ASCII bearer should 401, got {resp.status_code}'
@@ -3660,7 +3105,7 @@ class TestAuthToken:
             # on the *configured* (non-ASCII) operand; handler must map
             # that to 401 instead of 500.
             resp = await c.get(
-                '/api/debug/databases',
+                '/api/v1/debug/databases',
                 headers={'Authorization': 'Bearer secret-123'},
             )
             assert resp.status_code == 401, f'ASCII provided + bad config → 401, got {resp.status_code}'
@@ -3714,8 +3159,8 @@ class TestWebSocketAuth:
             transport = ASGITransport(app=fastapi_app)
             async with AsyncClient(transport=transport, base_url='http://test') as c:
                 # Positive case: valid token → 200. Bad-token case: 401.
-                ok = await c.get('/api/debug/databases', headers={'Authorization': 'Bearer secret-123'})
-                bad = await c.get('/api/debug/databases', headers={'Authorization': 'Bearer wrong'})
+                ok = await c.get('/api/v1/debug/databases', headers={'Authorization': 'Bearer secret-123'})
+                bad = await c.get('/api/v1/debug/databases', headers={'Authorization': 'Bearer wrong'})
                 return ok.status_code, bad.status_code
 
         ok_status, bad_status = asyncio.run(_call())
@@ -4048,7 +3493,7 @@ class TestApiPeriodicTasks:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/periodic')
+            resp = await c.get('/api/v1/debug/periodic')
         assert resp.status_code == 200
         assert resp.json() == []
         await db.close()
@@ -4091,7 +3536,7 @@ class TestApiPeriodicTasks:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/periodic')
+            resp = await c.get('/api/v1/debug/periodic')
         assert resp.status_code == 200
         data = resp.json()
         assert len(data) == 2
@@ -4186,7 +3631,7 @@ class TestApiLabelTrace:
     async def test_label_keys_returns_distinct_keys(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_labeled_events(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/debug/label-keys')
+            resp = await c.get('/api/v1/debug/label-keys')
         assert resp.status_code == 200
         keys = resp.json()
         assert 'request_id' in keys
@@ -4213,7 +3658,7 @@ class TestApiLabelTrace:
         fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/label-keys')
+            resp = await c.get('/api/v1/debug/label-keys')
         assert resp.status_code == 200
         assert resp.json() == []
         await db.close()
@@ -4221,7 +3666,7 @@ class TestApiLabelTrace:
     async def test_trace_by_label_finds_matching_events(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_labeled_events(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/debug/trace-by-label?key=request_id&value=req-123')
+            resp = await c.get('/api/v1/debug/trace-by-label?key=request_id&value=req-123')
         assert resp.status_code == 200
         events = resp.json()
         task_ids = {e['task_id'] for e in events}
@@ -4236,7 +3681,7 @@ class TestApiLabelTrace:
     async def test_trace_by_label_no_match_returns_empty(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_labeled_events(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/debug/trace-by-label?key=request_id&value=nonexistent')
+            resp = await c.get('/api/v1/debug/trace-by-label?key=request_id&value=nonexistent')
         assert resp.status_code == 200
         assert resp.json() == []
         await db.close()
@@ -4244,7 +3689,7 @@ class TestApiLabelTrace:
     async def test_trace_by_label_user_key(self, tmp_path, mock_recorder, mock_app):
         client, db = await self._make_client_with_labeled_events(tmp_path, mock_recorder, mock_app)
         async with client as c:
-            resp = await c.get('/api/debug/trace-by-label?key=user&value=bob')
+            resp = await c.get('/api/v1/debug/trace-by-label?key=user&value=bob')
         assert resp.status_code == 200
         events = resp.json()
         assert len(events) >= 1
@@ -4390,7 +3835,7 @@ async def test_probe_endpoint_valid_body_returns_report(mock_recorder, debug_con
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
         resp = await c.post(
-            '/api/debug/probe',
+            '/api/v1/debug/probe',
             json={'value': '{"hello": "world"}', 'key': 'k-1', 'partition': 3, 'offset': 42},
         )
     assert resp.status_code == 200
@@ -4423,7 +3868,7 @@ async def test_probe_endpoint_empty_body_returns_422(mock_recorder, debug_config
     fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.post('/api/debug/probe', json={})
+        resp = await c.post('/api/v1/debug/probe', json={})
     assert resp.status_code == 422
     # FastAPI's validation response includes a ``detail`` list with one
     # entry per missing/invalid field.
@@ -4444,8 +3889,8 @@ async def test_probe_endpoint_concurrent_calls_serialize(mock_recorder, debug_co
     fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp_a_coro = c.post('/api/debug/probe', json={'value': 'a', 'offset': 1})
-        resp_b_coro = c.post('/api/debug/probe', json={'value': 'b', 'offset': 2})
+        resp_a_coro = c.post('/api/v1/debug/probe', json={'value': 'a', 'offset': 1})
+        resp_b_coro = c.post('/api/v1/debug/probe', json={'value': 'b', 'offset': 2})
         resp_a, resp_b = await asyncio.gather(resp_a_coro, resp_b_coro)
     assert resp_a.status_code == 200
     assert resp_b.status_code == 200
@@ -4478,7 +3923,7 @@ async def test_probe_endpoint_use_cache_true_sees_seeded_value(mock_recorder, de
     fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.post('/api/debug/probe', json={'value': 'x', 'use_cache': True})
+        resp = await c.post('/api/v1/debug/probe', json={'value': 'x', 'use_cache': True})
     assert resp.status_code == 200
     assert observed['value'] == {'v': 1}
     # The cache_calls log should show a hit for the seeded key.
@@ -4509,7 +3954,7 @@ async def test_probe_endpoint_use_cache_false_sees_miss(mock_recorder, debug_con
     fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.post('/api/debug/probe', json={'value': 'x', 'use_cache': False})
+        resp = await c.post('/api/v1/debug/probe', json={'value': 'x', 'use_cache': False})
     assert resp.status_code == 200
     assert observed['value'] is None
     calls = resp.json()['cache_calls']
@@ -4549,7 +3994,7 @@ async def test_probe_endpoint_does_not_mutate_cache(mock_recorder, debug_config,
     fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.post('/api/debug/probe', json={'value': 'x'})
+        resp = await c.post('/api/v1/debug/probe', json={'value': 'x'})
     assert resp.status_code == 200
     # Same keys, same byte accumulator — proof that the two ``set``
     # calls inside the handler were suppressed by DebugCacheProxy.
@@ -4572,7 +4017,7 @@ async def test_probe_endpoint_handler_arrange_raises_returns_200_with_errors(
     fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.post('/api/debug/probe', json={'value': 'x'})
+        resp = await c.post('/api/v1/debug/probe', json={'value': 'x'})
     # Error is captured in the report, not bubbled as a 500.
     assert resp.status_code == 200
     body = resp.json()
@@ -4621,7 +4066,7 @@ async def test_probe_endpoint_timeout_returns_partial_report_with_truncated_true
     fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.post('/api/debug/probe', json={'value': 'x'})
+        resp = await c.post('/api/v1/debug/probe', json={'value': 'x'})
     assert resp.status_code == 200
     body = resp.json()
     assert body['truncated'] is True
@@ -4666,7 +4111,7 @@ async def test_probe_endpoint_timeout_partial_includes_sink_records_from_complet
     fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.post('/api/debug/probe', json={'value': 'x'})
+        resp = await c.post('/api/v1/debug/probe', json={'value': 'x'})
     assert resp.status_code == 200
     body = resp.json()
     assert body['truncated'] is True
@@ -4689,7 +4134,7 @@ async def test_probe_endpoint_empty_value_still_runs(mock_recorder, debug_config
     fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.post('/api/debug/probe', json={'value': ''})
+        resp = await c.post('/api/v1/debug/probe', json={'value': ''})
     assert resp.status_code == 200
     body = resp.json()
     assert body['input']['value'] == ''
@@ -4750,7 +4195,7 @@ async def test_probe_endpoint_dispatches_to_drakkar_main_loop_when_different(
         fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.post('/api/debug/probe', json={'value': '{"hello": "world"}'})
+            resp = await c.post('/api/v1/debug/probe', json={'value': '{"hello": "world"}'})
 
         assert resp.status_code == 200
         # arrange ran exactly once, on the main loop (not the test's).
@@ -4780,7 +4225,7 @@ async def test_probe_endpoint_defaults_topic_to_configured_source_topic(mock_rec
     fastapi_app = create_ui_app(debug_config, mock_recorder, _probe_mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.post('/api/debug/probe', json={'value': 'x'})
+        resp = await c.post('/api/v1/debug/probe', json={'value': 'x'})
     assert resp.status_code == 200
     body = resp.json()
     # The configured source topic appears as the echo, since the request
@@ -4895,7 +4340,7 @@ async def test_api_events_dispatches_to_drakkar_main_loop_when_different(
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/events')
+            resp = await c.get('/api/v1/events')
 
         assert resp.status_code == 200
         data = resp.json()
@@ -4948,7 +4393,7 @@ async def test_api_events_falls_back_to_inline_when_main_loop_is_mock(tmp_path, 
     fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/api/events')
+        resp = await c.get('/api/v1/events')
     assert resp.status_code == 200
     assert len(resp.json()) == 1
     await db.close()
@@ -5015,7 +4460,7 @@ async def test_api_debug_processors_snapshot_runs_on_main_loop(mock_recorder, de
         fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/debug/processors')
+            resp = await c.get('/api/v1/debug/processors')
 
         assert resp.status_code == 200
         # The snapshot touched ``_sorted_offsets[:20]`` which goes
@@ -5089,7 +4534,7 @@ async def test_flush_and_select_helper_returns_columns_and_rows(tmp_path, mock_r
     fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/api/events')
+        resp = await c.get('/api/v1/events')
 
     assert resp.status_code == 200
     data = resp.json()
@@ -5130,7 +4575,7 @@ async def test_flush_and_select_helper_returns_none_when_db_missing(debug_config
     fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/api/events')
+        resp = await c.get('/api/v1/events')
 
     assert resp.status_code == 200
     assert resp.json() == []
@@ -5164,8 +4609,8 @@ async def test_flush_and_select_logs_the_missing_reader_once_per_interval(
     transport = ASGITransport(app=fastapi_app)
     with capture_logs() as cap:
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            first = await c.get('/api/events')
-            second = await c.get('/api/events')
+            first = await c.get('/api/v1/events')
+            second = await c.get('/api/v1/events')
 
     assert first.status_code == second.status_code == 200
     warnings = [e for e in cap if e['event'] == 'ui_read_reader_db_absent']
@@ -5196,7 +4641,7 @@ async def test_flush_and_select_logs_a_dispatch_failure_as_its_own_cause(
     transport = ASGITransport(app=fastapi_app)
     with capture_logs() as cap:
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/events')
+            resp = await c.get('/api/v1/events')
 
     assert resp.status_code == 200
     assert resp.json() == []
@@ -5246,7 +4691,7 @@ async def test_flush_and_select_helper_prefers_reader_db_over_writer(tmp_path, m
     fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/api/events')
+        resp = await c.get('/api/v1/events')
 
     assert resp.status_code == 200
     data = resp.json()
@@ -5453,33 +4898,6 @@ async def test_readyz_with_auth_token_configured_still_accessible(debug_config, 
     assert resp.json() == {'status': 'ready'}
 
 
-class TestBuiltinUIBadge:
-    """The built-in fallback pages label themselves so operators can tell
-    them apart from a served drakkar-ui release (which shows its version in
-    its own header instead)."""
-
-    async def test_builtin_pages_show_the_badge(self, mock_recorder, mock_app):
-        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp')
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/')
-        assert resp.status_code == 200
-        assert 'built-in UI' in resp.text
-
-    async def test_spa_mode_does_not_show_the_badge(self, tmp_path, mock_recorder, mock_app):
-        bundle = tmp_path / 'v1.0.0'
-        bundle.mkdir()
-        (bundle / 'index.html').write_text('<html><body>spa</body></html>')
-        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp')
-        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app, ui_root=bundle)
-        transport = ASGITransport(app=fastapi_app)
-        async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/')
-        assert resp.status_code == 200
-        assert 'built-in UI' not in resp.text
-
-
 # ---------------------------------------------------------------------------
 # Kafka-UI deep-link builder
 # ---------------------------------------------------------------------------
@@ -5494,7 +4912,6 @@ class TestKafkaUiMessageUrl:
             config=cfg,
             recorder=mock_recorder,
             drakkar_app=mock_app,
-            templates=MagicMock(),
         )
 
     def test_returns_empty_string_when_kafka_ui_not_configured(self, mock_recorder, mock_app):
@@ -5539,7 +4956,7 @@ async def test_dispatch_bounded_returns_default_on_main_loop_timeout(mock_record
     try:
         mock_app.main_loop = stuck_loop
         cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp')
-        deps = UIDeps(config=cfg, recorder=mock_recorder, drakkar_app=mock_app, templates=MagicMock())
+        deps = UIDeps(config=cfg, recorder=mock_recorder, drakkar_app=mock_app)
 
         async def _never_answers():
             return 'unreachable'
@@ -5711,7 +5128,7 @@ class TestUIServerBodyLimit:
         transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post(
-                '/api/debug/probe',
+                '/api/v1/debug/probe',
                 content=b'{}',
                 headers={'content-length': str(MAX_BODY_BYTES + 1), 'content-type': 'application/json'},
             )
@@ -5723,7 +5140,7 @@ class TestUIServerBodyLimit:
         transport = ASGITransport(app=create_ui_app(cfg, mock_recorder, mock_app))
         async with AsyncClient(transport=transport, base_url='http://test') as c:
             resp = await c.post(
-                '/api/debug/probe',
+                '/api/v1/debug/probe',
                 content=b'{}',
                 headers={'content-length': 'not-a-number', 'content-type': 'application/json'},
             )

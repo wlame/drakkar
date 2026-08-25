@@ -141,97 +141,100 @@ async def client_with_pages(tmp_path, mock_recorder, mock_app):
 
 
 # ---------------------------------------------------------------------------
-# Work package A: /api/v1 aliases
+# One API surface: /api/v1 only
 # ---------------------------------------------------------------------------
 
 
-LEGACY_TO_V1 = [
-    ('/api/dashboard', '/api/v1/dashboard'),
-    ('/api/sinks', '/api/v1/sinks'),
-    ('/api/workers', '/api/v1/workers'),
-    ('/api/debug/processors', '/api/v1/debug/processors'),
-    ('/api/events', '/api/v1/events'),
-    ('/api/recent-tasks', '/api/v1/recent-tasks'),
-    ('/api/live/task-results', '/api/v1/live/task-results'),
-    ('/api/live/message-results', '/api/v1/live/message-results'),
-    ('/api/live/window-results', '/api/v1/live/window-results'),
-    ('/api/debug/databases', '/api/v1/debug/databases'),
-    ('/api/debug/label-keys', '/api/v1/debug/label-keys'),
-    ('/api/debug/periodic', '/api/v1/debug/periodic'),
-    ('/api/debug/archives', '/api/v1/debug/archives'),
+# Paths that used to be served unprefixed as well, for the built-in HTML
+# pages that no longer exist. The pages went, so these went with them —
+# the SPA has only ever called /api/v1.
+RETIRED_LEGACY_PATHS = [
+    '/api/dashboard',
+    '/api/sinks',
+    '/api/workers',
+    '/api/partitions',
+    '/api/events',
+    '/api/recent-tasks',
+    '/api/identity',
+    '/api/live/overview',
+    '/api/live/task-results',
+    '/api/live/message-results',
+    '/api/live/window-results',
+    '/api/debug/processors',
+    '/api/debug/databases',
+    '/api/debug/label-keys',
+    '/api/debug/periodic',
+    '/api/debug/archives',
+    '/api/debug/cache/stats',
+    '/debug/download/w1.db',
 ]
 
 
-class TestV1Aliases:
-    @pytest.mark.parametrize(('legacy', 'v1'), LEGACY_TO_V1)
-    async def test_v1_alias_matches_legacy_payload(self, client, legacy, v1):
-        legacy_resp = await client.get(legacy)
-        v1_resp = await client.get(v1)
-        assert legacy_resp.status_code == 200
-        assert v1_resp.status_code == 200
-        legacy_json = legacy_resp.json()
-        v1_json = v1_resp.json()
-        if isinstance(legacy_json, dict):
-            # uptime is wall-clock and differs between the two calls
-            legacy_json.pop('uptime', None)
-            v1_json.pop('uptime', None)
-        if legacy == '/api/workers':
-            # the current worker's last_seen_ts is wall-clock "now" and
-            # differs between the two calls; peers keep theirs (DB-sourced)
-            for worker in (*legacy_json, *v1_json):
-                if worker.get('is_current'):
-                    worker.pop('last_seen_ts', None)
-        assert v1_json == legacy_json
+class TestSingleAPISurface:
+    """Every JSON route lives under /api/v1 and nowhere else."""
 
-    async def test_download_alias_serves_file(self, tmp_path, mock_recorder, mock_app):
+    @pytest.mark.parametrize('path', RETIRED_LEGACY_PATHS)
+    async def test_the_unprefixed_path_is_gone(self, client, path):
+        resp = await client.get(path)
+
+        # 503 is the SPA catch-all reporting a missing bundle: with no
+        # route claiming the path, it falls through to the page surface.
+        # What matters is that no JSON API answers it.
+        assert resp.status_code in (404, 503), path
+
+    async def test_the_v1_path_answers(self, client):
+        assert (await client.get('/api/v1/dashboard')).status_code == 200
+        assert (await client.get('/api/v1/events')).status_code == 200
+
+    async def test_download_serves_only_under_v1(self, tmp_path, mock_recorder, mock_app):
         (tmp_path / 'w1.db').write_bytes(b'sqlite-bytes')
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         mock_recorder.config = cfg
+
         async with make_client(cfg, mock_recorder, mock_app) as c:
-            legacy = await c.get('/debug/download/w1.db')
             v1 = await c.get('/api/v1/debug/download/w1.db')
-        assert legacy.status_code == 200
+
         assert v1.status_code == 200
-        assert legacy.content == v1.content == b'sqlite-bytes'
+        assert v1.content == b'sqlite-bytes'
         assert v1.headers['content-type'] == 'application/x-sqlite3'
         assert v1.headers['cache-control'] == 'no-store, private'
 
-    async def test_archive_download_alias_serves_file(self, tmp_path, mock_recorder, mock_app):
+    async def test_archive_download_serves_under_v1(self, tmp_path, mock_recorder, mock_app):
         from drakkar.recorder.archive import archive_file_name
 
         name = archive_file_name('search-fleet', 0.0, 86400.0)
         (tmp_path / name).write_bytes(b'gzip-bytes')
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
         mock_recorder.config = cfg
+
         async with make_client(cfg, mock_recorder, mock_app) as c:
-            legacy = await c.get(f'/api/debug/archives/{name}')
             v1 = await c.get(f'/api/v1/debug/archives/{name}')
-        assert legacy.status_code == 200
+
         assert v1.status_code == 200
-        assert legacy.content == v1.content == b'gzip-bytes'
+        assert v1.content == b'gzip-bytes'
         assert v1.headers['content-type'] == 'application/gzip'
         assert v1.headers['cache-control'] == 'no-store, private'
 
-    async def test_merge_alias_validates_body(self, client):
+    async def test_merge_validates_body(self, client):
         resp = await client.post('/api/v1/debug/merge', json={'filenames': ['only-one.db']})
         assert resp.status_code == 400
         assert resp.json() == {'error': 'Select at least 2 databases'}
 
-    @pytest.mark.parametrize('path', ['/api/debug/cache/stats', '/api/v1/debug/cache/stats'])
-    async def test_cache_alias_404_when_disabled(self, client, path):
-        resp = await client.get(path)
+    async def test_cache_route_404s_when_disabled(self, client):
+        resp = await client.get('/api/v1/debug/cache/stats')
         assert resp.status_code == 404
         assert resp.json() == {'detail': 'Cache is disabled'}
 
-    @pytest.mark.parametrize('path', ['/api/partitions', '/api/task/some-id', '/api/live/overview', '/api/identity'])
-    async def test_new_endpoints_have_no_legacy_alias(self, client, path):
-        resp = await client.get(path)
-        assert resp.status_code == 404
+    async def test_probes_stay_unprefixed(self, client):
+        """The kubelet contract: /healthz and /readyz are not versioned.
 
-    async def test_probes_and_pages_stay_unprefixed(self, client):
+        A versioned probe path is not a route at all — it falls through to
+        the page catch-all, so the check is that it never answers 200.
+        """
         assert (await client.get('/healthz')).status_code == 200
-        assert (await client.get('/api/v1/healthz')).status_code == 404
-        assert (await client.get('/api/v1/readyz')).status_code == 404
+        assert (await client.get('/readyz')).status_code in (200, 503)
+        assert (await client.get('/api/v1/healthz')).status_code != 200
+        assert (await client.get('/api/v1/readyz')).status_code != 200
 
 
 class TestV1Auth:
@@ -633,7 +636,7 @@ class TestApiV1LiveOverview:
 
 
 class TestEventsMalformedPartitions:
-    @pytest.mark.parametrize('path', ['/api/events', '/api/v1/events'])
+    @pytest.mark.parametrize('path', ['/api/v1/events', '/api/v1/events'])
     async def test_malformed_partitions_csv_returns_422(self, client, path):
         resp = await client.get(path, params={'partitions': '0,abc'})
         assert resp.status_code == 422
@@ -642,7 +645,7 @@ class TestEventsMalformedPartitions:
         assert detail[0]['msg'] == 'Input should be a valid integer'
 
     async def test_valid_partitions_csv_still_ok(self, client):
-        resp = await client.get('/api/events', params={'partitions': '0, 1'})
+        resp = await client.get('/api/v1/events', params={'partitions': '0, 1'})
         assert resp.status_code == 200
         assert resp.json() == []
 
@@ -729,7 +732,7 @@ class TestPlannedSinkCustomPayloads:
 
 
 class TestMergeInputHardening:
-    @pytest.mark.parametrize('path', ['/api/debug/merge', '/api/v1/debug/merge'])
+    @pytest.mark.parametrize('path', ['/api/v1/debug/merge', '/api/v1/debug/merge'])
     async def test_malformed_json_body_returns_400(self, client, path):
         resp = await client.post(path, content=b'{not json', headers={'Content-Type': 'application/json'})
         assert resp.status_code == 400
@@ -744,7 +747,7 @@ class TestMergeInputHardening:
         ],
     )
     async def test_wrong_body_shape_returns_400(self, client, body):
-        resp = await client.post('/api/debug/merge', json=body)
+        resp = await client.post('/api/v1/debug/merge', json=body)
         assert resp.status_code == 400
         assert resp.json() == {'error': 'Invalid JSON body'}
 
@@ -753,7 +756,7 @@ class TestMergeInputHardening:
         ['evil";x.db', 'evil;.db', 'evil\n.db', 'evil\x00.db', 'evil\x7f.db'],
     )
     async def test_unsafe_filename_chars_rejected(self, client, bad_name):
-        resp = await client.post('/api/debug/merge', json={'filenames': [bad_name, 'other.db']})
+        resp = await client.post('/api/v1/debug/merge', json={'filenames': [bad_name, 'other.db']})
         assert resp.status_code == 400
         assert 'Invalid filename' in resp.json()['error']
 
@@ -764,7 +767,7 @@ class TestDownloadFilenameHardening:
         ['evil".db', 'evil;.db', 'evil\n.db', 'evil\x1f.db', 'evil\x7f.db'],
     )
     async def test_unsafe_filename_chars_rejected(self, client, bad_name):
-        resp = await client.get('/debug/download/' + quote(bad_name, safe=''))
+        resp = await client.get('/api/v1/debug/download/' + quote(bad_name, safe=''))
         assert resp.status_code == 400
         assert resp.json() == {'error': 'Invalid filename'}
 
@@ -775,7 +778,7 @@ class TestDownloadFilenameHardening:
 
 
 class TestTraceInt32Range:
-    @pytest.mark.parametrize('path', ['/api/debug/trace', '/api/v1/debug/trace'])
+    @pytest.mark.parametrize('path', ['/api/v1/debug/trace', '/api/v1/debug/trace'])
     @pytest.mark.parametrize('partition', [-1, _INT32_MAX + 1])
     async def test_out_of_range_partition_returns_422(self, client, path, partition):
         resp = await client.get(path, params={'partition': partition, 'offset': 0})
@@ -784,7 +787,7 @@ class TestTraceInt32Range:
         assert detail[0]['loc'] == ['query', 'partition']
 
     async def test_max_int32_partition_accepted(self, client):
-        resp = await client.get('/api/debug/trace', params={'partition': _INT32_MAX, 'offset': 0})
+        resp = await client.get('/api/v1/debug/trace', params={'partition': _INT32_MAX, 'offset': 0})
         assert resp.status_code == 200
         assert resp.json() == []
 
@@ -799,13 +802,13 @@ class TestTraceByLabelEmptyParams:
             {'key': 'k'},  # value missing entirely
         ],
     )
-    @pytest.mark.parametrize('path', ['/api/debug/trace-by-label', '/api/v1/debug/trace-by-label'])
+    @pytest.mark.parametrize('path', ['/api/v1/debug/trace-by-label', '/api/v1/debug/trace-by-label'])
     async def test_empty_or_missing_key_value_returns_422(self, client, path, params):
         resp = await client.get(path, params=params)
         assert resp.status_code == 422
 
     async def test_valid_key_value_ok(self, client):
-        resp = await client.get('/api/debug/trace-by-label', params={'key': 'k', 'value': 'v'})
+        resp = await client.get('/api/v1/debug/trace-by-label', params={'key': 'k', 'value': 'v'})
         assert resp.status_code == 200
         assert resp.json() == []
 
@@ -840,12 +843,11 @@ class TestApiV1Identity:
         assert data['config_summary'] == '[test-worker] topic=input-events group=drakkar-workers'
         assert data['link_bases'] == {}  # unset link_bases still reports as an empty object
         assert data['custom_renderers'] is False  # unset custom_renderers_path reports as False
-        # v1.2: backend flavor + versions. Built-in pages serve in this
-        # fixture, so the UI fields report the builtin fallback.
+        # v1.2: backend flavor + versions. No bundle is resolved in this
+        # fixture, so there is no UI version to report.
         assert data['backend'] == 'python'
         assert isinstance(data['backend_version'], str) and data['backend_version']
         assert data['ui_version'] is None
-        assert data['ui_source'] == 'builtin'
 
     async def test_ui_fields_report_served_bundle(self, tmp_path, debug_config, mock_recorder, mock_app):
         """SPA mode: identity reports the release tag the backend serves."""
@@ -865,32 +867,6 @@ class TestApiV1Identity:
             data = (await c.get('/api/v1/identity')).json()
         assert data['ui_version'] == 'v1.0.0'
         assert data['ui_source'] == 'release'
-
-    async def test_ui_fields_report_embedded_bundle(self, tmp_path, debug_config, mock_recorder, mock_app):
-        """The package-baked bundle reports ui_source='embedded' (v1.2)."""
-        from drakkar.uihost import EMBEDDED_BUNDLE_DIR, embedded_bundle_version
-
-        mock_app.config_summary = '[test-worker]'
-        mock_recorder.config = debug_config
-        fastapi_app = create_ui_app(
-            debug_config,
-            mock_recorder,
-            mock_app,
-            ui_root=EMBEDDED_BUNDLE_DIR,
-            ui_version=embedded_bundle_version(),
-            ui_source='embedded',
-        )
-        async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test') as c:
-            data = (await c.get('/api/v1/identity')).json()
-            index = await c.get('/')
-        assert data['ui_source'] == 'embedded'
-        # The embedded bundle is a REAL drakkar-ui release: it carries its
-        # tag (from the VERSION file `just embed-ui` writes) and serves a
-        # built SPA index, not the retired stub page.
-        assert data['ui_version'] == embedded_bundle_version()
-        assert data['ui_version'] is not None
-        assert index.status_code == 200
-        assert 'assets/' in index.text
 
     async def test_cluster_name_surfaces(self, debug_config, mock_recorder, mock_app):
         mock_app._cluster_name = 'main'
@@ -992,8 +968,9 @@ class TestApiV1Pages:
             ok = await c.get('/api/v1/pages', headers={'Authorization': 'Bearer secret-123'})
             assert ok.status_code == 200
 
-    async def test_pages_endpoint_has_no_legacy_alias(self, client):
-        assert (await client.get('/api/pages')).status_code == 404
+    async def test_pages_endpoint_is_v1_only(self, client):
+        """It never had an unprefixed alias, and there are none left to have."""
+        assert (await client.get('/api/pages')).status_code != 200
 
 
 # ---------------------------------------------------------------------------
@@ -1002,7 +979,7 @@ class TestApiV1Pages:
 
 
 class TestDashboardLinks:
-    @pytest.mark.parametrize('path', ['/api/dashboard', '/api/v1/dashboard'])
+    @pytest.mark.parametrize('path', ['/api/v1/dashboard', '/api/v1/dashboard'])
     async def test_links_absent_when_unconfigured(self, client, path):
         resp = await client.get(path)
         assert resp.status_code == 200
@@ -1065,7 +1042,7 @@ class TestDashboardLinks:
         cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), prometheus_url='http://prom:9090')
         mock_recorder.config = cfg
         async with make_client(cfg, mock_recorder, mock_app) as c:
-            legacy = await c.get('/api/dashboard')
+            legacy = await c.get('/api/v1/dashboard')
             v1 = await c.get('/api/v1/dashboard')
         assert legacy.json()['links'] == v1.json()['links']
 
@@ -1100,18 +1077,6 @@ async def test_live_overview_answers_degraded_when_main_loop_is_wedged(client, m
 # ---------------------------------------------------------------------------
 # register_v1_aliases: startup guard
 # ---------------------------------------------------------------------------
-
-
-def test_register_v1_aliases_with_no_legacy_routes_fails_loudly():
-    """Zero registered aliases means the /api/v1 surface would silently be
-    missing — the registration must raise at startup instead of serving a
-    broken UI contract."""
-    from fastapi import FastAPI
-
-    from drakkar.uiserver.server import register_v1_aliases
-
-    with pytest.raises(RuntimeError, match='no legacy API routes'):
-        register_v1_aliases(FastAPI(), [])
 
 
 class TestApiV1LiveOverviewCounts:

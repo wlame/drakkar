@@ -50,7 +50,7 @@ def create_runtime_router(deps: UIDeps) -> APIRouter:
             )
         return JSONResponse({'enabled': True, **monitor.snapshot()})
 
-    @router.get('/api/debug/runtime/units')
+    @router.get('/api/v1/debug/runtime/units')
     async def api_debug_runtime_units():
         """Census of live concurrency units, grouped by suspension point."""
 

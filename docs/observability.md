@@ -510,14 +510,14 @@ Filterable, paginated event browser across all partitions:
 
 Multi-purpose debug page with:
 
-- **Metrics viewer** -- live snapshot of all registered Prometheus metrics (framework and user), accessible via the `/api/debug/metrics` JSON endpoint.
+- **Metrics viewer** -- live snapshot of all registered Prometheus metrics (framework and user), accessible via the `/api/v1/debug/metrics` JSON endpoint.
 - **Periodic tasks** -- status of all `@periodic` handler methods: last run time, duration, success/error status, total counts, and a sparkline of recent runs.
 - **Cross-worker message trace** -- two search modes:
     - **By partition:offset** -- enter `partition:offset` (e.g., `5:42`) to trace a message through the full pipeline.
     - **By label** -- search inputs are auto-generated for each [label](handler.md#task-labels) key found in the database (e.g., `request_id`, `pattern`). Enter a value to find all tasks and events matching that label. Useful for tracing a specific request across partitions and workers.
     Both modes search the current worker first, then other live workers in the cluster, then rotated historical DB files.
 - **Database management** -- list all recorder database files with event counts and sizes, download individual files, merge multiple files into one, and view per-file breakdown by event type.
-- **Message Probe** -- replay a single pasted message through the handler pipeline (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with **zero footprint**: no sink writes, no offset commits, no event-recorder rows, no cache writes, no peer sync. The report shows every task's stdout/stderr/exit code, each hook's returned `CollectResult`, the payloads that *would have been* written to each sink, every cache call, a timeline waterfall, and any exceptions raised at any stage. Posts to `/api/debug/probe` with a JSON body containing the message's `value` (and optional `key`, `partition`, `offset`, `topic`, `timestamp`, `use_cache`).
+- **Message Probe** -- replay a single pasted message through the handler pipeline (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with **zero footprint**: no sink writes, no offset commits, no event-recorder rows, no cache writes, no peer sync. The report shows every task's stdout/stderr/exit code, each hook's returned `CollectResult`, the payloads that *would have been* written to each sink, every cache call, a timeline waterfall, and any exceptions raised at any stage. Posts to `/api/v1/debug/probe` with a JSON body containing the message's `value` (and optional `key`, `partition`, `offset`, `topic`, `timestamp`, `use_cache`).
 
 #### `/task/{id}` -- Task Detail
 
@@ -554,7 +554,9 @@ drakkar-ui fetch --version=v0.2.0   # download a specific release
 
 All subcommands accept `--repo=owner/name`, `--cache-dir=DIR`, and `--api-base=URL` (GitHub Enterprise); a `GITHUB_TOKEN` in the environment raises rate limits and unlocks private repos. Cached versions are never re-downloaded -- release tags are immutable. `just drakkar-ui <args>` wraps the same command for repo-local use.
 
-When neither the cache nor GitHub can supply a bundle (offline host, empty cache), the worker serves the drakkar-ui release **embedded in the package** (`just embed-ui vX.Y.Z` refreshes it; identity reports `ui_source: "embedded"`). The built-in server-rendered pages appear only when `ui.release.enabled=false` or resolution errored -- those pages carry a **built-in UI** tag in the header so operators can tell at a glance they are on the fallback rather than a drakkar-ui release.
+When neither the cache nor the release source can supply a bundle (an offline host whose cache is still empty), the worker **runs API-only**: `/api/v1/...`, the Kubernetes probes and the event WebSocket are all unaffected, and every page request answers **503** naming the ways to supply a bundle. There is no built-in HTML fallback -- the UI is one versioned artifact shared by both backends, and one download at any point in a worker's life fills a cache that every later start reads.
+
+For an air-gapped deployment, stage the bundle once with `drakkar-ui fetch --version=vX.Y.Z` (into a cache directory the workers share), or point `ui.release.repo` at an internal mirror that publishes the same release assets. `ui.release.enabled: false` turns the UI off deliberately, leaving the same API-only worker.
 
 ---
 
@@ -879,7 +881,7 @@ appears in the database list and can be downloaded.
 
 **Archives are never merge candidates.** The Databases tab's Archives
 section (see [Archiving](#archiving) above) is read-only — no selection
-checkboxes, no path into `/api/debug/merge`. `POST /api/debug/merge`
+checkboxes, no path into `/api/v1/debug/merge`. `POST /api/v1/debug/merge`
 itself does not specifically reject an archive filename passed to it by
 hand (filename hardening only checks for path traversal and unsafe
 characters), but the merge engine cannot open gzip bytes as SQLite, so it

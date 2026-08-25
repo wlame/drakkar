@@ -114,7 +114,7 @@ async def test_api_dashboard_includes_webapp_tile_when_enabled(debug_config):
     fastapi_app = create_ui_app(debug_config, rec, app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/api/dashboard')
+        resp = await c.get('/api/v1/dashboard')
 
     assert resp.status_code == 200
     data = resp.json()
@@ -138,7 +138,7 @@ async def test_api_dashboard_omits_webapp_tile_when_disabled(debug_config):
     fastapi_app = create_ui_app(debug_config, rec, app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/api/dashboard')
+        resp = await c.get('/api/v1/dashboard')
 
     assert resp.status_code == 200
     data = resp.json()
@@ -151,7 +151,7 @@ async def test_api_dashboard_omits_webapp_tile_when_disabled(debug_config):
 
 
 async def test_task_detail_renders_client_and_request_id_for_http(debug_config):
-    """origin=http swaps the Partition row for Client / Request ID."""
+    """An HTTP-origin task reports its client and request id, not a partition."""
     rec = _make_mock_recorder()
     now = time.time()
     rec.get_task_events.return_value = [
@@ -203,24 +203,20 @@ async def test_task_detail_renders_client_and_request_id_for_http(debug_config):
     fastapi_app = create_ui_app(debug_config, rec, app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/task/task-http-1')
+        resp = await c.get('/api/v1/task/task-http-1')
 
     assert resp.status_code == 200
-    text = resp.text
-    assert 'tenant-A' in text
-    assert 'req_x' in text
-    # Origin pill should mark this as HTTP and the labels should appear.
-    assert 'Client' in text
-    assert 'Request ID' in text
-    # The Kafka-only "Partition" header field should NOT be a column for HTTP tasks.
-    # We assert via the absence of the conditional partition link target on
-    # this page (HTTP partition is the synthetic ``-1`` and we suppress the
-    # back-link in the template header).
-    assert 'partition -1' not in text
+    detail = resp.json()
+    assert detail['origin'] == 'http'
+    assert detail['client_name'] == 'tenant-A'
+    assert detail['request_id'] == 'req_x'
+    # The synthetic partition an HTTP task carries is -1; the UI renders
+    # Client / Request ID in its place.
+    assert detail['partition'] == -1
 
 
 async def test_task_detail_renders_partition_for_kafka(debug_config):
-    """origin=kafka keeps the original Partition rendering."""
+    """A Kafka-origin task reports its partition and no HTTP fields."""
     rec = _make_mock_recorder()
     now = time.time()
     rec.get_task_events.return_value = [
@@ -251,15 +247,14 @@ async def test_task_detail_renders_partition_for_kafka(debug_config):
     fastapi_app = create_ui_app(debug_config, rec, app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as c:
-        resp = await c.get('/task/task-k-1')
+        resp = await c.get('/api/v1/task/task-k-1')
 
     assert resp.status_code == 200
-    text = resp.text
-    assert 'Partition' in text
-    # Kafka task should NOT render the HTTP-specific labels.
-    assert 'Request ID' not in text
-    # Specifically, the HTTP origin pill must be absent.
-    assert '>HTTP<' not in text
+    detail = resp.json()
+    assert detail['origin'] == 'kafka'
+    assert detail['partition'] == 7
+    assert detail['client_name'] is None
+    assert detail['request_id'] is None
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +302,7 @@ async def test_api_recent_tasks_includes_origin_fields(tmp_path, debug_config):
         fastapi_app = create_ui_app(cfg, rec, app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp = await c.get('/api/recent-tasks?minutes=5')
+            resp = await c.get('/api/v1/recent-tasks?minutes=5')
 
         assert resp.status_code == 200
         payload = resp.json()
@@ -330,8 +325,8 @@ async def test_api_recent_tasks_includes_origin_fields(tmp_path, debug_config):
 # ---------------------------------------------------------------------------
 
 
-async def test_history_filters_by_origin(tmp_path):
-    """/history?origin=kafka|http|all filters recorder events accordingly."""
+async def test_events_filter_by_origin(tmp_path):
+    """``origin=kafka|http`` splits Kafka-origin tasks from webapp requests."""
     cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path), flush_interval_seconds=60)
     rec = EventRecorder(cfg, worker_name='wlame-worker')
     await rec.start()
@@ -363,9 +358,7 @@ async def test_history_filters_by_origin(tmp_path):
         )
         await rec.flush()
 
-        # Use the recorder's ``get_events`` helper directly — the /history
-        # page exercises the same code path. Asserting through the public
-        # API keeps the test independent of HTML markup churn.
+        # The recorder helper first, then the same filter over HTTP.
         kafka_only = await rec.get_events(origin='kafka', limit=100)
         assert len(kafka_only) == 1
         assert kafka_only[0]['event'] == 'task_completed'
@@ -377,17 +370,19 @@ async def test_history_filters_by_origin(tmp_path):
         all_events = await rec.get_events(limit=100)
         assert len(all_events) == 2
 
-        # Round-trip through the HTTP route (smoke) — page must render.
+        # Round-trip through the HTTP route: the same filter over the wire.
         app = _make_mock_app(webapp_enabled=True)
         fastapi_app = create_ui_app(cfg, rec, app)
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(transport=transport, base_url='http://test') as c:
-            resp_all = await c.get('/history?origin=all')
-            resp_kafka = await c.get('/history?origin=kafka')
-            resp_http = await c.get('/history?origin=http')
+            resp_all = await c.get('/api/v1/events?limit=100')
+            resp_kafka = await c.get('/api/v1/events?origin=kafka&limit=100')
+            resp_http = await c.get('/api/v1/events?origin=http&limit=100')
+
         for r in (resp_all, resp_kafka, resp_http):
             assert r.status_code == 200
-        # The page surfaces an "Origin" filter label and the three options.
-        assert 'Origin' in resp_all.text
+        assert len(resp_all.json()) == 2
+        assert [e['event'] for e in resp_kafka.json()] == ['task_completed']
+        assert [e['event'] for e in resp_http.json()] == ['webapp_request_completed']
     finally:
         await rec.stop()

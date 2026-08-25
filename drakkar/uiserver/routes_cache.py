@@ -54,7 +54,7 @@ def create_cache_router(deps: UIDeps) -> APIRouter:
             raise HTTPException(status_code=404, detail='Cache is disabled')
         return engine.reader_db
 
-    @router.get('/api/debug/cache/entries')
+    @router.get('/api/v1/debug/cache/entries')
     async def api_debug_cache_entries(
         # ``ge=0, le=1000`` enforces the bounds at the FastAPI layer —
         # requests outside the range get a 422 response instead of reaching
@@ -168,7 +168,7 @@ def create_cache_router(deps: UIDeps) -> APIRouter:
             }
         )
 
-    @router.get('/api/debug/cache/entry/{key:path}')
+    @router.get('/api/v1/debug/cache/entry/{key:path}')
     async def api_debug_cache_entry(key: str):
         """Return a single entry by exact key, with the value decoded from JSON.
 
@@ -215,7 +215,7 @@ def create_cache_router(deps: UIDeps) -> APIRouter:
 
         return JSONResponse(entry)
 
-    @router.get('/api/debug/cache/stats')
+    @router.get('/api/v1/debug/cache/stats')
     async def api_debug_cache_stats():
         """Return a snapshot of the four cache gauges.
 

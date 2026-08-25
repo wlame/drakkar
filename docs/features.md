@@ -18,9 +18,9 @@ Per-feature guides: [Configuration](configuration.md) ·
 |---|---|---|---|
 | Metrics exporter | `metrics.enabled` | **on** (`:9090`) | Raw Prometheus endpoint on its own port |
 | Operator UI + probes | `ui.enabled` | **on** (`:8080`) | UI server, `/api/v1`, `/ws`, **`/healthz` + `/readyz`**, and the flight recorder |
-| Message probe endpoint | `ui.probe_enabled` | **on** | `POST /api/debug/probe` — runs caller bytes through the live handler and real executor pool; `false` = 403, independently of `auth_token` |
-| Database merge endpoint | `ui.merge_enabled` | **on** | `POST /api/debug/merge` — writes an unreclaimed `merged-<ts>.db` per call; `false` = 403, independently of `auth_token` |
-| Kafka read API | `ui.kafka_read_enabled` | **on** | `GET /api/debug/kafka/*` — pipeline-invisible reads of the configured topics; `false` = 403, independently of `auth_token` |
+| Message probe endpoint | `ui.probe_enabled` | **on** | `POST /api/v1/debug/probe` — runs caller bytes through the live handler and real executor pool; `false` = 403, independently of `auth_token` |
+| Database merge endpoint | `ui.merge_enabled` | **on** | `POST /api/v1/debug/merge` — writes an unreclaimed `merged-<ts>.db` per call; `false` = 403, independently of `auth_token` |
+| Kafka read API | `ui.kafka_read_enabled` | **on** | `GET /api/v1/debug/kafka/*` — pipeline-invisible reads of the configured topics; `false` = 403, independently of `auth_token` |
 | Consume pause | `ui.consume_pause.enabled` | **off** | Timed Live-page pause of message intake (auto-resume); off because pausing is production-affecting |
 | Recorder persistence | `ui.recorder.db_dir` | `/tmp` | Where event history and worker metadata live; empty = memory-only |
 | Recorder archiving | `ui.recorder.archive_enabled` | **on** | Fold rotated-out DB files into per-cluster `.db.gz` window archives; off = raw files are never deleted automatically |
@@ -60,12 +60,14 @@ the failure mode so you can decide what your deployment needs.
    Empty `db_dir` silently switches to a short in-memory window (lost
    on restart) and disables the OOM watchdog (`{db_dir}/{worker}.watchdog`).
 4. **The SPA bundle needs the UI server.** `ui.release.enabled` fetches
-   and serves the drakkar-ui release; any fetch failure is non-fatal
-   and falls back to the release **embedded in the binary/package**
-   (identity reports `ui_source: "embedded"`), so the SPA works fully
-   offline. The built-in pages (marked with a "built-in UI" badge)
-   serve only when `ui.release.enabled: false` — e.g. deliberately, for
-   air-gapped deployments that prefer them — or when resolution errored.
+   and serves the drakkar-ui release; a fetch failure is non-fatal, and
+   release tags are immutable, so a bundle downloaded once serves from the
+   shared cache on every later start — offline ones included. There is no
+   HTML fallback in the package: with nothing cached the worker runs
+   API-only and page requests answer **503** naming how to supply a
+   bundle. For an air-gapped deployment, stage one with
+   `drakkar-ui fetch --version=vX.Y.Z` or point `ui.release.repo` at an
+   internal mirror.
 5. **Fleet features need a SHARED `db_dir` + `store_config`.** Worker
    autodiscovery, the workers list, cross-worker links, and cross-worker
    tracing all work by scanning one shared directory for other workers'

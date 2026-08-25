@@ -17,7 +17,7 @@ Two independent bounds decide what the timeline shows: how many tasks, and how f
 **Count governs** — the row cap is the primary limit, and the time window is a ceiling on
 top of it, not the other way around.
 
-- **Depth (row count).** `GET /api/recent-tasks` defaults its `limit` to
+- **Depth (row count).** `GET /api/v1/recent-tasks` defaults its `limit` to
   `history_factor` &times; the executor pool's `max_executors` (or &times;8 when no pool is
   attached yet), capped at 100000 since neither factor has a ceiling of its own. A caller
   can pass an explicit `limit` (1-100000) to override the derived default.

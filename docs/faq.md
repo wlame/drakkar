@@ -245,7 +245,7 @@ The UI runs on a separate thread with its own asyncio event loop, so most read-o
 
 - **Message Probe** monkey-patches `handler.cache` process-wide while a probe runs — production hooks during that window see a `DebugCacheProxy` and their `cache.set()` calls are silently suppressed.
 - **Probe consumes `ExecutorPool` slots** exactly like production messages. Close it with `ui.probe_enabled: false`.
-- **Merge writes files.** `POST /api/debug/merge` creates a `merged-<ts>.db` in `ui.recorder.db_dir` that nothing reclaims. Close it with `ui.merge_enabled: false`.
+- **Merge writes files.** `POST /api/v1/debug/merge` creates a `merged-<ts>.db` in `ui.recorder.db_dir` that nothing reclaims. Close it with `ui.merge_enabled: false`.
 - **GIL contention** between the UI thread and the main loop under heavy UI use.
 - **aiosqlite connections** are per-thread workers; UI reads don't block pipeline writes thanks to SQLite WAL mode.
 
@@ -257,13 +257,13 @@ To a team of operators on a trusted network, yes -- that is what it is for. To a
 
 Auth is **opt-in by default**. No endpoint stops a worker, replays Kafka messages, mutates sinks, or commits offsets, and Drakkar is intended to run inside a private contour, so the framework starts unauthenticated when `ui.auth_token` is empty (the default) and emits a structured `ui_unauthenticated` warning at startup naming the host:port and the two opt-in paths (`ui.auth_token` in YAML or `DK_UI__AUTH_TOKEN` env var).
 
-Most endpoints are read-only, but two are not: `POST /api/debug/probe` runs caller-supplied bytes through the live handler, and `POST /api/debug/merge` writes a file that nothing reclaims. Set `ui.probe_enabled: false` / `ui.merge_enabled: false` to close them — independently of `auth_token`, so this works both when you cannot set a token and when you have one and want defence in depth. The startup warning names whichever is still enabled.
+Most endpoints are read-only, but two are not: `POST /api/v1/debug/probe` runs caller-supplied bytes through the live handler, and `POST /api/v1/debug/merge` writes a file that nothing reclaims. Set `ui.probe_enabled: false` / `ui.merge_enabled: false` to close them — independently of `auth_token`, so this works both when you cannot set a token and when you have one and want defence in depth. The startup warning names whichever is still enabled.
 
 For multi-operator setups, set a strong `ui.auth_token`:
 
-1. **Bearer token on protected endpoints.** Once the token is set, `/api/debug/databases`, `/api/debug/merge`, `/debug/download/{filename}`, and `/api/debug/probe` all require an `Authorization: Bearer <token>` header (or `?token=<token>` query parameter). Comparison uses `secrets.compare_digest` to avoid timing side-channels.
+1. **Bearer token on protected endpoints.** Once the token is set, `/api/v1/debug/databases`, `/api/v1/debug/merge`, `/debug/download/{filename}`, and `/api/v1/debug/probe` all require an `Authorization: Bearer <token>` header (or `?token=<token>` query parameter). Comparison uses `secrets.compare_digest` to avoid timing side-channels.
 2. **WebSocket auth + origin check.** With a token configured, the live-event WebSocket at `/ws` also requires the same `auth_token`; invalid tokens close with code 4401. The handshake validates the `Origin` header against `allowed_ws_origins` (explicit allowlist) or the `Host` header (same-origin fallback).
-3. **Read-only pages remain accessible** — both before and after enabling auth. `/`, `/live`, `/partitions`, `/sinks`, `/history`, and the per-task pages serve flight-recorder content; gating is on the mutating / data-exposing endpoints listed above.
+3. **Read-only views remain accessible** — both before and after enabling auth. `/`, `/live`, `/partitions`, `/sinks`, `/history` and the per-task views are SPA routes backed by read-only flight-recorder endpoints; the extra gating listed above is on the mutating / data-exposing ones.
 
 Even with auth, the read-only pages expose task stdout/stderr, task env (after [redaction](observability.md#flight-recorder)), cache contents, and live event streams. Restrict access to operators. Concurrent Message Probes serialize on an internal lock, and the probe temporarily replaces `handler.cache` — keep this in mind if you have many operators debugging the same worker simultaneously.
 
@@ -349,12 +349,12 @@ Drakkar does not run a built-in replay worker — replays are operator-driven. U
 
 ### A message is stuck in "in-flight" forever — what do I do?
 
-Check the **Executors** tab on `/live` for stuck tasks; their `task_timeout_seconds` should eventually fire. When a task overruns the timeout, `asyncio.wait_for` raises `TimeoutError`, the executor's `finally` block calls `proc.kill()` + `proc.wait()`, and the task takes the normal `on_error` path. If the subprocess *itself* doesn't die after `proc.kill()`, the task coroutine stays pending — the UI server exposes `/api/debug/processors`, which includes a `stuck_tasks` list with a live coroutine stack (top 5 frames) per in-flight task; that's the rescue-visibility tool.
+Check the **Executors** tab on `/live` for stuck tasks; their `task_timeout_seconds` should eventually fire. When a task overruns the timeout, `asyncio.wait_for` raises `TimeoutError`, the executor's `finally` block calls `proc.kill()` + `proc.wait()`, and the task takes the normal `on_error` path. If the subprocess *itself* doesn't die after `proc.kill()`, the task coroutine stays pending — the UI server exposes `/api/v1/debug/processors`, which includes a `stuck_tasks` list with a live coroutine stack (top 5 frames) per in-flight task; that's the rescue-visibility tool.
 
 Rescue procedure when a task is truly wedged past the timeout:
 
 1. Open `/live` → **Executors** tab and look for tasks whose `oldest_running_sec` exceeds `task_timeout_seconds`.
-2. Hit `/api/debug/processors` to get the coroutine stack for each wedged task via the `stuck_tasks` field.
+2. Hit `/api/v1/debug/processors` to get the coroutine stack for each wedged task via the `stuck_tasks` field.
 3. Check worker logs for the task's `task_id` — you'll usually find the downstream call (sink, cache, peer sync) that's blocked.
 4. If the stack shows the subprocess already exited and the coroutine is wedged in sink or recorder code, a worker restart is the safest recovery — Kafka's cooperative-sticky rebalance will reassign the partition to another worker, which will re-poll the un-committed offset range and retry the work.
 5. There is no in-UI "force complete" button today by design: marking a wedged task as succeeded could silently ack a half-applied side effect. Operators are expected to restart the worker instead.

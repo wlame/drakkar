@@ -67,7 +67,7 @@ async def test_state_carries_enabled_flag_and_presets_when_disabled():
     """The state endpoint answers 200 even when the feature is off —
     enabled:false in the body is the UI's hide signal."""
     async with _client(_mock_app(enabled=False)) as client:
-        resp = await client.get('/api/debug/consume-pause')
+        resp = await client.get('/api/v1/debug/consume-pause')
     assert resp.status_code == 200
     body = resp.json()
     assert body['enabled'] is False
@@ -87,8 +87,8 @@ async def test_state_served_under_v1_alias():
 
 async def test_mutating_routes_403_when_disabled():
     async with _client(_mock_app(enabled=False)) as client:
-        pause = await client.post('/api/debug/consume-pause', json={'duration_seconds': 15})
-        resume = await client.post('/api/debug/consume-resume')
+        pause = await client.post('/api/v1/debug/consume-pause', json={'duration_seconds': 15})
+        resume = await client.post('/api/v1/debug/consume-resume')
     assert pause.status_code == 403
     assert 'ui.consume_pause.enabled' in pause.json()['error']
     assert resume.status_code == 403
@@ -96,8 +96,8 @@ async def test_mutating_routes_403_when_disabled():
 
 async def test_routes_require_token_when_configured():
     async with _client(_mock_app(), make_ui_config(enabled=True, auth_token='secret-t')) as client:
-        anonymous = await client.get('/api/debug/consume-pause')
-        authed = await client.get('/api/debug/consume-pause', headers={'Authorization': 'Bearer secret-t'})
+        anonymous = await client.get('/api/v1/debug/consume-pause')
+        authed = await client.get('/api/v1/debug/consume-pause', headers={'Authorization': 'Bearer secret-t'})
     assert anonymous.status_code == 401
     assert authed.status_code == 200
 
@@ -108,7 +108,7 @@ async def test_routes_require_token_when_configured():
 async def test_pause_pauses_consumer_and_returns_active_state():
     app = _mock_app()
     async with _client(app) as client:
-        resp = await client.post('/api/debug/consume-pause', json={'duration_seconds': 60})
+        resp = await client.post('/api/v1/debug/consume-pause', json={'duration_seconds': 60})
     assert resp.status_code == 200
     body = resp.json()
     assert body['active'] is True
@@ -121,8 +121,8 @@ async def test_pause_pauses_consumer_and_returns_active_state():
 async def test_pause_duration_bounds_are_422():
     app = _mock_app()
     async with _client(app) as client:
-        low = await client.post('/api/debug/consume-pause', json={'duration_seconds': 0})
-        high = await client.post('/api/debug/consume-pause', json={'duration_seconds': 3601})
+        low = await client.post('/api/v1/debug/consume-pause', json={'duration_seconds': 0})
+        high = await client.post('/api/v1/debug/consume-pause', json={'duration_seconds': 3601})
     assert low.status_code == 422
     assert high.status_code == 422
     app._consumer.pause.assert_not_awaited()
@@ -132,7 +132,7 @@ async def test_pause_without_running_consumer_is_503():
     app = _mock_app()
     app._consumer = None
     async with _client(app) as client:
-        resp = await client.post('/api/debug/consume-pause', json={'duration_seconds': 15})
+        resp = await client.post('/api/v1/debug/consume-pause', json={'duration_seconds': 15})
     assert resp.status_code == 503
     assert 'Consumer' in resp.json()['detail']
 
@@ -140,9 +140,9 @@ async def test_pause_without_running_consumer_is_503():
 async def test_resume_ends_the_pause_and_is_idempotent():
     app = _mock_app()
     async with _client(app) as client:
-        await client.post('/api/debug/consume-pause', json={'duration_seconds': 3600})
-        first = await client.post('/api/debug/consume-resume')
-        second = await client.post('/api/debug/consume-resume')
+        await client.post('/api/v1/debug/consume-pause', json={'duration_seconds': 3600})
+        first = await client.post('/api/v1/debug/consume-resume')
+        second = await client.post('/api/v1/debug/consume-resume')
     assert first.status_code == 200
     assert first.json()['active'] is False
     assert second.status_code == 200

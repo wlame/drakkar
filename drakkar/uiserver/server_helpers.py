@@ -18,7 +18,6 @@ parameter and surfaces as a 422 error at runtime.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from drakkar.config import UIConfig
@@ -201,53 +200,6 @@ def origin_allowed(origin: str | None, host_header: str, config: UIConfig) -> bo
     if not origin_host_norm or not host_host:
         return False
     return origin_host_norm == host_host and origin_port_norm == host_port_norm
-
-
-def format_ts(ts: float | None) -> str:
-    """Format a Unix timestamp as ``HH:MM:SS`` (UTC). Empty string for None."""
-    if ts is None:
-        return ''
-    return datetime.fromtimestamp(ts, tz=UTC).strftime('%H:%M:%S')
-
-
-def format_ts_ms(ts: float | None) -> str:
-    """Format a Unix timestamp as ``HH:MM:SS.mmm`` (UTC). Empty string for None."""
-    if ts is None:
-        return ''
-    return datetime.fromtimestamp(ts, tz=UTC).strftime('%H:%M:%S.%f')[:-3]
-
-
-def format_ts_full(ts: float | None) -> str:
-    """Format a Unix timestamp as ``YYYY-MM-DD HH:MM:SS.mmm`` (UTC). Empty for None."""
-    if ts is None:
-        return ''
-    return datetime.fromtimestamp(ts, tz=UTC).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-
-
-def format_uptime(seconds: float) -> str:
-    """Format uptime as a human-readable string, scaling to the largest unit."""
-    s = int(seconds)
-    if s < 60:
-        return f'{s}s'
-    if s < 3600:
-        return f'{s // 60}m {s % 60}s'
-    if s < 86400:
-        h = s // 3600
-        m = (s % 3600) // 60
-        return f'{h}h {m}m'
-    if s < 86400 * 30:
-        d = s // 86400
-        h = (s % 86400) // 3600
-        return f'{d}d {h}h'
-    if s < 86400 * 365:
-        d = s // 86400
-        mo = d // 30
-        d_rem = d % 30
-        return f'{mo}mo {d_rem}d'
-    d = s // 86400
-    y = d // 365
-    d_rem = d % 365
-    return f'{y}y {d_rem // 30}mo'
 
 
 def worker_group(name: str) -> str:

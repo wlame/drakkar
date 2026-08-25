@@ -90,7 +90,7 @@ def create_kafka_read_router(deps: UIDeps) -> APIRouter:
             )
         return target
 
-    @router.get('/api/debug/kafka/topics')
+    @router.get('/api/v1/debug/kafka/topics')
     async def kafka_topics():
         """The readable topic aliases and their kinds.
 
@@ -101,7 +101,7 @@ def create_kafka_read_router(deps: UIDeps) -> APIRouter:
             return _disabled_response()
         return {'topics': [{'alias': t.alias, 'kind': t.kind} for t in aliases.values()]}
 
-    @router.get('/api/debug/kafka/{alias}/message')
+    @router.get('/api/v1/debug/kafka/{alias}/message')
     async def kafka_message(
         alias: str,
         partition: int = Query(ge=0),
@@ -118,7 +118,7 @@ def create_kafka_read_router(deps: UIDeps) -> APIRouter:
         except KafkaReadUnavailable as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    @router.get('/api/debug/kafka/{alias}/messages')
+    @router.get('/api/v1/debug/kafka/{alias}/messages')
     async def kafka_messages(
         alias: str,
         from_ts: int = Query(ge=0, description='Start of the window, epoch milliseconds (inclusive)'),

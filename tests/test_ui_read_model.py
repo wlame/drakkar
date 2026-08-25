@@ -486,3 +486,25 @@ class TestWebappRateTiles:
         assert 'COUNT(*)' in sql
         assert 'event IN (?,?)' in sql
         assert params == ['a', 'b', 99.0]
+
+
+class TestEventsOriginFilter:
+    """The History page's origin radio — the SPA sends it, so it must work."""
+
+    def test_origin_is_bound_not_interpolated(self):
+        sql, params = events_query(origin='http', limit=10)
+
+        assert 'origin = ?' in sql
+        assert params == ['http', 10]
+
+    def test_origin_combines_with_the_other_filters(self):
+        sql, params = events_query(partitions=[1], event_types=['consumed'], origin='kafka', after_id=5, limit=10)
+
+        assert sql.count('?') == len(params)
+        assert params == [1, 'consumed', 'kafka', 5, 10]
+
+    def test_no_origin_adds_no_condition(self):
+        sql, params = events_query(origin=None, limit=10)
+
+        assert 'origin' not in sql
+        assert params == [10]

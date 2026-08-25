@@ -440,7 +440,7 @@ supports `flock` before pointing multiple hosts' workers at one `db_dir`.
 
 ### Merge, compress, publish, then delete
 
-Each due window is merged with the same engine `POST /api/debug/merge`
+Each due window is merged with the same engine `POST /api/v1/debug/merge`
 uses, gzip-compressed, and published under its final name with an atomic
 rename. Only after the archive is durably on disk (its directory entry
 fsynced) are the raw files it covers deleted — any failure before the
@@ -501,7 +501,7 @@ parsed from the file name, no file is opened) and
 `GET /api/v1/debug/archives/{name}` (download,
 `Content-Type: application/gzip`). Archives are **read-only** in the UI:
 they never appear as merge candidates, and there is no delete button.
-`POST /api/debug/merge` does not specifically reject an archive name
+`POST /api/v1/debug/merge` does not specifically reject an archive name
 passed to it by hand — filename hardening only rejects path traversal and
 unsafe characters — but the merge engine cannot open gzip bytes as
 SQLite, so it silently drops that source from the result, the same
@@ -530,7 +530,7 @@ CLI or any tool that already reads a merged `.db`.
 
 ## The databases-page stats cache
 
-`GET /api/debug/databases` used to open every `.db` file and aggregate its
+`GET /api/v1/debug/databases` used to open every `.db` file and aggregate its
 whole events table per page load. It is now backed by
 `<db_dir>/.dbstats.db` (table `db_stats_v1` — identical schema on both
 backends; a mixed fleet shares the file):

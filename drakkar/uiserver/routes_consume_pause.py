@@ -64,14 +64,14 @@ def create_consume_pause_router(deps: UIDeps) -> APIRouter:
     def _enabled() -> bool:
         return bool(drakkar_app.config.ui.consume_pause.enabled)
 
-    @router.get('/api/debug/consume-pause')
+    @router.get('/api/v1/debug/consume-pause')
     async def consume_pause_state():
         """Current pause state. Served even when the feature is disabled —
         ``enabled: false`` in the body IS the signal the UI hides on, so
         the Live page needs no failure-probe to know."""
         return drakkar_app.consume_pause.state()
 
-    @router.post('/api/debug/consume-pause')
+    @router.post('/api/v1/debug/consume-pause')
     async def consume_pause_start(body: ConsumePauseRequest):
         """Pause consuming for ``duration_seconds`` (replaces an active pause)."""
         if not _enabled():
@@ -86,7 +86,7 @@ def create_consume_pause_router(deps: UIDeps) -> APIRouter:
         except ConsumerNotReadyError as exc:
             return JSONResponse({'detail': str(exc)}, status_code=503)
 
-    @router.post('/api/debug/consume-resume')
+    @router.post('/api/v1/debug/consume-resume')
     async def consume_pause_resume():
         """Resume consuming now. Idempotent — resuming while not paused
         answers 200 with the (inactive) state."""

@@ -222,6 +222,11 @@ paths:
           in: query
           description: CSV of event-type names.
           schema: {type: string}
+        - name: origin
+          in: query
+          description: >-
+            Keep only Kafka-origin tasks or webapp requests. Omit for both.
+          schema: {type: string, enum: [kafka, http]}
       responses:
         '200':
           description: Event rows, newest first.

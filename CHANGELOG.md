@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The built-in server-rendered pages.** `drakkar/templates/` (10 Jinja
+  templates), the `include_html` branches in the route modules, and the
+  `jinja2` runtime dependency are gone. Every backend now serves exactly
+  one UI — the versioned `drakkar-ui` bundle — instead of maintaining a
+  second, near-unused copy that every feature had to be built into twice.
+
+- **The `drakkar-ui` release embedded as package data** (`drakkar/uihost/bundle/`,
+  ~5 MB of the wheel) and the `just embed-ui` recipe that refreshed it.
+  Release tags are immutable, so a bundle downloaded once serves from the
+  shared cache on every later start, offline ones included; the embedded
+  copy only ever covered the *first* start on a host that could not reach
+  the release source. With nothing cached the worker now runs **API-only**:
+  `/api/v1/...`, the Kubernetes probes and the event WebSocket are
+  unaffected, and page requests answer **503** naming the ways to supply a
+  bundle. For an air-gapped deployment, stage one with
+  `drakkar-ui fetch --version=vX.Y.Z` or point `ui.release.repo` at an
+  internal mirror.
+
+- **The legacy unprefixed `/api/*` routes.** Every JSON endpoint now lives
+  under `/api/v1` and nowhere else. The unprefixed paths existed only for
+  the built-in pages' inline JavaScript — the `drakkar-ui` SPA has always
+  called `/api/v1` — so they went with the pages, and with them
+  `register_v1_aliases`, its `_V1_EXTRA_ALIASES` table and the startup
+  guard that reflected over FastAPI's router internals. The route table and
+  the OpenAPI artifact are roughly half their previous size.
+  `GET /debug/download/{filename}` moved to
+  `GET /api/v1/debug/download/{filename}`. `/healthz`, `/readyz` and `/ws`
+  stay unprefixed (kubelet and browser contracts).
+
+- `ui_source: "embedded"` from `GET /api/v1/identity` — only `"release"`
+  remains, and `ui_version` is `null` when no bundle is being served.
+
+- `{worker_id}` / `{cluster_name}` expansion in `ui.custom_links` URLs.
+  That expansion happened only while rendering the built-in dashboard; the
+  API has always passed `custom_links` to the SPA verbatim, per the
+  contract. Configure the final URL directly.
+
+### Added
+
+- `GET /api/v1/events?origin=kafka|http` — filter the event feed to
+  Kafka-origin tasks or webapp requests. The `drakkar-ui` History page has
+  been sending this parameter, and neither backend implemented it, so its
+  origin radio silently did nothing.
+
 ### Fixed
 
 - **`on_startup` can now tune `sinks.circuit_breaker` and

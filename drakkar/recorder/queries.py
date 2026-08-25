@@ -545,13 +545,16 @@ def events_query(
     *,
     partitions: Sequence[int] | None = None,
     event_types: Sequence[str] | None = None,
+    origin: str | None = None,
     after_id: int = 0,
     limit: int = 100,
 ) -> tuple[str, list[Any]]:
     """The ``/api/v1/events`` listing: newest first, optionally filtered.
 
     ``after_id`` supports the UI's incremental poll — "everything since the
-    id I last saw" — and is ignored when zero.
+    id I last saw" — and is ignored when zero. ``origin`` splits
+    Kafka-origin tasks from webapp requests (indexed by
+    ``idx_events_origin``).
     """
     conditions: list[str] = []
     params: list[Any] = []
@@ -561,6 +564,9 @@ def events_query(
     if event_types:
         conditions.append(f'event IN ({_placeholders(event_types)})')
         params.extend(event_types)
+    if origin:
+        conditions.append('origin = ?')
+        params.append(origin)
     if after_id > 0:
         conditions.append('id > ?')
         params.append(after_id)

@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from drakkar.concurrency import dispatch_to_loop
@@ -176,41 +176,23 @@ def _disabled_response(endpoint: str, config_key: str) -> JSONResponse:
     )
 
 
-def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
+def create_debug_router(deps: UIDeps) -> APIRouter:
     """Build the router that owns the debug page + ``/api/debug/*`` endpoints (excluding cache).
 
-    ``include_html=False`` (SPA mode) drops the ``/debug`` Jinja page so the
-    SPA catch-all owns it; the JSON endpoints and the file download at
-    ``/debug/download/{filename}`` are unaffected.
+    The file download at ``/debug/download/{filename}`` lives here too.
     """
     # Every debug route (config summary, traces, metrics, merge, probe,
     # downloads) is sensitive — gate the whole router behind require_auth
     # (no-op without a token). The per-route Depends below predate the
     # router-level gate and are kept as explicit markers.
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
-    # HTML page routes register on ``html``: the real router normally, or a
-    # throwaway router (never mounted) when the SPA owns the page surface.
-    html = router if include_html else APIRouter()
     config = deps.config
     recorder = deps.recorder
     drakkar_app = deps.drakkar_app
-    templates = deps.templates
 
-    # --- Debug databases page ---
+    # --- Debug databases ---
 
-    @html.get('/debug', response_class=HTMLResponse)
-    async def debug_databases(request: Request):
-        return templates.TemplateResponse(
-            request,
-            'debug.html',
-            {
-                'worker_id': drakkar_app._worker_id,
-                'db_dir': config.recorder.db_dir,
-                'config_summary': drakkar_app.config_summary,
-            },
-        )
-
-    @router.get('/api/debug/databases', dependencies=[Depends(deps.require_auth)])
+    @router.get('/api/v1/debug/databases', dependencies=[Depends(deps.require_auth)])
     async def api_debug_databases():
         """List all debug database files in db_dir with stats.
 
@@ -260,7 +242,7 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             ]
         )
 
-    @router.post('/api/debug/merge', dependencies=[Depends(deps.require_auth)])
+    @router.post('/api/v1/debug/merge', dependencies=[Depends(deps.require_auth)])
     async def api_debug_merge(request: Request):
         """Merge selected database files into one."""
 
@@ -318,7 +300,7 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             }
         )
 
-    @router.get('/api/debug/trace')
+    @router.get('/api/v1/debug/trace')
     async def api_debug_trace(
         partition: int = Query(ge=0, le=_INT32_MAX),
         offset: int = Query(),
@@ -327,7 +309,7 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         events = await dispatch_to_loop(recorder.cross_trace(partition, offset), deps.drakkar_app.main_loop)
         return JSONResponse(events)
 
-    @router.get('/api/debug/label-keys')
+    @router.get('/api/v1/debug/label-keys')
     async def api_debug_label_keys():
         """Return distinct label keys found in events."""
         query = """
@@ -353,7 +335,7 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
                 pass
         return JSONResponse(sorted(keys))
 
-    @router.get('/api/debug/trace-by-label')
+    @router.get('/api/v1/debug/trace-by-label')
     async def api_debug_trace_by_label(
         key: str = Query(min_length=1),
         value: str = Query(min_length=1),
@@ -362,14 +344,14 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
         events = await dispatch_to_loop(recorder.cross_trace_by_label(key, value), deps.drakkar_app.main_loop)
         return JSONResponse(events)
 
-    @router.get('/api/debug/metrics')
+    @router.get('/api/v1/debug/metrics')
     async def api_debug_metrics():
         """Return all registered Prometheus metrics with current values."""
         from drakkar.metrics import collect_all_metrics
 
         return JSONResponse(collect_all_metrics())
 
-    @router.get('/api/debug/periodic')
+    @router.get('/api/v1/debug/periodic')
     async def api_debug_periodic():
         """Return periodic task run history from the flight recorder.
 
@@ -444,7 +426,7 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
 
         return JSONResponse(sorted(tasks.values(), key=lambda t: t['name']))
 
-    @router.get('/debug/download/{filename}', dependencies=[Depends(deps.require_auth)])
+    @router.get('/api/v1/debug/download/{filename}', dependencies=[Depends(deps.require_auth)])
     async def debug_download(filename: str):
         """Download a database file from db_dir."""
         root = _db_root(config.recorder.db_dir)
@@ -465,7 +447,7 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             headers={'Cache-Control': 'no-store, private'},
         )
 
-    @router.get('/api/debug/archives', dependencies=[Depends(deps.require_auth)])
+    @router.get('/api/v1/debug/archives', dependencies=[Depends(deps.require_auth)])
     async def api_debug_archives():
         """List compressed archive files in db_dir."""
         from drakkar.recorder.archive import list_archives
@@ -490,7 +472,7 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             }
         )
 
-    @router.get('/api/debug/archives/{name}', dependencies=[Depends(deps.require_auth)])
+    @router.get('/api/v1/debug/archives/{name}', dependencies=[Depends(deps.require_auth)])
     async def debug_download_archive(name: str):
         """Download one compressed archive file from db_dir."""
         from drakkar.recorder.archive import ARCHIVE_NAME_RE
@@ -549,7 +531,7 @@ def create_debug_router(deps: UIDeps, include_html: bool = True) -> APIRouter:
             probe_state['runner'] = existing
         return existing
 
-    @router.post('/api/debug/probe', dependencies=[Depends(deps.require_auth)])
+    @router.post('/api/v1/debug/probe', dependencies=[Depends(deps.require_auth)])
     async def api_debug_probe(req: _ProbeRequest) -> JSONResponse:
         """Run a single-message probe through the live handler pipeline.
 
