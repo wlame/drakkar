@@ -194,4 +194,4 @@ See [`docs/development.md`](docs/development.md) and [`CONTRIBUTING.md`](CONTRIB
 
 ## License
 
-MIT
+MIT — see [`LICENSE`](LICENSE).

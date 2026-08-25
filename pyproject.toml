@@ -5,6 +5,7 @@ description = "Kafka subprocess orchestration framework"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "wlame" },
 ]

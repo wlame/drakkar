@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A `LICENSE` file.** `pyproject.toml` and the README have always said
+  MIT, but the text was never in the repository, so the published sdist and
+  wheel carried a license field with nothing behind it and GitHub could not
+  detect the license. `license-files = ["LICENSE"]` puts the text in both
+  artifacts (verified: `dist-info/licenses/LICENSE` in the wheel,
+  `License-File: LICENSE` in `METADATA`).
+
 ### Changed
 
 - **The recorder's 30 event names are one `EventType` enum**
