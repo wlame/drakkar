@@ -43,6 +43,27 @@ lint-fix:
 typecheck:
     uv run ty check drakkar/
 
+# The Swagger UI assets are served offline from drakkar/uiserver/swagger/
+# (no CDN) and ship in the wheel, so they are ordinary third-party
+# dependencies that nothing else updates: the lockfile does not cover them,
+# pip-audit does not see them, and Dependabot has no manifest to read. Run
+# this when swagger-ui-dist publishes a security release, then mirror the
+# result into the Go backend so both serve the same bytes.
+#
+# Re-vendor the Swagger UI assets (e.g. just vendor-swagger 5.32.8)
+vendor-swagger version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir=drakkar/uiserver/swagger
+    base="https://unpkg.com/swagger-ui-dist@{{ version }}"
+    for asset in swagger-ui-bundle.js swagger-ui.css LICENSE; do
+        echo "fetching $asset"
+        curl -fsSL "$base/$asset" -o "$dir/$asset.new"
+        mv "$dir/$asset.new" "$dir/$asset"
+    done
+    echo "{{ version }}" > "$dir/VERSION"
+    echo "vendored swagger-ui-dist {{ version }}; run 'just test' and mirror into ../drakkar-go"
+
 # Dependency CVE scan (pip-audit against the installed environment).
 # Deliberately NOT part of `just ci`: a newly published CVE must fail the
 # security job without blocking every unrelated PR behind an unrelated gate.

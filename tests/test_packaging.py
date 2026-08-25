@@ -39,6 +39,30 @@ def test_declared_license_matches_the_file() -> None:
     assert PYPROJECT['project']['license'] == 'MIT'
 
 
+SWAGGER_DIR = REPO_ROOT / 'drakkar' / 'uiserver' / 'swagger'
+
+
+def test_vendored_swagger_version_is_recorded() -> None:
+    """The VERSION file must match the version the bundle stamps into itself.
+
+    The Swagger assets are ~1.7MB of third-party JavaScript served offline
+    and shipped in the wheel. The lockfile does not cover them, pip-audit
+    cannot see them and Dependabot has no manifest to read, so the recorded
+    version is the only way to answer "are we exposed to this advisory?".
+    Re-vendoring without updating the record would make that answer wrong,
+    which is worse than no record at all — so the bundle's own build stamp
+    is the source of truth and the record is checked against it.
+    """
+    recorded = (SWAGGER_DIR / 'VERSION').read_text().strip()
+    bundle = (SWAGGER_DIR / 'swagger-ui-bundle.js').read_text(encoding='utf-8', errors='replace')
+    stamped = re.search(r'PACKAGE_VERSION:"(\d+\.\d+\.\d+)"', bundle)
+    assert stamped, 'no PACKAGE_VERSION stamp in the swagger bundle — did the upstream build change?'
+    assert recorded == stamped.group(1), (
+        f'swagger/VERSION records {recorded} but the bundle is {stamped.group(1)}; '
+        f're-run `just vendor-swagger {stamped.group(1)}` or correct the record'
+    )
+
+
 def test_security_policy_covers_the_current_release() -> None:
     """The supported-versions table must name the series we actually ship.
 

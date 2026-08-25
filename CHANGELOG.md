@@ -60,6 +60,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The vendored Swagger UI had no version record.**
+  `drakkar/uiserver/swagger/` carries ~1.7MB of third-party JavaScript that
+  is served offline and shipped in the wheel, with nothing saying which
+  release it came from and no way to refresh it. The lockfile does not cover
+  it, pip-audit cannot see it and Dependabot has no manifest to read, so an
+  advisory against it had no answerable "are we exposed?".
+  `swagger/VERSION` now records it (5.32.8), `just vendor-swagger <version>`
+  refreshes it, and a test compares the record against the version the
+  bundle stamps into itself, so re-vendoring without updating the record
+  fails. The Go backend carries the same three pieces.
+
 - **The security policy covered no released version.** The
   supported-versions table still said `1.0.x` while the project was on
   1.19.0, so a reporter checking whether their version was in scope got no
