@@ -120,10 +120,13 @@ user cache dir (`~/.cache/drakkar/ui/<tag>/`) — the path is byte-identical to
 Go's `os.UserCacheDir` on Linux, so co-located workers of both backends share
 one download. The concurrency invariant: a valid cached bundle is never
 deleted or replaced (`fetch.py`); racing workers converge on the first
-installer's copy. Resolution is never fatal — the ladder ends at the release
-embedded as package data (`just embed-ui vX.Y.Z` refreshes
-`drakkar/uihost/bundle/`, which ships in the wheel). The `drakkar-ui` console
-script mirrors the Go repo's CLI command-for-command over the same cache.
+installer's copy. Resolution is never fatal, but it can end with nothing:
+the wheel carries no bundle, so a worker with an empty cache and no
+reachable release source runs API-only and answers page requests with 503
+(`uiserver/routes_spa.py`). For an air-gapped deployment, stage a bundle
+with `drakkar-ui fetch --version=vX.Y.Z` or point `ui.release.repo` at an
+internal mirror. The `drakkar-ui` console script mirrors the Go repo's CLI
+command-for-command over the same cache.
 
 ## Directory map
 

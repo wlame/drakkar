@@ -137,6 +137,44 @@ def test_justfile_does_not_select_a_dev_extra() -> None:
     assert not offenders, 'recipes still select the removed dev extra: ' + '; '.join(offenders)
 
 
+# Documents whose `just <recipe>` references must resolve. AGENTS.md is read
+# by coding agents before the code; the rest are read by contributors and
+# operators.
+_RECIPE_DOCS = ('AGENTS.md', 'README.md', 'CONTRIBUTING.md', 'SECURITY.md')
+
+
+def _declared_recipes() -> set[str]:
+    """Recipe names the justfile declares, from the start of each line."""
+    justfile = (REPO_ROOT / 'justfile').read_text()
+    return set(re.findall(r'^([a-z][a-z0-9-]*)(?:\s+[^:]*)?:', justfile, re.M))
+
+
+def test_docs_only_reference_real_just_recipes() -> None:
+    """A document must not tell the reader to run a recipe that is gone.
+
+    ``just embed-ui`` outlived the recipe and the directory it refreshed by
+    a whole release, in AGENTS.md — the file written specifically so an agent
+    does not have to derive the project from source. The existing directory-map
+    test covers the map only, so a prose reference like that one slipped past.
+
+    Only backticked ``\`just x\``` counts: "just the events table" is prose.
+    """
+    recipes = _declared_recipes()
+    assert recipes, 'parsed no recipes from the justfile — did its format change?'
+
+    docs = [REPO_ROOT / name for name in _RECIPE_DOCS]
+    docs += sorted((REPO_ROOT / 'docs').glob('*.md'))
+
+    offenders = []
+    for doc in docs:
+        if not doc.is_file():
+            continue
+        for referenced in re.findall(r'`just ([a-z][a-z0-9-]*)', doc.read_text()):
+            if referenced not in recipes:
+                offenders.append(f'{doc.name}: just {referenced}')
+    assert not offenders, 'documents reference just recipes that do not exist: ' + '; '.join(sorted(offenders))
+
+
 def test_agents_md_directory_map_matches_the_tree() -> None:
     """AGENTS.md is a committed deliverable an agent reads before the code.
 

@@ -106,6 +106,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ui.release.repo`. Tests now pin the docstrings against the served route
   table and the `AGENTS.md` map against the tree.
 
+  A second pass caught what that sweep missed: `AGENTS.md` still ended the
+  UI resolution ladder at "the release embedded as package data", refreshed
+  by `just embed-ui vX.Y.Z` — no such recipe, no such bundle, and no such
+  fallback since 1.19. A worker that resolves nothing runs API-only and
+  answers page requests with 503. A new test fails when any document
+  references a `just` recipe the justfile does not declare, which is how
+  `just embed-ui` outlived its own deletion.
+
 ### Removed
 
 - **The pre-1.0 migration guards for retired config keys.** The `debug.*`
