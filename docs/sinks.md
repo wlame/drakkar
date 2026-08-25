@@ -362,7 +362,7 @@ payload is harmless — an idempotent upsert, a keyed Kafka topic a consumer
 dedups, a `SET` in Redis. For an operation that counts (`INCRBY`, `LPUSH`,
 an append, a webhook that charges a card), prefer `DLQ`: the payloads are
 preserved for a deliberate replay instead of being re-applied blindly. See
-[Idempotency](#idempotency) for the related per-sink `idempotent` flag,
+[Retry contract](#retry-contract) for the related per-sink `idempotent` flag,
 which governs the framework's own internal fast-retry.
 
 ### Circuit Breaker
