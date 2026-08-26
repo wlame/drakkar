@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.0] - 2026-08-26
+
 ### Added
 
 - **A `LICENSE` file.** `pyproject.toml` and the README have always said
