@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`exclude-newer` made `uv.lock` differ between machines.** It was written
+  as a bare date, which uv resolves against *local* midnight before recording
+  the instant in the lockfile — so a UTC machine wrote `T00:00:00Z` where a
+  UTC+2 machine wrote `T22:00:00Z`, and the file churned on every re-lock. It
+  is an explicit UTC instant now, verified stable across three timezones, and
+  a test rejects a value without one. Tightening the window by those hours
+  moved `idna` 3.19 to 3.18; nothing else changed.
+
 - **The release script left the security policy behind.** The
   supported-versions table is pinned to `__version__` by a test, but
   `scripts/bump.sh` only rewrote the version and the changelog — so cutting

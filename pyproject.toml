@@ -147,7 +147,13 @@ venv = ".venv"
 # Bump this deliberately when upgrading dependencies — keep it ~7 days behind
 # the day you bump — and re-run `uv lock` so the change is visible in the
 # lockfile diff rather than happening silently on someone's machine.
-exclude-newer = "2026-08-18"
+#
+# Pinned as an explicit UTC instant, not a bare date: uv reads a bare date as
+# local midnight and writes the resolved instant into uv.lock, so the same
+# date produced a different lockfile line on every machine in a different
+# timezone (UTC wrote T00:00:00Z, UTC+2 wrote T22:00:00Z) and the file
+# churned on every re-lock.
+exclude-newer = "2026-08-18T00:00:00Z"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN"]

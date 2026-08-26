@@ -40,7 +40,10 @@ published after the date it names, so a package compromised today cannot
 reach a build here before the yank catches it. Upgrading a dependency
 therefore means bumping that date — keep it roughly a week behind the day
 you bump — and re-running `uv lock`, so the change shows up in the lockfile
-diff. Two tests fail if the pin goes missing or lands in the future.
+diff. Write it as an explicit UTC instant (`2026-08-18T00:00:00Z`): uv reads
+a bare date as *local* midnight, which makes `uv.lock` differ between
+machines in different timezones. Tests fail if the pin goes missing, loses
+its timezone, or lands in the future.
 
 ## Cross-backend parity
 

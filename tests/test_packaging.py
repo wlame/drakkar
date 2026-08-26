@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 import tomllib
-from datetime import date
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -118,11 +118,24 @@ def test_uv_exclude_newer_is_set() -> None:
     )
 
 
-def test_uv_exclude_newer_is_a_past_date() -> None:
-    """A future date silently disables the pin it looks like it enforces."""
+def test_uv_exclude_newer_is_an_explicit_utc_instant_in_the_past() -> None:
+    """The pin must be timezone-explicit, and must be in the past.
+
+    uv reads a bare ``YYYY-MM-DD`` as *local* midnight and writes the resolved
+    instant into ``uv.lock``, so the same pyproject value produced a different
+    lockfile line on every machine in a different timezone — UTC wrote
+    ``T00:00:00Z`` where UTC+2 wrote ``T22:00:00Z`` — and the file churned on
+    every re-lock. Requiring the instant form makes the lock reproducible.
+
+    A future value would silently pin nothing at all.
+    """
     excluded = PYPROJECT['tool']['uv']['exclude-newer']
-    parsed = date.fromisoformat(excluded)
-    assert parsed <= date.today(), f'exclude-newer is in the future ({excluded}); it pins nothing'
+    parsed = datetime.fromisoformat(excluded)
+    assert parsed.tzinfo is not None, (
+        f'exclude-newer ({excluded}) has no timezone; uv resolves a bare date against '
+        f'local midnight, so uv.lock differs per machine. Use e.g. 2026-08-18T00:00:00Z.'
+    )
+    assert parsed <= datetime.now(UTC), f'exclude-newer is in the future ({excluded}); it pins nothing'
 
 
 def test_license_file_is_declared_for_the_build_backend() -> None:
