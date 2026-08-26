@@ -842,7 +842,7 @@ Each sink type is a dict mapping instance names to their config:
 | `recorder.rotation_interval_hours` | int | `1` | When to roll over DB files (1 = 1 hour) |
 | `recorder.archive_enabled` | bool | `True` | Merge rotated-out files into windowed `.db.gz` archives instead of leaking them |
 | `recorder.archive_window_hours` | int | `24` | Width of one archive window; one archive per cluster per window |
-| `recorder.archive_retention_days` | int | `0` | Delete archives older than this; `0` = keep forever |
+| `recorder.archive_retention_days` | int | `30` | Delete archives older than this; `0` = keep forever (warns at startup) |
 | `recorder.store_output` | bool | `True` | Include stdout/stderr in event records |
 | `recorder.flush_interval_seconds` | int | `5` | Buffer flush interval |
 | `recorder.max_buffer` | int | `50000` | In-memory event buffer size |

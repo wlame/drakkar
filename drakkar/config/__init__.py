@@ -34,6 +34,7 @@ from drakkar.config.sinks import (
     SinksConfig,
 )
 from drakkar.config.ui import (
+    DEFAULT_ARCHIVE_RETENTION_DAYS,
     TIMELINE_COLOR_NAMES,
     TIMELINE_NUMERIC_FIELDS,
     TIMELINE_OPS,
@@ -51,6 +52,7 @@ from drakkar.config.ui import (
 from drakkar.config.webapp import WebAppConfig, WebClientConfig
 
 __all__ = [
+    'DEFAULT_ARCHIVE_RETENTION_DAYS',
     'TIMELINE_COLOR_NAMES',
     'TIMELINE_NUMERIC_FIELDS',
     'TIMELINE_OPS',

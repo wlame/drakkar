@@ -103,9 +103,10 @@ everything else, and once that file's window is archived
 (`ui.recorder.archive_enabled`, default true — see
 [Archiving](local-databases.md#archiving)) the raw file is deleted but
 the annotation survives, compressed, inside the archive.
-`ui.recorder.archive_retention_days` (default `0` = keep forever) is the
-only thing that expires archives, so by default annotations are kept
-indefinitely rather than aged out. With `archive_enabled: false`, raw
+`ui.recorder.archive_retention_days` (default `30`) is the only thing
+that expires archives, so by default an annotation survives about a
+month after its window is archived. Set it to `0` to keep archives —
+and the annotations inside them — indefinitely. With `archive_enabled: false`, raw
 files — and the annotations inside them — are never deleted
 automatically at all.
 

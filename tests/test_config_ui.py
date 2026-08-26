@@ -7,7 +7,13 @@ and nested ``DK_UI__*`` env overrides.
 import pytest
 from pydantic import ValidationError
 
-from drakkar.config import DrakkarConfig, UIConfig, UIRecorderConfig, UIReleaseConfig
+from drakkar.config import (
+    DEFAULT_ARCHIVE_RETENTION_DAYS,
+    DrakkarConfig,
+    UIConfig,
+    UIRecorderConfig,
+    UIReleaseConfig,
+)
 
 
 def test_ui_defaults_match_old_debug_defaults():
@@ -35,7 +41,7 @@ def test_recorder_defaults_match_old_debug_defaults():
     assert rec.rotation_interval_hours == 1
     assert rec.archive_enabled is True
     assert rec.archive_window_hours == 24
-    assert rec.archive_retention_days == 0
+    assert rec.archive_retention_days == DEFAULT_ARCHIVE_RETENTION_DAYS
     assert rec.store_output is True
     assert rec.flush_interval_seconds == 5
     assert rec.max_buffer == 50_000
@@ -56,6 +62,43 @@ def test_recorder_archive_window_hours_rejects_below_one():
 
 def test_recorder_archive_retention_days_accepts_zero():
     assert UIRecorderConfig(archive_retention_days=0).archive_retention_days == 0
+
+
+def test_recorder_archive_retention_default_bounds_disk_growth():
+    """The default must expire archives, because nothing else reclaims them.
+
+    Rotation, the flush buffer and the live database are all bounded on
+    their own. Archives are not: with retention at 0 a worker left on its
+    defaults grows until the volume fills. The default is therefore a
+    horizon, and 0 is an explicit opt-out.
+    """
+    assert DEFAULT_ARCHIVE_RETENTION_DAYS > 0
+    assert UIRecorderConfig().archive_retention_days == DEFAULT_ARCHIVE_RETENTION_DAYS
+
+
+def test_recorder_archive_retention_default_covers_the_default_window():
+    """The shipped defaults must validate against each other.
+
+    Retention has to cover two archive windows, so a default retention
+    that did not clear 2 x the default window would make an untouched
+    config fail to load at all.
+    """
+    assert 2 * UIRecorderConfig().archive_window_hours <= DEFAULT_ARCHIVE_RETENTION_DAYS * 24
+
+
+def test_recorder_default_retention_against_a_wide_window_names_the_default():
+    """A window too wide for the default must say so, not just fail.
+
+    Whoever hits this never chose 30 days — they widened the window and
+    inherited the default. The message has to name that, or the number in
+    the error looks like it came from their own config.
+    """
+    too_wide = DEFAULT_ARCHIVE_RETENTION_DAYS * 24  # 2 x this exceeds the default's coverage
+    with pytest.raises(ValidationError) as excinfo:
+        UIRecorderConfig(archive_window_hours=too_wide)
+    message = str(excinfo.value)
+    assert f'{DEFAULT_ARCHIVE_RETENTION_DAYS}-day default' in message
+    assert 'set 0 to keep' in message
 
 
 def test_recorder_archive_retention_days_rejects_negative():

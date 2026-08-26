@@ -76,6 +76,7 @@ from drakkar.metrics import (
 from drakkar.partition import PartitionProcessor
 from drakkar.periodic import discover_periodic_tasks, run_periodic_task
 from drakkar.recorder import EventRecorder
+from drakkar.recorder.archive import warn_if_archives_unbounded
 from drakkar.sinks.manager import SinkNotConfiguredError
 from drakkar.timefmt import format_rfc3339_micro
 from drakkar.utils import wait_for_aligned_startup
@@ -444,6 +445,10 @@ class AppLifecycle:
             # also names any side-effecting endpoint (probe, merge) left
             # enabled. See docs/faq.md §"Security and trust model".
             warn_if_ui_unauthenticated(app._config)
+            # Archives are the one recorder artifact nothing else reclaims,
+            # so "keep forever" is stated at startup rather than discovered
+            # when a volume fills.
+            warn_if_archives_unbounded(app._config.ui.recorder)
 
             app._recorder = EventRecorder(
                 app._config.ui,

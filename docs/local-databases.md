@@ -372,7 +372,7 @@ backend does the work for a given cluster.
 ### Defaults walkthrough
 
 With `rotation_interval_hours: 1`, `archive_enabled: true`,
-`archive_window_hours: 24` and `archive_retention_days: 0` (all
+`archive_window_hours: 24` and `archive_retention_days: 30` (all
 defaults):
 
 - Every hour, rotation opens a new raw `<worker>-<timestamp>.db` file.
@@ -393,8 +393,11 @@ defaults):
 - Once due, whichever worker wins that tick's lock election merges the
   window's raw files into one `<cluster>-<from>__<to>.db.gz` and deletes
   the raw files it merged.
-- `archive_retention_days: 0` keeps every archive forever — nothing ever
-  deletes a `.db.gz` file.
+- `archive_retention_days: 30` deletes a `.db.gz` file once its window
+  ended more than 30 days ago, so the archive footprint settles at about
+  a month of history. `0` disables expiry entirely — nothing then deletes
+  a `.db.gz` file, and the worker logs a `recorder_archives_unbounded`
+  warning at startup saying so.
 
 Steady state: up to twice a window's worth of raw `.db` files per worker
 at any time — the window currently being written plus the most recently
@@ -488,7 +491,7 @@ ui:
     rotation_interval_hours: 1       # 1 = every hour (was rotation_interval_minutes)
     archive_enabled: true            # merge rotated-out files into windowed .db.gz archives
     archive_window_hours: 24         # one archive per cluster per UTC day; must be >= rotation_interval_hours
-    archive_retention_days: 0        # 0 = keep archives forever; else must be >= 2 x the window, in days
+    archive_retention_days: 30       # delete archives older than this; 0 = keep forever, must be >= 2 x the window
 ```
 
 ### Downloading archives

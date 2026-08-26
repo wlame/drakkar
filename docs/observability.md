@@ -163,6 +163,8 @@ Emitted only when [`ui.enabled=true`](configuration.md#ui-flight-recorder-ui). T
 | `drakkar_recorder_flush_batches_dropped_total` | Counter | -- | Batches discarded after `max_flush_retries` consecutive failures. This is silent recorder data loss — alert on any non-zero rate. Investigate disk space, filesystem health, and WAL contention. |
 | `drakkar_recorder_requeue_overflow_total` | Counter | -- | Events silently dropped from the recorder buffer tail when an `OperationalError`-triggered requeue exceeded `max_buffer` capacity (concurrent records filled the deque during the flush). Any non-zero value is data loss on the flush-retry path — alert alongside `flush_batches_dropped_total`. |
 | `drakkar_recorder_ws_dropped_events_total` | Counter | -- | Events dropped for a live WebSocket subscriber whose queue was full. Affects only that subscriber, which is signalled to resync from the DB, so the UI self-heals; sustained growth means live views cannot keep up with event volume. |
+| `drakkar_recorder_archive_bytes` | Gauge | -- | Total size on disk of this cluster's compressed `.db.gz` archives in `db_dir`, refreshed on every archive pass including the ticks that archive nothing. Archives are the only recorder artifact nothing else reclaims: bounded by `archive_retention_days`, and unbounded while that is `0`. Alert against your volume budget. |
+| `drakkar_recorder_archive_files` | Gauge | -- | Number of this cluster's `.db.gz` archives in `db_dir`. Read with `drakkar_recorder_archive_bytes` to tell a slow accumulation of small windows from a few very large ones. |
 | `drakkar_recorder_annotations_total` | Counter | -- | Handler annotations accepted and written to the recorder. See [Annotations](annotations.md). |
 | `drakkar_recorder_annotations_dropped_total` | Counter | `reason` | Annotations discarded before reaching the recorder. `reason` is `oversize` (payload alone exceeded `annotation_max_bytes`), `budget_exhausted` (the hook invocation had spent `annotation_max_bytes_per_call`), `no_context` (called outside a framework-invoked hook — a handler bug), or `unserializable`. Payloads are dropped whole, never truncated. The accompanying warning log falls silent after five drops in one hook invocation to protect the log pipeline, so **alert on this counter, not on log volume**. |
 
@@ -580,7 +582,7 @@ ui:
     rotation_interval_hours: 1        # Rotate to a new DB file every N hours (1 = 1 hour)
     archive_enabled: true             # Merge rotated-out files into windowed .db.gz archives (see Archiving below)
     archive_window_hours: 24          # One archive per cluster per window; must be >= rotation_interval_hours
-    archive_retention_days: 0         # 0 = keep archives forever; else must be >= 2x the window, in days
+    archive_retention_days: 30        # delete archives older than this; 0 = keep forever, must be >= 2x the window
     store_output: true                # Include stdout/stderr in event records
     output_min_duration_ms: 500       # Tasks faster than this store no args/stdout/stderr
     event_min_duration_ms: 0          # Task events faster than this are not persisted at all
@@ -758,15 +760,17 @@ for the full byte-level spec shared with the Go backend. The short
 version:
 
 - **Defaults** (`rotation_interval_hours: 1`, `archive_enabled: true`,
-  `archive_window_hours: 24`, `archive_retention_days: 0`): raw files
+  `archive_window_hours: 24`, `archive_retention_days: 30`): raw files
   rotate hourly; a UTC day's window becomes due exactly 24h after it
   closes and is archived on the next hourly tick after that, merging its
   raw files into one `.db.gz` per cluster and deleting them. That 24h
   due-delay is the safety margin, not a bug — but it means a single raw
   file's lifespan, counted from when it was *created* rather than from
   window close, can reach up to ~48h (up to 24h as part of its own
-  window, plus the ~24h due-delay after that window closes). With
-  `archive_retention_days: 0`, archives themselves are kept forever.
+  window, plus the ~24h due-delay after that window closes). Archives
+  themselves are deleted once their window ended more than
+  `archive_retention_days` ago; `0` keeps them forever and warns at
+  startup. Track the footprint with `drakkar_recorder_archive_bytes`.
 - **Windows key on file start time, not event time.** A raw file belongs
   to the window holding its own start timestamp; an archive can carry a
   handful of events timestamped slightly past its own window end.
@@ -795,7 +799,7 @@ ui:
     rotation_interval_hours: 1       # 1 = every hour (was rotation_interval_minutes)
     archive_enabled: true            # merge rotated-out files into windowed .db.gz archives
     archive_window_hours: 24         # one archive per cluster per UTC day; must be >= rotation_interval_hours
-    archive_retention_days: 0        # 0 = keep archives forever; else must be >= 2x the window, in days
+    archive_retention_days: 30       # delete archives older than this; 0 = keep forever, must be >= 2x the window
 ```
 
 Archives are downloaded from the same place as raw databases — **Debug →

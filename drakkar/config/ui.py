@@ -8,6 +8,13 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+# Archives are the only recorder artifact nothing else reclaims, so the
+# default has to be a horizon rather than "forever": a worker left alone
+# on its defaults must not be able to fill the disk it runs on. 30 days
+# keeps a month of history queryable while covering every archive window
+# up to 360 hours — wider windows have to name their own retention.
+DEFAULT_ARCHIVE_RETENTION_DAYS = 30
+
 
 class UIRecorderConfig(BaseModel):
     """Flight-recorder persistence settings — the UI's data store.
@@ -53,10 +60,16 @@ class UIRecorderConfig(BaseModel):
         as asked.
         """
         if self.archive_retention_days and self.archive_retention_days * 24 < 2 * self.archive_window_hours:
+            default_note = (
+                f' The value is the {DEFAULT_ARCHIVE_RETENTION_DAYS}-day default, so raise it (or set 0 to keep '
+                f'archives forever) to go with a window this wide.'
+                if self.archive_retention_days == DEFAULT_ARCHIVE_RETENTION_DAYS
+                else ''
+            )
             raise ValueError(
                 f'ui.recorder.archive_retention_days ({self.archive_retention_days}) must cover at least two '
                 f'archive windows, or be 0 to keep archives forever: archive_retention_days * 24 must be >= '
-                f'2 * ui.recorder.archive_window_hours ({self.archive_window_hours})'
+                f'2 * ui.recorder.archive_window_hours ({self.archive_window_hours}).{default_note}'
             )
         return self
 
@@ -76,12 +89,13 @@ class UIRecorderConfig(BaseModel):
         description='How much recent history the archive pass keeps queryable; must be >= rotation_interval_hours.',
     )
     archive_retention_days: int = Field(
-        default=0,
+        default=DEFAULT_ARCHIVE_RETENTION_DAYS,
         ge=0,
         description=(
-            'How long archived files are kept before deletion. 0 = keep archives forever; '
-            'any other value must cover at least two archive windows '
-            '(archive_retention_days * 24 >= 2 * archive_window_hours).'
+            f'How long archived files are kept before deletion. Defaults to '
+            f'{DEFAULT_ARCHIVE_RETENTION_DAYS} days so a worker cannot fill its disk unattended. '
+            f'0 = keep archives forever (a startup warning names the choice); any other value must '
+            f'cover at least two archive windows (archive_retention_days * 24 >= 2 * archive_window_hours).'
         ),
     )
     dbstats_warm_interval_seconds: int = Field(

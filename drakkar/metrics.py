@@ -778,6 +778,35 @@ recorder_requeue_overflow = Counter(
     ),
 )
 
+# Archive footprint — the only recorder growth an operator cannot see coming.
+#
+# Rotation is bounded (raw files are merged away), the buffer is bounded
+# (maxlen), and the live database is bounded by the archive window. Archives
+# are the exception: they accumulate until ``archive_retention_days`` expires
+# them, and with that set to 0 nothing ever does. Both gauges are refreshed on
+# every archive pass — including the ticks that archive nothing, which is
+# exactly when someone is asking why a volume is full.
+#
+# Alert suggestion:
+#   drakkar_recorder_archive_bytes > <your volume budget>  — warn
+recorder_archive_bytes = Gauge(
+    'drakkar_recorder_archive_bytes',
+    (
+        'Total size on disk of this cluster compressed recorder archives in '
+        'db_dir. Bounded by ui.recorder.archive_retention_days; grows without '
+        'limit while that is 0.'
+    ),
+)
+
+recorder_archive_files = Gauge(
+    'drakkar_recorder_archive_files',
+    (
+        'Number of this cluster compressed recorder archives in db_dir. '
+        'Read together with drakkar_recorder_archive_bytes to tell a slow '
+        'accumulation of small windows from a few very large ones.'
+    ),
+)
+
 
 # --- Handler annotations ---
 #

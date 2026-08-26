@@ -520,7 +520,7 @@ ui:
     rotation_interval_hours: 1       # how often to rotate the SQLite file; 1 = 1 hour. env: DK_UI__RECORDER__ROTATION_INTERVAL_HOURS
     archive_enabled: true            # merge rotated-out files into windowed .db.gz archives instead of leaking them. env: DK_UI__RECORDER__ARCHIVE_ENABLED
     archive_window_hours: 24         # one archive per cluster per window; must be >= rotation_interval_hours. env: DK_UI__RECORDER__ARCHIVE_WINDOW_HOURS
-    archive_retention_days: 0        # 0 = keep archives forever; else must be >= 2x the window, in days. env: DK_UI__RECORDER__ARCHIVE_RETENTION_DAYS
+    archive_retention_days: 30       # delete archives older than this; 0 = keep forever. Must be >= 2x the window, in days. env: DK_UI__RECORDER__ARCHIVE_RETENTION_DAYS
 
     # --- Databases-page stats cache (see docs/local-databases.md#the-databases-page-stats-cache) ---
     dbstats_warm_interval_seconds: 60 # background sweep filling the .dbstats cache + purging deleted files.

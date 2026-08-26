@@ -26,6 +26,7 @@ from drakkar.recorder.archive import (
     parse_db_start_ts,
     run_archive_pass,
     sanitize_cluster,
+    warn_if_archives_unbounded,
 )
 from tests.conftest import make_ui_config
 
@@ -849,6 +850,97 @@ def test_run_archive_pass_keeps_every_archive_when_retention_is_zero(tmp_path):
     _run(tmp_path, cfg=_make_config(archive_retention_days=0))
 
     assert old_mine.exists()
+
+
+# --- archive footprint --------------------------------------------------
+
+
+def test_archive_pass_reports_only_this_clusters_footprint(tmp_path):
+    """A shared db_dir must not bill one cluster for another's archives.
+
+    Retention is per-cluster, so a gauge covering the whole directory
+    would move for archives this worker's setting cannot expire.
+    """
+    now = time.time()
+    mine_a = _make_archive(tmp_path, CLUSTER, now - 3 * DAY)
+    mine_b = _make_archive(tmp_path, CLUSTER, now - 2 * DAY)
+    theirs = _make_archive(tmp_path, OTHER_CLUSTER, now - 3 * DAY)
+    theirs.write_bytes(b'x' * 4096)
+
+    _run(tmp_path, cfg=_make_config(archive_retention_days=0))
+
+    expected = mine_a.stat().st_size + mine_b.stat().st_size
+    assert archive_mod.recorder_archive_files._value.get() == 2
+    assert archive_mod.recorder_archive_bytes._value.get() == expected
+
+
+def test_archive_pass_reports_the_footprint_when_no_window_is_due(tmp_path):
+    """The gauge must refresh on quiet ticks too.
+
+    A pass with nothing to archive returns before it takes the lock. That
+    is precisely when an operator asks why the volume is full, so the
+    footprint is published before that early return.
+    """
+    now = time.time()
+    existing = _make_archive(tmp_path, CLUSTER, now - 2 * DAY)
+    archive_mod.recorder_archive_bytes.set(0)
+    archive_mod.recorder_archive_files.set(0)
+
+    _run(tmp_path, cfg=_make_config(archive_retention_days=0))  # no raw db: nothing is due
+
+    assert _archives(tmp_path) == [existing.name]
+    assert archive_mod.recorder_archive_files._value.get() == 1
+    assert archive_mod.recorder_archive_bytes._value.get() == existing.stat().st_size
+
+
+def test_archive_pass_reports_a_zero_footprint_for_an_empty_dir(tmp_path):
+    archive_mod.recorder_archive_bytes.set(999)
+    archive_mod.recorder_archive_files.set(9)
+
+    _run(tmp_path, cfg=_make_config(archive_retention_days=0))
+
+    assert archive_mod.recorder_archive_files._value.get() == 0
+    assert archive_mod.recorder_archive_bytes._value.get() == 0
+
+
+# --- unbounded-retention warning ----------------------------------------
+
+
+def test_warn_if_archives_unbounded_warns_when_retention_is_zero():
+    with capture_logs() as cap:
+        warn_if_archives_unbounded(_make_config(archive_retention_days=0, db_dir='/var/lib/drakkar'))
+
+    warnings = [e for e in cap if e['event'] == 'recorder_archives_unbounded']
+    assert len(warnings) == 1
+    assert warnings[0]['log_level'] == 'warning'
+    assert warnings[0]['db_dir'] == '/var/lib/drakkar'
+    # The message has to name the knob and the metric, or it tells an
+    # operator there is a problem without telling them what to do.
+    assert 'ui.recorder.archive_retention_days' in warnings[0]['message']
+    assert 'drakkar_recorder_archive_bytes' in warnings[0]['message']
+
+
+def test_warn_if_archives_unbounded_is_silent_when_retention_is_set():
+    with capture_logs() as cap:
+        warn_if_archives_unbounded(_make_config(archive_retention_days=30))
+
+    assert [e for e in cap if e['event'] == 'recorder_archives_unbounded'] == []
+
+
+def test_warn_if_archives_unbounded_is_silent_when_archiving_is_disabled():
+    """Nothing accumulates when no archive is ever written."""
+    with capture_logs() as cap:
+        warn_if_archives_unbounded(_make_config(archive_enabled=False, archive_retention_days=0))
+
+    assert [e for e in cap if e['event'] == 'recorder_archives_unbounded'] == []
+
+
+def test_warn_if_archives_unbounded_is_silent_on_the_shipped_defaults():
+    """The default config must not warn — a warning nobody can act on is noise."""
+    with capture_logs() as cap:
+        warn_if_archives_unbounded(UIRecorderConfig())
+
+    assert [e for e in cap if e['event'] == 'recorder_archives_unbounded'] == []
 
 
 # --- recorder wiring ----------------------------------------------------

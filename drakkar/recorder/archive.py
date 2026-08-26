@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import glob
 import gzip
 import json
 import os
@@ -46,6 +47,7 @@ import structlog
 
 from drakkar.dbfiles import secure_db_file
 from drakkar.merge import merge_databases
+from drakkar.metrics import recorder_archive_bytes, recorder_archive_files
 
 if TYPE_CHECKING:
     from drakkar.config import UIRecorderConfig
@@ -317,6 +319,10 @@ def run_archive_pass(
     window_seconds = cfg.archive_window_hours * 3600
     rotation_seconds = cfg.rotation_interval_hours * 3600
     now = time.time()
+
+    # Before the due-window check below can return early: the footprint is
+    # most worth reporting on the ticks that archive nothing.
+    _observe_archive_footprint(db_dir, own_cluster)
 
     candidates = [path for path in _list_raw_dbs(db_dir, exclude_path) if _read_cluster(path) == own_cluster]
     windows = assign_windows(candidates, window_seconds, now, rotation_seconds)
@@ -699,6 +705,54 @@ def _sync_dir(db_dir: str) -> None:
         pass
     finally:
         os.close(fd)
+
+
+def warn_if_archives_unbounded(cfg: UIRecorderConfig) -> None:
+    """Warn at startup when archives are configured to accumulate forever.
+
+    ``archive_retention_days: 0`` disables expiry outright, and nothing
+    else in the recorder reclaims an archive. It is a legitimate choice —
+    some deployments archive onto a volume they prune themselves — but it
+    is the one recorder setting whose cost stays invisible until a disk
+    fills, so the worker states it once rather than leaving it to be
+    discovered. Informational only: the worker starts normally, exactly
+    like the unauthenticated-UI warning.
+    """
+    if not cfg.archive_enabled or cfg.archive_retention_days > 0:
+        return
+
+    logger.warning(
+        'recorder_archives_unbounded',
+        category='recorder',
+        db_dir=cfg.db_dir,
+        archive_window_hours=cfg.archive_window_hours,
+        message=(
+            f'ui.recorder.archive_retention_days is 0, so compressed recorder archives in '
+            f'{cfg.db_dir} are kept forever and nothing reclaims that disk. Watch '
+            f'drakkar_recorder_archive_bytes, prune the directory yourself, or set '
+            f'ui.recorder.archive_retention_days (or DK_UI__RECORDER__ARCHIVE_RETENTION_DAYS) '
+            f'to a number of days covering at least two {cfg.archive_window_hours}h windows.'
+        ),
+    )
+
+
+def _observe_archive_footprint(db_dir: str, cluster: str) -> None:
+    """Publish this cluster's archive disk footprint as gauges.
+
+    Names carry the cluster, so a shared ``db_dir`` is filtered down to
+    this worker's own archives — the ones its retention setting governs.
+    Only the directory entries are read; no archive is opened.
+    """
+    total_bytes = 0
+    count = 0
+    for path in Path(db_dir).glob(f'{glob.escape(cluster)}-*{ARCHIVE_SUFFIX}'):
+        try:
+            total_bytes += path.stat().st_size
+        except OSError:
+            continue  # expired by a peer's pass between glob and stat
+        count += 1
+    recorder_archive_bytes.set(total_bytes)
+    recorder_archive_files.set(count)
 
 
 def _expire_archives(db_dir: str, cluster: str, now: float, retention_days: int) -> None:

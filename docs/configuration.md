@@ -818,7 +818,7 @@ Flight-recorder persistence — the UI's data store. All flags below require `db
 | `rotation_interval_hours` | `int` | `1` | >= 1 | How often (hours) to rotate the SQLite database file. On rotation, a new timestamped file is created and the old one is finalized. A `-live.db` symlink always points to the current file. Rotation itself deletes nothing — see [Archiving](local-databases.md#archiving). Renamed from `rotation_interval_minutes`, with a unit change (`1` = 1 hour, not 1 minute); a config that still sets the old key fails to load, naming the replacement. |
 | `archive_enabled` | `bool` | `true` | | Fold rotated-out files into compressed per-cluster, per-window archives and delete the raw files a pass successfully merged. `false` disables the pass entirely — no raw file is ever deleted automatically. See [Archiving](local-databases.md#archiving). |
 | `archive_window_hours` | `int` | `24` | >= 1, and >= `rotation_interval_hours` | Width of one archive window in hours (UTC epoch-aligned); a window is archived once it ended a full window ago and none of its files were written in the last rotation interval. |
-| `archive_retention_days` | `int` | `0` | >= 0, and `>= 2 * archive_window_hours / 24` when non-zero | How long archived `.db.gz` files are kept before deletion. `0` keeps archives forever. |
+| `archive_retention_days` | `int` | `30` | >= 0, and `>= 2 * archive_window_hours / 24` when non-zero | How long archived `.db.gz` files are kept before deletion. Defaults to 30 days because nothing else reclaims an archive. `0` keeps them forever and logs a `recorder_archives_unbounded` warning at startup. |
 | `dbstats_warm_interval_seconds` | `int` | `60` | >= 5 | How often the background warmer sweeps `db_dir`, computing statistics for database files the `.dbstats` cache does not know yet and purging entries for deleted files. Cheap when everything is already cached — one directory listing plus one small SELECT. |
 | `dbstats_inline_scan_limit` | `int` | `4` | >= 0 | How many cold (uncached) database files one `/api/v1/debug/databases` request may fully scan inline. Files beyond the cap return immediately with `stats_pending=true` and fill in as the warmer catches up. `0` = requests never scan; matters only on a cold cache (first boot over a pre-existing directory). |
 | `store_output` | `bool` | `true` | | Include subprocess stdout/stderr in event records. Disable to save disk space when output is large or not needed for debugging. |
@@ -880,7 +880,7 @@ ui:
     rotation_interval_hours: 1
     archive_enabled: true
     archive_window_hours: 24
-    archive_retention_days: 0
+    archive_retention_days: 30
     store_output: true
     flush_interval_seconds: 5
     max_buffer: 50000

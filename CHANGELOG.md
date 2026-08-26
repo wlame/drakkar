@@ -17,6 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the sdist with no build-config change (verified in both artifacts), and two
   tests pin that it exists and stays empty.
 
+- **Two gauges for the archive footprint.** `drakkar_recorder_archive_bytes`
+  and `drakkar_recorder_archive_files` report this cluster's compressed
+  archives in `db_dir`. Both refresh on every archive pass, including the
+  ticks that archive nothing — which is when an operator asks why a volume
+  is full. A shared `db_dir` is filtered to this cluster, because that is
+  what its retention setting governs.
+
+### Changed
+
+- **`ui.recorder.archive_retention_days` now defaults to 30 days, not
+  "forever".** Rotation, the flush buffer and the live database are all
+  bounded on their own. Archives were not: nothing reclaims a `.db.gz`, so a
+  worker left on its defaults grew until the disk filled. The default is now
+  a horizon. **This deletes archives that earlier versions kept** — set
+  `archive_retention_days: 0` to keep the old behaviour. A worker that sets 0
+  logs `recorder_archives_unbounded` at startup naming the directory, the
+  knob and the metric, so the choice is stated rather than discovered. One
+  edge: a config with `archive_window_hours` above 360 no longer loads on the
+  default retention, because retention must cover two windows; the error
+  names the default and how to change it.
+
 ### Fixed
 
 - **`exclude-newer` made `uv.lock` differ between machines.** It was written
