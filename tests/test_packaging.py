@@ -39,6 +39,37 @@ def test_declared_license_matches_the_file() -> None:
     assert PYPROJECT['project']['license'] == 'MIT'
 
 
+PY_TYPED = REPO_ROOT / 'drakkar' / 'py.typed'
+
+
+def test_py_typed_marker_exists() -> None:
+    """Without this file the package's type hints are invisible downstream.
+
+    PEP 561 makes the marker — not the annotations — what tells a type
+    checker to read an installed package. Everything here is annotated and
+    ``ty`` gates it, but a consumer's mypy/pyright silently discards all of
+    it unless ``drakkar/py.typed`` ships alongside the modules. It is
+    tracked, so hatchling picks it up from ``packages`` with no build-config
+    entry; this pins the file itself, which is the part that can vanish in
+    a rename or a stray clean.
+    """
+    assert PY_TYPED.is_file(), 'drakkar/py.typed missing — consumers get no types from the published package'
+
+
+def test_py_typed_marker_is_empty() -> None:
+    """An empty marker claims the package is FULLY typed.
+
+    The only other legal content is the literal ``partial``, which tells a
+    checker to fall back to stubs for anything missing. Nothing here is
+    partial, so anything in the file would either be a wrong claim or a
+    typo that some checkers reject outright.
+    """
+    assert PY_TYPED.read_bytes() == b'', (
+        'drakkar/py.typed must be empty (an empty marker means fully typed); '
+        "only the literal 'partial' is otherwise valid, and this package is not partial"
+    )
+
+
 SWAGGER_DIR = REPO_ROOT / 'drakkar' / 'uiserver' / 'swagger'
 
 

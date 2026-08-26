@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A `py.typed` marker, so the published package is actually typed.** Every
+  module is annotated and `ty` gates them, but PEP 561 makes the marker — not
+  the annotations — what tells a type checker to read an installed package.
+  Without it, mypy and pyright discarded all of it for anyone who ran
+  `uv add py-drakkar`. The file is tracked, so it ships in both the wheel and
+  the sdist with no build-config change (verified in both artifacts), and two
+  tests pin that it exists and stays empty.
+
 ### Fixed
 
 - **`exclude-newer` made `uv.lock` differ between machines.** It was written
