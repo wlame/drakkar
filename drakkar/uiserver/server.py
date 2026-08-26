@@ -148,7 +148,10 @@ class UIDeps:
         self.drakkar_app = drakkar_app
         # Identity v1.2: which drakkar-ui bundle this server serves — the
         # release tag, or ``None`` when no bundle could be resolved and the
-        # server is running API-only.
+        # server is running API-only. ``ui_source`` is ``'release'`` for a
+        # fetched or cached bundle and ``''`` when none is served; the
+        # retired ``'embedded'``/``'builtin'`` values went with the baked-in
+        # bundle and the server-rendered pages in 1.19.
         self.ui_version = ui_version
         self.ui_source = ui_source
 
@@ -519,7 +522,7 @@ def create_ui_app(
     drakkar_app: DrakkarApp,
     ui_root: Path | None = None,
     ui_version: str | None = None,
-    ui_source: str = 'release',
+    ui_source: str | None = None,
 ) -> FastAPI:
     """Create the FastAPI UI application.
 
@@ -588,6 +591,13 @@ def create_ui_app(
                     status_code=413,
                 )
         return await call_next(request)
+
+    if ui_source is None:
+        # Derived, not defaulted: identity must never report a served bundle
+        # ('release') next to a null ui_version. Deriving both from ui_root
+        # keeps the pair consistent for every caller, tests included. An
+        # explicit value is still accepted for a future source label.
+        ui_source = 'release' if ui_root else ''
 
     deps = UIDeps(
         config=config,

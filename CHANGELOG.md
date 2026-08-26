@@ -60,6 +60,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`ui_source` claimed a served bundle when none was served.**
+  `GET /api/v1/identity` reported `ui_source: "release"` alongside
+  `ui_version: null` whenever no drakkar-ui bundle could be resolved — the
+  one state this pair of fields exists to distinguish. The contract reserves
+  `""` for it. `create_ui_app` now derives the label from `ui_root` instead
+  of defaulting it, so the two fields cannot disagree for any caller. The
+  canonical OpenAPI spec dropped its `enum: [release, embedded, builtin]`,
+  which still named the baked-in bundle and the server-rendered pages that
+  went away in 1.19 and had no value for API-only at all. The Go backend
+  reported `"builtin"` in the same state and carries the matching fix.
+
 - **The vendored Swagger UI had no version record.**
   `drakkar/uiserver/swagger/` carries ~1.7MB of third-party JavaScript that
   is served offline and shipped in the wheel, with nothing saying which

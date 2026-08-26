@@ -1199,15 +1199,16 @@ components:
         ui_version:
           type: [string, 'null']
           description: >-
-            Served drakkar-ui release tag; null when built-in pages serve
-            (or when an embedded pre-release stub carries no tag). (v1.2)
+            Served drakkar-ui release tag; null when no bundle could be
+            resolved and the backend is running API-only. (v1.2)
         ui_source:
           type: string
-          enum: [release, embedded, builtin]
           description: >-
-            Where the served UI comes from - a fetched/cached release, the
-            release embedded in the backend binary/package, or the built-in
-            fallback pages. (v1.2)
+            Where the served UI comes from - "release" for a fetched or
+            cached bundle, "" when no bundle is being served. Not a closed
+            enum: clients must tolerate unknown future values. The retired
+            "embedded" and "builtin" values went with the baked-in bundle
+            and the server-rendered pages in v1.19. (v1.2)
         link_bases:
           type: object
           additionalProperties: {type: string}

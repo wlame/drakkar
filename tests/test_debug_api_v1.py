@@ -868,6 +868,23 @@ class TestApiV1Identity:
         assert data['ui_version'] == 'v1.0.0'
         assert data['ui_source'] == 'release'
 
+    async def test_ui_fields_report_api_only_when_no_bundle(self, debug_config, mock_recorder, mock_app):
+        """API-only mode: no bundle served, so ui_source is the empty string.
+
+        The contract reserves "" for this state. Reporting "release" with a
+        null ui_version claims a bundle is being served that is not, which is
+        the one thing this pair of fields exists to distinguish. The retired
+        "embedded" and "builtin" values went with the baked-in bundle and the
+        server-rendered pages in 1.19.
+        """
+        mock_app.config_summary = '[test-worker]'
+        mock_recorder.config = debug_config
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
+        async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test') as c:
+            data = (await c.get('/api/v1/identity')).json()
+        assert data['ui_version'] is None
+        assert data['ui_source'] == ''
+
     async def test_cluster_name_surfaces(self, debug_config, mock_recorder, mock_app):
         mock_app._cluster_name = 'main'
         mock_app.config_summary = '[test-worker/main] topic=input-events'
