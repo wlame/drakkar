@@ -63,6 +63,25 @@ def test_vendored_swagger_version_is_recorded() -> None:
     )
 
 
+def test_release_script_updates_every_version_pinned_file() -> None:
+    """A release moves three files, and the bump script must move all three.
+
+    ``test_security_policy_covers_the_current_release`` pins SECURITY.md to
+    ``__version__``. When that pin was added, ``bump.sh`` only rewrote the
+    version and the changelog — so the very next release produced a tree that
+    failed its own gate, and CI went red on the release commit. Any file a
+    test pins to the version has to be in the release script's commit.
+    """
+    script = (REPO_ROOT / 'scripts' / 'bump.sh').read_text()
+    staged = re.search(r'^git add (.+)$', script, re.M)
+    assert staged, 'bump.sh has no `git add` line to check'
+    for pinned in ('$VERSION_FILE', '$CHANGELOG', '$SECURITY'):
+        assert pinned in staged.group(1), (
+            f'bump.sh does not stage {pinned} — a release would leave it behind '
+            f'and the tree would fail its own version-pin test'
+        )
+
+
 def test_security_policy_covers_the_current_release() -> None:
     """The supported-versions table must name the series we actually ship.
 

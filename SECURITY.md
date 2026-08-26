@@ -8,8 +8,8 @@ reporting if you are behind.
 
 | Version | Supported |
 |---------|-----------|
-| 1.19.x  | yes       |
-| < 1.19  | no        |
+| 1.20.x  | yes       |
+| < 1.20  | no        |
 
 ## Reporting a vulnerability
 

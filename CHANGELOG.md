@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The release script left the security policy behind.** The
+  supported-versions table is pinned to `__version__` by a test, but
+  `scripts/bump.sh` only rewrote the version and the changelog — so cutting
+  1.20.0 produced a tree that failed its own gate and CI went red on the
+  release commit. The script now moves the table too, refuses upfront if the
+  table is not where it expects, and reports the transition in the release
+  plan. `test_release_script_updates_every_version_pinned_file` checks that
+  every version-pinned file is in the release commit. The Go backend had the
+  same latent gap and carries the same fix.
+
 ## [1.20.0] - 2026-08-26
 
 ### Added
