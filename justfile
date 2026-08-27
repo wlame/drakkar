@@ -181,6 +181,14 @@ integration-down:
 integration-logs *args:
     docker compose -f integration/docker-compose.yml logs -f {{ args }}
 
+# Needs the harness up and the producer finished; pass the TOTAL_MESSAGES it
+# ran with (just verify-delivery 200). Fails when a request was lost,
+# duplicated past the cap, or delivered out of payload order.
+#
+# Check the harness delivered every request, in order (just verify-delivery 200)
+verify-delivery total='5000' *args:
+    uv run python integration/verify_delivery.py --total-messages={{ total }} {{ args }}
+
 # Run the rolling-outage chaos test against the integration environment
 chaos:
     cd integration && ./chaos-test.sh

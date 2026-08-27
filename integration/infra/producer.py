@@ -12,19 +12,29 @@ Load phases:
 Messages include a "repeat" field (how many times to run rg):
   - 97% of messages: repeat 1-15 (normal, seconds)
   - 3% of messages:  repeat 150-250 (slow outliers, minutes)
+
+Request ids are DETERMINISTIC (``req-000001`` ... ``req-<TOTAL>``) rather
+than random UUIDs, so ``verify_delivery.py`` can reconstruct exactly what
+was produced from the message count alone and check the sinks against it.
+The flood phase re-sends the same id range: same volume and the same
+consumer lag as before, but now every request is genuinely redelivered,
+which is what the at-least-once assertions need to be meaningful.
 """
 
 import json
 import os
 import random
 import time
-import uuid
 
 from confluent_kafka import Producer
 
 BROKERS = os.environ.get('KAFKA_BROKERS', 'kafka:9092')
 TOPIC = os.environ.get('SOURCE_TOPIC', 'search-requests')
 TOTAL_MESSAGES = int(os.environ.get('TOTAL_MESSAGES', '5000'))
+
+# Kept byte-identical in integration/verify_delivery.py, which rebuilds the
+# produced id set from TOTAL_MESSAGES alone. A unit test pins the two.
+REQUEST_ID_FORMAT = 'req-{:06d}'
 
 # search requests pool — patterns x paths
 SEARCH_REQUESTS = [
@@ -100,7 +110,7 @@ HOT_QUERIES = [
 ]
 
 
-def make_message() -> dict:
+def make_message(request_id: str) -> dict:
     """One SearchRequest with multiple patterns and files.
 
     Each request fans out to len(patterns) x len(file_paths) subprocess
@@ -136,7 +146,7 @@ def make_message() -> dict:
         file_paths = list({p['file_path'] for p in picks[:num_paths]})
 
     return {
-        'request_id': str(uuid.uuid4()),
+        'request_id': request_id,
         'patterns': patterns,
         'file_paths': file_paths,
         'repeat': make_repeat(),
@@ -148,10 +158,10 @@ def delivery_report(err, msg):
         print(f'Delivery failed: {err}', flush=True)
 
 
-def send_batch(producer, count, label=''):
-    """Send `count` messages as fast as possible (burst)."""
-    for _i in range(count):
-        message = make_message()
+def send_batch(producer, ids, label=''):
+    """Send one message per id in `ids` as fast as possible (burst)."""
+    for request_id in ids:
+        message = make_message(request_id)
         producer.produce(
             topic=TOPIC,
             key=message['request_id'].encode(),
@@ -160,14 +170,14 @@ def send_batch(producer, count, label=''):
         )
         producer.poll(0)
     producer.flush(timeout=10)
-    print(f'  [{label}] burst: {count} messages sent', flush=True)
+    print(f'  [{label}] burst: {len(ids)} messages sent', flush=True)
 
 
-def send_steady(producer, count, rate, label=''):
-    """Send `count` messages at `rate` per second."""
+def send_steady(producer, ids, rate, label=''):
+    """Send one message per id in `ids` at `rate` per second."""
     interval = 1.0 / rate if rate > 0 else 0
-    for i in range(count):
-        message = make_message()
+    for i, request_id in enumerate(ids):
+        message = make_message(request_id)
         producer.produce(
             topic=TOPIC,
             key=message['request_id'].encode(),
@@ -176,7 +186,7 @@ def send_steady(producer, count, rate, label=''):
         )
         producer.poll(0)
         if (i + 1) % 100 == 0:
-            print(f'  [{label}] steady: {i + 1}/{count} at {rate}/sec', flush=True)
+            print(f'  [{label}] steady: {i + 1}/{len(ids)} at {rate}/sec', flush=True)
         if interval > 0:
             time.sleep(interval)
     producer.flush(timeout=10)
@@ -186,18 +196,27 @@ def main():
     print(f'Producer starting: {TOTAL_MESSAGES} total messages to {TOPIC}', flush=True)
 
     producer = Producer({'bootstrap.servers': BROKERS})
+    # One id per logical request, handed out in order across the phases. The
+    # phases below slice this list rather than counting, so the ids a phase
+    # sends are always exactly the ones no earlier phase used.
+    ids = [REQUEST_ID_FORMAT.format(n) for n in range(1, TOTAL_MESSAGES + 1)]
     sent = 0
+
+    def take(count):
+        """The next `count` unsent ids, clipped to what is left."""
+        nonlocal sent
+        chunk = ids[sent : sent + count]
+        sent += len(chunk)
+        return chunk
 
     # Phase 0: slow drip — 10 messages, one every 5 seconds
     print('Phase 0: slow drip — 10 msgs, one every 5 sec', flush=True)
-    send_steady(producer, 10, rate=0.2, label='drip')
-    sent += 10
+    send_steady(producer, take(10), rate=0.2, label='drip')
 
     # Phase 1: warm-up
-    phase1 = min(500, TOTAL_MESSAGES - sent)
-    print(f'Phase 1: warm-up — {phase1} msgs at 15/sec', flush=True)
+    phase1 = take(500)
+    print(f'Phase 1: warm-up — {len(phase1)} msgs at 15/sec', flush=True)
     send_steady(producer, phase1, rate=15, label='warmup')
-    sent += phase1
 
     if sent >= TOTAL_MESSAGES:
         return _done(sent)
@@ -207,19 +226,17 @@ def main():
     time.sleep(15)
 
     # Phase 3: burst
-    phase3 = min(200, TOTAL_MESSAGES - sent)
-    print(f'Phase 3: burst — {phase3} msgs at max speed', flush=True)
+    phase3 = take(200)
+    print(f'Phase 3: burst — {len(phase3)} msgs at max speed', flush=True)
     send_batch(producer, phase3, label='burst1')
-    sent += phase3
 
     if sent >= TOTAL_MESSAGES:
         return _done(sent)
 
     # Phase 4: steady
-    phase4 = min(2000, TOTAL_MESSAGES - sent)
-    print(f'Phase 4: steady — {phase4} msgs at 20/sec', flush=True)
+    phase4 = take(2000)
+    print(f'Phase 4: steady — {len(phase4)} msgs at 20/sec', flush=True)
     send_steady(producer, phase4, rate=20, label='steady')
-    sent += phase4
 
     if sent >= TOTAL_MESSAGES:
         return _done(sent)
@@ -229,30 +246,33 @@ def main():
     time.sleep(10)
 
     # Phase 6: burst
-    phase6 = min(300, TOTAL_MESSAGES - sent)
-    print(f'Phase 6: burst — {phase6} msgs at max speed', flush=True)
+    phase6 = take(300)
+    print(f'Phase 6: burst — {len(phase6)} msgs at max speed', flush=True)
     send_batch(producer, phase6, label='burst2')
-    sent += phase6
 
     if sent >= TOTAL_MESSAGES:
         return _done(sent)
 
     # Phase 7: cool-down — remaining messages
-    remaining = TOTAL_MESSAGES - sent
-    print(f'Phase 7: cool-down — {remaining} msgs at 10/sec', flush=True)
-    send_steady(producer, remaining, rate=10, label='cooldown')
-    sent += remaining
+    cooldown = take(TOTAL_MESSAGES - sent)
+    print(f'Phase 7: cool-down — {len(cooldown)} msgs at 10/sec', flush=True)
+    send_steady(producer, cooldown, rate=10, label='cooldown')
 
-    # Phase 8: flood — same volume again, no pauses, create massive consumer lag
-    print(f'\nPhase 8: FLOOD — {TOTAL_MESSAGES} msgs at max speed (creating consumer lag)', flush=True)
-    send_batch(producer, TOTAL_MESSAGES, label='flood')
-    sent += TOTAL_MESSAGES
+    # Phase 8: flood — the SAME id range again, no pauses. Same volume and the
+    # same consumer lag as before, but every request is now redelivered, so
+    # the upsert convergence and the "a redelivery must not un-notify"
+    # invariant are actually under load rather than assumed.
+    print(f'\nPhase 8: FLOOD — {TOTAL_MESSAGES} msgs at max speed (redelivering every id)', flush=True)
+    send_batch(producer, ids, label='flood')
 
     _done(sent)
 
 
 def _done(sent):
+    # PRODUCER_DONE is the marker the CI workflow greps for; the count is
+    # DISTINCT request ids, which is what verify_delivery.py reconstructs.
     print(f'Producer finished: {sent} messages sent', flush=True)
+    print(f'PRODUCER_DONE distinct_request_ids={sent}', flush=True)
     # keep running so docker doesn't restart
     while True:
         time.sleep(60)

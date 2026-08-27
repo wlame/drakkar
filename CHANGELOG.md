@@ -17,6 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the sdist with no build-config change (verified in both artifacts), and two
   tests pin that it exists and stays empty.
 
+- **The integration harness now verifies delivery instead of reporting it.**
+  `integration/verify_delivery.py` checks the sinks against the exact set of
+  requests the producer sent: nothing lost, nothing arriving that was never
+  sent, per-task rows present behind every rollup, duplication inside a cap,
+  and — the ordering case — no request left with `notified = false` above the
+  notify threshold, which is what an `UPDATE` executed before its `UPSERT`
+  leaves on disk. The producer numbers requests `req-000001`..`req-<N>` and
+  the flood phase redelivers that same range, so the expected set is
+  reconstructable from the message count and redelivery is under real load.
+  `just verify-delivery <count>` runs it; the scheduled workflow runs it on a
+  300-message corpus after waiting for the pipeline to drain. `chaos-test.sh`
+  ends with the same checks and **exits non-zero when they fail** — it used
+  to finish by asking the operator to look at three dashboards, so a run that
+  lost records still passed. The pass/fail logic is pure and covered by the
+  unit suite; the constants it shares with the producer and the handler are
+  pinned there too.
+
 - **Two gauges for the archive footprint.** `drakkar_recorder_archive_bytes`
   and `drakkar_recorder_archive_files` report this cluster's compressed
   archives in `db_dir`. Both refresh on every archive pass, including the

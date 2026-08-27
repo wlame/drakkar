@@ -23,8 +23,20 @@ jobs:
   harness:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Small corpus on purpose. The default 5000 (x2 with the flood phase)
+      # takes far longer than this job's budget, and the delivery checks are
+      # just as conclusive on 300 requests: they compare against the exact
+      # produced id set, not a sample. Read by docker-compose.yml for the
+      # producer and by the verify step for the expected set — one value, so
+      # the two cannot disagree.
+      TOTAL_MESSAGES: "300"
     steps:
       - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.32"
 
       - uses: extractions/setup-just@v4
 
@@ -46,6 +58,27 @@ jobs:
               sleep 5
             done
           done
+
+      - name: Wait for the producer to finish sending
+        run: |
+          for attempt in $(seq 1 60); do
+            if docker compose -f integration/docker-compose.yml logs producer 2>/dev/null | grep -q PRODUCER_DONE; then
+              echo "producer finished"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "producer did not finish within 600s"
+          docker compose -f integration/docker-compose.yml logs --tail=50 producer
+          exit 1
+
+      # The gate this job exists for. Everything above proves the containers
+      # came up; this proves the framework did its job — every message the
+      # producer sent reached its sinks, nothing arrived that was never sent,
+      # and payload order survived. It waits for the pipeline to drain first,
+      # because an in-flight request is indistinguishable from a lost one.
+      - name: Verify delivery
+        run: just verify-delivery "$TOTAL_MESSAGES" --wait-seconds=600
 
       - name: Dump logs on failure
         if: failure()

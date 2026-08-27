@@ -311,7 +311,10 @@ services:
     environment:
       KAFKA_BROKERS: kafka:9092
       SOURCE_TOPIC: search-requests
-      TOTAL_MESSAGES: "5000"
+      # Overridable so CI can run a small, fast corpus: the scheduled
+      # job verifies delivery end to end and does not need 5000 messages
+      # to do it. Request ids are 1..TOTAL_MESSAGES either way.
+      TOTAL_MESSAGES: "${TOTAL_MESSAGES:-5000}"
 
   # --- HTTP Load Generator ---
   #

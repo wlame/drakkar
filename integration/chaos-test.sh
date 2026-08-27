@@ -2,9 +2,10 @@
 # ============================================================================
 # Chaos Test: Rolling Outage
 #
-# Simulates cascading worker failures and recoveries during message processing.
-# Validates that Drakkar's cooperative-sticky rebalancing handles partition
-# reassignment correctly and no messages are lost.
+# Simulates cascading worker failures and recoveries during message processing,
+# then VERIFIES the outcome: every produced request reached its sinks, nothing
+# arrived that was never sent, and payload order survived the rebalances.
+# Exits non-zero when any of that is untrue (see verify_delivery.py).
 #
 # Timeline:
 #   t1 — ~3000/10000 messages processed (≈1/3 progress)
@@ -21,6 +22,9 @@
 #   cd integration
 #   docker-compose up --build -d
 #   ./chaos-test.sh
+#
+# Export TOTAL_MESSAGES with the value the producer ran with if it is not
+# the compose default; the verification rebuilds the produced id set from it.
 # ============================================================================
 
 set -euo pipefail
@@ -198,7 +202,31 @@ wait_with_status 60 "post-recovery stabilization"
 step "Results"
 worker_status
 echo ""
-log "scenario complete — check debug UIs for rebalance events:"
+
+# The scenario above only PRODUCES a rebalance storm. This is what decides
+# whether the run passed: the same delivery checks CI runs, against the
+# sinks, after the pipeline drains. Before this existed the script ended by
+# asking a human to look at three dashboards, so a run that lost records
+# still exited 0.
+step "Verifying delivery after the outages"
+if [ -z "${TOTAL_MESSAGES:-}" ]; then
+    warn "TOTAL_MESSAGES is unset — assuming the compose default of 5000."
+    warn "Export the value the producer ran with if you changed it."
+    TOTAL_MESSAGES=5000
+fi
+
+if ! (cd .. && uv run python integration/verify_delivery.py \
+        --total-messages="$TOTAL_MESSAGES" --wait-seconds=600); then
+    fail "DELIVERY VERIFICATION FAILED — records were lost, duplicated past the cap, or reordered"
+    log "inspect the rebalance history:"
+    log "  worker-1: http://localhost:8081/history"
+    log "  worker-2: http://localhost:8082/history"
+    log "  worker-3: http://localhost:8083/history"
+    exit 1
+fi
+
+ok "scenario complete — delivery verified across the full outage sequence"
+log "rebalance history, if you want to see how it got there:"
 log "  worker-1: http://localhost:8081/history"
 log "  worker-2: http://localhost:8082/history"
 log "  worker-3: http://localhost:8083/history"

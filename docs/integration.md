@@ -376,7 +376,44 @@ task counts and partition counts, so you can watch rebalancing happen.
 - Partition reassignment in `/history` (filter by `assigned`/`revoked` events)
 - Pool utilization spike on surviving worker in `/live`
 - Consumer lag changes in `/partitions`
-- No message loss: total processed across all workers should equal total produced
+
+The script does not stop at "watch it happen". When the outage sequence
+finishes it runs the delivery verification below and **exits non-zero if
+anything was lost, duplicated past the cap, or reordered** -- so a chaos run
+is a pass/fail gate, not an invitation to read three dashboards.
+
+---
+
+## Verifying delivery
+
+`verify_delivery.py` is what makes the harness a test rather than a demo. It
+rebuilds the exact set of request ids the producer sent -- they are numbered
+`req-000001`..`req-<TOTAL_MESSAGES>`, not random -- and checks it against
+what the sinks hold:
+
+| Check | What a failure means |
+|-------|----------------------|
+| `no_loss` | A produced request has no `request_summaries` row. An offset was committed past a message whose sinks never confirmed. |
+| `no_phantom` | A summary row exists for an id nobody sent. A corrupted key path, or a database still holding rows from an earlier run. |
+| `update_not_reordered` | A request above the notify threshold still reads `notified = false`. The handler appends `UPDATE notified` immediately after the `UPSERT` that creates the row, and the upsert never writes that column -- so an `UPDATE` that ran first matched nothing and lost the write. This is the on-disk signature of the Postgres sink executing payloads out of order. |
+| `task_rows_present` | A rollup reports successful tasks but wrote no `search_results` rows. The per-request summary was delivered while the per-task writes behind it were not. |
+| `duplication_bounded` | `search_results` rows per request passed the cap. At-least-once permits duplicates -- the flood phase redelivers every request on purpose -- but this many means messages are being replayed in a loop. |
+
+Run it once the producer has finished and the pipeline has drained:
+
+```bash
+just verify-delivery 5000              # the TOTAL_MESSAGES the producer ran with
+just verify-delivery 300 --dsn=...     # other flags pass straight through
+```
+
+It waits for the `request_summaries` count to stop moving before checking,
+because a request still in flight is indistinguishable from a lost one. Pass
+`--wait-seconds=0` to check immediately.
+
+The scheduled `Integration` workflow runs the same recipe against a small
+300-message corpus. The checks compare against the exact produced id set
+rather than a sample, so a small corpus is as conclusive as a large one --
+it just finishes inside the job's budget.
 
 ---
 
@@ -384,12 +421,17 @@ task counts and partition counts, so you can watch rebalancing happen.
 
 ### Adjust message volume
 
-Override `TOTAL_MESSAGES` on the producer:
+`TOTAL_MESSAGES` is read from the environment, so export it before starting
+the harness rather than editing the file:
 
-```yaml
-# docker-compose.yml → producer → environment
-TOTAL_MESSAGES: "20000"
+```bash
+TOTAL_MESSAGES=20000 just integration-up
+just verify-delivery 20000
 ```
+
+Pass the same number to `verify-delivery`: request ids run `req-000001`
+through `req-<TOTAL_MESSAGES>`, and that is how the verification knows what
+to expect.
 
 ### Change executor concurrency
 
