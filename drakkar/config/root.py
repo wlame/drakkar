@@ -50,8 +50,7 @@ class DrakkarConfig(BaseSettings):
         prefix (``BaseDrakkarHandler.app_env_prefix``, default ``APP_``).
         Letting ``DK_APP__*`` silently merge into the pass-through dict
         would create a second, framework-flavored override path for the
-        same values. Sorted var order keeps this message byte-comparable
-        with the Go backend's twin guard.
+        same values. Sorted var order keeps the message deterministic.
         """
         app_env = sorted(name for name in os.environ if name.startswith('DK_APP__'))
         if app_env:
@@ -103,7 +102,7 @@ class DrakkarConfig(BaseSettings):
 
         The ``ui`` token reports the UI server state; the ``ui.release``
         bundle-fetch settings are deliberately excluded (they never affect
-        pipeline behavior). Byte-parity with the Go backend is contractual.
+        pipeline behavior). The exact bytes are contractual.
 
         The ``webapp`` token reports the synchronous-ingress server
         (``webapp.host``/``port`` bind; port shown, host omitted like the

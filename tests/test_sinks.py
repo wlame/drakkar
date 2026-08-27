@@ -1741,9 +1741,9 @@ def _script_config(**overrides):
     )
 
 
-# --- golden wire-level commands, shared with drakkar-go ---
+# --- golden wire-level commands ---
 #
-# tests/fixtures/redis_commands.json is mirrored verbatim into the Go repo.
+# tests/fixtures/redis_commands.json pins the emitted argument vectors.
 # The cases run through the sink's OWN command builder into a REAL redis-py
 # client whose transport is intercepted, so what is pinned is the argument
 # vector redis-py actually sends — not a test-local idea of it. A divergence
@@ -1763,7 +1763,7 @@ async def _capture_wire_command(config, payload: RedisPayload) -> list:
     The client is a real ``redis.asyncio.Redis`` that never connects: only
     ``execute_command`` is replaced, and every method above it — argument
     assembly, keyword expansion, the EVALSHA hashing — is redis-py's own.
-    That is what makes these vectors trustworthy as a cross-backend
+    That is what makes these vectors trustworthy as a wire-level
     contract rather than a restatement of this repo's code.
     """
     import redis.asyncio as aioredis
@@ -1785,7 +1785,7 @@ async def _capture_wire_command(config, payload: RedisPayload) -> list:
 
 @pytest.mark.parametrize('case', _REDIS_COMMAND_CORPUS['cases'], ids=lambda c: c['case'])
 async def test_redis_command_corpus(case):
-    """Both backends must issue this command with these arguments, in this order."""
+    """The sink must issue this command with these arguments, in this order."""
     from drakkar.config import RedisSinkConfig
 
     config = RedisSinkConfig(
@@ -2159,8 +2159,8 @@ async def test_redis_sink_sorts_mapping_arguments_but_not_lists(redis_sink_confi
     """Mappings emit sorted; caller-supplied lists keep their order.
 
     Argument order changes neither HSET's nor ZADD's end state, but it does
-    change the emitted command — and the Go backend decodes a mapping into
-    an unordered map, so sorting is the only rule both backends can honour.
+    change the emitted command — and a mapping decoded from a payload has
+    no key order to preserve, so sorting is the only rule available.
     A list is a sequence both can preserve, so it is left alone.
     """
     sink, mock_client = _make_redis_sink(redis_sink_config)
@@ -2359,7 +2359,7 @@ async def test_redis_sink_remaps_transient_errors_to_builtins(redis_sink_config,
     ``ConnectionError``/``TimeoutError``, but ``redis.exceptions.*``
     inherit only from ``RedisError``. Without this remap a dropped Redis
     connection was never eligible for the fast-retry, so
-    ``RedisSink.idempotent = True`` did nothing at all — while the Go
+    ``RedisSink.idempotent = True`` did nothing at all — while the
     backend, which classifies structurally, has always retried.
     """
     import redis.exceptions
@@ -2926,18 +2926,15 @@ async def test_dlq_sink_send_returns_false_when_future_resolves_to_none():
 
 
 async def test_dlq_message_serialization_cross_backend_golden():
-    """Byte-parity pin — the Go suite pins this SAME literal.
+    """Byte-stability pin — this exact literal is the contract.
 
-    DLQ JSON byte-stability is contractual: tooling byte-compares entries
-    produced by either backend. The envelope carries Python's ``json.dumps``
-    default separators (``", "`` and ``": "``); the Go backend hand-assembles
-    the identical bytes in ``serializeDLQMessage``/``encodePythonJSON``,
-    because ``encoding/json`` only emits compact JSON.
+    DLQ JSON byte-stability is contractual: tooling byte-compares entries.
+    The envelope carries ``json.dumps`` default separators (``", "`` and
+    ``": "``).
 
     The embedded payload strings stay **compact** — they come from
-    ``model_dump_json()`` on this side and ``json.Marshal`` on Go's. The
-    flight recorder likewise encodes compact on both backends. That asymmetry
-    is deliberate; do not unify the two.
+    ``model_dump_json()``. The flight recorder likewise encodes compact.
+    That asymmetry is deliberate; do not unify the two.
 
     The sibling test below parses the JSON before asserting, so it cannot see
     separator drift — which is exactly how the two backends diverged
@@ -3307,9 +3304,9 @@ def test_postgres_sink_batch_idempotent_empty_batch_is_safe(pg_sink_config):
     assert sink.batch_idempotent([]) is True
 
 
-# --- golden rendered SQL, shared with drakkar-go ---------------------------
+# --- golden rendered SQL ---------------------------------------------------
 #
-# tests/fixtures/pg_rendered_sql.json is mirrored verbatim into the Go repo.
+# tests/fixtures/pg_rendered_sql.json pins the emitted statements.
 # These cases run through the sink's own unit builder and renderers rather
 # than a test-local copy of that logic, so a divergence between the two
 # backends fails here instead of reaching an operator's database.
@@ -3345,7 +3342,7 @@ def _golden_payloads(case):
 
 @pytest.mark.parametrize('case', _RENDERED_SQL_CORPUS['cases'], ids=lambda c: c['case'])
 def test_postgres_rendered_sql_corpus(pg_sink_config, case):
-    """Both backends must emit this SQL and bind these values, in this order."""
+    """The sink must emit this SQL and bind these values, in this order."""
     sink, _, _ = _make_pg_sink(pg_sink_config)
 
     units = [sink._build_unit(p) for p in _golden_payloads(case)]
@@ -3384,9 +3381,8 @@ def test_postgres_rendered_sql_corpus_invalid_identifiers(name):
 async def test_postgres_sink_emits_columns_in_sorted_order(pg_sink_config):
     """Columns are sorted, not left in model-declaration order.
 
-    Go builds its column map from a JSON round-trip into map[string]any,
-    which has no order to preserve, so sorting is the only rule both
-    backends can honour unconditionally.
+    Payload data decoded into a mapping has no field order to preserve, so
+    sorting is the only rule that can be honoured unconditionally.
     """
 
     class Declared(BaseModel):

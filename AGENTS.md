@@ -12,37 +12,35 @@ pluggable sinks (Kafka, Postgres, Mongo, Redis, HTTP, files), commit offsets
 at-least-once on a per-partition watermark. The framework owns the control loop
 and calls into user code; the actual work runs in an external subprocess.
 
-It is the reference implementation of a three-repo product:
+The worker serves its own operator UI: `drakkar-ui`, a versioned SPA
+published on GitHub Releases and fetched at startup (see "Decoupled UI
+hosting" below). The normative description of the JSON/WS surface under
+`/api/v1` is `drakkar-ui/docs/api-contract-v1.md`; any API-surface change
+updates that document too.
 
-| repo | role |
-|---|---|
-| `drakkar` (this) | Python reference implementation, published as `py-drakkar` |
-| `drakkar-go` | Go implementation; byte-parity where contractual |
-| `drakkar-ui` | the one web UI both backends serve — a versioned SPA on GitHub Releases |
+## Wire contracts (the most important invariant)
 
-Both backends implement one JSON/WS contract under `/api/v1`; the normative
-spec is `drakkar-ui/docs/api-contract-v1.md`. Any API-surface change updates
-that document and lands on both backends.
-
-## Cross-backend parity (the most important invariant)
-
-These surfaces are contractual with `drakkar-go` — change them only in lockstep:
+These surfaces are contracts, not implementation details. Something else
+already depends on their exact bytes — a UI release, an operator's SQL, a
+dashboard query, a database file on a shared volume — so a change here is a
+breaking change, never a refactor:
 
 - config format (YAML keys, defaults, `DK_` env overrides) and the
   config-summary one-liner
-- DLQ JSON byte-stability, metric names, emitted Postgres SQL, emitted Redis
-  commands
-- mapping-derived arguments are sorted (Postgres columns, Redis hset fields /
-  zadd members) because Go decodes payloads into orderless maps;
-  caller-supplied lists keep their order
-- the `/api/v1` shapes, and the SQLite schemas both backends read
-  (`tests/test_cross_backend_db.py` pins interop against fixtures from the Go
-  repo's `just gen-db-fixtures`)
+- DLQ JSON byte-stability, metric names and help text, emitted Postgres SQL,
+  emitted Redis commands, emitted Mongo statements
+- mapping-derived arguments are emitted **sorted** (Postgres columns, Redis
+  hset fields / zadd members) so the bytes are reproducible from a payload
+  whose decoded form carries no key order; caller-supplied lists keep the
+  order they were given
+- the `/api/v1` shapes, and the SQLite schemas on disk — a worker reads
+  recorder and cache files written by other workers sharing its `db_dir`
 - framework datetimes in JSON use one canonical format:
   `drakkar.format_rfc3339_micro` — never `isoformat()` on framework values
 
-Known deliberate divergences from Go are documented in `docs/configuration.md`
-(Kafka library differences) and in code comments at the point of divergence.
+Deliberate divergences from what a contract seems to imply are documented at
+the point of divergence in code comments, and in `docs/configuration.md` for
+Kafka library behaviour.
 
 ## Commands
 
@@ -52,7 +50,7 @@ just cover              # the gate: 95% coverage floor — new code without test
 just ci                 # exactly what CI runs: fmt-check, lint, typecheck, cover
 just check              # ci + strict docs build
 just integration-up     # docker harness (Kafka, all sinks, workers + load gen)
-just drakkar-ui where   # UI-bundle cache CLI (mirrors the Go repo's)
+just drakkar-ui where   # UI-bundle cache CLI
 ```
 
 Tooling: `uv` only (never pip), `ruff` format + lint (single quotes in code,
@@ -116,17 +114,15 @@ parametrize).
 ## Decoupled UI hosting (`drakkar/uihost/`)
 
 Workers fetch the `drakkar-ui` release at startup and cache it under the
-user cache dir (`~/.cache/drakkar/ui/<tag>/`) — the path is byte-identical to
-Go's `os.UserCacheDir` on Linux, so co-located workers of both backends share
-one download. The concurrency invariant: a valid cached bundle is never
+user cache dir (`~/.cache/drakkar/ui/<tag>/`), so co-located workers share one
+download rather than each keeping their own copy. The concurrency invariant: a valid cached bundle is never
 deleted or replaced (`fetch.py`); racing workers converge on the first
 installer's copy. Resolution is never fatal, but it can end with nothing:
 the wheel carries no bundle, so a worker with an empty cache and no
 reachable release source runs API-only and answers page requests with 503
 (`uiserver/routes_spa.py`). For an air-gapped deployment, stage a bundle
 with `drakkar-ui fetch --version=vX.Y.Z` or point `ui.release.repo` at an
-internal mirror. The `drakkar-ui` console script mirrors the Go repo's CLI
-command-for-command over the same cache.
+internal mirror.
 
 ## Directory map
 

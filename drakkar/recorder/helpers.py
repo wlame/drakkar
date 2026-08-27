@@ -44,15 +44,15 @@ from drakkar.utils import redact_url
 #   identical output (deterministic hashes / cache dedup downstream).
 # - Datetimes render via :func:`drakkar.timefmt.format_rfc3339_micro`
 #   in BOTH paths (fixed six-digit microseconds, ``Z`` suffix) — the
-#   canonical cross-backend format, byte-identical to the Go backend.
+#   one canonical format, so the bytes never depend on the encoder path.
 # - Other non-JSON-native types fall back to ``str()``.
 
 
 def _json_default(obj: Any) -> Any:
     """Fallback serializer shared by both encoder paths.
 
-    Datetimes render in the canonical cross-backend timestamp format;
-    anything else JSON can't represent degrades to ``str()``.
+    Datetimes render in the canonical timestamp format; anything else JSON
+    can't represent degrades to ``str()``.
     """
     if isinstance(obj, datetime):
         return format_rfc3339_micro(obj)
@@ -76,8 +76,8 @@ try:
         - ``OPT_PASSTHROUGH_DATETIME``: orjson hands datetimes to
           ``default`` instead of rendering them natively, so both encoder
           paths emit the one canonical timestamp format. orjson's native
-          rendering omits the fraction for whole seconds — neither
-          deterministic-width nor what the Go backend writes.
+          rendering omits the fraction for whole seconds, which is not
+          deterministic-width.
         - ``OPT_NON_STR_KEYS``: coerce non-string dict keys (rare but safe).
         """
         return orjson.dumps(

@@ -29,9 +29,10 @@ site dominated, little CPU), ``cpu_bound`` (the loop itself burned the
 time), ``starved`` (the loop wanted CPU and did not get it — host-level
 contention), or ``inconclusive``.
 
-Wire naming is deliberately backend-neutral (``lag_ms``, ``unit_count``,
-``unit_label``): the Go backend can serve the same contract from its
-scheduler-latency and goroutine metrics without a spec change.
+Wire naming is deliberately generic (``lag_ms``, ``unit_count``,
+``unit_label``): the readout describes how much concurrent work was
+outstanding while the worker was unhealthy, and the label names the unit
+so a consumer renders the number without assuming what produced it.
 """
 
 from __future__ import annotations
@@ -57,15 +58,16 @@ logger = structlog.get_logger()
 
 HealthState = Literal['healthy', 'degraded', 'stalled']
 
-# Gauge encoding of the state, shared with the Go backend's contract.
+# Gauge encoding of the state — part of the metric contract.
 STATE_VALUES: dict[HealthState, int] = {'healthy': 0, 'degraded': 1, 'stalled': 2}
 
 # Consecutive clean ticks required to leave 'degraded' — hysteresis so a
 # loop hovering around warn_lag_seconds emits one transition, not dozens.
 RECOVERY_TICKS = 5
 
-# What this backend counts as its concurrency unit; the Go backend sends
-# "goroutines". The UI takes wording from this field, never hardcodes it.
+# What this worker counts as its concurrency unit. The UI takes wording
+# from this field and never hardcodes it, so the readout stays correct if
+# the unit ever changes.
 UNIT_LABEL = 'tasks'
 
 Verdict = Literal['blocked', 'cpu_bound', 'starved', 'inconclusive']

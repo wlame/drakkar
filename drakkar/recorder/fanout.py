@@ -6,8 +6,7 @@ wrapper, and the deferred ``task_started`` events that are held back until
 a task proves it is slow enough to be worth showing.
 
 Split out of :mod:`drakkar.recorder.core` so the fan-out can be reviewed
-and tested without a database, and so the Go backend has a one-to-one
-module to diff against (its ``subsMu``-guarded fan-out).
+and tested without a database.
 """
 
 from __future__ import annotations
@@ -224,8 +223,8 @@ class WSFanout:
         surface on the message-processing path — ``_record`` is called from
         ``PartitionProcessor.enqueue``, which has no ``except`` — and kill the
         worker. ``list(set)`` completes in C without executing bytecode, so no
-        thread switch can occur inside it. The Go backend guards the same
-        fan-out with ``subsMu``; this is the CPython-idiomatic equivalent.
+        thread switch can occur inside it — the CPython-idiomatic
+        equivalent of holding a lock across the snapshot.
 
         Every interested subscriber receives the **same** :class:`LiveEvent`
         wrapper, so the event is JSON-encoded once regardless of how many

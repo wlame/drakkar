@@ -47,8 +47,7 @@ typecheck:
 # (no CDN) and ship in the wheel, so they are ordinary third-party
 # dependencies that nothing else updates: the lockfile does not cover them,
 # pip-audit does not see them, and Dependabot has no manifest to read. Run
-# this when swagger-ui-dist publishes a security release, then mirror the
-# result into the Go backend so both serve the same bytes.
+# this when swagger-ui-dist publishes a security release.
 #
 # Re-vendor the Swagger UI assets (e.g. just vendor-swagger 5.32.8)
 vendor-swagger version:
@@ -62,12 +61,11 @@ vendor-swagger version:
         mv "$dir/$asset.new" "$dir/$asset"
     done
     echo "{{ version }}" > "$dir/VERSION"
-    echo "vendored swagger-ui-dist {{ version }}; run 'just test' and mirror into ../drakkar-go"
+    echo "vendored swagger-ui-dist {{ version }}; run 'just test'"
 
 # Dependency CVE scan (pip-audit against the installed environment).
 # Deliberately NOT part of `just ci`: a newly published CVE must fail the
 # security job without blocking every unrelated PR behind an unrelated gate.
-# Mirrors the Go backend's `just vuln`.
 audit:
     uv run --with=pip-audit pip-audit
 
@@ -83,16 +81,10 @@ test *args:
 cover:
     uv run pytest --cov=drakkar --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
 
-# Regenerate the Python-written cross-backend DB fixtures consumed by
-# drakkar-go's interop tests (commit the result in that repo)
-gen-db-fixtures:
-    uv run python scripts/gen_db_fixtures.py --out=../drakkar-go/internal/crossbackend/testdata/python-db
-
-# Regenerate the shared recorder event-type vocabulary fixture from
-# drakkar.recorder.schema.EventType, here and in the Go repo's testdata
+# Regenerate the recorder event-type vocabulary fixture from
+# drakkar.recorder.schema.EventType (test_event_vocabulary.py pins it)
 gen-event-vocabulary:
     uv run python scripts/gen_event_vocabulary.py
-    uv run python scripts/gen_event_vocabulary.py --out=../drakkar-go/internal/recorder/testdata
 
 # ---------------------------------------------------------------------------
 # CI / pre-push

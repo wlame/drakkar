@@ -95,7 +95,7 @@ class TestChangeDetection:
         config.app = {'priority_threshold': 1}
 
         # Table order, not alphabetical — deterministic so the warning text
-        # is stable and the Go backend emits the same list.
+        # is stable.
         assert changed_consumed_settings(before, config) == ['app', 'worker_name_env']
 
 
@@ -147,7 +147,7 @@ class TestLifecycleWarning:
 class TestSinkSettingsAreHonoured:
     """`sinks.circuit_breaker` and `sinks.delivery_timeout_seconds` are read
     when the sinks are built, which happens after the hook — so tuning them
-    in `on_startup` works, and matches the Go backend.
+    in `on_startup` works.
     """
 
     def test_the_manager_reads_the_live_config_not_a_snapshot(self):
@@ -205,7 +205,7 @@ class TestSinkSettingsAreHonoured:
         assert app._sink_manager._delivery_timeout_seconds == 3.0
 
     def test_the_table_no_longer_claims_the_sink_settings_are_consumed_early(self):
-        """Both backends must list the same settings — Go builds its sinks
+        """The list must stay complete — the sink manager is built
         after the hook too."""
         paths = {setting.path for setting in SETTINGS_CONSUMED_BEFORE_ON_STARTUP}
 

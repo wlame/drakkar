@@ -392,7 +392,7 @@ def test_nothing_resolvable_returns_none_rather_than_a_baked_in_bundle(tmp_path)
 
     There is deliberately no bundle baked into the package: one download at
     any point in a worker's life fills a cache that every later start — and
-    every co-located worker of either backend — reads. Until then the worker
+    every co-located worker — reads. Until then the worker
     runs API-only and the UI server says how to supply a bundle.
     """
     assert resolve(ui_config(tmp_path, repo='')) is None
@@ -414,7 +414,7 @@ def test_default_cache_root_honors_xdg(monkeypatch, tmp_path):
 def test_ui_config_defaults():
     # Default-ON with an update check: workers serve the latest
     # fetched/cached release and keep the Jinja pages when nothing is
-    # fetchable (matches the Go backend's DefaultUIConfig).
+    # fetchable.
     cfg = DrakkarConfig()
     assert cfg.ui.enabled is True
     assert cfg.ui.release.enabled is True
@@ -780,7 +780,7 @@ def test_fetch_rejects_malformed_checksum_asset(stub_github, tmp_path):
 
 
 def test_fetch_release_checksum_mismatch_error_message(stub_github, tmp_path):
-    """The mismatch error text is byte-identical to the Go backend's."""
+    """The mismatch error text names both versions."""
     from drakkar.uihost import fetch_release
 
     stub_github.add_direct_release('wlame/drakkar-ui', 'v1.0.0', make_tar_gz(BUNDLE_FILES))

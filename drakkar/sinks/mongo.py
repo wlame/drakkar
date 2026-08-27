@@ -220,8 +220,7 @@ def _build_delete(payload: MongoPayload) -> '_BuiltUnit':
 
 
 # Which driver write each op builds. A table rather than a branch chain: the
-# mapping IS the specification, and it is what the Go backend has to
-# reproduce operation for operation.
+# mapping IS the specification of which driver write each op performs.
 #
 # One and many stay separate entries rather than a flag, because the blast
 # radius differs by orders of magnitude and the driver makes the distinction

@@ -14,8 +14,7 @@ the ``annotation`` event value, anchored by the same ``partition`` /
 ``offset`` / ``task_id`` columns every other event uses. That choice buys
 three things for free: rotation and retention already expire them, the
 existing trace queries already return them alongside the events they explain,
-and no schema column is added, so the pinned cross-backend row shape is
-untouched.
+and no schema column is added, so the pinned event-row shape is untouched.
 
 Scope comes from the target passed to :meth:`Annotator.emit`:
 
@@ -77,8 +76,8 @@ logger = structlog.get_logger()
 # reintroduces the flood this guards against.
 MAX_DROP_LOGS_PER_CALL = 5
 
-# Drop reasons. Mirrored in the Go backend and in the metric's label values —
-# keep the two in lockstep.
+# Drop reasons. These are the metric's label values, so renaming one breaks
+# every dashboard built on it.
 REASON_OVERSIZE = 'oversize'
 REASON_BUDGET_EXHAUSTED = 'budget_exhausted'
 REASON_NO_CONTEXT = 'no_context'

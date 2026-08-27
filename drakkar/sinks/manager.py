@@ -159,8 +159,7 @@ class SinkManager:
         # the section in place, and it may return a whole new
         # ``DrakkarConfig``, which rebinds ``app._config`` and leaves any
         # captured section object stale. Going through the app on each read
-        # follows both. The Go backend never had this problem because it
-        # builds its sinks after the hook.
+        # follows both.
         #
         # ``None`` for a manager built standalone (tests, plugin authors),
         # which then uses the two explicit arguments.

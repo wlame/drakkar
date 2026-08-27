@@ -1,10 +1,9 @@
-"""Tests for the canonical cross-backend timestamp format.
+"""Tests for the canonical timestamp format.
 
 ``format_rfc3339_micro`` is the ONE formatter for framework-controlled
 datetimes rendered to text (webapp report fields, recorder JSON
-metadata). Its output must be byte-identical to the Go backend's
-``drakkar.FormatRFC3339Micro`` for the same instant, so these tests pin
-exact strings, not shapes.
+metadata). The same instant must always render to the same bytes, so
+these tests pin exact strings, not shapes.
 """
 
 from datetime import UTC, datetime, timedelta, timezone

@@ -4371,10 +4371,10 @@ def test_encode_json_orjson_stdlib_byte_parity(payload):
 
 
 def test_encode_json_datetime_canonical_format():
-    """Datetimes encode in the canonical cross-backend format on BOTH paths.
+    """Datetimes encode in the canonical format on BOTH paths.
 
     Fixed six-digit microseconds + ``Z`` suffix (:mod:`drakkar.timefmt`) —
-    the exact string the Go backend writes for the same instant. The
+    the one canonical string for that instant. The
     orjson fast path reaches the shared ``_json_default`` hook via
     ``OPT_PASSTHROUGH_DATETIME``, so the format cannot depend on whether
     the ``perf`` extra is installed. Whole seconds keep the full
@@ -5173,7 +5173,7 @@ async def test_update_live_link_no_op_when_no_db_path(tmp_path):
     await rec.stop()
 
 
-# --- Pinned event-row shape (cross-backend + API contract) -----------------
+# --- Pinned event-row shape (on-disk + API contract) -----------------------
 
 
 async def test_event_columns_pin_matches_live_table(tmp_path):
@@ -5181,7 +5181,7 @@ async def test_event_columns_pin_matches_live_table(tmp_path):
 
     The constant is the contract for every SELECT-*-pass-through surface
     (/ws, /api/v1/events, /api/v1/trace, /api/v1/trace-by-label) and for
-    cross-backend DB interop; the Go backend pins the identical list
+    on-disk interop between workers; the same list is pinned
     (internal/recorder/schema.go EventColumns) and the normative copy
     lives in drakkar-ui/docs/api-contract-v1.md. If this test fails, the
     schema changed without updating the pinned contract — update all
@@ -5661,7 +5661,7 @@ class TestLastBreathFlush:
 
 
 # ---------------------------------------------------------------------------
-# Stream sizing: no redundant encodes, byte counts match the Go backend
+# Stream sizing: no redundant encodes, byte counts are decoder-independent
 # ---------------------------------------------------------------------------
 
 
@@ -5677,10 +5677,10 @@ class TestLastBreathFlush:
 async def test_task_completed_stdout_size_counts_bytes_of_the_decoded_string(recorder, stdout, expected_size):
     """``stdout_size`` is the UTF-8 length of the decoded capture.
 
-    Not the raw byte count: both backends replace each invalid byte with
-    U+FFFD before measuring (Python's ``errors='replace'``, Go's
-    ``decodeReplace``), so this is what keeps the two agreeing on output
-    that is not valid UTF-8. The ASCII fast path must not disturb it.
+    Not the raw byte count: each invalid byte becomes U+FFFD before
+    measuring (``errors='replace'``), so the number stays defined for
+    output that is not valid UTF-8. The ASCII fast path must not disturb
+    it.
     """
     result = ExecutorResult(
         exit_code=0,

@@ -237,9 +237,7 @@ class PostgresSink(BaseSink[PostgresPayload]):
         database is always in payload order. Failure granularity is
         preserved: a batch that fails is retried row-by-row so the error an
         operator sees names the offending row, exactly as the per-payload
-        loop did. See the Go backend's ``internal/sinks/postgres.go`` — the
-        two must stay observably identical (divergence #18 in its migration
-        notes).
+        loop did.
         """
         if not payloads:
             return
@@ -301,9 +299,9 @@ class PostgresSink(BaseSink[PostgresPayload]):
         if payload.op is PostgresOp.STATEMENT:
             return self._build_statement_unit(payload)
         data = _dump_required(payload.data, 'data', payload.op)
-        # Sorted, not left in the model's declaration order: the Go backend
-        # decodes payload data into a map, which has no order to preserve, so
-        # sorting is the only rule both backends can honour unconditionally.
+        # Sorted, not left in the model's declaration order: payload data
+        # decoded into a mapping has no order to preserve, so sorting is the
+        # only rule that can be honoured unconditionally.
         # Values are re-read by column so they stay aligned with the sort.
         columns = sorted(data)
         quoted_table = quote_ident(payload.table)

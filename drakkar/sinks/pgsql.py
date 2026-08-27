@@ -27,10 +27,10 @@ _IDENT_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
 # visible: the sink catches the failure and re-runs the group row by row,
 # turning one statement into hundreds without a word in the log.
 #
-# **Deliberate divergence from the Go backend**, which keeps 65535 in
-# ``internal/pgsql``: pgx v5 tops out at exactly ``math.MaxUint16``, so its
-# cap is already correct for its driver. The emitted SQL stays identical —
-# only the row count per statement differs, which no consumer can observe.
+# The cap is a DRIVER limit, not a protocol one: the Postgres wire protocol
+# itself allows 65535, so a different client may legitimately chunk at a
+# different row count. Only the rows-per-statement differ; the emitted SQL
+# is the same either way, which is why no consumer can observe the choice.
 MAX_INSERT_PARAMS = 32767
 
 

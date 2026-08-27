@@ -176,7 +176,7 @@ class OffloadPool:
         """Current pool state for the live-overview endpoint.
 
         Key-presence of this object in the overview payload is the UI's
-        feature flag: backends without an offload pool (Go) omit it.
+        feature flag: a worker with no offload pool omits it entirely.
         """
         with self._count_lock:
             return {

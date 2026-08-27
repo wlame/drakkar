@@ -553,7 +553,7 @@ the message's offset pending forever, and since the commit watermark only
 advances over a gap-free prefix, that would freeze **every later commit on
 the partition** and force a full replay from the wedge point on restart.
 Alert on a non-zero rate of that counter — the pipeline keeps flowing, so
-nothing else will tell you the hook is broken. The Go backend contains the
+nothing else will tell you the hook is broken. The framework contains the
 equivalent hook error identically.
 
 The `ExecutorError` fields:

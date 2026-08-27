@@ -126,7 +126,7 @@ def test_side_effecting_endpoint_routes_are_served_v1_paths() -> None:
     """The operator warning must name endpoints where they actually are.
 
     ``SideEffectingEndpoint.route`` is display-only — nothing routes on it —
-    which is exactly why both backends kept advertising
+    which is exactly why the warning kept advertising
     ``POST /api/debug/probe`` long after the unprefixed aliases were removed
     in v1.19. An operator who acts on the warning has to find the endpoint.
     """

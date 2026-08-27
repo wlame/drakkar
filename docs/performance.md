@@ -63,7 +63,7 @@ Two things are deliberately **not** affected:
   so batching never turns into redelivery at handover.
 
 The window bounds how much work a crash can cost: up to 500 ms of finished
-messages get reprocessed instead of up to one. Both backends use the same
+messages get reprocessed instead of up to one. The framework uses the same
 two thresholds.
 
 ### Where the time goes for a 30ms task

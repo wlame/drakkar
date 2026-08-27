@@ -2,8 +2,7 @@
 
 A UI release asset is a gzipped tarball whose files sit at the archive root
 (``index.html`` at the top level) — the drakkar-ui release workflow produces
-that shape. This module mirrors the Go backend's ``internal/uihost/fetch.go``
-so both backends fetch, validate, and cache bundles identically.
+that shape. This module fetches, validates and caches those bundles.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ GITHUB_API_BASE = 'https://api.github.com'
 # rate limit (60 req/h per IP), so it is the PRIMARY fetch path for public
 # repos; the API remains the fallback (needed for private repos via
 # GITHUB_TOKEN and for releases whose asset name deviates from the
-# convention). Same trick as rx-go's frontend manager.
+# convention).
 GITHUB_DOWNLOAD_BASE = 'https://github.com'
 
 # Caps total extracted size to defuse a decompression bomb in a
@@ -142,7 +141,7 @@ def fetch_release(
     # each other's in-flight extraction. A pid would NOT be unique here:
     # containerized workers are all pid 1, and the cache is shared across
     # containers by design. The '.incoming' suffix is what
-    # newest_cached_version (both backends) filters on.
+    # newest_cached_version filters on.
     incoming = dest_dir.with_name(f'{dest_dir.name}.{secrets.token_hex(4)}.incoming')
     direct_url = f'{download_base}/{repo}/releases/download/{version}/{bundle_asset_name(version)}'
     try:
@@ -214,7 +213,7 @@ def _verify_checksum(tarball: IO[bytes], checksum_url: str, version: str, *, dea
     skips verification (the download is already HTTPS-authenticated to
     GitHub). A PRESENT sidecar is binding: a malformed one, or a digest
     that does not match the downloaded bytes, aborts the install before
-    any extraction work. Error messages match the Go backend verbatim.
+    any extraction work.
     """
     try:
         with tempfile.TemporaryFile() as sumfile:

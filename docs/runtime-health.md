@@ -196,15 +196,14 @@ Every field is environment-overridable (`DK_RUNTIME_HEALTH__*`); see the
   is unreadable the verdict falls back to stack dominance and host
   evidence alone.
 
-## Cross-backend note
+## Why the wire shape is generic
 
-The wire contract is backend-neutral: `unit_label` says what
-`unit_count` counts (`tasks` here, `goroutines` on the Go backend). The
-Go backend implements the same monitor with Go-shaped introspection:
-heartbeat lag measures scheduler latency, episode stacks are aggregated
-goroutine-dump groups, and episode CPU comes from process rusage (Go has
-no single loop thread — a blocked goroutine does not stall the others,
-so the verdicts that matter there are `starved` and `cpu_bound`).
+`unit_count` is paired with a `unit_label` naming what it counts
+(`tasks` here) rather than being called `task_count` outright. The
+readout describes "how much concurrent work was outstanding while the
+worker was unhealthy", and what that unit *is* depends on the runtime
+doing the work. Keeping the label on the wire means a consumer renders
+the number correctly without knowing which runtime produced it.
 
 ## See also
 

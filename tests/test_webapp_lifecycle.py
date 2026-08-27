@@ -55,7 +55,7 @@ class _WebHandler(BaseDrakkarHandler[_Input, _Output, _HttpReq, _HttpResp]):
     """Handler with all four Generic slots populated for webapp use.
 
     Overrides both HTTP hooks — construction-time validation (mirroring
-    the Go backend) rejects a webapp-enabled handler that leaves them at
+    construction time) rejects a webapp-enabled handler that leaves them at
     the raising Base defaults.
     """
 
@@ -429,14 +429,14 @@ async def test_shutdown_calls_webapp_stop_after_processor_drain(shutdown_app):
 
 
 # ---------------------------------------------------------------------------
-# Construction-time fail-fast (parity with the Go backend's app.New check)
+# Construction-time fail-fast
 # ---------------------------------------------------------------------------
 
 
 def test_app_construction_fails_fast_when_webapp_enabled_without_hooks():
     """webapp.enabled + a handler without the HTTP hooks → immediate error.
 
-    Mirrors the Go backend, which rejects this pairing at ``app.New``.
+    The pairing is rejected at construction, not at the first request.
     Before this check the misconfiguration was only discovered when the
     webapp thread failed to start (non-fatal, worker continued without
     the webapp) — or worse, at the first POST.

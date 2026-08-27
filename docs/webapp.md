@@ -132,7 +132,7 @@ below documents every knob for production deployments.
 | `sinks_enabled` | `bool` | `false` | When `true`, calls `on_message_complete(group)` after the executor fan-out and routes returned `CollectResult` payloads through the [SinkManager](sinks.md). When `false`, sinks are skipped entirely and the response carries `sinks: null`. |
 | `request_timeout_seconds` | `float` | `30.0` | Per-request budget enforced via `asyncio.wait_for` on the webapp loop. On timeout the client receives a 504 with `status='timeout'` and the runner's post-execute hook is cooperatively cancelled. Must be > 0. |
 | `max_concurrent` | `int` | `64` | Per-worker semaphore capacity for in-flight HTTP requests. The 65th concurrent request returns 503 `status='capacity'` immediately rather than queuing. Must be > 0. |
-| `max_body_bytes` | `int` | `10485760` (10 MiB) | Cap on a single POST body, counted from the stream (a lying Content-Length cannot bypass it). Oversized requests receive 413 `error='request_too_large'` before parsing. Must be > 0. Same key, default, and 413 envelope on both backends. |
+| `max_body_bytes` | `int` | `10485760` (10 MiB) | Cap on a single POST body, counted from the stream (a lying Content-Length cannot bypass it). Oversized requests receive 413 `error='request_too_large'` before parsing. Must be > 0. |
 | `clients` | `list[WebClientConfig]` | one anonymous client with rpm=4 | Configured tenants. See the table below. At least one client is required; explicit `clients: []` fails at config load. |
 
 ### `webapp.clients[]` — `WebClientConfig`
@@ -439,7 +439,7 @@ topic for higher throughput and worker-restart resilience.
 |------|----------|------|-------------|
 | 200 | `ok` | Successful end-to-end execution | See [Request / response examples](#request-response-examples). |
 | 401 | `auth_failed` | `Authorization` header is missing-with-no-anonymous-slot, malformed, or names a non-configured token | `{"error": "unauthorized"}` |
-| 413 | n/a (`error: request_too_large`) | Body exceeds `max_body_bytes` (enforced before parsing; identical on both backends) | `{"error": "request_too_large", "request_id": "req-...", "details": "request body exceeds webapp.max_body_bytes (10485760 bytes)"}` |
+| 413 | n/a (`error: request_too_large`) | Body exceeds `max_body_bytes` (enforced before parsing) | `{"error": "request_too_large", "request_id": "req-...", "details": "request body exceeds webapp.max_body_bytes (10485760 bytes)"}` |
 | 422 | n/a (legacy `error: invalid_request`) | Body is missing or fails Pydantic validation against `HttpRequestT` | `{"error": "invalid_request", "request_id": "req-...", "details": [{"loc": ["query"], "msg": "Field required", "type": "missing"}]}` |
 | 429 | n/a (`error: rate_limited`) | Per-client rpm window is full (rejected at the gate, before the runner; the response also carries a `Retry-After` header with the wait rounded up to whole seconds) | `{"error": "rate_limited", "client": "tenant-a", "rpm_limit": 60, "retry_after_seconds": 1.7, "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
 | 408 | n/a (`error: request_timeout`) | The request body was not delivered within `request_timeout_seconds` + 30 s. The size cap alone is not a slow-loris defence — a client can stay under it indefinitely by sending one byte at a time — so the body read is bounded in time too | `{"error": "request_timeout", "request_id": "req-...", "hint": "the request body was not delivered in time"}` |

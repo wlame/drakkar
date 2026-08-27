@@ -347,7 +347,7 @@ class EventRecorder(EventWriter):
                 # WAL_SYNCHRONOUS_PRAGMA for the durability trade.
                 await self._db.execute(WAL_SYNCHRONOUS_PRAGMA)
                 # Explicit busy_timeout so shared-db_dir contention behaves
-                # identically to the Go backend (which has no driver default).
+                # the same regardless of the driver's own default.
                 await self._db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
                 # Webapp-release schema check. Run BEFORE ``_create_schema``
                 # so a pre-existing

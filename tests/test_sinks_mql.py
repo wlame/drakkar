@@ -1,7 +1,7 @@
 """Unit tests for drakkar.sinks.mql — MQL template compilation and binding.
 
 Pure functions, so no database, no mocks, and no sink. The vectors that must
-stay identical to the Go backend live in tests/fixtures/mongo_statements.json
+stay stable live in tests/fixtures/mongo_statements.json
 and are driven separately; these tests cover the rules themselves.
 """
 
@@ -23,8 +23,8 @@ def _compiled(document):
 def test_compile_collects_distinct_names_sorted():
     """Sorted, not in first-appearance order.
 
-    The Go backend decodes a template into a map with no insertion order to
-    recover, so sorting is the only rule both backends can honour — the same
+    A template decoded into a mapping has no insertion order to recover, so
+    sorting is the only rule available — the same
     reasoning behind sorted Postgres columns and Redis mapping arguments.
     Binding is keyed by name, so the order changes nothing observable.
     """
@@ -254,9 +254,9 @@ def test_a_non_string_key_is_rejected():
         _compiled({1: 'x'})
 
 
-# --- golden vectors, shared with drakkar-go ---------------------------------
+# --- golden vectors ---------------------------------------------------------
 #
-# tests/fixtures/mongo_statements.json is mirrored verbatim into the Go repo.
+# tests/fixtures/mongo_statements.json pins the bound documents.
 # The cases run through THIS module's own compile and substitute functions —
 # not a test-local reimplementation — so what is pinned is the substitution
 # that ships. A divergence between the two backends fails here instead of
@@ -267,7 +267,7 @@ _MONGO_STATEMENT_CORPUS = json.loads((Path(__file__).parent / 'fixtures' / 'mong
 
 @pytest.mark.parametrize('case', _MONGO_STATEMENT_CORPUS['ok'], ids=lambda c: c['case'])
 def test_mongo_statement_corpus_binds(case):
-    """Both backends must produce this document from this template and params."""
+    """The compiler must produce this document from this template and params."""
     compiled = compile_template(case['template'])
 
     assert list(compiled.params) == case['names']
@@ -276,7 +276,7 @@ def test_mongo_statement_corpus_binds(case):
 
 @pytest.mark.parametrize('case', _MONGO_STATEMENT_CORPUS['errors'], ids=lambda c: c['case'])
 def test_mongo_statement_corpus_rejects(case):
-    """Both backends must refuse these, compiling or binding."""
+    """These must be refused, at compile time or at bind time."""
     with pytest.raises(ValueError) as excinfo:
         compiled = compile_template(case['template'])
         # A vector carrying params is a BIND-time rejection: compiling it
@@ -284,9 +284,8 @@ def test_mongo_statement_corpus_rejects(case):
         # reason.
         substitute(compiled, case.get('params', {}))
 
-    # Case-insensitive: the corpus pins WHICH failure a vector produces, not
-    # its prose, because Go requires lowercase error strings and Python
-    # capitalises. The same allowance the shared Postgres corpus makes.
+    # Case-insensitive: the corpus pins WHICH failure a vector produces,
+    # not its exact prose. The same allowance the Postgres corpus makes.
     assert case['error'].lower() in str(excinfo.value).lower()
 
 

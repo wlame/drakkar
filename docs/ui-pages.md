@@ -224,13 +224,12 @@ other unmatched route.
 
 ---
 
-## Mixed fleets
+## Workers that declare no pages
 
-Declared pages are a **Python-only** feature today: `drakkar-go`
-answers `GET /api/v1/pages` with an empty list unconditionally, the same
-shape a Python worker returns when its handler declares no `ui_pages`.
-A fleet mixing both backends behind one UI simply shows no extra nav
-entries for the Go workers — never an error, never a broken page.
+A worker whose handler sets no `ui_pages` answers `GET /api/v1/pages`
+with an empty list. The UI shows no extra nav entries for it — never an
+error, never a broken page — so a fleet where only some workers declare
+pages needs no special handling.
 
 ---
 

@@ -1477,9 +1477,9 @@ async def test_stdin_still_delivered_with_cap_set():
     ],
 )
 def test_trim_incomplete_utf8_golden(data: bytes, expected: bytes):
-    """Cross-backend golden vectors — the Go suite pins the identical table.
+    """Golden vectors for the UTF-8 trim rule.
 
-    Do not change inputs or outputs without changing the Go twin in the
+    Do not change inputs or outputs without re-deriving them from the
     same change set.
     """
     assert _trim_incomplete_utf8(data) == expected

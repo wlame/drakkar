@@ -33,8 +33,8 @@ OnRevokeCallback = Callable[[list[int]], Awaitable[None]]
 # untimed lag query against an unreachable partition leader parks a pool
 # thread forever and the poll loop eventually queues behind it. The worker
 # then stops consuming with no error, while readiness still reports healthy.
-# 2s matches the Go backend's context timeout for the same queries
-# (``app/providers.go``); keep the two in step.
+# 2s is long enough for a healthy broker round trip and short enough that
+# a wedged one cannot hold the poll loop.
 LAG_QUERY_TIMEOUT_SECONDS = 2.0
 
 # AIOConsumer defaults to 2 executor threads for EVERY consumer operation.

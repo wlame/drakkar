@@ -536,7 +536,7 @@ Detailed view of a single task's lifecycle:
 
 ### API
 
-The pages above are backed by a JSON/WebSocket API under `/api/v1` -- the same contract the Go backend implements. Endpoints useful beyond the pages themselves:
+The pages above are backed by a JSON/WebSocket API under `/api/v1`. Endpoints useful beyond the pages themselves:
 
 - `GET /api/v1/identity` -- worker identity for the SPA and external tooling. Since contract v1.2 the response also carries `backend` (`"python"` or `"go"`), `backend_version`, `ui_version`, and `ui_source`.
 - `GET /api/v1/openapi.json` -- the vendored OpenAPI 3.1 spec describing the `/api/v1` surface. Served from `drakkar/uiserver/openapi.yaml`; the canonical source is `docs/openapi-v1.yaml` in the drakkar-ui repo, and `tests/test_openapi_parity.py` pins the served route table to the spec.
@@ -546,7 +546,7 @@ Both the spec and Swagger UI endpoints are auth-gated exactly like the rest of t
 
 ### Managing the UI bundle cache
 
-The `drakkar-ui` console script (installed with the package) manages the shared per-user bundle cache -- the same engine the worker runs at startup, and command-for-command identical to the Go backend's `drakkar-ui` CLI, so either backend's binary maintains the cache for both:
+The `drakkar-ui` console script (installed with the package) manages the shared per-user bundle cache -- the same engine the worker runs at startup, so you can prime or inspect the cache without starting a worker:
 
 ```bash
 drakkar-ui where                    # report the cache location + what would be served
@@ -556,7 +556,7 @@ drakkar-ui fetch --version=v0.2.0   # download a specific release
 
 All subcommands accept `--repo=owner/name`, `--cache-dir=DIR`, and `--api-base=URL` (GitHub Enterprise); a `GITHUB_TOKEN` in the environment raises rate limits and unlocks private repos. Cached versions are never re-downloaded -- release tags are immutable. `just drakkar-ui <args>` wraps the same command for repo-local use.
 
-When neither the cache nor the release source can supply a bundle (an offline host whose cache is still empty), the worker **runs API-only**: `/api/v1/...`, the Kubernetes probes and the event WebSocket are all unaffected, and every page request answers **503** naming the ways to supply a bundle. There is no built-in HTML fallback -- the UI is one versioned artifact shared by both backends, and one download at any point in a worker's life fills a cache that every later start reads.
+When neither the cache nor the release source can supply a bundle (an offline host whose cache is still empty), the worker **runs API-only**: `/api/v1/...`, the Kubernetes probes and the event WebSocket are all unaffected, and every page request answers **503** naming the ways to supply a bundle. There is no built-in HTML fallback -- the UI is one versioned artifact, and a single download at any point in a worker's life fills a cache that every later start reads.
 
 For an air-gapped deployment, stage the bundle once with `drakkar-ui fetch --version=vX.Y.Z` (into a cache directory the workers share), or point `ui.release.repo` at an internal mirror that publishes the same release assets. `ui.release.enabled: false` turns the UI off deliberately, leaving the same API-only worker.
 
@@ -650,7 +650,7 @@ The `/ws` stream additionally carries a **`throughput`** frame — the
 three-window cost/speed aggregate behind the [throughput](throughput.md)
 strips. It is broadcast only and never written to `events`, so it has no row
 above: buffering a periodic aggregate would grow the table with rows no
-query reads back. Both backends pin the full vocabulary, stored and
+query reads back. A fixture pins the full vocabulary, stored and
 broadcast-only alike, against one shared fixture — see
 `drakkar-ui/docs/api-contract-v1.md`, "Recorder event-type vocabulary".
 
@@ -756,7 +756,7 @@ Age- and count-based retention (the old `retention_hours` /
 files into one compressed, merged database per cluster
 (`<cluster>-<from>__<to>.db.gz`), and deletes only the raw files it
 successfully merged — see [Local Databases → Archiving](local-databases.md#archiving)
-for the full byte-level spec shared with the Go backend. The short
+for the full byte-level spec. The short
 version:
 
 - **Defaults** (`rotation_interval_hours: 1`, `archive_enabled: true`,
@@ -788,7 +788,7 @@ version:
 - **Renamed key:** `rotation_interval_minutes` is now
   `rotation_interval_hours`, with a unit change (`1` = 1 hour, not 1
   minute). `rotation_interval_minutes`, `retention_hours` and
-  `retention_max_events` are gone from both backends and are ignored if
+  `retention_max_events` are gone and are ignored if
   still present — see [Renamed and removed
   keys](local-databases.md#renamed-and-removed-keys).
 

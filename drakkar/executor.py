@@ -50,12 +50,12 @@ def _trim_incomplete_utf8(data: bytes) -> bytes:
     """Strip a trailing incomplete-but-valid UTF-8 sequence (at most 3 bytes).
 
     Applied only to truncated captures: a byte-exact cut can split a
-    multi-byte character, and the dangling prefix decodes differently across
-    backends (Python emits one replacement char per maximal subpart, Go one
-    per byte). Removing the incomplete tail keeps the decoded text identical
-    on both. Genuinely invalid tails (an 0xF8-0xFF lead, a stray
+    multi-byte character, and how many replacement characters a dangling
+    prefix decodes to is decoder-specific (one per maximal subpart, or one
+    per byte). Removing the incomplete tail makes the decoded text the same
+    either way. Genuinely invalid tails (an 0xF8-0xFF lead, a stray
     continuation byte) are left in place — ``decode(errors='replace')``
-    already renders those identically on both backends.
+    already renders those consistently.
     """
     for back in range(1, min(3, len(data)) + 1):
         byte = data[-back]
@@ -555,7 +555,7 @@ class ExecutorPool:
         set by startup hooks are still picked up. The consequence is that
         mutating ``os.environ`` after the first task no longer affects later
         subprocesses — use ``executor.env`` or ``ExecutorTask.env`` for values
-        that need to vary per task. The Go backend caches the same way.
+        that need to vary per task.
         """
         if self._filtered_parent_env_cache is None:
             self._filtered_parent_env_cache = {

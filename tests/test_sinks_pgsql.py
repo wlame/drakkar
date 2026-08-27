@@ -19,7 +19,7 @@ from drakkar.sinks.pgsql import (
     render_upsert,
 )
 
-# Shared with drakkar-go: the same file is mirrored there and drives the same
+# The fixture is the corpus and drives the
 # assertions, so a divergence between the two tokenizers fails a test rather
 # than reaching an operator's SQL.
 _CORPUS = json.loads((Path(__file__).parent / 'fixtures' / 'pg_statements.json').read_text())
@@ -65,8 +65,8 @@ def test_max_insert_params_matches_the_driver_limit():
     The cap has to be the driver's, not the protocol's, or the sink builds
     statements the driver will not send — and the sink's per-row fallback
     then quietly turns every oversized batch into hundreds of single-row
-    inserts. This is a deliberate divergence from the Go backend, whose pgx
-    v5 driver does allow the full 65535.
+    inserts. A different client library may legitimately cap higher; the
+    emitted SQL is the same either way, only the rows per statement differ.
     """
     assert MAX_INSERT_PARAMS == 32767
 
@@ -116,7 +116,7 @@ def test_render_upsert_empty_update_columns_becomes_do_nothing():
 
 @pytest.mark.parametrize('case', _CORPUS['ok'], ids=lambda c: c['case'])
 def test_compile_named_statement_corpus(case):
-    """The corpus is shared with drakkar-go — both backends must agree."""
+    """The rendered SQL must match the pinned corpus exactly."""
     sql, params = compile_named_statement(case['sql'])
     assert sql == case['expected_sql']
     assert params == case['params']

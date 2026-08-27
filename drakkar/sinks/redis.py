@@ -119,14 +119,14 @@ def _sorted_mapping(value: object) -> dict[str, object]:
     """Emit a payload MAPPING in sorted key order.
 
     Argument order does not change what HSET or ZADD leave behind, but it
-    does change the emitted command — and the Go backend decodes these into
-    a map with no order to preserve, so sorting is the only rule both
-    backends can honour unconditionally. Postgres columns are sorted for
-    exactly this reason.
+    does change the emitted command — and a mapping decoded from a payload
+    carries no key order to preserve, so sorting is the only rule that can be
+    honoured unconditionally. Postgres columns are sorted for exactly this
+    reason.
 
     LISTS (hdel fields, sadd/srem members) are NOT sorted: those are the
     caller's own order, like an explicit `update_columns` on the Postgres
-    side, and both backends can preserve a sequence.
+    side, and a sequence can be preserved as given.
     """
     # The cast states an invariant the annotation cannot: ``value`` is typed
     # ``object`` because every renderer takes the same payload, but the
@@ -160,8 +160,7 @@ def _render_push(payload: RedisPayload, key: str) -> _Rendered:
 
 
 # Which redis-py call each op renders to. A table rather than a branch chain:
-# the mapping IS the specification, and it is what the Go backend has to
-# reproduce argument-for-argument.
+# the mapping IS the specification of the emitted argument vector.
 #
 # Every renderer receives the ALREADY-PREFIXED key, so no renderer can
 # forget the sink instance's namespace.
@@ -214,9 +213,8 @@ def _as_builtin_transient(exc: BaseException) -> BaseException | None:
     but ``redis.exceptions.ConnectionError`` and its ``TimeoutError``
     inherit only from ``RedisError``. A dropped Redis connection was
     therefore never eligible for the idempotent fast-retry, so this sink's
-    ``idempotent = True`` declaration did nothing — while the Go backend,
-    whose classifier is structural, has always retried. Remapping here
-    closes that divergence.
+    ``idempotent = True`` declaration did nothing. Remapping here makes the
+    declaration mean what it says.
 
     ``manager`` explicitly delegates this responsibility to sinks: "raise a
     library-specific exception that the sink implementation can remap
@@ -343,9 +341,7 @@ class RedisSink(BaseSink[RedisPayload]):
         that fails is retried key-by-key so the error an operator sees
         names the offending key, exactly as the per-payload loop did. That
         retry is safe because ``SET`` is write-replace — re-running it for
-        keys the pipeline already applied is a no-op. See the Go backend's
-        ``internal/sinks/redis.go`` — the two must stay observably
-        identical (divergence #18 in its migration notes).
+        keys the pipeline already applied is a no-op.
         """
         if not payloads:
             return

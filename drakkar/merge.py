@@ -141,10 +141,10 @@ _EVENT_COLUMNS = [
     'output_topic',
     'metadata',
     'pid',
-    # Present in the live recorder schema (drakkar/recorder/schema.py, the
-    # cross-backend contract). ``row.get()`` yields None for source files
-    # written by older backends, which INSERTs as NULL — hence nullable
-    # here even though the live ``origin`` column is NOT NULL.
+    # Present in the live recorder schema (drakkar/recorder/schema.py).
+    # ``row.get()`` yields None for source files written by older versions,
+    # which INSERTs as NULL — hence nullable here even though the live
+    # ``origin`` column is NOT NULL.
     'labels',
     'origin',
     'client_name',
@@ -165,7 +165,7 @@ _STATE_COLUMNS = [
     'committed_count',
     'paused',
     # v1.15/v1.16 columns; row.get() yields None for databases written by
-    # older backends, which INSERTs as NULL.
+    # older versions, which INSERTs as NULL.
     'health_state',
     'loop_lag_ms',
     'throughput',

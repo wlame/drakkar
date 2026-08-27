@@ -1,15 +1,13 @@
 """The recorder's event-type vocabulary is one enum, pinned by a fixture.
 
-Event names are a cross-backend contract: the Go backend writes the same
-strings into the same ``events.event`` column, and the drakkar-ui SPA
-matches on them. Before this, each name was a string literal at its
+Event names are a wire contract: they are written into ``events.event``
+and the UI matches on them, so a rename breaks consumers rather than
+refactoring them. Before this, each name was a string literal at its
 ``record_*`` site and at every consumer comparison, so a typo was invisible
 to the type checker and to the tests.
 
-``tests/fixtures/event_vocabulary.json`` is the shared list. The Go repo
-vendors a byte-identical copy at
-``internal/recorder/testdata/event_vocabulary.json`` and runs the mirror
-assertion there.
+``tests/fixtures/event_vocabulary.json`` is the reviewed list the enum is
+pinned against — regenerate it with ``just gen-event-vocabulary``.
 """
 
 from __future__ import annotations
@@ -57,15 +55,6 @@ def test_ws_only_events_are_never_buffered() -> None:
     fixture = json.loads(FIXTURE.read_text())
     ws_only = {name for name, is_stored in fixture['stored_in_events'].items() if not is_stored}
     assert ws_only == {EventType.THROUGHPUT.value}
-
-
-def test_fixture_names_the_backend_that_emits_each_event() -> None:
-    """Every event says which backends emit it, so a gap is explicit."""
-    fixture = json.loads(FIXTURE.read_text())
-    for name in fixture['events']:
-        assert name in fixture['emitted_by'], f'{name} has no emitted_by entry'
-        assert set(fixture['emitted_by'][name]) <= {'python', 'go'}
-        assert fixture['emitted_by'][name], f'{name} is emitted by nothing'
 
 
 def test_every_member_value_equals_its_lowercased_name() -> None:

@@ -45,20 +45,22 @@ a bare date as *local* midnight, which makes `uv.lock` differ between
 machines in different timezones. Tests fail if the pin goes missing, loses
 its timezone, or lands in the future.
 
-## Cross-backend parity
+## Wire contracts
 
-Drakkar has two implementations: this one and `drakkar-go`. The following
-surfaces are **contractual** and must stay identical across both:
+Some surfaces are contracts rather than implementation details — something
+outside this repository already depends on their exact bytes:
 
 - config format (YAML keys and `DK_` env overrides)
 - DLQ JSON bytes
 - **metric names and help text**
 - the config-summary one-liner
 - `/api/v1` request and response shapes
+- the recorder and cache SQLite schemas, which workers sharing a `db_dir`
+  read from each other
 
-A change to any of them lands on both backends in the same change, or not
-at all. **Adding a metric obliges an identical metric in the Go backend**
-— budget for that before introducing one.
+Changing any of them is a breaking change, not a refactor. Metric names and
+help text are the easiest to change by accident and the most disruptive to
+change silently: a rename breaks every dashboard and alert built on it.
 
 ## Domain neutrality
 

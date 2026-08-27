@@ -3,7 +3,7 @@
 Drakkar's optional features depend on each other. This page is the map:
 which switch turns what on, what each feature silently needs, and the
 order to enable things in as a deployment grows from a minimal worker to
-a full-featured fleet. It applies to **both backends** — every toggle,
+a full-featured fleet. Every toggle,
 default, and dependency below is identical in the Python and Go
 implementations.
 
@@ -50,7 +50,7 @@ the failure mode so you can decide what your deployment needs.
 1. **Probes need the UI server.** `/healthz` and `/readyz` are served
    *only* by the UI server. `ui.enabled: false` means **no probe
    endpoints at all** — Kubernetes liveness/readiness checks simply
-   fail. Both backends log the warning `ui_disabled_no_probes` at
+   fail. The worker logs the warning `ui_disabled_no_probes` at
    startup; under Kubernetes, keep the UI enabled (auth-token it
    instead of disabling it).
 2. **The flight recorder runs only when `ui.enabled`.** UI off = no
@@ -90,7 +90,7 @@ the failure mode so you can decide what your deployment needs.
    worker with `webapp.enabled` and a handler that lacks the HTTP hooks
    (Python: `arrange_http_request` + `on_http_request_complete` plus the
    3rd/4th generic models; Go: the `drakkar.HTTPHandler` interface)
-   fails fast with a `ConfigurationError` on both backends. A webapp
+   fails fast with a `ConfigurationError`. A webapp
    **bind** failure at startup is non-fatal (the worker continues
    without it); a UI-server bind failure is fatal.
 9. **The webapp's dashboard tile needs the UI + recorder.** The tile on
@@ -199,7 +199,7 @@ in your handler (rule 8).
 - Cache not syncing? → check `store_config` (rule 7), the shared
   directory (rule 6), and that both workers are in the same cluster for
   `cluster`-scoped keys.
-- Webapp 500s at the first request? → it can't: both backends now
+- Webapp 500s at the first request? → it can't: the worker now
   reject a hook-less handler at startup (rule 8).
 - Air-gapped? → stage the bundle once with
   `drakkar-ui fetch --version=vX.Y.Z` into a cache the workers share, or

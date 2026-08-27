@@ -1,10 +1,9 @@
 """Serve the drakkar web UI as static files, decoupled from the backend.
 
 The UI ships as its own versioned bundle (the separate drakkar-ui repo,
-published to GitHub Releases) so every backend on a host serves the same UI
-and looks identical. This package is the Python port of the Go backend's
-``internal/uihost`` — both resolve bundles into the same per-user cache
-directory so a host running mixed backends downloads each release once.
+published to GitHub Releases), on its own release cadence. Bundles resolve
+into a per-user cache directory, so several workers on one host download
+each release once rather than each keeping a private copy.
 
 Resolution order (graceful degradation, never fatal):
 
@@ -21,8 +20,7 @@ Resolution order (graceful degradation, never fatal):
 A fetch failure is never fatal — the worker still starts, and serves
 whatever the cache holds. There is deliberately no bundle baked into the
 package: one download, at any point in the worker's life, fills a cache
-that every later start (and every co-located worker of either backend)
-reads. When nothing can be resolved the worker runs API-only and the UI
+that every later start — and every co-located worker — reads. When nothing can be resolved the worker runs API-only and the UI
 server explains how to supply a bundle — see
 :mod:`drakkar.uiserver.routes_spa`.
 """
@@ -73,15 +71,10 @@ logger = structlog.get_logger()
 # Identifies which bundle ``resolve`` selected — surfaced in logs.
 Source = Literal['cache', 'fetched']
 
-# Bounds the whole startup-time resolution (update check + fetch), matching
-# the Go backend's uiResolveTimeout. Resolution failures degrade to a cached
-# a cached bundle; they never delay worker startup past this budget.
+# Bounds the whole startup-time resolution (update check + fetch).
+# Resolution failures degrade to a cached bundle; they never delay worker
+# startup past this budget.
 UI_RESOLVE_TIMEOUT_SECONDS = 30.0
-
-# The drakkar-ui release baked into the package (``just embed-ui vX.Y.Z``
-# refreshes it) so SPA mode works fully offline out of the box — mirrors
-# Go's go:embed fallback bundle. The bundled release tag lives in the
-# VERSION file the embed recipe writes alongside index.html.
 
 
 # Cached bundle directories are named after release tags (``v1.2.0``).
@@ -105,8 +98,8 @@ class ResolvedBundle:
 def default_cache_root() -> Path:
     """Per-user bundle cache root: ``$XDG_CACHE_HOME/drakkar/ui`` or ``~/.cache/drakkar/ui``.
 
-    This is exactly the directory Go's ``os.UserCacheDir()/drakkar/ui``
-    produces on Linux, so the Python and Go backends share one cache.
+    The conventional per-user cache location, so co-located workers
+    converge on one cache without any of them configuring it.
     """
     xdg = os.environ.get('XDG_CACHE_HOME', '')
     base = Path(xdg) if xdg else Path.home() / '.cache'
@@ -169,8 +162,8 @@ def resolve(
 
     ``api_base`` overrides the GitHub API base (GitHub Enterprise, or a stub
     server in tests); when it is overridden and ``download_base`` is not,
-    the same server handles the plain-web routes too, mirroring the Go
-    backend's single BaseURL override. ``timeout`` bounds the whole
+    the same server handles the plain-web routes too, so one override
+    covers both. ``timeout`` bounds the whole
     resolution — update check plus download — as an absolute wall-clock
     budget.
     """
@@ -248,7 +241,7 @@ def resolve(
 
 # ---------------------------------------------------------------------------
 # Introspection + fetch API the drakkar-ui CLI is a thin projection of (the
-# headless-first command surface, mirroring the Go backend's uihost helpers).
+# headless-first command surface).
 # ``resolve`` stays the single function the UI server calls at startup; these
 # expose the individual steps — inspect the cache, fetch a pinned version,
 # fetch the latest — so the CLI's where / fetch / update subcommands never
@@ -260,8 +253,7 @@ def resolve(
 class Status:
     """What bundle would be served for a config, from cache state only (no network).
 
-    Backs the ``drakkar-ui where`` output; field-for-field identical to the
-    Go backend's ``uihost.Status``.
+    Backs the ``drakkar-ui where`` output.
     """
 
     cache_root: Path
@@ -324,8 +316,6 @@ def fetch_version(
 
     An already-cached valid copy is left in place (release tags are
     immutable, so re-downloading the same tag can never change content).
-    Error copy matches the Go CLI so the two backends' commands report
-    interchangeably.
     """
     if not config.repo:
         raise FetchError('no release repo configured (set --repo)')

@@ -409,14 +409,13 @@ charset=utf-8`; the `charset` parameter can no longer be expressed at
 all. Per RFC 8259, UTF-8 is JSON's default charset, so receivers should
 be unaffected. Remove the header, or change the encoding.
 
-**Cross-backend byte parity.** Both backends are pinned against the same
-golden vectors and guarantee byte-identical bodies for strings, booleans,
-null, integers, objects, arrays, and field ordering. Byte parity is
-**not** guaranteed for float formatting (`42.0` in Python vs `42` in Go)
-or for U+2028/U+2029 inside a `json`-encoded string (escaped by Go's JSON
-encoder, emitted literally by Python's). Both are numerically and
-semantically equivalent — see the Go repository's divergence list
-(`docs/migration.md`, entries #25 and #26) for the full detail.
+**Byte stability.** The encoder is pinned against golden vectors, so the
+body is byte-stable across releases for strings, booleans, null, integers,
+objects, arrays, and field ordering. Two things are deliberately left
+unpinned because JSON encoders legitimately differ on them: float
+formatting (`42.0` versus `42`) and whether U+2028/U+2029 inside an
+encoded string is escaped or emitted literally. Both forms are numerically
+and semantically equivalent, so a consumer must not depend on either.
 
 ### Redis Sink (`sinks.redis.<name>`)
 
@@ -843,7 +842,7 @@ Decoupled drakkar-ui bundle fetching. The UI ships as its own versioned bundle (
 | `enabled` | `bool` | `true` | Resolve and serve the drakkar-ui bundle. Off means no UI at all (no fetch, no cache read): the JSON API, the health probes and the event WebSocket keep working, and page requests answer 503. |
 | `repo` | `str` | `'wlame/drakkar-ui'` | The `owner/name` GitHub repo that publishes UI bundles. Empty disables fetching — only an already-cached bundle is served, which is how an air-gapped deployment pins itself to a bundle staged with the `drakkar-ui` CLI. |
 | `pinned_version` | `str` | `''` | Known-good UI release tag this backend is built against (e.g. `v1.2.0`); the contract is API-major compatible. Empty means "no pinned version". |
-| `cache_dir` | `str` | `''` | Bundle cache root override. Empty uses the per-user cache dir (`$XDG_CACHE_HOME/drakkar/ui`, falling back to `~/.cache/drakkar/ui` — the same directory the Go backend uses on Linux, so both backends share one cache). |
+| `cache_dir` | `str` | `''` | Bundle cache root override. Empty uses the per-user cache dir (`$XDG_CACHE_HOME/drakkar/ui`, falling back to `~/.cache/drakkar/ui` — so co-located workers share one cache). |
 | `check_update` | `bool` | `true` | Resolve the latest release tag on startup instead of only the pinned version. Already-cached versions are never re-downloaded — release tags are immutable. |
 
 ```yaml
@@ -958,7 +957,7 @@ See [Webapp](webapp.md) for the full feature guide (enabling, hooks, request/res
 | `sinks_enabled` | `bool` | `false` | | When `true`, calls `on_message_complete` after the executor fan-out and routes returned `CollectResult` payloads through the [SinkManager](sinks.md). When `false`, sinks are skipped and the response carries `sinks: null`. |
 | `request_timeout_seconds` | `float` | `30.0` | > 0 | Per-request budget enforced via `asyncio.wait_for` on the webapp loop. On timeout the client receives a 504 and the runner's post-execute hooks are cooperatively cancelled. |
 | `max_concurrent` | `int` | `64` | > 0 | Per-worker semaphore capacity for in-flight HTTP requests. The 65th concurrent request returns 503 `status='capacity'` immediately rather than queuing. |
-| `max_body_bytes` | `int` | `10485760` (10 MiB) | > 0 | Cap on a single POST body; oversized requests receive 413 `error='request_too_large'` before the body is buffered. Same key, default, and envelope as the Go backend. |
+| `max_body_bytes` | `int` | `10485760` (10 MiB) | > 0 | Cap on a single POST body; oversized requests receive 413 `error='request_too_large'` before the body is buffered. Enforced before the body is buffered. backend. |
 | `clients` | `list[WebClientConfig]` | one anonymous client (`name='anonymous'`, `token=''`, `rpm=4`) | length >= 1 | Configured tenants. Empty `clients: []` fails at config load. |
 
 ### Webapp Clients (`webapp.clients[]`)
@@ -1003,10 +1002,6 @@ ignored and what consumed it.
 
 The full list and the working alternative are on the
 [Handler](handler.md#on_startup) page.
-
-Both backends list the same settings and emit the same
-`on_startup_config_change_ignored` event, so a handler behaves identically
-on a Python and a Go worker.
 
 ---
 

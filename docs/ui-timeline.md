@@ -8,7 +8,7 @@ numeric highlight, a substring filter, and vertical batch markers) — all witho
 any client-side code.
 
 Every field below is validated at config load: an unknown operator, field, or color fails
-worker boot with the offending value named in the error, on both backends, rather than
+worker boot with the offending value named in the error, rather than
 silently never matching at render time.
 
 ## How much history the timeline keeps

@@ -501,8 +501,8 @@ class SinksConfig(BaseModel):
         Useful for startup logging. Only includes types with at least one
         instance. Instance names are SORTED (and custom types render after
         the built-ins, sorted by type name) so the config-summary one-liner
-        is byte-identical to the Go backend's, whose maps have no insertion
-        order to preserve.
+        is reproducible from config whose decoded form carries no
+        insertion order.
         """
         result: dict[str, list[str]] = {}
         if self.kafka:

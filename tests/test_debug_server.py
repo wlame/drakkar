@@ -2635,7 +2635,7 @@ class TestUIServerClass:
     async def test_start_with_dead_thread_raises_bind_error(self, debug_config, mock_recorder, mock_app):
         """A server thread that exits before serving (e.g. port in use) must raise.
 
-        Mirrors the Go backend, where a debug-server bind failure is fatal:
+        A debug-server bind failure is fatal:
         without the UI server the worker has no probe surface at all.
         """
         from unittest.mock import patch
@@ -5155,7 +5155,7 @@ class TestUIServerBodyLimit:
         assert resp.status_code == 200
 
     async def test_uvicorn_config_carries_the_transport_limits(self, debug_config, mock_recorder, mock_app):
-        """Mirrors the Go backend's http.Server hardening, which the Python
+        """The transport hardening uvicorn does not apply by default, which the Python
         UI server was missing entirely — on the process that also answers
         the Kubernetes probes."""
         from unittest.mock import patch

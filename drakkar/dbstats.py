@@ -45,8 +45,8 @@ The cache lives in ``<db_dir>/.dbstats.db`` — dot-prefixed, so the
 directory listing itself excludes it. It is shared by every co-located
 worker: rows are keyed by absolute path and writes are idempotent
 (re-scanning the same immutable file yields the same row), so concurrent
-writers need only WAL + a busy timeout, no election. The schema below is
-a cross-backend contract — the Go worker reads and writes the same file.
+writers need only WAL + a busy timeout, no election. The schema below is a
+contract: every worker sharing the directory reads and writes this file.
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ _CACHE_SUFFIX = '-cache.db'
 
 BUSY_TIMEOUT_MS = 5000
 
-# Cross-backend schema — the Go worker creates/reads the identical table.
+# Shared schema — every worker sharing db_dir creates/reads this table.
 # ``path`` is the absolute path of the *scanned* file (for cache DBs the
 # ``.actual`` target, not the symlink). Version suffix in the table name
 # so a future incompatible change can coexist during a mixed-version

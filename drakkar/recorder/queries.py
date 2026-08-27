@@ -3,8 +3,7 @@
 The recorder writes; this module reads. Split out of
 :mod:`drakkar.recorder.core` so the queries can be exercised against a
 plain SQLite file with no recorder, no event loop wiring and no UI server,
-and so the Go backend has one module to diff its own queries against
-instead of hunting them through a 3,000-line class.
+rather than hunting them through a 3,000-line class.
 
 Two families live here:
 
@@ -44,7 +43,7 @@ logger = structlog.get_logger()
 # and rotated files from every worker on the host. The sweep is reached from a
 # UI request but executes on the MAIN loop (UI reads of live state hop there),
 # so an unbounded scan stalls Kafka polling — and it is trivially repeatable
-# by refreshing the page. Values match the Go backend.
+# by refreshing the page.
 CROSS_TRACE_MAX_FILES = 64
 CROSS_TRACE_BUDGET_SECONDS = 5.0
 
@@ -308,8 +307,8 @@ class EventQueries:
             searched_paths.add(os.path.realpath(db_path))
 
         # 2. Fallback: other workers' live DBs. Sorted so the first-match
-        # scan visits peers in the same deterministic order as the Go
-        # backend (filepath.Glob returns sorted paths).
+        # scan visits peers in a deterministic order, whatever order the
+        # filesystem happens to list them in.
         budget = _ScanBudget()
 
         # The directory walks below are synchronous stat/readlink syscalls, and
@@ -340,8 +339,8 @@ class EventQueries:
     def _enumerate_peer_live_dbs(self) -> list[str]:
         """Resolve other workers' live-DB symlinks. Blocking; call in a thread.
 
-        Sorted so the first-match scan visits peers in the same deterministic
-        order as the Go backend (filepath.Glob returns sorted paths).
+        Sorted so the first-match scan visits peers in a deterministic
+        order, whatever order the filesystem happens to list them in.
         """
         targets: list[str] = []
         live_pattern = os.path.join(self._ctx.store.db_dir, '*-live.db')
@@ -503,9 +502,8 @@ class EventQueries:
 # Both halves live here rather than inside the route closures in
 # ``drakkar/uiserver/routes_*``. Three reasons: the aggregation can then be
 # tested against known rows without building a FastAPI app; schema
-# knowledge stops leaking into the presentation layer; and the Go backend
-# has one module to diff its own queries against instead of hunting them
-# through 900-line closures.
+# knowledge stops leaking into the presentation layer; and the queries live
+# in one module instead of scattered through 900-line closures.
 #
 # The route keeps what is genuinely its own — parsing query parameters,
 # dispatching the read to the main loop, and shaping the JSON response.

@@ -5,15 +5,14 @@ module owns the bytes: given the payload model it returns both the
 request body and the Content-Type that describes it, so the two can never
 disagree.
 
-Parity: ``drakkar-go``'s ``internal/sinks/http_encoding.go`` is the paired
-reference. Both backends must emit byte-identical bodies for the same
-model — ``tests/fixtures/http_encoding_vectors.json`` pins that.
+The emitted body is contractual: a receiver may byte-compare it, so
+``tests/fixtures/http_encoding_vectors.json`` pins it.
 
 Compact JSON is written by hand here rather than delegated to
-``json.dumps`` because the two standard libraries disagree on defaults:
-``json.dumps`` escapes non-ASCII, and Go's ``json.Marshal`` HTML-escapes
-``<``, ``>``, ``&`` and escapes U+2028/U+2029. Hand-writing one agreed
-escape set removes all three divergences.
+``json.dumps`` because JSON encoders disagree on defaults that are all
+visible in the bytes: whether non-ASCII is escaped, whether ``<``, ``>``
+and ``&`` are HTML-escaped, and whether U+2028/U+2029 are escaped.
+Writing one explicit escape set removes the question.
 """
 
 import json
@@ -48,10 +47,10 @@ class HttpEncodingError(Exception):
 class _RawNumber(str):
     """A JSON number carried as its original literal text.
 
-    ``json.loads`` would turn numbers into ``int``/``float``; re-rendering
-    those would diverge from Go, which decodes every JSON number into
-    ``float64``. Keeping the literal makes both backends emit exactly the
-    bytes that were in the marshalled JSON.
+    ``json.loads`` would turn numbers into ``int``/``float``, and
+    re-rendering them re-formats them — ``42`` can come back as ``42.0``,
+    and a high-precision decimal can lose digits. Keeping the literal emits
+    exactly the bytes that were in the marshalled JSON.
 
     Subclassing ``str`` means ``isinstance(value, str)`` is also true, so
     every check for this type must come first.
@@ -138,8 +137,8 @@ def generate_boundary() -> str:
 def _escape_field_name(name: str) -> str:
     """Escape a field name for a Content-Disposition header.
 
-    Matches Go's ``mime/multipart`` escaping, which is what the Go
-    backend emits: backslash and double quote are escaped, nothing else.
+    Backslash and double quote are escaped, nothing else — the escaping
+    RFC 7578 receivers expect.
     """
     return name.replace('\\', '\\\\').replace('"', '\\"')
 
@@ -149,17 +148,16 @@ def _encode_multipart(data: BaseModel, boundary: str) -> bytes:
 
     No filename parameter and no per-part Content-Type: this carries form
     fields, not files. The framing (CRLF everywhere, closing ``--`` on the
-    final delimiter) mirrors Go's ``mime/multipart`` writer byte for byte.
+    final delimiter) follows RFC 2046 exactly.
     """
     chunks: list[bytes] = []
     for index, (name, value) in enumerate(_extract_fields(data)):
         if '\r' in name or '\n' in name:
             raise HttpEncodingError(f'multipart field name {name!r} contains a line break, which cannot be encoded')
-        # Go's multipart.Writer prefixes every part after the first with CRLF
-        # and writes one unconditionally at Close, rather than trailing each
-        # part with it. Mirroring that shape means the zero-field body comes
-        # out as CRLF + close-delimiter with no special case, matching both
-        # Go and RFC 2046's close-delimiter grammar.
+        # Every part after the first is PREFIXED with CRLF, rather than each
+        # part being trailed by one. That shape makes the zero-field body come
+        # out as CRLF + close-delimiter with no special case, which is what
+        # RFC 2046's close-delimiter grammar asks for.
         chunks.append((f'--{boundary}\r\n' if index == 0 else f'\r\n--{boundary}\r\n').encode())
         chunks.append(f'Content-Disposition: form-data; name="{_escape_field_name(name)}"\r\n\r\n'.encode())
         chunks.append(value.encode())

@@ -412,7 +412,6 @@ worker runs. Two consequences worth knowing:
 - Variables exported by startup hooks *are* picked up, because the snapshot is
   taken lazily on first use rather than at pool construction.
 
-The Go backend caches identically.
 
 ### Config-level env
 

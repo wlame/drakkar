@@ -2,16 +2,15 @@
 
 This page is the **specification** of every SQLite file a Drakkar worker
 creates, how it is written, and how workers find each other through a
-shared directory. Both backends — Python (`py-drakkar`) and Go — implement
-this spec **identically, byte-for-byte where it matters**: a file written
-by one backend is read correctly by the other, and a mixed fleet sharing
-one `db_dir` is a **supported deployment mode** (see
-[Mixed fleets](#mixed-python-go-fleets-are-supported)).
+shared directory. It is written as a specification, byte-for-byte where it
+matters, because these files outlive the process that wrote them: several
+workers share one `db_dir` and read each other's files, and an archive is
+opened months later by tooling that was not running when it was created.
 
 Any change to schemas, encodings, pragmas, naming, or discovery rules is a
-cross-backend contract change: land it on **both** backends, update this
-page in **both** repos, and regenerate the cross-backend fixtures
-(`just gen-db-fixtures` in each repo).
+breaking change to that spec, not a refactor: existing files on a shared
+volume were written by the old rules, and this page has to move with the
+code.
 
 ## The files
 
@@ -36,7 +35,7 @@ Rules:
   files strictly read-only (`file:...?mode=ro`).
 - Timestamp format in recorder filenames is exactly
   `%Y-%m-%d__%H_%M_%S` (UTC).
-- DB files are created with `0600` permissions; both backends log a
+- DB files are created with `0600` permissions, and the worker logs a
   warning when `db_dir` is world-writable.
 - `db_dir` is **disposable**: deleting it loses history/cache contents but
   never breaks a worker — fresh files are created on next start. This is
@@ -50,8 +49,7 @@ Rules:
 ## Modes: which files exist when
 
 The recorder and the cache are switched independently, and every
-persistence flag needs a directory to write into. Identical behavior on
-both backends:
+persistence flag needs a directory to write into:
 
 | Config | Effect |
 |---|---|
@@ -88,8 +86,7 @@ The rows that matter most for after-the-fact investigations:
 - **`runtime_stall`** persists the event-loop stall duration **with the
   captured stack traces** ([Runtime Health](runtime-health.md)), so "the
   whole worker froze for 3 seconds at 04:12" stays answerable from the
-  archive. Both backends emit it; on Go the stacks are goroutine-dump
-  groups.
+  archive.
 - **`resource_sample`** is a periodic snapshot (every
   `state_sync_interval_seconds`) of what the worker consumed: RSS, thread
   count, open file descriptors, CPU percent for the process and its
@@ -118,10 +115,9 @@ list, with env-var overrides, is in the
 
 ## Schemas
 
-The DDL below is normative and **byte-identical in both backends**
-(Python `drakkar/recorder/schema.py` + `drakkar/cache/sql.py`; Go
-`internal/recorder/schema.go` + `internal/cache/sql.go`). The Go repo pins
-its constants against these with unit tests.
+The DDL below is normative: it is what `drakkar/recorder/schema.py` and
+`drakkar/cache/sql.py` create, and what anything reading these files on a
+shared volume may rely on.
 
 ### `events` (recorder)
 
@@ -245,20 +241,15 @@ CREATE INDEX IF NOT EXISTS idx_cache_scope_updated
 
 ## Connections & pragmas
 
-Both backends follow the same connection discipline:
+The connection discipline is:
 
-- **One writer connection per DB** (SQLite allows a single writer anyway;
-  the Go side caps its `database/sql` pool at one connection to match the
-  Python single-connection model).
+- **One writer connection per DB** (SQLite allows a single writer anyway).
 - **A dedicated read-only reader connection** per DB for UI queries and
   cache `get()` fallback, so reads never queue behind flush commits.
 - **`journal_mode=WAL`**, set on the writer at open (persisted in the DB
   header; readers inherit it). WAL is what lets peers read consistent
-  snapshots while the owner commits, across processes and across
-  backends — the WAL/SHM on-disk format is identical (the Go backend's
-  pure-Go driver is transpiled from the same SQLite sources).
-- **Explicit `busy_timeout` on every connection**, identical values in
-  both backends:
+  snapshots while the owner commits, across processes.
+- **Explicit `busy_timeout` on every connection**:
 
 | Connection | busy_timeout |
 |---|---|
@@ -269,7 +260,7 @@ Both backends follow the same connection discipline:
   The cache's own connections wait longer so a checkpoint can't fail a
   local flush; **peer** reads time out fast so a lock-wedged peer stays
   inside the per-peer failure isolation.
-- **`synchronous=NORMAL` on every WAL writer**, in both backends — the
+- **`synchronous=NORMAL` on every WAL writer** — the
   recorder (including the connection rotation opens), the handler cache and
   the `.dbstats` cache.
 
@@ -294,32 +285,29 @@ Both backends follow the same connection discipline:
   is not stored in the database header. Python sets it on each writer
   connection; Go sets it as a DSN pragma, because `database/sql` may reopen
   a pooled connection and it would otherwise revert to the default.
-- No explicit WAL checkpoints, no `VACUUM`, driver-default `foreign_keys` —
-  on both backends.
+- No explicit WAL checkpoints, no `VACUUM`, driver-default `foreign_keys`.
 
 ## Encodings
 
 - **JSON columns** (`args`, `metadata`, `labels`, `sinks_json`,
   `env_vars_json`, `assigned_partitions`): compact separators, **sorted
-  keys**, raw UTF-8 (no `\uXXXX` escapes). Byte-identical across backends
-  and across Python's orjson/stdlib encoder paths.
-- **Datetimes embedded in JSON** use the canonical cross-backend format —
-  UTC, RFC 3339, **fixed six-digit microseconds**, `Z` suffix:
-  `2026-07-05T12:34:56.123456Z` (Python
-  `drakkar.timefmt.format_rfc3339_micro`, Go
-  `drakkar.FormatRFC3339Micro`). Fixed width is deliberate: no
-  trailing-zero trimming, no `+00:00`/`Z` ambiguity, identical bytes from
-  either backend.
+  keys**, raw UTF-8 (no `\uXXXX` escapes). Byte-identical across the
+  orjson and stdlib encoder paths.
+- **Datetimes embedded in JSON** use one canonical format — UTC,
+  RFC 3339, **fixed six-digit microseconds**, `Z` suffix:
+  `2026-07-05T12:34:56.123456Z` (`drakkar.timefmt.format_rfc3339_micro`).
+  Fixed width is deliberate: no trailing-zero trimming and no
+  `+00:00`/`Z` ambiguity, so the bytes are always the same shape.
 - **`dt` / `created_at_dt` / `updated_at_dt` columns** keep their own
   display format `YYYY-MM-DD HH:MM:SS.mmm` (space separator,
-  milliseconds) — also identical across backends.
+  milliseconds).
 - **`ts` columns** are `REAL` Unix seconds.
-- **Cache `value` column**: JSON, but the exact bytes are
-  **backend-specific and deliberately unspecified** — Python writes
-  `json.dumps` defaults (spaces, insertion-order keys), Go writes
-  `json.Marshal` (compact, sorted keys). Values are opaque: LWW compares
-  `updated_at_ms` + `origin_worker_id`, never bytes, and both backends
-  parse either form. `size_bytes` reflects the writer's own encoding.
+- **Cache `value` column**: JSON, but the exact bytes are **deliberately
+  unspecified** — this worker writes `json.dumps` defaults (spaces,
+  insertion-order keys), and a reader must accept compact or sorted-key
+  forms too. Values are opaque: LWW compares `updated_at_ms` +
+  `origin_worker_id`, never bytes. `size_bytes` reflects the writer's own
+  encoding.
 
 ## Write patterns & archiving
 
@@ -333,15 +321,12 @@ failures. Recording-side filters (`event_min_duration_ms`,
 they affect row presence, never layout.
 
 **Last-breath flush**: the most interesting events of a dying worker are
-the unflushed last ones, so both backends salvage the buffer on fatal
-exits that skip the clean shutdown path. The Python backend registers an
-`atexit` hook (armed at recorder start, disarmed by a clean stop) that
-writes the remaining buffer synchronously through a direct SQLite
-connection — covering startup failures after the recorder came up,
-unhandled exceptions, and stray `sys.exit` calls. The Go backend flushes
-the recorder from a panic guard on every pipeline goroutine that runs
-user hook code, then re-panics so the crash keeps its original stack.
-Both are best-effort and log `recorder_last_breath_flush` when they fire.
+the unflushed last ones, so the buffer is salvaged on fatal exits that skip
+the clean shutdown path. An `atexit` hook (armed at recorder start,
+disarmed by a clean stop) writes the remaining buffer synchronously through
+a direct SQLite connection — covering startup failures after the recorder
+came up, unhandled exceptions, and stray `sys.exit` calls. It is
+best-effort and logs `recorder_last_breath_flush` when it fires.
 Neither can help against SIGKILL / the OOM killer — the watchdog file
 covers *detecting* those, and the last periodic flush is what remains.
 
@@ -363,10 +348,9 @@ Age-based and count-based retention (the old `retention_hours` /
 `retention_max_events` keys) are gone. In their place, a periodic
 **archive pass** folds each finished UTC time window's rotated-out raw
 files into one compressed, merged database per cluster, and deletes only
-the raw files it successfully merged. Both backends run this pass with
-identical window math, file names, and lock protocol — Python
-`drakkar/recorder/archive.py`, Go `internal/recorder/archive.go` — so a
-mixed fleet sharing one `db_dir` archives correctly no matter which
+the raw files it successfully merged. The window math, file names and lock
+protocol (`drakkar/recorder/archive.py`) are part of the on-disk spec, so a
+fleet sharing one `db_dir` archives correctly no matter which
 backend does the work for a given cluster.
 
 ### Defaults walkthrough
@@ -478,9 +462,9 @@ job against them).
 | `retention_hours` | `archive_enabled`, `archive_window_hours`, `archive_retention_days` | Age-based deletion is gone; archiving replaces it. |
 | `retention_max_events` | *(no replacement)* | Count-based deletion is gone entirely. |
 
-These keys no longer exist in either backend, and neither backend carries
-a migration guard for them any more: a config that still sets one is an
-unknown key inside `ui.recorder` and is ignored. Delete them.
+These keys no longer exist, and no migration guard remains for them: a
+config that still sets one is an unknown key inside `ui.recorder` and is
+ignored. Delete them.
 
 ### Copy-pasteable config
 
@@ -575,13 +559,12 @@ under the stable symlink name).
 
 ## Schema evolution
 
-There are **no migrations**. Both backends create tables with
+There are **no migrations**. Tables are created with
 `CREATE TABLE IF NOT EXISTS` only, and `db_dir` is documented as
 disposable. One forward-compatibility guard exists: at open, the recorder
 verifies a pre-existing `events` table carries the webapp-release columns
 (`origin`, `client_name`, `request_id`) and aborts startup with an
-identical actionable message on both backends when they are missing
-(delete the DB, restart). The cache has no version check; its schema is
+actionable message when they are missing (delete the DB, restart). The cache has no version check; its schema is
 additive-only by contract.
 
 ## Worker autodiscovery
@@ -590,8 +573,7 @@ A worker **advertises** itself by writing its single `worker_config` row
 (requires `ui.recorder.store_config: true`, the default) and maintaining
 the `<worker>-live.db` symlink. There is no separate registry.
 
-The UI's workers list **discovers** siblings with this exact algorithm on
-both backends:
+The UI's workers list **discovers** siblings with this exact algorithm:
 
 1. Scan `db_dir/*-live.db`, **sorted** by path.
 2. Keep only true symlinks (plain files are ignored).
@@ -635,47 +617,39 @@ exists). For each peer, every `cache.peer_sync.interval_seconds`:
 2. **Cursor pull**: `WHERE <scope> AND (expires_at_ms IS NULL OR
    expires_at_ms > now) AND updated_at_ms > cursor ORDER BY
    updated_at_ms ASC, key ASC LIMIT batch_size`, then drain same-
-   millisecond ties keyed on `key >` continuation. Cursors advance
-   identically on both backends.
+   millisecond ties keyed on `key >` continuation.
 3. **Apply through the LWW UPSERT** (below) and invalidate touched
    in-memory keys. The commit + metrics + invalidation trio is
-   cancellation-atomic on both backends.
+   cancellation-atomic.
 4. Per-peer failures are isolated; each cycle is bounded by
    `cycle_deadline_seconds` (default `interval × 0.9`).
 
 The **LWW conflict rule** is one shared SQL statement used by both the
-local flush path and the peer-apply path, byte-identical across backends:
-incoming `updated_at_ms` strictly greater wins; on a tie the
-lexicographically **smaller** `origin_worker_id` wins; otherwise the
-stored row is kept. Two workers observing the same conflict — regardless
-of backend — converge on the same survivor.
+local flush path and the peer-apply path: incoming `updated_at_ms`
+strictly greater wins; on a tie the lexicographically **smaller**
+`origin_worker_id` wins; otherwise the stored row is kept. Two workers
+observing the same conflict converge on the same survivor.
 
-## Mixed Python + Go fleets are supported
+## Sharing one `db_dir` across workers
 
-Running Python and Go workers against one shared `db_dir` — recorder
-discovery, cross-tracing, and cache peer sync included — is a
-**supported deployment mode**. This is guaranteed by:
+Running several workers against one shared `db_dir` — recorder discovery,
+cross-tracing, and cache peer sync included — is a **supported deployment
+mode**, and the reason this page is written as a specification rather than
+as a description. What makes it safe:
 
-- byte-identical DDL, filenames, symlink protocols, JSON encodings, and
-  the canonical datetime format (this page);
-- identical busy-timeout behavior under cross-process WAL contention;
-- **cross-backend round-trip tests in both repos**: each repo commits
-  fixture DBs generated by the *other* backend's real engines and
-  verifies discovery, tracing, the pinned event-row shape, and cache
-  peer sync against them (Python `tests/test_cross_backend_db.py` +
-  `tests/fixtures/go-db/`; Go `internal/crossbackend/` +
-  `internal/cache/crossbackend_roundtrip_test.go`). Regenerate with
-  `just gen-db-fixtures` in either repo after any spec change.
+- fixed DDL, filenames, symlink protocols, JSON encodings, and the
+  canonical datetime format (this page);
+- defined busy-timeout behaviour under cross-process WAL contention;
+- per-peer failure isolation, so one lock-wedged worker cannot stall the
+  others.
 
 Requirements: mount the shared directory at the **same path** in every
-worker, keep `ui.recorder.store_config: true` (discovery and
-cluster-scoped cache sync depend on the `worker_config` row), and keep
-both backends on the same contract version during the overlap.
+worker, and keep `ui.recorder.store_config: true` (discovery and
+cluster-scoped cache sync depend on the `worker_config` row).
 
 ## Watchdog file
 
 `{db_dir}/{worker_id}.watchdog` is written at startup and marked
 `CLEAN_EXIT` on graceful shutdown; a worker that finds its own stale
 watchdog without the marker reports the previous run as killed
-(OOM/SIGKILL detection). Same path and marker semantics on both backends;
-disabled (with a log line) when `db_dir` is empty.
+(OOM/SIGKILL detection). Disabled (with a log line) when `db_dir` is empty.

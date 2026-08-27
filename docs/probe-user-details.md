@@ -179,7 +179,7 @@ The grouping keys travel inside each row, so filling a tree is a plain
 `probe.append` — no group argument. The UI groups client-side in append
 order and renders one collapsible level per key; each leaf shows a sortable
 table of the columns that are **not** grouping keys. Because the tree is a
-projection of a flat list, group order is append order on both backends,
+projection of a flat list, group order is append order,
 same as `tables`.
 
 `group_by` must name existing row-model fields, without duplicates — both

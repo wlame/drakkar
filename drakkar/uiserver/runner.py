@@ -529,7 +529,7 @@ class DebugSinkCollector:
                 )
             # Plugin-registered sinks: the payload is opaque to the
             # framework, so the sink instance name doubles as the
-            # destination (matching the Go collector).
+            # destination.
             for cp in cr.custom:
                 records.append(
                     PlannedSinkRecord(

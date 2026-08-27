@@ -168,7 +168,7 @@ def test_make_stable_task_id_requires_parts():
 
 
 def test_make_stable_task_id_cross_backend_golden():
-    """Byte-parity pin — the Go suite pins this SAME literal (mixed fleets
+    """Byte-stability pin — this exact literal is the contract (readers
     must see one convention)."""
     assert make_stable_task_id('t', 'alpha', 'beta') == 't-5d11bfa62398519b'
 
@@ -472,7 +472,7 @@ def test_redis_payload_op_serializes_as_a_plain_string():
 
 
 def test_redis_payload_field_order_is_the_dlq_contract():
-    """The Go backend must emit these fields in this order — byte-stability."""
+    """These fields must be emitted in this order — byte-stability."""
     assert list(RedisPayload.model_fields) == [
         'sink',
         'op',
@@ -722,7 +722,7 @@ def test_mongo_payload_op_serializes_as_a_plain_string():
 
 
 def test_mongo_payload_field_order_is_the_dlq_contract():
-    """The Go backend must emit these fields in this order — byte-stability."""
+    """These fields must be emitted in this order — byte-stability."""
     assert list(MongoPayload.model_fields) == [
         'sink',
         'op',

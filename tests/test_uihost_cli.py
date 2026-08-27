@@ -1,10 +1,9 @@
 """Tests for the ``drakkar-ui`` cache-management CLI.
 
-The CLI mirrors the Go backend's ``cmd/drakkar-ui`` byte-for-byte — same
-subcommands (``where`` / ``fetch`` / ``update``), flags, output shapes, and
-exit codes (0 ok, 1 runtime error, 2 usage error) — so cache-management
-commands are interchangeable between the two backends. Network tests run
-against the same ``StubGitHub`` the resolver tests use.
+It exposes ``where`` / ``fetch`` / ``update`` over the same cache the
+worker uses at startup, with exit codes 0 ok, 1 runtime error, 2 usage
+error. Network tests run against the same ``StubGitHub`` the resolver
+tests use.
 """
 
 import io
@@ -75,7 +74,7 @@ def test_where_pinned_and_cached(tmp_path):
     code, out, _ = invoke('where', f'--cache-dir={tmp_path / "cache"}', '--version=v1.0.0')
     assert code == 0
     assert 'pinned version: v1.0.0' in out
-    assert 'cached:         true' in out  # lowercase — matches the Go CLI
+    assert 'cached:         true' in out  # lowercase keeps it scriptable
     assert 'would serve:    cache' in out
 
 

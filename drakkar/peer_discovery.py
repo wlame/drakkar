@@ -41,9 +41,9 @@ def _scan_peer_dbs(db_dir: str, suffix: str, self_worker_name: str) -> list[tupl
 
     results: list[tuple[str, str]] = []
     # glob returns symlinks themselves, not their targets, which is what we
-    # want. Sorted so peers are visited in a deterministic order — the Go
-    # backend's filepath.Glob returns sorted paths, and an identical visit
-    # order keeps log order and first-match scans comparable across backends.
+    # want. Sorted so peers are visited in a deterministic order, which
+    # keeps log order and first-match scans reproducible rather than
+    # depending on how the filesystem happens to list the directory.
     pattern = os.path.join(db_dir, f'*{suffix}')
     for link_path in sorted(glob.glob(pattern)):
         # skip plain files — only true symlinks are peer live-links

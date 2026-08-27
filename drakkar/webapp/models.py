@@ -23,10 +23,10 @@ from pydantic import BaseModel, Field, PlainSerializer
 
 from drakkar.timefmt import format_rfc3339_micro
 
-# JSON dumps of report timestamps use the canonical cross-backend format
-# (fixed six-digit microseconds, ``Z`` suffix) so a Python worker's
-# response body is byte-identical to the Go backend's for the same
-# instant. ``when_used='json'`` keeps plain ``model_dump()`` returning
+# JSON dumps of report timestamps use the canonical format (fixed
+# six-digit microseconds, ``Z`` suffix) so the response body for a given
+# instant is always the same bytes.
+# ``when_used='json'`` keeps plain ``model_dump()`` returning
 # real datetimes for in-process consumers.
 UTCMicroDatetime = Annotated[
     datetime,

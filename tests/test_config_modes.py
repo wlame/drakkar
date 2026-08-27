@@ -921,7 +921,7 @@ class TestConfigSummary:
     def test_summary_with_app_section_is_byte_identical_to_baseline(self):
         """The user-owned app: section must never surface in the one-liner.
 
-        The summary is byte-compared with the Go backend, so introducing
+        The summary's exact bytes are contractual, so introducing
         the pass-through section must not change a single character —
         with or without content in it.
         """
@@ -942,7 +942,7 @@ class TestConfigSummary:
             ),
         )
         summary = cfg.config_summary(worker_id='w')
-        # Sorted instance names — byte-parity with the Go backend's
+        # Sorted instance names — reproducible from config whose
         # summary, which cannot preserve YAML insertion order.
         assert 'kf:alerts,events' in summary
         assert 'pg:main' in summary

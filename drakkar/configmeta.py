@@ -5,9 +5,8 @@ tree (never hand-maintained), so it can never drift from the fields the
 config loader actually accepts. The output is committed as
 ``drakkar/uiserver/config-metadata.json`` — the same "generate once, vendor
 the artifact" pattern already used for the OpenAPI spec
-(``drakkar/uiserver/openapi.yaml``) — so the Go backend and the debug-UI
-frontend can consume one canonical source instead of each re-deriving field
-lists from source.
+(``drakkar/uiserver/openapi.yaml``) — so the UI can consume one canonical
+source instead of re-deriving field lists from source.
 
 Run ``python -m drakkar.configmeta`` to regenerate the artifact after a
 config model change; ``tests/test_configmeta.py`` fails loudly (with that

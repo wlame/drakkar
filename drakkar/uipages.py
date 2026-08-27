@@ -4,8 +4,7 @@ A deployment may declare a handful of custom dashboard pages in config —
 each a list of widgets reading from one of a fixed set of built-in sources
 (events, annotations, tasks, metrics). ``build_pages`` validates the
 declarations at startup (fail-fast, mirroring ``drakkar.probe``'s
-probe-details validation) and produces the wire list the UI renders and
-``drakkar-go`` mirrors.
+probe-details validation) and produces the wire list the UI renders.
 """
 
 from __future__ import annotations
@@ -109,7 +108,7 @@ class Page(BaseModel):
 
 
 class UIPageWidget(BaseModel):
-    """The wire form of a widget, mirrored by the UI and by drakkar-go."""
+    """The wire form of a widget, as the UI receives it."""
 
     title: str
     view: str

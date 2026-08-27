@@ -44,8 +44,7 @@ def make_stable_task_id(prefix: str, *parts: str) -> str:
     Example: make_stable_task_id('t', 'alpha', 'beta') -> 't-5d11bfa62398519b'
 
     Same prefix+parts always produce the same ID — across retries,
-    restarts, workers, and backends (the Go MakeStableTaskID emits
-    byte-identical output). That determinism is what makes
+    restarts and workers. That determinism is what makes
     ``PendingContext`` deduplication work: a redelivered message
     arranges to the same ID, which IS in ``pending_task_ids``.
     ``make_task_id`` is random and can never match — do not use it
@@ -789,8 +788,8 @@ class MongoPayload(BaseModel):
     declarative tier to equality-only predicates by construction. A
     dynamic-key filter is a named statement.
 
-    Field order is a contract: it fixes the DLQ JSON byte order the Go
-    backend must reproduce.
+    Field order is a contract: it fixes the DLQ JSON byte order that
+    downstream tooling byte-compares.
     """
 
     sink: str = _SINK_FIELD
@@ -1008,8 +1007,8 @@ class RedisPayload(BaseModel):
         RedisPayload(op=RedisOp.SCRIPT, script='push_and_cap',
                      keys=['recent'], args=[body, 100])
 
-    Field order is a contract: it fixes the DLQ JSON byte order the Go
-    backend must reproduce.
+    Field order is a contract: it fixes the DLQ JSON byte order that
+    downstream tooling byte-compares.
     """
 
     sink: str = _SINK_FIELD

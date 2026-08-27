@@ -251,9 +251,10 @@ survives a briefly unavailable Redis.
 Mapping arguments (`hset` fields, `zadd` members) are emitted in **sorted key
 order**; lists (`hdel` fields, `sadd`/`srem` members) keep the order you supply.
 Order changes neither command's end state, but it does change the emitted
-command, and the Go backend decodes a mapping into a map with no order to
-preserve — so sorting is the only rule both backends can honour. This is the
-same reasoning as [Postgres column order](#postgres-column-order) below.
+command — and a mapping decoded from a payload carries no key order to
+preserve, so sorting is the only rule that can be honoured unconditionally.
+This is the same reasoning as
+[Postgres column order](#postgres-column-order) below.
 
 `zadd` takes `members` as member→score, which is the natural shape and matches
 the client's own signature; Redis receives `score member`, flipped during
@@ -427,10 +428,10 @@ PostgresPayload(table='results', data=Row(...))
 ```
 
 Bound values follow the same sort, so columns and values always stay aligned.
-The rule exists for cross-backend identity: the Go backend decodes payload data
-into a map, which has no field order to preserve, so sorting is the only rule
-both backends can honour unconditionally. It also makes the emitted SQL
-independent of how a model happens to be written.
+The rule exists so the emitted SQL is reproducible: payload data decoded into
+a mapping has no field order to preserve, so sorting is the only rule that can
+be honoured unconditionally. It also makes the statement independent of how a
+model happens to be written.
 
 Two lists are *not* sorted, because they are the operator's own: `conflict`, and
 an explicit `update_columns`. An `update_columns` left to default is derived from

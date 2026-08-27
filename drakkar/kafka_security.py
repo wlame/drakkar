@@ -2,7 +2,7 @@
 
 A leaf module (no Drakkar imports) so the mapping table, the validation
 rules, and the merge order can be exercised without pulling in the config
-package — and so the Go backend has a single behaviour to mirror.
+package.
 
 Three clients speak to Kafka: the consumer (``drakkar/consumer.py``), the
 Kafka sink (``drakkar/sinks/kafka.py``), and the DLQ producer
@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field, SecretStr, model_validator
 
 # Field name -> librdkafka property. Kept as data rather than a chain of
 # ``if`` statements so adding a property is a row here, not a new branch in
-# a builder — and so the Go backend can diff one table against one table.
+# a builder.
 # Order is the order keys appear in the built config (stable for tests and
 # for eyeballing a logged dict).
 SECURITY_FIELD_KEYS: tuple[tuple[str, str], ...] = (

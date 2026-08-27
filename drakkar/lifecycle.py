@@ -265,9 +265,8 @@ class AppLifecycle:
         """Log how the worker will authenticate to Kafka, and flag mismatches.
 
         The one-line ``config_summary`` deliberately does not carry security
-        (adding a token would break byte-parity with the Go backend until it
-        ships the same change), so this is where an operator confirms the
-        worker negotiated what they configured. Protocol and mechanism only —
+        (its exact bytes are contractual), so this is where an operator
+        confirms the worker negotiated what they configured. Protocol and mechanism only —
         never a username, password, or key path.
 
         The warning covers the one combination that is almost always a
@@ -470,8 +469,8 @@ class AppLifecycle:
         else:
             # The UI server is this worker's ONLY probe surface — without
             # it nothing serves /healthz or /readyz and Kubernetes probes
-            # simply fail. Warn loudly (same event name on both backends)
-            # because that consequence is easy to miss.
+            # simply fail. Warn loudly, because that consequence is easy
+            # to miss.
             await log.awarning(
                 'ui_disabled_no_probes',
                 category='lifecycle',

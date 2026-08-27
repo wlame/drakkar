@@ -10,8 +10,8 @@ registration order).
 When no bundle resolved — offline first start, ``ui.release.enabled: false``,
 or a repo that cannot be reached — the same catch-all answers **503** with
 what to do about it. There is deliberately no built-in HTML fallback: the
-UI is one versioned artifact shared by both backends, and a second
-server-rendered copy meant every feature had to be built twice. Losing the
+UI is one versioned artifact, and a second server-rendered copy meant every
+feature had to be built twice. Losing the
 pages costs nothing operationally — the JSON API under ``/api/v1``, the
 Kubernetes probes and the Prometheus exporter are all unaffected.
 

@@ -1741,7 +1741,7 @@
           "path": "ui.release.cache_dir",
           "env": "DK_UI__RELEASE__CACHE_DIR",
           "description": "Bundle cache root override.",
-          "full_description": "Bundle cache root override. Empty uses the per-user cache dir ($XDG_CACHE_HOME/drakkar/ui, falling back to ~/.cache/drakkar/ui — the same directory the Go backend's os.UserCacheDir produces on Linux, so both backends share one cache).",
+          "full_description": "Bundle cache root override. Empty uses the per-user cache dir ($XDG_CACHE_HOME/drakkar/ui, falling back to ~/.cache/drakkar/ui — the conventional per-user cache location, so co-located workers share one cache).",
           "type": "string",
           "default": "",
           "secret": false,

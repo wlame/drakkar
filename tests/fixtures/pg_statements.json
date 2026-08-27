@@ -1,5 +1,5 @@
 {
-  "_comment": "Shared corpus for the :name -> $n statement compiler used by the Postgres sink. Mirrored verbatim into drakkar-go, so both backends compile operator-authored SQL to the same text with the same parameter order.",
+  "_comment": "Shared corpus for the :name -> $n statement compiler used by the Postgres sink. Pinned so operator-authored SQL always compiles to the same text with the same parameter order.",
   "ok": [
     {
       "case": "two distinct params",

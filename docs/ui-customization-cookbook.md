@@ -265,13 +265,12 @@ probe-details columns do, and this widget set doesn't happen to need a link.
 `/p/scan-pipeline` now shows a live table of recent tasks next to a running
 total of the `scan_pipeline_files_total` metric.
 
-!!! note "Go workers: pages are Python-only today"
-    `drakkar-go` has no equivalent of `ui_pages` yet — it answers
-    `GET /api/v1/pages` with an empty list unconditionally, the same shape a
-    Python worker returns when its handler declares no `ui_pages`. A fleet
-    mixing this Python worker with Go workers simply shows no extra nav
-    entry for the Go ones — never an error, never a broken page. See
-    [Mixed fleets](ui-pages.md#mixed-fleets) for the full contract.
+!!! note "Workers that declare no pages"
+    A worker whose handler sets no `ui_pages` answers `GET /api/v1/pages`
+    with an empty list, and the UI shows no extra nav entry for it — never
+    an error, never a broken page. See
+    [Workers that declare no pages](ui-pages.md#workers-that-declare-no-pages)
+    for the full contract.
 
 ---
 

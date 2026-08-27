@@ -13,7 +13,7 @@ opens it. Chmod-ing afterwards — which is what the code used to do —
 leaves both sidecars at 0644 while the main file reads 0600, so an
 assertion on the main file alone would pass against the bug.
 
-The Go backend mirrors this in internal/dbfile; both fleets share a
+Every worker sharing a db_dir depends on it, so they share a
 ``db_dir``, so the two must agree.
 """
 

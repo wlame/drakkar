@@ -61,12 +61,12 @@ class CompiledTemplate:
     """Distinct parameter names, SORTED. The caller supplies exactly one
     value per name, however often it appears.
 
-    Sorted rather than in first-appearance order because the Go backend
-    decodes a template into a map with no insertion order to recover, so
-    sorting is the only rule both backends can honour unconditionally —
-    the same reasoning that sorts Postgres columns and Redis mapping
-    arguments. The order has no effect on binding, which is keyed by name;
-    it exists so the two backends can be compared."""
+    Sorted rather than in first-appearance order because a template decoded
+    into a mapping has no insertion order to recover, so sorting is the only
+    rule that can be honoured unconditionally — the same reasoning that sorts
+    Postgres columns and Redis mapping arguments. The order has no effect on
+    binding, which is keyed by name; it exists so the result is
+    reproducible."""
     plan: tuple[tuple[_Path, str], ...]
     """(path, parameter name) for every position to fill."""
 

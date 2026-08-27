@@ -894,9 +894,8 @@ class PartitionProcessor:
                     # committed anyway, silently defeating 'stall'.
                     #
                     # Re-raised so the outer handler still synthesizes a
-                    # terminal task failure: that accounting is unchanged and
-                    # identical on the Go backend (settleSuccess →
-                    # synthesizeFailure). Only the offset decision is new.
+                    # terminal task failure: that accounting is unchanged.
+                    # Only the offset decision is new.
                     if self._on_dlq_failure == 'stall':
                         self._mark_offsets_delivery_failed(task.source_offsets)
                     await log.aerror(
@@ -962,8 +961,7 @@ class PartitionProcessor:
                 #
                 # Degrade to SKIP: the task settles as a terminal failure,
                 # the tracker completes, the watermark keeps advancing.
-                # At-least-once holds either way. Matches the Go backend,
-                # which contains the equivalent hook error the same way.
+                # At-least-once holds either way.
                 action: Any = ErrorAction.SKIP
                 handler_hook_errors.labels(hook='on_error').inc()
                 await log.aerror(

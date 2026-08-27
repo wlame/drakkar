@@ -84,7 +84,7 @@ class _WebHandler(BaseDrakkarHandler[_Input, _Output, _HttpReq, _HttpResp]):
     """Handler with all four Generic slots populated.
 
     Overrides both HTTP hooks — construction-time validation (mirroring
-    the Go backend) rejects a webapp-enabled handler that leaves them at
+    construction time) rejects a webapp-enabled handler that leaves them at
     the raising Base defaults.
     """
 
@@ -347,14 +347,14 @@ def test_request_when_ready_and_not_shutting_down_dispatches_to_runner():
 
 
 # ---------------------------------------------------------------------------
-# Body-size cap (parity with the Go backend's max_body_bytes / 413 path)
+# Body-size cap (max_body_bytes / 413 path)
 # ---------------------------------------------------------------------------
 
 
 def test_oversized_body_returns_413_with_go_parity_envelope():
     """A body beyond ``max_body_bytes`` trips 413 BEFORE parsing.
 
-    The envelope (keys and details text) matches the Go backend's
+    The envelope (keys and details text) is contractual —
     MaxBytesReader path byte-for-byte, and the cap fires ahead of the
     422 parse gate — the payload is never read, so "invalid" would
     mislead clients into retrying the same oversized body.
@@ -578,7 +578,7 @@ def test_request_id_resolution_failure_returns_flat_500():
 
 
 def test_uvicorn_config_carries_the_transport_limits():
-    """The Go backend has carried these on its http.Server since it was
+    """Uvicorn applies none of these by default, which is why they are
     hardened; Python set none of them, so a client that dribbled bytes — or
     simply opened connections and left them — could pin connections and
     memory in the process that also runs the pipeline."""
@@ -597,7 +597,7 @@ def test_uvicorn_config_carries_the_transport_limits():
 
 async def test_slow_request_body_is_answered_with_408():
     """The size cap alone is not a slow-loris defence — a client can stay
-    under it forever by sending one byte at a time. Go gets this bound from
+    under it forever by sending one byte at a time. The bound comes from
     http.Server.WriteTimeout; uvicorn has no equivalent, so the body read is
     wrapped explicitly."""
     import drakkar.webapp.server as webapp_server

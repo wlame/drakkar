@@ -89,7 +89,7 @@ ignored value — `PostgresPayload(op='insert', where=key)` raises.
 
 **Serialization:** `data.model_dump()` produces a `{column: value}` dict. Column
 and table names are validated against SQL injection. Columns are emitted in
-sorted order — not model-declaration order — so both backends render identical
+sorted order — not model-declaration order — so every write renders identical
 SQL; see [Column order](sink-write-operations.md#postgres-column-order).
 
 **Batching:** payloads batch only with *adjacent* same-shaped neighbours, so
@@ -562,20 +562,19 @@ Each DLQ message is a JSON document containing:
 | `partition` | Source Kafka partition the message came from |
 | `attempt_count` | Number of delivery attempts before writing to DLQ |
 
-**Byte format is contractual.** Both backends emit the envelope with Python's
+**Byte format is contractual.** The envelope is emitted with Python's
 `json.dumps` default separators — `", "` between members and `": "` after each
 key — in the field order listed above, with `timestamp` always carrying a
 decimal point (`1700000000.0`, never `1700000000`). Tooling may byte-compare
-entries produced by either backend; `tests/test_sinks.py` and the Go suite pin
-the identical golden literal.
+entries across releases; `tests/test_sinks.py` pins the golden literal.
 
 Two deliberate asymmetries, both easy to "tidy up" by mistake:
 
 - The **embedded** payload strings inside `original_payloads` are *compact*
-  (no spaces) — they come from `model_dump_json()` here and `json.Marshal` on
-  the Go side. Only the outer envelope is spaced.
-- The **flight recorder** encodes compact on both backends, to stay
-  byte-identical with orjson. The DLQ is a wire format read by external
+  (no spaces) — they come from `model_dump_json()`. Only the outer envelope
+  is spaced.
+- The **flight recorder** encodes compact, to stay byte-identical with
+  orjson. The DLQ is a wire format read by external
   tooling; the recorder is an internal store. Do not unify them.
 
 ### Broker inheritance
@@ -613,7 +612,7 @@ configured (or whose name is ambiguous across plugin sinks), or a
 genuinely unknown, so `stall` treats it as undelivered and leaves the offset for
 redelivery, while `drop` commits and logs. This applies uniformly at all three
 delivery points — after `on_task_complete`, after `on_message_complete`, and
-after `on_window_complete` — and identically on both backends. The task is still
+after `on_window_complete`. The task is still
 reported as a terminal failure to the handler in every case; only the offset
 decision changes.
 

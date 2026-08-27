@@ -70,8 +70,8 @@ RECENT_TASKS_MAX_MINUTES = 1440
 RECENT_TASKS_MAX_LIMIT = 100_000
 
 # Lane count (and history-factor multiplier) fallback when no executor pool
-# is attached — a contract value the SPA/Go backend also assume, not just a
-# local default.
+# is attached — a contract value the SPA assumes too, not just a local
+# default.
 DEFAULT_LANE_COUNT = 8
 
 
@@ -169,9 +169,9 @@ def create_live_router(deps: UIDeps) -> APIRouter:
             'kafka_source_topic': kafka_cfg.source_topic,
         }
         # Key-presence-as-flag (same idiom as ``webapp_tile`` on the
-        # dashboard): backends without an offload pool — the Go worker,
-        # or this worker before lifecycle wiring — omit the key entirely
-        # and the UI readout stays hidden. ``snapshot()`` is thread-safe,
+        # dashboard): a worker with no offload pool — including this one
+        # before lifecycle wiring — omits the key entirely and the UI
+        # readout stays hidden. ``snapshot()`` is thread-safe,
         # so no main-loop dispatch is needed.
         if drakkar_app._offload_pool is not None:
             overview['offload'] = drakkar_app._offload_pool.snapshot()

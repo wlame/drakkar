@@ -36,7 +36,7 @@ CENSUS_TIMEOUT_SECONDS: float = 5.0
 def create_runtime_router(deps: UIDeps) -> APIRouter:
     """Build the runtime-health router. Pure factory, no side effects."""
     # Gated behind require_auth (no-op without a token) like every other
-    # API router — the Go backend gates these routes the same way.
+    # API router.
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
 
     @router.get('/api/v1/runtime/health')

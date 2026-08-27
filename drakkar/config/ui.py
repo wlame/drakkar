@@ -221,8 +221,8 @@ class UIReleaseConfig(BaseModel):
         description=(
             'Bundle cache root override. Empty uses the per-user cache dir '
             '($XDG_CACHE_HOME/drakkar/ui, falling back to ~/.cache/drakkar/ui '
-            "— the same directory the Go backend's os.UserCacheDir produces "
-            'on Linux, so both backends share one cache).'
+            '— the conventional per-user cache location, so co-located '
+            'workers share one cache).'
         ),
     )
     check_update: bool = Field(
@@ -451,8 +451,7 @@ class UIConfig(BaseModel):
     Set ``enabled: false`` to disable the whole UI feature (server,
     recorder persistence, and bundle serving).
 
-    The YAML keys and semantics match the Go backend's ``ui`` config block,
-    so ``DK_UI__*`` env overrides behave identically on both backends.
+    Every field is overridable through ``DK_UI__*`` environment variables.
     """
 
     enabled: bool = True

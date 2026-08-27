@@ -145,5 +145,5 @@ Path resolution mirrors `load_config`: explicit argument → the
   see [Configuration Loading](configuration.md#configuration-loading).
 - The `app:` section never appears in the one-line config summary the
   worker logs at startup.
-- The Go backend supports the same reserved `app:` section with its own
+- The reserved `app:` section is part of the config contract, with its own
   model binding, so a mixed fleet shares one YAML layout.

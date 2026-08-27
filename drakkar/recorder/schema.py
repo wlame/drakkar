@@ -42,11 +42,11 @@ from enum import StrEnum
 class EventType(StrEnum):
     """Every event name the flight recorder can write to ``events.event``.
 
-    This vocabulary is a **cross-backend contract**, not an internal
-    detail: the Go backend writes the same strings into the same column,
-    the drakkar-ui SPA matches on them, and a merged database mixes rows
-    from both. ``tests/fixtures/event_vocabulary.json`` vendors the list
-    for the parity tests in both repos, and
+    This vocabulary is a **wire contract**, not an internal detail: the
+    strings land in a column that outlives the process, the drakkar-ui SPA
+    matches on them, and a merged database mixes rows from many workers.
+    ``tests/fixtures/event_vocabulary.json`` vendors the list for the
+    pinning tests, and
     ``drakkar-ui/docs/api-contract-v1.md`` documents it for UI authors.
 
     ``StrEnum`` rather than plain constants so a member is a ``str``
@@ -91,10 +91,6 @@ class EventType(StrEnum):
     # --- Handler extension points ---
     ANNOTATION = 'annotation'
     PERIODIC_RUN = 'periodic_run'
-    # Python-only: the Go backend accepts ``offload.*`` config but does not
-    # run the pool yet, so it never writes this row. Declared here (and in
-    # the shared fixture, flagged python-only) so the vocabulary itself
-    # stays one list across both backends.
     OFFLOAD = 'offload'
 
     # --- Webapp (synchronous HTTP ingress) ---
@@ -121,12 +117,11 @@ WEBAPP_REQUIRED_EVENT_COLUMNS: tuple[str, ...] = (
 # The PINNED recorder event-row shape, in DDL order. This is the contract
 # for every surface that passes event rows through as JSON objects —
 # ``/ws``, ``/api/v1/events``, ``/api/v1/trace``, ``/api/v1/trace-by-label``
-# — and for cross-backend DB interop (a Go worker reads these columns from
-# a Python-written file and vice versa). The list is mirrored in
-# ``drakkar-ui/docs/api-contract-v1.md`` ("Recorder event row shape") and
-# in the Go backend's ``internal/recorder/schema.go``; a parity test in
-# each backend asserts the live table matches. Column PRESENCE is the
-# contract — values stay event-type-dependent (nullable).
+# — and for on-disk interop, since a worker reads these columns out of
+# files other workers wrote. The list is mirrored in
+# ``drakkar-ui/docs/api-contract-v1.md`` ("Recorder event row shape"), and
+# a test asserts the live table matches. Column PRESENCE is the contract —
+# values stay event-type-dependent (nullable).
 EVENT_COLUMNS: tuple[str, ...] = (
     'id',
     'ts',

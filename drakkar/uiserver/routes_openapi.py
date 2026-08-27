@@ -2,8 +2,8 @@
 
 The spec (``openapi.yaml`` next to this module) is the byte-identical
 vendored copy of ``drakkar-ui/docs/openapi-v1.yaml`` — the canonical,
-hand-maintained description of the ``/api/v1`` surface both backends must
-serve. It is exposed two ways:
+hand-maintained description of the ``/api/v1`` surface. It is exposed two
+ways:
 
 - ``GET /api/v1/openapi.json`` — the document converted to JSON once at
   router build time (same auth as every API route);
@@ -12,8 +12,7 @@ serve. It is exposed two ways:
   fully offline (no CDN), token-gated exactly like the other UI pages.
 
 ``tests/test_openapi_parity.py`` pins the served route table to the spec's
-``paths`` — the mechanism that keeps this backend drop-in identical to the
-Go one.
+``paths``, so an endpoint added or renamed on only one side fails CI.
 """
 
 from __future__ import annotations

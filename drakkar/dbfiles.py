@@ -1,9 +1,9 @@
 """Filesystem handling for the SQLite files Drakkar writes.
 
 Two jobs, both shared by the flight recorder and the cache engine so the
-two stores behave identically and the Go backend has one behaviour to
-mirror: tightening file permissions, and publishing the "this is my current
-database" symlink that peer discovery and the UI resolve workers through.
+two stores behave identically: tightening file permissions, and publishing
+the "this is my current database" symlink that peer discovery and the UI
+resolve workers through.
 
 A leaf module — it imports nothing from Drakkar.
 
@@ -56,8 +56,8 @@ _WAL_SUFFIXES = ('-wal', '-shm')
 #
 # ``synchronous`` is per-connection and, unlike ``journal_mode``, is NOT
 # stored in the database header — so every writer connection must set it,
-# including the one rotation opens. The Go backend applies the same level as
-# a DSN pragma (its pooled connections would otherwise each start at FULL).
+# including the one rotation opens — a pooled connection would otherwise
+# start at the SQLite default of FULL.
 WAL_SYNCHRONOUS_PRAGMA = 'PRAGMA synchronous=NORMAL'
 
 

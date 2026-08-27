@@ -67,8 +67,7 @@ async def _peer_reader(db_path: str):
 
     All three peer-read paths (cluster-name resolution, batch pull,
     same-ms tail drain) come through here so every ephemeral peer
-    connection carries the same explicit ``busy_timeout`` — matching the
-    Go backend's peer reads byte-for-byte in behavior. The shorter peer
+    connection carries the same explicit ``busy_timeout``. The shorter peer
     timeout (vs the engine's own writer/reader) keeps a lock-wedged peer
     inside the per-peer failure isolation instead of stalling the cycle.
     """
@@ -346,8 +345,8 @@ class CacheEngine:
         # One fsync per checkpoint instead of one per commit — see
         # WAL_SYNCHRONOUS_PRAGMA for the durability trade.
         await self._writer_db.execute(WAL_SYNCHRONOUS_PRAGMA)
-        # Explicit busy_timeout mirroring the Go engine's writer DSN, so
-        # lock contention on a shared cache DB behaves identically.
+        # Explicit busy_timeout so lock contention on a shared cache DB
+        # behaves the same regardless of the driver's own default.
         await self._writer_db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
         await self._writer_db.commit()
 
@@ -406,8 +405,7 @@ class CacheEngine:
         # the reader see consistent snapshots while the writer commits.
         reader_uri = f'file:{self._db_path}?mode=ro'
         self._reader_db = await aiosqlite.connect(reader_uri, uri=True)
-        # Same explicit busy_timeout as the writer (mirrors the Go
-        # engine's reader DSN).
+        # Same explicit busy_timeout as the writer.
         await self._reader_db.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
         # If a Cache has already been attached (typical — engine.attach_cache
         # happens before start()), wire the reader through now; if it gets

@@ -77,8 +77,7 @@ logger = structlog.get_logger()
 # tab never appears frozen.
 MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS = 5.0
 
-# HTTP transport limits. The Go backend has carried these on its
-# ``http.Server`` since it was hardened; Python set none of them, so a
+# HTTP transport limits. Uvicorn sets none of these by default, so a
 # client that dribbled bytes — or simply opened connections and left them —
 # could pin connections and memory in the process that also runs the
 # pipeline AND answers the Kubernetes probes. Values mirror
@@ -89,10 +88,9 @@ MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS = 5.0
 
 # Reaps keep-alive connections idle between requests, so an operator
 # leaving a dashboard tab open does not pin connections forever.
-# Go: uiIdleTimeout.
 KEEP_ALIVE_TIMEOUT_SECONDS = 120
 
-# Caps the request header section. Go: uiMaxHeaderBytes.
+# Caps the request header section.
 MAX_HEADER_BYTES = 64 * 1024
 
 # Caps a request body before it is buffered. The UI server takes a body on
@@ -673,8 +671,7 @@ class UIServer:
             host=self._config.host,
             port=self._config.port,
             log_level='warning',
-            # See the module constants: mirrors the Go backend's
-            # http.Server hardening, which Python was missing entirely.
+            # See the module constants for why each of these is set.
             timeout_keep_alive=KEEP_ALIVE_TIMEOUT_SECONDS,
             h11_max_incomplete_event_size=MAX_HEADER_BYTES,
         )
@@ -688,8 +685,8 @@ class UIServer:
         # Verify the bind before declaring success. Without this a
         # port-in-use error dies silently inside the daemon thread while
         # the worker keeps running with no probe surface (/healthz,
-        # /readyz). The Go backend treats a debug-server bind failure as
-        # fatal — mirror that by raising so startup fails visibly. The
+        # /readyz). A bind failure is treated as fatal: raise so startup
+        # fails visibly rather than half-succeeding. The
         # wait runs off-loop (to_thread) because it polls with sleeps.
         try:
             await asyncio.to_thread(self._wait_until_serving, timeout=5.0)

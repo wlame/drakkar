@@ -4,7 +4,7 @@ The spec (``drakkar/uiserver/openapi.yaml``) is the vendored copy of
 ``drakkar-ui/docs/openapi-v1.yaml`` — the canonical description of the
 contract surface. This test walks the live FastAPI route table and asserts
 set-equality with the spec's ``paths``, so any endpoint added, removed, or
-renamed on only one side fails CI here (the Go backend pins the same spec
+renamed on only one side fails CI here (the spec is pinned by checksum
 with its own copy of this test). Legacy unprefixed ``/api/*`` aliases,
 ``/ws``, ``/docs``, and the SPA catch-all are deliberately outside the
 pinned surface.

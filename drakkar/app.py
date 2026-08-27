@@ -166,8 +166,8 @@ class DrakkarApp:
             self._config = load_config(config_path)
 
         self._handler = handler
-        # Fail fast on a webapp/handler mismatch, mirroring the Go
-        # backend's app.New check: a webapp without the HTTP hooks (or
+        # Fail fast on a webapp/handler mismatch: a webapp without the
+        # HTTP hooks (or
         # the typed models they need) can never serve a request, so
         # surface it at construction rather than at the first POST. The
         # import is local because the webapp stack (FastAPI/uvicorn) is

@@ -275,7 +275,7 @@ def test_sinks_config_multiple_types():
 
 def test_sinks_config_multiple_instances_same_type():
     # Instance names come back SORTED (not YAML order) — the summary is
-    # byte-parity contractual with the Go backend, whose maps have no
+    # byte-stability contractual: the decoded form has no
     # insertion order to preserve.
     cfg = SinksConfig(
         kafka={
@@ -566,7 +566,7 @@ def test_webapp_config_defaults():
     assert cfg.sinks_enabled is False
     assert cfg.request_timeout_seconds == 30.0
     assert cfg.max_concurrent == 64
-    assert cfg.max_body_bytes == 10 * 1024 * 1024  # same default as the Go backend
+    assert cfg.max_body_bytes == 10 * 1024 * 1024
     assert len(cfg.clients) == 1
     assert cfg.clients[0].name == 'anonymous'
     assert cfg.clients[0].token == ''
@@ -640,7 +640,7 @@ def test_webapp_config_rejects_zero_max_concurrent():
 
 def test_webapp_config_rejects_non_positive_max_body_bytes():
     # A zero/negative cap would reject every non-empty POST — same
-    # validation rule (and message shape) as the Go backend.
+    # validation rule (and message shape).
     with pytest.raises(ValidationError) as exc_info:
         WebAppConfig(max_body_bytes=0)
     assert 'max_body_bytes must be > 0' in str(exc_info.value)

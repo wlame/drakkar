@@ -43,6 +43,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Docs and comments no longer describe a second implementation.** The
+  repository described itself as one half of a two-backend product, naming a
+  repository nobody can open. Every rule those references justified is kept,
+  restated in terms of what it actually buys: emitted arguments are sorted
+  because a decoded mapping has no key order to reproduce, DLQ bytes are
+  pinned because tooling byte-compares them, the SQLite schemas are a
+  specification because workers read each other's files on a shared volume.
+  Two doc sections that only existed to describe the other implementation
+  are gone, and "mixed fleets" is now "sharing one `db_dir` across workers",
+  which is what the page always documented. `drakkar/uiserver/openapi.yaml`
+  is untouched on purpose: it is a vendored copy of the UI repository's
+  canonical spec, pinned by checksum so it cannot be edited in place.
+
+- **The interop suite moved out of the repository.** `test_cross_backend_db.py`,
+  its fixtures and `gen_db_fixtures.py` needed a second implementation's
+  engines to regenerate, so they are no longer part of the published tree or
+  of `just ci`. Coverage was measured before and after: 95.88% → 95.86%,
+  still above the 95 floor. `just gen-db-fixtures` is gone;
+  `just gen-event-vocabulary` stays and no longer writes outside the repo.
+  The event-vocabulary fixture drops its per-event backend map — the
+  vocabulary and where each name is stored are what the tests pin.
+
 - **`ui.recorder.archive_retention_days` now defaults to 30 days, not
   "forever".** Rotation, the flush buffer and the live database are all
   bounded on their own. Archives were not: nothing reclaims a `.db.gz`, so a

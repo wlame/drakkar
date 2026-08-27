@@ -45,7 +45,7 @@ flowchart LR
 - **Observability** — Prometheus metrics, ECS-compatible structured logging, flight recorder (SQLite event log), runtime-health and host-pressure monitors, task cost/throughput stats
 - **Kubernetes-ready** — `/healthz` and `/readyz` probes, reference manifests, crash/OOM detection on restart
 
-A **Go implementation** ([drakkar-go](https://github.com/wlame/drakkar-go)) is config- and contract-compatible; both backends serve the same [drakkar-ui](https://github.com/wlame/drakkar-ui) web UI and can run side by side in one fleet.
+The operator UI is [drakkar-ui](https://github.com/wlame/drakkar-ui), a versioned SPA the worker fetches at startup and caches on disk — so co-located workers share one download, and the UI ships on its own release cadence.
 
 ## Quick start
 

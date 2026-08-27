@@ -215,7 +215,7 @@ def probe_field(
     return Field(default=default, json_schema_extra=extra)
 
 
-# ---- wire models (mirrored 1:1 by drakkar-go and the UI) --------------------
+# ---- wire models (rendered 1:1 by the UI) ----------------------------------
 
 
 class ProbeDetailsColumn(BaseModel):

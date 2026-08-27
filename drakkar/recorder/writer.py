@@ -365,9 +365,9 @@ class EventWriter:
             'task_id': result.task.task_id,
             'exit_code': result.exit_code,
             'duration': result.duration_seconds,
-            # Sized off the DECODED string, matching Go's len(result.Stdout):
-            # both backends replace each invalid byte with U+FFFD before
-            # measuring, so the two agree even on non-UTF-8 output.
+            # Sized off the DECODED string, after each invalid byte has
+            # become U+FFFD — so the number stays defined for non-UTF-8
+            # output rather than depending on how it was decoded.
             'stdout_size': _byte_len(result.stdout),
             # WS-frame-only field, like task_started's stdin_lines/stdin_size:
             # not in the pinned events-table column list, so the DB insert
@@ -583,9 +583,9 @@ class EventWriter:
         """Record one runtime-health transition or periodic sample.
 
         ``kind`` is ``'transition'`` (state changed) or ``'sample'`` (the
-        low-frequency history point). Wire fields are backend-neutral —
-        ``unit_count`` counts asyncio tasks here, goroutines on the Go
-        backend.
+        low-frequency history point). ``unit_count`` is paired with a
+        ``unit_label`` naming what it counts (asyncio tasks here), so a
+        consumer renders it without assuming the unit.
         """
         self._record(
             {

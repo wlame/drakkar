@@ -72,8 +72,7 @@ class WebAppConfig(BaseModel):
     request_timeout_seconds: float = 30.0
     max_concurrent: int = 64
     # Cap on a single POST body (bytes); requests beyond it get a 413
-    # ``request_too_large`` envelope before the body is buffered. Same
-    # key, default, and behavior as the Go backend.
+    # ``request_too_large`` envelope before the body is buffered.
     max_body_bytes: int = 10 * 1024 * 1024
     clients: list[WebClientConfig] = Field(
         default_factory=lambda: [WebClientConfig(name='anonymous', token='', rpm=4)],

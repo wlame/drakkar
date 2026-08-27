@@ -3,7 +3,7 @@
 These used to be closures inside `create_live_router`, reachable only
 through HTTP. They are plain functions in `drakkar/recorder/queries.py`
 now, so the timeline's retry grouping and the task-state fold can be
-checked against known rows — and the Go backend has one place to diff its
+checked against known rows — and the aggregation lives in one place, not
 own queries against.
 """
 

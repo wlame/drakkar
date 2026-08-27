@@ -5,10 +5,9 @@ startup (headless-first parity). It fetches a versioned UI release from
 GitHub into the local cache, updates to the latest release, and reports
 where the cache lives and what would be served.
 
-The command mirrors the Go backend's ``cmd/drakkar-ui`` byte-for-byte —
-same subcommands, flags, output shapes, and exit codes (0 ok, 1 runtime
-error, 2 usage error) — and both operate on the same per-user cache, so on
-a mixed host either backend's command manages the bundle for both.
+Exit codes are 0 ok, 1 runtime error, 2 usage error. It operates on the
+same per-user cache the worker uses at startup, so priming the cache from
+the command line is exactly what a worker would have done itself.
 
 Usage::
 
@@ -39,12 +38,12 @@ from drakkar.uihost import (
 # The canonical drakkar-ui release repo.
 DEFAULT_REPO = 'wlame/drakkar-ui'
 
-# Bounds a single fetch/update network round-trip (matches the Go CLI).
+# Bounds a single fetch/update network round-trip.
 FETCH_TIMEOUT_SECONDS = 60.0
 
 # What ``where`` prints when nothing would serve. An empty cache is a normal
 # state, not an error: the worker runs API-only until a bundle is fetched.
-# One word, so the Go CLI's output stays byte-identical.
+# One word, so the report stays easy to parse from a script.
 NOTHING_CACHED = 'nothing'
 
 USAGE_TEXT = f"""drakkar-ui — manage the decoupled drakkar-ui static bundle.
@@ -72,9 +71,9 @@ class _UsageError(Exception):
 class _Parser(argparse.ArgumentParser):
     """ArgumentParser that raises instead of calling ``sys.exit``.
 
-    The CLI writes to explicit stdout/stderr handles (testability, mirroring
-    the Go CLI's ``run(argv, stdout, stderr) int`` shape), so argparse's
-    default print-and-exit behavior would bypass them.
+    The CLI writes to explicit stdout/stderr handles so it stays testable
+    in-process; argparse's default print-and-exit behavior would bypass
+    them.
     """
 
     def error(self, message: str) -> NoReturn:
@@ -116,7 +115,7 @@ def _run_where(argv: list[str], stdout: IO[str]) -> int:
     else:
         print(f'pinned version: {status.pinned_version}', file=stdout)
         print(f'version dir:    {status.pinned_dir}', file=stdout)
-        # Lowercase booleans keep the report byte-identical to the Go CLI.
+        # Lowercase booleans keep the report scriptable (`true`/`false`).
         print(f'cached:         {str(status.pinned_cached).lower()}', file=stdout)
     print(f'would serve:    {status.source or NOTHING_CACHED}', file=stdout)
     return 0

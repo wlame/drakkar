@@ -178,16 +178,6 @@ blocks the loop.
   pure-Python code more than one core. If you need that, it is
   subprocess-shaped work — consider making it an `ExecutorTask`.
 
-## The Go backend
-
-The Go backend has no `offload()` and needs none: the Go runtime
-preempts goroutines (~10ms quanta) and schedules them across
-`GOMAXPROCS` OS threads, so a CPU-heavy `Arrange` never stalls the rest
-of the worker. Mixed fleets share one YAML — Go accepts and validates
-the `offload:` block without acting on it — and the UI hides the offload
-readout for Go workers automatically. See the Go repo's `docs/offload.md`
-for the full story.
-
 ## Worked example
 
 The integration worker uses `offload()` in production shape:
