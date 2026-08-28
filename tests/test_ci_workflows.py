@@ -13,6 +13,7 @@ quietly turn an assertion into a no-op.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -119,4 +120,20 @@ def test_uv_is_pinned_to_an_explicit_version(name: str) -> None:
             version = step.get('with', {}).get('version')
             where = f'{name}:{job_name} step {index}'
             assert version and version != 'latest', f'{where} does not pin uv'
-            assert version == EXPECTED_UV_VERSION, f'{where} pins uv {version}, expected {EXPECTED_UV_VERSION}'
+            if version == EXPECTED_UV_VERSION:
+                continue
+            # The experimental-CPython lane selects its own uv through a matrix
+            # expression. That still counts as pinned when the fallback is the
+            # expected version and every matrix override is an explicit version.
+            fallback = re.fullmatch(r"\$\{\{ matrix\.uv-version \|\| '([0-9.]+)' \}\}", version)
+            assert fallback and fallback.group(1) == EXPECTED_UV_VERSION, (
+                f'{where} pins uv {version}, expected {EXPECTED_UV_VERSION}'
+            )
+            overrides = [
+                include.get('uv-version')
+                for include in job.get('strategy', {}).get('matrix', {}).get('include', [])
+                if 'uv-version' in include
+            ]
+            assert overrides and all(re.fullmatch(r'[0-9]+(\.[0-9]+)*', str(v)) for v in overrides), (
+                f'{where} uses a matrix uv-version whose overrides are not explicit versions: {overrides}'
+            )
