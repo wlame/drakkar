@@ -5,6 +5,7 @@ depth) and the consume-pause presets, which are UI-driven controls.
 """
 
 import re
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -464,6 +465,63 @@ class TimelineLabels(BaseModel):
     )
 
 
+_TIMELINE_EVENT_NAME_RE = re.compile(r'^[a-z_][a-z0-9_]*$')
+
+
+class TimelineEventType(BaseModel):
+    """One declared custom timeline event type: its identity, look, and click behavior."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    name: str = Field(description='Type identifier handlers emit by; lower_snake_case, unique in the list.')
+    kind: Literal['marker', 'range', 'flag'] = Field(
+        description='Visualization family: a vertical marker line, a background time range, or a flag pin.'
+    )
+    color: str = Field(description="Timeline color name or '#rrggbb', same vocabulary as color_rules.")
+    line: Literal['solid', 'bold', 'dotted'] | None = Field(
+        default=None,
+        description="Marker line style; only valid for kind=marker, where it defaults to 'solid'.",
+    )
+    label: str = Field(
+        default='',
+        description='Chip template drawn at the marker top / flag pin; {text} substitutes the instance text.',
+    )
+    enabled: bool = Field(
+        default=True,
+        description='False makes emission of this type a no-op: nothing recorded, nothing sent to the UI.',
+    )
+    show: bool = Field(default=True, description='Initial visibility state of the per-type UI toggle.')
+    link: str = Field(
+        default='',
+        description=(
+            'URL template opened on click when action=link; resolves {ts_ms}, {end_ts_ms}, {text}, '
+            'instance value keys, and ui.link_bases names.'
+        ),
+    )
+    action: Literal['none', 'link', 'highlight', 'filter'] = Field(
+        default='none',
+        description='Click behavior: nothing, open the link template, or emphasize/dim matching tasks.',
+    )
+
+    @model_validator(mode='after')
+    def _validate_event_type(self) -> 'TimelineEventType':
+        if not _TIMELINE_EVENT_NAME_RE.match(self.name):
+            raise ValueError(f"timeline event name '{self.name}' must match {_TIMELINE_EVENT_NAME_RE.pattern}")
+        if self.color not in TIMELINE_COLOR_NAMES and not _TIMELINE_HEX_RE.fullmatch(self.color):
+            raise ValueError(
+                f"timeline event color '{self.color}' must be one of {sorted(TIMELINE_COLOR_NAMES)} or '#rrggbb'"
+            )
+        if self.kind != 'marker' and self.line is not None:
+            raise ValueError(f"timeline event '{self.name}': line style applies only to kind=marker")
+        if self.kind == 'marker' and self.line is None:
+            self.line = 'solid'
+        if self.action == 'link' and not self.link:
+            raise ValueError(f"timeline event '{self.name}': action=link requires a link template")
+        if self.action != 'link' and self.link:
+            raise ValueError(f"timeline event '{self.name}': link is only used with action=link")
+        return self
+
+
 class UITimelineConfig(BaseModel):
     """Timeline history depth, bar color rules, and special label roles."""
 
@@ -489,6 +547,21 @@ class UITimelineConfig(BaseModel):
         default_factory=TimelineLabels,
         description='Task label keys the UI uses for the tag, caption, highlight, filter, and marker roles.',
     )
+    events: list[TimelineEventType] = Field(
+        default_factory=list,
+        max_length=50,
+        description='Declared custom timeline event types drawn as markers, ranges, or flag pins on the live timeline.',
+    )
+
+    @field_validator('events')
+    @classmethod
+    def _reject_duplicate_event_names(cls, value: list[TimelineEventType]) -> list[TimelineEventType]:
+        seen: set[str] = set()
+        for event_type in value:
+            if event_type.name in seen:
+                raise ValueError(f"duplicate timeline event name '{event_type.name}'")
+            seen.add(event_type.name)
+        return value
 
 
 class UIConsumePauseConfig(BaseModel):
