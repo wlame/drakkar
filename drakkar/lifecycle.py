@@ -79,6 +79,7 @@ from drakkar.recorder import EventRecorder
 from drakkar.recorder.archive import warn_if_archives_unbounded
 from drakkar.sinks.manager import SinkNotConfiguredError
 from drakkar.timefmt import format_rfc3339_micro
+from drakkar.timeline_events import TimelineEventEmitter
 from drakkar.utils import wait_for_aligned_startup
 from drakkar.watchdog import WatchdogFile
 
@@ -517,7 +518,7 @@ class AppLifecycle:
         app._throughput.start()
 
     def _wire_annotator(self) -> None:
-        """Replace the handler's NoOpAnnotator stub with a live one.
+        """Replace the handler's NoOpAnnotator stub with a live one, and wire timeline events on top of it.
 
         Called right after the recorder starts, since annotations are stored
         as recorder events and there is nowhere to put them otherwise. When
@@ -530,17 +531,29 @@ class AppLifecycle:
         the recorder never starts a flush loop, so annotations would fill the
         bounded buffer and be evicted, spending memory and inflating
         ``drakkar_recorder_dropped_events_total`` to no benefit.
+
+        Custom timeline events (``self.timeline_event(...)``) ride the same
+        annotator instance, so they share its byte budgets and its
+        no-context handling. They are wired only when at least one type is
+        declared under ``ui.timeline.events`` — with none declared, every
+        emission would be dropped as unknown, so the class-level
+        ``NoOpTimelineEventEmitter`` stub stays in place instead.
         """
         app = self._app
         recorder_config = app._config.ui.recorder
         if app._recorder is None or not recorder_config.annotations_enabled or not recorder_config.store_events:
             return
-        app._handler._annotator = Annotator(
+        annotator = Annotator(
             app._recorder,
             max_bytes=recorder_config.annotation_max_bytes,
             max_bytes_per_call=recorder_config.annotation_max_bytes_per_call,
             log_max_bytes=recorder_config.annotation_log_max_bytes,
         )
+        app._handler._annotator = annotator
+
+        event_types = app._config.ui.timeline.events
+        if event_types:
+            app._handler._timeline_events = TimelineEventEmitter(annotator, {t.name: t for t in event_types})
 
     def _wire_io_executor(self) -> None:
         """Resize asyncio's default to_thread executor when io.max_threads is set.

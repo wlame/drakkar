@@ -121,3 +121,27 @@ def test_offsets_match_wire_shape(window_ctx):
 
 def test_noop_emitter_swallows_everything():
     NoOpTimelineEventEmitter().emit('anything')  # must not raise
+
+
+def test_handler_default_timeline_event_is_noop():
+    from drakkar.handler import BaseDrakkarHandler
+
+    class H(BaseDrakkarHandler):
+        async def arrange(self, messages):  # pragma: no cover - unused
+            return []
+
+    H().timeline_event('anything')  # must not raise with nothing installed
+
+
+def test_handler_delegates_to_installed_emitter(window_ctx):
+    from drakkar.handler import BaseDrakkarHandler
+
+    class H(BaseDrakkarHandler):
+        async def arrange(self, messages):  # pragma: no cover - unused
+            return []
+
+    sink = RecordingSink()
+    handler = H()
+    handler._timeline_events = _emitter(sink, _marker())
+    handler.timeline_event('deploy', text='hi')
+    assert len(sink.records) == 1

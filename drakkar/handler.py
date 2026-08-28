@@ -22,8 +22,11 @@ from pydantic import BaseModel, ValidationError
 from drakkar.annotations import AnnotatorLike
 from drakkar.cache.protocol import CacheLike
 from drakkar.offload import OffloaderLike
+from drakkar.timeline_events import NoOpTimelineEventEmitter, TimelineEventEmitter, TimelineMatch
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from drakkar.config import DrakkarConfig
     from drakkar.uipages import Page
 
@@ -269,6 +272,15 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # ``ui.recorder.annotations_enabled`` is set. Private because users call
     # the method, never the object.
     _annotator: AnnotatorLike
+
+    # Backs :meth:`timeline_event`. Same lifecycle as ``_annotator`` above: a
+    # stateless no-op stub lives on the class so ``self.timeline_event(...)``
+    # is callable in unit tests and before startup finishes, and the
+    # framework replaces it per-instance with a real ``TimelineEventEmitter``
+    # when the annotator is wired and ``ui.timeline.events`` declares at
+    # least one type. Private because users call the method, never the
+    # object.
+    _timeline_events: TimelineEventEmitter | NoOpTimelineEventEmitter
 
     # Backs :meth:`offload`. Same lifecycle again: the class-level
     # ``InlineOffloader`` stub keeps ``await self.offload(...)`` working in
@@ -582,6 +594,50 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         """
         self._annotator.emit(target, kind, data, labels=labels)
 
+    def timeline_event(
+        self,
+        type_name: str,
+        text: str = '',
+        *,
+        ts: datetime | None = None,
+        end_ts: datetime | None = None,
+        values: Mapping[str, Any] | None = None,
+        match: TimelineMatch | None = None,
+    ) -> None:
+        """Emit one instance of a custom timeline event declared in ``ui.timeline.events``.
+
+        Use this to mark a domain event on the live Debug UI timeline as it
+        happens — a deploy, an incident window, a flag worth pinning — so an
+        operator watching the timeline sees it lined up against the tasks
+        running at the time::
+
+            self.timeline_event('deploy', text='v2.1', values={'sha': 'ab12f'})
+
+        ``type_name`` must match a type declared under ``ui.timeline.events``
+        (see :class:`~drakkar.config.TimelineEventType` for ``kind``,
+        ``action``, and the rest of a type's look and click behavior). It
+        rides the same recorder storage as :meth:`annotate`.
+
+        Best-effort by design — this never raises and never affects
+        processing. An unknown ``type_name`` or a malformed emission (wrong
+        shape for the type's ``kind``, an ill-formed ``match``) is dropped
+        and counted in ``drakkar_recorder_annotations_dropped_total``; see
+        :mod:`drakkar.timeline_events` for the exact drop rules.
+
+        Args:
+            type_name: Name of a type declared in ``ui.timeline.events``.
+            text: Instance text substituted into the type's label/link
+                templates.
+            ts: Event start time. Defaults to now.
+            end_ts: Event end time; required for ``kind=range`` types,
+                rejected for every other kind.
+            values: Extra instance data available to link templates.
+            match: Which tasks this event correlates with, for
+                ``action=highlight``/``action=filter`` types. Auto-filled
+                from the current window when omitted.
+        """
+        self._timeline_events.emit(type_name, text, ts=ts, end_ts=end_ts, values=values, match=match)
+
     async def offload[**P, R](self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs) -> R:
         """Run a CPU-bound synchronous function off the event loop.
 
@@ -733,7 +789,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
 def _install_default_cache() -> None:
     """Attach the stateless default stubs as class attributes.
 
-    Called once at module import. All three stubs are stateless so sharing
+    Called once at module import. All four stubs are stateless so sharing
     one instance across all handler classes is safe. ``InlineOffloader``
     still executes offloaded functions (on ``asyncio.to_thread``) — the
     stub-ness is only the missing pool/metrics/recorder wiring.
@@ -743,6 +799,7 @@ def _install_default_cache() -> None:
     from drakkar.offload import InlineOffloader
 
     BaseDrakkarHandler.cache = NoOpCache()
+    BaseDrakkarHandler._timeline_events = NoOpTimelineEventEmitter()
     BaseDrakkarHandler._annotator = NoOpAnnotator()
     BaseDrakkarHandler._offloader = InlineOffloader()
 
