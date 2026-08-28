@@ -80,14 +80,18 @@ Run more workers in the same Kafka consumer group. The group rebalances partitio
 
 ### What's the maximum throughput per worker?
 
-Roughly **4,000-8,000 tasks/sec/worker** before a single event loop becomes the bottleneck — see [Bottleneck: Event Loop](performance.md#bottleneck-event-loop) for the breakdown of where the GIL time goes. In practice you hit this ceiling with sub-10ms tasks and `max_executors > 100`; for longer tasks (≥ 30ms) you'll saturate on CPU / downstream sinks well before Python orchestration becomes the limit.
+Plan for **~400 tasks/sec/worker** at most. Your rate follows from the pool size — roughly `max_executors / average task duration` — but past ~400 completions/sec the single Python event loop that orchestrates everything becomes the bottleneck, and adding slots only grows the queue. See [Bottleneck: Event Loop](performance.md#bottleneck-event-loop) for the breakdown of where the GIL time goes.
 
-Knobs that move the ceiling up (all documented in [performance.md](performance.md)):
+The ceiling is soft, and it mostly moves down: the more CPU-bound work your `arrange()` and completion hooks do on the loop (compiling or applying regexes, nested loops over large collections, building large payloads), the more loop stalls you introduce, and each stall delays every in-flight task's completion handling. Heavy hooks can drag the practical maximum well below 400/sec — keep them cheap and move heavy work to [`handler.offload()`](handler.md#offloading-cpu-bound-work).
 
-- **Precomputed tasks** (cache hits skip the subprocess entirely) remove the per-task launch cost — the ceiling becomes whatever your sinks can absorb.
-- **Batching messages per task** (one subprocess launch for N messages via stdin) amortizes the 1-5ms launch cost.
+Knobs that stretch what one worker delivers within that envelope (all documented in [performance.md](performance.md)):
+
+- **Precomputed tasks** (cache hits skip the subprocess entirely) remove the per-task launch cost, though every completion still pays the loop's orchestration cost.
+- **Batching messages per task** (one subprocess launch for N messages via stdin) amortizes the launch cost and — more importantly — raises *message* throughput without raising the completions/sec the loop has to absorb.
 - **Larger `window_size`** enables larger batches in `arrange()`.
-- **Off-thread JSON encoding** and **`orjson`** are available to cut recorder overhead (see [Available optimization: `orjson`](performance.md#available-optimization-orjson-opt-in)).
+- **`orjson`** cuts recorder encoding overhead (see [Available optimization: `orjson`](performance.md#available-optimization-orjson-opt-in)).
+
+Past the ceiling, scale horizontally: more workers, each with its own event loop. And if your workload is inherently high-rate, small, CPU-bound tasks, a Go implementation of Drakkar (`drakkar-go`) exists with a byte-for-byte identical config and API surface — not yet publicly released — whose runtime schedules orchestration across all cores instead of one GIL-held loop; consider porting your business logic to it for that profile.
 
 Use the [Config Calculator](calculator.md) for a starting point, then measure in staging. Target metrics live in [Monitoring Throughput](performance.md#monitoring-throughput).
 

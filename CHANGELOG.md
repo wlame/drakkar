@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Documented a realistic per-worker task-rate ceiling.** The
+  performance guide, FAQ, and config calculator now plan for at most
+  ~400 tasks/s per worker instead of the earlier 4k-8k claim. The rate
+  follows from the executor pool size, and the docs now warn that
+  CPU-bound work in `arrange()` and completion hooks (regex work,
+  nested loops over large data) stalls the event loop and lowers the
+  practical maximum. The calculator caps its `max_executors`
+  suggestion at 400 x task duration and says to add workers, not
+  slots. The docs also note a Go implementation with an identical
+  surface for high-rate small CPU-bound workloads.
+
 ## [2.0.0] - 2026-08-27
 
 ### Added

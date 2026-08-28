@@ -97,6 +97,15 @@ function drakkarCalc() {
   maxWorkers = Math.min(maxWorkers, partPerWorker * 4);
   maxWorkers = Math.max(1, maxWorkers);
 
+  // Event-loop throughput ceiling: one Python event loop orchestrates
+  // every completion, so past ~400 tasks/sec the loop is the bottleneck
+  // and extra slots add queue, not throughput (see performance.md,
+  // "Bottleneck: Event Loop"). Cap the pool at 400 x task duration.
+  var LOOP_CEILING_TASKS_PER_SEC = 400;
+  var loopCapSlots = Math.max(1, Math.round(LOOP_CEILING_TASKS_PER_SEC * p80s));
+  var loopCapped = loopCapSlots < maxWorkers;
+  if (loopCapped) { maxWorkers = loopCapSlots; }
+
   // window_size: target 2-5 seconds of work per window
   var windowTargetSec = p80s < 0.1 ? 5 : p80s < 1 ? 3 : 2;
   var windowSize = Math.max(1, Math.round(windowTargetSec / p80s));
@@ -193,7 +202,9 @@ function drakkarCalc() {
   var dl = addDl();
 
   addDt(dl, 'max_executors: ' + maxWorkers);
-  addDd(dl, cpu + ' cores - ' + reservedCores + ' reserved (20%) = ' + (cpu - reservedCores) + ' available. Capped at ' + partPerWorker + ' partitions/worker * 4 = ' + (partPerWorker * 4) + '. Each slot runs one subprocess. More slots than cores causes context-switch overhead without throughput gain.');
+  addDd(dl, loopCapped
+    ? cpu + ' cores would allow more, but the event-loop ceiling binds first: ~' + LOOP_CEILING_TASKS_PER_SEC + ' tasks/sec * p80 ' + p80 + 'ms = ' + loopCapSlots + ' slots. More slots would complete tasks faster than the single Python event loop can orchestrate. To use the remaining cores, run more workers per host instead. CPU-bound work in arrange()/hooks lowers the real ceiling further.'
+    : cpu + ' cores - ' + reservedCores + ' reserved (20%) = ' + (cpu - reservedCores) + ' available. Capped at ' + partPerWorker + ' partitions/worker * 4 = ' + (partPerWorker * 4) + '. Each slot runs one subprocess. More slots than cores causes context-switch overhead without throughput gain.');
 
   addDt(dl, 'window_size: ' + windowSize);
   addDd(dl, 'Target ' + windowTargetSec + 's of work per window. At p80=' + p80 + 'ms, that is ' + windowTargetSec + '/' + p80s.toFixed(3) + ' = ' + windowSize + ' messages. Larger windows reduce arrange() call overhead and enable batching. Smaller windows reduce commit latency \u2014 offsets commit only when the slowest task in the window finishes.');
@@ -230,7 +241,8 @@ function drakkarCalc() {
   addH3('Estimates');
   var dl2 = addDl();
   addDt(dl2, 'Throughput');
-  addDd(dl2, '~' + tasksPerSec.toFixed(1) + ' tasks/sec per worker, ~' + tasksPerSecCluster.toFixed(1) + ' tasks/sec cluster (' + workers + ' workers * ' + maxWorkers + ' slots / ' + p80s.toFixed(3) + 's)');
+  addDd(dl2, '~' + tasksPerSec.toFixed(1) + ' tasks/sec per worker, ~' + tasksPerSecCluster.toFixed(1) + ' tasks/sec cluster (' + workers + ' workers * ' + maxWorkers + ' slots / ' + p80s.toFixed(3) + 's)'
+    + (loopCapped ? ' Per-worker rate sits at the ~' + LOOP_CEILING_TASKS_PER_SEC + ' tasks/sec event-loop ceiling — to go faster, add workers, not slots.' : ''));
   addDt(dl2, 'Memory (per worker)');
   addDd(dl2, '~' + Math.round(totalEstMb) + ' MB (' + baseMb + ' MB runtime + ' + Math.round(peakQueuedMb) + ' MB peak queue + ' + Math.round(recorderBufferMb) + ' MB recorder buffer)');
   addDt(dl2, 'Commit latency');

@@ -116,10 +116,23 @@ Uvicorn event loop (`UIServer` uses `threading.Thread`). It does not
 compete for time on the main event loop. Communication between them uses
 a thread-safe `queue.Queue` for WebSocket event broadcasting.
 
-With 80 executors completing 30ms tasks, that's ~2,700 task
-completions per second hitting the event loop. Each completion triggers
-a cascade of Python bytecode and JSON encoding, all serialized on the
-single event-loop thread (GIL-held):
+Your task rate follows from the pool size: roughly
+`max_executors / average task duration` — 8 slots at 20ms tasks is
+~400 tasks/sec, 64 slots at 200ms tasks is ~320 tasks/sec. But the
+rate has a ceiling that pool size cannot buy past: **plan for at most
+~400 tasks per second per worker**. Beyond that, the single event loop
+itself becomes the bottleneck, and adding slots only grows the queue.
+
+The number is deliberately conservative. The per-completion budget
+below measures framework overhead only — it does not include the
+preparation work a real `arrange()` does to *create* those tasks
+(parsing, grouping, building stdin), which also runs on the loop and
+scales with the task count. Planning against ~400/sec leaves room for
+that unmeasured cost; a handler with unusually lean hooks may sustain
+more, but measure before counting on it.
+
+Each completion triggers a cascade of Python bytecode and JSON
+encoding, all serialized on the single event-loop thread (GIL-held):
 
 1. Subprocess completion handling, pipe read, UTF-8 decode
 2. Pydantic `ExecutorResult` construction
@@ -134,28 +147,39 @@ single event-loop thread (GIL-held):
 **Total Python-side cost per completion**: **210-390us**
 (150-250us bytecode + 60-140us JSON encoding) **+ on_task_complete() duration**.
 
-At 2,700 completions/sec, that's **570-1050ms/sec of GIL-held time —
-57-100% of a single core**. Your `on_task_complete()` runs on top of
-that. **At the advertised sweet spot (80 executors, 30ms tasks), the
-event loop IS the bottleneck**, not a comfortable cushion.
+At 400 completions/sec, that baseline is 84-156ms of GIL-held time per
+second — 8-16% of a core — which leaves real headroom for your own hook
+code, Kafka polling, offset commits, and recorder flushes. Push toward
+2,700 completions/sec (80 executors on 30ms tasks) and the same math
+gives **570-1050ms/sec: 57-100% of a single core** consumed before
+`arrange()` and `on_task_complete()` run at all. The loop saturates,
+consumer lag grows, and every subsystem sharing the loop degrades
+together. This is why very short CPU-bound tasks in high volume are the
+worst fit for the model: they maximize completions per second, which is
+exactly the currency the loop runs out of first.
 
-**Budget for it.** Python orchestration is the primary reason a single
-worker tops out around 4k-8k tasks/sec regardless of how many cores are
-available. To push further, scale horizontally (more workers, each with
-its own event loop) or reduce per-task overhead (see the mitigations
-below and the [Recorder](#bottleneck-recorder-and-ui) tuning
-knobs).
+**The ceiling is soft — and it mostly moves down.** ~400 tasks/sec
+assumes your hook code is cheap. The more CPU-bound work task
+preparation and completion do on the loop — compiling or applying
+regexes, nested loops over large collections, building large payloads
+in `arrange()` or `on_task_complete()` — the more loop stalls you
+introduce, and each stall delays *every* in-flight task's completion
+handling, not just its own. Heavy hooks can drag the practical maximum
+far below 400/sec. Keep per-call hook work in the tens of microseconds
+and move anything heavier to
+[`handler.offload()`](handler.md#offloading-cpu-bound-work).
 
-The ceiling moves even lower when:
+The ceiling also drops when:
 
-- `arrange()` or `on_task_complete()` do non-trivial CPU work (any
-  time spent here is fully additive to the 210-390us baseline)
 - `event_min_duration_ms: 0` is set at high throughput — every task
   pays the full JSON-encode cost into the recorder buffer
 - Sink payloads are large enough that per-sink JSON encoding is
   non-trivial (group size x payload complexity)
-- You run 200+ executors with sub-5ms tasks (>40,000 completions/sec is
-  beyond a single event loop's reach, period)
+
+**To go faster, add workers, not slots.** Each worker brings its own
+event loop, so cluster throughput scales horizontally (see
+[Scaling Horizontally](#scaling-horizontally)). On a large host, run
+several workers side by side rather than one worker with a huge pool.
 
 ### Available optimization: `orjson` (opt-in)
 
@@ -174,8 +198,9 @@ not installed. **Output bytes are identical across both paths** (same
 sort-key order, compact separators, UTF-8) so the on-disk recorder DB
 stays stable whether or not the extra is present.
 
-Recommended at **> 1k tasks/sec/worker**; below that, the stdlib
-encoder is fast enough that the gain is not measurable.
+Recommended once a worker runs in the upper part of its envelope
+(roughly **> 200 tasks/sec**); below that, the stdlib encoder is fast
+enough that the gain is not measurable.
 
 ### Further headroom on the horizon
 
@@ -189,10 +214,26 @@ changing the execution model:
   buffer; serialization happens off-thread and doesn't hold the GIL
   during the I/O-free encoding fast path.
 
-Combined with `orjson`, this should unlock the 4k-8k tasks/sec/worker
-ceiling. It is scoped for a later phase — today the honest guidance
-is "install the `perf` extra, then scale horizontally once one worker
-saturates".
+Combined with `orjson`, this buys back part of the per-completion
+budget — but it does not change the architecture. Orchestration stays
+serialized on one loop, so treat these gains as extra headroom *within*
+the ~400 tasks/sec envelope, not as a path to multiples of it. Today
+the honest guidance is "install the `perf` extra, then scale
+horizontally once one worker saturates".
+
+### When Python is the wrong tool
+
+If your workload is inherently high-rate, small, CPU-bound tasks —
+thousands per second of 5-20ms work — no amount of tuning makes a
+single Python event loop comfortable, and the right fix may be a
+different runtime rather than more workers. A Go implementation of
+Drakkar (`drakkar-go`) exists with a byte-for-byte identical surface —
+same config format, same wire contracts, same HTTP API — though it is
+not yet publicly released. Go's runtime schedules orchestration across
+all cores instead of one GIL-held loop, which suits exactly this
+profile. If you are hitting the per-worker ceiling with short CPU-bound
+tasks, consider porting your business logic; the framework surface you
+would port it to is the same one documented here.
 
 ---
 
@@ -283,8 +324,8 @@ blocks the partition pipeline for the duration of that call.
 ## Bottleneck: Recorder and UI
 
 With `event_min_duration_ms: 0` (default), every task writes events to
-the SQLite buffer. See [Duration Thresholds](observability.md#duration-thresholds) for the full reference on these settings. At 2,700 tasks/sec (80 workers, 30ms tasks), that's
-~8,000 events/sec (started + completed + consumed), flushed to SQLite
+the SQLite buffer. See [Duration Thresholds](observability.md#duration-thresholds) for the full reference on these settings. At the ~400 tasks/sec per-worker ceiling, that's
+~1,200 events/sec (started + completed + consumed), flushed to SQLite
 every `flush_interval_seconds`. The flush itself is a batch INSERT that
 takes ~10-50ms for 10,000 rows.
 
@@ -318,8 +359,8 @@ the fast majority.
 A minor detail that matters at extreme scale: after each task completes,
 the executor pool runs `self._available_slots.sort()` (line 82 of
 `executor.py`). With `max_executors: 80`, this sorts a list of up to
-80 integers on every task completion. At 2,700 completions/sec, that's
-2,700 sorts/sec -- still fast (80-element sort is ~1us), but it's
+80 integers on every task completion. At 400 completions/sec, that's
+400 sorts/sec -- still fast (80-element sort is ~1us), but it's
 there.
 
 ---
@@ -381,7 +422,7 @@ to buffer more in memory.
 
 ```yaml
 executor:
-  max_executors: 64              # match available cores, leave headroom
+  max_executors: 16              # the ~400 tasks/sec loop ceiling binds before core count
   window_size: 200             # larger windows for batching opportunity
   task_timeout_seconds: 30     # short timeout for fast tasks
   backpressure_high_multiplier: 16
@@ -401,7 +442,7 @@ ui:
 
 | Setting | Rationale |
 |---------|-----------|
-| `max_executors: 64` | On an 80-core machine, leave ~16 cores for the event loop, OS, Kafka consumer, and sink I/O. Going higher adds contention without benefit. |
+| `max_executors: 16` | With fast tasks, the event-loop ceiling (~400 tasks/sec, see [Bottleneck: Event Loop](#bottleneck-event-loop)) binds before core count: ~400 x average task duration is all the slots one worker can drain. At p80=40ms that is ~16 slots — more would complete tasks faster than the loop can orchestrate. On a big machine, run several workers per host instead of one worker with a larger pool. |
 | `window_size: 200` | With fast tasks, larger windows let `arrange()` batch more messages per subprocess. Even without batching, larger windows reduce `arrange()` call frequency. |
 | `max_poll_records: 500` | Pull more messages per Kafka poll to keep partition queues full. Reduces poll overhead per message. |
 | `ws_min_duration_ms: 100` | Fast tasks flood the WebSocket and live UI. Hiding them reduces event loop work and browser rendering cost. |
