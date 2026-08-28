@@ -53,14 +53,29 @@ class KafkaSinkConfig(BaseModel):
     defaults to PLAINTEXT.
     """
 
-    topic: str
-    brokers: str = ''
-    ui_url: str = ''
+    topic: str = Field(description='Target Kafka topic for output messages.')
+    brokers: str = Field(
+        default='',
+        description=(
+            'Kafka brokers for this sink. Empty inherits kafka.brokers — and with it '
+            'kafka.security and kafka.client_config (same cluster, same credentials). '
+            'Setting brokers makes the sink self-contained with its own security block.'
+        ),
+    )
+    ui_url: str = Field(
+        default='',
+        description='URL to a web UI for this sink (e.g. Kafka-UI), shown as a link in the operator UI.',
+    )
 
     # Only consulted when ``brokers`` is set; an inheriting sink takes the
     # consumer's security instead. See ``resolve_kafka_client_settings``.
     security: KafkaSecurityConfig = Field(default_factory=KafkaSecurityConfig)
-    client_config: dict[str, str] = Field(default_factory=dict)
+    client_config: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            'Raw librdkafka properties for this sink, merged after security. Only consulted when brokers is set.'
+        ),
+    )
 
     flush_timeout_seconds: float = Field(
         default=30.0,
@@ -94,8 +109,8 @@ class PostgresSinkConfig(BaseModel):
         description='PostgreSQL connection string (asyncpg-compatible), typically embedding user and password.',
         json_schema_extra={'drakkar_secret': True},
     )
-    pool_min: int = Field(default=2, ge=1)
-    pool_max: int = Field(default=10, ge=1)
+    pool_min: int = Field(default=2, ge=1, description='Minimum connections in the asyncpg pool.')
+    pool_max: int = Field(default=10, ge=1, description='Maximum connections in the asyncpg pool.')
     statements: dict[str, str] = Field(
         default_factory=dict,
         description=(
@@ -108,7 +123,10 @@ class PostgresSinkConfig(BaseModel):
             'reach the statement text.'
         ),
     )
-    ui_url: str = ''
+    ui_url: str = Field(
+        default='',
+        description='URL to a database management UI (e.g. pgAdmin), shown as a link in the operator UI.',
+    )
 
     @field_validator('statements')
     @classmethod
@@ -169,8 +187,13 @@ class MongoStatementConfig(BaseModel):
     for the four substitution rules.
     """
 
-    collection: str = Field(description='Target MongoDB collection.')
-    op: MongoOp = Field(description='Which write operation to perform.')
+    collection: str = Field(description='Target MongoDB collection the statement writes to.')
+    op: MongoOp = Field(
+        description=(
+            'Which write operation to perform. Statements allow the update and delete ops only — '
+            'an insert is fully expressible as a declarative payload and needs no template.'
+        )
+    )
     filter: dict[str, Any] = Field(
         description='Equality-or-richer predicate selecting the documents to write. Must be non-empty.'
     )
@@ -205,7 +228,7 @@ class MongoSinkConfig(BaseModel):
         description='MongoDB connection string, typically embedding user and password.',
         json_schema_extra={'drakkar_secret': True},
     )
-    database: str
+    database: str = Field(description='Target database name.')
     statements: dict[str, MongoStatementConfig] = Field(
         default_factory=dict,
         description=(
@@ -218,7 +241,10 @@ class MongoSinkConfig(BaseModel):
             'position, where a value of {"$gt": ""} would match every document.'
         ),
     )
-    ui_url: str = ''
+    ui_url: str = Field(
+        default='',
+        description='URL to a MongoDB management UI (e.g. Mongo Express), shown as a link in the operator UI.',
+    )
 
     @field_validator('statements')
     @classmethod
@@ -281,17 +307,31 @@ class HttpSinkConfig(BaseModel):
     would leak cloud IAM credentials.
     """
 
-    url: str
-    method: str = 'POST'
-    timeout_seconds: int = Field(default=30, ge=1)
+    url: str = Field(
+        description=(
+            'Target URL for requests. Must be http:// or https:// with a non-empty host; '
+            'cloud metadata endpoints are refused at config load.'
+        )
+    )
+    method: str = Field(default='POST', description='HTTP method to use.')
+    timeout_seconds: int = Field(default=30, ge=1, description='Request timeout in seconds.')
     headers: dict[str, str] = Field(
         default_factory=dict,
         description='Extra request headers. May carry an Authorization value, so treated as secret as a whole.',
         json_schema_extra={'drakkar_secret': True},
     )
-    encoding: Literal['json', 'form', 'multipart'] = 'json'
-    max_retries: int = Field(default=3, ge=0)
-    ui_url: str = ''
+    encoding: Literal['json', 'form', 'multipart'] = Field(
+        default='json',
+        description=(
+            "Request body format: 'json', 'form' (urlencoded), or 'multipart'. "
+            'The Content-Type header always derives from it, so headers must not set one.'
+        ),
+    )
+    max_retries: int = Field(default=3, ge=0, description='Maximum retry attempts for failed HTTP requests.')
+    ui_url: str = Field(
+        default='',
+        description='URL to a related web UI, shown as a link in the operator UI.',
+    )
 
     @field_validator('url')
     @classmethod
@@ -340,7 +380,10 @@ class RedisSinkConfig(BaseModel):
         description='Redis connection URL, which may embed a password (redis://:password@host:port/db).',
         json_schema_extra={'drakkar_secret': True},
     )
-    key_prefix: str = ''
+    key_prefix: str = Field(
+        default='',
+        description="Prefix prepended to all keys (e.g. 'cache:' produces keys like 'cache:my-key').",
+    )
     scripts: dict[str, str] = Field(
         default_factory=dict,
         description=(
@@ -353,7 +396,10 @@ class RedisSinkConfig(BaseModel):
             'content cannot alter what runs.'
         ),
     )
-    ui_url: str = ''
+    ui_url: str = Field(
+        default='',
+        description='URL to a Redis management UI (e.g. RedisInsight), shown as a link in the operator UI.',
+    )
 
     @field_validator('scripts')
     @classmethod
@@ -385,8 +431,17 @@ class FileSinkConfig(BaseModel):
     paths are resolved relative to it and contained within it.
     """
 
-    base_path: str = Field(min_length=1)
-    ui_url: str = ''
+    base_path: str = Field(
+        min_length=1,
+        description=(
+            'Base directory for all writes. Payload paths resolve relative to it and must stay '
+            'contained within it — absolute or traversing paths are rejected.'
+        ),
+    )
+    ui_url: str = Field(
+        default='',
+        description='URL to a file browser or related UI, shown as a link in the operator UI.',
+    )
 
 
 class CircuitBreakerConfig(BaseModel):
@@ -533,12 +588,27 @@ class DLQConfig(BaseModel):
     same-cluster-means-same-credentials rule the Kafka sinks follow.
     """
 
-    topic: str = ''
-    brokers: str = ''
+    topic: str = Field(
+        default='',
+        description="DLQ Kafka topic name. Empty derives '{source_topic}_dlq' at runtime.",
+    )
+    brokers: str = Field(
+        default='',
+        description=(
+            'Kafka brokers for the DLQ producer. Empty inherits kafka.brokers — and with it '
+            'kafka.security and kafka.client_config, on the same same-cluster-means-same-'
+            'credentials rule the Kafka sinks follow.'
+        ),
+    )
 
     # Only consulted when ``brokers`` is set; see ``KafkaSinkConfig.security``.
     security: KafkaSecurityConfig = Field(default_factory=KafkaSecurityConfig)
-    client_config: dict[str, str] = Field(default_factory=dict)
+    client_config: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            'Raw librdkafka properties for the DLQ producer, merged after security. Only consulted when brokers is set.'
+        ),
+    )
 
     flush_timeout_seconds: float = Field(
         default=30.0,
@@ -570,4 +640,12 @@ class DLQConfig(BaseModel):
     # Either way the failure is loud: alert on
     # drakkar_dlq_send_failures_total and (for 'stall')
     # drakkar_delivery_stalled_offsets_total.
-    on_send_failure: Literal['drop', 'stall'] = 'drop'
+    on_send_failure: Literal['drop', 'stall'] = Field(
+        default='drop',
+        description=(
+            "Strategy when the DLQ write itself fails. 'drop' logs CRITICAL, counts the loss, "
+            "commits the offset, and keeps the pipeline moving; 'stall' leaves the offset "
+            'uncommitted and pauses the partition until restart — no loss, at the cost of '
+            'consumer lag.'
+        ),
+    )

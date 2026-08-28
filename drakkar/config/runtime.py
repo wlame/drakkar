@@ -15,7 +15,14 @@ class ExecutorConfig(BaseModel):
     task will fail with a clear error.
     """
 
-    binary_path: str | None = Field(default=None, min_length=1)
+    binary_path: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            'Default binary path for all tasks. None means each ExecutorTask returned by '
+            'arrange() must carry its own binary_path, otherwise the task fails with a clear error.'
+        ),
+    )
     env: dict[str, str] = Field(
         default_factory=dict,
         description=(
@@ -55,8 +62,18 @@ class ExecutorConfig(BaseModel):
             'Set to [] to fully trust the parent environment.'
         ),
     )
-    max_executors: int = Field(default=4, ge=1)
-    task_timeout_seconds: int = Field(default=120, ge=1)
+    max_executors: int = Field(
+        default=4,
+        ge=1,
+        description='Maximum concurrent subprocesses. Tasks beyond this limit wait in a queue.',
+    )
+    task_timeout_seconds: int = Field(
+        default=120,
+        ge=1,
+        description=(
+            'Wall-clock timeout (seconds) per subprocess. A process exceeding it is killed and treated as a failure.'
+        ),
+    )
     max_stdout_bytes: int = Field(
         default=0,
         ge=0,
@@ -78,8 +95,21 @@ class ExecutorConfig(BaseModel):
             'stderr stream; sets ExecutorResult.stderr_truncated on cut.'
         ),
     )
-    window_size: int = Field(default=100, ge=1)
-    max_retries: int = Field(default=3, ge=0)
+    window_size: int = Field(
+        default=100,
+        ge=1,
+        description=(
+            'Maximum messages collected per arrange() window. Larger windows allow more '
+            'batching in arrange(); smaller windows reduce latency.'
+        ),
+    )
+    max_retries: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            'Maximum retry attempts per failed task (0 = no retries). A task runs at most max_retries + 1 times.'
+        ),
+    )
     drain_timeout_seconds: int = Field(
         default=30,
         ge=1,
@@ -92,15 +122,37 @@ class ExecutorConfig(BaseModel):
             'committed (those messages will replay on restart — at-least-once).'
         ),
     )
-    backpressure_high_multiplier: int = Field(default=32, ge=1)
-    backpressure_low_multiplier: int = Field(default=4, ge=1)
+    backpressure_high_multiplier: int = Field(
+        default=32,
+        ge=1,
+        description=(
+            'Pause threshold multiplier: Kafka consumption pauses when total queued messages '
+            'reach max_executors * this value.'
+        ),
+    )
+    backpressure_low_multiplier: int = Field(
+        default=4,
+        ge=1,
+        description=(
+            'Resume threshold multiplier: Kafka consumption resumes when total queued messages '
+            'drop to max(1, max_executors * this value).'
+        ),
+    )
 
 
 class MetricsConfig(BaseModel):
     """Prometheus metrics settings."""
 
-    enabled: bool = True
-    port: int = Field(default=9090, ge=1, le=65535)
+    enabled: bool = Field(
+        default=True,
+        description='Serve Prometheus metrics over HTTP.',
+    )
+    port: int = Field(
+        default=9090,
+        ge=1,
+        le=65535,
+        description='Port for the Prometheus metrics endpoint.',
+    )
     task_label_histograms: list[str] = Field(
         default_factory=list,
         description=(
@@ -162,7 +214,13 @@ class RuntimeHealthConfig(BaseModel):
     only runs during a stall or on an explicit debug-UI request.
     """
 
-    enabled: bool = True
+    enabled: bool = Field(
+        default=True,
+        description=(
+            'Run the runtime health monitor: heartbeat lag tracking, stall stack sampling, '
+            "and the data behind the debug UI's Runtime tab."
+        ),
+    )
     tick_seconds: float = Field(
         default=0.25,
         gt=0.01,
@@ -313,8 +371,18 @@ class OffloadConfig(BaseModel):
 class LoggingConfig(BaseModel):
     """Structured logging settings."""
 
-    level: str = 'INFO'
-    format: str = Field(default='json', pattern='^(json|console)$')
+    level: str = Field(
+        default='INFO',
+        description='Log level: DEBUG, INFO, WARNING, ERROR, or CRITICAL.',
+    )
+    format: str = Field(
+        default='json',
+        pattern='^(json|console)$',
+        description=(
+            "Output format. 'json' produces machine-readable structured logs; "
+            "'console' produces colorized human-readable output for local development."
+        ),
+    )
     output: str = Field(
         default='stderr',
         description=(

@@ -175,6 +175,18 @@ def test_app_field_is_excluded_from_metadata_and_artifact_is_unchanged():
     assert ARTIFACT_PATH.read_text() == fresh
 
 
+def test_every_entry_carries_a_description():
+    """No config field ships without a ``Field(description=...)``.
+
+    The Configs debug tab renders the description column from this
+    catalogue; a blank entry there is a regression, not a choice.
+    """
+    missing = [
+        entry.path for group in build_config_metadata().groups for entry in group.entries if not entry.description
+    ]
+    assert missing == [], f'config fields without Field(description=...): {missing}'
+
+
 def test_every_leaf_field_appears_exactly_once():
     expected_paths = _independent_leaf_paths(DrakkarConfig)
     metadata = build_config_metadata()

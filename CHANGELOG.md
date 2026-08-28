@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Every config field now has a description on the Debug -> Config page.**
+  All 195 fields in the config catalogue carry a `Field(description=...)`;
+  before, 96 showed an empty description cell. A new test keeps the
+  catalogue at full coverage. No key, default, or env name changed.
+
 - **Documented a realistic per-worker task-rate ceiling.** The
   performance guide, FAQ, and config calculator now plan for at most
   ~400 tasks/s per worker instead of the earlier 4k-8k claim. The rate

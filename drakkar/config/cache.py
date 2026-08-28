@@ -22,10 +22,20 @@ class CachePeerSyncConfig(BaseModel):
     expose later if someone actually needs it.
     """
 
-    enabled: bool = True
-    interval_seconds: float = Field(default=30.0, gt=0)
-    batch_size: int = Field(default=500, ge=1)
-    timeout_seconds: float = Field(default=5.0, gt=0)
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Pull cache entries from sibling workers' cache DBs on a periodic loop. "
+            'Off, flush and cleanup still run but nothing propagates across workers.'
+        ),
+    )
+    interval_seconds: float = Field(default=30.0, gt=0, description='Seconds between peer-sync cycles.')
+    batch_size: int = Field(default=500, ge=1, description='Maximum rows pulled from one peer per sync cycle.')
+    timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description='Per-peer time budget (seconds) within one sync cycle.',
+    )
     # ``cycle_deadline_seconds`` is a hard wall-clock cap on one peer-sync
     # cycle. Without this bound, a single slow peer (NFS lag, disk
     # contention, unresponsive remote) could keep ``_sync_once`` in flight
@@ -87,12 +97,32 @@ class CacheConfig(BaseModel):
       silently disabled (autodiscovery needs ``store_config``)
     """
 
-    enabled: bool = False
-    # empty → engine init falls back to debug.db_dir. Kept empty in config layer
+    enabled: bool = Field(
+        default=False,
+        description=(
+            'Give every handler a self.cache key/value store, memory-backed with '
+            'write-behind SQLite. Off, the handler cache API is absent.'
+        ),
+    )
+    # empty → engine init falls back to ui.recorder.db_dir. Kept empty in config layer
     # so the config is pure data — resolution happens when the engine spins up.
-    db_dir: str = ''
-    flush_interval_seconds: float = Field(default=3.0, gt=0)
-    cleanup_interval_seconds: float = Field(default=60.0, gt=0)
+    db_dir: str = Field(
+        default='',
+        description=(
+            'Directory for the cache SQLite file. Empty falls back to ui.recorder.db_dir; '
+            'with neither set, the cache warns at startup and disables itself.'
+        ),
+    )
+    flush_interval_seconds: float = Field(
+        default=3.0,
+        gt=0,
+        description='Seconds between write-behind flushes of dirty entries to SQLite.',
+    )
+    cleanup_interval_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description='Seconds between cleanup passes deleting expired rows and refreshing DB-size gauges.',
+    )
     # Cap for in-memory LRU entries. Default 10_000 prevents unbounded growth
     # under write-heavy workloads. Set to None for explicitly unbounded cache;
     # the engine will warn at startup so operators see the intentional choice.

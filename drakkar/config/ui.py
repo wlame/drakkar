@@ -73,11 +73,42 @@ class UIRecorderConfig(BaseModel):
             )
         return self
 
-    db_dir: str = '/tmp'
-    store_events: bool = True
-    store_config: bool = True
-    store_state: bool = True
-    state_sync_interval_seconds: int = Field(default=10, ge=1)
+    db_dir: str = Field(
+        default='/tmp',
+        description=(
+            'Directory for the recorder SQLite files. Empty runs memory-only: no files, no '
+            'history — the live WebSocket view keeps working. Use a shared filesystem for '
+            'cross-worker autodiscovery and merge.'
+        ),
+    )
+    store_events: bool = Field(
+        default=True,
+        description=(
+            'Write processing events to the events table. Off, the live WebSocket view still '
+            'streams, but History, Trace, and task queries return nothing.'
+        ),
+    )
+    store_config: bool = Field(
+        default=True,
+        description=(
+            'Write the worker config snapshot to the worker_config table — what makes the '
+            'worker discoverable by peers sharing the same db_dir.'
+        ),
+    )
+    store_state: bool = Field(
+        default=True,
+        description=(
+            'Periodically snapshot worker counters (uptime, partitions, pool utilization, '
+            'queue depth) to the worker_state table.'
+        ),
+    )
+    state_sync_interval_seconds: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            'Seconds between worker_state snapshots — also the heartbeat cadence worker liveness is judged by.'
+        ),
+    )
     rotation_interval_hours: int = Field(default=1, ge=1, description='How often to roll over to a new SQLite file.')
     archive_enabled: bool = Field(
         default=True,
@@ -120,7 +151,10 @@ class UIRecorderConfig(BaseModel):
             'cache (first boot over a pre-existing directory).'
         ),
     )
-    store_output: bool = True
+    store_output: bool = Field(
+        default=True,
+        description='Store subprocess stdout/stderr content in task events. Off drops output content from all of them.',
+    )
     store_stdin: bool = Field(
         default=False,
         description=(
@@ -141,8 +175,19 @@ class UIRecorderConfig(BaseModel):
             'stdin_truncated in the event metadata.'
         ),
     )
-    flush_interval_seconds: int = Field(default=5, ge=1)
-    max_buffer: int = Field(default=50_000, ge=1000)
+    flush_interval_seconds: int = Field(
+        default=5,
+        ge=1,
+        description='Seconds between recorder buffer flushes to SQLite.',
+    )
+    max_buffer: int = Field(
+        default=50_000,
+        ge=1000,
+        description=(
+            'In-memory event buffer capacity. When full, the oldest events are evicted and '
+            'counted in drakkar_recorder_dropped_events_total.'
+        ),
+    )
     # Maximum consecutive ``OperationalError`` failures tolerated on a single
     # batch before the recorder gives up and drops it. On each failure the
     # batch is re-queued at the front of the buffer so the next flush tick
@@ -150,9 +195,27 @@ class UIRecorderConfig(BaseModel):
     # ``drakkar_recorder_flush_batches_dropped_total`` counter ticks. Default
     # 3 matches the cache engine's retry budget and keeps a persistent DB
     # outage from leaking the buffer indefinitely.
-    max_flush_retries: int = Field(default=3, ge=1)
-    event_min_duration_ms: int = Field(default=0, ge=0)
-    output_min_duration_ms: int = Field(default=500, ge=0)
+    max_flush_retries: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            'Consecutive failed flush attempts tolerated per batch before it is dropped '
+            '(counted in drakkar_recorder_flush_batches_dropped_total).'
+        ),
+    )
+    event_min_duration_ms: int = Field(
+        default=0,
+        ge=0,
+        description='Minimum task duration (ms) to persist a task event at all. 0 persists everything.',
+    )
+    output_min_duration_ms: int = Field(
+        default=500,
+        ge=0,
+        description=(
+            'Minimum task duration (ms) to include args/stdout/stderr in the persisted event. '
+            'Faster tasks keep their row without output data.'
+        ),
+    )
     # Handler annotations — diagnostic records a handler attaches to a window,
     # message, or task from inside a hook (see drakkar.annotations). They are
     # stored as ordinary rows in the events table, alongside everything else
@@ -164,14 +227,34 @@ class UIRecorderConfig(BaseModel):
     # hook invocation can add to the DB in total — without the latter, a handler
     # annotating every message of a wide window can flood the events table
     # with low-value rows.
-    annotations_enabled: bool = True
-    annotation_max_bytes: int = Field(default=16_384, ge=0)
-    annotation_max_bytes_per_call: int = Field(default=262_144, ge=0)
+    annotations_enabled: bool = Field(
+        default=True,
+        description='Accept handler annotations (self.annotate(...)) and write them to the events table.',
+    )
+    annotation_max_bytes: int = Field(
+        default=16_384,
+        ge=0,
+        description='Byte cap for one annotation payload; larger payloads are dropped whole. 0 disables the cap.',
+    )
+    annotation_max_bytes_per_call: int = Field(
+        default=262_144,
+        ge=0,
+        description=(
+            'Total annotation bytes one hook invocation may write; further payloads past it '
+            'are dropped. 0 disables the cap.'
+        ),
+    )
     # Cap on the payload copy written to the warning log when a record is
     # dropped. Higher than the row itself is pointless; lower is fine. Log
     # lines usually ship to a metered aggregator, so an uncapped copy can cost
     # more than the row it replaced.
-    annotation_log_max_bytes: int = Field(default=2048, ge=0)
+    annotation_log_max_bytes: int = Field(
+        default=2048,
+        ge=0,
+        description=(
+            'Cap on the payload copy included in the warning log when an annotation is dropped. 0 disables the cap.'
+        ),
+    )
 
 
 class UIReleaseConfig(BaseModel):
@@ -348,11 +431,37 @@ class TimelineLabels(BaseModel):
 
     model_config = ConfigDict(extra='forbid')
 
-    tag: str = ''
-    caption: str = ''
-    highlight: str = ''
-    filter: str = ''
-    marker: str = ''
+    tag: str = Field(
+        default='',
+        description="Label whose value draws as a short chip at the task bar's right edge (truncated to 16 chars).",
+    )
+    caption: str = Field(
+        default='',
+        description=(
+            "Label whose value draws at the task bar's left edge, in the space the tag "
+            'leaves over (truncated to 32 chars).'
+        ),
+    )
+    highlight: str = Field(
+        default='',
+        description=(
+            'Numeric label bound to the toolbar threshold input: tasks at or above the '
+            'typed value are emphasized, the rest dimmed.'
+        ),
+    )
+    filter: str = Field(
+        default='',
+        description=(
+            'String label bound to the toolbar text input: tasks whose value contains the '
+            'typed text are emphasized, the rest dimmed.'
+        ),
+    )
+    marker: str = Field(
+        default='',
+        description=(
+            'Label that draws one vertical pin above the strip per distinct value — e.g. a batch or request id.'
+        ),
+    )
 
 
 class UITimelineConfig(BaseModel):
@@ -454,12 +563,18 @@ class UIConfig(BaseModel):
     Every field is overridable through ``DK_UI__*`` environment variables.
     """
 
-    enabled: bool = True
+    enabled: bool = Field(
+        default=True,
+        description=(
+            'Enable the whole UI feature: the server, flight-recorder persistence, and '
+            'bundle serving. Off skips all of it.'
+        ),
+    )
     host: str = Field(
         default='127.0.0.1',
         description='Bind address for the UI server. Use 0.0.0.0 to expose on all interfaces.',
     )
-    port: int = Field(default=8080, ge=1, le=65535)
+    port: int = Field(default=8080, ge=1, le=65535, description='Port for the UI server.')
     auth_token: str = Field(
         default='',
         description=(
@@ -570,15 +685,64 @@ class UIConfig(BaseModel):
             'healthy worker never flaps offline between heartbeats.'
         ),
     )
-    expose_env_vars: list[str] = Field(default_factory=list)
-    max_rows: int = Field(default=5000, ge=100)
-    log_min_duration_ms: int = Field(default=500, ge=0)
-    ws_min_duration_ms: int = Field(default=500, ge=0)
-    prometheus_url: str = ''
-    prometheus_rate_interval: str = '5m'
-    prometheus_worker_label: str = ''
-    prometheus_cluster_label: str = ''
-    custom_links: list[dict[str, str]] = Field(default_factory=list)
+    expose_env_vars: list[str] = Field(
+        default_factory=list,
+        description=(
+            'Environment variable names captured into the worker_config snapshot — for '
+            'recording deployment metadata like GIT_SHA or K8S_POD_NAME.'
+        ),
+    )
+    max_rows: int = Field(
+        default=5000,
+        ge=100,
+        description='Maximum rows returned to the web UI in list views.',
+    )
+    log_min_duration_ms: int = Field(
+        default=500,
+        ge=0,
+        description=(
+            'Minimum task duration (ms) to emit a slow_task_completed / slow_task_failed log line. 0 logs all tasks.'
+        ),
+    )
+    ws_min_duration_ms: int = Field(
+        default=500,
+        ge=0,
+        description=(
+            'Minimum task duration (ms) to broadcast to the live UI over WebSocket. Failed '
+            'tasks always appear. 0 shows all tasks.'
+        ),
+    )
+    prometheus_url: str = Field(
+        default='',
+        description='Base URL of the Prometheus server used for UI links. Empty shows no Prometheus links.',
+    )
+    prometheus_rate_interval: str = Field(
+        default='5m',
+        description="Rate interval used in PromQL rate() expressions in UI links (e.g. '1m', '5m', '15m').",
+    )
+    prometheus_worker_label: str = Field(
+        default='',
+        description=(
+            'PromQL label filter for worker-scoped queries, with {worker_id}, {cluster_name}, '
+            '{metrics_port}, and {debug_port} template variables. Empty defaults to '
+            'instance="{hostname}:{metrics_port}".'
+        ),
+    )
+    prometheus_cluster_label: str = Field(
+        default='',
+        description=(
+            'PromQL label filter for cluster-wide queries, same template variables as '
+            'prometheus_worker_label. Empty hides cluster-wide links.'
+        ),
+    )
+    custom_links: list[dict[str, str]] = Field(
+        default_factory=list,
+        description=(
+            'Custom links shown in the dashboard navigation. Each entry is a dict with name '
+            'and url keys; url supports the {worker_id}, {cluster_name}, {metrics_port}, and '
+            '{debug_port} template variables.'
+        ),
+    )
     link_bases: dict[str, str] = Field(
         default_factory=dict,
         description=(

@@ -64,16 +64,51 @@ class WebAppConfig(BaseModel):
     See ``docs/webapp.md`` for the full feature guide.
     """
 
-    enabled: bool = False
-    host: str = '0.0.0.0'
-    port: int = 8090
-    path: str = '/process'
-    sinks_enabled: bool = False
-    request_timeout_seconds: float = 30.0
-    max_concurrent: int = 64
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Run the synchronous HTTP ingress. Off, no server starts and the handler's HTTP hooks are never invoked."
+        ),
+    )
+    host: str = Field(
+        default='0.0.0.0',
+        description="Interface the webapp binds. Use '127.0.0.1' to keep the endpoint host-local.",
+    )
+    port: int = Field(
+        default=8090,
+        description='Port the webapp binds. Not shared with the operator UI or the metrics server.',
+    )
+    path: str = Field(
+        default='/process',
+        description="The single POST route the webapp registers. Must start with '/' and name a non-empty route.",
+    )
+    sinks_enabled: bool = Field(
+        default=False,
+        description=(
+            'Call on_message_complete() after the executor fan-out and route returned payloads '
+            'through the sinks. Off, sinks are skipped and the response carries sinks: null.'
+        ),
+    )
+    request_timeout_seconds: float = Field(
+        default=30.0,
+        description=(
+            'Per-request budget in seconds. On timeout the client receives a 504 with '
+            "status='timeout' and remaining pipeline work is cooperatively cancelled."
+        ),
+    )
+    max_concurrent: int = Field(
+        default=64,
+        description='Cap on in-flight HTTP requests. Requests beyond it receive an immediate 503 instead of queuing.',
+    )
     # Cap on a single POST body (bytes); requests beyond it get a 413
     # ``request_too_large`` envelope before the body is buffered.
-    max_body_bytes: int = 10 * 1024 * 1024
+    max_body_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        description=(
+            'Cap on a single POST body (bytes), counted from the stream so a lying '
+            'Content-Length cannot bypass it. Oversized requests receive 413 before parsing.'
+        ),
+    )
     clients: list[WebClientConfig] = Field(
         default_factory=lambda: [WebClientConfig(name='anonymous', token='', rpm=4)],
         description=(
