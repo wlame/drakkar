@@ -57,30 +57,67 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: lint
+    # The experimental lane may fail for reasons that are not ours (missing
+    # cp-next wheels, interpreter bugs in the RC); it reports, never gates.
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.13", "3.14"]
+        experimental: [false]
+        include:
+          # Experimental: the next CPython, from its release candidate.
+          # Needs a newer uv than the pin above — 0.11.32 predates the
+          # python-build-standalone release that carries 3.15.0rc1.
+          - python-version: "3.15.0rc1"
+            experimental: true
+            uv-version: "0.12.7"
+    env:
+      # Pin every uv invocation (sync, run) to the lane's interpreter, so a
+      # pre-release lane cannot silently fall back to a stable interpreter.
+      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "0.11.32"
+          version: ${{ matrix.uv-version || '0.11.32' }}
 
       - uses: extractions/setup-just@v4
 
       - name: Set up Python
         run: uv python install ${{ matrix.python-version }}
 
+      # No cp-next wheels exist during the RC phase, so C extensions build
+      # from source; confluent-kafka needs the librdkafka headers for that
+      # (the compilers themselves are preinstalled on the runner).
+      - name: Install C-extension build dependencies
+        if: matrix.experimental
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends librdkafka-dev
+
       - name: Install dependencies
+        if: ${{ !matrix.experimental }}
         run: just install
+
+      # Without extras: orjson (the perf extra) is Rust and routinely lags
+      # new interpreters; the lane measures Drakkar, not its optional deps.
+      - name: Install dependencies without extras
+        if: matrix.experimental
+        run: just install-minimal
 
       - name: Type check with ty
         if: matrix.python-version == '3.14'
         run: just typecheck
 
       - name: Run tests with coverage
+        if: ${{ !matrix.experimental }}
         run: just cover
+
+      # Plain test run: the question here is "does Drakkar work on the next
+      # CPython", and a coverage floor would only add noise to the answer.
+      - name: Run tests without the coverage gate
+        if: matrix.experimental
+        run: just test
 
       - name: Upload coverage artifact
         if: matrix.python-version == '3.14'

@@ -49,7 +49,7 @@ Any language. The executor launches a subprocess and communicates via stdin/stdo
 
 ### Why Python 3.13+?
 
-The floor is driven by **PEP 695 generic syntax** used across the codebase (e.g. `async def get[T: BaseModel](...)` in `drakkar/cache_memory.py`). That syntax parses only on 3.12+, and Drakkar stabilized it on 3.13 where the type parameter machinery is mature and ty / mypy handle it cleanly. Python 3.14 is also supported (the package classifiers list both). Dropping the 3.13 floor would mean rewriting those signatures to the `TypeVar` / `Generic[T]` form — doable, but not planned pre-1.0.
+The floor is driven by **PEP 695 generic syntax** used across the codebase (e.g. `async def get[T: BaseModel](...)` in `drakkar/cache_memory.py`). That syntax parses only on 3.12+, and Drakkar stabilized it on 3.13 where the type parameter machinery is mature and ty / mypy handle it cleanly. Python 3.14 is also supported (the package classifiers list both), and CI runs a non-blocking lane against the next CPython's release candidate so compatibility problems surface before that version ships. Dropping the 3.13 floor would mean rewriting those signatures to the `TypeVar` / `Generic[T]` form — doable, but not currently planned.
 
 ---
 

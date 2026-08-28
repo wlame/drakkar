@@ -1,4 +1,7 @@
-FROM python:3.13-slim
+# Overridable so the harness can run on a release-candidate interpreter
+# (e.g. python:3.15-rc-slim); the default is the stable lane's image.
+ARG PYTHON_IMAGE=python:3.13-slim
+FROM ${PYTHON_IMAGE}
 
 WORKDIR /app
 

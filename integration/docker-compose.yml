@@ -148,6 +148,9 @@ services:
     build:
       context: ..
       dockerfile: integration/worker/Dockerfile
+      args:
+        PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
+        EXTRA_APT: ${HARNESS_EXTRA_APT:-}
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -199,6 +202,9 @@ services:
     build:
       context: ..
       dockerfile: integration/worker/Dockerfile
+      args:
+        PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
+        EXTRA_APT: ${HARNESS_EXTRA_APT:-}
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -233,6 +239,9 @@ services:
     build:
       context: ..
       dockerfile: integration/worker/Dockerfile
+      args:
+        PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
+        EXTRA_APT: ${HARNESS_EXTRA_APT:-}
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -263,6 +272,9 @@ services:
     build:
       context: ..
       dockerfile: integration/fast-worker/Dockerfile
+      args:
+        PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
+        EXTRA_APT: ${HARNESS_EXTRA_APT:-}
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -283,6 +295,9 @@ services:
     build:
       context: ..
       dockerfile: integration/fast-worker/Dockerfile
+      args:
+        PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
+        EXTRA_APT: ${HARNESS_EXTRA_APT:-}
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -305,6 +320,9 @@ services:
     build:
       context: ..
       dockerfile: integration/infra/Dockerfile.producer
+      args:
+        PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
+        EXTRA_APT: ${HARNESS_EXTRA_APT:-}
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -329,6 +347,8 @@ services:
     build:
       context: ./load_generator
       dockerfile: Dockerfile
+      args:
+        PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
     depends_on:
       worker-1:
         condition: service_healthy
@@ -354,6 +374,8 @@ services:
     build:
       context: ./load_generator
       dockerfile: Dockerfile
+      args:
+        PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
     depends_on:
       worker-1:
         condition: service_healthy

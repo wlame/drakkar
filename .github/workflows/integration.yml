@@ -21,9 +21,31 @@ concurrency:
 
 jobs:
   harness:
+    name: harness (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The experimental lane may fail for reasons that are not ours (missing
+    # cp-next wheels, interpreter bugs in the RC); it reports, never gates.
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: stable
+            experimental: false
+          # Experimental: every harness image rebuilt on the next CPython's
+          # release-candidate Docker image. C extensions have no cp-next
+          # wheels during the RC phase, so the images compile them from
+          # source — hence the extra apt packages.
+          - name: python-3.15-rc
+            experimental: true
+            python-image: "python:3.15-rc-slim"
+            extra-apt: "build-essential librdkafka-dev"
     env:
+      # Read by docker-compose.yml as image build args; empty values mean
+      # the stable defaults baked into the Dockerfiles.
+      HARNESS_PYTHON_IMAGE: ${{ matrix.python-image || '' }}
+      HARNESS_EXTRA_APT: ${{ matrix.extra-apt || '' }}
       # Small corpus on purpose. The default 5000 (x2 with the flood phase)
       # takes far longer than this job's budget, and the delivery checks are
       # just as conclusive on 300 requests: they compare against the exact

@@ -83,10 +83,16 @@ just replay-dlq -- --help       # DLQ replay tool (docs: sinks.md#dlq-replay)
 
 ## CI layout
 
-Three workflows in `.github/workflows/`, all driving the justfile:
+Four workflows in `.github/workflows/`, all driving the justfile:
 
 | Workflow | Trigger | Recipes |
 |----------|---------|---------|
-| `ci.yml` | push / PR to `main` | `fmt-check`, `lint`, then per Python (3.13, 3.14): `install`, `typecheck` (3.14 only), `cover` |
+| `ci.yml` | push / PR to `main` | `fmt-check`, `lint`, then per Python (3.13, 3.14): `install`, `typecheck` (3.14 only), `cover` — plus a non-blocking lane on the next CPython's release candidate running `install-minimal` + `test` |
+| `integration.yml` | nightly cron / manual | the Docker harness: `integration-up`, readiness + delivery verification, `integration-down` — on the stable images, plus a non-blocking lane rebuilding every image on the next CPython's `-rc` Docker image |
 | `release.yml` | GitHub Release published | same gates + tag-vs-`just version` check + `build` + PyPI publish |
 | `docs.yml` | docs changes on `main` | `docs-build` + GitHub Pages deploy |
+
+The release-candidate lanes are experimental by design: they surface breakage
+on the next CPython months early (missing wheels force C extensions to build
+from source there), and `continue-on-error` keeps them from ever gating a
+merge or a release.

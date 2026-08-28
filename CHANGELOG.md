@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Experimental CI lanes on the next CPython release candidate.** The unit
+  suite runs on Python 3.15.0rc1 and the integration harness rebuilds its
+  images on `python:3.15-rc-slim`. Both lanes are non-blocking
+  (`continue-on-error`): they report early breakage and never gate a merge.
+  Supported versions stay 3.13 and 3.14.
+
 ### Changed
 
 - **Every config field now has a description on the Debug -> Config page.**

@@ -19,6 +19,11 @@ default:
 install:
     uv sync --extra=perf
 
+# Install dependencies without optional extras (the experimental-CPython CI
+# lane: extras with native code may not build on a release candidate yet)
+install-minimal:
+    uv sync
+
 # ---------------------------------------------------------------------------
 # Quality gates
 # ---------------------------------------------------------------------------
