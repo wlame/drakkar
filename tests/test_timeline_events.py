@@ -1,0 +1,123 @@
+"""Emitter tests: validation, drop paths, and the pinned wire envelope."""
+
+from datetime import UTC, datetime
+
+import pytest
+
+from drakkar.annotations import Annotator
+from drakkar.config import TimelineEventType
+from drakkar.hookctx import bind_hook_context, clear_hook_context
+from drakkar.timeline_events import (
+    NoOpTimelineEventEmitter,
+    TimelineEventEmitter,
+    TimelineMatch,
+)
+
+
+class RecordingSink:
+    """Stub recorder capturing what the annotator writes; mock target is the framework seam, not the code under test."""
+
+    def __init__(self):
+        self.records = []
+
+    def record_annotation(self, **kwargs):
+        self.records.append(kwargs)
+
+
+def _emitter(sink: RecordingSink, *decls: dict) -> TimelineEventEmitter:
+    types = {}
+    for d in decls:
+        t = TimelineEventType.model_validate(d)
+        types[t.name] = t
+    return TimelineEventEmitter(Annotator(sink), types)
+
+
+def _marker(**over) -> dict:
+    base = {'name': 'deploy', 'kind': 'marker', 'color': 'purple'}
+    base.update(over)
+    return base
+
+
+@pytest.fixture
+def window_ctx():
+    token = bind_hook_context(hook='on_message_complete', partition=0, window_id=41, offsets=(1200, 1201))
+    yield
+    clear_hook_context(token)
+
+
+def test_emitted_envelope_matches_the_pinned_wire_bytes(window_ctx):
+    sink = RecordingSink()
+    _emitter(sink, _marker()).emit(
+        'deploy', text='v2.1', ts=datetime.fromtimestamp(1756350000, tz=UTC), values={'sha': 'ab12f'}
+    )
+    assert len(sink.records) == 1
+    # encode_json (drakkar/recorder/helpers.py) applies OPT_SORT_KEYS, so the
+    # wire order is alphabetical regardless of payload construction order.
+    assert sink.records[0]['metadata_json'] == (
+        '{"data":{"end_ts_ms":null,"match":null,"text":"v2.1","ts_ms":1756350000000,'
+        '"type":"deploy","values":{"sha":"ab12f"}},"hook":"on_message_complete",'
+        '"kind":"timeline_event","offsets":[1200,1201],"scope":"window","window_id":41}'
+    )
+
+
+def test_unknown_type_drops_without_raising(window_ctx):
+    sink = RecordingSink()
+    _emitter(sink, _marker()).emit('not_declared')
+    assert sink.records == []
+
+
+def test_disabled_type_is_a_silent_noop(window_ctx):
+    sink = RecordingSink()
+    _emitter(sink, _marker(enabled=False)).emit('deploy')
+    assert sink.records == []
+
+
+def test_range_requires_end_ts(window_ctx):
+    sink = RecordingSink()
+    emitter = _emitter(sink, _marker(name='span', kind='range'))
+    emitter.emit('span')  # no end_ts -> bad_shape drop
+    assert sink.records == []
+    emitter.emit('span', ts=datetime.fromtimestamp(10, tz=UTC), end_ts=datetime.fromtimestamp(20, tz=UTC))
+    assert len(sink.records) == 1
+
+
+def test_end_ts_on_a_marker_drops(window_ctx):
+    sink = RecordingSink()
+    _emitter(sink, _marker()).emit('deploy', end_ts=datetime.now(tz=UTC))
+    assert sink.records == []
+
+
+def test_end_before_start_drops(window_ctx):
+    sink = RecordingSink()
+    _emitter(sink, _marker(name='span', kind='range')).emit(
+        'span', ts=datetime.fromtimestamp(20, tz=UTC), end_ts=datetime.fromtimestamp(10, tz=UTC)
+    )
+    assert sink.records == []
+
+
+def test_highlight_action_autofills_window_match(window_ctx):
+    sink = RecordingSink()
+    _emitter(sink, _marker(action='highlight')).emit('deploy')
+    import json
+
+    envelope = json.loads(sink.records[0]['metadata_json'])
+    assert envelope['data']['match'] == {'window_id': 41}
+
+
+def test_match_with_two_fields_drops(window_ctx):
+    sink = RecordingSink()
+    _emitter(sink, _marker(action='highlight')).emit('deploy', match=TimelineMatch(window_id=1, label=('k', 'v')))
+    assert sink.records == []
+
+
+def test_offsets_match_wire_shape(window_ctx):
+    sink = RecordingSink()
+    _emitter(sink, _marker(action='filter')).emit('deploy', match=TimelineMatch(offsets=((0, 1200), (0, 1201))))
+    import json
+
+    envelope = json.loads(sink.records[0]['metadata_json'])
+    assert envelope['data']['match'] == {'offsets': [[0, 1200], [0, 1201]]}
+
+
+def test_noop_emitter_swallows_everything():
+    NoOpTimelineEventEmitter().emit('anything')  # must not raise

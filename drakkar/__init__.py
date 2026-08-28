@@ -39,6 +39,7 @@ from drakkar.models import (
 from drakkar.periodic import periodic
 from drakkar.probe import probe_field
 from drakkar.timefmt import format_rfc3339_micro
+from drakkar.timeline_events import NoOpTimelineEventEmitter, TimelineEventEmitter, TimelineMatch
 from drakkar.utils import make_request_id
 from drakkar.webapp import SinkDeliverySummary, WebReport, WebRequestContext
 
@@ -64,6 +65,7 @@ __all__ = [
     'MessageGroup',
     'MessageParseError',
     'MongoPayload',
+    'NoOpTimelineEventEmitter',
     'ParseFailurePayload',
     'PendingContext',
     'PostgresOp',
@@ -75,6 +77,8 @@ __all__ = [
     'SinkDeliverySummary',
     'SourceMessage',
     'TaskOrigin',
+    'TimelineEventEmitter',
+    'TimelineMatch',
     'WebAppConfig',
     'WebClientConfig',
     'WebReport',
