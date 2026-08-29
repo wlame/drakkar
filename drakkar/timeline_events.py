@@ -56,7 +56,7 @@ REASON_BAD_SHAPE = 'bad_shape'
 
 # Click behaviors that correlate the event with a set of tasks, so they
 # need a match — either given explicitly or auto-filled from the current
-# window.
+# hook's offsets.
 _MATCH_ACTIONS = frozenset({'highlight', 'filter'})
 
 
@@ -121,7 +121,7 @@ class TimelineEventEmitter:
             values: Extra instance data available to link templates.
             match: Which tasks this event correlates with, for
                 ``action=highlight``/``action=filter`` types. Auto-filled
-                from the current window when omitted.
+                from the current hook's offsets when omitted.
         """
         decl = self._types.get(type_name)
         if decl is None:
@@ -149,8 +149,14 @@ class TimelineEventEmitter:
 
         if match is None and decl.action in _MATCH_ACTIONS:
             ctx = current_hook_context()
-            if ctx is not None and ctx.window_id is not None:
-                match = TimelineMatch(window_id=ctx.window_id)
+            # Auto-fill from offsets, not window_id: the UI's task view has
+            # no window field to correlate against, so a window-id match
+            # would highlight nothing. Offsets are what the task view can
+            # actually resolve.
+            if ctx is not None and ctx.offsets:
+                match = TimelineMatch(offsets=tuple((ctx.partition, o) for o in ctx.offsets))
+            elif ctx is not None and ctx.offset is not None:
+                match = TimelineMatch(offsets=((ctx.partition, ctx.offset),))
             else:
                 self._drop(
                     REASON_BAD_SHAPE,

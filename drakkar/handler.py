@@ -634,7 +634,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
             values: Extra instance data available to link templates.
             match: Which tasks this event correlates with, for
                 ``action=highlight``/``action=filter`` types. Auto-filled
-                from the current window when omitted.
+                from the current hook's offsets when omitted.
         """
         self._timeline_events.emit(type_name, text, ts=ts, end_ts=end_ts, values=values, match=match)
 

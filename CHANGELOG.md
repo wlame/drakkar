@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`timeline_event` highlight/filter matches auto-fill from offsets, not
+  window id.** The task view has no window field to correlate against, so
+  an auto-filled window-id match highlighted nothing. Explicit
+  `match=TimelineMatch(window_id=...)` still works unchanged.
+
 - **Every config field now has a description on the Debug -> Config page.**
   All 195 fields in the config catalogue carry a `Field(description=...)`;
   before, 96 showed an empty description cell. A new test keeps the

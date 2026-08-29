@@ -45,6 +45,13 @@ def window_ctx():
     clear_hook_context(token)
 
 
+@pytest.fixture
+def no_offsets_ctx():
+    token = bind_hook_context(hook='on_message_complete', partition=0, offsets=(), offset=None)
+    yield
+    clear_hook_context(token)
+
+
 def test_emitted_envelope_matches_the_pinned_wire_bytes(window_ctx):
     sink = RecordingSink()
     _emitter(sink, _marker()).emit(
@@ -95,13 +102,19 @@ def test_end_before_start_drops(window_ctx):
     assert sink.records == []
 
 
-def test_highlight_action_autofills_window_match(window_ctx):
+def test_highlight_action_autofills_offsets_match(window_ctx):
     sink = RecordingSink()
     _emitter(sink, _marker(action='highlight')).emit('deploy')
     import json
 
     envelope = json.loads(sink.records[0]['metadata_json'])
-    assert envelope['data']['match'] == {'window_id': 41}
+    assert envelope['data']['match'] == {'offsets': [[0, 1200], [0, 1201]]}
+
+
+def test_highlight_action_with_no_offsets_drops(no_offsets_ctx):
+    sink = RecordingSink()
+    _emitter(sink, _marker(action='highlight')).emit('deploy')
+    assert sink.records == []
 
 
 def test_match_with_two_fields_drops(window_ctx):
