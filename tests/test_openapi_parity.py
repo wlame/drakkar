@@ -299,6 +299,77 @@ async def test_identity_and_recent_tasks_payloads_match_schemas():
     assert 'unavailable' not in recent_tasks
 
 
+async def test_timeline_events_payload_matches_schema():
+    """Validates GET /api/v1/timeline/events against the vendored TimelineEvents
+    (and, via $ref resolution, TimelineEventInstance) schemas — same mechanism as
+    the identity/recent-tasks check above. The seeded row is emitted through the
+    real ``Annotator`` + ``TimelineEventEmitter`` under a bound hook context
+    rather than hand-written metadata JSON, so the payload validated here carries
+    the actual wire envelope."""
+    import aiosqlite
+
+    from drakkar.annotations import Annotator
+    from drakkar.config import TimelineEventType
+    from drakkar.hookctx import bind_hook_context, clear_hook_context
+    from drakkar.recorder import SCHEMA_EVENTS
+    from drakkar.timeline_events import TimelineEventEmitter
+
+    schemas = yaml.safe_load(SPEC_PATH.read_text())['components']['schemas']
+
+    class _RecordingSink:
+        """Stub recorder capturing what the annotator writes; mock target is the framework seam, not the code under test."""
+
+        def __init__(self):
+            self.records = []
+
+        def record_annotation(self, **kwargs):
+            self.records.append(kwargs)
+
+    sink = _RecordingSink()
+    decl = TimelineEventType.model_validate({'name': 'deploy', 'kind': 'marker', 'color': 'purple'})
+    emitter = TimelineEventEmitter(Annotator(sink), {'deploy': decl})
+    token = bind_hook_context(hook='on_message_complete', partition=0, window_id=1, offsets=(10, 11))
+    try:
+        emitter.emit('deploy', text='v2.1')
+    finally:
+        clear_hook_context(token)
+    metadata_json = sink.records[0]['metadata_json']
+
+    db = await aiosqlite.connect(':memory:')
+    await db.executescript(SCHEMA_EVENTS)
+    now = time.time()
+    await db.execute(
+        "INSERT INTO events (ts, dt, event, partition, metadata) VALUES (?, ?, 'annotation', 0, ?)",
+        (now - 5, '2026-04-02', metadata_json),
+    )
+    await db.commit()
+
+    cfg = make_ui_config()
+    recorder = AsyncMock(spec=EventRecorder)
+    recorder._db = db
+    recorder._reader_db = db
+    recorder.reader_db = db
+    recorder.flush = AsyncMock()
+    recorder._buffer = []
+    recorder.config = cfg
+    app = MagicMock()
+    app._worker_id = 'schema-worker'
+    app._cluster_name = ''
+    app._start_time = time.monotonic()
+    app._config = DrakkarConfig()
+    app.config_summary = '[schema-worker]'
+    app._executor_pool = None
+
+    transport = ASGITransport(app=create_ui_app(cfg, recorder, app))
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        payload = (await client.get('/api/v1/timeline/events?minutes=5')).json()
+    await db.close()
+
+    assert payload['unavailable'] is False
+    assert len(payload['events']) == 1
+    jsonschema.validate(payload, _resolve_schema(schemas, 'TimelineEvents'), cls=jsonschema.Draft202012Validator)
+
+
 async def test_archives_payload_matches_schema(tmp_path):
     """Validates the archive-list payload shape against the vendored ArchiveList schema.
 

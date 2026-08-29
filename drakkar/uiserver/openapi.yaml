@@ -285,7 +285,7 @@ paths:
       parameters:
         - name: minutes
           in: query
-          schema: {type: integer, minimum: 1}
+          schema: {type: integer}
       responses:
         '200':
           description: Newest-first timeline event instances.
