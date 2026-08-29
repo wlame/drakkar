@@ -82,12 +82,29 @@ def _timeline_wire(cfg: UITimelineConfig) -> dict[str, object]:
             conditions.append(entry)
         rules.append({'name': rule.name, 'when': conditions, 'color': rule.color})
     labels = {role: key for role, key in cfg.labels.model_dump().items() if key}
-    return {
+    out: dict[str, object] = {
         'history_factor': cfg.history_factor,
         'max_age_minutes': cfg.max_age_minutes,
         'color_rules': rules,
         'labels': labels,
     }
+    events = []
+    for e in cfg.events:
+        if not e.enabled:
+            continue
+        entry: dict[str, object] = {'name': e.name, 'kind': e.kind, 'color': e.color}
+        if e.kind == 'marker':
+            entry['line'] = e.line
+        if e.label:
+            entry['label'] = e.label
+        entry['show'] = e.show
+        if e.link:
+            entry['link'] = e.link
+        entry['action'] = e.action
+        events.append(entry)
+    if events:
+        out['events'] = events
+    return out
 
 
 def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:

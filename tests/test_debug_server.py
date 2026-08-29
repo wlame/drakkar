@@ -15,9 +15,12 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 from starlette.testclient import TestClient
 
-from drakkar.config import DrakkarConfig, UITimelineConfig
+from drakkar.annotations import Annotator
+from drakkar.config import DrakkarConfig, TimelineEventType, UITimelineConfig
+from drakkar.hookctx import bind_hook_context, clear_hook_context
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.archive import archive_file_name
+from drakkar.timeline_events import TimelineEventEmitter
 from drakkar.uiserver import routes_live
 from drakkar.uiserver.server import (
     UIDeps,
@@ -2293,6 +2296,142 @@ class TestApiRecentTasks:
         tasks_by_id = {t['task_id']: t for t in data['tasks']}
         assert tasks_by_id['task-4']['status'] == 'failed'
         assert tasks_by_id['task-4']['stdout_size'] is None
+        await db.close()
+
+
+class _RecordingAnnotationSink:
+    """Stub recorder capturing what the annotator writes; mock target is the framework seam, not the code under test."""
+
+    def __init__(self):
+        self.records = []
+
+    def record_annotation(self, **kwargs):
+        self.records.append(kwargs)
+
+
+class TestApiTimelineEvents:
+    """Cover GET /api/v1/timeline/events."""
+
+    def _timeline_event_metadata_json(self, *, type_name='deploy', decl_overrides=None, text='', partition=0):
+        """Build one real timeline-event envelope by driving it through the
+        actual ``Annotator`` + ``TimelineEventEmitter`` under a bound hook
+        context, instead of hand-writing the metadata JSON — so the test
+        exercises the real encoding (key order, ``kind``, ``data`` shape)."""
+        decl = {'name': type_name, 'kind': 'marker', 'color': 'purple'}
+        decl.update(decl_overrides or {})
+        sink = _RecordingAnnotationSink()
+        emitter = TimelineEventEmitter(Annotator(sink), {type_name: TimelineEventType.model_validate(decl)})
+        token = bind_hook_context(hook='on_message_complete', partition=partition, window_id=1, offsets=(10, 11))
+        try:
+            emitter.emit(type_name, text=text)
+        finally:
+            clear_hook_context(token)
+        return sink.records[0]['metadata_json']
+
+    def _other_annotation_metadata_json(self, *, partition=0):
+        """A non-timeline annotation envelope (kind != 'timeline_event') that
+        the history endpoint must not surface."""
+        sink = _RecordingAnnotationSink()
+        annotator = Annotator(sink)
+        token = bind_hook_context(hook='on_message_complete', partition=partition, window_id=1, offsets=(10, 11))
+        try:
+            annotator.emit(None, 'note', {'text': 'hi'})
+        finally:
+            clear_hook_context(token)
+        return sink.records[0]['metadata_json']
+
+    async def _make_client_with_rows(self, tmp_path, mock_recorder, mock_app, rows):
+        """``rows``: ``(ts, partition, metadata_json)`` tuples, inserted in order."""
+        import aiosqlite
+
+        from drakkar.recorder import SCHEMA_EVENTS
+
+        db_path = str(tmp_path / 'live.db')
+        db = await aiosqlite.connect(db_path)
+        await db.executescript(SCHEMA_EVENTS)
+        for ts, partition, metadata_json in rows:
+            await db.execute(
+                "INSERT INTO events (ts, dt, event, partition, metadata) VALUES (?, ?, 'annotation', ?, ?)",
+                (ts, '2026-04-02', partition, metadata_json),
+            )
+        await db.commit()
+
+        cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+        mock_recorder._db = db
+        mock_recorder._reader_db = db
+        mock_recorder.reader_db = db
+        mock_recorder.flush = AsyncMock()
+        mock_recorder.config = cfg
+        mock_recorder._buffer = []
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        client = AsyncClient(transport=transport, base_url='http://test')
+        return client, db
+
+    async def test_no_reader_returns_empty_unavailable_payload(self, debug_config, mock_recorder, mock_app):
+        mock_recorder._db = None
+        mock_recorder._reader_db = None
+        mock_recorder.reader_db = None
+        mock_recorder.flush = AsyncMock()
+
+        fastapi_app = create_ui_app(debug_config, mock_recorder, mock_app)
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/v1/timeline/events')
+        assert resp.status_code == 200
+        assert resp.json() == {'events': [], 'unavailable': True}
+
+    async def test_seeded_events_come_back_newest_first_excluding_other_annotations(
+        self, tmp_path, mock_recorder, mock_app
+    ):
+        now = time.time()
+        older = self._timeline_event_metadata_json(text='v1', partition=0)
+        newer = self._timeline_event_metadata_json(text='v2', partition=1)
+        other = self._other_annotation_metadata_json(partition=0)
+        client, db = await self._make_client_with_rows(
+            tmp_path,
+            mock_recorder,
+            mock_app,
+            rows=[
+                (now - 30, 0, older),
+                (now - 10, 1, newer),
+                (now - 5, 0, other),
+            ],
+        )
+        async with client as c:
+            resp = await c.get('/api/v1/timeline/events?minutes=5')
+        data = resp.json()
+        assert data['unavailable'] is False
+        events = data['events']
+        assert len(events) == 2
+        assert all(e['kind'] == 'timeline_event' for e in events)
+        # Newest insertion (highest id) first — the non-timeline row in
+        # between is skipped entirely, not just excluded from the count.
+        assert events[0]['data']['text'] == 'v2'
+        assert events[0]['partition'] == 1
+        assert events[0]['ts'] == pytest.approx(now - 10)
+        assert events[1]['data']['text'] == 'v1'
+        assert events[1]['partition'] == 0
+        await db.close()
+
+    async def test_minutes_clamped_to_timeline_max_age_minutes(self, tmp_path, mock_recorder, mock_app):
+        now = time.time()
+        old_row = self._timeline_event_metadata_json(text='ancient')
+        recent_row = self._timeline_event_metadata_json(text='fresh')
+        client, db = await self._make_client_with_rows(
+            tmp_path,
+            mock_recorder,
+            mock_app,
+            rows=[
+                (now - 90 * 60, 0, old_row),  # older than the 60-minute default max_age_minutes
+                (now - 5 * 60, 0, recent_row),
+            ],
+        )
+        async with client as c:
+            # A huge minutes value must clamp down to ui.timeline.max_age_minutes (60 by default).
+            resp = await c.get('/api/v1/timeline/events?minutes=99999')
+        texts = [e['data']['text'] for e in resp.json()['events']]
+        assert texts == ['fresh']
         await db.close()
 
 

@@ -6,6 +6,7 @@ These back the drakkar-ui Live page; the page itself is served by
 Routes:
   * ``/api/v1/events``                    — paginated event JSON feed.
   * ``/api/v1/recent-tasks``              — last-N-minutes timeline view.
+  * ``/api/v1/timeline/events``           — handler-emitted timeline event instances.
   * ``/api/v1/live/arrange-tasks``        — per-task lookup by task_id list.
   * ``/api/v1/live/task-results``         — completion-hook task feed.
   * ``/api/v1/live/message-results``      — completion-hook message feed.
@@ -299,6 +300,36 @@ def create_live_router(deps: UIDeps) -> APIRouter:
                 'truncated': truncated or trimmed,
             }
         )
+
+    @router.get('/api/v1/timeline/events')
+    async def api_timeline_events(minutes: int = 0):
+        """Handler-emitted timeline event instances (markers/ranges/flags) for the live timeline.
+
+        Unlike ``/api/v1/recent-tasks`` this has no operator-facing default
+        window: ``minutes=0`` (unset) uses the full ``ui.timeline.max_age_minutes``
+        horizon, and any larger value is clamped down to it — same ceiling,
+        same rationale (a high-fan-out worker's window can hold far more
+        rows than the query should scan in one main-loop dispatch).
+        """
+        timeline_cfg = config.timeline
+        cap = timeline_cfg.max_age_minutes
+        minutes_clamped = min(minutes, cap) if minutes > 0 else cap
+        since = time.time() - minutes_clamped * 60
+        query, params = queries.timeline_events_query(since=since, limit=config.max_rows)
+        result = await deps.flush_and_select(query, params)
+        if result is None:
+            return JSONResponse({'events': [], 'unavailable': True})
+        columns, rows = result
+        events = []
+        for row in rows:
+            entry = dict(zip(columns, row, strict=False))
+            envelope = queries.parse_json_object(entry.get('metadata'))
+            if not envelope:
+                continue
+            envelope['ts'] = entry['ts']
+            envelope['partition'] = entry['partition']
+            events.append(envelope)
+        return JSONResponse({'events': events, 'unavailable': False})
 
     # Lookup-by-task-ID endpoint for the Arrange tab. Unlike /api/v1/recent-tasks
     # this does NOT filter by ``minutes`` and does NOT apply the

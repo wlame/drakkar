@@ -599,6 +599,17 @@ def recent_tasks_query(*, since: float, event_limit: int) -> tuple[str, list[Any
     return query, [since, event_limit]
 
 
+def timeline_events_query(*, since: float, limit: int) -> tuple[str, list[Any]]:
+    """Timeline-event instances (annotation rows carrying metadata.kind='timeline_event'), newest first."""
+    query = (
+        'SELECT ts, partition, metadata FROM events '
+        "WHERE event = 'annotation' AND ts >= ? "
+        "AND json_extract(metadata, '$.kind') = 'timeline_event' "
+        'ORDER BY id DESC LIMIT ?'
+    )
+    return query, [since, limit]
+
+
 def task_state_query(task_ids: Sequence[str]) -> tuple[str, list[Any]]:
     """Every lifecycle event for the named tasks, oldest first per task."""
     query = f"""

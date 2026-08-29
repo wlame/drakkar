@@ -269,6 +269,36 @@ paths:
               schema: {$ref: '#/components/schemas/RecentTasks'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
+  /api/v1/timeline/events:
+    get:
+      tags: [live]
+      operationId: getTimelineEvents
+      summary: Timeline event instances for the visible window (v1.21)
+      description: >-
+        History backfill for operator-declared custom timeline events
+        (ui.timeline.events). `minutes` is clamped to
+        `ui.timeline.max_age_minutes`; results are newest-first and capped
+        at `ui.max_rows`. A degraded recorder reader answers 200 with an
+        empty `events` array and `unavailable: true` rather than failing.
+        404 on backends predating v1.21 — clients must tolerate it and
+        render no overlay.
+      parameters:
+        - name: minutes
+          in: query
+          schema: {type: integer, minimum: 1}
+      responses:
+        '200':
+          description: Newest-first timeline event instances.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TimelineEvents'}
+        '404':
+          description: Backend predates v1.21.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
   /api/v1/live/overview:
     get:
       tags: [live]
@@ -1270,7 +1300,88 @@ components:
           description: >-
             Only the bound label roles (tag, caption, highlight, filter,
             marker); unbound roles are absent, never an empty string.
+        # v1.21, optional: declared custom event types (ui.timeline.events).
+        # enabled: false entries are omitted entirely — the UI never learns
+        # about disabled types. Absent or empty when none are declared.
+        events:
+          type: array
+          items: {$ref: '#/components/schemas/TimelineEventType'}
       required: [history_factor, max_age_minutes, color_rules, labels]
+
+    TimelineEventType:
+      description: >-
+        One operator-declared custom timeline event type from
+        ui.timeline.events (v1.21).
+      type: object
+      properties:
+        name: {type: string, pattern: '^[a-z_][a-z0-9_]*$'}
+        kind: {type: string, enum: [marker, range, flag]}
+        color: {type: string, description: 'Timeline color name or #rrggbb.'}
+        line:
+          type: string
+          enum: [solid, bold, dotted]
+          description: Markers only; defaults to solid, omitted otherwise.
+        label:
+          type: string
+          description: Optional template; only {text} substitutes.
+        show: {type: boolean, description: Initial UI visibility.}
+        link:
+          type: string
+          description: Optional URL template; present iff action is link.
+        action: {type: string, enum: [none, link, highlight, filter]}
+      required: [name, kind, color, show, action]
+
+    TimelineEventInstance:
+      description: >-
+        One custom timeline event instance (v1.21): the metadata envelope
+        of an `annotation` event (metadata.kind == "timeline_event") plus,
+        on GET /api/v1/timeline/events rows only, `ts` and `partition` from
+        the underlying event row.
+      type: object
+      properties:
+        kind: {type: string, enum: [timeline_event]}
+        scope: {type: string}
+        hook: {type: string}
+        window_id: {type: [integer, 'null']}
+        offsets:
+          type: array
+          items: {type: integer}
+        ts: {type: number, description: Row epoch seconds.}
+        partition: {type: integer}
+        data:
+          type: object
+          properties:
+            type: {type: string, description: Names a declared TimelineEventType.}
+            ts_ms: {type: integer}
+            end_ts_ms:
+              type: [integer, 'null']
+              description: Non-null iff the type's kind is range.
+            text: {type: string}
+            values:
+              type: object
+              additionalProperties: true
+              description: Flat object for tooltips and {key} link variables.
+            match:
+              type: [object, 'null']
+              description: >-
+                Null, or exactly one of {window_id}, {offsets}, {label} —
+                see the contract doc for the three shapes.
+          required: [type, ts_ms, end_ts_ms, text, values, match]
+      required: [kind, scope, hook, window_id, offsets, data, ts, partition]
+
+    TimelineEvents:
+      description: Response envelope for GET /api/v1/timeline/events (v1.21).
+      type: object
+      properties:
+        events:
+          type: array
+          items: {$ref: '#/components/schemas/TimelineEventInstance'}
+        unavailable:
+          type: boolean
+          description: >-
+            True when the recorder reader is degraded; events is then an
+            empty placeholder, not a measurement.
+      required: [events, unavailable]
 
     Dashboard:
       type: object

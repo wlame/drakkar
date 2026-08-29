@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from drakkar.config import DrakkarConfig, TimelineColorRule, TimelineLabels, TimelineRuleCondition, UITimelineConfig
 from drakkar.recorder import EventRecorder
+from drakkar.uiserver.routes_pages import _timeline_wire
 from drakkar.uiserver.server import create_ui_app
 from tests.conftest import make_ui_config
 
@@ -957,6 +958,42 @@ class TestApiV1Identity:
             ],
             'labels': {'tag': 'env', 'marker': 'urgent'},
         }
+
+    def test_timeline_wire_omits_events_key_when_none_enabled(self):
+        cfg = UITimelineConfig.model_validate(
+            {'events': [{'name': 'off_one', 'kind': 'flag', 'color': 'gray', 'enabled': False}]}
+        )
+        assert 'events' not in _timeline_wire(cfg)
+
+    def test_timeline_wire_event_entry_shape(self):
+        cfg = UITimelineConfig.model_validate(
+            {
+                'events': [
+                    {
+                        'name': 'deploy',
+                        'kind': 'marker',
+                        'color': 'purple',
+                        'line': 'dotted',
+                        'label': 'deploy {text}',
+                        'link': 'https://g/{ts_ms}',
+                        'action': 'link',
+                    },
+                    {'name': 'span', 'kind': 'range', 'color': '#1f2a44', 'action': 'highlight'},
+                ]
+            }
+        )
+        wire = _timeline_wire(cfg)['events']
+        assert wire[0] == {
+            'name': 'deploy',
+            'kind': 'marker',
+            'color': 'purple',
+            'line': 'dotted',
+            'label': 'deploy {text}',
+            'show': True,
+            'link': 'https://g/{ts_ms}',
+            'action': 'link',
+        }
+        assert wire[1] == {'name': 'span', 'kind': 'range', 'color': '#1f2a44', 'show': True, 'action': 'highlight'}
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ from drakkar.recorder.queries import (
     recent_tasks_query,
     sink_breakdown_query,
     task_state_query,
+    timeline_events_query,
 )
 from drakkar.recorder.queries import (
     base_task_id as parse_base,
@@ -89,6 +90,14 @@ class TestSqlBuilders:
         assert 'stdout,' not in sql
         assert 'stderr' not in sql
         assert 'stdout_size' in sql
+
+    def test_timeline_events_query_filters_kind_and_binds_params(self):
+        query, params = timeline_events_query(since=100.5, limit=50)
+
+        assert "json_extract(metadata, '$.kind') = 'timeline_event'" in query
+        assert "event = 'annotation'" in query
+        assert 'ORDER BY id DESC' in query
+        assert params == [100.5, 50]
 
     def test_task_state_query_binds_one_placeholder_per_id(self):
         sql, params = task_state_query(['a', 'b', 'c'])
