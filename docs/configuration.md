@@ -802,6 +802,8 @@ Write caps for the Message Probe's user-defined details tab (`max_writes`, defau
 
 Live-timeline history depth, first-match-wins bar color rules, and label roles —
 covered field-by-field on the dedicated [Timeline Tuning](ui-timeline.md) page.
+`ui.timeline.events` — handler-declared custom event types drawn as markers, ranges,
+or flag pins — is covered on [Custom Timeline Events](ui-timeline-events.md).
 
 ### Flight Recorder (`ui.recorder:`)
 

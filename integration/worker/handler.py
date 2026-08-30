@@ -15,11 +15,15 @@ Shows how to:
 - OFFLOAD: run the CPU/syscall-bound window planning (nested loops +
   file stats + cache probes) on the offload pool via self.offload(),
   keeping the event loop responsive (docs/offload.md)
+- CUSTOM TIMELINE EVENTS: mark batch boundaries, request-processing
+  ranges, and external deep links on the Live page timeline via
+  self.timeline_event() (docs/ui-timeline-events.md)
 """
 
 import asyncio
 import os
 import random
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from metrics import (
@@ -427,6 +431,24 @@ class RipgrepHandler(
             },
         )
 
+        # Custom timeline events (docs/ui-timeline-events.md), cookbook
+        # example 1 — a dotted marker per Kafka batch. Both events below
+        # take no explicit `match`: neither type's action needs one
+        # (`ripgrep_batch_started_marker` is action=none, the flag pin is
+        # action=link), so there is nothing for the emitter to auto-fill.
+        first_offset = messages[0].offset
+        self.timeline_event('ripgrep_batch_started_marker', text=str(first_offset))
+
+        # Cookbook example 3 — a flag pin whose `action: link` opens
+        # Kafka-UI on this batch's first message. `partition` isn't one of
+        # the fixed template variables ({ts_ms}/{end_ts_ms}/{text}), so it
+        # rides in `values` and the link template picks it up as {partition}.
+        self.timeline_event(
+            'kafka_ui_batch_link_flag',
+            text=str(first_offset),
+            values={'partition': str(messages[0].partition)},
+        )
+
         # Message-scoped: which pairs each message contributed, and which of
         # them it shares with a sibling. Answers "what did THIS message ask
         # for, and did it get its own subprocess or someone else's".
@@ -809,6 +831,28 @@ class RipgrepHandler(
         if ranked_patterns:
             top_pattern, top_matches = ranked_patterns[0]
             probe.set(top_pattern_chip={'pattern': top_pattern, 'matches': top_matches})
+
+        # Custom timeline events (docs/ui-timeline-events.md), cookbook
+        # example 2 — a highlighted range spanning this request's whole
+        # fan-out, from the first task scheduled to the last terminal
+        # outcome. group.started_at/finished_at are MONOTONIC timestamps
+        # (comparable only to each other), so the wall-clock range is
+        # reconstructed by offsetting "now" back by group.duration_seconds
+        # rather than converting them directly.
+        #
+        # An EXPLICIT match, not the auto-fill default: this hook's context
+        # carries only this message's own offset, which is what auto-fill
+        # would use anyway here — spelled out so the cookbook shows how to
+        # build a match by hand for the general case (e.g. a group whose
+        # tasks came from more than one source offset).
+        now = datetime.now(tz=UTC)
+        self.timeline_event(
+            'scan_window_processing_range',
+            text=f'{len(group.results)} tasks',
+            ts=now - timedelta(seconds=group.duration_seconds),
+            end_ts=now,
+            match=dk.TimelineMatch(offsets=((group.source_message.partition, group.source_message.offset),)),
+        )
 
         aggregate = SearchAggregate(
             request_id=req.request_id,

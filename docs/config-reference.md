@@ -577,6 +577,9 @@ ui:
       highlight: ''                  # env: DK_UI__TIMELINE__LABELS__HIGHLIGHT
       filter: ''                     # env: DK_UI__TIMELINE__LABELS__FILTER
       marker: ''                     # env: DK_UI__TIMELINE__LABELS__MARKER
+    events: []                       # declared custom timeline event types (see ui-timeline-events.md); max 50.
+                                     # env: DK_UI__TIMELINE__EVENTS (JSON list)
+                                     # e.g. [{name: deploy, kind: marker, color: purple, action: link, link: "{grafana}/d?from={ts_ms}"}]
 ```
 
 ---

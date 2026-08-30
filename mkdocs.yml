@@ -58,6 +58,7 @@ nav:
   - Declared UI Pages (your own dashboard pages): ui-pages.md
   - UI Customization Cookbook (a worked example): ui-customization-cookbook.md
   - Timeline Tuning (history depth, color rules, label roles): ui-timeline.md
+  - Custom Timeline Events (handler-marked markers, ranges, and links): ui-timeline-events.md
   - Configuration: configuration.md
   - App Config (your own settings in drakkar.yaml): app-config.md
   - Features & Enable Order: features.md

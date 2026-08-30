@@ -11,6 +11,10 @@ Every field below is validated at config load: an unknown operator, field, or co
 worker boot with the offending value named in the error, rather than
 silently never matching at render time.
 
+This page covers the bars the framework draws for you. To mark your own domain events —
+a deploy, an incident window, a batch boundary — on top of them, see
+[Custom Timeline Events](ui-timeline-events.md).
+
 ## How much history the timeline keeps
 
 Two independent bounds decide what the timeline shows: how many tasks, and how far back.
@@ -269,6 +273,8 @@ And the five label roles:
 
 ## See also
 
+- [Custom Timeline Events](ui-timeline-events.md) for handler-emitted markers, ranges, and
+  link flags drawn alongside these bars.
 - [Observability — Operator UI](observability.md#operator-ui) for the rest of the Live view.
 - [Handler — Task labels](handler.md#task-labels) for how to set labels a timeline rule or
   role can read.

@@ -226,11 +226,14 @@ ui:
       url: "https://github.com/wlame/drakkar?from={worker_id}"
   # Named URL bases the probe-details layout's link templates resolve
   # against (see docs/ui-enrichment.md). Fake hostnames — this is an
-  # integration demo, not a real deployment.
+  # integration demo, not a real deployment. kafka_ui is real, though:
+  # it feeds the kafka_ui_batch_link_flag timeline event type below and
+  # points at the same Kafka-UI instance the kafka.ui_url deep links use.
   link_bases:
     code_review: "https://code-review.integration.example.com"
     file_browser: "https://files.integration.example.com"
     build_farm: "https://builds.integration.example.com"
+    kafka_ui: "http://localhost:8088"
   # Deployment-owned JS module implementing the matchBar/patternChip
   # custom cell renderers (see docs/ui-enrichment.md#custom-cell-renderers).
   # Path matches the Dockerfile's COPY target under WORKDIR /app.
@@ -270,6 +273,27 @@ ui:
       highlight: lines
       filter: module
       marker: request
+    # Custom timeline events (docs/ui-timeline-events.md): handler-emitted
+    # markers, ranges, and flag pins, distinct from the marker LABEL ROLE
+    # above (which derives pins from a task label rather than an explicit
+    # self.timeline_event() call). Emitted from handler.py's arrange() and
+    # on_message_complete().
+    events:
+      - name: scan_window_processing_range
+        kind: range
+        color: blue
+        action: highlight
+      - name: ripgrep_batch_started_marker
+        kind: marker
+        line: dotted
+        color: purple
+        label: "batch {text}"
+      - name: kafka_ui_batch_link_flag
+        kind: flag
+        color: orange
+        label: "kafka {text}"
+        link: "{kafka_ui}/ui/clusters/drakkar-local/all-topics/search-requests/messages?seekType=OFFSET&seekTo={partition}::{text}"
+        action: link
 
 # --- Framework cache ---
 #

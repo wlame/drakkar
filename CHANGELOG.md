@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Custom timeline events** (contract v1.21): declare your own marker,
+  range, or flag pin types under `ui.timeline.events` and emit instances
+  with `self.timeline_event(type_name, text='', ts=None, end_ts=None,
+  values=None, match=None)` from any hook, so domain events — a deploy, a
+  processing window, a link out to another service — line up against the
+  tasks running at the time on the Live page timeline. `action:
+  highlight`/`filter` types correlate with tasks via `TimelineMatch`
+  (auto-filled from the hook's offsets when omitted). Unknown types and
+  malformed emissions are dropped and logged; a disabled type is a silent
+  no-op. New docs page: Custom Timeline Events. The integration harness
+  demonstrates all three kinds.
+
 - **Experimental CI lanes on the next CPython release candidate.** The unit
   suite runs on Python 3.15.0rc1 and the integration harness rebuilds its
   images on `python:3.15-rc-slim`. Both lanes are non-blocking
