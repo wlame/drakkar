@@ -6,8 +6,8 @@ contract surface. This test walks the live FastAPI route table and asserts
 set-equality with the spec's ``paths``, so any endpoint added, removed, or
 renamed on only one side fails CI here (the spec is pinned by checksum
 with its own copy of this test). Legacy unprefixed ``/api/*`` aliases,
-``/ws``, ``/docs``, and the SPA catch-all are deliberately outside the
-pinned surface.
+``/ws``, ``/api-docs``, the ``/docs/`` static mount, and the SPA catch-all
+are deliberately outside the pinned surface.
 
 That comparison covers the path inventory only — not parameters, not
 schemas — so it cannot see a vendored copy that was edited in place. The
@@ -122,7 +122,7 @@ def _app_routes(app) -> set[tuple[str, str]]:
         if path is None:
             continue  # APIRouter and friends expose no path of their own
         if not (path.startswith('/api/v1/') or path in ('/healthz', '/readyz')):
-            continue  # legacy aliases, /ws, /docs, SPA catch-all: out of scope
+            continue  # legacy aliases, /ws, /api-docs, /docs/, SPA catch-all: out of scope
         path = path.replace(':path}', '}')  # FastAPI converter suffix
         for method in getattr(route, 'methods', None) or ():
             if method in ('HEAD', 'OPTIONS'):
@@ -158,28 +158,28 @@ async def test_openapi_json_serves():
     assert '/api/v1/identity' in body['paths']
 
 
-async def test_docs_page_serves():
+async def test_api_docs_page_serves():
     transport = ASGITransport(app=_stub_app())
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        page = await client.get('/docs')
+        page = await client.get('/api-docs')
         assert page.status_code == 200
         assert 'swagger-ui-bundle.js' in page.text
-        js = await client.get('/docs/swagger-ui-bundle.js')
+        js = await client.get('/api-docs/swagger-ui-bundle.js')
         assert js.status_code == 200 and len(js.content) > 100_000
-        css = await client.get('/docs/swagger-ui.css')
+        css = await client.get('/api-docs/swagger-ui.css')
         assert css.status_code == 200
 
 
-async def test_docs_page_propagates_token():
+async def test_api_docs_page_propagates_token():
     """Opened with ?token=, the page carries it into asset and spec URLs."""
     transport = ASGITransport(app=_stub_app())
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        page = await client.get('/docs', params={'token': 'abc'})
-    assert '/docs/swagger-ui.css?token=abc' in page.text
+        page = await client.get('/api-docs', params={'token': 'abc'})
+    assert '/api-docs/swagger-ui.css?token=abc' in page.text
     assert '/api/v1/openapi.json?token=abc' in page.text
 
 
-async def test_docs_gated_when_token_configured():
+async def test_api_docs_gated_when_token_configured():
     recorder = AsyncMock(spec=EventRecorder)
     cfg = make_ui_config(auth_token='secret-123')
     recorder.config = cfg
@@ -191,9 +191,9 @@ async def test_docs_gated_when_token_configured():
     fastapi_app = create_ui_app(cfg, recorder, app)
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        assert (await client.get('/docs')).status_code == 401
+        assert (await client.get('/api-docs')).status_code == 401
         assert (await client.get('/api/v1/openapi.json')).status_code == 401
-        ok = await client.get('/docs', params={'token': 'secret-123'})
+        ok = await client.get('/api-docs', params={'token': 'secret-123'})
         assert ok.status_code == 200
 
 
@@ -225,11 +225,11 @@ async def test_framework_openapi_route_is_not_served():
         assert (await client.get('/api/v1/openapi.json')).status_code == 401
 
 
-async def test_docs_page_escapes_reflected_token():
+async def test_api_docs_page_escapes_reflected_token():
     """A hostile ?token= value must not break out of the HTML/JS context."""
     transport = ASGITransport(app=_stub_app())
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        page = await client.get('/docs', params={'token': '"><script>alert(1)</script>'})
+        page = await client.get('/api-docs', params={'token': '"><script>alert(1)</script>'})
     assert '<script>alert(1)</script>' not in page.text
     assert 'token=%22%3E%3Cscript%3Ealert%281%29%3C%2Fscript%3E' in page.text
 

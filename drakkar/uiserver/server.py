@@ -548,6 +548,7 @@ def create_ui_app(
     from drakkar.uiserver.routes_config_reference import create_config_reference_router
     from drakkar.uiserver.routes_consume_pause import create_consume_pause_router
     from drakkar.uiserver.routes_debug import create_debug_router
+    from drakkar.uiserver.routes_docs import create_docs_router
     from drakkar.uiserver.routes_kafka_read import create_kafka_read_router
     from drakkar.uiserver.routes_live import create_live_router
     from drakkar.uiserver.routes_openapi import create_openapi_router
@@ -627,6 +628,12 @@ def create_ui_app(
     )
     for router in routers:
         app.include_router(router)
+
+    # The operator docs site sits between the API routers and the SPA: it
+    # must outrank the catch-all (otherwise /docs/ renders the UI shell),
+    # and it is registered unconditionally so an unconfigured or missing
+    # site answers its own hint-404 rather than falling through.
+    app.include_router(create_docs_router(deps))
 
     # SPA catch-all LAST: Starlette matches in registration order, so every
     # route above (probes, /ws, /api/v1/*) keeps precedence. With no bundle

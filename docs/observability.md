@@ -540,7 +540,7 @@ The pages above are backed by a JSON/WebSocket API under `/api/v1`. Endpoints us
 
 - `GET /api/v1/identity` -- worker identity for the SPA and external tooling. Since contract v1.2 the response also carries `backend` (`"python"` or `"go"`), `backend_version`, `ui_version`, and `ui_source`.
 - `GET /api/v1/openapi.json` -- the vendored OpenAPI 3.1 spec describing the `/api/v1` surface. Served from `drakkar/uiserver/openapi.yaml`; the canonical source is `docs/openapi-v1.yaml` in the drakkar-ui repo, and `tests/test_openapi_parity.py` pins the served route table to the spec.
-- `GET /docs` -- a self-hosted Swagger UI over that spec (no CDN assets).
+- `GET /api-docs` -- a self-hosted Swagger UI over that spec (no CDN assets). It moved off `/docs` in contract v1.22; that path now serves the operator docs site.
 
 Both the spec and Swagger UI endpoints are auth-gated exactly like the rest of their route class when `ui.auth_token` is set.
 

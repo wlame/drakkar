@@ -7,9 +7,11 @@ ways:
 
 - ``GET /api/v1/openapi.json`` — the document converted to JSON once at
   router build time (same auth as every API route);
-- ``GET /docs`` — a minimal Swagger UI shell over that document, using the
-  vendored ``swagger-ui-dist`` assets under ``swagger/`` so the page works
-  fully offline (no CDN), token-gated exactly like the other UI pages.
+- ``GET /api-docs`` — a minimal Swagger UI shell over that document, using
+  the vendored ``swagger-ui-dist`` assets under ``swagger/`` so the page
+  works fully offline (no CDN), token-gated exactly like the other UI pages.
+  It moved off ``/docs`` in contract v1.22, where that path became the
+  operator docs site (:mod:`drakkar.uiserver.routes_docs`).
 
 ``tests/test_openapi_parity.py`` pins the served route table to the spec's
 ``paths``, so an endpoint added or renamed on only one side fails CI.
@@ -38,16 +40,16 @@ SWAGGER_DIR = _HERE / 'swagger'
 # header, so when the page itself was opened with ?token=... the asset and
 # spec URLs carry the same query parameter (mirroring how downloads and the
 # WebSocket already pass the token).
-_DOCS_HTML = """<!doctype html>
+_SWAGGER_HTML = """<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <title>Drakkar API</title>
-<link rel="stylesheet" href="/docs/swagger-ui.css{token_qs}">
+<link rel="stylesheet" href="/api-docs/swagger-ui.css{token_qs}">
 </head>
 <body>
 <div id="swagger-ui"></div>
-<script src="/docs/swagger-ui-bundle.js{token_qs}"></script>
+<script src="/api-docs/swagger-ui-bundle.js{token_qs}"></script>
 <script>
 SwaggerUIBundle({{
   url: '/api/v1/openapi.json{token_qs}',
@@ -76,8 +78,8 @@ def create_openapi_router(deps: UIDeps) -> APIRouter:
         """The OpenAPI 3.1 document for this backend's surface."""
         return Response(content=spec_json, media_type='application/json')
 
-    @router.get('/docs')
-    async def docs_page(request: Request) -> HTMLResponse:
+    @router.get('/api-docs')
+    async def swagger_page(request: Request) -> HTMLResponse:
         """Self-hosted Swagger UI over the vendored spec."""
         token = request.query_params.get('token', '')
         # Strict percent-encoding (safe='') neutralizes every character
@@ -85,15 +87,15 @@ def create_openapi_router(deps: UIDeps) -> APIRouter:
         # string — without it the reflected token would be an XSS vector
         # on deployments that run with auth disabled.
         token_qs = f'?token={quote(token, safe="")}' if token else ''
-        return HTMLResponse(_DOCS_HTML.format(token_qs=token_qs))
+        return HTMLResponse(_SWAGGER_HTML.format(token_qs=token_qs))
 
-    @router.get('/docs/swagger-ui-bundle.js')
-    async def docs_js() -> FileResponse:
+    @router.get('/api-docs/swagger-ui-bundle.js')
+    async def swagger_js() -> FileResponse:
         """Vendored swagger-ui-dist bundle (no CDN — offline-safe)."""
         return FileResponse(SWAGGER_DIR / 'swagger-ui-bundle.js', media_type='text/javascript')
 
-    @router.get('/docs/swagger-ui.css')
-    async def docs_css() -> FileResponse:
+    @router.get('/api-docs/swagger-ui.css')
+    async def swagger_css() -> FileResponse:
         """Vendored swagger-ui-dist stylesheet."""
         return FileResponse(SWAGGER_DIR / 'swagger-ui.css', media_type='text/css')
 
