@@ -34,17 +34,21 @@ from drakkar.config.sinks import (
     SinksConfig,
 )
 from drakkar.config.ui import (
+    BUILTIN_LINK_BASES,
     DEFAULT_ARCHIVE_RETENTION_DAYS,
     TIMELINE_COLOR_NAMES,
     TIMELINE_NUMERIC_FIELDS,
     TIMELINE_OPS,
     TIMELINE_STRING_FIELDS,
+    DocsAnchor,
+    DocsAnchorMatch,
     TimelineColorRule,
     TimelineEventType,
     TimelineLabels,
     TimelineRuleCondition,
     UIConfig,
     UIConsumePauseConfig,
+    UIDocsConfig,
     UIProbeDetailsConfig,
     UIRecorderConfig,
     UIReleaseConfig,
@@ -53,6 +57,7 @@ from drakkar.config.ui import (
 from drakkar.config.webapp import WebAppConfig, WebClientConfig
 
 __all__ = [
+    'BUILTIN_LINK_BASES',
     'DEFAULT_ARCHIVE_RETENTION_DAYS',
     'TIMELINE_COLOR_NAMES',
     'TIMELINE_NUMERIC_FIELDS',
@@ -62,6 +67,8 @@ __all__ = [
     'CachePeerSyncConfig',
     'CircuitBreakerConfig',
     'DLQConfig',
+    'DocsAnchor',
+    'DocsAnchorMatch',
     'DrakkarConfig',
     'ExecutorConfig',
     'FileSinkConfig',
@@ -85,6 +92,7 @@ __all__ = [
     'TimelineRuleCondition',
     'UIConfig',
     'UIConsumePauseConfig',
+    'UIDocsConfig',
     'UIProbeDetailsConfig',
     'UIRecorderConfig',
     'UIReleaseConfig',

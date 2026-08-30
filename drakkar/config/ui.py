@@ -614,6 +614,89 @@ class UIConsumePauseConfig(BaseModel):
         return v
 
 
+# Link-base names the framework owns. ``ui.link_bases`` may not redefine
+# them: ``{docs}`` always resolves to the worker's own docs site, so a
+# deployment shadowing it would silently break every built-in docs link.
+BUILTIN_LINK_BASES = frozenset({'docs'})
+
+# A relative site path with at most one trailing #fragment. It pins the
+# overall shape only; the validator adds the explicit scheme, absolute-path
+# and '..' rejections that this pattern alone would not express readably.
+_DOCS_PATH_RE = re.compile(r'^[^/#][^#]*(#[^#]*)?$')
+
+
+class DocsAnchorMatch(BaseModel):
+    """Exactly one selector naming the UI context this anchor attaches to."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    label: str = Field(
+        default='',
+        description='Task label key the anchor attaches to (all values unless value is set).',
+    )
+    value: str = Field(default='', description='Optional specific label value; only valid together with label.')
+    sink: str = Field(default='', description='Configured sink instance name the anchor attaches to.')
+    event: str = Field(default='', description='Declared timeline event type name the anchor attaches to.')
+    page: str = Field(default='', description='Declared UI page slug the anchor attaches to.')
+
+    @model_validator(mode='after')
+    def _validate_match(self) -> 'DocsAnchorMatch':
+        """Keep the selector unambiguous: one context per anchor, never two.
+
+        Two selectors would leave the UI guessing which surface to attach
+        the anchor to, so the ambiguity is rejected at load time.
+        """
+        selectors = [bool(self.label), bool(self.sink), bool(self.event), bool(self.page)]
+        if sum(selectors) != 1:
+            raise ValueError('docs anchor match must set exactly one of label/sink/event/page')
+        if self.value and not self.label:
+            raise ValueError('docs anchor match value is only valid together with label')
+        return self
+
+
+class DocsAnchor(BaseModel):
+    """One contextual link from a UI surface into the operator docs site."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    match: DocsAnchorMatch = Field(description='Which UI context shows this anchor; exactly one selector.')
+    path: str = Field(
+        description="Relative path into the site with optional #fragment; no scheme, no leading '/', no '..'."
+    )
+    title: str = Field(default='', description='Hover text on the anchor icon and the drawer heading.')
+
+    @field_validator('path')
+    @classmethod
+    def _validate_path(cls, value: str) -> str:
+        """Confine the anchor to the served docs site.
+
+        The path is resolved under the site directory, so anything that
+        could escape it — an absolute path, a '..' segment, an external
+        scheme — is a config mistake caught at startup rather than a
+        broken (or leaking) link in the UI.
+        """
+        if not value or value.startswith('/') or '..' in value or '://' in value or not _DOCS_PATH_RE.match(value):
+            raise ValueError(f"docs anchor path '{value}' must be relative, without '..' or a scheme")
+        return value
+
+
+class UIDocsConfig(BaseModel):
+    """Operator docs site served at /docs/ plus its contextual anchors."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    site_dir: str = Field(
+        default='',
+        description='Directory of a prebuilt static docs site served at /docs/. Empty disables the feature.',
+    )
+    title: str = Field(default='Docs', description='Nav-entry label and default drawer heading in the UI.')
+    anchors: list[DocsAnchor] = Field(
+        default_factory=list,
+        max_length=200,
+        description='Contextual anchors: book icons on matching UI surfaces opening the named docs page.',
+    )
+
+
 class UIConfig(BaseModel):
     """The operator web UI: HTTP server, presentation, and sub-sections.
 
@@ -628,7 +711,9 @@ class UIConfig(BaseModel):
     - ``ui.probe_details.*`` — write caps for the Message Probe's
       user-defined details (:class:`UIProbeDetailsConfig`);
     - ``ui.timeline.*`` — timeline history depth, bar color rules, and
-      label roles (:class:`UITimelineConfig`).
+      label roles (:class:`UITimelineConfig`);
+    - ``ui.docs.*`` — the operator docs site and its contextual anchors
+      (:class:`UIDocsConfig`).
 
     Set ``enabled: false`` to disable the whole UI feature (server,
     recorder persistence, and bundle serving).
@@ -844,6 +929,7 @@ class UIConfig(BaseModel):
     release: UIReleaseConfig = Field(default_factory=UIReleaseConfig)
     probe_details: UIProbeDetailsConfig = Field(default_factory=UIProbeDetailsConfig)
     timeline: UITimelineConfig = Field(default_factory=UITimelineConfig)
+    docs: UIDocsConfig = Field(default_factory=UIDocsConfig)
 
     @field_validator('link_bases')
     @classmethod
@@ -851,6 +937,8 @@ class UIConfig(BaseModel):
         for name, base in value.items():
             if not re.fullmatch(r'[a-z][a-z0-9_]*', name):
                 raise ValueError(f"link_bases name '{name}' must be a lower-case identifier ([a-z][a-z0-9_]*)")
+            if name in BUILTIN_LINK_BASES:
+                raise ValueError(f"link_bases name '{name}' is reserved for the built-in docs base")
             if not base.startswith(('http://', 'https://')):
                 raise ValueError(f"link_bases['{name}'] must start with http:// or https://")
         return {name: base.rstrip('/') for name, base in value.items()}

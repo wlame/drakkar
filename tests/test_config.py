@@ -355,6 +355,11 @@ def test_link_bases_rejects_invalid_base_name():
         UIConfig(link_bases={'Jira Prod': 'https://jira.internal.example.com'})
 
 
+def test_link_bases_rejects_reserved_docs_name():
+    with pytest.raises(ValidationError, match='reserved'):
+        UIConfig(link_bases={'docs': 'https://docs.internal.example.com'})
+
+
 def test_logging_config_defaults():
     cfg = LoggingConfig()
     assert cfg.level == 'INFO'
