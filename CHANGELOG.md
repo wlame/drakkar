@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`continue-on-error`): they report early breakage and never gate a merge.
   Supported versions stay 3.13 and 3.14.
 
+### Fixed
+
+- **`timeline_event()` no longer risks crashing on extreme `ts`/`end_ts`
+  values.** `datetime.timestamp()` can raise for a naive datetime the
+  platform can't represent; both conversions are now guarded and fall back
+  to the existing dropped-event path instead of raising into the handler.
+
+- **Startup now warns about a custom timeline event's `link` template
+  referencing an unconfigured `ui.link_bases` entry**, mirroring the
+  existing probe-details warning — the link renders as plain text rather
+  than failing silently with no signal to the operator.
+
 ### Changed
 
 - **`timeline_event` highlight/filter matches auto-fill from offsets, not

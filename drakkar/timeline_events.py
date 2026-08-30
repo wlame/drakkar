@@ -33,6 +33,7 @@ operator needs to notice.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -58,6 +59,30 @@ REASON_BAD_SHAPE = 'bad_shape'
 # need a match — either given explicitly or auto-filled from the current
 # hook's offsets.
 _MATCH_ACTIONS = frozenset({'highlight', 'filter'})
+
+# Names a link template can substitute without a declared ui.link_bases
+# entry — the fields TimelineEventEmitter.emit always fills in itself.
+LINK_BUILTIN_VARS = frozenset({'ts_ms', 'end_ts_ms', 'text'})
+
+_LINK_TOKEN_RE = re.compile(r'\{([A-Za-z_][A-Za-z0-9_.]*)\}')
+_LOWER_IDENT_RE = re.compile(r'^[a-z][a-z0-9_]*$')
+
+
+def referenced_link_bases(link: str) -> set[str]:
+    """Collect a link template's ``{name}`` tokens that could be a link_bases name.
+
+    Mirrors :func:`drakkar.probe.referenced_bases` / :func:`drakkar.uipages.pages_referenced_bases`:
+    app startup compares the result against ``ui.link_bases`` and warns about
+    entries that are missing, rather than treating it as a hard validation
+    error — a token here might legitimately resolve as a per-instance
+    ``values`` key supplied only at emit time, so this module can't tell a
+    genuine missing base from a values key by name alone.
+    """
+    return {
+        token
+        for token in _LINK_TOKEN_RE.findall(link)
+        if token not in LINK_BUILTIN_VARS and _LOWER_IDENT_RE.fullmatch(token)
+    }
 
 
 @dataclass(slots=True, frozen=True)
@@ -130,8 +155,21 @@ class TimelineEventEmitter:
         if not decl.enabled:
             return  # deliberate config, not an error: no metric, no log
 
-        ts_s = ts.timestamp() if isinstance(ts, datetime) else time.time()
-        end_s = end_ts.timestamp() if isinstance(end_ts, datetime) else None
+        # datetime.timestamp() can raise OverflowError/OSError/ValueError for
+        # an extreme naive datetime (e.g. datetime.min: the platform C
+        # mktime() can't represent it) — that must not escape into user
+        # code, so treat it like any other malformed instance: a bad_shape
+        # drop, not a crash.
+        try:
+            ts_s = ts.timestamp() if isinstance(ts, datetime) else time.time()
+        except (OverflowError, OSError, ValueError):
+            self._drop(REASON_BAD_SHAPE, type_name, detail='ts out of range')
+            return
+        try:
+            end_s = end_ts.timestamp() if isinstance(end_ts, datetime) else None
+        except (OverflowError, OSError, ValueError):
+            self._drop(REASON_BAD_SHAPE, type_name, detail='end_ts out of range')
+            return
 
         if decl.kind == 'range' and end_s is None:
             self._drop(REASON_BAD_SHAPE, type_name, detail='kind=range requires end_ts')

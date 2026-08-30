@@ -3,14 +3,28 @@
 from datetime import UTC, datetime
 
 import pytest
+from structlog.testing import capture_logs
 
 from drakkar.annotations import Annotator
-from drakkar.config import TimelineEventType
+from drakkar.app import DrakkarApp
+from drakkar.config import (
+    DrakkarConfig,
+    ExecutorConfig,
+    KafkaConfig,
+    LoggingConfig,
+    MetricsConfig,
+    SinksConfig,
+    TimelineEventType,
+    UIConfig,
+    UITimelineConfig,
+)
+from drakkar.handler import BaseDrakkarHandler
 from drakkar.hookctx import bind_hook_context, clear_hook_context
 from drakkar.timeline_events import (
     NoOpTimelineEventEmitter,
     TimelineEventEmitter,
     TimelineMatch,
+    referenced_link_bases,
 )
 
 
@@ -158,3 +172,82 @@ def test_handler_delegates_to_installed_emitter(window_ctx):
     handler._timeline_events = _emitter(sink, _marker())
     handler.timeline_event('deploy', text='hi')
     assert len(sink.records) == 1
+
+
+class _ExplodingDatetime(datetime):
+    """A datetime whose .timestamp() always raises, so the guard is exercised
+    deterministically instead of relying on platform-specific mktime() overflow
+    behavior for extreme values like datetime.min."""
+
+    def timestamp(self) -> float:
+        raise OverflowError('timestamp out of range')
+
+
+def test_ts_timestamp_overflow_drops_without_raising(window_ctx):
+    sink = RecordingSink()
+    _emitter(sink, _marker()).emit('deploy', ts=_ExplodingDatetime(1, 1, 1))
+    assert sink.records == []
+
+
+def test_end_ts_timestamp_overflow_drops_without_raising(window_ctx):
+    sink = RecordingSink()
+    emitter = _emitter(sink, _marker(name='span', kind='range'))
+    emitter.emit('span', ts=datetime.fromtimestamp(10, tz=UTC), end_ts=_ExplodingDatetime(9999, 1, 1))
+    assert sink.records == []
+
+
+def _minimal_config(ui: UIConfig | None = None) -> DrakkarConfig:
+    """Smallest DrakkarConfig that satisfies DrakkarApp.__init__ (mirrors tests/test_uipages.py)."""
+    return DrakkarConfig(
+        kafka=KafkaConfig(brokers='localhost:9092', source_topic='test-in'),
+        executor=ExecutorConfig(binary_path='/bin/echo'),
+        sinks=SinksConfig(),
+        metrics=MetricsConfig(enabled=False),
+        logging=LoggingConfig(level='WARNING', format='console'),
+        ui=ui or UIConfig(),
+    )
+
+
+def _app_with_timeline_events(*event_types: TimelineEventType) -> DrakkarApp:
+    class _Handler(BaseDrakkarHandler):
+        async def arrange(self, messages):  # pragma: no cover - unused
+            return []
+
+    ui = UIConfig(timeline=UITimelineConfig(events=list(event_types)))
+    return DrakkarApp(handler=_Handler(), config=_minimal_config(ui=ui))
+
+
+def test_startup_warns_on_timeline_event_link_missing_base():
+    """{jira} in a deploy event's link template is unconfigured in ui.link_bases."""
+    deploy = TimelineEventType(
+        name='deploy', kind='marker', color='purple', action='link', link='https://{jira}/browse/{text}'
+    )
+    with capture_logs() as cap:
+        _app_with_timeline_events(deploy)
+
+    warnings = [r for r in cap if r['log_level'] == 'warning' and r.get('event') == 'timeline_event_link_bases_missing']
+    assert len(warnings) == 1
+    assert warnings[0]['event_type'] == 'deploy'
+    assert warnings[0]['missing_bases'] == ['jira']
+    assert 'link_bases' in warnings[0]['message']
+
+
+def test_startup_silent_when_timeline_event_link_bases_are_configured():
+    deploy = TimelineEventType(
+        name='deploy', kind='marker', color='purple', action='link', link='https://{jira}/browse/{text}'
+    )
+    ui = UIConfig(link_bases={'jira': 'https://jira.example.com'}, timeline=UITimelineConfig(events=[deploy]))
+
+    class _Handler(BaseDrakkarHandler):
+        async def arrange(self, messages):  # pragma: no cover - unused
+            return []
+
+    with capture_logs() as cap:
+        DrakkarApp(handler=_Handler(), config=_minimal_config(ui=ui))
+
+    assert not [r for r in cap if r.get('event') == 'timeline_event_link_bases_missing']
+
+
+def test_referenced_link_bases_excludes_builtins_and_non_lowercase_tokens():
+    assert referenced_link_bases('https://{jira}/{ts_ms}/{end_ts_ms}/{text}') == {'jira'}
+    assert referenced_link_bases('https://{Jira}/{NOT_LOWER}') == set()

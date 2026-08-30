@@ -47,6 +47,7 @@ from drakkar.sinks.manager import SinkManager
 from drakkar.sinks.mongo import MongoSink
 from drakkar.sinks.postgres import PostgresSink
 from drakkar.sinks.redis import RedisSink
+from drakkar.timeline_events import referenced_link_bases
 from drakkar.uipages import UIPage, build_pages, pages_referenced_bases
 
 logger = structlog.get_logger()
@@ -222,6 +223,25 @@ class DrakkarApp:
                         f'configured: {", ".join(missing_bases)}; affected links render as plain text'
                     ),
                 )
+            # Same warn-don't-fail treatment for custom timeline event link
+            # templates. Checked per type (unlike the probe-details case
+            # above) because each type's link template is independent, so
+            # naming which type is affected is more useful than one pooled
+            # list.
+            for event_type in self._config.ui.timeline.events:
+                missing_event_bases = sorted(referenced_link_bases(event_type.link) - set(self._config.ui.link_bases))
+                if missing_event_bases:
+                    logger.warning(
+                        'timeline_event_link_bases_missing',
+                        category='timeline',
+                        event_type=event_type.name,
+                        missing_bases=missing_event_bases,
+                        message=(
+                            f"timeline event '{event_type.name}' link template references ui.link_bases "
+                            f'entries that are not configured: {", ".join(missing_event_bases)}; '
+                            'link renders as plain text'
+                        ),
+                    )
         # Load the handler-declared application config (docs/app-config.md)
         # at construction — after load_config, before the lifecycle ever
         # calls on_startup — so a bad app: section or env override is a
