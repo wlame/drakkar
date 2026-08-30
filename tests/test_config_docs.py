@@ -31,7 +31,21 @@ def test_anchor_value_only_with_label():
     assert ok.match.value == 'vendor'
 
 
-@pytest.mark.parametrize('bad_path', ['../escape.md', '/absolute.md', 'https://example.com/page', 'a/../../b'])
+@pytest.mark.parametrize(
+    'bad_path',
+    [
+        '../escape.md',
+        'a/../../b',
+        'a/../b',
+        '..',
+        '/absolute.md',
+        'https://example.com/page',
+        'javascript:alert(1)',
+        'notes:2026.html',
+        'a#b#c',
+        '',
+    ],
+)
 def test_anchor_path_rejects_traversal_absolute_and_scheme(bad_path):
     with pytest.raises(ValidationError, match='path'):
         DocsAnchor.model_validate(_anchor(path=bad_path))
@@ -39,6 +53,32 @@ def test_anchor_path_rejects_traversal_absolute_and_scheme(bad_path):
 
 def test_anchor_path_accepts_relative_with_fragment():
     assert DocsAnchor.model_validate(_anchor()).path == 'architecture/scanners/#modules'
+
+
+def test_anchor_path_accepts_dots_inside_a_segment():
+    """Only a whole '..' segment traverses; dots inside a filename are ordinary characters."""
+    assert DocsAnchor.model_validate(_anchor(path='release..notes.html')).path == 'release..notes.html'
+
+
+def test_duplicate_anchor_matches_are_rejected():
+    anchors = [_anchor(), _anchor(path='operations/runbook/')]
+    with pytest.raises(ValidationError, match='duplicate'):
+        UIDocsConfig.model_validate({'anchors': anchors})
+
+
+def test_anchors_differing_in_selector_or_value_are_not_duplicates():
+    cfg = UIDocsConfig.model_validate(
+        {
+            'anchors': [
+                _anchor(),
+                _anchor(match={'label': 'module', 'value': 'vendor'}),
+                _anchor(match={'sink': 'archive_results_db'}),
+                _anchor(match={'event': 'deploy_marker'}),
+                _anchor(match={'page': 'scanners'}),
+            ]
+        }
+    )
+    assert len(cfg.anchors) == 5
 
 
 def test_more_than_200_anchors_fail():

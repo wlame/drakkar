@@ -624,6 +624,12 @@ BUILTIN_LINK_BASES = frozenset({'docs'})
 # and '..' rejections that this pattern alone would not express readably.
 _DOCS_PATH_RE = re.compile(r'^[^/#][^#]*(#[^#]*)?$')
 
+# Any RFC 3986 scheme prefix, not just the '//' ones. Checking for '://'
+# alone would let through the single-colon schemes that carry the real
+# risk here ('javascript:', 'data:', 'mailto:'), since the anchor path
+# ends up in an href.
+_DOCS_SCHEME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.\-]*:')
+
 
 class DocsAnchorMatch(BaseModel):
     """Exactly one selector naming the UI context this anchor attaches to."""
@@ -670,13 +676,25 @@ class DocsAnchor(BaseModel):
     def _validate_path(cls, value: str) -> str:
         """Confine the anchor to the served docs site.
 
-        The path is resolved under the site directory, so anything that
-        could escape it — an absolute path, a '..' segment, an external
-        scheme — is a config mistake caught at startup rather than a
-        broken (or leaking) link in the UI.
+        The path is resolved under the site directory and rendered into an
+        href, so anything that could leave the site — a URL scheme, an
+        absolute path, a '..' segment — is a config mistake caught at
+        startup rather than a broken (or actively unsafe) link in the UI.
+        Each rule reports separately: a rejected path should say which one
+        it broke.
         """
-        if not value or value.startswith('/') or '..' in value or '://' in value or not _DOCS_PATH_RE.match(value):
-            raise ValueError(f"docs anchor path '{value}' must be relative, without '..' or a scheme")
+        if _DOCS_SCHEME_RE.match(value):
+            raise ValueError(f"docs anchor path '{value}' must be site-relative; a URL scheme is not allowed")
+        if not value or value.startswith('/'):
+            raise ValueError(f"docs anchor path '{value}' must be a non-empty path without a leading '/'")
+        # Segment-wise, so a filename that merely contains dots
+        # ('release..notes.html') is fine and only a real traversal
+        # segment is rejected. The fragment cannot traverse, so it is
+        # dropped before the check.
+        if '..' in value.split('#', 1)[0].split('/'):
+            raise ValueError(f"docs anchor path '{value}' must not contain a '..' segment")
+        if not _DOCS_PATH_RE.match(value):
+            raise ValueError(f"docs anchor path '{value}' must be a relative path with at most one '#fragment'")
         return value
 
 
@@ -693,8 +711,26 @@ class UIDocsConfig(BaseModel):
     anchors: list[DocsAnchor] = Field(
         default_factory=list,
         max_length=200,
-        description='Contextual anchors: book icons on matching UI surfaces opening the named docs page.',
+        description='Contextual anchors opening the named docs page from matching UI surfaces.',
     )
+
+    @field_validator('anchors')
+    @classmethod
+    def _reject_duplicate_anchor_matches(cls, value: list[DocsAnchor]) -> list[DocsAnchor]:
+        """One anchor per UI context — a second one for the same match is unreachable.
+
+        Only an exact match is a duplicate: a different selector, or the
+        same label with and without a ``value``, addresses a different
+        surface and is allowed.
+        """
+        seen: set[tuple[str, str, str, str, str]] = set()
+        for anchor in value:
+            match = anchor.match
+            key = (match.label, match.value, match.sink, match.event, match.page)
+            if key in seen:
+                raise ValueError(f'duplicate docs anchor match {match.model_dump(exclude_defaults=True)}')
+            seen.add(key)
+        return value
 
 
 class UIConfig(BaseModel):

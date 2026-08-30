@@ -1890,8 +1890,8 @@
         {
           "path": "ui.docs.anchors",
           "env": "DK_UI__DOCS__ANCHORS",
-          "description": "Contextual anchors: book icons on matching UI surfaces opening the named docs page.",
-          "full_description": "Contextual anchors: book icons on matching UI surfaces opening the named docs page.",
+          "description": "Contextual anchors opening the named docs page from matching UI surfaces.",
+          "full_description": "Contextual anchors opening the named docs page from matching UI surfaces.",
           "type": "array",
           "default": [],
           "secret": false,
