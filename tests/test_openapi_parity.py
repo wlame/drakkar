@@ -241,7 +241,7 @@ async def test_identity_and_recent_tasks_payloads_match_schemas():
     without the other."""
     import aiosqlite
 
-    from drakkar.config import TimelineColorRule, UITimelineConfig
+    from drakkar.config import TimelineColorRule, UIDocsConfig, UITimelineConfig
     from drakkar.recorder import SCHEMA_EVENTS
 
     schemas = yaml.safe_load(SPEC_PATH.read_text())['components']['schemas']
@@ -251,7 +251,24 @@ async def test_identity_and_recent_tasks_payloads_match_schemas():
     timeline_cfg = UITimelineConfig(
         color_rules=[TimelineColorRule(when={'field': 'status', 'op': 'eq', 'value': 'failed'}, color='red')],
     )
-    cfg = make_ui_config(timeline=timeline_cfg)
+    # Likewise for the optional v1.22 docs key: enabled, with one anchor, so
+    # DocsSettings/DocsAnchor are validated rather than skipped as absent.
+    # The site directory need not exist — /docs/ answers its hint-404 and
+    # identity reports the configuration either way.
+    docs_cfg = UIDocsConfig.model_validate(
+        {
+            'site_dir': '/srv/operator-docs',
+            'title': 'Ranking Pipeline Docs',
+            'anchors': [
+                {
+                    'match': {'label': 'module', 'value': 'vendor'},
+                    'path': 'architecture/scanners/#vendor-scanning',
+                    'title': 'Vendor scanning',
+                }
+            ],
+        }
+    )
+    cfg = make_ui_config(timeline=timeline_cfg, docs=docs_cfg)
 
     # A single shared in-memory connection standing in for both the writer
     # and reader handles, same pattern as the debug-server route tests —
@@ -294,6 +311,8 @@ async def test_identity_and_recent_tasks_payloads_match_schemas():
     await db.close()
 
     jsonschema.validate(identity, _resolve_schema(schemas, 'Identity'), cls=jsonschema.Draft202012Validator)
+    # The built-in base rides along with the docs site, never on its own.
+    assert identity['link_bases']['docs'] == '/docs'
     jsonschema.validate(recent_tasks, _resolve_schema(schemas, 'RecentTasks'), cls=jsonschema.Draft202012Validator)
     # Live data carries no degradation flag at all.
     assert 'unavailable' not in recent_tasks

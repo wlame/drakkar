@@ -18,9 +18,16 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
-from drakkar.config import DrakkarConfig, TimelineColorRule, TimelineLabels, TimelineRuleCondition, UITimelineConfig
+from drakkar.config import (
+    DrakkarConfig,
+    TimelineColorRule,
+    TimelineLabels,
+    TimelineRuleCondition,
+    UIDocsConfig,
+    UITimelineConfig,
+)
 from drakkar.recorder import EventRecorder
-from drakkar.uiserver.routes_pages import _timeline_wire
+from drakkar.uiserver.routes_pages import _docs_wire, _timeline_wire
 from drakkar.uiserver.server import create_ui_app
 from tests.conftest import make_ui_config
 
@@ -994,6 +1001,80 @@ class TestApiV1Identity:
             'action': 'link',
         }
         assert wire[1] == {'name': 'span', 'kind': 'range', 'color': '#1f2a44', 'show': True, 'action': 'highlight'}
+
+    # --- v1.22: the operator docs site on identity ---
+
+    def test_docs_wire_is_none_when_site_dir_is_unset(self):
+        """No site directory means the feature is off, so identity carries no docs key at all."""
+        assert _docs_wire(UIDocsConfig()) is None
+
+    def test_docs_wire_emits_only_the_set_selector_fields(self):
+        cfg = UIDocsConfig.model_validate(
+            {
+                'site_dir': '/srv/operator-docs',
+                'title': 'Ranking Pipeline Docs',
+                'anchors': [
+                    {
+                        'match': {'label': 'module', 'value': 'vendor'},
+                        'path': 'architecture/scanners/#vendor-scanning',
+                        'title': 'Vendor scanning',
+                    },
+                    {'match': {'sink': 'archive_results_db'}, 'path': 'operations/sinks/'},
+                ],
+            }
+        )
+        assert _docs_wire(cfg) == {
+            'title': 'Ranking Pipeline Docs',
+            'anchors': [
+                {
+                    'match': {'label': 'module', 'value': 'vendor'},
+                    'path': 'architecture/scanners/#vendor-scanning',
+                    'title': 'Vendor scanning',
+                },
+                # Unset selectors and an empty anchor title are omitted, not
+                # sent as empty strings.
+                {'match': {'sink': 'archive_results_db'}, 'path': 'operations/sinks/'},
+            ],
+        }
+
+    async def test_identity_omits_docs_and_builtin_base_when_feature_is_off(self, tmp_path, mock_recorder, mock_app):
+        cfg = make_ui_config(
+            enabled=True,
+            port=8080,
+            db_dir=str(tmp_path),
+            link_bases={'jira': 'https://jira.internal.example.com'},
+        )
+        mock_app.config_summary = '[test-worker]'
+        mock_recorder.config = cfg
+        async with make_client(cfg, mock_recorder, mock_app) as c:
+            data = (await c.get('/api/v1/identity')).json()
+        assert 'docs' not in data
+        assert data['link_bases'] == {'jira': 'https://jira.internal.example.com'}
+
+    async def test_identity_reports_docs_and_injects_the_builtin_link_base(self, tmp_path, mock_recorder, mock_app):
+        docs_cfg = UIDocsConfig.model_validate(
+            {
+                'site_dir': str(tmp_path / 'site'),
+                'title': 'Ranking Pipeline Docs',
+                'anchors': [{'match': {'page': 'scanners'}, 'path': 'architecture/scanners/'}],
+            }
+        )
+        cfg = make_ui_config(
+            enabled=True,
+            port=8080,
+            db_dir=str(tmp_path),
+            link_bases={'jira': 'https://jira.internal.example.com'},
+            docs=docs_cfg,
+        )
+        mock_app.config_summary = '[test-worker]'
+        mock_recorder.config = cfg
+        async with make_client(cfg, mock_recorder, mock_app) as c:
+            data = (await c.get('/api/v1/identity')).json()
+        assert data['docs'] == {
+            'title': 'Ranking Pipeline Docs',
+            'anchors': [{'match': {'page': 'scanners'}, 'path': 'architecture/scanners/'}],
+        }
+        assert data['link_bases'] == {'jira': 'https://jira.internal.example.com', 'docs': '/docs'}
 
 
 # ---------------------------------------------------------------------------

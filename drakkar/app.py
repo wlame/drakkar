@@ -26,7 +26,7 @@ from structlog.contextvars import bind_contextvars, unbind_contextvars
 from drakkar import __version__
 from drakkar.appconfig import load_app_config
 from drakkar.cache import CacheEngine
-from drakkar.config import DrakkarConfig, load_config
+from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, load_config
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
@@ -51,6 +51,12 @@ from drakkar.timeline_events import referenced_link_bases
 from drakkar.uipages import UIPage, build_pages, pages_referenced_bases
 
 logger = structlog.get_logger()
+
+
+# SinksConfig sections whose keys are sink instance names. ``custom`` is
+# excluded on purpose: plugin instances nest one level deeper (type name →
+# instance name) and are collected separately.
+_TYPED_SINK_SECTIONS = ('kafka', 'postgres', 'mongo', 'http', 'redis', 'filesystem')
 
 
 # Re-exported for backward compatibility — moved into
@@ -212,7 +218,10 @@ class DrakkarApp:
             referenced = pages_referenced_bases(self._ui_pages)
             if layout is not None:
                 referenced = referenced | referenced_bases(layout)
-            missing_bases = sorted(referenced - set(self._config.ui.link_bases))
+            # BUILTIN_LINK_BASES is subtracted everywhere a template's bases
+            # are checked: {docs} is resolved by the framework itself, so it
+            # is never something ui.link_bases has to configure.
+            missing_bases = sorted(referenced - set(self._config.ui.link_bases) - BUILTIN_LINK_BASES)
             if missing_bases:
                 logger.warning(
                     'probe_details_link_bases_missing',
@@ -229,7 +238,9 @@ class DrakkarApp:
             # naming which type is affected is more useful than one pooled
             # list.
             for event_type in self._config.ui.timeline.events:
-                missing_event_bases = sorted(referenced_link_bases(event_type.link) - set(self._config.ui.link_bases))
+                missing_event_bases = sorted(
+                    referenced_link_bases(event_type.link) - set(self._config.ui.link_bases) - BUILTIN_LINK_BASES
+                )
                 if missing_event_bases:
                     logger.warning(
                         'timeline_event_link_bases_missing',
@@ -242,6 +253,11 @@ class DrakkarApp:
                             'link renders as plain text'
                         ),
                     )
+            # Docs anchors name surfaces declared elsewhere in the
+            # deployment; an anchor naming nothing renders nothing, so each
+            # one is cross-checked here (warn, don't fail — same treatment
+            # as the missing link bases above).
+            self._warn_on_unresolved_docs_anchors()
         # Load the handler-declared application config (docs/app-config.md)
         # at construction — after load_config, before the lifecycle ever
         # calls on_startup — so a bad app: section or env override is a
@@ -423,6 +439,57 @@ class DrakkarApp:
             cluster_name=self._cluster_name,
         )
         asyncio.run(self._lifecycle._async_run())
+
+    def _warn_on_unresolved_docs_anchors(self) -> None:
+        """Warn once per docs anchor whose sink/event/page selector names nothing.
+
+        An anchor attaches to a surface declared elsewhere in the deployment
+        — a sink instance, a timeline event type, a declared UI page — and a
+        selector matching none of them simply renders no anchor, which stays
+        invisible until an operator goes looking for the link. Label anchors
+        are deliberately unchecked: label keys come from runtime task labels,
+        not from config, so there is no declared set to check them against.
+        """
+        anchors = self._config.ui.docs.anchors
+        if not anchors:
+            return
+        sink_names = {name for section in _TYPED_SINK_SECTIONS for name in getattr(self._config.sinks, section)}
+        sink_names |= {name for instances in self._config.sinks.custom.values() for name in instances}
+        # One row per checkable selector: the match field, the warning it
+        # raises, the declared names it must be one of, what such a name is,
+        # and where the deployment declares one.
+        anchor_checks = (
+            ('sink', 'docs_anchor_unknown_sink', sink_names, 'configured sink instance', 'sinks.*'),
+            (
+                'event',
+                'docs_anchor_unknown_event',
+                {event_type.name for event_type in self._config.ui.timeline.events},
+                'declared timeline event type',
+                'ui.timeline.events',
+            ),
+            (
+                'page',
+                'docs_anchor_unknown_page',
+                {page.slug for page in self._ui_pages},
+                'declared UI page slug',
+                "the handler's ui_pages",
+            ),
+        )
+        for anchor in anchors:
+            for selector, warning_event, declared_names, noun, source in anchor_checks:
+                target = getattr(anchor.match, selector)
+                if not target or target in declared_names:
+                    continue
+                logger.warning(
+                    warning_event,
+                    category='docs',
+                    selector=selector,
+                    target=target,
+                    message=(
+                        f"docs anchor for {selector} '{target}' names no {noun}; the anchor never "
+                        f'renders — fix the name in ui.docs.anchors or declare it in {source}'
+                    ),
+                )
 
     def _wire_app_config(self) -> None:
         """Load the handler-declared application config and attach it.

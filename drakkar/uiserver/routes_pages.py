@@ -37,7 +37,7 @@ from drakkar.recorder import queries
 from drakkar.uiserver.server_helpers import backend_version, origin_allowed
 
 if TYPE_CHECKING:
-    from drakkar.config import UITimelineConfig
+    from drakkar.config import UIDocsConfig, UITimelineConfig
     from drakkar.uiserver.server import UIDeps
 
 # Idle backoff bounds for the WebSocket drain loop. The loop polls a
@@ -105,6 +105,45 @@ def _timeline_wire(cfg: UITimelineConfig) -> dict[str, object]:
     if events:
         out['events'] = events
     return out
+
+
+# Where the built-in ``{docs}`` link base resolves to. Same-origin path (the
+# static mount this worker serves), unlike the absolute URLs user-configured
+# bases carry — see the contract's "Built-in docs link base".
+DOCS_LINK_BASE = '/docs'
+
+
+def _docs_wire(cfg: UIDocsConfig) -> dict[str, object] | None:
+    """Serialize the operator docs site for /api/v1/identity, or None when it is off.
+
+    ``None`` keeps the ``docs`` key out of the payload entirely: the SPA
+    reads its presence as the feature flag, the same presence-as-flag
+    convention the dashboard tiles and ``_timeline_wire``'s ``events`` use.
+    """
+    if not cfg.site_dir:
+        return None
+    anchors: list[dict[str, object]] = []
+    for anchor in cfg.anchors:
+        # Only the selector fields the operator actually set — the model
+        # defaults the other four to '' and sending those would make every
+        # anchor look like it matched five contexts.
+        match = {field: value for field, value in anchor.match.model_dump().items() if value}
+        entry: dict[str, object] = {'match': match, 'path': anchor.path}
+        if anchor.title:
+            entry['title'] = anchor.title
+        anchors.append(entry)
+    return {'title': cfg.title, 'anchors': anchors}
+
+
+def _link_bases_wire(cfg: UIDocsConfig, link_bases: dict[str, str]) -> dict[str, str]:
+    """User link bases plus the built-in ``docs`` entry when the docs site is served.
+
+    Config load rejects a user base named ``docs``, so the injection can
+    never shadow one.
+    """
+    if not cfg.site_dir:
+        return link_bases
+    return {**link_bases, 'docs': DOCS_LINK_BASE}
 
 
 def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
@@ -350,20 +389,23 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
     @router.get('/api/v1/identity')
     async def api_identity():
         """Worker identity: id, cluster, config summary, and versions."""
-        return JSONResponse(
-            {
-                'worker_id': drakkar_app._worker_id,
-                'cluster': drakkar_app._cluster_name or None,
-                'config_summary': drakkar_app.config_summary,
-                'backend': 'python',
-                'backend_version': backend_version(),
-                'ui_version': deps.ui_version,
-                'ui_source': deps.ui_source,
-                'link_bases': config.link_bases,
-                'custom_renderers': bool(config.custom_renderers_path),
-                'timeline': _timeline_wire(config.timeline),
-            }
-        )
+        payload: dict[str, object] = {
+            'worker_id': drakkar_app._worker_id,
+            'cluster': drakkar_app._cluster_name or None,
+            'config_summary': drakkar_app.config_summary,
+            'backend': 'python',
+            'backend_version': backend_version(),
+            'ui_version': deps.ui_version,
+            'ui_source': deps.ui_source,
+            'link_bases': _link_bases_wire(config.docs, config.link_bases),
+            'custom_renderers': bool(config.custom_renderers_path),
+            'timeline': _timeline_wire(config.timeline),
+        }
+        # v1.22: absent rather than null when no docs site is configured.
+        docs = _docs_wire(config.docs)
+        if docs is not None:
+            payload['docs'] = docs
+        return JSONResponse(payload)
 
     @router.get('/api/v1/sinks')
     async def api_sinks():

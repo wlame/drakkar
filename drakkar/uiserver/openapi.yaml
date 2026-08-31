@@ -1245,7 +1245,10 @@ components:
           description: >-
             Named URL bases from ui.link_bases, keyed by base name; empty
             object when unset (never absent). Probe-details link templates
-            resolve {<base>} tokens against this map. (v1.4)
+            resolve {<base>} tokens against this map. (v1.4) When the
+            operator docs site is enabled the map also carries the built-in
+            entry "docs": "/docs" — a same-origin path, not an absolute URL;
+            user configs may not define a base named docs. (v1.22)
         custom_renderers:
           type: boolean
           description: >-
@@ -1253,7 +1256,45 @@ components:
             fetches GET /api/v1/ui/renderers.js when this is true.
         timeline:
           $ref: '#/components/schemas/TimelineSettings'
+        # v1.22, optional: present only when the operator docs site is
+        # enabled. Absent on older backends and when the feature is off.
+        docs:
+          $ref: '#/components/schemas/DocsSettings'
       required: [worker_id, cluster, config_summary, timeline]
+
+    DocsSettings:
+      description: >-
+        Operator docs site metadata (v1.22): the site title and the
+        contextual anchors the UI links from. Present on Identity only when
+        the feature is enabled. The site itself is a static mount at
+        GET /docs/ and is not part of this document's paths.
+      type: object
+      properties:
+        title: {type: string, description: Display title of the operator docs site.}
+        anchors:
+          type: array
+          maxItems: 200
+          items: {$ref: '#/components/schemas/DocsAnchor'}
+      required: [title, anchors]
+
+    DocsAnchor:
+      description: >-
+        One contextual link from a UI context into the operator docs site
+        (v1.22). Most specific match wins (label+value over key-wide label).
+      type: object
+      properties:
+        match:
+          type: object
+          description: >-
+            Exactly one of label (with optional value), sink, event, page —
+            see the contract doc for what each selector names.
+        path:
+          type: string
+          description: >-
+            Site-relative path with an optional #fragment; never absolute,
+            never a scheme, never containing "..".
+        title: {type: string, description: Link text; omitted when empty.}
+      required: [match, path]
 
     TimelineRuleCondition:
       description: >-
