@@ -43,7 +43,7 @@ static file server could serve it, so can the worker.
 `DK_UI__DOCS__SITE_DIR`, `DK_UI__DOCS__TITLE` — so one image can carry the
 anchors while each environment points `site_dir` at its own staged site.
 Declare `anchors` in the YAML file: like the other structured lists in
-`ui`, it is not a value an environment variable can express.
+`ui`, the loader does not read structured lists from the environment.
 
 ### One anchor
 
@@ -193,16 +193,19 @@ answers with the UI shell.
 
 | Request | Answer |
 |---|---|
+| `/docs` (no trailing slash) | `307` to `/docs/`, so the site's relative links resolve |
 | A file inside the site | The file, verbatim |
 | A directory (`/docs/`, `/docs/architecture/`) | That directory's `index.html` |
 | A file that is not there | `404` — never the UI shell, so a wrong docs URL reads as wrong |
 | A path escaping the site (`..`, an absolute path, a symlink pointing out) | `404` |
 | Feature off, or the directory missing | `404` with a JSON hint naming `ui.docs.site_dir` |
 
-`site_dir` is resolved to an absolute path once, at startup, so point it at
-a path that exists by then. Whether the directory is *there* is re-checked
-on every request: a site deleted or swapped out under a running worker
-answers the hint-404 rather than an error page.
+`site_dir` is turned into an absolute path once, at startup, and the
+symlinks along it are followed then — so a path whose *symlinks* change
+later needs a restart. Whether the directory is there is re-checked on
+every request: a site staged after boot at the same path starts serving on
+its own, and one deleted or swapped out under a running worker answers the
+hint-404 rather than an error page.
 
 Symlinks are followed **and then checked**: a site whose `assets/` is a
 symlink into a shared directory elsewhere on the host answers 404 for
@@ -217,13 +220,17 @@ when `ui.auth_token` is empty, token-required when it is set — including
 the hint-404, which must not confirm the feature's state to an anonymous
 caller.
 
-!!! warning "A token-gated worker needs the token on the docs URL too"
-    The operator UI opens the site as a plain same-origin URL and does not
-    append its token to it, so on a worker with `ui.auth_token` set the
-    drawer and the nav entry land on `401`. Reach the site with
-    `/docs/?token=<token>`, or terminate auth at an ingress that injects
-    the credential for the whole worker. The rest of the feature —
-    anchors, icons, the drawer chrome — is unaffected.
+Browser-issued requests carry the token as `?token=<token>` — the same
+query-parameter path downloads and the WebSocket already use, because a
+browser cannot set a header on a framed page or a nav link. Current UI
+bundles build every docs link that way, so the nav entry and the drawer
+work unchanged on a token-gated worker.
+
+!!! note "Reaching the site outside the UI"
+    An older UI bundle, a bookmark, or a `curl` has to supply the token
+    itself: `/docs/?token=<token>`, an `Authorization: Bearer <token>`
+    header where the client can set one, or an ingress that injects the
+    credential for the whole worker.
 
 **Treat the site's content as trusted code.** It is served from the
 worker's own origin and framed inside the operator UI, so a script in it

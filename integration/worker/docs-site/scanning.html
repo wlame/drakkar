@@ -21,22 +21,24 @@
 <p>
   Values come from the request, not from configuration, so the set grows with
   whatever the producer asks for. Treat an unfamiliar module name as new input,
-  not as a fault.
+  not as a fault. A module whose name contains <code>vendor</code> is colored
+  purple on the timeline by the <code>vendored code</code> rule, so third-party
+  source is easy to skip past.
 </p>
 
-<h2 id="vendor-scanning">Vendor scanning</h2>
+<h2 id="tests-module">The tests module</h2>
 <p>
-  Vendored code is third-party source kept inside the repository. It is scanned
-  like any other module, but the results are rarely actionable: the pattern
-  matches belong to someone else's code. Timeline bars for these tasks are
-  colored purple by the <code>vendored code</code> rule so an operator can skip
-  them at a glance.
+  Tasks with <code>module = tests</code> scan the test suite: either one test
+  file, or the whole <code>tests</code> directory in a single recursive task.
+  The directory tasks are the long ones — they read far more bytes than a
+  single-file scan, so they dominate the throughput track without meaning
+  anything is wrong.
 </p>
 <p>
   This section is what a value-specific docs anchor points at:
   <code>module</code> alone opens the section above, while
-  <code>module = vendor</code> opens this one. The narrower anchor wins wherever
-  both apply.
+  <code>module = tests</code> opens this one. The narrower anchor wins on the
+  tasks it names, and the key-wide one still covers every other module.
 </p>
 
 <h2 id="scan-windows">Scan window ranges</h2>

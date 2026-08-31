@@ -474,7 +474,7 @@ ui:
                                    # env: DK_UI__CONSUME_PAUSE__DURATIONS_SECONDS (JSON list)
 
   # --- Deployment metadata ---
-  expose_env_vars: []              # env vars captured into worker_config table. env: DK_UI__EXPOSE_ENV_VARS (JSON list)
+  expose_env_vars: []              # env vars captured into worker_config table. YAML only.
                                    # e.g. ['GIT_SHA', 'DEPLOY_ENV', 'K8S_POD_NAME']
 
   # --- Presentation ---
@@ -578,7 +578,7 @@ ui:
       filter: ''                     # env: DK_UI__TIMELINE__LABELS__FILTER
       marker: ''                     # env: DK_UI__TIMELINE__LABELS__MARKER
     events: []                       # declared custom timeline event types (see ui-timeline-events.md); max 50.
-                                     # env: DK_UI__TIMELINE__EVENTS (JSON list)
+                                     # YAML only.
                                      # e.g. [{name: deploy, kind: marker, color: purple, action: link, link: "{grafana}/d?from={ts_ms}"}]
 
   # --- Operator docs site served at /docs/ + contextual anchors (see ui-docs.md) ---

@@ -304,9 +304,11 @@ ui:
   # already mounted read-only at /project, so no extra volume is needed.
   #
   # Each anchor names exactly one UI surface. The two label anchors show
-  # the specificity rule: the module=vendor anchor wins on vendored
-  # tasks, the key-wide module anchor covers every other value. The sink
-  # and event anchors must name things this file declares elsewhere
+  # the specificity rule: the module=tests anchor wins on tasks that
+  # scan the test suite, and the key-wide module anchor covers every
+  # other value (tests is a module the producer really asks for, so both
+  # anchors are reachable in a running harness). The sink and event
+  # anchors must name things this file declares elsewhere
   # (sinks.postgres.archive_results_db and the timeline event type
   # above) — a name that matches nothing logs a startup warning and
   # renders no icon.
@@ -317,9 +319,9 @@ ui:
       - match: {label: module}
         path: scanning.html#modules
         title: "Scan target modules"
-      - match: {label: module, value: vendor}
-        path: scanning.html#vendor-scanning
-        title: "Vendor scanning"
+      - match: {label: module, value: tests}
+        path: scanning.html#tests-module
+        title: "The tests module"
       - match: {sink: archive_results_db}
         path: operations.html#archive-database
         title: "Result archive database"
