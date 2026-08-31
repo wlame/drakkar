@@ -7,7 +7,10 @@ API: the path is absent from ``openapi.yaml`` and from the route-parity pin.
 
 Serving rules, all normative:
 
-- requests resolve inside the configured directory; an escape is a 404;
+- requests resolve inside the configured directory; an escape is a 404.
+  Resolution follows symlinks, so a link pointing outside ``site_dir`` is an
+  escape too: a site whose ``assets/`` is a symlink to a shared directory
+  elsewhere on the host answers 404 rather than serving through it;
 - a directory request serves its ``index.html``;
 - a missing file is a 404 — deliberately NOT the SPA shell, unlike
   :mod:`drakkar.uiserver.routes_spa`, because a wrong docs URL must read as
@@ -64,11 +67,17 @@ def create_docs_router(deps: UIDeps) -> APIRouter:
         # answer than a stack trace from FileResponse.
         if root is None or not root.is_dir():
             return _unavailable()
-        candidate = (root / full_path).resolve()
-        if candidate.is_dir():
-            # Directory request (including '/docs/' itself, where full_path
-            # is empty). Resolved again so a symlinked index cannot escape.
-            candidate = (candidate / 'index.html').resolve()
+        try:
+            candidate = (root / full_path).resolve()
+            if candidate.is_dir():
+                # Directory request (including '/docs/' itself, where full_path
+                # is empty). Resolved again so a symlinked index cannot escape.
+                candidate = (candidate / 'index.html').resolve()
+        except (ValueError, OSError) as exc:
+            # A path the OS refuses to even look at — an embedded NUL byte,
+            # an over-long segment. It names nothing inside the site, so it
+            # is a 404 like any other miss; unguarded it escaped as a 500.
+            raise HTTPException(status_code=404, detail='Not found in the docs site') from exc
         # Containment: the resolved path must stay under the site root. The
         # is_file() check also rules out the root directory itself.
         if candidate.is_relative_to(root) and candidate.is_file():

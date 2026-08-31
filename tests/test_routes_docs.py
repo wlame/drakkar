@@ -137,6 +137,12 @@ async def test_docs_traversal_is_404_and_leaks_nothing(docs_client, secret_outsi
     assert b'top secret' not in resp.content, path
 
 
+async def test_docs_unlookupable_path_is_404_not_a_traceback(docs_client):
+    """An embedded NUL makes ``Path.resolve()`` raise; it must still read as a miss."""
+    resp = await docs_client.get('/docs/%00x')
+    assert resp.status_code == 404
+
+
 # --- unconfigured / missing directory --------------------------------------
 
 
@@ -188,6 +194,15 @@ async def test_docs_hint_404_is_also_gated(tmp_path):
         assert (await client.get('/docs/')).status_code == 401
 
 
+async def test_docs_bare_path_redirect_requires_token_when_configured(tmp_path, docs_site):
+    """The redirect is gated too — it must not confirm the mount to an anonymous caller."""
+    async with make_docs_client(tmp_path, site_dir=str(docs_site), auth_token='secret-123') as client:
+        assert (await client.get('/docs')).status_code == 401
+        ok = await client.get('/docs', headers={'Authorization': 'Bearer secret-123'})
+        assert ok.status_code == 307
+        assert ok.headers['location'] == '/docs/'
+
+
 # --- neighbours: Swagger relocation and the SPA catch-all ------------------
 
 
@@ -204,6 +219,32 @@ async def test_docs_path_no_longer_serves_swagger(tmp_path, docs_site):
     async with make_docs_client(tmp_path, site_dir=str(docs_site)) as client:
         resp = await client.get('/docs/')
     assert 'swagger-ui-bundle.js' not in resp.text
+
+
+async def test_docs_unconfigured_keeps_the_hint_404_with_a_bundle_present(tmp_path):
+    """The contract clause: /docs/ answers the hint, never the SPA shell.
+
+    With a bundle resolved the catch-all would happily return index.html
+    with a 200 — which is exactly what the unconditional registration of
+    this router exists to prevent.
+    """
+    from tests.test_uihost import BUNDLE_FILES, seed_cache
+
+    ui_root = seed_cache(tmp_path, 'v1.0.0')
+    cfg = make_ui_config(enabled=True, port=8080, db_dir=str(tmp_path))
+    recorder = AsyncMock(spec=EventRecorder)
+    recorder.config = cfg
+    app = MagicMock()
+    app._worker_id = 'docs-worker'
+    app._cluster_name = ''
+    app._start_time = time.monotonic()
+    app._config = DrakkarConfig()
+    fastapi_app = create_ui_app(cfg, recorder, app, ui_root=ui_root)
+    async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url='http://test') as client:
+        resp = await client.get('/docs/')
+    assert resp.status_code == 404
+    assert resp.content != BUNDLE_FILES['index.html']
+    assert 'ui.docs.site_dir' in resp.json()['detail']
 
 
 async def test_spa_still_owns_non_docs_paths(tmp_path, docs_site):

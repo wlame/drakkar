@@ -84,8 +84,15 @@ def create_spa_router(deps: UIDeps, ui_root: Path | None) -> APIRouter:
         inside it — traversal attempts and directory hits fall through to the
         SPA shell rather than exposing anything outside the bundle.
         """
-        candidate = (root / full_path).resolve()
-        if candidate != root and candidate.is_relative_to(root) and candidate.is_file():
+        try:
+            candidate: Path | None = (root / full_path).resolve()
+        except (ValueError, OSError):
+            # A path the OS refuses to even look at — an embedded NUL byte,
+            # an over-long segment. Treated exactly like a traversal attempt
+            # (fall through to the shell) so the History-API contract holds
+            # for every unknown path; unguarded it escaped as a 500.
+            candidate = None
+        if candidate is not None and candidate != root and candidate.is_relative_to(root) and candidate.is_file():
             return FileResponse(candidate)
         index = root / 'index.html'
         if not index.is_file():

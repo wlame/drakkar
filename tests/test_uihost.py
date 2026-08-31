@@ -534,6 +534,17 @@ async def test_spa_traversal_falls_back_to_index(spa_client):
     assert resp.content == BUNDLE_FILES['index.html']
 
 
+async def test_spa_unlookupable_path_falls_back_to_index(spa_client):
+    """An embedded NUL makes ``Path.resolve()`` raise — the shell answers anyway.
+
+    Same contract as a traversal attempt: unknown paths belong to the
+    client-side router, and the raised OS error must not become a 500.
+    """
+    resp = await spa_client.get('/%00x')
+    assert resp.status_code == 200
+    assert resp.content == BUNDLE_FILES['index.html']
+
+
 async def test_spa_mode_keeps_json_api(spa_client):
     resp = await spa_client.get('/api/v1/dashboard')
     assert resp.status_code == 200
