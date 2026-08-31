@@ -1019,6 +1019,7 @@ class TestApiV1Identity:
                         'path': 'architecture/scanners/#vendor-scanning',
                         'title': 'Vendor scanning',
                     },
+                    {'match': {'label': 'module'}, 'path': 'architecture/scanners/'},
                     {'match': {'sink': 'archive_results_db'}, 'path': 'operations/sinks/'},
                 ],
             }
@@ -1031,6 +1032,9 @@ class TestApiV1Identity:
                     'path': 'architecture/scanners/#vendor-scanning',
                     'title': 'Vendor scanning',
                 },
+                # The key-wide label anchor is its own shape: no 'value' key
+                # at all, not 'value': ''.
+                {'match': {'label': 'module'}, 'path': 'architecture/scanners/'},
                 # Unset selectors and an empty anchor title are omitted, not
                 # sent as empty strings.
                 {'match': {'sink': 'archive_results_db'}, 'path': 'operations/sinks/'},

@@ -1,10 +1,12 @@
 """Validation tests for ui.docs (UIDocsConfig / DocsAnchor) and the startup anchor cross-checks."""
 
+from typing import get_origin
+
 import pytest
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from drakkar.app import DrakkarApp
+from drakkar.app import _TYPED_SINK_SECTIONS, DrakkarApp
 from drakkar.config import (
     DocsAnchor,
     DrakkarConfig,
@@ -130,7 +132,7 @@ def _minimal_config(ui: UIConfig | None = None, sinks: SinksConfig | None = None
     )
 
 
-def _startup_warnings(*, anchors=(), sinks=None, events=(), ui_pages=None, link_bases=None) -> list[dict]:
+def _startup_warnings(*, anchors=(), sinks=None, events=(), ui_pages=None, site_dir='/srv/operator-docs') -> list[dict]:
     """Construct an app with the given docs config and return its warning records."""
 
     class _Handler(BaseDrakkarHandler):
@@ -139,9 +141,8 @@ def _startup_warnings(*, anchors=(), sinks=None, events=(), ui_pages=None, link_
 
     _Handler.ui_pages = ui_pages
     ui = UIConfig(
-        link_bases=link_bases or {},
         timeline=UITimelineConfig(events=list(events)),
-        docs=UIDocsConfig.model_validate({'site_dir': '/srv/operator-docs', 'anchors': list(anchors)}),
+        docs=UIDocsConfig.model_validate({'site_dir': site_dir, 'anchors': list(anchors)}),
     )
     with capture_logs() as cap:
         DrakkarApp(handler=_Handler(), config=_minimal_config(ui=ui, sinks=sinks))
@@ -182,6 +183,30 @@ def test_startup_silent_when_docs_anchor_names_a_configured_sink():
         )
         == []
     )
+
+
+def test_typed_sink_sections_are_derived_from_the_sinks_model():
+    """The enumerated sections must track SinksConfig, and must exclude its non-mapping settings.
+
+    Restating the six built-in names would go stale the day a seventh sink
+    type lands; deriving them off every field would try to iterate
+    ``delivery_timeout_seconds`` (a float) and blow up instead.
+    """
+    mapping_fields = {name for name, field in SinksConfig.model_fields.items() if get_origin(field.annotation) is dict}
+    assert set(_TYPED_SINK_SECTIONS) == mapping_fields - {'custom'}
+    assert {'delivery_timeout_seconds', 'circuit_breaker'}.isdisjoint(_TYPED_SINK_SECTIONS)
+    assert all(isinstance(getattr(SinksConfig(), section), dict) for section in _TYPED_SINK_SECTIONS)
+
+
+def test_startup_still_warns_on_a_bad_anchor_when_no_docs_site_is_configured():
+    """A misspelled anchor is a config typo whether or not the site is served yet.
+
+    Operators stage anchors before pointing ui.docs.site_dir at a built
+    site; staying silent there would hide the typo until the day the site
+    lands, which is exactly when nobody is looking at startup logs.
+    """
+    warnings = _startup_warnings(anchors=[_anchor(match={'sink': 'archive_results_db'})], site_dir='')
+    assert [w['event'] for w in warnings] == ['docs_anchor_unknown_sink']
 
 
 def test_startup_silent_when_docs_anchor_names_a_custom_sink_instance():

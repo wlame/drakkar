@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_origin
 
 import structlog
 from pydantic import BaseModel
@@ -26,7 +26,7 @@ from structlog.contextvars import bind_contextvars, unbind_contextvars
 from drakkar import __version__
 from drakkar.appconfig import load_app_config
 from drakkar.cache import CacheEngine
-from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, load_config
+from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, SinksConfig, load_config
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.consumer import KafkaConsumer
 from drakkar.executor import ExecutorPool
@@ -53,10 +53,17 @@ from drakkar.uipages import UIPage, build_pages, pages_referenced_bases
 logger = structlog.get_logger()
 
 
-# SinksConfig sections whose keys are sink instance names. ``custom`` is
-# excluded on purpose: plugin instances nest one level deeper (type name →
-# instance name) and are collected separately.
-_TYPED_SINK_SECTIONS = ('kafka', 'postgres', 'mongo', 'http', 'redis', 'filesystem')
+# SinksConfig sections whose keys are sink instance names, derived from the
+# model rather than restated here so a newly added built-in sink type takes
+# part without a second edit. Two exclusions: the non-mapping settings on
+# SinksConfig (delivery_timeout_seconds, circuit_breaker), which the dict
+# check drops, and ``custom``, whose plugin instances nest one level deeper
+# (type name → instance name) and are collected separately.
+_TYPED_SINK_SECTIONS: tuple[str, ...] = tuple(
+    name
+    for name, field in SinksConfig.model_fields.items()
+    if name != 'custom' and get_origin(field.annotation) is dict
+)
 
 
 # Re-exported for backward compatibility — moved into
