@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Operator docs site** (contract v1.22): point `ui.docs.site_dir` at a
+  prebuilt static site — an mkdocs `site/`, a Sphinx build, plain HTML —
+  and the worker serves it at `/docs/`. `ui.docs.anchors` binds pages of
+  that site to the surfaces they explain: a task label key (or one
+  specific value of it), a sink instance, a declared timeline event type,
+  or a declared UI page. The operator UI shows the site as a nav entry and
+  opens an anchored page beside the live view. Link templates gain a
+  built-in `{docs}` base, so `ui.link_bases` may no longer define a base
+  named `docs`. Paths stay inside the site: a scheme, a leading `/`, a
+  `..` segment, or a duplicate match fails config load, and an escape at
+  request time is a 404. An anchor that names an unknown sink, event type,
+  or page logs one startup warning and renders nothing. New docs page:
+  Operator Docs Site. The integration harness serves a small hand-written
+  handbook with four anchors.
+
 - **Custom timeline events** (contract v1.21): declare your own marker,
   range, or flag pin types under `ui.timeline.events` and emit instances
   with `self.timeline_event(type_name, text='', ts=None, end_ts=None,
@@ -40,6 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than failing silently with no signal to the operator.
 
 ### Changed
+
+- **The built-in Swagger UI moved from `/docs` to `/api-docs`.** The old
+  path now serves the operator docs site above. Swagger assets moved with
+  it (`/api-docs/swagger-ui-bundle.js`, `/api-docs/swagger-ui.css`); the
+  OpenAPI document itself is unchanged at `/api/v1/openapi.json`. Update
+  bookmarks and scripts that used `/docs` for the API docs — nothing in
+  the operator UI linked it.
 
 - **`timeline_event` highlight/filter matches auto-fill from offsets, not
   window id.** The task view has no window field to correlate against, so

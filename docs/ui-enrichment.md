@@ -75,6 +75,11 @@ ui:
 ```
 
 - Base names are lower-case identifiers (`^[a-z][a-z0-9_]*$`).
+- The name `docs` is reserved: it is the built-in base for the worker's own
+  [operator docs site](ui-docs.md), so config load rejects a `ui.link_bases`
+  entry that tries to define it. With a docs site configured, a
+  `{docs}/page/#section` template resolves wherever any other base does;
+  without one the token stays unresolved, like any missing base.
 - Values must start with `http://` or `https://`; a trailing `/` is
   stripped, so a template's own leading `/job/...` doesn't produce a
   doubled slash.

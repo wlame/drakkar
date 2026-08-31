@@ -294,6 +294,38 @@ ui:
         label: "kafka {text}"
         link: "{kafka_ui}/ui/clusters/drakkar-local/all-topics/search-requests/messages?seekType=OFFSET&seekTo={partition}::{text}"
         action: link
+  # --- Operator docs site (docs/ui-docs.md) ---
+  #
+  # A prebuilt static site served at /docs/ by this worker, plus the
+  # contextual anchors that link UI surfaces into it. The site under
+  # docs-site/ is hand-written HTML, not an mkdocs build: the worker
+  # serves any static directory, and small files make the anchor
+  # fragments (real id= attributes) easy to read. The repo root is
+  # already mounted read-only at /project, so no extra volume is needed.
+  #
+  # Each anchor names exactly one UI surface. The two label anchors show
+  # the specificity rule: the module=vendor anchor wins on vendored
+  # tasks, the key-wide module anchor covers every other value. The sink
+  # and event anchors must name things this file declares elsewhere
+  # (sinks.postgres.archive_results_db and the timeline event type
+  # above) — a name that matches nothing logs a startup warning and
+  # renders no icon.
+  docs:
+    site_dir: /project/integration/worker/docs-site
+    title: "Ripgrep Pipeline Handbook"
+    anchors:
+      - match: {label: module}
+        path: scanning.html#modules
+        title: "Scan target modules"
+      - match: {label: module, value: vendor}
+        path: scanning.html#vendor-scanning
+        title: "Vendor scanning"
+      - match: {sink: archive_results_db}
+        path: operations.html#archive-database
+        title: "Result archive database"
+      - match: {event: scan_window_processing_range}
+        path: scanning.html#scan-windows
+        title: "Scan window ranges"
 
 # --- Framework cache ---
 #

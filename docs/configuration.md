@@ -805,6 +805,13 @@ covered field-by-field on the dedicated [Timeline Tuning](ui-timeline.md) page.
 `ui.timeline.events` — handler-declared custom event types drawn as markers, ranges,
 or flag pins — is covered on [Custom Timeline Events](ui-timeline-events.md).
 
+### Operator Docs Site (`ui.docs:`)
+
+A prebuilt static docs site the worker serves at `/docs/`, plus the contextual
+anchors that link UI surfaces (a label, a sink, a timeline event type, a declared
+page) into it — covered field-by-field on the dedicated
+[Operator Docs Site](ui-docs.md) page.
+
 ### Flight Recorder (`ui.recorder:`)
 
 Flight-recorder persistence — the UI's data store. All flags below require `db_dir` to be non-empty; any combination of the `store_*` flags is valid.

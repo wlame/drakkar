@@ -1,0 +1,27 @@
+/* One stylesheet for the three pages. It exists mostly to prove the mount
+   serves non-HTML assets too: the drawer loads this file from /docs/style.css
+   through the same route the pages come from. */
+body {
+  margin: 0 auto;
+  max-width: 46rem;
+  padding: 1.5rem 1.25rem 4rem;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.55;
+  color: #1c2024;
+  background: #fff;
+}
+
+h1 { font-size: 1.5rem; }
+h2 { margin-top: 2rem; font-size: 1.15rem; border-bottom: 1px solid #e3e6ea; padding-bottom: 0.25rem; }
+code { background: #f2f4f7; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.9em; }
+nav ul { padding-left: 1.1rem; }
+a { color: #0b6bcb; }
+
+/* The drawer frames these pages inside the operator UI, which follows the
+   viewer's theme; a light-only site would glare inside a dark UI. */
+@media (prefers-color-scheme: dark) {
+  body { color: #e6e9ee; background: #16181d; }
+  h2 { border-bottom-color: #2b3038; }
+  code { background: #22262e; }
+  a { color: #6ab0ff; }
+}

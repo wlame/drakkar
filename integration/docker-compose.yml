@@ -175,6 +175,11 @@ services:
       # HTTP path is sticky to a single worker, and round-robin
       # load-balancing across all three would 503 two-thirds of requests.
       DK_WEBAPP__ENABLED: "true"
+      # Env override of one ui.docs field, so the harness shows the docs
+      # section taking DK_ overrides like any other scalar setting.
+      # worker-1 labels the nav entry differently from worker-2/3, which
+      # keep the yaml title; all three serve the same site.
+      DK_UI__DOCS__TITLE: "Ripgrep Pipeline Handbook (worker-1)"
     ports:
       - "9090:9090"
       - "8081:8081"

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scanning — Ripgrep Pipeline Handbook</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>Scanning</h1>
+<p><a href="index.html">← Handbook index</a></p>
+
+<h2 id="modules">Modules</h2>
+<p>
+  Every scan task carries a <code>module</code> label: the directory that owns
+  the scan target. A task that scans a directory reports that directory's own
+  name; a task that scans one file reports its parent directory. The label
+  drives the timeline filter box, so typing a module name there dims every task
+  from the other modules.
+</p>
+<p>
+  Values come from the request, not from configuration, so the set grows with
+  whatever the producer asks for. Treat an unfamiliar module name as new input,
+  not as a fault.
+</p>
+
+<h2 id="vendor-scanning">Vendor scanning</h2>
+<p>
+  Vendored code is third-party source kept inside the repository. It is scanned
+  like any other module, but the results are rarely actionable: the pattern
+  matches belong to someone else's code. Timeline bars for these tasks are
+  colored purple by the <code>vendored code</code> rule so an operator can skip
+  them at a glance.
+</p>
+<p>
+  This section is what a value-specific docs anchor points at:
+  <code>module</code> alone opens the section above, while
+  <code>module = vendor</code> opens this one. The narrower anchor wins wherever
+  both apply.
+</p>
+
+<h2 id="scan-windows">Scan window ranges</h2>
+<p>
+  The handler marks each source message's whole fan-out as a
+  <code>scan_window_processing_range</code> event: a shaded band on the live
+  timeline from the first task of the message to the last. Click the band to
+  emphasize every task the message produced.
+</p>
+<p>
+  A band that is much wider than its tasks means the window waited — for an
+  executor slot, or for one slow task the rest of the message could not finish
+  without. Compare the band with the pool utilization on the Live page before
+  blaming the scan itself.
+</p>
+</body>
+</html>

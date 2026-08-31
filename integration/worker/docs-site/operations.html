@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Operations — Ripgrep Pipeline Handbook</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>Operations</h1>
+<p><a href="index.html">← Handbook index</a></p>
+
+<h2 id="archive-database">Result archive database</h2>
+<p>
+  The <code>archive_results_db</code> sink is the long-term home of every search
+  result. It writes to the shared Postgres server and keeps a larger connection
+  pool than the hot database, because every result lands there while only
+  high-match results reach the hot one.
+</p>
+<p>
+  When this sink reports delivery errors, check the Postgres service first: the
+  pipeline keeps consuming, and failed batches are not replayed, so a long
+  outage is visible as a gap in the archive rather than as a stalled worker.
+</p>
+
+<h2 id="daily-checks">Daily checks</h2>
+<ul>
+  <li>Consumer lag on <code>search-requests</code> is flat or falling.</li>
+  <li>No sink circuit breaker is open on the dashboard.</li>
+  <li>The DLQ topic is empty; anything in it names its own failure reason.</li>
+</ul>
+</body>
+</html>

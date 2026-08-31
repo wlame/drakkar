@@ -580,6 +580,16 @@ ui:
     events: []                       # declared custom timeline event types (see ui-timeline-events.md); max 50.
                                      # env: DK_UI__TIMELINE__EVENTS (JSON list)
                                      # e.g. [{name: deploy, kind: marker, color: purple, action: link, link: "{grafana}/d?from={ts_ms}"}]
+
+  # --- Operator docs site served at /docs/ + contextual anchors (see ui-docs.md) ---
+  docs:
+    site_dir: ''                     # directory of a PREBUILT static site (mkdocs site/, Sphinx html/, plain
+                                     # HTML); '' = feature off, /docs/ answers a hint-404. env: DK_UI__DOCS__SITE_DIR
+    title: Docs                      # nav-entry label + default drawer heading. env: DK_UI__DOCS__TITLE
+    anchors: []                      # contextual links from UI surfaces into the site; max 200. YAML only.
+                                     # Each entry: {match: {...}, path: 'page.html#frag', title: '...'}; match sets
+                                     # exactly one of label (+optional value), sink, event, page.
+                                     # e.g. [{match: {sink: archive_results_db}, path: 'operations/#archive-database'}]
 ```
 
 ---

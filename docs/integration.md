@@ -321,6 +321,17 @@ Full task lifecycle: status, labels, partition, duration, PID, CLI
 command, source offsets (linked to trace), stdout/stderr output, event
 timeline.
 
+### Operator Docs Site (`/docs/`)
+
+The handbook the worker serves for itself (see
+[Operator Docs Site](ui-docs.md)) -- hand-written HTML under
+`integration/worker/docs-site/`, not an mkdocs build, to show that any
+prebuilt static directory works. The nav entry opens it in a new tab;
+`ui.docs.anchors` also puts a book icon on the `module` label chips of a
+task detail page, on the `archive_results_db` row of the sinks table, and
+on the `scan_window_processing_range` entry in the Live timeline's event
+list. Each icon opens that page in a drawer beside the live view.
+
 ---
 
 ## Kafka Topics

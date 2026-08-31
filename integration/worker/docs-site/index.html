@@ -1,0 +1,50 @@
+<!doctype html>
+<!--
+  The operator docs site the harness worker serves at /docs/.
+
+  Deliberately hand-written HTML, NOT an mkdocs (or Sphinx) build: the
+  worker serves whatever prebuilt static directory `ui.docs.site_dir`
+  names, and three small files prove that contract better than a
+  generated site would. A generated site would also add a build step to
+  the harness and hide the one thing worth showing here -- that an
+  anchor's `#fragment` is just an `id=` attribute in a file on disk.
+
+  Keep the ids stable: `integration/worker/drakkar.yaml`'s ui.docs.anchors
+  point at them, and an anchor whose fragment does not exist scrolls
+  nowhere.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ripgrep Pipeline Handbook</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>Ripgrep Pipeline Handbook</h1>
+
+<p>
+  Operator notes for the integration harness worker: what it scans, where the
+  results go, and what to do when a part of it misbehaves. The worker serves
+  this site itself, so it is reachable from any operator UI page and from the
+  book icons next to the surfaces it documents.
+</p>
+
+<nav>
+  <ul>
+    <li><a href="scanning.html">Scanning</a> — scan targets, modules, and window ranges.</li>
+    <li><a href="operations.html">Operations</a> — sinks, storage, and routine checks.</li>
+  </ul>
+</nav>
+
+<h2 id="contextual-anchors">How you got here</h2>
+<p>
+  Every book icon in the operator UI opens one page of this site in a drawer.
+  The mapping lives in the worker's own configuration
+  (<code>ui.docs.anchors</code> in <code>integration/worker/drakkar.yaml</code>):
+  a task label, a sink instance, a timeline event type, or a declared page is
+  bound to a path in this directory. Nothing in this site knows about the UI,
+  and the UI knows nothing about this site beyond those paths.
+</p>
+</body>
+</html>

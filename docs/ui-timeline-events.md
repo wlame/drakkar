@@ -236,5 +236,8 @@ identity behaves the same way.
   best-effort drop policy this feature rides.
 - [UI Enrichment](ui-enrichment.md#link-templates) for `ui.link_bases` and
   the same trusted-base/percent-encoded-value split link templates use.
+- [Operator Docs Site](ui-docs.md) for binding a docs page to an event type
+  with a `{event: <name>}` anchor, so an operator can read what a band or pin
+  means without leaving the Live page.
 - [Integration Tests](integration.md) for the worked example's full
   handler.
