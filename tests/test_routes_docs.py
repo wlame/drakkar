@@ -188,6 +188,19 @@ async def test_docs_requires_token_when_configured(tmp_path, docs_site):
         assert ok.content == SITE_FILES['index.html']
 
 
+async def test_docs_accepts_the_token_as_a_query_parameter(tmp_path, docs_site):
+    """The UI builds every docs link with ``?token=``: an iframe src or a plain
+    <a> navigation cannot carry the Authorization header (contract v1.22)."""
+    async with make_docs_client(tmp_path, site_dir=str(docs_site), auth_token='secret-123') as client:
+        home = await client.get('/docs/?token=secret-123')
+        assert home.status_code == 200
+        assert home.content == SITE_FILES['index.html']
+        nested = await client.get('/docs/guide/deep.html?token=secret-123')
+        assert nested.status_code == 200
+        assert nested.content == SITE_FILES['guide/deep.html']
+        assert (await client.get('/docs/?token=wrong')).status_code == 401
+
+
 async def test_docs_hint_404_is_also_gated(tmp_path):
     """An unconfigured site must not reveal its state to an unauthenticated caller."""
     async with make_docs_client(tmp_path, auth_token='secret-123') as client:
