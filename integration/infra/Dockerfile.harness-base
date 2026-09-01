@@ -1,0 +1,32 @@
+# Shared base for the experimental-CPython harness lane.
+#
+# On a release-candidate interpreter no confluent-kafka wheel exists, so every
+# harness image compiles that extension from its sdist — and the compile needs
+# librdkafka headers newer than any distribution package carries (see
+# scripts/install-librdkafka.sh). Building librdkafka once here, then pointing
+# the four service images at the result, keeps that compile out of four image
+# builds competing for the same runner cores.
+#
+# The stable lane never touches this file: the service Dockerfiles default to a
+# plain python:*-slim image, and `just integration-up` only builds this base
+# when HARNESS_PYTHON_IMAGE names a non-default interpreter.
+ARG PYTHON_IMAGE=python:3.13-slim
+FROM ${PYTHON_IMAGE}
+
+# Empty means "use the version the locked confluent-kafka requires".
+ARG LIBRDKAFKA_VERSION=""
+
+# build-essential stays in the image: the service builds on top of this one
+# still compile confluent-kafka itself. The -dev packages are what librdkafka
+# feature-tests against, so the build keeps the TLS and SASL support that the
+# published wheels bundle.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential ca-certificates curl \
+        libssl-dev libsasl2-dev zlib1g-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Mirrors the repository layout so the script finds uv.lock where it expects.
+COPY scripts/install-librdkafka.sh /src/scripts/install-librdkafka.sh
+COPY uv.lock /src/uv.lock
+RUN /src/scripts/install-librdkafka.sh ${LIBRDKAFKA_VERSION} && rm -rf /src

@@ -37,12 +37,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   demonstrates all three kinds.
 
 - **Experimental CI lanes on the next CPython release candidate.** The unit
-  suite runs on Python 3.15.0rc1 and the integration harness rebuilds its
+  suite runs on Python 3.15.0rc2 and the integration harness rebuilds its
   images on `python:3.15-rc-slim`. Both lanes are non-blocking
   (`continue-on-error`): they report early breakage and never gate a merge.
   Supported versions stay 3.13 and 3.14.
 
+- **Python 3.15 is advertised as supported.** The full unit suite passes on
+  3.15, and the published wheel is pure Python (`py3-none-any`), so the
+  existing artifact already installs there — no per-version wheel to build.
+  `requires-python` is unchanged at `>=3.13`.
+
 ### Fixed
+
+- **The experimental-CPython lanes can build `confluent-kafka` again.** With
+  no wheel for a release-candidate interpreter the sdist is built instead, and
+  that build needs librdkafka headers at least as new as the `confluent-kafka`
+  version — which no distribution package carries, so installing
+  `librdkafka-dev` failed with `requires librdkafka v2.15.0 or later`. Both
+  lanes now compile librdkafka first, at the version taken from the
+  `confluent-kafka` pin in `uv.lock`: `just install-librdkafka` on the unit
+  lane, and one shared base image for the four harness images.
 
 - **`timeline_event()` no longer risks crashing on extreme `ts`/`end_ts`
   values.** `datetime.timestamp()` can raise for a naive datetime the

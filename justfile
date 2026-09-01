@@ -24,6 +24,15 @@ install:
 install-minimal:
     uv sync
 
+# Needed only where confluent-kafka has no wheel and builds from its sdist:
+# the experimental-CPython lanes. Distribution packages of librdkafka are far
+# behind what that build demands, so the headers are compiled, not installed.
+# With no argument the version comes from the confluent-kafka pin in uv.lock.
+#
+# Build and install librdkafka from source (e.g. just install-librdkafka 2.15.0)
+install-librdkafka *args:
+    ./scripts/install-librdkafka.sh {{ args }}
+
 # ---------------------------------------------------------------------------
 # Quality gates
 # ---------------------------------------------------------------------------
@@ -168,6 +177,20 @@ drakkar-ui *args:
 
 # Start the integration environment (Kafka, sinks, worker clusters, load generator)
 integration-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # A non-default interpreter image means a release candidate, which means no
+    # confluent-kafka wheel: the service images compile it from source and need
+    # librdkafka headers newer than any distro package. Build that base once
+    # here rather than in four image builds at the same time.
+    if [ -n "${HARNESS_PYTHON_IMAGE:-}" ]; then
+        docker build \
+            -f integration/infra/Dockerfile.harness-base \
+            --build-arg PYTHON_IMAGE="$HARNESS_PYTHON_IMAGE" \
+            --build-arg LIBRDKAFKA_VERSION="${HARNESS_LIBRDKAFKA_VERSION:-}" \
+            -t drakkar-harness-base:local .
+        export HARNESS_PYTHON_IMAGE=drakkar-harness-base:local
+    fi
     docker compose -f integration/docker-compose.yml up -d --build
 
 # Tear the integration environment down, including volumes

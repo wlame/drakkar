@@ -3,9 +3,10 @@
 ARG PYTHON_IMAGE=python:3.13-slim
 FROM ${PYTHON_IMAGE}
 
-# Extra apt packages for source-building C extensions — empty on stable
-# images (wheels exist), set by the experimental lane where cp-next wheels
-# are not published yet (e.g. "build-essential librdkafka-dev").
+# Extra apt packages, empty on every lane today. The experimental lane gets
+# its C-extension toolchain and librdkafka from the base image it builds on
+# (integration/infra/Dockerfile.harness-base) rather than from here: an apt
+# librdkafka is too old to compile confluent-kafka against.
 ARG EXTRA_APT=""
 RUN if [ -n "$EXTRA_APT" ]; then \
     apt-get update && \

@@ -96,3 +96,17 @@ The release-candidate lanes are experimental by design: they surface breakage
 on the next CPython months early (missing wheels force C extensions to build
 from source there), and `continue-on-error` keeps them from ever gating a
 merge or a release.
+
+Building `confluent-kafka` from source needs librdkafka headers no older than
+the `confluent-kafka` being built, and every distribution package is older
+than that, so both lanes compile librdkafka first — `just install-librdkafka`
+on the unit lane, and a shared base image
+(`integration/infra/Dockerfile.harness-base`) for the harness. The version
+comes from the `confluent-kafka` pin in `uv.lock`, so bumping the dependency
+does not leave a second number behind.
+
+A release candidate reaches the unit lane only once
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone)
+publishes a build of it, which trails python.org by some days. Until then the
+lane stops at `uv python install`; the harness lane is unaffected, because its
+`python:3.15-rc-slim` image tag floats to the current candidate.

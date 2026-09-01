@@ -68,10 +68,16 @@ jobs:
         include:
           # Experimental: the next CPython, from its release candidate.
           # Needs a newer uv than the pin above — 0.11.32 predates the
-          # python-build-standalone release that carries 3.15.0rc1.
-          - python-version: "3.15.0rc1"
+          # python-build-standalone builds that carry 3.15 candidates.
+          #
+          # The interpreter comes from python-build-standalone, which
+          # publishes a candidate some days after python.org does. Until it
+          # catches up, this lane stops at `uv python install` with "no
+          # download found" — a known upstream lag, not Drakkar breakage,
+          # and the reason the lane never gates a merge.
+          - python-version: "3.15.0rc2"
             experimental: true
-            uv-version: "0.12.7"
+            uv-version: "0.12.8"
     env:
       # Pin every uv invocation (sync, run) to the lane's interpreter, so a
       # pre-release lane cannot silently fall back to a stable interpreter.
@@ -91,9 +97,18 @@ jobs:
       # No cp-next wheels exist during the RC phase, so C extensions build
       # from source; confluent-kafka needs the librdkafka headers for that
       # (the compilers themselves are preinstalled on the runner).
+      #
+      # The headers have to be built, not installed: every distribution
+      # package is older than the version confluent-kafka's own header guard
+      # demands, which fails the build with "requires librdkafka v2.15.0 or
+      # later". libssl-dev and libsasl2-dev are what librdkafka feature-tests
+      # against, so the build keeps the TLS and SASL support the wheels have.
       - name: Install C-extension build dependencies
         if: matrix.experimental
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends librdkafka-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libssl-dev libsasl2-dev zlib1g-dev
+          just install-librdkafka
 
       - name: Install dependencies
         if: ${{ !matrix.experimental }}

@@ -34,16 +34,22 @@ jobs:
           - name: stable
             experimental: false
           # Experimental: every harness image rebuilt on the next CPython's
-          # release-candidate Docker image. C extensions have no cp-next
-          # wheels during the RC phase, so the images compile them from
-          # source — hence the extra apt packages.
+          # release-candidate Docker image, which floats to the current
+          # candidate as Docker Hub publishes it. C extensions have no
+          # cp-next wheels during the RC phase, so the images compile them
+          # from source. `just integration-up` builds the toolchain and the
+          # librdkafka headers that compile needs into one shared base image
+          # (integration/infra/Dockerfile.harness-base), so nothing extra is
+          # installed per service here.
           - name: python-3.15-rc
             experimental: true
             python-image: "python:3.15-rc-slim"
-            extra-apt: "build-essential librdkafka-dev"
     env:
       # Read by docker-compose.yml as image build args; empty values mean
-      # the stable defaults baked into the Dockerfiles.
+      # the stable defaults baked into the Dockerfiles. HARNESS_EXTRA_APT is
+      # the escape hatch for a service needing an extra package: no lane sets
+      # it today, because the experimental lane gets its toolchain from the
+      # shared base image instead.
       HARNESS_PYTHON_IMAGE: ${{ matrix.python-image || '' }}
       HARNESS_EXTRA_APT: ${{ matrix.extra-apt || '' }}
       # Small corpus on purpose. The default 5000 (x2 with the flood phase)
