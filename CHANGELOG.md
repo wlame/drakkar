@@ -37,10 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   demonstrates all three kinds.
 
 - **Experimental CI lanes on the next CPython release candidate.** The unit
-  suite runs on Python 3.15.0rc2 and the integration harness rebuilds its
-  images on `python:3.15-rc-slim`. Both lanes are non-blocking
-  (`continue-on-error`): they report early breakage and never gate a merge.
-  Supported versions stay 3.13 and 3.14.
+  suite runs on the newest 3.15 candidate available the day it runs, and the
+  integration harness rebuilds its images on `python:3.15-rc-slim`. Both
+  lanes are non-blocking (`continue-on-error`): they report early breakage
+  and never gate a merge. Supported versions stay 3.13 and 3.14.
 
 - **Python 3.15 is advertised as supported.** The full unit suite passes on
   3.15, and the published wheel is pure Python (`py3-none-any`), so the

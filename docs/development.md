@@ -105,8 +105,13 @@ on the unit lane, and a shared base image
 comes from the `confluent-kafka` pin in `uv.lock`, so bumping the dependency
 does not leave a second number behind.
 
-A release candidate reaches the unit lane only once
+Both release-candidate lanes deliberately float rather than pin. The unit lane
+asks for `3.15` and gets the newest build of it, because
 [python-build-standalone](https://github.com/astral-sh/python-build-standalone)
-publishes a build of it, which trails python.org by some days. Until then the
-lane stops at `uv python install`; the harness lane is unaffected, because its
-`python:3.15-rc-slim` image tag floats to the current candidate.
+publishes a candidate days after python.org does and an exact pin fails with
+`no download found` in between. It also installs the latest `uv` rather than
+the reproducible pin the supported lanes use, since the set of downloadable
+interpreters is compiled into each `uv` release: a pinned `uv` never learns
+about a candidate published after it. The harness lane floats the same way
+through its `python:3.15-rc-slim` image tag. Each run reports the interpreter
+it actually tested.
