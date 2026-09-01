@@ -68,20 +68,22 @@ jobs:
         include:
           # Experimental: the next CPython, whichever candidate is current.
           #
-          # Both values float on purpose, and pinning either one breaks the
-          # lane. The interpreter comes from python-build-standalone, which
-          # publishes a candidate days after python.org does, so an exact
-          # pin fails with "no download found" until it catches up; "3.15"
-          # resolves to the newest 3.15 build instead. That set of builds is
-          # compiled into each uv release, so a pinned uv would never learn
-          # about a candidate published after it — hence "latest" here,
-          # against the reproducible pin the supported lanes use.
+          # The interpreter request floats. python-build-standalone publishes
+          # a candidate days after python.org does, so pinning an exact one
+          # fails with "no download found" until it catches up, while "3.15"
+          # resolves to the newest 3.15 build on offer.
           #
-          # The lane therefore tests the newest 3.15 candidate available on
-          # the day it runs; the step below records which one that was.
+          # uv stays pinned to an explicit version, as everywhere else in
+          # this repository — a floating tool version breaks a build for
+          # reasons unrelated to the change (tests/test_ci_workflows.py).
+          # The pin has a second effect worth knowing: the downloadable
+          # interpreters are compiled into each uv release, so this lane
+          # reaches a newer candidate only once uv is bumped to a release
+          # that carries it. That bump is deliberate and reviewable rather
+          # than automatic, which is the trade this invariant is making.
           - python-version: "3.15"
             experimental: true
-            uv-version: "latest"
+            uv-version: "0.12.8"
     env:
       # Pin every uv invocation (sync, run) to the lane's interpreter, so a
       # pre-release lane cannot silently fall back to a stable interpreter.

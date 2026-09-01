@@ -105,13 +105,17 @@ on the unit lane, and a shared base image
 comes from the `confluent-kafka` pin in `uv.lock`, so bumping the dependency
 does not leave a second number behind.
 
-Both release-candidate lanes deliberately float rather than pin. The unit lane
-asks for `3.15` and gets the newest build of it, because
-[python-build-standalone](https://github.com/astral-sh/python-build-standalone)
+The release-candidate lanes float their *interpreter* request but not their
+tooling. The unit lane asks for `3.15` and gets the newest build of it,
+because [python-build-standalone](https://github.com/astral-sh/python-build-standalone)
 publishes a candidate days after python.org does and an exact pin fails with
-`no download found` in between. It also installs the latest `uv` rather than
-the reproducible pin the supported lanes use, since the set of downloadable
-interpreters is compiled into each `uv` release: a pinned `uv` never learns
-about a candidate published after it. The harness lane floats the same way
-through its `python:3.15-rc-slim` image tag. Each run reports the interpreter
-it actually tested.
+`no download found` in between. The harness lane floats the same way through
+its `python:3.15-rc-slim` image tag. Each run reports the interpreter it
+actually tested.
+
+`uv` itself stays pinned to an explicit version on every lane, experimental
+included — a floating tool version breaks a build for reasons unrelated to
+the change, and `tests/test_ci_workflows.py` enforces it. Because the set of
+downloadable interpreters is compiled into each `uv` release, the lane reaches
+a newer candidate only once that pin is bumped to a release carrying it. That
+is a deliberate, reviewable step rather than an automatic one.
