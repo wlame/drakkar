@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The recorder no longer counts stdin and stdout lines on the hot path when
+  nothing is listening.** `stdin_lines` and `stdout_lines` are not recorder
+  columns — the database insert drops them — so they exist only for live
+  WebSocket clients, yet they were computed for every task, twice, by walking
+  the whole of its stdin and its stdout. At the throughput the executor pool
+  targets that was a large share of the per-task budget spent on a value
+  nobody read. They are now counted only while a client is attached, and sent
+  as `null` otherwise — the shape the WS contract already allowed. The byte
+  sizes are unchanged and stay exact.
+
 - **The WebSocket `Origin` check now runs on every handshake**, not only when
   `ui.auth_token` is set. WebSockets are not subject to CORS, so on a default
   worker any page the operator visited could open `ws://127.0.0.1:8080/ws`

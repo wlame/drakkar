@@ -328,7 +328,9 @@ async def test_record_task_completed_without_output(recorder):
 async def test_record_task_completed_carries_stdout_lines_on_ws_entry_only(recorder):
     # stdout_lines is a WS-frame-only field (like task_started's
     # stdin_lines): present on the recorded entry the WS fanout serializes,
-    # dropped at DB insert by the fixed column list.
+    # dropped at DB insert by the fixed column list. Counted only while a
+    # live client is subscribed — see ``_ws_line_count``.
+    recorder.subscribe()
     result = make_result('t1')  # stdout is 'line1\nline2\n'
     recorder.record_task_completed(result, partition=2)
     entry = next(e for e in recorder._buffer if e['event'] == 'task_completed')
@@ -338,6 +340,69 @@ async def test_record_task_completed_carries_stdout_lines_on_ws_entry_only(recor
     await recorder._flush()
     events = await recorder.get_events(event_type='task_completed')
     assert 'stdout_lines' not in events[0]
+
+
+async def test_line_counts_are_not_computed_without_a_live_client(recorder, monkeypatch):
+    """Walking the whole of every task's stdin and stdout to count lines is a
+    large share of the per-task loop budget at the throughput the pool
+    targets, and the counts are dropped at DB insert — they exist only for
+    live WebSocket clients. With none connected the walk must not happen.
+    """
+    from drakkar.recorder import writer as writer_mod
+
+    calls = []
+    monkeypatch.setattr(writer_mod, '_line_count', lambda text: calls.append(text) or 0)
+
+    task = make_task('t-no-client')
+    task.stdin = 'first\nsecond\n'
+    recorder.record_task_started(task, partition=0)
+    recorder.record_task_completed(make_result('t-no-client'), partition=0)
+
+    assert calls == [], 'line counting ran with no subscriber to read it'
+    started = next(e for e in recorder._buffer if e.get('task_id') == 't-no-client')
+    assert started['stdin_lines'] is None
+    # The byte sizes are real columns and stay exact.
+    assert started['stdin_size'] == len(b'first\nsecond\n')
+    completed = next(e for e in recorder._buffer if e['event'] == 'task_completed')
+    assert completed['stdout_lines'] is None
+    assert completed['stdout_size'] == len(b'line1\nline2\n')
+
+
+async def test_line_counts_are_computed_once_a_client_subscribes(recorder):
+    """The gate is "is anyone listening", so the frame a connected browser
+    receives carries the same integers as before.
+    """
+    recorder.subscribe()
+    task = make_task('t-with-client')
+    task.stdin = 'first\nsecond\n'
+    recorder.record_task_started(task, partition=0)
+    # A separate id: a completion whose start was deferred sends no frame,
+    # which is its own case below.
+    recorder.record_task_completed(make_result('t-other'), partition=0)
+
+    started = next(e for e in recorder._buffer if e.get('task_id') == 't-with-client')
+    assert started['stdin_lines'] == 2
+    completed = next(e for e in recorder._buffer if e['event'] == 'task_completed')
+    assert completed['stdout_lines'] == 2
+
+
+async def test_completed_line_count_skipped_when_the_frame_is_not_sent(recorder, monkeypatch):
+    """A completion whose start was deferred and never fired sends no frame at
+    all, so its stdout must not be walked even with a client connected.
+    """
+    from drakkar.recorder import writer as writer_mod
+
+    calls = []
+    monkeypatch.setattr(writer_mod, '_line_count', lambda text: calls.append(text) or 0)
+    recorder.subscribe()
+
+    result = make_result('t-deferred')
+    recorder.fanout.defer('t-deferred', {'event': 'task_started'}, 60.0)
+    recorder.record_task_completed(result, partition=0)
+
+    assert calls == [], 'stdout was walked for a frame nobody receives'
+    completed = next(e for e in recorder._buffer if e['event'] == 'task_completed')
+    assert completed['stdout_lines'] is None
 
 
 @pytest.mark.parametrize(
@@ -4766,6 +4831,7 @@ async def test_record_task_started_includes_stdin_metadata(recorder):
     size and line count and puts both on the in-memory entry. These fields
     are NOT in the events table schema — they live on the buffered entry
     and on WS broadcasts only — so we assert against the buffer."""
+    recorder.subscribe()  # the counts exist for live clients only
     task = make_task('t-stdin')
     task.stdin = 'first line\nsecond line\n'
     recorder.record_task_started(task, partition=0)
@@ -4780,6 +4846,7 @@ async def test_record_task_started_stdin_without_trailing_newline(recorder):
     """A stdin payload that doesn't end with ``\\n`` still counts the final
     line — the recorder adds 1 to the newline count when the input doesn't
     end with one."""
+    recorder.subscribe()  # the counts exist for live clients only
     task = make_task('t-stdin-no-trailing')
     task.stdin = 'line-a\nline-b'  # no trailing newline
     recorder.record_task_started(task, partition=0)
@@ -5705,6 +5772,7 @@ async def test_task_completed_stdout_size_counts_bytes_of_the_decoded_string(rec
 )
 async def test_task_started_stdin_size_counts_bytes_not_characters(recorder, stdin, expected_size, expected_lines):
     """The ASCII fast path must not change the recorded byte count."""
+    recorder.subscribe()  # the line count exists for live clients only
     task = ExecutorTask(task_id='t-stdin', args=[], source_offsets=[0], stdin=stdin or None)
     recorder.record_task_started(task, partition=0)
     entry = recorder._buffer[-1]

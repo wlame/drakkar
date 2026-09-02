@@ -132,6 +132,25 @@ class EventWriter:
         """The live-stream fan-out (subscribers + deferred start events)."""
         return self._fanout
 
+    def _ws_line_count(self, text: str, *, reaches_ws: bool = True) -> int | None:
+        """Logical lines in ``text``, or ``None`` when nobody will read them.
+
+        ``stdin_lines`` and ``stdout_lines`` are not recorder columns — the DB
+        insert drops them — so they exist only for live WebSocket clients.
+        Counting them unconditionally means walking the whole of every task's
+        stdin and stdout on the event loop, twice per task, for a value that is
+        discarded when no browser is connected. At the throughput the pool
+        targets, with the input sizes it targets, that is a large share of the
+        per-task loop budget spent on nothing.
+
+        The fields stay present and nullable, which is the shape the ``/ws``
+        contract already defines and the UI already renders (it falls back to
+        the byte size alone).
+        """
+        if not reaches_ws or not self._fanout.subscribers:
+            return None
+        return _line_count(text)
+
     def subscribe(self, event_types: Collection[str] | None = None) -> WSSubscriber:
         """Subscribe to the live event stream — see :meth:`WSFanout.subscribe`."""
         return self._fanout.subscribe(event_types)
@@ -249,11 +268,14 @@ class EventWriter:
         request_id: str | None = None,
         queue_wait_ms: float | None = None,
     ) -> None:
-        stdin_lines = 0
+        stdin_lines: int | None = 0
         stdin_size = 0
         if task.stdin:
             stdin_size = _byte_len(task.stdin)
-            stdin_lines = _line_count(task.stdin)
+            # Gated, not skipped: a deferred start still reaches the stream
+            # when the task outlives ws_min_duration_ms, so the gate is "is
+            # anyone listening", not "is this frame sent now".
+            stdin_lines = self._ws_line_count(task.stdin)
         metadata: dict = {
             'source_offsets': task.source_offsets,
             'slot': slot,
@@ -371,8 +393,9 @@ class EventWriter:
             'stdout_size': _byte_len(result.stdout),
             # WS-frame-only field, like task_started's stdin_lines/stdin_size:
             # not in the pinned events-table column list, so the DB insert
-            # drops it and the row shape is unchanged.
-            'stdout_lines': _line_count(result.stdout),
+            # drops it and the row shape is unchanged. Null when no live
+            # client is connected — see ``_ws_line_count``.
+            'stdout_lines': self._ws_line_count(result.stdout, reaches_ws=not skip_ws),
             'pid': result.pid,
             'pool_active': pool_active,
             'pool_waiting': pool_waiting,
