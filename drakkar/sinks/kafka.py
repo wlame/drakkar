@@ -17,6 +17,11 @@ from drakkar.kafka_security import KafkaSecurityConfig, merge_client_config, res
 from drakkar.metrics import sink_deliver_duration, sink_deliver_errors, sink_payloads_delivered
 from drakkar.models import KafkaPayload
 from drakkar.sinks.base import BaseSink
+from drakkar.sinks.kafka_delivery import (
+    ABANDONED_FUTURE_GRACE_SECONDS,
+    future_outcome,
+    settle_budget,
+)
 from drakkar.utils import redact_url
 
 logger = structlog.get_logger()
@@ -137,17 +142,32 @@ class KafkaSink(BaseSink[KafkaPayload]):
             # handful of stuck deliveries starve every other delivery on the
             # same producer. The outer delivery timeout cannot rescue this:
             # cancelling the await does not stop the thread.
+            deadline = time.monotonic() + self._config.flush_timeout_seconds
             remaining = await self._producer.flush(self._config.flush_timeout_seconds)
-            if remaining and remaining > 0:
+
+            # ``remaining`` is NOT the verdict for this batch. librdkafka's
+            # flush is producer-wide and this producer is shared by every
+            # partition loop, so the count includes messages some other
+            # partition is still waiting on. One topic-partition without a
+            # leader would otherwise fail every concurrently-delivered batch
+            # on the worker — re-producing groups the broker already
+            # acknowledged (duplicates on the topic) or shipping them to the
+            # DLQ for a replay that duplicates them again. The batch is
+            # judged by its own delivery futures below; the count only
+            # explains a timeout in the log.
+            _settled, pending = await asyncio.wait(futures, timeout=settle_budget(deadline))
+            if pending:
                 # TimeoutError, not RuntimeError: the manager classifies it
                 # as transient, so the breaker sees the outage and an
                 # idempotent sink gets its fast-retry.
                 raise TimeoutError(
-                    f'Kafka flush timed out after {self._config.flush_timeout_seconds}s: '
-                    f'{remaining} message(s) still in queue '
-                    f'(topic={self._config.topic!r}, sink={self._name!r})'
+                    f'Kafka delivery not acknowledged within {self._config.flush_timeout_seconds}s: '
+                    f'{len(pending)} of {len(futures)} message(s) in this batch are still unconfirmed '
+                    f'(producer-wide queue: {remaining}, topic={self._config.topic!r}, sink={self._name!r})'
                 )
-            results = await asyncio.gather(*futures)
+            # Every future is done; ``.result()`` re-raises a produce-side
+            # exception here exactly as the previous ``gather`` did.
+            results = [f.result() for f in futures]
             futures_collected = True
             for i, result in enumerate(results):
                 if result is None:
@@ -175,34 +195,35 @@ class KafkaSink(BaseSink[KafkaPayload]):
                 # would otherwise depend on producer-close internals.
                 # Bounded wait: futures of permanently-undeliverable
                 # messages may never resolve.
-                try:
-                    leftover = await asyncio.wait_for(
-                        asyncio.gather(*futures, return_exceptions=True),
-                        timeout=5.0,
-                    )
-                except TimeoutError:
+                # ``asyncio.wait``, not ``wait_for(gather(...))``: a timeout
+                # there cancels the delivery futures, and the producer thread
+                # then sets a result on a cancelled future when the report
+                # finally arrives. A short grace is enough — these futures
+                # already had the full flush budget.
+                done, pending = await asyncio.wait(futures, timeout=ABANDONED_FUTURE_GRACE_SECONDS)
+                if pending:
                     await logger.awarning(
                         'kafka_sink_abandoned_futures_timeout',
                         category='sink',
                         sink_name=self._name,
                         topic=self._config.topic,
-                        future_count=len(futures),
+                        future_count=len(pending),
                     )
-                else:
-                    failed = [
-                        r
-                        for r in leftover
-                        if isinstance(r, BaseException) or (hasattr(r, 'error') and r.error() is not None)
-                    ]
-                    if failed:
-                        await logger.awarning(
-                            'kafka_sink_inflight_delivery_errors',
-                            category='sink',
-                            sink_name=self._name,
-                            topic=self._config.topic,
-                            failed_count=len(failed),
-                            first_error=str(failed[0]),
-                        )
+                leftover = [future_outcome(f) for f in done]
+                failed = [
+                    r
+                    for r in leftover
+                    if isinstance(r, BaseException) or (hasattr(r, 'error') and r.error() is not None)
+                ]
+                if failed:
+                    await logger.awarning(
+                        'kafka_sink_inflight_delivery_errors',
+                        category='sink',
+                        sink_name=self._name,
+                        topic=self._config.topic,
+                        failed_count=len(failed),
+                        first_error=str(failed[0]),
+                    )
 
     async def close(self) -> None:
         """Flush pending messages and close the producer."""

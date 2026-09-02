@@ -241,24 +241,69 @@ def _done_future(result) -> asyncio.Future:
     return fut
 
 
-async def test_kafka_sink_collects_futures_when_flush_reports_remaining():
+async def test_kafka_sink_ignores_producer_wide_remainder_when_its_own_futures_acked():
+    """One producer serves every partition loop, so ``flush()``'s remainder
+    counts other partitions' messages too. Judging a batch by it re-produces
+    groups the broker already acknowledged — duplicates on the output topic —
+    or ships delivered payloads to the DLQ for a replay that duplicates them
+    again.
+    """
     sink = KafkaSink(name='k', config=KafkaSinkConfig(topic='out'), brokers_fallback='localhost:9092')
     ok_report = MagicMock()
     ok_report.error.return_value = None
 
     producer = AsyncMock()
     producer.produce.side_effect = lambda **kw: _done_future(ok_report)
-    producer.flush.return_value = 2  # messages stuck in the queue
+    producer.flush.return_value = 2  # another partition's messages, not ours
     sink._producer = producer
 
     payloads = [KafkaPayload(data=_Out(v='a')), KafkaPayload(data=_Out(v='b'))]
-    # TimeoutError, not RuntimeError: a flush that leaves messages queued is a
-    # broker problem, and the sink manager classifies TimeoutError as transient
-    # so the circuit breaker sees it.
-    with pytest.raises(TimeoutError, match='flush timed out'):
-        await sink.deliver(payloads)
-    # The finally block gathered the outstanding futures — nothing left
-    # unretrieved, and the call completed without hanging.
+    await sink.deliver(payloads)  # must not raise
+
+
+async def test_kafka_sink_reports_a_broker_error_carried_in_its_own_report():
+    """A failed delivery arrives inside ``Message.error()`` rather than being
+    raised, so a resolved future is not on its own a confirmation. This path
+    is unchanged by the producer-wide-remainder fix and must stay a failure.
+    """
+    sink = KafkaSink(name='k', config=KafkaSinkConfig(topic='out'), brokers_fallback='localhost:9092')
+    err_report = MagicMock()
+    err_report.error.return_value = 'BROKER_DOWN'
+
+    producer = AsyncMock()
+    producer.produce.side_effect = lambda **kw: _done_future(err_report)
+    producer.flush.return_value = 0  # the producer drained cleanly
+    sink._producer = producer
+
+    with pytest.raises(RuntimeError, match='BROKER_DOWN'):
+        await sink.deliver([KafkaPayload(data=_Out(v='a'))])
+
+
+async def test_kafka_sink_timeout_survives_an_unresolved_future_without_cancelling_it():
+    """The abandoned-future collection must not cancel the delivery futures:
+    the producer thread sets their result when the report finally arrives, and
+    setting a result on a cancelled future raises inside that thread.
+    """
+    cfg = KafkaSinkConfig(topic='out', flush_timeout_seconds=0.05)
+    sink = KafkaSink(name='k', config=cfg, brokers_fallback='localhost:9092')
+
+    stuck: list[asyncio.Future] = []
+
+    def _never_resolves(**kw):
+        fut = asyncio.get_running_loop().create_future()
+        stuck.append(fut)
+        return fut
+
+    producer = AsyncMock()
+    producer.produce.side_effect = _never_resolves
+    producer.flush.return_value = 0
+    sink._producer = producer
+
+    with pytest.raises(TimeoutError, match='not acknowledged'):
+        await sink.deliver([KafkaPayload(data=_Out(v='a'))])
+
+    assert not stuck[0].cancelled(), 'an abandoned delivery future must stay settable'
+    stuck[0].set_result(MagicMock())  # the late report must not raise
 
 
 async def test_kafka_sink_collects_futures_when_flush_raises():

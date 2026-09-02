@@ -5,6 +5,7 @@ the framework uses this sink to persist the failed payloads with error
 metadata so they can be investigated and reprocessed later.
 """
 
+import asyncio
 import json
 import time
 import uuid
@@ -19,6 +20,7 @@ from drakkar.kafka_security import KafkaSecurityConfig, merge_client_config
 from drakkar.metrics import dlq_send_failures, sink_dlq_messages
 from drakkar.models import DeliveryError
 from drakkar.sinks.base import BaseSink
+from drakkar.sinks.kafka_delivery import settle_budget
 from drakkar.utils import redact_url
 
 logger = structlog.get_logger()
@@ -190,19 +192,29 @@ class DLQSink(BaseSink[BaseModel]):
                 topic=self._topic,
                 value=serialized,
             )
+            deadline = time.monotonic() + self._flush_timeout_seconds
             remaining = await self._producer.flush(self._flush_timeout_seconds)
-            if remaining:
+
+            # ``remaining`` is producer-wide: librdkafka counts every message
+            # still queued on this producer, and the DLQ producer serves the
+            # whole worker. Treating it as this write's verdict would report a
+            # message the broker accepted as lost — stalling the partition, or
+            # telling the operator payloads are gone when they are on the DLQ
+            # topic — because some other write is stuck. This write is judged
+            # by its own delivery report; the count only explains a timeout.
+            _settled, pending = await asyncio.wait([future], timeout=settle_budget(deadline))
+            if pending:
                 await logger.acritical(
                     'dlq_flush_incomplete',
                     category='sink',
                     dlq_topic=self._topic,
                     remaining=remaining,
                     flush_timeout_seconds=self._flush_timeout_seconds,
-                    action='ALERT: DLQ broker did not accept the message — offsets will stall',
+                    action='ALERT: DLQ write not acknowledged in time — offsets will stall',
                 )
                 dlq_send_failures.inc()
                 return False
-            report = await future
+            report = future.result()
             # A failed delivery is reported *in* the Message, not raised, so
             # the future resolving is not on its own a confirmation. Reading
             # it as one would commit the source offsets past payloads no

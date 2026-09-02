@@ -269,8 +269,40 @@ def test_kafka_sink_topic_property(kafka_sink_config):
 
 
 @patch('drakkar.sinks.kafka.AIOProducer')
-async def test_kafka_sink_deliver_flush_incomplete_raises_timeout(mock_cls, kafka_sink_config):
-    """A flush that leaves messages queued is a transient failure.
+async def test_kafka_sink_deliver_succeeds_when_flush_reports_other_partitions_backlog(
+    mock_cls, kafka_sink_config
+):
+    """A producer-wide flush remainder is not this batch's verdict.
+
+    ``flush()`` is librdkafka's producer-wide flush and one producer serves
+    every partition loop, so its count includes messages another partition is
+    waiting on. This batch's own futures are acknowledged, so the delivery
+    succeeds and the payloads are counted.
+    """
+    from drakkar.metrics import sink_deliver_errors, sink_payloads_delivered
+    from drakkar.sinks.kafka import KafkaSink
+
+    mock_producer = AsyncMock()
+    mock_producer.produce.side_effect = lambda **kw: _make_future()
+    mock_producer.flush.return_value = 3  # someone else's messages
+    mock_cls.return_value = mock_producer
+
+    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    await sink.connect()
+
+    labels = {'sink_type': 'kafka', 'sink_name': 'results'}
+    before = sink_payloads_delivered.labels(**labels)._value.get()
+    errors_before = sink_deliver_errors.labels(**labels)._value.get()
+
+    await sink.deliver([KafkaPayload(data=SampleOutput())])
+
+    assert sink_payloads_delivered.labels(**labels)._value.get() == before + 1
+    assert sink_deliver_errors.labels(**labels)._value.get() == errors_before
+
+
+@patch('drakkar.sinks.kafka.AIOProducer')
+async def test_kafka_sink_deliver_raises_timeout_when_own_futures_never_resolve(mock_cls, kafka_sink_config):
+    """Only this batch's unacknowledged messages are a delivery failure.
 
     ``TimeoutError``, not ``RuntimeError``: the sink manager classifies it
     as transient, so the circuit breaker sees the broker outage and an
@@ -280,14 +312,16 @@ async def test_kafka_sink_deliver_flush_incomplete_raises_timeout(mock_cls, kafk
     from drakkar.sinks.kafka import KafkaSink
 
     mock_producer = AsyncMock()
-    mock_producer.produce.side_effect = lambda **kw: _make_future()
-    mock_producer.flush.return_value = 3
+    # A future nobody ever resolves — the delivery report never arrives.
+    mock_producer.produce.side_effect = lambda **kw: asyncio.get_running_loop().create_future()
+    mock_producer.flush.return_value = 0  # the producer itself looks drained
     mock_cls.return_value = mock_producer
 
-    sink = KafkaSink('results', kafka_sink_config, brokers_fallback='localhost:9092')
+    cfg = kafka_sink_config.model_copy(update={'flush_timeout_seconds': 0.05})
+    sink = KafkaSink('results', cfg, brokers_fallback='localhost:9092')
     await sink.connect()
 
-    with pytest.raises(TimeoutError, match=r'flush timed out.*3 message'):
+    with pytest.raises(TimeoutError, match=r'not acknowledged.*1 of 1 message'):
         await sink.deliver([KafkaPayload(data=SampleOutput())])
 
 
@@ -2880,12 +2914,35 @@ async def test_dlq_sink_send_flushes_the_producer():
     mock_producer.flush.assert_called_once()
 
 
-async def test_dlq_sink_send_returns_false_when_flush_leaves_messages_queued():
-    """A non-zero flush remainder means the broker never took the message."""
-    sink, mock_producer = _make_dlq_sink()
-    mock_producer.flush.return_value = 2
+async def test_dlq_sink_send_succeeds_when_flush_reports_other_writes_backlog():
+    """A producer-wide flush remainder is not this write's verdict.
 
+    The DLQ producer serves the whole worker, so ``flush()`` counts messages
+    other writes are waiting on. Reporting failure there would stall a
+    partition whose DLQ message the broker already accepted.
+    """
+    from drakkar.metrics import dlq_send_failures
+
+    sink, mock_producer = _make_dlq_sink()
+    mock_producer.flush.return_value = 2  # someone else's messages
+
+    failures_before = dlq_send_failures._value.get()
+    assert await sink.send(_sample_delivery_error(), partition_id=0) is True
+    assert dlq_send_failures._value.get() == failures_before
+
+
+async def test_dlq_sink_send_returns_false_when_own_write_is_not_acknowledged():
+    """A delivery report that never arrives is the real DLQ failure."""
+    from drakkar.metrics import dlq_send_failures
+
+    sink, mock_producer = _make_dlq_sink()
+    mock_producer.produce.side_effect = lambda **kw: asyncio.get_running_loop().create_future()
+    mock_producer.flush.return_value = 0  # the producer itself looks drained
+    sink._flush_timeout_seconds = 0.05
+
+    failures_before = dlq_send_failures._value.get()
     assert await sink.send(_sample_delivery_error(), partition_id=0) is False
+    assert dlq_send_failures._value.get() == failures_before + 1
 
 
 async def test_dlq_sink_send_returns_false_on_delivery_report_error():

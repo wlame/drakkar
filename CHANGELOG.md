@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Kafka and DLQ deliveries are judged by their own acknowledgements.** The
+  producer flush is shared by every partition loop, so its "still queued"
+  count included messages other partitions were waiting on. One stuck
+  topic-partition therefore failed batches the broker had already accepted:
+  the Kafka sink re-produced them (duplicates on the output topic) or sent
+  them to the DLQ, and the DLQ sink reported a written message as lost. Both
+  sinks now keep the flush as the nudge that hands messages to the broker and
+  take the verdict from this batch's own delivery reports. A timeout now
+  means this batch was not acknowledged in time, and the flush and the wait
+  share one `flush_timeout_seconds` budget instead of taking one each.
+
 ## [2.1.0] - 2026-09-01
 
 ### Added
