@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI and `just install` now refuse a stale lockfile.** `just ci` starts with
+  `just lock-check` (`uv lock --check`) and the install recipes pass
+  `uv sync --locked`, so a dependency change that skipped `uv lock` fails with
+  a specific message instead of quietly re-resolving on the runner — which
+  tested packages that never appeared in the diff and did not apply the
+  `[tool.uv] exclude-newer` pin the way CONTRIBUTING describes.
+
 ### Fixed
 
 - **The recorder no longer counts stdin and stdout lines on the hot path when

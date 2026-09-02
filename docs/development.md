@@ -27,7 +27,8 @@ just install        # uv sync --extra=perf; the dev dependency-group installs by
 | `just fmt-check` | Formatting check only — the CI gate |
 | `just lint` | Lint with **ruff** (`ruff check`); `just lint-fix` applies safe autofixes |
 | `just typecheck` | Type-check with **ty** (`tests/` and `integration/` are excluded via `[tool.ty.src]`) |
-| `just ci` | Exactly what GitHub CI enforces, in the same order: `fmt-check → lint → typecheck → cover` |
+| `just lock-check` | Fail when `uv.lock` is stale against `pyproject.toml` — the CI gate |
+| `just ci` | Exactly what GitHub CI enforces, in the same order: `lock-check → fmt-check → lint → typecheck → cover` |
 | `just check` | Full pre-push battery: `ci` + strict docs build |
 
 ruff and ty both run from the repo's own pinned dependencies (`uv run`), never from ad-hoc latest versions — what passes locally passes in CI and vice versa.

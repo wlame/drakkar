@@ -31,6 +31,9 @@ jobs:
 
       - uses: extractions/setup-just@v4
 
+      - name: Check the lockfile is current
+        run: just lock-check
+
       - name: Check formatting
         run: just fmt-check
 

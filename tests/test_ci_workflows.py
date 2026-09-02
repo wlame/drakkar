@@ -137,3 +137,50 @@ def test_uv_is_pinned_to_an_explicit_version(name: str) -> None:
             assert overrides and all(re.fullmatch(r'[0-9]+(\.[0-9]+)*', str(v)) for v in overrides), (
                 f'{where} uses a matrix uv-version whose overrides are not explicit versions: {overrides}'
             )
+
+
+JUSTFILE = WORKFLOW_DIR.parent.parent / 'justfile'
+
+# Workflows that install dependencies and therefore must prove the lock is
+# current before they build or test anything against it.
+INSTALLING_WORKFLOWS = ('ci.yml', 'release.yml')
+
+
+@pytest.mark.parametrize('name', INSTALLING_WORKFLOWS)
+def test_a_job_checks_the_lockfile_is_current(name: str) -> None:
+    """Without this, a dependency change that skipped ``uv lock`` lets the
+    runner resolve whatever is current: CI then tests a set of packages that
+    never appeared in the diff, and ``[tool.uv] exclude-newer`` is not applied
+    the way CONTRIBUTING describes. It runs in milliseconds, so it belongs in
+    the first job rather than behind the test matrix.
+    """
+    commands = [
+        step.get('run', '') for job in jobs(load(name)).values() for step in job.get('steps', []) if 'run' in step
+    ]
+    assert any('lock-check' in run or 'uv lock --check' in run for run in commands), (
+        f'{name} never verifies uv.lock against pyproject.toml'
+    )
+
+
+def test_install_recipes_refuse_a_stale_lockfile() -> None:
+    """``uv sync`` without ``--locked`` re-resolves silently when the lock is
+    stale. Every install path has to fail instead, so the failure is a red run
+    with an actionable message rather than a build against unreviewed
+    packages.
+    """
+    text = JUSTFILE.read_text()
+    offenders = [
+        line.strip()
+        for line in text.splitlines()
+        if re.match(r'\s+uv sync\b', line) and '--locked' not in line and '--frozen' not in line
+    ]
+    assert offenders == [], f'justfile installs without --locked: {offenders}'
+
+
+def test_ci_aggregate_runs_the_lock_check() -> None:
+    """``just ci`` must be exactly the gates GitHub CI enforces — a local run
+    that skips one is how the two drift apart.
+    """
+    text = JUSTFILE.read_text()
+    ci_line = next(line for line in text.splitlines() if line.startswith('ci:'))
+    assert 'lock-check' in ci_line, f'`just ci` does not depend on lock-check: {ci_line!r}'

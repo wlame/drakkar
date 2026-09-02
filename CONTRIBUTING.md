@@ -45,6 +45,12 @@ a bare date as *local* midnight, which makes `uv.lock` differ between
 machines in different timezones. Tests fail if the pin goes missing, loses
 its timezone, or lands in the future.
 
+Any change to the dependency list must include the `uv.lock` diff. CI
+enforces it: `just lock-check` (`uv lock --check`) runs before anything else
+and `just install` uses `uv sync --locked`, so a stale lock is a red run with
+a specific message rather than a silent re-resolve that tests packages nobody
+reviewed.
+
 ## Wire contracts
 
 Some surfaces are contracts rather than implementation details — something

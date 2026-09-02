@@ -15,14 +15,25 @@ default:
 # Setup
 # ---------------------------------------------------------------------------
 
-# Install/sync all dependencies (the dev group is installed by default)
+# Install/sync all dependencies (the dev group is installed by default).
+# --locked fails when uv.lock does not match pyproject.toml instead of
+# quietly re-resolving: without it a dependency change that skipped `uv lock`
+# installs whatever resolves today, so CI tests a set nobody reviewed and the
+# [tool.uv] exclude-newer date pin is not applied the way CONTRIBUTING
+# describes. The fix when it fails is `uv lock`, and the lock diff belongs in
+# the same change.
 install:
-    uv sync --extra=perf
+    uv sync --locked --extra=perf
 
 # Install dependencies without optional extras (the experimental-CPython CI
 # lane: extras with native code may not build on a release candidate yet)
 install-minimal:
-    uv sync
+    uv sync --locked
+
+# Fail when uv.lock is stale against pyproject.toml. Runs in milliseconds and
+# gives a contributor the specific message before any test does.
+lock-check:
+    uv lock --check
 
 # Needed only where confluent-kafka has no wheel and builds from its sdist:
 # the experimental-CPython lanes. Distribution packages of librdkafka are far
@@ -105,7 +116,7 @@ gen-event-vocabulary:
 # ---------------------------------------------------------------------------
 
 # Exactly what GitHub CI enforces, same order: format → lint → types → tests+coverage
-ci: fmt-check lint typecheck cover
+ci: lock-check fmt-check lint typecheck cover
 
 # Full pre-push battery: ci + strict docs build
 check: ci docs-build
