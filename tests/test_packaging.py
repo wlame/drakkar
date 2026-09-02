@@ -297,3 +297,93 @@ def test_agents_md_directory_map_matches_the_tree() -> None:
     assert listed, 'directory map parsed as empty — did its format change?'
     missing = [entry for entry in listed if not (REPO_ROOT / 'drakkar' / entry.rstrip('/')).exists()]
     assert not missing, f'AGENTS.md maps paths that do not exist: {missing}'
+
+
+# Tracked files allowed to exceed the size cap, each with the reason it earns
+# its place in every clone. Add to this deliberately: a file listed here is
+# downloaded by everyone who clones the repository, forever, because removing
+# it later shrinks the working tree and not the history.
+LARGE_TRACKED_FILES: dict[str, str] = {
+    'demo.gif': 'the operator-UI animation the README shows on the GitHub landing page',
+    'drakkar/uiserver/swagger/swagger-ui-bundle.js': (
+        'vendored Swagger UI: the worker serves /api-docs offline, so the bundle ships in the wheel'
+    ),
+}
+MAX_TRACKED_FILE_BYTES = 1_000_000
+
+
+def _tracked_files() -> list[str] | None:
+    """Paths git tracks, or ``None`` outside a checkout (an unpacked sdist)."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ['git', 'ls-files', '-z'],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return [name for name in out.stdout.split('\0') if name]
+
+
+def test_no_unexpected_large_file_is_tracked() -> None:
+    """A large file committed once is in the history for good.
+
+    A 4.8 MB animation was added by an unrelated commit, referenced by
+    nothing, and paid for by every clone from then on — and the 2.4 MB logo
+    was served as the docs favicon, so every page load fetched it to draw a
+    tab icon. Neither showed up in a review. This makes the next one a red
+    test instead, and forces the reason to be written down.
+    """
+    tracked = _tracked_files()
+    if tracked is None:
+        pytest.skip('not a git checkout')
+
+    offenders = {}
+    for name in tracked:
+        if name in LARGE_TRACKED_FILES:
+            continue
+        path = REPO_ROOT / name
+        if not path.is_file():
+            continue  # a submodule or a path removed in the working tree
+        size = path.stat().st_size
+        if size > MAX_TRACKED_FILE_BYTES:
+            offenders[name] = size
+
+    assert offenders == {}, (
+        'tracked files over '
+        f'{MAX_TRACKED_FILE_BYTES // 1000} kB: {offenders}. '
+        'Shrink them, or add each to LARGE_TRACKED_FILES with the reason it is worth a clone.'
+    )
+
+
+def test_the_large_file_allowlist_stays_honest() -> None:
+    """An allowlist entry for a file that is gone, or for one that no longer
+    needs the exemption, quietly widens the guard.
+    """
+    tracked = _tracked_files()
+    if tracked is None:
+        pytest.skip('not a git checkout')
+
+    stale = sorted(set(LARGE_TRACKED_FILES) - set(tracked))
+    assert stale == [], f'allowlisted files that are no longer tracked: {stale}'
+
+    shrunk = [
+        name
+        for name in LARGE_TRACKED_FILES
+        if (REPO_ROOT / name).is_file() and (REPO_ROOT / name).stat().st_size <= MAX_TRACKED_FILE_BYTES
+    ]
+    assert shrunk == [], f'allowlisted files that no longer need the exemption: {shrunk}'
+
+
+def test_the_readme_shows_the_demo_animation() -> None:
+    """The GIF is the largest file in every clone. It has to earn that by
+    being what a visitor sees on the repository's landing page — it spent a
+    release tracked and referenced by nothing.
+    """
+    readme = (REPO_ROOT / 'README.md').read_text()
+    assert 'demo.gif' in readme, 'demo.gif is tracked but the README never shows it'
+    assert 'TODO(wlame): screenshot or GIF' not in readme, 'the placeholder outlived the image it asked for'

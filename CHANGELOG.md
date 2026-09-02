@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`demo.gif` is now what the README shows.** It was tracked at the
+  repository root, referenced by nothing, and paid for by every clone. The
+  placeholder comment asking for it is gone.
+
+- **The docs site no longer serves a 2.4 MB image as its favicon.**
+  `mkdocs.yml` now points at a 29 kB nav logo and a 3 kB favicon exported
+  from the master, which every page load used to fetch in full to draw a tab
+  icon. A test fails when a tracked file passes 1 MB without an allowlist
+  entry naming the reason it is worth a clone.
+
 - **CI and `just install` now refuse a stale lockfile.** `just ci` starts with
   `just lock-check` (`uv lock --check`) and the install recipes pass
   `uv sync --locked`, so a dependency change that skipped `uv lock` fails with

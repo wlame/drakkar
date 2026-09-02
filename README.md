@@ -19,9 +19,11 @@ flowchart LR
     S -- "all confirmed" --> CO["commit offsets<br>(watermark)"]
 ```
 
-<!-- TODO(wlame): screenshot or GIF of the Live executor timeline goes here.
-<p align="center"><img src="docs/media/timeline.gif" alt="Live executor timeline" width="800"></p>
--->
+<p align="center">
+  <img src="demo.gif" alt="The operator UI: live executor timeline, partition lag, and message tracing" width="800">
+</p>
+
+<p align="center"><sub>The operator UI every worker serves: the live executor timeline, per-partition lag, and message tracing.</sub></p>
 
 **[Documentation](https://wlame.github.io/drakkar)** — full guides for every feature below.
 

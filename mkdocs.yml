@@ -7,8 +7,12 @@ copyright: Copyright &copy; 2025-2026 wlame
 
 theme:
   name: material
-  logo: drakkar-logo.png
-  favicon: drakkar-logo.png
+  # Exported small on purpose. The nav strip renders the logo at ~2.2rem and
+  # the browser renders the favicon at 16-32 CSS px, so one full-resolution
+  # master served as both meant every page load fetched megabytes to draw a
+  # tab icon.
+  logo: drakkar-logo-nav.png
+  favicon: favicon.png
   icon:
     repo: fontawesome/brands/github
   font:
