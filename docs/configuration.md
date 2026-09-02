@@ -270,7 +270,7 @@ Controls the subprocess executor pool that runs user-defined binaries.
 | `max_stderr_bytes` | `int` | `0` | >= 0 | Same as `max_stdout_bytes`, for stderr; sets `ExecutorResult.stderr_truncated`. |
 | `window_size` | `int` | `100` | >= 1 | Maximum number of messages collected per [arrange()](handler.md#arrange-required) [window](executor.md#windowing). Larger windows allow more batching in `arrange()`; smaller windows reduce latency. |
 | `max_retries` | `int` | `3` | >= 0 | Maximum number of retry attempts per failed task (0 = no retries). A task can run up to `max_retries + 1` times total. |
-| `drain_timeout_seconds` | `int` | `30` | >= 1 | Maximum time (seconds) to wait for in-flight tasks during shutdown or partition revocation. When drain times out, offsets for still-in-flight tasks are **not** committed — those messages will replay on restart (at-least-once). Tune together with `task_timeout_seconds`. |
+| `drain_timeout_seconds` | `int` | `30` | >= 1 | Maximum time (seconds) to wait for in-flight tasks during shutdown or partition revocation. When drain times out, the still-running tasks are cancelled (their subprocess process group is killed) and their offsets are **not** committed — those messages replay on restart (at-least-once). Tune together with `task_timeout_seconds`. |
 | `backpressure_high_multiplier` | `int` | `32` | >= 1 | Multiplier for the pause threshold. When total queued messages reach `max_executors * backpressure_high_multiplier`, Kafka consumption is paused. |
 | `backpressure_low_multiplier` | `int` | `4` | >= 1 | Multiplier for the resume threshold. When total queued messages drop to `max(1, max_executors * backpressure_low_multiplier)`, Kafka consumption resumes. |
 

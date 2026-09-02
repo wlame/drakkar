@@ -118,8 +118,10 @@ class ExecutorConfig(BaseModel):
             'during graceful shutdown or partition revocation. Set lower to '
             'speed up shutdown; set at least as high as task_timeout_seconds '
             'if you rely on clean final commits for every in-flight task. '
-            'When drain times out, offsets for in-flight tasks are NOT '
-            'committed (those messages will replay on restart — at-least-once).'
+            'When drain times out, the still-running tasks are cancelled — '
+            'their subprocess process group is killed so the executor slot '
+            'is freed at once — and their offsets are NOT committed (those '
+            'messages will replay on restart — at-least-once).'
         ),
     )
     backpressure_high_multiplier: int = Field(

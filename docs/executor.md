@@ -524,7 +524,7 @@ executor:
 | `max_stderr_bytes` | `int` | `0` | 0 | Same as `max_stdout_bytes`, for stderr; sets `ExecutorResult.stderr_truncated`. |
 | `window_size` | `int` | `100` | 1 | Max messages per `arrange()` window. |
 | `max_retries` | `int` | `3` | 0 | Max retries per failed task. 0 disables retries. |
-| `drain_timeout_seconds` | `int` | `30` | 1 | Max wait for in-flight tasks during graceful shutdown. On timeout, offsets of still-in-flight tasks are **not** committed (they replay on restart). |
+| `drain_timeout_seconds` | `int` | `30` | 1 | Max wait for in-flight tasks during graceful shutdown. On timeout, those tasks are cancelled and their offsets are **not** committed (they replay on restart). |
 | `backpressure_high_multiplier` | `int` | `32` | 1 | Pause threshold = `max_executors` x this. |
 | `backpressure_low_multiplier` | `int` | `4` | 1 | Resume threshold = max(1, `max_executors` x this). |
 

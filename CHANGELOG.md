@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Tasks that outlive a drain timeout are cancelled instead of left
+  running.** A revoke or a shutdown gave in-flight tasks
+  `executor.drain_timeout_seconds` to finish and then only suppressed their
+  results. The tasks kept running: each held an executor slot and a live
+  subprocess for up to `executor.task_timeout_seconds`, work from the
+  partitions the worker still owned queued behind them, and the processing
+  loop could not exit while they were counted in flight — so every following
+  stop waited out its full grace period as well. They are now cancelled,
+  which kills the subprocess process group and frees the slot at once. Their
+  offsets still stay uncommitted, as before. The revoke teardown now runs
+  the drain, the final commit and the processor stop against one
+  `drain_timeout_seconds` deadline, so the rebalance callback cannot overrun
+  `max.poll.interval.ms` and get the worker evicted. Shutdown stops all
+  partitions together rather than one at a time, and a partition whose loop
+  died no longer burns the whole drain budget before being given up on.
+
 - **Kafka and DLQ deliveries are judged by their own acknowledgements.** The
   producer flush is shared by every partition loop, so its "still queued"
   count included messages other partitions were waiting on. One stuck

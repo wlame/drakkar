@@ -3375,3 +3375,171 @@ async def test_deferred_commit_survives_a_failing_broker(echo_pool, monkeypatch)
     await proc._note_commit_due()
     await wait_for(lambda: proc._offset_tracker.last_committed == 1)
     await proc._cancel_commit_flush()
+
+
+# --- Zombie tasks after a drain timeout ---
+
+
+class _SleeperHandler(BaseDrakkarHandler):
+    """Arranges one long-running subprocess per message."""
+
+    def __init__(self, seconds: float = 30.0) -> None:
+        self.seconds = seconds
+
+    async def arrange(self, messages, pending):
+        return [
+            ExecutorTask(
+                task_id=f'sleep-{m.offset}',
+                args=['-c', f'import time; time.sleep({self.seconds})'],
+                source_offsets=[m.offset],
+            )
+            for m in messages
+        ]
+
+
+def _sleeper_pool(max_executors: int = 2) -> ExecutorPool:
+    return ExecutorPool(
+        binary_path=sys.executable,
+        max_executors=max_executors,
+        task_timeout_seconds=120,
+    )
+
+
+async def test_cancel_active_tasks_frees_executor_slots_and_kills_subprocesses():
+    """A zombie holds its priority-gate slot and its subprocess until
+    ``task_timeout_seconds`` — two minutes by default — while the partitions
+    this worker still owns queue behind it. Cancelling releases both at once.
+    """
+    pool = _sleeper_pool(max_executors=2)
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=_SleeperHandler(),
+        executor_pool=pool,
+        window_size=10,
+    )
+    proc.enqueue(make_msg(offset=0))
+    proc.enqueue(make_msg(offset=1))
+    proc.start()
+
+    await wait_for(lambda: pool.active_count == 2, timeout=5)
+
+    cancelled = await proc.cancel_active_tasks()
+
+    assert cancelled == 2
+    assert proc._active_tasks == set() or all(t.done() for t in proc._active_tasks)
+    assert proc.inflight_count == 0, 'the finally in _execute_and_track still decrements'
+    await wait_for(lambda: pool.active_count == 0, timeout=5)
+
+    proc.signal_stop()
+    await proc.stop(timeout=1.0)
+
+
+async def test_cancel_active_tasks_leaves_the_offsets_uncommitted():
+    """``CancelledError`` is a ``BaseException``, so it propagates past the
+    tracker settlement that follows ``_execute_and_track``'s ``finally``. The
+    cancelled task's offsets therefore stay pending — committing past work
+    this worker abandoned would lose it (AGENTS.md invariant 3).
+    """
+    committed: list[dict] = []
+
+    async def commit(offsets):
+        committed.append(offsets)
+
+    pool = _sleeper_pool()
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=_SleeperHandler(),
+        executor_pool=pool,
+        window_size=10,
+        on_commit=commit,
+    )
+    proc.enqueue(make_msg(offset=7))
+    proc.start()
+    await wait_for(lambda: proc.inflight_count == 1, timeout=5)
+
+    await proc.cancel_active_tasks()
+    await proc._commit_now()
+
+    assert proc.offset_tracker.committable() is None
+    assert committed == []
+
+    proc.signal_stop()
+    await proc.stop(timeout=1.0)
+
+
+async def test_cancel_active_tasks_is_a_noop_without_in_flight_work(echo_pool):
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=EchoHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+    )
+    assert await proc.cancel_active_tasks() == 0
+
+
+async def test_stop_after_suppress_does_not_wait_out_its_timeout():
+    """After a drain timeout ``_run`` can never leave its drain loop: it spins
+    while the zombies are counted in flight. ``stop()`` therefore always burnt
+    its whole grace period — on the thread librdkafka's rebalance callback is
+    blocked in. Suppressed processors now cancel first.
+    """
+    pool = _sleeper_pool()
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=_SleeperHandler(),
+        executor_pool=pool,
+        window_size=10,
+    )
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: proc.inflight_count == 1, timeout=5)
+
+    proc.suppress_deliveries()
+    start = asyncio.get_running_loop().time()
+    await proc.stop(timeout=10.0)
+    elapsed = asyncio.get_running_loop().time() - start
+
+    assert elapsed < 5.0, f'stop() waited {elapsed:.1f}s for a zombie it could cancel'
+    assert proc.inflight_count == 0
+
+
+async def test_stop_cancels_tasks_the_cancelled_loop_left_behind(echo_pool, monkeypatch):
+    """Cancelling ``_run`` does not reach the task coroutines it spawned — they
+    are separate tasks. Without the sweep at the end of ``stop()`` they keep an
+    executor slot and a subprocess with no owner left to read the result.
+    """
+    pool = _sleeper_pool()
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=_SleeperHandler(),
+        executor_pool=pool,
+        window_size=10,
+    )
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: proc.inflight_count == 1, timeout=5)
+
+    # Not suppressed: this is the plain shutdown path, where ``stop()`` waits
+    # for ``_run`` and then force-cancels it.
+    await proc.stop(timeout=0.2)
+
+    assert proc.inflight_count == 0
+    await wait_for(lambda: pool.active_count == 0, timeout=5)
+
+
+async def test_dead_processor_drain_returns_without_waiting(echo_pool):
+    """A dead processor has no loop left to empty its queue, so draining it
+    always burnt the caller's full budget and then suppressed a commit that
+    was in fact safe to make.
+    """
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=EchoHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+    )
+    proc.enqueue(make_msg(offset=0))
+    proc._dead = True
+
+    await asyncio.wait_for(proc.drain(), timeout=1.0)
+    assert proc.queue_size == 1, 'drain must not consume the queue of a dead processor'

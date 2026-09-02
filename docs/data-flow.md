@@ -176,13 +176,15 @@ last committed offset while in-flight work here was still delivering the
 same messages, duplicating everything between the last commit and the drain
 end.
 
-The wait is bounded, not open-ended: each stop sequence is capped by
-`executor.drain_timeout_seconds` and suppresses deliveries when it expires,
-so the callback always returns. That bound matters —
-`run_coroutine_threadsafe(...).result()` has no timeout of its own, so an
-unbounded wait would wedge the consumer thread permanently. Teardown runs
-concurrently across partitions, so N revoked partitions cost one drain
-timeout, not N.
+The wait is bounded, not open-ended: each stop sequence runs against one
+`executor.drain_timeout_seconds` deadline covering the drain, the final commit
+and the processor stop, and it suppresses deliveries when the drain expires,
+so the callback always returns within roughly that budget. That bound
+matters — `run_coroutine_threadsafe(...).result()` has no timeout of its own,
+so an unbounded wait would wedge the consumer thread permanently, and a
+callback that overruns `max.poll.interval.ms` gets the worker evicted from the
+group. Teardown runs concurrently across partitions, so N revoked partitions
+cost one drain timeout, not N.
 
 1. Records a `revoked` event per partition.
 2. For each revoked partition (concurrently, all awaited before returning):
@@ -192,7 +194,8 @@ timeout, not N.
      2. Waits up to `executor.drain_timeout_seconds` (default: `30`, min: `1`) for in-flight work to complete.
      3. **Only if drain completed cleanly**, commits the offset watermark. If drain timed out, in-flight tasks may still be running and committing their offsets would silently skip them on reassign — safer to let at-least-once replay recover them.
      4. **On drain timeout**, the still-running tasks are marked as *zombies*: their late results are suppressed (no sink deliveries, no offset commits) because the new partition owner replays their messages from the last committed offset — delivering here would be a guaranteed double-write, and a late commit could clobber the new owner's progress. Suppressions are counted in `drakkar_suppressed_zombie_deliveries_total` and logged as `zombie_delivery_suppressed`. The same suppression applies to tasks that outlive the shutdown drain timeout.
-     5. Calls `processor.stop()`.
+     5. **On drain timeout**, the zombies are then cancelled, which kills each subprocess' process group and returns its executor slot immediately. Left running they would hold a slot until `executor.task_timeout_seconds`, queuing work from the partitions this worker still owns behind them. The cancellation is logged as `zombie_tasks_cancelled`. Their offsets stay uncommitted, exactly as in step 3.
+     6. Calls `processor.stop()` with what is left of the deadline.
 3. Updates the `assigned_partitions` gauge.
 4. Calls the handler's `on_revoke(partition_ids)` hook on a background task. The hook is a user notification, not part of the commit contract, so a slow hook does not eat into the rebalance budget.
 
@@ -656,7 +659,8 @@ When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
 
   to finish their work.
 - Each processor drains by: processing remaining queued messages into windows, waiting for in-flight tasks to complete, then doing a final commit.
-- If the timeout expires, logs a warning but continues shutdown. The flag that tracks a clean drain is used by the next step to decide whether committing final offsets is safe.
+- If the timeout expires, logs a warning but continues shutdown. The flag that tracks a clean drain is used by the next step to decide whether committing final offsets is safe. The still-running tasks are suppressed and then cancelled, so they release their executor slots and subprocesses rather than holding them for the rest of the pod's grace period.
+- Processors whose loop has died are excluded: nothing will empty their queue or settle their pending offsets, so waiting on one would spend the whole budget and suppress every other partition's final commit with it.
 
 ### Step 4: Final Offset Commits
 - **Only if Step 3 drained cleanly**, iterates processors and commits any remaining offsets via `committable()`.
@@ -664,9 +668,11 @@ When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
 - If a commit call itself fails, logs a warning. Those offsets will be re-processed on next startup (at-least-once semantics).
 
 ### Step 5: Stop All Processors
-- Calls `processor.stop()` on each, which:
+- Calls `processor.stop()` on all of them concurrently, which:
   - Waits up to 10 seconds for the processor's async task to exit naturally.
   - If it doesn't exit in 10 seconds, force-cancels the task.
+  - Cancels any task coroutine the loop left behind — cancelling the loop does not reach them, and one still holding an executor slot has no owner left to read its result.
+- Sequentially, a worker with N partitions would pay N stop timeouts back to back, which the pod's grace period usually outlasts — and it expires *after* the watchdog was marked clean, so the SIGKILL is recorded as a clean exit and the closes in steps 7-11 never run.
 - Clears the processors dict.
 
 ### Step 6: Await Rebalance Background Tasks

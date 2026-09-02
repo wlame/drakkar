@@ -63,6 +63,10 @@ StallCallback = Callable[[int], Awaitable[None]]
 MAX_RETRIES = 3  # default, overridden by config.executor.max_retries
 DRAIN_POLL_INTERVAL = 0.05  # seconds between checks when draining in-flight work
 
+# How long ``stop()`` waits for the processing loop to leave on its own before
+# force-cancelling it. Callers with their own deadline pass a smaller value.
+DEFAULT_STOP_TIMEOUT = 10.0
+
 # Offset-commit coalescing. A commit is a broker round trip, and it used to
 # happen once per finished message: with a low-fan-out handler that makes the
 # commit rate the bottleneck, and completions queue behind the partition's
@@ -330,17 +334,30 @@ class PartitionProcessor:
         """
         self._running = False
 
-    async def stop(self) -> None:
+    async def stop(self, timeout: float = DEFAULT_STOP_TIMEOUT) -> None:
         """Stop the partition processor and wait for completion.
 
         Signals _run() to exit its main loop via ``signal_stop`` (the
-        single documented way to clear ``_running``), then waits up to 10s
-        for natural exit before force-cancelling.
+        single documented way to clear ``_running``), then waits up to
+        ``timeout`` for natural exit before force-cancelling.
+
+        ``timeout`` exists so a caller working against its own deadline —
+        the rebalance callback, which blocks librdkafka's thread — can hand
+        down what is left of its budget instead of always paying the
+        default.
         """
         self.signal_stop()
+        if self._deliveries_suppressed:
+            # Zombie path. These tasks already had the whole drain budget and
+            # their results are discarded on arrival, so waiting on them below
+            # would burn the full ``timeout`` for nothing — and ``_run`` cannot
+            # leave its drain loop while they are counted in flight, so that
+            # wait always expires. Cancelling frees their executor slots and
+            # kills their subprocesses now.
+            await self.cancel_active_tasks()
         if self._task:
             try:
-                await asyncio.wait_for(self._task, timeout=10.0)
+                await asyncio.wait_for(self._task, timeout=timeout)
             except TimeoutError:
                 self._task.cancel()
                 try:
@@ -350,6 +367,11 @@ class PartitionProcessor:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        # Cancelling ``_run`` above does not reach the task coroutines it
+        # spawned — they are separate tasks. Anything still running here
+        # would hold an executor slot and a subprocess with no owner left to
+        # read its result.
+        await self.cancel_active_tasks()
         # ``_run`` ends with a forced commit, so by here there is nothing a
         # pending coalescing timer still needs to send — but the loop may
         # have been cancelled before reaching it, and a processor that was
@@ -380,6 +402,42 @@ class PartitionProcessor:
         and any commit could clobber the new owner's progress.
         """
         self._deliveries_suppressed = True
+
+    async def cancel_active_tasks(self) -> int:
+        """Cancel every in-flight task coroutine and wait for it to unwind.
+
+        Returns how many were cancelled. Idempotent, and a no-op on a
+        processor that drained cleanly.
+
+        Cancellation propagates into ``ExecutorPool.execute``, whose
+        ``finally`` kills the subprocess' process group and releases the
+        priority-gate slot — which is the point. Without it a zombie holds
+        its slot until ``task_timeout_seconds`` (two minutes by default)
+        while the partitions this worker still owns queue behind it.
+
+        ``_execute_and_track``'s ``finally`` decrements the in-flight count
+        and pops ``_pending_tasks`` on the way out, but ``CancelledError``
+        is a ``BaseException``: it propagates past the tracker settlement
+        that follows, so a cancelled task's offsets stay pending and are
+        never committed. That is deliberate — committing past work this
+        worker abandoned would lose it.
+        """
+        tasks = [t for t in self._active_tasks if not t.done()]
+        if not tasks:
+            return 0
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await logger.awarning(
+            'zombie_tasks_cancelled',
+            category='partition',
+            partition=self._partition_id,
+            cancelled=len(tasks),
+            hint='tasks outlived the drain timeout; their executor slots and '
+            'subprocesses are released and their offsets stay uncommitted — '
+            'raise executor.drain_timeout_seconds if this happens routinely',
+        )
+        return len(tasks)
 
     def _note_suppressed_delivery(self, hook: str) -> None:
         suppressed_zombie_deliveries.labels(partition=str(self._partition_id)).inc()
@@ -412,7 +470,15 @@ class PartitionProcessor:
         that moment is redelivered to the next owner for nothing. Draining
         without committing would also make the wait pointless: the work is
         done but no record of it survives.
+
+        A dead processor returns at once. Its loop gave up, so nothing will
+        ever empty its queue or settle its pending offsets; waiting would
+        burn the caller's whole drain budget and then suppress a commit that
+        was in fact safe to make.
         """
+        if self._dead or self._deliveries_suppressed:
+            await self._commit_now()
+            return
         while self._queue.qsize() > 0 or self._has_drainable_pending() or self._inflight_count > 0:
             await asyncio.sleep(DRAIN_POLL_INTERVAL)
         await self._commit_now()
@@ -435,7 +501,7 @@ class PartitionProcessor:
             # in window_size chunks. One unbounded window here would hand
             # arrange() the whole backlog at every shutdown/rebalance —
             # a memory spike, and quadratic pain for O(n²) arrange hooks.
-            while self._queue.qsize() > 0:
+            while self._queue.qsize() > 0 and not self._deliveries_suppressed:
                 messages = []
                 while len(messages) < self._window_size:
                     try:
@@ -446,8 +512,15 @@ class PartitionProcessor:
                     await self._process_window(messages)
 
             # wait for any in-flight tasks to complete (stalled offsets are
-            # excluded — they never complete in this process by design)
-            while self._inflight_count > 0 or self._has_drainable_pending():
+            # excluded — they never complete in this process by design).
+            #
+            # A suppressed processor exits at once. Its drain already timed
+            # out and its tasks were cancelled, so their offsets stay pending
+            # by design (nothing settles a cancelled task's tracker) and this
+            # condition would never clear — the loop would spin until the
+            # caller force-cancelled it, which is exactly the ten seconds
+            # every ``stop()`` used to pay after a revoke.
+            while not self._deliveries_suppressed and (self._inflight_count > 0 or self._has_drainable_pending()):
                 await asyncio.sleep(DRAIN_POLL_INTERVAL)
 
             # Final commit — forced, not coalesced: this is the last chance

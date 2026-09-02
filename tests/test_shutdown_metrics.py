@@ -15,6 +15,7 @@ share state because each one targets a distinct metric or a delta read.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -254,3 +255,154 @@ async def test_drain_no_timeout_does_not_increment_counter(shutdown_config):
 
     after = drain_timeout_hit._value.get()
     assert after == before
+
+
+# --- Teardown is bounded and concurrent ---
+
+
+async def test_shutdown_stops_processors_concurrently(shutdown_config):
+    """Sequential stops cost one stop timeout per partition. The pod's grace
+    period then expires mid-teardown — after the watchdog was marked clean, so
+    the SIGKILL is recorded as a clean exit and the sink/DLQ/recorder/consumer
+    closes never run.
+    """
+    shutdown_config.executor.drain_timeout_seconds = 0.05
+
+    app = DrakkarApp(handler=_StubHandler(), config=shutdown_config)
+    app._executor_pool = ExecutorPool(
+        binary_path='/bin/echo',
+        max_executors=2,
+        task_timeout_seconds=10,
+    )
+    app._consumer = AsyncMock()
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+
+    app._lifecycle._on_assign([0, 1, 2])
+
+    concurrent = 0
+    peak = 0
+
+    async def slow_stop(timeout: float = 10.0) -> None:
+        nonlocal concurrent, peak
+        concurrent += 1
+        peak = max(peak, concurrent)
+        await asyncio.sleep(0.05)
+        concurrent -= 1
+
+    for processor in app.processors.values():
+        processor.stop = slow_stop
+
+    await app._lifecycle._shutdown()
+
+    assert peak == 3, f'processors stopped {peak} at a time, expected all 3 together'
+
+
+async def test_shutdown_drain_timeout_cancels_the_zombie_tasks(shutdown_config):
+    """A zombie that is only suppressed keeps its executor slot and its
+    subprocess for up to ``task_timeout_seconds`` and keeps its processing
+    loop from exiting, so every ``processor.stop()`` in the teardown waits out
+    its full timeout inside the pod's grace period.
+    """
+    shutdown_config.executor.drain_timeout_seconds = 0.05
+
+    app = DrakkarApp(handler=_StubHandler(), config=shutdown_config)
+    app._executor_pool = ExecutorPool(
+        binary_path='/bin/echo',
+        max_executors=2,
+        task_timeout_seconds=10,
+    )
+    app._consumer = AsyncMock()
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+
+    app._lifecycle._on_assign([0, 1])
+    for processor in app.processors.values():
+        # Pending offset that never completes — the drain hangs until timeout.
+        processor._offset_tracker.register(42)
+
+    cancelled: list[int] = []
+    for pid, processor in app.processors.items():
+
+        async def _record(_pid: int = pid) -> int:
+            cancelled.append(_pid)
+            return 0
+
+        processor.cancel_active_tasks = _record
+
+    await app._lifecycle._shutdown()
+
+    # ``stop()`` sweeps again on its way out, so each partition appears more
+    # than once; what matters is that no zombie was left running.
+    assert set(cancelled) == {0, 1}
+
+
+async def test_revoke_teardown_stays_within_the_drain_budget(shutdown_config):
+    """librdkafka's rebalance thread blocks on ``_stop_processor``, so the
+    drain, the final commit RPC and the processor stop all have to come out of
+    one ``drain_timeout_seconds`` budget. A step taking its own budget lets the
+    callback overrun ``max.poll.interval.ms`` and the member is evicted, which
+    triggers the next rebalance.
+    """
+    shutdown_config.executor.drain_timeout_seconds = 0.2
+
+    app = DrakkarApp(handler=_StubHandler(), config=shutdown_config)
+    app._executor_pool = ExecutorPool(
+        binary_path='/bin/echo',
+        max_executors=2,
+        task_timeout_seconds=10,
+    )
+    app._consumer = AsyncMock()
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+
+    app._lifecycle._on_assign([0])
+    processor = app.processors[0]
+    # Pending offset that never completes — the drain hangs until timeout.
+    processor._offset_tracker.register(42)
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    await app._lifecycle._stop_processor(processor)
+    elapsed = loop.time() - start
+
+    # Drain budget plus the step floor, with slack for scheduling. Before the
+    # fix this was drain_timeout + a hardcoded 10s stop.
+    assert elapsed < 3.0, f'revoke teardown took {elapsed:.1f}s on a 0.2s drain budget'
+
+
+async def test_stop_processor_bounds_the_final_commit(shutdown_config):
+    """The post-drain commit is a synchronous librdkafka call dispatched to the
+    consumer's thread pool. Unbounded, a coordinator that stopped answering
+    holds the rebalance callback open for as long as it stays silent.
+    """
+    shutdown_config.executor.drain_timeout_seconds = 0.2
+
+    app = DrakkarApp(handler=_StubHandler(), config=shutdown_config)
+    app._executor_pool = ExecutorPool(
+        binary_path='/bin/echo',
+        max_executors=2,
+        task_timeout_seconds=10,
+    )
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+
+    app._lifecycle._on_assign([0])
+    processor = app.processors[0]
+    processor._offset_tracker.register(7)
+    processor._offset_tracker.complete(7)  # drains cleanly, so a commit is due
+
+    async def never_answers(_offsets):
+        await asyncio.sleep(3600)
+
+    app._consumer = AsyncMock()
+    app._consumer.commit = never_answers
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    await app._lifecycle._stop_processor(processor)
+    elapsed = loop.time() - start
+
+    assert elapsed < 3.0, f'the final commit was unbounded: {elapsed:.1f}s'
+    # The commit never confirmed, so the watermark must stay uncommitted.
+    assert processor.offset_tracker.committable() == 8

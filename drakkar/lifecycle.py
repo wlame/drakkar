@@ -93,6 +93,17 @@ logger = structlog.get_logger()
 # from a single location to keep the lifecycle self-contained.
 POLL_IDLE_SLEEP = 0.05
 
+# Floor for the shares of a teardown deadline handed to a commit RPC or to
+# ``PartitionProcessor.stop``. A deadline that has already passed still has to
+# let a step that is only waiting on an already-settled future finish, so it
+# never gets zero.
+MIN_TEARDOWN_STEP_SECONDS = 0.5
+
+
+def _remaining(deadline: float) -> float:
+    """Return what is left of ``deadline``, never below the step floor."""
+    return max(deadline - time.monotonic(), MIN_TEARDOWN_STEP_SECONDS)
+
 
 class AppLifecycle:
     """Lifecycle driver for :class:`DrakkarApp` (internal use).
@@ -903,13 +914,21 @@ class AppLifecycle:
         deliveries for the same messages, so every message between the
         last commit and the drain end was delivered twice.
 
-        The wait is bounded, not open-ended: each ``_stop_processor`` is
-        capped by ``executor.drain_timeout_seconds`` and suppresses
-        deliveries when it expires, so this always returns. That bound
-        matters — ``run_coroutine_threadsafe(...).result()`` has no
-        timeout of its own, so an unbounded wait here would wedge the
-        consumer thread permanently. Teardown runs concurrently across
-        partitions, so N revoked partitions cost one drain timeout, not N.
+        The wait is bounded, not open-ended: every ``_stop_processor`` runs
+        against one ``executor.drain_timeout_seconds`` deadline that covers
+        the drain, the final commit RPC and the processor stop, so this
+        always returns within roughly that budget. That bound matters —
+        ``run_coroutine_threadsafe(...).result()`` has no timeout of its
+        own, so an unbounded wait here would wedge the consumer thread
+        permanently. Teardown runs concurrently across partitions, so N
+        revoked partitions cost one drain timeout, not N.
+
+        A drain that expires cancels the tasks it was waiting for rather
+        than leaving them running: their results are discarded anyway, and
+        an uncancelled zombie holds an executor slot until
+        ``task_timeout_seconds`` while it also keeps the processing loop
+        from exiting — which is what used to add a full stop timeout on top
+        of the drain.
 
         The handler's ``on_revoke`` hook stays on a background task — it is
         a user notification, not part of the commit contract, and a slow
@@ -1036,11 +1055,18 @@ class AppLifecycle:
         Preferring at-least-once duplication over silent loss.
         """
         app = self._app
+        drain_timeout = app._config.executor.drain_timeout_seconds
+        # One deadline for the whole teardown. librdkafka's rebalance thread
+        # is blocked on this coroutine, so every step below has to come out
+        # of the same budget — a step that takes its own would let the
+        # callback overrun ``max.poll.interval.ms`` and get the member
+        # evicted, which triggers the next rebalance.
+        deadline = time.monotonic() + drain_timeout
         try:
             processor.signal_stop()
             drained_cleanly = False
             try:
-                await asyncio.wait_for(processor.drain(), timeout=app._config.executor.drain_timeout_seconds)
+                await asyncio.wait_for(processor.drain(), timeout=drain_timeout)
                 drained_cleanly = True
             except TimeoutError:
                 # Tasks still running are zombies now — the new partition
@@ -1048,18 +1074,27 @@ class AppLifecycle:
                 # not reach sinks (double-write) or commit offsets
                 # (clobbering the new owner's progress).
                 processor.suppress_deliveries()
+                cancelled = await processor.cancel_active_tasks()
                 logger.warning(
                     'stop_processor_drain_timeout',
                     category='lifecycle',
                     partition=processor.partition_id,
                     inflight=processor.inflight_count,
                     queue_size=processor.queue_size,
+                    cancelled_tasks=cancelled,
                 )
             if drained_cleanly:
                 committable = processor.offset_tracker.committable()
                 if committable is not None and app._consumer:
                     try:
-                        await app._consumer.commit({processor.partition_id: committable})
+                        # Bounded: this is a synchronous librdkafka commit
+                        # dispatched to the consumer's thread pool, and a
+                        # coordinator that stopped answering would otherwise
+                        # hold the rebalance callback open with no deadline.
+                        await asyncio.wait_for(
+                            app._consumer.commit({processor.partition_id: committable}),
+                            timeout=_remaining(deadline),
+                        )
                         processor.offset_tracker.acknowledge_commit(committable)
                     except Exception as e:
                         logger.warning(
@@ -1068,7 +1103,7 @@ class AppLifecycle:
                             partition=processor.partition_id,
                             error=str(e),
                         )
-            await processor.stop()
+            await processor.stop(timeout=_remaining(deadline))
         except Exception as e:
             # Critical cleanup path: a failure here must not leave the
             # processor running (it would keep consuming executor slots
@@ -1193,8 +1228,15 @@ class AppLifecycle:
                 # the last committed offset. Suppress their late sink
                 # deliveries and commits to avoid double-writes during the
                 # remaining teardown window.
-                for processor in list(app._processors.values()):
+                zombies = list(app._processors.values())
+                for processor in zombies:
                     processor.suppress_deliveries()
+                # Cancel them as well: an uncancelled zombie keeps its
+                # executor slot and subprocess for up to
+                # ``task_timeout_seconds`` and keeps its processing loop from
+                # exiting, so every ``processor.stop()`` below would wait out
+                # its full timeout inside the pod's grace period.
+                await asyncio.gather(*(p.cancel_active_tasks() for p in zombies))
                 await log.awarning(
                     'drain_timeout',
                     category='lifecycle',
@@ -1267,7 +1309,13 @@ class AppLifecycle:
             # ``processor.stop()`` is idempotent on already-drained
             # processors, and skipping it on a drain failure would leak
             # the processor's worker tasks.
-            for processor in list(app._processors.values()):
+            # Concurrently, as the revoke path does. Sequentially, a worker
+            # with N partitions pays N stop timeouts back to back and the
+            # pod's grace period expires mid-teardown — after the watchdog
+            # was already marked clean, so the SIGKILL is recorded as a
+            # clean exit and the sink/DLQ/recorder/consumer closes below
+            # never run.
+            async def _stop_one(processor: PartitionProcessor) -> None:
                 try:
                     await processor.stop()
                 except Exception as exc:
@@ -1278,6 +1326,10 @@ class AppLifecycle:
                         error=str(exc),
                         exc_info=True,
                     )
+
+            stopping = list(app._processors.values())
+            if stopping:
+                await asyncio.gather(*(_stop_one(p) for p in stopping))
             app._processors.clear()
 
             # Wait for background tasks scheduled by rebalance callbacks
@@ -1458,7 +1510,13 @@ class AppLifecycle:
         drain_tasks = [
             processor.drain()
             for processor in processors
-            if processor.queue_size > 0 or processor.offset_tracker.has_pending() or processor.inflight_count > 0
+            # A dead processor has no loop left to empty its queue or settle
+            # its pending offsets, so including it guarantees the whole drain
+            # hits the timeout and every healthy partition's commit is
+            # suppressed with it. ``drain()`` returns at once for one anyway;
+            # skipping it here keeps the intent visible at the call site.
+            if not processor.is_dead
+            and (processor.queue_size > 0 or processor.offset_tracker.has_pending() or processor.inflight_count > 0)
         ]
         if drain_tasks:
             await asyncio.gather(*drain_tasks)
