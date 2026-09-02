@@ -106,6 +106,31 @@ FLUSH_CHUNK_ROWS = 5_000
 # large enough to be invisible next to the workloads the recorder observes.
 FLUSH_POLL_SECONDS = 0.25
 
+# Approximate buffered payload bytes that trigger an early flush, alongside
+# the half-full event count. ``max_buffer`` bounds the buffer by COUNT, which
+# says nothing about its size: a task over ``output_min_duration_ms`` has its
+# whole stdout and stderr stored, uncapped, so a workload with large outputs
+# reaches gigabytes of resident buffer long before it reaches 25 000 events.
+# Bounding both makes the memory a function of throughput rather than of the
+# handler's output size. Not configurable on purpose — it is a safety floor,
+# not a tuning knob, and flushing early is never wrong.
+FLUSH_BYTES_HIGH_WATER = 64 * 1024 * 1024
+
+# Event keys whose values can be arbitrarily large. Summed for the byte
+# high-water mark above; everything else in a row is bounded and small.
+_HEAVY_EVENT_FIELDS = ('stdout', 'stderr', 'metadata', 'args')
+
+
+def _event_weight(event: dict) -> int:
+    """Approximate payload size of one buffered event, in characters.
+
+    Characters rather than bytes: ``len`` on a ``str`` is O(1) while
+    ``encode`` copies the whole string, and this runs once per recorded event
+    on the loop. The count is a lower bound for non-ASCII text, which only
+    makes the flush trigger slightly later than the nominal threshold.
+    """
+    return sum(len(value) for field in _HEAVY_EVENT_FIELDS if isinstance(value := event.get(field), str))
+
 
 def _last_breath_flush_all() -> None:
     """The single atexit hook: salvage every still-live recorder's buffer."""
@@ -144,6 +169,11 @@ class EventRecorder(EventWriter):
         self._worker_name = worker_name
         self._cluster_name = cluster_name
         self._buffer: deque[dict] = deque(maxlen=config.recorder.max_buffer)
+        # Approximate payload bytes appended since the last flush. Reset at
+        # flush rather than decremented per drained row: it exists to decide
+        # "flush now", where over-counting costs one early write and
+        # under-counting falls back to the interval.
+        self._buffered_bytes = 0
         # Whether an appended event will ever reach a table. The flush loop
         # is created only when ``store_events`` is on (and only when there
         # is a ``db_dir`` to open a DB in), and ``_flush`` returns early
@@ -530,6 +560,7 @@ class EventRecorder(EventWriter):
             if maxlen is not None and len(self._buffer) >= maxlen:
                 recorder_dropped_events.inc()
             self._buffer.append(event)
+            self._buffered_bytes += _event_weight(event)
             recorder_buffer_size.set(len(self._buffer))
         if not skip_ws:
             self._fanout.broadcast(event)
@@ -983,6 +1014,8 @@ class EventRecorder(EventWriter):
             await asyncio.sleep(min(remaining, FLUSH_POLL_SECONDS))
             if high_water is not None and len(self._buffer) >= high_water:
                 return
+            if self._buffered_bytes >= FLUSH_BYTES_HIGH_WATER:
+                return
 
     async def _flush_loop(self) -> None:
         while self._running:
@@ -1052,6 +1085,11 @@ class EventRecorder(EventWriter):
             # ride along on the next tick rather than extending this one
             # indefinitely under a fast producer.
             pending = len(self._buffer)
+            # Reset before draining, not after: the counter drives the
+            # "flush now" decision only, and the events appended while this
+            # flush awaits are re-counted as they arrive. Resetting after the
+            # drain would discard their weight.
+            self._buffered_bytes = 0
             while pending > 0:
                 take = min(pending, FLUSH_CHUNK_ROWS)
                 pending -= take

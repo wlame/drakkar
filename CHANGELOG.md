@@ -28,6 +28,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A slow WebSocket client can no longer pin the captured output of every
+  event it has queued.** Subscriber queues hold up to 10,000 events, and each
+  queued wrapper held the raw recorder event — including the whole stdout and
+  stderr of the task — until the UI thread encoded it, even though those
+  fields are never streamed. A throttled browser tab could keep gigabytes
+  alive that way. The output is now dropped when the event is handed to the
+  fan-out rather than when it is encoded. Nothing on the wire changes, and the
+  stored row still keeps the full output.
+
+- **The recorder buffer now flushes early on size, not only on event count.**
+  `ui.recorder.max_buffer` bounds the buffer by count, which says nothing
+  about how much memory it holds: with `store_output` on and
+  `executor.max_stdout_bytes` unlimited, a handler producing large output
+  reaches gigabytes of resident buffer long before it reaches half of 50,000
+  events. A flush now also starts once the buffered payload passes roughly
+  64 MiB. Nothing is truncated — the stored row is unchanged and the
+  task-detail page still shows the whole output.
+
 - **The recorder no longer counts stdin and stdout lines on the hot path when
   nothing is listening.** `stdin_lines` and `stdout_lines` are not recorder
   columns — the database insert drops them — so they exist only for live

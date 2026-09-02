@@ -5834,3 +5834,106 @@ def test_capped_stdin_still_truncates_on_the_byte_boundary():
     assert (stored, truncated) == ('aé', True)
     stored, truncated = _capped_stdin('aé' + 'b' * 100, 2)  # splits 'é'
     assert (stored, truncated) == ('a', True)
+
+
+# --- Bounded memory for large captured output ---
+
+
+async def test_queued_ws_events_do_not_pin_captured_output(recorder):
+    """A subscriber queue holds up to ``WS_SUBSCRIBER_QUEUE_SIZE`` wrappers
+    until the UI thread drains it. Holding the raw event there pinned the
+    whole stdout and stderr of every queued task, so one throttled browser tab
+    on a slow link could keep gigabytes alive and take the worker out with it.
+    The fields are omitted from the wire anyway.
+    """
+    sub = recorder.subscribe()
+    result = make_result('t-big')
+    result.stdout = 'x' * 100_000
+    result.stderr = 'y' * 100_000
+    recorder.record_task_completed(result, partition=0)
+
+    wrapper = sub.queue.get_nowait()
+    assert 'stdout' not in wrapper.event
+    assert 'stderr' not in wrapper.event
+    # The encoded frame is unchanged: these fields never reached the wire.
+    assert '"stdout"' not in wrapper.text
+    assert wrapper.event['stdout_size'] == 100_000
+
+
+@pytest.fixture
+async def output_recorder(tmp_path):
+    """A recorder that stores captured output, as the shipped default does."""
+    rec = EventRecorder(make_debug_config(tmp_path, store_output=True), worker_name=WORKER_NAME)
+    await rec.start()
+    yield rec
+    await rec.stop()
+
+
+async def test_the_db_buffer_still_holds_the_full_output(output_recorder):
+    """Stripping is for the live stream only. The stored row keeps the whole
+    output so the task-detail page can show it untruncated.
+    """
+    output_recorder.subscribe()
+    result = make_result('t-stored')
+    result.stdout = 'x' * 100_000
+    output_recorder.record_task_completed(result, partition=0)
+
+    buffered = next(e for e in output_recorder._buffer if e['event'] == 'task_completed')
+    assert buffered['stdout'] == 'x' * 100_000
+
+
+async def test_flush_is_triggered_by_buffered_bytes_not_only_by_event_count(output_recorder, monkeypatch):
+    """``max_buffer`` bounds the buffer by COUNT, which says nothing about its
+    size: a handful of tasks with large output reaches gigabytes of resident
+    buffer long before it reaches half of 50 000 events.
+
+    The real threshold is 64 MiB; shrunk here so the test does not have to
+    allocate and write that much to prove the mechanism.
+    """
+    from drakkar.recorder import core as core_mod
+
+    monkeypatch.setattr(core_mod, 'FLUSH_BYTES_HIGH_WATER', 100_000)
+
+    for i in range(4):
+        result = make_result(f't-heavy-{i}')
+        result.stdout = 'x' * 30_000
+        output_recorder.record_task_completed(result, partition=0)
+
+    assert len(output_recorder._buffer) < (output_recorder._buffer.maxlen or 0) // 2, (
+        'the event-count high-water mark must not be what fires here'
+    )
+    assert output_recorder._buffered_bytes >= 100_000
+
+    # flush_interval_seconds is 60 on this fixture, so a write inside a couple
+    # of seconds can only have come from the byte high-water mark.
+    async def flushed() -> bool:
+        return len(await output_recorder.get_events(event_type='task_completed')) == 4
+
+    deadline = asyncio.get_running_loop().time() + 5
+    while asyncio.get_running_loop().time() < deadline:
+        if await flushed():
+            break
+        await asyncio.sleep(0.05)
+    else:
+        pytest.fail('the byte high-water mark did not trigger an early flush')
+
+
+async def test_the_byte_counter_resets_on_flush(output_recorder):
+    """Otherwise the first large burst would leave every later wait returning
+    at once, turning the flush loop into a spin.
+    """
+    result = make_result('t-weighty')
+    result.stdout = 'x' * 50_000
+    output_recorder.record_task_completed(result, partition=0)
+    assert output_recorder._buffered_bytes >= 50_000
+
+    await output_recorder._flush()
+    assert output_recorder._buffered_bytes == 0
+
+
+async def test_light_events_do_not_move_the_byte_counter_far(recorder):
+    """The weight is the unbounded fields only — a row of small columns must
+    not push the buffer towards an early flush on its own.
+    """
+    recorder.record_committed(partition=0, offset=1)
+    assert recorder._buffered_bytes < 1000

@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from queue import Queue
 
 from drakkar.metrics import recorder_ws_dropped_events
-from drakkar.recorder.helpers import encode_ws_event
+from drakkar.recorder.helpers import encode_ws_event, strip_ws_omitted
 
 # Upper bound on the deferred-start sweep period. One sweep expires every
 # task_started event whose ws_min_duration_ms threshold has passed, instead of
@@ -63,7 +63,16 @@ class LiveEvent:
     __slots__ = ('_text', 'event')
 
     def __init__(self, event: dict) -> None:
-        self.event = event
+        # Stripped here rather than at encode time. This wrapper sits in every
+        # interested subscriber's queue — up to ``WS_SUBSCRIBER_QUEUE_SIZE``
+        # deep — until the UI thread drains it, so holding the raw event would
+        # pin the whole captured stdout and stderr of every queued task. One
+        # throttled browser tab on a slow link could keep gigabytes alive that
+        # way, on top of the recorder buffer, and take the worker out with it.
+        # The fields are omitted from the wire anyway (WS_OMITTED_FIELDS), so
+        # nothing downstream loses anything; the database buffer still holds
+        # the original dict with the output intact.
+        self.event = strip_ws_omitted(event)
         self._text: str | None = None
 
     @property

@@ -851,6 +851,23 @@ of milliseconds and show up as loop lag in
 `flush_interval_seconds` elapses, once the buffer is half full — a burst is
 written out rather than left to reach `max_buffer` and evict.
 
+A flush starts early on **size** as well as on count, once the buffered
+payload passes roughly 64 MiB. `max_buffer` bounds the buffer by event count,
+which says nothing about how much memory it holds: with `store_output` on,
+every task at or above `output_min_duration_ms` has its whole stdout and
+stderr buffered, and `executor.max_stdout_bytes` is unlimited by default. A
+handler producing hundreds of kilobytes per task therefore reaches gigabytes
+of resident buffer long before it reaches 25,000 events. The size trigger is
+not configurable: it is a safety floor rather than a tuning knob, and flushing
+early is never wrong. Nothing is truncated — the stored row keeps the whole
+output, which is what the task-detail page shows.
+
+Live WebSocket clients never receive captured output — the live views show
+`stdout_size`, not the text — and the queued frames do not hold it either: the
+output is dropped when the event is handed to the fan-out, not when it is
+encoded. Otherwise a browser tab on a slow link could pin up to 10,000 events'
+worth of full output in its subscriber queue, on top of the buffer above.
+
 The chunk is also the unit of loss. A chunk that still fails after
 `max_flush_retries` consecutive attempts is dropped and
 `drakkar_recorder_flush_batches_dropped_total` ticks; the rest of the buffer

@@ -127,20 +127,32 @@ def encode_json_str(obj: Any) -> str:
 WS_OMITTED_FIELDS = frozenset({'stdout', 'stderr'})
 
 
+def strip_ws_omitted(event: dict) -> dict:
+    """Return ``event`` without :data:`WS_OMITTED_FIELDS`.
+
+    Returns the original dict when there is nothing to omit, which is the
+    common case — only ``task_completed`` / ``task_failed`` carry captured
+    output — so the copy is paid for only by the events that need it.
+
+    Callers must not mutate the result: it may BE the caller's dict, and the
+    recorder hands the same dict to the database buffer, which does need the
+    output.
+    """
+    if WS_OMITTED_FIELDS.isdisjoint(event):
+        return event
+    return {k: v for k, v in event.items() if k not in WS_OMITTED_FIELDS}
+
+
 def encode_ws_event(event: dict) -> str:
     """Render one recorder event as the JSON text sent over ``/ws``.
 
     The streamed view drops :data:`WS_OMITTED_FIELDS`; every other key is
     passed through unchanged, so the wire shape stays the recorder event
-    shape documented in ``schema.EVENT_COLUMNS``.
-
-    The dict copy is skipped entirely when there is nothing to omit, which
-    is the common case — only ``task_completed`` / ``task_failed`` carry
-    captured output.
+    shape documented in ``schema.EVENT_COLUMNS``. The strip is normally done
+    once at fan-out (see ``LiveEvent``); repeating it here keeps this function
+    correct for any caller that hands it a raw event.
     """
-    if not WS_OMITTED_FIELDS.isdisjoint(event):
-        event = {k: v for k, v in event.items() if k not in WS_OMITTED_FIELDS}
-    return encode_json_str(event)
+    return encode_json_str(strip_ws_omitted(event))
 
 
 # Env var name patterns whose values get redacted before being written to the
