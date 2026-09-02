@@ -249,7 +249,9 @@ def origin_allowed(origin: str | None, host_header: str, config: UIConfig) -> bo
     # Case 5: open UI. Allow the cluster view (a sibling worker's page
     # reaching this worker over the network) but never a page from
     # elsewhere reaching a worker on the browser's own loopback.
-    return not (is_loopback_host(host_host) and not is_loopback_host(origin_host_norm))
+    worker_on_loopback = is_loopback_host(host_host)
+    page_on_loopback = is_loopback_host(origin_host_norm)
+    return not worker_on_loopback or page_on_loopback
 
 
 def worker_group(name: str) -> str:

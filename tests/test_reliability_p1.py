@@ -154,6 +154,8 @@ class _FakeProcessor:
 
     queue_size = 0
     inflight_count = 0
+    # The drain skips dead processors, so the fake has to answer that too.
+    is_dead = False
 
     def __init__(self):
         self.offset_tracker = _FakeOffsetTracker()
