@@ -17,6 +17,7 @@ parameter and surfaces as a 422 error at runtime.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from urllib.parse import urlparse
 
@@ -27,6 +28,23 @@ from drakkar.config import UIConfig
 # the same canonical form before comparing so a legitimate same-origin
 # request never trips the check on a ``:80``/``:443`` mismatch.
 _DEFAULT_PORTS = {'http': 80, 'https': 443, 'ws': 80, 'wss': 443}
+
+
+def is_loopback_host(host: str) -> bool:
+    """True when ``host`` names the machine the caller is running on.
+
+    Covers the literal addresses (``127.0.0.0/8``, ``::1``) and the reserved
+    name ``localhost``, which every resolver maps to one of them.
+    """
+    host = host.strip().lower().strip('[]')
+    if not host:
+        return False
+    if host == 'localhost' or host.endswith('.localhost'):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def hook_flags(handler: object) -> dict[str, bool]:
@@ -120,26 +138,47 @@ def parse_host_header(host_header: str) -> tuple[str, int | None]:
 def origin_allowed(origin: str | None, host_header: str, config: UIConfig) -> bool:
     """Return True when a WebSocket handshake origin is allowed.
 
-    Decision table (only consulted when ``auth_token`` is set — caller
-    enforces that guard):
+    Runs on every handshake, with or without ``auth_token``. WebSockets are
+    not subject to CORS, so without this check any page the operator visits
+    can open ``ws://127.0.0.1:8080/ws`` from their browser and read the live
+    stream — task arguments, redacted env, output excerpts, cache activity.
+
+    Decision table:
 
     1. ``origin is None``  → accept. Non-browser clients (curl, websocat,
-       Python websockets lib) typically omit ``Origin``; they already
-       authenticated via token. We err on the side of letting tooling
-       connect rather than pretending a missing Origin is hostile.
+       Python websockets lib) typically omit ``Origin``; a page cannot omit
+       it, so this lets tooling connect without weakening the browser case.
     2. ``origin is not None`` + ``allowed_ws_origins`` non-empty → accept
        only if ``origin`` is in the allowlist. Case-insensitive compare
        on the parsed scheme://host:port form so trivial casing differences
        don't reject legitimate browsers.
-    3. ``origin is not None`` + ``allowed_ws_origins`` empty → same-origin
-       fallback. Parse scheme/host/port from ``origin`` and compare to
-       the Host header after normalizing case and default ports.
+    3. Same-origin (the served SPA) → accept. Parse scheme/host/port from
+       ``origin`` and compare to the Host header after normalizing case and
+       default ports.
+    4. Cross-origin with ``auth_token`` set → reject. The operator opted
+       into a closed UI; ``allowed_ws_origins`` is how they name exceptions.
+    5. Cross-origin with no token → accept **unless** this worker is being
+       reached over loopback by a page that is not itself on loopback.
+
+    Rule 5 is what keeps the cluster view working while closing the attack.
+    The cluster view is deliberately cross-origin: the page served by one
+    worker opens a socket to each of its peers, so rejecting every
+    cross-origin handshake would break it. But a peer worker is never
+    reachable at the *browser's own* loopback address, so a page from
+    somewhere else asking for ``127.0.0.1`` is not a cluster peer — it is a
+    web page reaching into the operator's machine. Workers co-located on one
+    host (loopback origin, loopback host, different ports) still pass.
+
+    The remaining gap is a page served from another loopback port, which
+    this cannot distinguish from a co-located worker. Set
+    ``allowed_ws_origins`` to close it.
 
     Returns False on any malformed origin — the WS endpoint will close
     with 4403 in that case.
     """
     if origin is None:
-        # Case 1: absent Origin. Non-browser client — token already checked.
+        # Case 1: absent Origin. Non-browser client — a browser always sends
+        # one, so this cannot be the attack this check exists for.
         return True
 
     # Case 2: explicit allowlist. Normalize both sides (case + default
@@ -199,7 +238,18 @@ def origin_allowed(origin: str | None, host_header: str, config: UIConfig) -> bo
     )
     if not origin_host_norm or not host_host:
         return False
-    return origin_host_norm == host_host and origin_port_norm == host_port_norm
+    if origin_host_norm == host_host and origin_port_norm == host_port_norm:
+        return True
+
+    # Cross-origin from here on.
+    if config.auth_token:
+        # Case 4: a closed UI. The operator names exceptions explicitly.
+        return False
+
+    # Case 5: open UI. Allow the cluster view (a sibling worker's page
+    # reaching this worker over the network) but never a page from
+    # elsewhere reaching a worker on the browser's own loopback.
+    return not (is_loopback_host(host_host) and not is_loopback_host(origin_host_norm))
 
 
 def worker_group(name: str) -> str:

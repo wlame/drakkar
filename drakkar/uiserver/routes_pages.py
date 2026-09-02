@@ -569,13 +569,16 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
         header (non-browser clients) or the ``?token=`` query parameter
         (browsers, which cannot set custom headers on WS handshakes).
 
-        Origin validation: when ``auth_token`` is set, the ``Origin``
-        header (if present) must match the configured allowlist. With an
-        empty allowlist we fall back to same-origin: the origin's host
-        must equal the request's ``Host`` header. Absent ``Origin`` is
-        treated as same-origin (non-browser clients typically don't send
-        it). When ``auth_token`` is empty we skip both checks to preserve
-        the dev workflow.
+        Origin validation runs on every handshake, token or not.
+        WebSockets are not subject to CORS, so skipping it left any page the
+        operator visited able to open ``ws://127.0.0.1:8080/ws`` from their
+        browser and read the live stream. ``origin_allowed`` carries the
+        decision table: absent Origin (non-browser clients) and same-origin
+        (the served SPA) always pass, ``ui.allowed_ws_origins`` decides when
+        it is set, and an untokened worker still accepts the cross-origin
+        handshakes the cluster view depends on — except a page that is not
+        itself on loopback reaching a worker over loopback, which no cluster
+        peer ever is.
         """
         # --- Auth gate (WebSocket) ---
         # FastAPI's Depends() works on websocket endpoints, but keeping the
@@ -593,16 +596,16 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
                 await ws.close(code=4401, reason='unauthorized')
                 return
 
-            # --- Origin validation ---
-            # Delegate to ``origin_allowed`` (module scope) so the
-            # decision logic is directly unit-testable and the four
-            # branches (absent origin / allowlist hit / allowlist miss /
-            # same-origin fallback) are spelled out in one place.
-            origin = ws.headers.get('origin')
-            request_host = ws.headers.get('host', '')
-            if not origin_allowed(origin, request_host, config):
-                await ws.close(code=4403, reason='forbidden origin')
-                return
+        # --- Origin validation ---
+        # Outside the token branch on purpose: the default worker has no
+        # token, and that is exactly the worker a malicious page can reach
+        # at the operator's loopback. Delegated to ``origin_allowed`` (module
+        # scope) so the decision table is directly unit-testable.
+        origin = ws.headers.get('origin')
+        request_host = ws.headers.get('host', '')
+        if not origin_allowed(origin, request_host, config):
+            await ws.close(code=4403, reason='forbidden origin')
+            return
 
         await ws.accept()
 

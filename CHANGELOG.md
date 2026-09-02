@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The WebSocket `Origin` check now runs on every handshake**, not only when
+  `ui.auth_token` is set. WebSockets are not subject to CORS, so on a default
+  worker any page the operator visited could open `ws://127.0.0.1:8080/ws`
+  from their browser and read the live event stream — task arguments,
+  redacted env, output excerpts, cache activity. An untokened worker still
+  accepts the cross-origin handshakes the cluster view is built on, because a
+  peer worker is reached over the network and never at the browser's own
+  loopback address; what it rejects is a page that is not on loopback asking
+  for a worker that is. Workers co-located on one host are unaffected. Set
+  `ui.allowed_ws_origins` for a strict allowlist.
+
 - **Tasks that outlive a drain timeout are cancelled instead of left
   running.** A revoke or a shutdown gave in-flight tasks
   `executor.drain_timeout_seconds` to finish and then only suppressed their

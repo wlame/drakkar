@@ -46,8 +46,9 @@ network access.
 | Control | What it does |
 |---|---|
 | **Loopback default** | `ui.host` defaults to `127.0.0.1`, so a worker is not reachable off-host until you change it. |
+| **WebSocket Origin check** | Runs on every `/ws` handshake, token or not. A page that is not itself on loopback cannot open a socket to a worker on the browser's loopback — the one route that would otherwise reach past the loopback bind. |
 | **UI bearer token** | `ui.auth_token` gates every page and API route (`Authorization: Bearer`, or `?token=` for browser navigation), compared with `secrets.compare_digest`. `/healthz` and `/readyz` stay public for Kubernetes. |
-| **WebSocket handshake auth** | `/ws` authenticates inside the handshake and validates `Origin` against `ui.allowed_ws_origins` (or the `Host` header). |
+| **WebSocket handshake auth** | With a token set, `/ws` authenticates inside the handshake and validates `Origin` against `ui.allowed_ws_origins` (or the `Host` header), rejecting every other cross-origin handshake. |
 | **Startup warning** | A worker running the UI without a token logs `ui_unauthenticated` at startup, naming the bind and both opt-in paths. |
 | **Independent kill switches** | `ui.probe_enabled` and `ui.merge_enabled` close the two non-read-only endpoints, whether or not a token is set. |
 | **Webapp auth + rate limits** | Per-client bearer tokens and a per-client rpm sliding window on the HTTP ingress, with `max_concurrent` shedding over-capacity requests. |
@@ -74,6 +75,28 @@ Stated plainly, so nobody plans around a control that is not there:
 The last two are architectural trust boundaries with their own reasoning —
 see [the FAQ's trust model](faq.md#security-and-trust-model) and
 [`SECURITY.md`](https://github.com/wlame/drakkar/blob/main/SECURITY.md).
+
+## Even inside the private network
+
+### The loopback bind and the operator's browser
+
+The loopback bind stops the network from reaching a worker. It does not stop
+the operator's own browser, which is on that machine: WebSockets are not
+subject to CORS, so a page on any site could open `ws://127.0.0.1:8080/ws`
+and read the live task stream. Every handshake is therefore Origin-checked,
+with or without a token.
+
+An untokened worker still accepts the cross-origin handshakes the cluster
+view is built on — one worker's page opens a socket to each of its peers —
+because a peer is reached over the network, never at the browser's own
+loopback address. What it rejects is a page that is not on loopback asking
+for a worker that is. Workers co-located on one host, which advertise
+loopback addresses on different ports, are unaffected.
+
+The gap this leaves is a page served from another *loopback* port, such as a
+local dev server: a worker cannot tell it apart from a co-located sibling.
+Set `ui.allowed_ws_origins` to close it — a non-empty list is a strict
+allowlist and nothing outside it connects.
 
 ## Even inside the private network
 

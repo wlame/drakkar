@@ -3359,6 +3359,67 @@ class TestWebSocketAuth:
                     ws.receive_text()
         assert exc_info.value.code == 4403
 
+    def test_ws_origin_is_checked_without_a_token(self, mock_recorder, mock_app):
+        """The Origin check used to run only inside the ``auth_token`` branch,
+        so the default worker — no token — accepted any Origin. WebSockets are
+        not subject to CORS, so that let any page the operator visited read
+        the live stream off their loopback worker.
+        """
+        from starlette.websockets import WebSocketDisconnect
+
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='')
+        real_recorder = EventRecorder(cfg)
+        real_recorder._running = True
+        fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
+
+        with TestClient(fastapi_app) as tc:  # noqa: SIM117
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                with tc.websocket_connect(
+                    '/ws',
+                    headers={'host': '127.0.0.1:8080', 'origin': 'https://news.example.com'},
+                ) as ws:
+                    ws.receive_text()
+        assert exc_info.value.code == 4403
+
+    def test_ws_without_a_token_accepts_a_cluster_peer_origin(self, mock_recorder, mock_app):
+        """The cluster view opens one socket per peer from the page a sibling
+        worker served, so the handshake is cross-origin by design. It must
+        still be accepted on an untokened worker reached over the network.
+        """
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='')
+        real_recorder = EventRecorder(cfg)
+        real_recorder._running = True
+        fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
+
+        with (
+            TestClient(fastapi_app) as tc,
+            tc.websocket_connect(
+                '/ws',
+                headers={'host': 'worker-b.internal:8080', 'origin': 'http://worker-a.internal:8080'},
+            ) as ws,
+        ):
+            real_recorder._record({'ts': time.time(), 'event': 'peer_origin_ok', 'partition': 0})
+            (event,) = ws_recv_events(ws)
+            assert event['event'] == 'peer_origin_ok'
+
+    def test_ws_without_a_token_accepts_a_same_origin_page(self, mock_recorder, mock_app):
+        """The served SPA — the normal case — must keep working."""
+        cfg = make_ui_config(enabled=True, port=8080, db_dir='/tmp', auth_token='')
+        real_recorder = EventRecorder(cfg)
+        real_recorder._running = True
+        fastapi_app = create_ui_app(cfg, real_recorder, mock_app)
+
+        with (
+            TestClient(fastapi_app) as tc,
+            tc.websocket_connect(
+                '/ws',
+                headers={'host': '127.0.0.1:8080', 'origin': 'http://127.0.0.1:8080'},
+            ) as ws,
+        ):
+            real_recorder._record({'ts': time.time(), 'event': 'peer_origin_ok', 'partition': 0})
+            (event,) = ws_recv_events(ws)
+            assert event['event'] == 'peer_origin_ok'
+
     def test_ws_correct_token_and_origin_accepted(self, mock_recorder, mock_app):
         """WS with valid token + allowlisted origin is accepted and streams events."""
         cfg = make_ui_config(
@@ -3595,6 +3656,59 @@ class TestOriginAllowedHelper:
         cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
         # No scheme → urlparse returns empty hostname → mismatch
         assert origin_allowed('not-a-url', 'testserver', cfg) is False
+
+    # --- untokened worker: the default deployment -------------------------
+
+    def test_foreign_page_reaching_a_loopback_worker_is_rejected(self):
+        """The attack this check exists for. WebSockets are not subject to
+        CORS, so an ad on any site the operator visits can open
+        ``ws://127.0.0.1:8080/ws`` from their browser and read the live task
+        stream. No peer worker is ever at the browser's own loopback.
+        """
+        cfg = make_ui_config(auth_token='', allowed_ws_origins=[])
+        assert origin_allowed('https://news.example.com', '127.0.0.1:8080', cfg) is False
+        assert origin_allowed('https://news.example.com', 'localhost:8080', cfg) is False
+        assert origin_allowed('https://news.example.com', '[::1]:8080', cfg) is False
+
+    def test_untokened_same_origin_accepted(self):
+        """The served SPA, which is the normal case."""
+        cfg = make_ui_config(auth_token='', allowed_ws_origins=[])
+        assert origin_allowed('http://127.0.0.1:8080', '127.0.0.1:8080', cfg) is True
+
+    def test_untokened_absent_origin_accepted(self):
+        """curl / websocat / the Python websockets lib send no Origin."""
+        cfg = make_ui_config(auth_token='', allowed_ws_origins=[])
+        assert origin_allowed(None, '127.0.0.1:8080', cfg) is True
+
+    def test_untokened_cluster_peer_across_hosts_accepted(self):
+        """The cluster view is deliberately cross-origin: the page one worker
+        serves opens a socket to each of its peers. Rejecting every
+        cross-origin handshake would break it.
+        """
+        cfg = make_ui_config(auth_token='', allowed_ws_origins=[])
+        assert origin_allowed('http://worker-a.internal:8080', 'worker-b.internal:8080', cfg) is True
+
+    def test_untokened_cluster_peer_co_located_on_loopback_accepted(self):
+        """Workers sharing one host advertise loopback addresses on different
+        ports, so the cluster view there is loopback-to-loopback. That is a
+        peer, not a web page reaching into the machine.
+        """
+        cfg = make_ui_config(auth_token='', allowed_ws_origins=[])
+        assert origin_allowed('http://127.0.0.1:8080', '127.0.0.1:8081', cfg) is True
+        assert origin_allowed('http://localhost:8080', '127.0.0.1:8081', cfg) is True
+
+    def test_untokened_allowlist_still_decides_when_set(self):
+        """An operator who names origins gets a strict allowlist, token or not."""
+        cfg = make_ui_config(auth_token='', allowed_ws_origins=['https://ops.internal'])
+        assert origin_allowed('https://ops.internal', '127.0.0.1:8080', cfg) is True
+        assert origin_allowed('http://worker-a.internal:8080', 'worker-b.internal:8080', cfg) is False
+
+    def test_tokened_worker_stays_strict_across_origins(self):
+        """With a token the operator opted into a closed UI; the allowlist is
+        how they name exceptions. Unchanged behaviour.
+        """
+        cfg = make_ui_config(auth_token='secret', allowed_ws_origins=[])
+        assert origin_allowed('http://worker-a.internal:8080', 'worker-b.internal:8080', cfg) is False
 
 
 # ---------------------------------------------------------------------------

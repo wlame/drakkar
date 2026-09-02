@@ -775,7 +775,8 @@ class UIConfig(BaseModel):
             'Bearer token for the UI. **Empty (the default) disables auth** '
             'entirely — every endpoint (including database download, merge, and '
             'message-probe) is reachable without credentials and the WebSocket '
-            'live-event stream skips both token and Origin checks. This is a '
+            'live-event stream skips the token check (the Origin check always '
+            'runs). This is a '
             'deliberate opt-in design: no endpoint stops a worker, replays '
             'Kafka messages, mutates sinks, or commits offsets, and Drakkar is '
             'intended for deployment inside a private contour (VPC / internal '
@@ -799,9 +800,15 @@ class UIConfig(BaseModel):
     allowed_ws_origins: list[str] = Field(
         default_factory=list,
         description=(
-            'Explicit allowlist of WebSocket origins. Empty list with non-empty '
-            'auth_token defaults to same-origin only; empty list with empty '
-            'auth_token = no origin check (dev workflow preserved).'
+            'Explicit allowlist of WebSocket origins. A non-empty list is '
+            'strict: nothing outside it connects, token or not. Empty list '
+            'with a token set means same-origin only. Empty list with no '
+            'token allows the cross-origin handshakes the cluster view needs '
+            'but rejects a page that is not itself on loopback asking for a '
+            'worker that is — a peer worker is never at the browser own '
+            'loopback address, only a web page reaching into the machine is. '
+            'A missing Origin header (curl, websocat) is always accepted; a '
+            'browser cannot omit it.'
         ),
     )
     probe_enabled: bool = Field(
