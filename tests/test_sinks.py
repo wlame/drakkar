@@ -269,9 +269,7 @@ def test_kafka_sink_topic_property(kafka_sink_config):
 
 
 @patch('drakkar.sinks.kafka.AIOProducer')
-async def test_kafka_sink_deliver_succeeds_when_flush_reports_other_partitions_backlog(
-    mock_cls, kafka_sink_config
-):
+async def test_kafka_sink_deliver_succeeds_when_flush_reports_other_partitions_backlog(mock_cls, kafka_sink_config):
     """A producer-wide flush remainder is not this batch's verdict.
 
     ``flush()`` is librdkafka's producer-wide flush and one producer serves
