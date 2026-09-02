@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A large window no longer monopolises the event loop while it fans out.**
+  Task creation had no `await` in it, and asyncio runs every ready handle
+  before it polls I/O again — so creating N tasks also ran the first step of
+  all N coroutines back to back, about 9 µs each. A 10,000-task window stalled
+  the loop for a tenth of a second and a 100,000-task one for close to a
+  second, with no Kafka poll, sink delivery, UI frame or health sample in
+  between. Tasks are now created 256 at a time with the loop handed back
+  between chunks. Memory is still proportional to the window's task count —
+  see the fan-out note in the performance guide.
+
 - **A slow WebSocket client can no longer pin the captured output of every
   event it has queued.** Subscriber queues hold up to 10,000 events, and each
   queued wrapper held the raw recorder event — including the whole stdout and

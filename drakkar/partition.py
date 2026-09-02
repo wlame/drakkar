@@ -67,6 +67,14 @@ DRAIN_POLL_INTERVAL = 0.05  # seconds between checks when draining in-flight wor
 # force-cancelling it. Callers with their own deadline pass a smaller value.
 DEFAULT_STOP_TIMEOUT = 10.0
 
+# Tasks created per loop turn when fanning out a window. The loop is handed
+# back between chunks so a large window cannot monopolise it; the chunk is the
+# unit of stall, so it must stay small enough that one turn is unnoticeable
+# (~2 ms at the measured per-task cost) and large enough that the yields do not
+# dominate. Not configurable: it trades one fixed cost against another and has
+# no workload-dependent right answer.
+FANOUT_CHUNK_TASKS = 256
+
 # Offset-commit coalescing. A commit is a broker round trip, and it used to
 # happen once per finished message: with a low-fan-out handler that makes the
 # commit rate the bottleneck, and completions queue behind the partition's
@@ -734,21 +742,42 @@ class PartitionProcessor:
             await self._note_commit_due()
             return
 
-        for task in tasks:
-            if task.task_id in self._pending_tasks:
-                logger.warning(
-                    'duplicate_task_id_in_pending',
-                    category='partition',
-                    partition=self._partition_id,
-                    task_id=task.task_id,
-                )
-            self._pending_tasks[task.task_id] = task
-
-        for task in tasks:
-            self._inflight_count += 1
-            t = asyncio.create_task(self._execute_and_track(task, window))
-            self._active_tasks.add(t)
-            t.add_done_callback(self._active_tasks.discard)
+        # Fan out in chunks, handing the loop back between them.
+        #
+        # There used to be no await in this loop, and asyncio runs every ready
+        # handle before it polls I/O again — so creating N tasks also ran the
+        # first step of all N coroutines back to back: the context binds, the
+        # metric lookups, the priority computation and the gate's heap push.
+        # Measured at ~9 µs per task, which is a tenth of a second for a
+        # 10 000-task window and close to a second for 100 000, during which
+        # the worker does nothing else: no Kafka poll, no sink delivery, no UI
+        # frame, no health sample. A window's task count is bounded only by
+        # what the handler returns, so the stall grew with the message shape.
+        #
+        # Registration rides in the same chunk: a dict insert is cheap, but
+        # 100 000 of them in one turn is not.
+        #
+        # Yielding mid-fan-out means a task from an earlier chunk can complete
+        # while later chunks are still being created. That is safe because
+        # ``window.total_tasks`` and every tracker's ``remaining`` were set for
+        # the whole list above, so neither the window nor a message group can
+        # reach a completed state early.
+        for start in range(0, len(tasks), FANOUT_CHUNK_TASKS):
+            for task in tasks[start : start + FANOUT_CHUNK_TASKS]:
+                if task.task_id in self._pending_tasks:
+                    logger.warning(
+                        'duplicate_task_id_in_pending',
+                        category='partition',
+                        partition=self._partition_id,
+                        task_id=task.task_id,
+                    )
+                self._pending_tasks[task.task_id] = task
+                self._inflight_count += 1
+                t = asyncio.create_task(self._execute_and_track(task, window))
+                self._active_tasks.add(t)
+                t.add_done_callback(self._active_tasks.discard)
+            if start + FANOUT_CHUNK_TASKS < len(tasks):
+                await asyncio.sleep(0)
 
     async def _signal_stall(self) -> None:
         """Notify the lifecycle (once) that this partition has stalled.

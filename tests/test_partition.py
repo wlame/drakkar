@@ -3543,3 +3543,141 @@ async def test_dead_processor_drain_returns_without_waiting(echo_pool):
 
     await asyncio.wait_for(proc.drain(), timeout=1.0)
     assert proc.queue_size == 1, 'drain must not consume the queue of a dead processor'
+
+
+# --- Window fan-out does not monopolise the loop ---
+
+
+class _ManyTasksHandler(BaseDrakkarHandler):
+    """Arranges ``count`` trivial tasks for the first message."""
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+
+    async def arrange(self, messages, pending):
+        return [
+            ExecutorTask(
+                task_id=f'fan-{i}',
+                args=['-c', 'pass'],
+                source_offsets=[messages[0].offset],
+            )
+            for i in range(self.count)
+        ]
+
+
+async def test_fanout_hands_the_loop_back_between_chunks():
+    """asyncio runs every ready handle before it polls I/O again, so creating
+    N tasks in one turn also ran the first step of all N coroutines back to
+    back — measured at ~9 µs each. A 10k-task window stalled the loop for a
+    tenth of a second, during which nothing else ran: no Kafka poll, no sink
+    delivery, no UI frame, no health sample.
+    """
+    from drakkar.partition import FANOUT_CHUNK_TASKS
+
+    task_count = FANOUT_CHUNK_TASKS * 4
+    pool = ExecutorPool(binary_path='/bin/true', max_executors=2, task_timeout_seconds=10)
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=_ManyTasksHandler(task_count),
+        executor_pool=pool,
+        window_size=10,
+    )
+
+    # A probe that counts how often it got the loop back while the fan-out ran.
+    ticks = 0
+    probe_running = True
+
+    async def probe():
+        nonlocal ticks
+        while probe_running:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    probe_task = asyncio.create_task(probe())
+    await asyncio.sleep(0)
+    ticks = 0
+
+    await proc._process_window([make_msg(offset=0)])
+
+    probe_running = False
+    probe_task.cancel()
+    try:
+        await probe_task
+    except asyncio.CancelledError:
+        pass
+
+    assert proc._inflight_count == task_count, 'every task must still be created'
+    # One yield per chunk boundary, minus the last chunk which does not yield.
+    assert ticks >= 3, f'the loop only ran the probe {ticks} times during a {task_count}-task fan-out'
+
+    await proc.cancel_active_tasks()
+
+
+async def test_fanout_creates_every_task_when_the_window_fits_one_chunk():
+    """The common case must not pay a yield it does not need."""
+    from drakkar.partition import FANOUT_CHUNK_TASKS
+
+    pool = ExecutorPool(binary_path='/bin/true', max_executors=2, task_timeout_seconds=10)
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=_ManyTasksHandler(FANOUT_CHUNK_TASKS),
+        executor_pool=pool,
+        window_size=10,
+    )
+
+    ticks = 0
+    probe_running = True
+
+    async def probe():
+        nonlocal ticks
+        while probe_running:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    probe_task = asyncio.create_task(probe())
+    await asyncio.sleep(0)
+    ticks = 0
+
+    await proc._process_window([make_msg(offset=0)])
+
+    probe_running = False
+    probe_task.cancel()
+    try:
+        await probe_task
+    except asyncio.CancelledError:
+        pass
+
+    assert proc._inflight_count == FANOUT_CHUNK_TASKS
+    assert ticks == 0, 'a single-chunk fan-out must not yield'
+
+    await proc.cancel_active_tasks()
+
+
+async def test_a_task_completing_mid_fanout_cannot_complete_the_window_early(echo_pool):
+    """Yielding mid-fan-out lets an early chunk's task finish while later
+    chunks are still being created. The window and every message tracker are
+    sized for the whole list before the loop starts, so neither can reach a
+    completed state until the last task settles.
+    """
+    from drakkar.partition import FANOUT_CHUNK_TASKS
+
+    window_completions: list[int] = []
+
+    class _CountingHandler(_ManyTasksHandler):
+        async def on_window_complete(self, results, source_messages):
+            window_completions.append(len(results))
+            return None
+
+    task_count = FANOUT_CHUNK_TASKS * 2
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=_CountingHandler(task_count),
+        executor_pool=echo_pool,
+        window_size=10,
+    )
+
+    await proc._process_window([make_msg(offset=0)])
+
+    assert window_completions == [], 'the window completed before its last task was even created'
+    await wait_for(lambda: proc.inflight_count == 0, timeout=20)
+    assert window_completions == [task_count]

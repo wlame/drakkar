@@ -116,6 +116,23 @@ Uvicorn event loop (`UIServer` uses `threading.Thread`). It does not
 compete for time on the main event loop. Communication between them uses
 a thread-safe `queue.Queue` for WebSocket event broadcasting.
 
+### Fan-out is chunked
+
+A window's task count is whatever `arrange()` returns, so it is bounded by
+the message shape rather than by any setting. The framework creates those
+tasks 256 at a time and hands the loop back between chunks. Without that,
+asyncio would run the first step of every coroutine before polling I/O again
+— roughly 9 µs per task, which is a tenth of a second for a 10,000-task
+window and close to a second for 100,000, during which nothing else runs at
+all: no Kafka poll, no sink delivery, no UI frame, no health sample.
+
+The chunk size is fixed, not configurable. What is still proportional to the
+window's task count is **memory**, not loop time: every task is a parked
+`asyncio.Task` with a queue entry until a pool slot frees up. Keep
+`window_size` in proportion to the tasks per message — a handler emitting a
+thousand tasks per message wants a window of a few messages, not the default
+hundred.
+
 Your task rate follows from the pool size: roughly
 `max_executors / average task duration` — 8 slots at 20ms tasks is
 ~400 tasks/sec, 64 slots at 200ms tasks is ~320 tasks/sec. But the
