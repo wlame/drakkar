@@ -780,6 +780,44 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         return request_id
 
 
+# Completion hooks whose default implementation does nothing, keyed by the
+# short name the callers use. A handler that leaves one of these inherited
+# tells the framework two things: the Live view has no tab worth drawing for
+# it, and — more expensively — nothing will ever read the results the
+# framework would otherwise accumulate for it.
+_COMPLETION_HOOKS = {
+    'task_complete': 'on_task_complete',
+    'message_complete': 'on_message_complete',
+    'window_complete': 'on_window_complete',
+}
+
+
+def overridden_completion_hooks(handler: object) -> dict[str, bool]:
+    """Report which completion hooks this handler actually implements.
+
+    Compares the function object reachable through the handler's class
+    against ``BaseDrakkarHandler``'s no-op: a subclass that overrides the
+    hook has a different one, one that inherits shares it. This also works
+    for handlers that implement the ``DrakkarHandler`` protocol without
+    subclassing — their methods are not the base class's either, so they
+    read as implemented.
+
+    A handler that wraps a hook through composition or a decorator also
+    reads as implemented. That is the safe direction to be wrong in: the
+    caller then keeps data nobody reads, rather than dropping data a hook
+    was going to be handed.
+    """
+    cls = type(handler)
+    return {
+        # ``getattr`` on the class, not the instance: bound methods wrap in a
+        # fresh object per access, so an identity test on them never matches.
+        # A handler missing the attribute entirely (it should not happen given
+        # the Protocol) counts as not implemented.
+        name: getattr(cls, attr, None) is not getattr(BaseDrakkarHandler, attr)
+        for name, attr in _COMPLETION_HOOKS.items()
+    }
+
+
 # Attach the class-level default stubs after class definition. We do this
 # outside the class body because ``NoOpCache`` is imported lazily (to avoid the
 # circular ``handler.py`` ↔ ``cache.py`` import at module load time). The

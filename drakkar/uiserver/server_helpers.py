@@ -54,35 +54,15 @@ def hook_flags(handler: object) -> dict[str, bool]:
     semantic meaning for this handler — an empty "Window Results" tab on
     a handler that never implements ``on_window_complete`` is just noise.
 
-    We compare bound-method identity against the base class's no-op
-    implementation. A subclass that overrides the hook has a different
-    function object reachable via ``type(handler).on_*``; one that
-    inherits the default shares the same object. This works for:
-
-      * standard subclasses of BaseDrakkarHandler (common case)
-      * handlers that implement DrakkarHandler directly without
-        subclassing — their on_* methods aren't the base class's, so
-        they also register as "implemented"
-
-    Handlers that use composition or decorators that wrap the method
-    will still register as "implemented" — we err on the side of showing
-    the tab rather than hiding it.
+    The same answer decides whether the partition processor keeps the
+    results those hooks would receive, so the detection lives next to the
+    handler base class and both callers read it from there.
     """
-    # Import here to avoid a circular import; handler imports debug_server
-    # only via app.py's wiring, but the other direction is live.
-    from drakkar.handler import BaseDrakkarHandler
+    # Imported here rather than at module scope: handler.py reaches the UI
+    # server only through app.py's wiring, but the other direction is live.
+    from drakkar.handler import overridden_completion_hooks
 
-    cls = type(handler)
-    # ``getattr`` on the class (not the instance) so we compare unbound
-    # function objects — bound methods would wrap with a different id
-    # per-instance and break the identity check. A handler that somehow
-    # lacks one of these attributes (shouldn't happen given Protocol
-    # conformance) is treated as "not implemented".
-    return {
-        'task_complete': getattr(cls, 'on_task_complete', None) is not BaseDrakkarHandler.on_task_complete,
-        'message_complete': getattr(cls, 'on_message_complete', None) is not BaseDrakkarHandler.on_message_complete,
-        'window_complete': getattr(cls, 'on_window_complete', None) is not BaseDrakkarHandler.on_window_complete,
-    }
+    return overridden_completion_hooks(handler)
 
 
 def normalize_hostport(scheme: str, host: str, port: int | None) -> tuple[str, int | None]:

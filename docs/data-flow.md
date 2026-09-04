@@ -414,19 +414,19 @@ The hook must return one of three types of responses:
   - There is **no sleep or backoff** between retries; the task is immediately re-submitted to the executor pool.
 - If `retry_count >= executor.max_retries` (retries exhausted):
   - Logs a `max_retries_exceeded` warning with the task_id and retry count.
-  - The failed result is appended to the window's results list.
+  - The failed result is appended to the window's results list (kept only when `on_window_complete` is implemented).
   - Falls through to the finally block (task counted as completed).
 
 **Response B -- `ErrorAction.SKIP`** (skip and continue):
 - The default behavior from `BaseDrakkarHandler.on_error()`.
-- The failed result is appended to the window's results list.
+- The failed result is appended to the window's results list (kept only when `on_window_complete` is implemented).
 - Falls through to the finally block.
 
 **Response C -- `list[ExecutorTask]`** (replacement tasks):
 - The handler returns new tasks to run instead of retrying the original.
 - For each new task:
   - Added to `_pending_tasks`.
-  - `window.tasks` list extended.
+  - `window.task_ids` list extended.
   - `window.total_tasks` incremented (the window grows dynamically).
   - `_inflight_count` incremented.
   - A new `asyncio.Task` is created.

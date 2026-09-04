@@ -374,6 +374,16 @@ async def on_window_complete(self, results, source_messages):
         ...
 ```
 
+!!! note "Collected only when the hook is implemented"
+    Both collections cost real memory — a result holds the subprocess
+    output, a task holds its stdin — and a window holds them until its
+    last task settles. The framework therefore fills `window.results`
+    only for a handler that implements `on_window_complete`, and a
+    `MessageGroup`'s `tasks` / `results` / `errors` only for one that
+    implements `on_message_complete`. Counters, metrics and the recorder
+    events are unaffected either way. See
+    [Performance](performance.md#what-the-completion-hooks-cost).
+
 !!! info "Why omit the replaced original?"
     Semantically, an `on_error` list-return says "this invocation
     didn't count — route around it with these instead." Appending a

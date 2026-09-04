@@ -133,6 +133,26 @@ window's task count is **memory**, not loop time: every task is a parked
 thousand tasks per message wants a window of a few messages, not the default
 hundred.
 
+### What the completion hooks cost
+
+`on_window_complete` receives every result of its window, and
+`on_message_complete` receives every task, result and error of its message.
+A result carries the subprocess output; a task carries the stdin it was
+given. Holding them is what the hooks are for — but the window only releases
+them when its **last** task settles, so a handler that implements
+`on_window_complete` keeps the payload of a whole window resident.
+
+The framework therefore collects them only for the hooks a handler actually
+implements. A handler that leaves both inherited pays nothing: the counters
+still move, the recorder still reports how many tasks succeeded and failed,
+and resident memory tracks the tasks in flight instead of the window.
+
+If you implement one of them, size the window for it: at a thousand tasks
+per message with 300 kB of input and output each, `window_size: 100` is
+60 GB of retained payload. Read what you need in `on_task_complete` — which
+is handed one result at a time and retains nothing — and keep the aggregate
+hooks for counts and summaries.
+
 Your task rate follows from the pool size: roughly
 `max_executors / average task duration` — 8 slots at 20ms tasks is
 ~400 tasks/sec, 64 slots at 200ms tasks is ~320 tasks/sec. But the

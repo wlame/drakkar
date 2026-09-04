@@ -19,9 +19,10 @@ from drakkar.models import (
     ExecutorResult,
     ExecutorTask,
     KafkaPayload,
+    MessageGroup,
     SourceMessage,
 )
-from drakkar.partition import MAX_RETRIES, PARTITION_RESTART_LIMIT, PartitionProcessor, Window
+from drakkar.partition import MAX_RETRIES, PARTITION_RESTART_LIMIT, MessageTracker, PartitionProcessor, Window
 from tests.conftest import wait_for
 
 
@@ -2430,7 +2431,7 @@ async def test_replacement_window_results_contains_replacements_only(failing_poo
     # Window-level accounting:
     assert w.total_tasks == 3, f'total_tasks={w.total_tasks} (expected 1 original + 2 replacements)'
     assert w.completed_count == 3, f'completed_count={w.completed_count}'
-    assert len(w.tasks) == 3, 'tasks list should contain full history (original + 2 replacements)'
+    assert len(w.task_ids) == 3, 'task_ids should contain full history (original + 2 replacements)'
     # The documented invariant: one result per actual execution outcome,
     # so the replaced original is absent.
     assert len(w.results) == 2, (
@@ -2510,7 +2511,7 @@ async def test_replacement_cascading_replaced_then_skip(failing_pool):
 
     assert w.total_tasks == 2, f'total_tasks={w.total_tasks} (expected 1 original + 1 replacement)'
     assert w.completed_count == 2
-    assert len(w.tasks) == 2
+    assert len(w.task_ids) == 2
     # One entry: the SKIP'd replacement's failure result.
     # The replaced original contributes nothing.
     assert len(w.results) == 1, (
@@ -2529,14 +2530,14 @@ async def test_replacement_mixed_with_retries_then_replaced(failing_pool):
     """Mixed: original fails → 2 retries (all fail) → then replaced by 1 success.
 
     Retries reuse the original invocation's slot — they do NOT bump
-    ``total_tasks`` or append to ``window.tasks``. Only the replacement
+    ``total_tasks`` or append to ``window.task_ids``. Only the replacement
     list-return adds new entries. The final accounting therefore:
 
       - ``total_tasks == 2`` (original + 1 replacement)
       - ``completed_count == 2`` (1 for the replaced original, 1 for
         the replacement's terminal success)
       - ``len(window.results) == 1`` (just the replacement's success)
-      - ``window.tasks`` contains 2 entries (no per-retry entries)
+      - ``window.task_ids`` contains 2 entries (no per-retry entries)
     """
     captured_windows: list[Window] = []
     complete_fired = asyncio.Event()
@@ -2600,7 +2601,7 @@ async def test_replacement_mixed_with_retries_then_replaced(failing_pool):
         'only the replacement list-return bumps this counter.'
     )
     assert w.completed_count == 2
-    assert len(w.tasks) == 2, 'tasks holds 2 entries (original + replacement); retries are not re-appended'
+    assert len(w.task_ids) == 2, 'task_ids holds 2 entries (original + replacement); retries are not re-appended'
     assert len(w.results) == 1, f'len(results)={len(w.results)} — expected 1 (the successful replacement).'
     assert w.results[0].task.task_id == 'repl-success'
     assert w.results[0].exit_code == 0
@@ -3686,3 +3687,197 @@ async def test_a_task_completing_mid_fanout_cannot_complete_the_window_early(ech
     assert window_completions == [], 'the window completed before its last task was even created'
     await wait_for(lambda: proc.inflight_count == 0, timeout=20)
     assert window_completions == [task_count]
+
+
+# ---------------------------------------------------------------------------
+# Retention: the framework collects outcomes only for hooks that exist
+#
+# A window holds its results until its LAST task settles, and a result holds
+# the subprocess output plus the task — whose stdin is the whole input the
+# subprocess was given. At a large fan-out that is the dominant memory the
+# worker uses, and it used to be paid whether or not any hook read it. These
+# tests pin both directions, plus the counters that must stay correct when
+# nothing is collected.
+# ---------------------------------------------------------------------------
+
+
+def _wrap_capture_tracker(proc: PartitionProcessor, captured: list[MessageTracker]) -> None:
+    """Snapshot each message tracker as it finalises.
+
+    Trackers are popped once their offset is committable, so a test that
+    wants to look inside one has to catch it on the way out.
+    """
+    original = proc._finalize_message_tracker
+
+    async def wrapped(tracker):
+        captured.append(tracker)
+        return await original(tracker)
+
+    proc._finalize_message_tracker = wrapped  # type: ignore[method-assign]
+
+
+async def test_window_collects_no_results_when_the_hook_is_not_implemented(echo_pool):
+    """The default handler reads no window results, so none are kept."""
+    captured_windows: list[Window] = []
+
+    class NoHooksHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(task_id=f'task-{m.offset}-{i}', args=['ok'], source_offsets=[m.offset])
+                for m in messages
+                for i in range(3)
+            ]
+
+    proc = PartitionProcessor(partition_id=0, handler=NoHooksHandler(), executor_pool=echo_pool, window_size=10)
+    _wrap_capture_window(proc, captured_windows)
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: bool(captured_windows) and captured_windows[0].is_complete)
+    await proc.stop(timeout=1)
+
+    window = captured_windows[0]
+    assert window.results == [], 'no hook reads window results, so none should be retained'
+    # The accounting the framework itself relies on is untouched.
+    assert window.total_tasks == 3
+    assert window.completed_count == 3
+    # Ids, not tasks: an id cannot pin a task's stdin.
+    assert window.task_ids == ['task-0-0', 'task-0-1', 'task-0-2']
+
+
+async def test_window_collects_results_when_the_hook_is_implemented(echo_pool):
+    """A handler that implements ``on_window_complete`` still gets everything."""
+    captured_windows: list[Window] = []
+    delivered: list[int] = []
+
+    class WindowHookHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(task_id=f'task-{m.offset}-{i}', args=['ok'], source_offsets=[m.offset])
+                for m in messages
+                for i in range(3)
+            ]
+
+        async def on_window_complete(self, results, source_messages):
+            delivered.append(len(results))
+            return None
+
+    proc = PartitionProcessor(partition_id=0, handler=WindowHookHandler(), executor_pool=echo_pool, window_size=10)
+    _wrap_capture_window(proc, captured_windows)
+    proc.enqueue(make_msg(offset=0))
+    proc.start()
+    await wait_for(lambda: bool(delivered))
+    await proc.stop(timeout=1)
+
+    assert delivered == [3]
+    assert len(captured_windows[0].results) == 3
+
+
+async def test_message_tracker_collects_nothing_when_the_hook_is_not_implemented(echo_pool):
+    """No ``on_message_complete`` means no MessageGroup contents to build."""
+    captured_trackers: list[MessageTracker] = []
+
+    class NoHooksHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(task_id=f'task-{m.offset}-{i}', args=['ok'], source_offsets=[m.offset])
+                for m in messages
+                for i in range(2)
+            ]
+
+    proc = PartitionProcessor(partition_id=0, handler=NoHooksHandler(), executor_pool=echo_pool, window_size=10)
+    _wrap_capture_tracker(proc, captured_trackers)
+    proc.enqueue(make_msg(offset=4))
+    proc.start()
+    await wait_for(lambda: bool(captured_trackers))
+    await proc.stop(timeout=1)
+
+    tracker = captured_trackers[0]
+    assert tracker.tasks == []
+    assert tracker.results == []
+    assert tracker.errors == []
+    # The counts stand in for the lists — the recorder reports them for
+    # every message, implemented hook or not.
+    assert tracker.scheduled_count == 2
+    assert tracker.succeeded_count == 2
+    assert tracker.failed_count == 0
+
+
+async def test_message_tracker_collects_everything_when_the_hook_is_implemented(echo_pool):
+    """The MessageGroup a handler receives is unchanged by the optimisation."""
+    groups: list[MessageGroup] = []
+
+    class MessageHookHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(task_id=f'task-{m.offset}-{i}', args=['ok'], source_offsets=[m.offset])
+                for m in messages
+                for i in range(2)
+            ]
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+            return None
+
+    proc = PartitionProcessor(partition_id=0, handler=MessageHookHandler(), executor_pool=echo_pool, window_size=10)
+    proc.enqueue(make_msg(offset=4))
+    proc.start()
+    await wait_for(lambda: bool(groups))
+    await proc.stop(timeout=1)
+
+    group = groups[0]
+    assert len(group.tasks) == 2
+    assert group.total == 2
+    assert group.succeeded == 2
+    assert group.failed == 0
+
+
+async def test_recorder_message_counts_survive_without_the_collected_lists(failing_pool):
+    """The recorder's per-message counts used to be read off the lists.
+
+    They are the source of the Live view's succeeded / failed / replaced
+    columns, so they have to be right for a handler that implements no
+    completion hook at all — which is the case where the lists are empty.
+    Replacement accounting is the interesting one: the replaced original is
+    neither a success nor a failure.
+    """
+    recorder = MagicMock()
+
+    class ReplacingHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [
+                ExecutorTask(
+                    task_id='original',
+                    args=['-c', 'import sys; sys.exit(1)'],
+                    source_offsets=[messages[0].offset],
+                )
+            ]
+
+        async def on_error(self, task, error):
+            if task.task_id == 'original':
+                return [
+                    ExecutorTask(
+                        task_id='replacement',
+                        args=['-c', 'print("ok")'],
+                        source_offsets=task.source_offsets,
+                    )
+                ]
+            return ErrorAction.SKIP
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=ReplacingHandler(),
+        executor_pool=failing_pool,
+        window_size=10,
+        max_retries=0,
+        recorder=recorder,
+    )
+    proc.enqueue(make_msg(offset=9))
+    proc.start()
+    await wait_for(lambda: recorder.record_message_complete.call_count == 1)
+    await proc.stop(timeout=1)
+
+    counts = recorder.record_message_complete.call_args.kwargs
+    assert counts['task_count'] == 2, 'original + replacement were both scheduled'
+    assert counts['succeeded'] == 1
+    assert counts['failed'] == 0
+    assert counts['replaced'] == 1

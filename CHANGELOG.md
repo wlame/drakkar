@@ -43,6 +43,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A window no longer keeps the input and output of every task it ran.**
+  A window held one `ExecutorResult` per settled task — the subprocess
+  output plus the task, whose stdin is the whole input it was given — and
+  released none of it until its last task settled. The same held per
+  message, for the `MessageGroup`. Both exist only for
+  `on_window_complete` and `on_message_complete`, so both are now
+  collected only when the handler implements those hooks; a handler that
+  implements neither pays nothing. Measured on 400 tasks of 400 kB output:
+  230 MB peak resident memory before, 76 MB after. Counters, metrics and
+  the recorder's per-message succeeded / failed / replaced numbers are
+  unchanged — they now come from counters rather than from the length of
+  the collections.
+
 - **A large window no longer monopolises the event loop while it fans out.**
   Task creation had no `await` in it, and asyncio runs every ready handle
   before it polls I/O again — so creating N tasks also ran the first step of

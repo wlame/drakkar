@@ -11,7 +11,7 @@ from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import taskflow
 from drakkar.executor import ExecutorPool, ExecutorTaskError
-from drakkar.handler import BaseDrakkarHandler
+from drakkar.handler import BaseDrakkarHandler, overridden_completion_hooks
 from drakkar.hookctx import bind_hook_context, clear_hook_context
 from drakkar.metrics import (
     batch_duration,
@@ -124,18 +124,29 @@ class Window:
       replaced original's invocation). Retries hand off to a fresh
       coroutine and defer the increment; the final retry is the one
       that ticks.
-    - ``tasks`` mirrors ``total_tasks`` in length — the full scheduled
-      history, including replaced originals. Used for debugging /
-      tracing the replacement chain via ``parent_task_id``. Retries
-      are NOT appended here (the same ``ExecutorTask`` instance is
-      re-run).
+    - ``task_ids`` mirrors ``total_tasks`` in length — the full
+      scheduled history, including replaced originals. Used for
+      debugging / tracing the replacement chain via ``parent_task_id``.
+      Retries are NOT appended here (the same ``ExecutorTask`` instance
+      is re-run). Ids rather than the tasks themselves: a task holds its
+      whole stdin, and a window that outlives its tasks would pin every
+      byte of it until the last task of the window settles.
     - ``results`` contains the ``ExecutorResult`` of every task
       invocation that reached a terminal outcome — success OR
       subprocess-level failure (exit_code != 0, SKIP'd or retries
       exhausted). Replaced originals do NOT contribute — their slot
-      in ``tasks`` has no corresponding entry in ``results``. So
+      in ``task_ids`` has no corresponding entry in ``results``. So
       ``len(results)`` can be less than ``total_tasks`` whenever any
       task was replaced; the gap equals the number of replaced tasks.
+
+      **Populated only when the handler implements
+      ``on_window_complete``** — that hook is the only reader. A result
+      holds the task's stdout, stderr and the task itself (stdin
+      included), and the window holds them until its last task settles,
+      so accumulating them for a hook that does nothing costs the whole
+      window's payload in resident memory for no gain. When the hook is
+      not implemented the list stays empty and only the counters move;
+      ``completed_count`` and ``total_tasks`` are unaffected either way.
 
     This is by design: ``window.results`` is what gets passed to
     ``on_window_complete`` and it represents "outcomes of task runs
@@ -152,7 +163,7 @@ class Window:
 
     window_id: int
     source_messages: list[SourceMessage]
-    tasks: list[ExecutorTask] = field(default_factory=list)
+    task_ids: list[str] = field(default_factory=list)
     results: list[ExecutorResult] = field(default_factory=list)
     completed_count: int = 0
     total_tasks: int = 0
@@ -183,12 +194,25 @@ class MessageTracker:
         or ``errors`` — replaced tasks decrement without appending.
       - When ``remaining == 0`` AND all scheduled tasks are accounted for,
         the tracker fires ``on_message_complete`` and the offset completes.
+
+    ``tasks``, ``results`` and ``errors`` exist for the ``MessageGroup``
+    handed to ``on_message_complete``, so they are populated only when the
+    handler implements that hook — one message's fan-out can be a thousand
+    tasks, each holding its stdin and its captured output. The counters
+    below are kept either way: the recorder reports them for every message
+    and they are three integers, not the payloads.
     """
 
     source_message: SourceMessage
     tasks: list[ExecutorTask] = field(default_factory=list)
     results: list[ExecutorResult] = field(default_factory=list)
     errors: list[ExecutorError] = field(default_factory=list)
+    # Outcome counts, always maintained — the same numbers the lists above
+    # would give through ``MessageGroup.total`` / ``.succeeded`` / ``.failed``
+    # when the lists are being kept.
+    scheduled_count: int = 0
+    succeeded_count: int = 0
+    failed_count: int = 0
     # Tasks still awaiting a terminal outcome. Incremented on schedule /
     # replacement, decremented on success / SKIP / retries-exhausted /
     # replaced-by-list.
@@ -246,6 +270,17 @@ class PartitionProcessor:
         self._on_dlq_failure = on_dlq_failure
         self._on_stall = on_stall
         self._stall_signaled = False
+
+        # Whether anything will ever read the outcomes the window and the
+        # message trackers would collect. Both lists cost the payload of
+        # every task in them — stdin on the task, stdout and stderr on the
+        # result — held until the window's last task settles, which at a
+        # large fan-out is the dominant memory the worker uses. Asked once
+        # here rather than per task: the answer is a property of the
+        # handler's class and cannot change while the processor runs.
+        implemented = overridden_completion_hooks(handler)
+        self._keep_window_results = implemented['window_complete']
+        self._keep_message_details = implemented['message_complete']
 
         self._queue: asyncio.Queue[SourceMessage] = asyncio.Queue()
         self._offset_tracker = OffsetTracker()
@@ -723,7 +758,7 @@ class PartitionProcessor:
                 message_labels=arrange_labels,
                 window_id=window.window_id,
             )
-        window.tasks = tasks
+        window.task_ids = [task.task_id for task in tasks]
         window.total_tasks = len(tasks)
 
         # Register each task with every message tracker it belongs to
@@ -734,7 +769,9 @@ class PartitionProcessor:
             for offset in task.source_offsets:
                 tracker = self._message_trackers.get(offset)
                 if tracker is not None:
-                    tracker.tasks.append(task)
+                    if self._keep_message_details:
+                        tracker.tasks.append(task)
+                    tracker.scheduled_count += 1
                     tracker.remaining += 1
 
         # Fire on_message_complete immediately for any message whose
@@ -1018,7 +1055,8 @@ class PartitionProcessor:
                     )
                     raise
 
-            window.results.append(result)
+            if self._keep_window_results:
+                window.results.append(result)
             task_result = result
 
         except ExecutorTaskError as e:
@@ -1094,7 +1132,7 @@ class PartitionProcessor:
                 # to every message tracker; add the replacements.
                 for new_task in taskflow.link_replacements(task, list(decision.replacements)):
                     self._pending_tasks[new_task.task_id] = new_task
-                    window.tasks.append(new_task)
+                    window.task_ids.append(new_task.task_id)
                     window.total_tasks += 1
                     self._inflight_count += 1
                     # Register the replacement with every message tracker
@@ -1104,7 +1142,9 @@ class PartitionProcessor:
                     for offset in new_task.source_offsets:
                         tracker = self._message_trackers.get(offset)
                         if tracker is not None:
-                            tracker.tasks.append(new_task)
+                            if self._keep_message_details:
+                                tracker.tasks.append(new_task)
+                            tracker.scheduled_count += 1
                             tracker.remaining += 1
                     t = asyncio.create_task(self._execute_and_track(new_task, window))
                     self._active_tasks.add(t)
@@ -1127,7 +1167,8 @@ class PartitionProcessor:
                         task_id=task.task_id,
                         retries=retry_count,
                     )
-                window.results.append(e.result)
+                if self._keep_window_results:
+                    window.results.append(e.result)
                 task_error = e.error
 
         except Exception as e:
@@ -1137,7 +1178,8 @@ class PartitionProcessor:
             # terminal failure for this task (the group treats unexpected
             # exceptions like retries-exhausted failures).
             synthesized_result, task_error = taskflow.synthesize_internal_failure(task, e)
-            window.results.append(synthesized_result)
+            if self._keep_window_results:
+                window.results.append(synthesized_result)
 
         finally:
             if not handed_off_to_retry:
@@ -1168,9 +1210,13 @@ class PartitionProcessor:
             # error, or replaced.
             tracker.remaining -= 1
             if task_result is not None:
-                tracker.results.append(task_result)
+                tracker.succeeded_count += 1
+                if self._keep_message_details:
+                    tracker.results.append(task_result)
             elif task_error is not None:
-                tracker.errors.append(task_error)
+                tracker.failed_count += 1
+                if self._keep_message_details:
+                    tracker.errors.append(task_error)
             # replaced_by path: neither results nor errors is appended.
             # The replacements will eventually report their own outcomes
             # through this same loop and settle the tracker.
@@ -1324,14 +1370,21 @@ class PartitionProcessor:
         handler_duration.labels(hook='on_message_complete').observe(mc_duration)
 
         if self._recorder:
+            # From the tracker's counters, not the group's list lengths: the
+            # lists are populated only for a handler that implements
+            # on_message_complete, but this event is recorded for every
+            # message. The arithmetic is MessageGroup's own — replaced tasks
+            # are the ones that were scheduled and never reached a terminal
+            # outcome of their own.
+            replaced = max(0, tracker.scheduled_count - tracker.succeeded_count - tracker.failed_count)
             self._recorder.record_message_complete(
                 partition=self._partition_id,
                 offset=tracker.source_message.offset,
                 duration=mc_duration,
-                task_count=group.total,
-                succeeded=group.succeeded,
-                failed=group.failed,
-                replaced=group.replaced,
+                task_count=tracker.scheduled_count,
+                succeeded=tracker.succeeded_count,
+                failed=tracker.failed_count,
+                replaced=replaced,
                 output_message_count=len(on_complete_result.kafka) if on_complete_result else 0,
             )
 

@@ -905,7 +905,7 @@ class DebugRunner:
         # --- per-task execution ---------------------------------------------
         # ``all_scheduled_tasks`` starts with the arrange output and grows
         # as on_error replacements are added (mirrors production's
-        # ``window.tasks`` / ``tracker.tasks`` behaviour). Passed to
+        # ``window.task_ids`` / ``tracker.tasks`` behaviour). Passed to
         # on_message_complete below so the handler sees the full lineage.
         all_scheduled_tasks: list[ExecutorTask] = list(tasks)
         # Production separates three lists with distinct semantics — the
