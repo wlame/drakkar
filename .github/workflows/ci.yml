@@ -139,15 +139,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends libssl-dev libsasl2-dev zlib1g-dev
           just install-librdkafka
 
+      # Every lane installs the same set, extras included. The experimental
+      # lane used to skip them because orjson — the perf extra, and Rust —
+      # had no wheel for a CPython still in pre-release; it does now, so
+      # skipping would only mean the lane tested a set nobody runs. If a
+      # future candidate outpaces orjson again, give this step back its
+      # `if: ${{ !matrix.experimental }}` and add an `install-minimal` step
+      # for the other side.
       - name: Install dependencies
-        if: ${{ !matrix.experimental }}
         run: just install
-
-      # Without extras: orjson (the perf extra) is Rust and routinely lags
-      # new interpreters; the lane measures Drakkar, not its optional deps.
-      - name: Install dependencies without extras
-        if: matrix.experimental
-        run: just install-minimal
 
       # The lane floats to whatever candidate is current, so the run has to
       # say which interpreter it actually tested against.

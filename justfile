@@ -26,8 +26,10 @@ default:
 install:
     uv sync --locked --extra=perf
 
-# Install dependencies without optional extras (the experimental-CPython CI
-# lane: extras with native code may not build on a release candidate yet)
+# Install dependencies without optional extras. Reproduces what a user who
+# installed py-drakkar without `[perf]` runs, so the recorder's stdlib JSON
+# fallback is exercised rather than orjson's fast path. Also the escape hatch
+# for a CI lane on a CPython that a native extra has no wheel for yet.
 install-minimal:
     uv sync --locked
 

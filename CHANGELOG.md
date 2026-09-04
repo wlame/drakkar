@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   icon. A test fails when a tracked file passes 1 MB without an allowlist
   entry naming the reason it is worth a clone.
 
+- **Dependencies refreshed and the release-candidate lane now tests the same
+  set as the others.** The supply-chain pin moved to 2026-08-28, which brings
+  ruff, ty, uvicorn, websockets and four smaller packages forward. The
+  experimental CPython lane installs the `perf` extra again: orjson now
+  publishes a wheel for that interpreter, so skipping it only meant the lane
+  tested a set nobody runs.
+
 - **The coverage gate now measures branches, not only lines.** A line in a
   `try` no longer counts as covered while its `except` has never run. Tests
   for the paths this exposed keep the floor at 95 %.

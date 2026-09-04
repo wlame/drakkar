@@ -173,7 +173,7 @@ venv = ".venv"
 # date produced a different lockfile line on every machine in a different
 # timezone (UTC wrote T00:00:00Z, UTC+2 wrote T22:00:00Z) and the file
 # churned on every re-lock.
-exclude-newer = "2026-08-18T00:00:00Z"
+exclude-newer = "2026-08-28T00:00:00Z"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN"]
