@@ -19,29 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   icon. A test fails when a tracked file passes 1 MB without an allowlist
   entry naming the reason it is worth a clone.
 
-- **The coverage gate now measures branches, not only lines.** A line inside
-  a `try` used to count as covered when its `except` had never run, which is
-  where most of the framework's hard cases live — a drain that times out, a
-  commit that fails, a delivery that cannot be confirmed. Turning branches on
-  cost 0.98 points; tests for the paths it exposed (suppressed zombie
-  deliveries from both aggregate hooks, the message-tracker double-fire
-  guard) paid it back, so the floor stays at 95 % and now means more. The
-  coverage report also hides fully covered files.
+- **The coverage gate now measures branches, not only lines.** A line in a
+  `try` no longer counts as covered while its `except` has never run. Tests
+  for the paths this exposed keep the floor at 95 %.
 
-- **The test suite runs in about 30 s instead of 5 minutes.** Three tests
-  waited out production timeouts (30 s and 10 s) for outcomes that are
-  reached at once, and the partition loop's one-second idle wake-up was paid
-  by every test that stopped a processor. The loop's wake-up interval is now
-  a named constant the suite shortens, and `just test` and `just cover` run
-  under `pytest-xdist` across all cores, one worker per test file. A test
-  that hangs now fails after 60 s (`pytest-timeout`) instead of holding the
-  CI runner until the job cap.
+- **The test suite runs in about 30 s instead of 5 minutes.** It no longer
+  waits out production timeouts, and it runs across all cores
+  (`pytest-xdist`, one worker per file). A hung test now fails after 60 s
+  instead of holding the CI runner until the job cap.
 
 - **The strict docs build now runs on every pull request.** It used to run
-  only after a merge, as the first step of the Pages deploy, so a broken
-  link passed review and reddened `main`. `just ci` now ends with
-  `docs-build` and CI has a `docs` job that calls it. `just check` keeps its
-  role as the wider pre-push battery by adding the dependency CVE scan.
+  only after a merge, so a broken link reddened `main`. `just ci` ends with
+  `docs-build`; `just check` adds the dependency CVE scan.
 
 - **CI and `just install` now refuse a stale lockfile.** `just ci` starts with
   `just lock-check` (`uv lock --check`) and the install recipes pass
@@ -53,17 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **A window no longer keeps the input and output of every task it ran.**
-  A window held one `ExecutorResult` per settled task — the subprocess
-  output plus the task, whose stdin is the whole input it was given — and
-  released none of it until its last task settled. The same held per
-  message, for the `MessageGroup`. Both exist only for
-  `on_window_complete` and `on_message_complete`, so both are now
-  collected only when the handler implements those hooks; a handler that
-  implements neither pays nothing. Measured on 400 tasks of 400 kB output:
-  230 MB peak resident memory before, 76 MB after. Counters, metrics and
-  the recorder's per-message succeeded / failed / replaced numbers are
-  unchanged — they now come from counters rather than from the length of
-  the collections.
+  The results a window collects, and the `MessageGroup` a message collects,
+  exist only for `on_window_complete` and `on_message_complete` — and a
+  window releases them only when its last task settles. They are now
+  collected only when the handler implements those hooks. A handler that
+  implements neither pays nothing: 400 tasks of 400 kB output measured
+  230 MB peak memory before, 76 MB after. All counters, metrics and
+  recorder events are unchanged.
 
 - **A large window no longer monopolises the event loop while it fans out.**
   Task creation had no `await` in it, and asyncio runs every ready handle
