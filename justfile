@@ -98,13 +98,19 @@ audit:
 # Tests
 # ---------------------------------------------------------------------------
 
+# Distribution for both test recipes. `loadfile` keeps a file's tests in one
+# worker: the suite shares process-global state within a file (the Prometheus
+# default registry above all), so scattering a file across workers would make
+# the result depend on the split. Pass `-n0` to run serially.
+test_parallel := "-n auto --dist loadfile"
+
 # Run the unit test suite; extra pytest args pass through (just test -k cache)
 test *args:
-    uv run pytest {{ args }}
+    uv run pytest {{ test_parallel }} {{ args }}
 
 # Run tests with the coverage gate (fail_under from pyproject) + CI artifacts
 cover:
-    uv run pytest --cov=drakkar --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
+    uv run pytest {{ test_parallel }} --cov=drakkar --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
 
 # Regenerate the recorder event-type vocabulary fixture from
 # drakkar.recorder.schema.EventType (test_event_vocabulary.py pins it)

@@ -507,6 +507,11 @@ async def test_stop_processor_handles_arrange_error(test_config):
         async def arrange(self, messages, pending):
             raise RuntimeError('arrange exploded')
 
+    # A failed arrange leaves the window's offsets pending for the life of the
+    # processor, so the revoke below always drains to its timeout. One second
+    # is the floor the config allows (drain_timeout_seconds is an int) and
+    # thirty times cheaper than the default this test used to wait out.
+    test_config.executor.drain_timeout_seconds = 1
     app = DrakkarApp(handler=BrokenArrangeHandler(), config=test_config)
     from drakkar.executor import ExecutorPool
 

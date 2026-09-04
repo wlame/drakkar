@@ -65,6 +65,10 @@ artifacts = ["drakkar/uiserver/openapi.yaml", "drakkar/uiserver/swagger/**"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "--strict-markers -v"
+# A hung test used to hold a runner until the 20-minute job cap and report
+# nothing. This fails it with a traceback instead. The value is far above the
+# slowest test (about 3 s) so it can only catch a genuine hang.
+timeout = 60
 
 [tool.coverage.run]
 source = ["drakkar"]
@@ -121,6 +125,8 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.1.0",
+    "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.11.0",
     "ty>=0.0.24",
 ]

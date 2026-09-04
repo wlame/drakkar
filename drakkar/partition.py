@@ -63,6 +63,14 @@ StallCallback = Callable[[int], Awaitable[None]]
 MAX_RETRIES = 3  # default, overridden by config.executor.max_retries
 DRAIN_POLL_INTERVAL = 0.05  # seconds between checks when draining in-flight work
 
+# How long the loop blocks on an empty queue before waking to retry an
+# outstanding commit. It bounds two things: how long a quiet partition holds
+# committable progress, and how long ``stop()`` waits for a loop that is
+# sitting on the queue. Named rather than inline so the test suite can shorten
+# it — otherwise every test that stops a running processor pays up to a
+# second of real waiting for nothing.
+IDLE_POLL_TIMEOUT = 1.0
+
 # How long ``stop()`` waits for the processing loop to leave on its own before
 # force-cancelling it. Callers with their own deadline pass a smaller value.
 DEFAULT_STOP_TIMEOUT = 10.0
@@ -624,7 +632,7 @@ class PartitionProcessor:
         messages: list[SourceMessage] = []
 
         try:
-            first = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+            first = await asyncio.wait_for(self._queue.get(), timeout=IDLE_POLL_TIMEOUT)
             messages.append(first)
         except TimeoutError:
             return []

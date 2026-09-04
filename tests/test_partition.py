@@ -2748,7 +2748,10 @@ async def test_run_loop_restarts_once_after_an_unexpected_error(echo_pool):
         await wait_for(lambda: len(collected) > 0)  # loop resumed after the crash
         assert not proc.is_dead
     finally:
-        await proc.stop()
+        # The crashed window's offsets stay pending by design, so the drain
+        # loop never clears and stop() always waits out its bound. Hand it a
+        # test-sized one instead of paying the ten-second production default.
+        await proc.stop(timeout=0.1)
 
 
 async def test_restart_leaves_the_crashed_window_uncommitted(echo_pool):
@@ -2792,7 +2795,9 @@ async def test_restart_leaves_the_crashed_window_uncommitted(echo_pool):
         assert committed == [], "the crashed window's offset must keep blocking the watermark"
         assert proc.offset_tracker.pending_count == 1
     finally:
-        await proc.stop()
+        # Same as above: the offset this test asserts on is exactly the one
+        # that keeps the drain loop from finishing.
+        await proc.stop(timeout=0.1)
 
 
 async def test_run_loop_dies_after_a_second_crash(echo_pool):

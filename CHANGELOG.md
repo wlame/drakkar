@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   icon. A test fails when a tracked file passes 1 MB without an allowlist
   entry naming the reason it is worth a clone.
 
+- **The test suite runs in about 30 s instead of 5 minutes.** Three tests
+  waited out production timeouts (30 s and 10 s) for outcomes that are
+  reached at once, and the partition loop's one-second idle wake-up was paid
+  by every test that stopped a processor. The loop's wake-up interval is now
+  a named constant the suite shortens, and `just test` and `just cover` run
+  under `pytest-xdist` across all cores, one worker per test file. A test
+  that hangs now fails after 60 s (`pytest-timeout`) instead of holding the
+  CI runner until the job cap.
+
 - **The strict docs build now runs on every pull request.** It used to run
   only after a merge, as the first step of the Pages deploy, so a broken
   link passed review and reddened `main`. `just ci` now ends with

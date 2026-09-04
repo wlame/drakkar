@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from drakkar import partition as partition_module
 from drakkar.config import UIConfig, UIRecorderConfig
 from drakkar.models import (
     ExecutorError,
@@ -41,6 +42,24 @@ async def wait_for(condition, timeout=5.0, interval=0.05):
             return
         await asyncio.sleep(interval)
     raise TimeoutError(f'Condition not met within {timeout}s')
+
+
+# The partition loop blocks this long on an empty queue before waking to
+# retry a commit. In production a second is right — it costs nothing and
+# bounds how long a quiet partition holds progress. In a test it is dead
+# waiting: every test that stops a running processor pays it once, which was
+# most of the suite's tests over one second.
+TEST_IDLE_POLL_TIMEOUT = 0.02
+
+
+@pytest.fixture(autouse=True)
+def fast_idle_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shorten the partition loop's idle wake-up for every test.
+
+    Only the wake-up cadence changes: the loop does the same work, and a
+    test that needs the production value can set it back.
+    """
+    monkeypatch.setattr(partition_module, 'IDLE_POLL_TIMEOUT', TEST_IDLE_POLL_TIMEOUT)
 
 
 @pytest.fixture

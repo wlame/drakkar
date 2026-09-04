@@ -21,7 +21,7 @@ just install        # uv sync --extra=perf; the dev dependency-group installs by
 
 | Recipe | What it does |
 |--------|--------------|
-| `just test` | Run the unit test suite (`pytest`). Extra args pass through: `just test -k cache`, `just test tests/test_partition.py -x` |
+| `just test` | Run the unit test suite (`pytest`) across all cores. Extra args pass through: `just test -k cache`, `just test tests/test_partition.py -x`; add `-n0` to run serially |
 | `just cover` | Tests with the coverage gate — fails under the 95% floor from `pyproject.toml`, writes `coverage.xml` + `junit.xml` |
 | `just fmt` | Format with **ruff** (`ruff format`) |
 | `just fmt-check` | Formatting check only — the CI gate |
@@ -32,6 +32,12 @@ just install        # uv sync --extra=perf; the dev dependency-group installs by
 | `just check` | Full pre-push battery: `ci` + the dependency CVE scan (`audit`), which CI keeps in a job of its own |
 
 ruff and ty both run from the repo's own pinned dependencies (`uv run`), never from ad-hoc latest versions — what passes locally passes in CI and vice versa.
+
+Tests run under `pytest-xdist` with `--dist loadfile`, so each test file stays
+in one worker process. Files share process state — the Prometheus default
+registry is the main one — and scattering a file across workers would make the
+outcome depend on the split. A test that hangs is failed after 60 s by
+`pytest-timeout` instead of holding the runner until the job cap.
 
 ## Docs
 
