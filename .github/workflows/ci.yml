@@ -41,6 +41,26 @@ jobs:
       - name: Lint with ruff
         run: just lint
 
+  # The strict build is the only thing that reads the docs as a whole: it
+  # fails on a link to a page that moved, a page missing from the nav, or a
+  # snippet anchor that no longer exists. Running it here rather than only on
+  # the post-merge Pages deploy means a broken link fails the pull request
+  # that wrote it, not `main`.
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.32"
+
+      - uses: extractions/setup-just@v4
+
+      - name: Build docs (strict)
+        run: just docs-build
+
   security:
     runs-on: ubuntu-latest
     timeout-minutes: 20

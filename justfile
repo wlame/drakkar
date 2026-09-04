@@ -115,11 +115,11 @@ gen-event-vocabulary:
 # CI / pre-push
 # ---------------------------------------------------------------------------
 
-# Exactly what GitHub CI enforces, same order: format → lint → types → tests+coverage
-ci: lock-check fmt-check lint typecheck cover
+# Exactly what GitHub CI enforces, same order: lock → format → lint → types → tests+coverage → docs
+ci: lock-check fmt-check lint typecheck cover docs-build
 
-# Full pre-push battery: ci + strict docs build
-check: ci docs-build
+# Full pre-push battery: ci + the CVE scan CI keeps in a job of its own
+check: ci audit
 
 # ---------------------------------------------------------------------------
 # Docs

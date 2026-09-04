@@ -187,7 +187,7 @@ a vulnerability, see [`SECURITY.md`](SECURITY.md).
 ```bash
 just install     # uv sync with dev + perf extras
 just test        # unit tests (hermetic, no network)
-just ci          # format check -> lint -> types -> tests + coverage gate
+just ci          # format check -> lint -> types -> tests + coverage -> strict docs
 just docs-serve  # live-reload docs at http://127.0.0.1:8000
 just --list      # everything else (integration env, chaos test, DLQ replay, ...)
 ```

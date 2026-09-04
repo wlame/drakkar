@@ -4,7 +4,7 @@
 
 ```bash
 just install     # uv sync --extra=perf (the dev dependency-group installs by default)
-just ci           # what CI enforces: fmt-check, lint, typecheck, cover
+just ci           # what CI enforces: fmt-check, lint, typecheck, cover, docs-build
 ```
 
 `uv` only — never `pip`. Every gate runs through `just`, and the GitHub
@@ -13,8 +13,9 @@ disagree.
 
 ## Before every commit
 
-Run `just ci`. It must pass. `just check` additionally builds the docs
-strictly and is the full pre-push battery.
+Run `just ci`. It must pass — it includes the strict docs build, so a
+broken link fails here rather than after merge. `just check` adds the
+dependency CVE scan and is the full pre-push battery.
 
 ## Commit messages
 

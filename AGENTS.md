@@ -47,8 +47,8 @@ Kafka library behaviour.
 ```bash
 just test               # unit suite (uv run pytest); pass pytest args through
 just cover              # the gate: 95% coverage floor — new code without tests trips it
-just ci                 # exactly what CI runs: fmt-check, lint, typecheck, cover
-just check              # ci + strict docs build
+just ci                 # exactly what CI runs: fmt-check, lint, typecheck, cover, docs-build
+just check              # ci + the dependency CVE scan
 just integration-up     # docker harness (Kafka, all sinks, workers + load gen)
 just drakkar-ui where   # UI-bundle cache CLI
 ```

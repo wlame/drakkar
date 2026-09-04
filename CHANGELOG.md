@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   icon. A test fails when a tracked file passes 1 MB without an allowlist
   entry naming the reason it is worth a clone.
 
+- **The strict docs build now runs on every pull request.** It used to run
+  only after a merge, as the first step of the Pages deploy, so a broken
+  link passed review and reddened `main`. `just ci` now ends with
+  `docs-build` and CI has a `docs` job that calls it. `just check` keeps its
+  role as the wider pre-push battery by adding the dependency CVE scan.
+
 - **CI and `just install` now refuse a stale lockfile.** `just ci` starts with
   `just lock-check` (`uv lock --check`) and the install recipes pass
   `uv sync --locked`, so a dependency change that skipped `uv lock` fails with

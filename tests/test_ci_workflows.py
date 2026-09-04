@@ -177,10 +177,33 @@ def test_install_recipes_refuse_a_stale_lockfile() -> None:
     assert offenders == [], f'justfile installs without --locked: {offenders}'
 
 
-def test_ci_aggregate_runs_the_lock_check() -> None:
+# Recipes ``just ci`` must depend on, with what a local run that skips one
+# lets through. The aggregate is the contributor-facing promise that a green
+# `just ci` means a green CI, so every gate CI enforces belongs in this table.
+CI_AGGREGATE_GATES = {
+    'lock-check': 'a dependency change that skipped `uv lock` resolves packages nobody reviewed',
+    'docs-build': 'a broken link or a page missing from the nav reaches main and reddens the Pages deploy',
+}
+
+
+@pytest.mark.parametrize('recipe', sorted(CI_AGGREGATE_GATES))
+def test_ci_aggregate_runs_every_gate_ci_enforces(recipe: str) -> None:
     """``just ci`` must be exactly the gates GitHub CI enforces — a local run
     that skips one is how the two drift apart.
     """
     text = JUSTFILE.read_text()
     ci_line = next(line for line in text.splitlines() if line.startswith('ci:'))
-    assert 'lock-check' in ci_line, f'`just ci` does not depend on lock-check: {ci_line!r}'
+    assert recipe in ci_line, f'`just ci` does not depend on {recipe}, so {CI_AGGREGATE_GATES[recipe]}: {ci_line!r}'
+
+
+def test_a_pull_request_builds_the_docs() -> None:
+    """The strict build is what validates cross-links, the nav and snippet
+    anchors. Gated only by the post-merge deploy, a broken link passes review,
+    lands on ``main`` and then needs a second pull request to fix.
+    """
+    commands = [
+        step.get('run', '') for job in jobs(load('ci.yml')).values() for step in job.get('steps', []) if 'run' in step
+    ]
+    assert any('docs-build' in run for run in commands), (
+        'ci.yml never builds the docs, so docs breakage is found only after merge'
+    )
