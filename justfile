@@ -4,7 +4,8 @@
 
 set shell := ["bash", "-uc"]
 
-# Coverage floor — mirrored by [tool.coverage.report] fail_under in pyproject.toml.
+# Coverage floor on the combined line+branch measure — mirrored by
+# [tool.coverage.report] fail_under in pyproject.toml.
 coverage_min := "95"
 
 # List all recipes

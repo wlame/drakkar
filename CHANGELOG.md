@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   icon. A test fails when a tracked file passes 1 MB without an allowlist
   entry naming the reason it is worth a clone.
 
+- **The coverage gate now measures branches, not only lines.** A line inside
+  a `try` used to count as covered when its `except` had never run, which is
+  where most of the framework's hard cases live — a drain that times out, a
+  commit that fails, a delivery that cannot be confirmed. Turning branches on
+  cost 0.98 points; tests for the paths it exposed (suppressed zombie
+  deliveries from both aggregate hooks, the message-tracker double-fire
+  guard) paid it back, so the floor stays at 95 % and now means more. The
+  coverage report also hides fully covered files.
+
 - **The test suite runs in about 30 s instead of 5 minutes.** Three tests
   waited out production timeouts (30 s and 10 s) for outcomes that are
   reached at once, and the partition loop's one-second idle wake-up was paid

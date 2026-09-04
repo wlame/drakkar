@@ -28,11 +28,12 @@ prefixes, no body.
 
 ## Coverage
 
-The floor is 95% (`just cover`), and the suite currently sits only
-fractionally above it (~95.3%). That is no longer slack: new code
-without tests will trip the gate almost immediately, so add tests
-alongside the code that needs them rather than planning to backfill
-later.
+The floor is 95% (`just cover`) and it measures **branches as well as
+lines**: a line inside a `try` does not count as covered until its
+`except` has run too. The suite sits fractionally above the floor
+(~95.0%), so that is not slack — new code without tests trips the gate
+almost immediately. Add the tests alongside the code, and give the error
+path one of its own; that is where the framework's real bugs live.
 
 ## Dependencies
 

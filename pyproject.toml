@@ -73,9 +73,20 @@ timeout = 60
 [tool.coverage.run]
 source = ["drakkar"]
 omit = ["tests/*"]
+# Line coverage says a line ran; it does not say both sides of an `if` or a
+# `try` did. The framework's hard parts are the branches nobody takes on a
+# good day — a drain that times out, a commit that fails, a sink that
+# refuses — so those are exactly the ones the gate has to see.
+branch = true
 
 [tool.coverage.report]
 show_missing = true
+# Files at 100% say nothing an author has to act on; with branch coverage on,
+# the full table is long enough that the ones that do get lost in it.
+skip_covered = true
+# The floor is on the combined line+branch measure (mirrored by coverage_min
+# in the justfile). Turning branches on cost 0.98 pp, which was paid back by
+# testing the paths it exposed rather than by lowering the number.
 fail_under = 95
 
 [tool.ruff]

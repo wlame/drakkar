@@ -3881,3 +3881,105 @@ async def test_recorder_message_counts_survive_without_the_collected_lists(faili
     assert counts['succeeded'] == 1
     assert counts['failed'] == 0
     assert counts['replaced'] == 1
+
+
+# ---------------------------------------------------------------------------
+# Suppressed (zombie) deliveries from the aggregate hooks
+#
+# After a drain timeout the partition belongs to another worker. Tasks still
+# running here are zombies: their per-task deliveries are already suppressed,
+# and so must be the payloads the aggregate hooks return — delivering those
+# would double-write what the new owner is re-processing right now.
+# ---------------------------------------------------------------------------
+
+
+async def test_suppressed_processor_does_not_deliver_on_message_complete_payloads(echo_pool):
+    collected: list[CollectResult] = []
+    fired = asyncio.Event()
+
+    class AggregatingHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [ExecutorTask(task_id=f'task-{m.offset}', args=['ok'], source_offsets=[m.offset]) for m in messages]
+
+        async def on_message_complete(self, group):
+            fired.set()
+            return CollectResult(kafka=[KafkaPayload(data={'offset': group.source_message.offset})])
+
+    async def on_collect(result, partition_id):
+        collected.append(result)
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=AggregatingHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_collect=on_collect,
+    )
+    proc.suppress_deliveries()
+    proc.enqueue(make_msg(offset=3))
+    proc.start()
+    await fired.wait()
+    await proc.stop(timeout=1)
+
+    assert collected == [], 'a zombie partition must not deliver its aggregate payload'
+
+
+async def test_suppressed_processor_does_not_deliver_on_window_complete_payloads(echo_pool):
+    collected: list[CollectResult] = []
+    fired = asyncio.Event()
+
+    class WindowAggregatingHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [ExecutorTask(task_id=f'task-{m.offset}', args=['ok'], source_offsets=[m.offset]) for m in messages]
+
+        async def on_window_complete(self, results, source_messages):
+            fired.set()
+            return CollectResult(kafka=[KafkaPayload(data={'windowed': len(results)})])
+
+    async def on_collect(result, partition_id):
+        collected.append(result)
+
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=WindowAggregatingHandler(),
+        executor_pool=echo_pool,
+        window_size=10,
+        on_collect=on_collect,
+    )
+    proc.suppress_deliveries()
+    proc.enqueue(make_msg(offset=4))
+    proc.start()
+    await fired.wait()
+    await proc.stop(timeout=1)
+
+    assert collected == [], 'a zombie partition must not deliver its window payload'
+
+
+async def test_finalizing_a_tracker_twice_fires_the_hook_once(echo_pool):
+    """``completion_fired`` is the guard against a pathological double-fire.
+
+    on_message_complete is where a user emits their per-message aggregate, so
+    a second call would duplicate a sink write for a message that already
+    committed.
+    """
+    groups: list[MessageGroup] = []
+
+    class MessageHookHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return [ExecutorTask(task_id=f'task-{m.offset}', args=['ok'], source_offsets=[m.offset]) for m in messages]
+
+        async def on_message_complete(self, group):
+            groups.append(group)
+            return None
+
+    captured_trackers: list[MessageTracker] = []
+    proc = PartitionProcessor(partition_id=0, handler=MessageHookHandler(), executor_pool=echo_pool, window_size=10)
+    _wrap_capture_tracker(proc, captured_trackers)
+    proc.enqueue(make_msg(offset=5))
+    proc.start()
+    await wait_for(lambda: len(groups) == 1)
+    await proc.stop(timeout=1)
+
+    # The tracker is already settled; finalising it again must be a no-op.
+    await proc._finalize_message_tracker(captured_trackers[0])
+    assert len(groups) == 1
