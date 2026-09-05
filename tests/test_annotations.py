@@ -396,7 +396,7 @@ async def test_annotations_reach_the_recorder_db_through_the_real_pipeline(tmp_p
             SourceMessage(topic='t', partition=0, offset=7, value=b'{}', timestamp=1000),
         )
         proc.start()
-        await wait_for(lambda: not proc.offset_tracker.has_pending() and proc.inflight_count == 0, timeout=5)
+        await wait_for(lambda: not proc.offset_tracker.has_pending() and proc.inflight_count == 0)
         await proc.stop()
 
         trace = await recorder.get_trace(partition=0, msg_offset=7)

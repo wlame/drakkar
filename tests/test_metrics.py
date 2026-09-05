@@ -75,6 +75,21 @@ def histogram_sum(hist, **labels):
     return hist._sum.get()
 
 
+def histogram_count(hist, **labels):
+    """Get the number of observations recorded in a histogram.
+
+    Use this, not the sum, to assert that something *was* observed. Durations
+    reach the histogram rounded to milliseconds, so a subprocess that finishes
+    in under half a millisecond observes exactly 0.0 and leaves the sum where
+    it was — an assertion on the sum then waits for a change that never comes,
+    and how often that happens depends only on how fast the machine is.
+    """
+    target = hist.labels(**labels) if labels else hist
+    # prometheus_client keeps one counter per bucket and no total, so the
+    # number of observations is their sum.
+    return sum(bucket.get() for bucket in target._buckets)
+
+
 def make_msg(partition=0, offset=0):
     return SourceMessage(
         topic='t',
@@ -393,10 +408,10 @@ async def test_executor_duration_observed_on_completion():
         window_size=10,
     )
 
-    before = histogram_sum(executor_duration)
+    before = histogram_count(executor_duration)
     proc.enqueue(make_msg(partition=94, offset=0))
     proc.start()
-    await wait_for(lambda: histogram_sum(executor_duration) > before)
+    await wait_for(lambda: histogram_count(executor_duration) > before)
     await proc.stop()
 
 

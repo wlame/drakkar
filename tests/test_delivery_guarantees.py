@@ -129,7 +129,7 @@ async def test_policy_skip_keeps_message_in_window_and_commits(echo_pool):
     )
     proc.enqueue(make_msg(offset=5, value=b'broken'))
     proc.start()
-    await wait_for(lambda: any(c[1] == 6 for c in committed), timeout=5)
+    await wait_for(lambda: any(c[1] == 6 for c in committed))
     await proc.stop()
 
     assert len(handler.arranged) == 1
@@ -160,7 +160,7 @@ async def test_policy_dlq_excludes_message_and_commits_on_confirmed_send(echo_po
     )
     proc.enqueue(make_msg(offset=5, value=b'broken'))
     proc.start()
-    await wait_for(lambda: any(c[1] == 6 for c in committed), timeout=5)
+    await wait_for(lambda: any(c[1] == 6 for c in committed))
     await proc.stop()
 
     assert handler.arranged == [], 'unparseable message must not reach arrange()'
@@ -201,7 +201,7 @@ async def test_policy_dlq_send_failure_stall_mode_stalls_offset_and_pauses(echo_
     proc.enqueue(make_msg(offset=5, value=b'broken'))
     proc.enqueue(make_msg(offset=6, value=b'also broken'))
     proc.start()
-    await wait_for(lambda: proc.queue_size == 0 and not proc._arranging, timeout=5)
+    await wait_for(lambda: proc.queue_size == 0 and not proc._arranging)
     await asyncio.sleep(0.1)
 
     # Stalled offsets must not wedge drain — only block the commit.
@@ -238,7 +238,7 @@ async def test_policy_dlq_send_failure_drop_mode_commits_and_counts(echo_pool):
     )
     proc.enqueue(make_msg(offset=5, value=b'broken'))
     proc.start()
-    await wait_for(lambda: any(c[1] == 6 for c in committed), timeout=5)
+    await wait_for(lambda: any(c[1] == 6 for c in committed))
     await proc.stop()
 
     assert not proc.offset_tracker.has_pending()
@@ -269,10 +269,10 @@ async def test_policy_raise_stops_partition_without_commit(echo_pool):
     restarts = partition_processor_deaths.labels(partition='0', outcome='restarted')
     before = restarts._value.get()
     proc.enqueue(make_msg(offset=5, value=b'broken'))
-    await wait_for(lambda: restarts._value.get() > before, timeout=5)
+    await wait_for(lambda: restarts._value.get() > before)
     proc.enqueue(make_msg(offset=6, value=b'broken'))
 
-    await wait_for(lambda: proc._task is not None and proc._task.done(), timeout=5)
+    await wait_for(lambda: proc._task is not None and proc._task.done())
 
     assert proc.is_dead, 'a loop that died twice must be marked dead so /readyz fails'
     assert handler.arranged == []

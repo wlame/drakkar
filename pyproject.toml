@@ -87,6 +87,12 @@ skip_covered = true
 # The floor is on the combined line+branch measure (mirrored by coverage_min
 # in the justfile). Turning branches on cost 0.98 pp, which was paid back by
 # testing the paths it exposed rather than by lowering the number.
+#
+# Measure on every supported interpreter before trusting a margin: coverage
+# parses each file with the running Python's own AST, so 3.13 and 3.14 do not
+# report the same statement count for the same code (12,602 vs 12,562 today).
+# The two land about 0.01 pp apart, which is enough to pass on one and fail on
+# the other when the margin is thin.
 fail_under = 95
 
 [tool.ruff]

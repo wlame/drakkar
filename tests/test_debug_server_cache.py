@@ -314,6 +314,36 @@ class TestApiCacheEntries:
         finally:
             await engine.stop()
 
+    async def test_unreadable_cache_returns_an_empty_page_instead_of_an_error(
+        self, tmp_path, mock_recorder, debug_config
+    ):
+        """A read that fails degrades to an empty page, it does not 500.
+
+        The Databases tab polls this endpoint. A 500 would replace the whole
+        view with an error because one file could not be read, so the count
+        and the row query each degrade on their own and log a warning instead.
+        Dropping the table is the cheapest stand-in for the real cause — a
+        half-written or truncated database file on the shared volume.
+        """
+        engine = await _start_live_engine(tmp_path)
+        try:
+            await _write_entry(engine, key='k1', value='"v1"')
+            assert engine._writer_db is not None
+            await engine._writer_db.execute('DROP TABLE cache_entries')
+            await engine._writer_db.commit()
+
+            fastapi_app = create_ui_app(debug_config, mock_recorder, _make_mock_app(cache_engine=engine))
+            transport = ASGITransport(app=fastapi_app)
+            async with AsyncClient(transport=transport, base_url='http://test') as c:
+                resp = await c.get('/api/v1/debug/cache/entries')
+
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body['entries'] == []
+            assert body['total'] == 0
+        finally:
+            await engine.stop()
+
     async def test_lists_entries(self, tmp_path, mock_recorder, debug_config):
         engine = await _start_live_engine(tmp_path)
         try:

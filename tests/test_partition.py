@@ -205,7 +205,7 @@ async def test_partition_processor_error_handling(failing_pool):
 
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(lambda: not proc.offset_tracker.has_pending() and proc.inflight_count == 0, timeout=3)
+    await wait_for(lambda: not proc.offset_tracker.has_pending() and proc.inflight_count == 0)
     await proc.stop()
 
 
@@ -754,7 +754,7 @@ async def test_commit_failure_preserves_offsets_for_retry(echo_pool):
 
     proc.start()
     # first commit attempt fails, retry on idle loop should succeed
-    await wait_for(lambda: any(c[1] == 3 for c in committed), timeout=5)
+    await wait_for(lambda: any(c[1] == 3 for c in committed))
     await proc.stop()
 
     assert commit_count >= 2, 'Expected at least one retry after failure'
@@ -797,12 +797,12 @@ async def test_active_tasks_set_holds_references():
 
     proc.start()
     # while slow tasks are in-flight, _active_tasks should hold references
-    await wait_for(lambda: len(proc._active_tasks) > 0, timeout=2)
+    await wait_for(lambda: len(proc._active_tasks) > 0)
     assert proc._active_tasks  # strong references exist
 
     # after completion, done callbacks should clean up
-    await wait_for(lambda: proc.inflight_count == 0, timeout=5)
-    await wait_for(lambda: len(proc._active_tasks) == 0, timeout=2)
+    await wait_for(lambda: proc.inflight_count == 0)
+    await wait_for(lambda: len(proc._active_tasks) == 0)
     await proc.stop()
 
 
@@ -840,12 +840,12 @@ async def test_arrange_tracking_state(echo_pool):
     proc.start()
 
     # during arrange, _arranging should be True
-    await wait_for(lambda: proc._arranging, timeout=2)
+    await wait_for(lambda: proc._arranging)
     assert len(proc._arrange_labels) > 0
     assert proc._arrange_labels[0] == '0:0'  # default message_label
 
     # after arrange completes, _arranging should be False
-    await wait_for(lambda: not proc._arranging, timeout=2)
+    await wait_for(lambda: not proc._arranging)
     await proc.stop()
 
 
@@ -880,10 +880,10 @@ async def test_custom_message_label_in_arrange_tracking(echo_pool):
     proc.enqueue(make_msg(offset=42))
     proc.start()
 
-    await wait_for(lambda: proc._arranging, timeout=2)
+    await wait_for(lambda: proc._arranging)
     assert proc._arrange_labels == ['REQ-42']
 
-    await wait_for(lambda: not proc._arranging, timeout=2)
+    await wait_for(lambda: not proc._arranging)
     await proc.stop()
 
 
@@ -935,7 +935,7 @@ async def test_on_error_returns_replacement_tasks(failing_pool, echo_pool):
 
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(lambda: len(committed) > 0, timeout=5)
+    await wait_for(lambda: len(committed) > 0)
     await proc.stop()
 
     assert 'replace-fail-0' in collected_task_ids
@@ -978,7 +978,7 @@ async def test_on_window_complete_returns_collect_result(echo_pool):
 
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(lambda: len(window_complete_collected) > 0, timeout=3)
+    await wait_for(lambda: len(window_complete_collected) > 0)
     await proc.stop()
 
     wc_results = [r for r in window_complete_collected if r.kafka and r.kafka[0].data.v == 'from_window_complete']
@@ -1319,7 +1319,7 @@ async def test_on_message_complete_fan_out_waits_for_all_tasks(failing_pool):
     proc = PartitionProcessor(partition_id=0, handler=FanOutHandler(), executor_pool=failing_pool, window_size=10)
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await wait_for(lambda: len(groups) == 1)
     await proc.stop()
 
     assert len(groups) == 1, f'expected exactly one hook fire, got {len(groups)}'
@@ -1355,7 +1355,7 @@ async def test_on_message_complete_partial_failure(failing_pool):
     proc = PartitionProcessor(partition_id=0, handler=PartialHandler(), executor_pool=failing_pool, window_size=10)
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await wait_for(lambda: len(groups) == 1)
     await proc.stop()
 
     g = groups[0]
@@ -1391,7 +1391,7 @@ async def test_on_message_complete_all_fail(failing_pool):
     proc = PartitionProcessor(partition_id=0, handler=AllFailHandler(), executor_pool=failing_pool, window_size=10)
     proc.enqueue(make_msg(offset=3))
     proc.start()
-    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await wait_for(lambda: len(groups) == 1)
     await proc.stop()
 
     assert groups[0].failed == 1
@@ -1481,7 +1481,7 @@ async def test_on_message_complete_replacement_chain(failing_pool):
     proc = PartitionProcessor(partition_id=0, handler=ReplaceHandler(), executor_pool=failing_pool, window_size=10)
     proc.enqueue(make_msg(offset=11))
     proc.start()
-    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await wait_for(lambda: len(groups) == 1)
     await proc.stop()
 
     g = groups[0]
@@ -1528,8 +1528,8 @@ async def test_on_message_complete_empty_arrange_fires_hook(echo_pool):
     )
     proc.enqueue(make_msg(offset=55))
     proc.start()
-    await wait_for(lambda: len(groups) >= 1, timeout=5)
-    await wait_for(lambda: any(c[1] == 56 for c in committed), timeout=5)
+    await wait_for(lambda: len(groups) >= 1)
+    await wait_for(lambda: any(c[1] == 56 for c in committed))
     await proc.stop()
 
     assert groups[0].is_empty
@@ -1564,7 +1564,7 @@ async def test_on_message_complete_exception_does_not_block_offset(echo_pool):
     )
     proc.enqueue(make_msg(offset=20))
     proc.start()
-    await wait_for(lambda: any(c[1] == 21 for c in committed), timeout=5)
+    await wait_for(lambda: any(c[1] == 21 for c in committed))
     await proc.stop()
 
     # Hook fired, raised; offset still committed (no stall)
@@ -1618,7 +1618,7 @@ async def test_on_message_complete_per_message_commits(echo_pool):
     proc.enqueue(make_msg(offset=0))
     proc.enqueue(make_msg(offset=1))
     proc.start()
-    await wait_for(lambda: any(c[1] == 2 for c in committed), timeout=5)
+    await wait_for(lambda: any(c[1] == 2 for c in committed))
     await proc.stop()
 
     # Both groups fired
@@ -1667,7 +1667,7 @@ async def test_on_message_complete_sink_exception_drop_mode_commits(echo_pool):
     )
     proc.enqueue(make_msg(offset=30))
     proc.start()
-    await wait_for(lambda: any(c[1] == 31 for c in committed), timeout=5)
+    await wait_for(lambda: any(c[1] == 31 for c in committed))
     await proc.stop()
 
     assert delivery_calls, 'on_collect must have been invoked'
@@ -1694,7 +1694,7 @@ async def test_on_message_complete_sink_exception_stall_mode_stalls_offset(echo_
     )
     proc.enqueue(make_msg(offset=30))
     proc.start()
-    await wait_for(lambda: bool(delivery_calls), timeout=5)
+    await wait_for(lambda: bool(delivery_calls))
     # Give the (not expected) commit a chance to fire before asserting.
     await asyncio.sleep(0.1)
     await proc.stop()
@@ -1736,7 +1736,7 @@ async def test_on_task_complete_sink_exception_drop_mode_commits(echo_pool):
     )
     proc.enqueue(make_msg(offset=40))
     proc.start()
-    await wait_for(lambda: any(c[1] == 41 for c in committed), timeout=5)
+    await wait_for(lambda: any(c[1] == 41 for c in committed))
     await proc.stop()
 
     assert delivery_calls, 'on_collect must have been invoked'
@@ -1770,7 +1770,7 @@ async def test_on_task_complete_sink_exception_stall_mode_stalls_offset(echo_poo
     )
     proc.enqueue(make_msg(offset=40))
     proc.start()
-    await wait_for(lambda: bool(delivery_calls), timeout=5)
+    await wait_for(lambda: bool(delivery_calls))
     # Give the (not expected) commit a chance to fire before asserting.
     await asyncio.sleep(0.1)
     await proc.stop()
@@ -1809,7 +1809,7 @@ async def test_concurrent_commit_now_does_not_resend_a_stale_watermark(echo_pool
 
     # First commit parks inside the lock, mid-RPC.
     first = asyncio.create_task(proc._commit_now())
-    await wait_for(lambda: bool(commits), timeout=2)
+    await wait_for(lambda: bool(commits))
     # Second arrives while the first is still in flight.
     second = asyncio.create_task(proc._commit_now())
     await asyncio.sleep(0.05)
@@ -1856,7 +1856,7 @@ async def test_on_error_replacement_preserves_explicit_parent_task_id(failing_po
     proc = PartitionProcessor(partition_id=0, handler=Handler(), executor_pool=failing_pool, window_size=10)
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await wait_for(lambda: len(groups) == 1)
     await proc.stop()
 
     child_task = next(t for t in groups[0].tasks if t.task_id == 'child')
@@ -1885,7 +1885,7 @@ async def test_on_window_complete_still_fires_alongside_on_message_complete(echo
     proc.enqueue(make_msg(offset=1))
     proc.enqueue(make_msg(offset=2))
     proc.start()
-    await wait_for(lambda: len(window_calls) >= 1 and len(msg_groups) >= 3, timeout=5)
+    await wait_for(lambda: len(window_calls) >= 1 and len(msg_groups) >= 3)
     await proc.stop()
 
     assert len(msg_groups) == 3
@@ -1923,7 +1923,7 @@ async def test_fan_in_single_task_reported_to_all_groups(echo_pool):
     proc.enqueue(make_msg(offset=101))
     proc.enqueue(make_msg(offset=102))
     proc.start()
-    await wait_for(lambda: len(groups) == 3, timeout=5)
+    await wait_for(lambda: len(groups) == 3)
     await proc.stop()
 
     # All three messages saw the SAME task and the SAME result.
@@ -1966,7 +1966,7 @@ async def test_fan_in_task_failure_reported_to_all_groups(failing_pool):
     proc.enqueue(make_msg(offset=5))
     proc.enqueue(make_msg(offset=6))
     proc.start()
-    await wait_for(lambda: len(groups) == 2, timeout=5)
+    await wait_for(lambda: len(groups) == 2)
     await proc.stop()
 
     for g in groups:
@@ -2014,7 +2014,7 @@ async def test_fan_in_mixed_with_fan_out_waits_for_all(failing_pool):
     proc.enqueue(make_msg(offset=20))
     proc.enqueue(make_msg(offset=21))
     proc.start()
-    await wait_for(lambda: len(groups) == 2, timeout=5)
+    await wait_for(lambda: len(groups) == 2)
     await proc.stop()
 
     for g in groups:
@@ -2053,7 +2053,7 @@ async def test_fan_in_offsets_outside_window_silently_ignored(echo_pool):
     proc = PartitionProcessor(partition_id=0, handler=StrangeHandler(), executor_pool=echo_pool, window_size=10)
     proc.enqueue(make_msg(offset=7))
     proc.start()
-    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await wait_for(lambda: len(groups) == 1)
     await proc.stop()
 
     # Real tracker got its outcome; bogus 500/501 offsets silently ignored.
@@ -2098,7 +2098,7 @@ async def test_precomputed_task_flows_through_on_task_complete(echo_pool):
     proc.enqueue(make_msg(offset=40))
     proc.enqueue(make_msg(offset=41))
     proc.start()
-    await wait_for(lambda: len(groups) == 2, timeout=5)
+    await wait_for(lambda: len(groups) == 2)
     await proc.stop()
 
     # Both results delivered to on_task_complete.
@@ -2148,7 +2148,7 @@ async def test_precomputed_mixed_with_real_subprocess_in_one_window(failing_pool
     proc = PartitionProcessor(partition_id=0, handler=Mixed(), executor_pool=failing_pool, window_size=10)
     proc.enqueue(make_msg(offset=50))
     proc.start()
-    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await wait_for(lambda: len(groups) == 1)
     await proc.stop()
 
     g = groups[0]
@@ -2188,7 +2188,7 @@ async def test_precomputed_fan_in_across_multiple_messages(echo_pool):
     proc.enqueue(make_msg(offset=61))
     proc.enqueue(make_msg(offset=62))
     proc.start()
-    await wait_for(lambda: len(groups) == 3, timeout=5)
+    await wait_for(lambda: len(groups) == 3)
     await proc.stop()
 
     # All three groups saw the SAME precomputed result.
@@ -2228,7 +2228,7 @@ async def test_precomputed_failure_routes_through_on_error(failing_pool):
     proc = PartitionProcessor(partition_id=0, handler=H(), executor_pool=failing_pool, window_size=10)
     proc.enqueue(make_msg(offset=70))
     proc.start()
-    await wait_for(lambda: len(groups) == 1, timeout=5)
+    await wait_for(lambda: len(groups) == 1)
     await proc.stop()
 
     assert error_hook_calls == ['pc-fail']
@@ -2263,7 +2263,7 @@ async def test_signal_stop_sets_running_false_without_blocking(echo_pool):
     proc.enqueue(make_msg(offset=0))
     proc.start()
     # Wait until the run loop has picked up the message and entered arrange().
-    await wait_for(lambda: proc._arranging, timeout=2)
+    await wait_for(lambda: proc._arranging)
     assert proc._running is True
     assert proc._task is not None
 
@@ -2300,7 +2300,7 @@ async def test_stop_after_signal_stop_completes_cleanly(echo_pool):
     proc.start()
 
     # Let the processor pick up at least one task before signalling stop.
-    await wait_for(lambda: len(handler.collect_calls) >= 1, timeout=5)
+    await wait_for(lambda: len(handler.collect_calls) >= 1)
 
     proc.signal_stop()
     # stop() should complete without error: it re-sets _running=False
@@ -2422,7 +2422,7 @@ async def test_replacement_window_results_contains_replacements_only(failing_poo
 
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(lambda: len(window_complete_results_sizes) > 0, timeout=5)
+    await wait_for(lambda: len(window_complete_results_sizes) > 0)
     await proc.stop()
 
     assert len(captured_windows) == 1, f'expected 1 window, got {len(captured_windows)}'
@@ -2658,7 +2658,7 @@ async def test_timeout_kind_increments_timeout_metric():
     proc = PartitionProcessor(partition_id=0, handler=handler, executor_pool=stub_pool, window_size=10)
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(lambda: len(handler.window_complete_calls) == 1, timeout=5)
+    await wait_for(lambda: len(handler.window_complete_calls) == 1)
     await proc.stop()
 
     after = executor_timeouts._value.get()  # type: ignore[attr-defined]
@@ -2685,7 +2685,7 @@ async def test_timeout_text_without_timeout_kind_does_not_increment():
     proc = PartitionProcessor(partition_id=0, handler=handler, executor_pool=stub_pool, window_size=10)
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(lambda: len(handler.window_complete_calls) == 1, timeout=5)
+    await wait_for(lambda: len(handler.window_complete_calls) == 1)
     await proc.stop()
 
     after = executor_timeouts._value.get()  # type: ignore[attr-defined]
@@ -2970,7 +2970,7 @@ async def run_annotating_processor(handler, pool, partition_id=2, offsets=(0, 1)
     for offset in offsets:
         proc.enqueue(make_msg(partition=partition_id, offset=offset))
     proc.start()
-    await wait_for(lambda: not proc.offset_tracker.has_pending() and proc.inflight_count == 0, timeout=5)
+    await wait_for(lambda: not proc.offset_tracker.has_pending() and proc.inflight_count == 0)
     await proc.stop()
     return annotator
 
@@ -3080,7 +3080,7 @@ async def test_raising_on_task_complete_does_not_leak_its_context(echo_pool):
     )
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(lambda: handler.snapshot is not None, timeout=5)
+    await wait_for(lambda: handler.snapshot is not None)
     await proc.stop()
 
     assert handler.snapshot is not None
@@ -3427,14 +3427,14 @@ async def test_cancel_active_tasks_frees_executor_slots_and_kills_subprocesses()
     proc.enqueue(make_msg(offset=1))
     proc.start()
 
-    await wait_for(lambda: pool.active_count == 2, timeout=5)
+    await wait_for(lambda: pool.active_count == 2)
 
     cancelled = await proc.cancel_active_tasks()
 
     assert cancelled == 2
     assert proc._active_tasks == set() or all(t.done() for t in proc._active_tasks)
     assert proc.inflight_count == 0, 'the finally in _execute_and_track still decrements'
-    await wait_for(lambda: pool.active_count == 0, timeout=5)
+    await wait_for(lambda: pool.active_count == 0)
 
     proc.signal_stop()
     await proc.stop(timeout=1.0)
@@ -3461,7 +3461,7 @@ async def test_cancel_active_tasks_leaves_the_offsets_uncommitted():
     )
     proc.enqueue(make_msg(offset=7))
     proc.start()
-    await wait_for(lambda: proc.inflight_count == 1, timeout=5)
+    await wait_for(lambda: proc.inflight_count == 1)
 
     await proc.cancel_active_tasks()
     await proc._commit_now()
@@ -3498,7 +3498,7 @@ async def test_stop_after_suppress_does_not_wait_out_its_timeout():
     )
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(lambda: proc.inflight_count == 1, timeout=5)
+    await wait_for(lambda: proc.inflight_count == 1)
 
     proc.suppress_deliveries()
     start = asyncio.get_running_loop().time()
@@ -3523,14 +3523,14 @@ async def test_stop_cancels_tasks_the_cancelled_loop_left_behind(echo_pool, monk
     )
     proc.enqueue(make_msg(offset=0))
     proc.start()
-    await wait_for(lambda: proc.inflight_count == 1, timeout=5)
+    await wait_for(lambda: proc.inflight_count == 1)
 
     # Not suppressed: this is the plain shutdown path, where ``stop()`` waits
     # for ``_run`` and then force-cancels it.
     await proc.stop(timeout=0.2)
 
     assert proc.inflight_count == 0
-    await wait_for(lambda: pool.active_count == 0, timeout=5)
+    await wait_for(lambda: pool.active_count == 0)
 
 
 async def test_dead_processor_drain_returns_without_waiting(echo_pool):
@@ -3571,6 +3571,27 @@ class _ManyTasksHandler(BaseDrakkarHandler):
         ]
 
 
+def _park_task_execution(proc: PartitionProcessor) -> None:
+    """Replace the per-task coroutine with one that parks forever.
+
+    What these tests measure is what ``_process_window`` does *while* it fans
+    out: how many tasks it creates, and how often it hands the loop back.
+    Letting the real coroutine run makes that measurement depend on how fast
+    the machine drains subprocesses — a task that finishes during one of the
+    fan-out's yields settles itself out of the counters the assertions read,
+    so the same code passes on a slow machine and fails on a fast one.
+    Parking every task removes the race, and 1,280 subprocess spawns with it.
+
+    Tasks are then counted through ``_pending_tasks``: the fan-out registers
+    each task there as it creates it, and only a settling task removes itself.
+    """
+
+    async def park(task, window, retry_count=0):
+        await asyncio.Event().wait()
+
+    proc._execute_and_track = park  # type: ignore[method-assign]
+
+
 async def test_fanout_hands_the_loop_back_between_chunks():
     """asyncio runs every ready handle before it polls I/O again, so creating
     N tasks in one turn also ran the first step of all N coroutines back to
@@ -3588,6 +3609,8 @@ async def test_fanout_hands_the_loop_back_between_chunks():
         executor_pool=pool,
         window_size=10,
     )
+
+    _park_task_execution(proc)
 
     # A probe that counts how often it got the loop back while the fan-out ran.
     ticks = 0
@@ -3612,7 +3635,7 @@ async def test_fanout_hands_the_loop_back_between_chunks():
     except asyncio.CancelledError:
         pass
 
-    assert proc._inflight_count == task_count, 'every task must still be created'
+    assert len(proc._pending_tasks) == task_count, f'created {len(proc._pending_tasks)} of {task_count} tasks'
     # One yield per chunk boundary, minus the last chunk which does not yield.
     assert ticks >= 3, f'the loop only ran the probe {ticks} times during a {task_count}-task fan-out'
 
@@ -3630,6 +3653,8 @@ async def test_fanout_creates_every_task_when_the_window_fits_one_chunk():
         executor_pool=pool,
         window_size=10,
     )
+
+    _park_task_execution(proc)
 
     ticks = 0
     probe_running = True
@@ -3653,7 +3678,9 @@ async def test_fanout_creates_every_task_when_the_window_fits_one_chunk():
     except asyncio.CancelledError:
         pass
 
-    assert proc._inflight_count == FANOUT_CHUNK_TASKS
+    assert len(proc._pending_tasks) == FANOUT_CHUNK_TASKS, (
+        f'created {len(proc._pending_tasks)} of {FANOUT_CHUNK_TASKS} tasks'
+    )
     assert ticks == 0, 'a single-chunk fan-out must not yield'
 
     await proc.cancel_active_tasks()

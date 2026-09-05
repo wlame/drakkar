@@ -112,7 +112,7 @@ async def test_suppressed_processor_neither_delivers_nor_commits(echo_pool):
     proc.start()
     # The task completes and the tracker settles, but nothing leaves the
     # processor. wait on internal settlement, not on observable effects.
-    await wait_for(lambda: proc.inflight_count == 0 and proc.queue_size == 0, timeout=5)
+    await wait_for(lambda: proc.inflight_count == 0 and proc.queue_size == 0)
     await asyncio.sleep(0.1)
     await proc.stop()
 

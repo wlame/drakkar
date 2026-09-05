@@ -1401,7 +1401,7 @@ async def test_revoke_mid_window_clean_drain_commits_finished_messages(test_conf
     for offset in (200, 201, 202):
         processor.enqueue(SourceMessage(topic='t', partition=0, offset=offset, value=b'x', timestamp=0))
 
-    await wait_for(lambda: processor.inflight_count >= 1, timeout=5)
+    await wait_for(lambda: processor.inflight_count >= 1)
 
     await app._lifecycle._on_revoke([0])
     await wait_for(lambda: len(app._background_tasks) == 0, timeout=10)
@@ -1499,6 +1499,55 @@ async def test_revoke_while_arrange_running(test_config):
 
 
 # --- AppLifecycle: focused unit tests ---
+
+
+async def test_shutdown_continues_when_an_optional_subsystem_refuses_to_stop(test_config):
+    """One subsystem failing to stop must not abandon the rest of teardown.
+
+    The offload pool, the throughput tracker and the runtime-health monitor
+    are stopped in sequence before the recorder and the consumer. An
+    exception escaping any of them would skip everything after it: the
+    recorder would never flush its buffer, sinks would stay open, and the
+    consumer would never leave the group, so the broker would wait out the
+    session timeout before rebalancing. Each stop is therefore logged and
+    stepped over.
+    """
+    from drakkar.executor import ExecutorPool
+    from drakkar.lifecycle import AppLifecycle
+
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    app._executor_pool = ExecutorPool(binary_path='/bin/echo', max_executors=2, task_timeout_seconds=10)
+    app._consumer = AsyncMock()
+    _setup_app_sinks(app)
+    app._dlq_sink = AsyncMock()
+    app._running = True
+    app.is_ready = True
+
+    class _RefusesToStop:
+        """Stands in for any subsystem whose stop path can raise."""
+
+        def __init__(self) -> None:
+            self.stop_attempted = False
+
+        def shutdown(self) -> None:
+            self.stop_attempted = True
+            raise RuntimeError('pool will not shut down')
+
+        async def stop(self) -> None:
+            self.stop_attempted = True
+            raise RuntimeError('subsystem will not stop')
+
+    offload, throughput, health = _RefusesToStop(), _RefusesToStop(), _RefusesToStop()
+    app._offload_pool = offload
+    app._throughput = throughput
+    app._runtime_health = health
+
+    await AppLifecycle(app)._shutdown()
+
+    assert offload.stop_attempted and throughput.stop_attempted and health.stop_attempted
+    # Everything downstream of the failures still ran.
+    assert app.is_ready is False
+    app._consumer.close.assert_called_once()
 
 
 async def test_lifecycle_shutdown_drains_and_flips_ready(test_config):

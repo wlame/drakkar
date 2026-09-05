@@ -34,7 +34,17 @@ def make_ui_config(**kwargs) -> UIConfig:
     return UIConfig(**kwargs)
 
 
-async def wait_for(condition, timeout=5.0, interval=0.05):
+# Default ceiling for wait_for. It is a safety net that turns a stuck test
+# into a readable failure — not an assertion about how fast the code is. The
+# suite runs one worker per core and many of these conditions wait on a real
+# subprocess, so under that contention a few seconds is not a generous budget:
+# five seconds produced a flaky failure roughly one run in three. Nothing pays
+# this cost when the condition holds, and pytest-timeout still bounds a true hang
+# at 60 s.
+WAIT_FOR_TIMEOUT_SECONDS = 20.0
+
+
+async def wait_for(condition, timeout=WAIT_FOR_TIMEOUT_SECONDS, interval=0.05):
     """Poll until condition() returns True or timeout expires."""
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:

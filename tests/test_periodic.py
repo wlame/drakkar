@@ -247,7 +247,7 @@ async def test_run_periodic_task_on_error_stop():
     )
 
     # poll until the task self-terminates (avoids flaky wall-clock sleep)
-    await wait_for(lambda: t.done(), timeout=2.0)
+    await wait_for(lambda: t.done())
     assert call_count == 1
 
 

@@ -433,7 +433,7 @@ class TestExecutorEdgeCases:
 
         # wait for processing to complete — task should fail once and be skipped
         # Use last_committed because completed_count resets to 0 after acknowledge_commit
-        await wait_for(lambda: proc.offset_tracker.last_committed is not None, timeout=5.0)
+        await wait_for(lambda: proc.offset_tracker.last_committed is not None)
         await proc.stop()
 
     async def test_max_retries_one_allows_single_retry(self):
@@ -469,7 +469,7 @@ class TestExecutorEdgeCases:
         proc.start()
         proc.enqueue(make_msg(offset=0))
 
-        await wait_for(lambda: proc.offset_tracker.last_committed is not None, timeout=5.0)
+        await wait_for(lambda: proc.offset_tracker.last_committed is not None)
         await proc.stop()
 
         # on_error called twice: once for initial failure, once for retry failure
@@ -497,7 +497,7 @@ class TestExecutorEdgeCases:
         for i in range(3):
             proc.enqueue(make_msg(offset=i))
 
-        await wait_for(lambda: len(committed) >= 1 and committed[-1][1] == 3, timeout=5.0)
+        await wait_for(lambda: len(committed) >= 1 and committed[-1][1] == 3)
         await proc.stop()
 
         # all 3 messages processed and committed
@@ -823,7 +823,7 @@ class TestProcessorCallbackModes:
 
         # Without on_commit, offsets go COMPLETED → acknowledged immediately,
         # so last_committed is the stable indicator
-        await wait_for(lambda: proc.offset_tracker.last_committed is not None, timeout=5.0)
+        await wait_for(lambda: proc.offset_tracker.last_committed is not None)
         await proc.stop()
 
     async def test_processor_with_collect_but_no_commit(self):
@@ -846,7 +846,7 @@ class TestProcessorCallbackModes:
         proc.start()
         proc.enqueue(make_msg(offset=0))
 
-        await wait_for(lambda: len(collected) > 0, timeout=5.0)
+        await wait_for(lambda: len(collected) > 0)
         await proc.stop()
 
         assert len(collected) >= 1

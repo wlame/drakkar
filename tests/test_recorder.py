@@ -3270,7 +3270,7 @@ async def test_deferred_sweep_broadcasts_expired_starts(tmp_path):
     rec.record_task_started(make_task('t-slow'), partition=0)
     assert sub.empty(), 'the start event must not be sent before the threshold'
 
-    await wait_for(lambda: not sub.empty(), timeout=2.0)
+    await wait_for(lambda: not sub.empty())
     event = sub.get_nowait()
     assert event['event'] == 'task_started'
     assert event['task_id'] == 't-slow'
@@ -3287,9 +3287,9 @@ async def test_deferred_sweep_rearms_only_while_entries_remain(tmp_path):
     await rec.start()
 
     rec.record_task_started(make_task('t-1'), partition=0)
-    await wait_for(lambda: not rec.fanout.deferred, timeout=2.0)
+    await wait_for(lambda: not rec.fanout.deferred)
     # The sweep that drained the last entry must not re-arm itself.
-    await wait_for(lambda: rec.fanout.sweep_handle is None, timeout=2.0)
+    await wait_for(lambda: rec.fanout.sweep_handle is None)
 
     await rec.stop()
 
