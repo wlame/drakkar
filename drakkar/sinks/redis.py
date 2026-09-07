@@ -380,8 +380,10 @@ class RedisSink(BaseSink[RedisPayload]):
         """Build a command for every payload up front.
 
         On the first bad payload returns the commands built so far, the
-        failing index, and the error — the caller replays the legacy partial
-        side effects before raising it.
+        failing index, and the error — the caller replays those side
+        effects, in order, before raising it: a failing command on the way
+        takes precedence, exactly as a sequential per-payload loop would
+        hit it first.
         """
         commands: list[_Command] = []
         for i, payload in enumerate(payloads):

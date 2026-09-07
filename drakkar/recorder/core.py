@@ -1020,10 +1020,10 @@ class EventRecorder(EventWriter):
     async def _flush_loop(self) -> None:
         while self._running:
             await self._wait_until_flush_due()
-            # Per-iteration guard: an unexpected raise here used to end the
-            # task, so the recorder stopped persisting events for the rest
-            # of the process lifetime with nothing in the log. Cancellation
-            # must still propagate — that is how ``stop`` ends the loop.
+            # Per-iteration guard: an unexpected raise here would end the
+            # task, silently stopping the recorder from persisting events
+            # for the rest of the process lifetime. Cancellation must still
+            # propagate — that is how ``stop`` ends the loop.
             try:
                 await self._flush()
             except asyncio.CancelledError:
@@ -1040,14 +1040,13 @@ class EventRecorder(EventWriter):
     async def _flush(self) -> None:
         """Write the buffered events to the ``events`` table, in chunks.
 
-        Chunking is what keeps the flush off the loop's critical path. The
-        whole buffer used to be turned into row tuples in one comprehension:
-        at the target workload a 5 s interval holds tens of thousands of
-        events, each costing one ``dict.get`` per column, so the loop stalled
-        for tens of milliseconds every flush and runtime health reported it
-        as lag. Rows are now built one ``FLUSH_CHUNK_ROWS`` slice at a time,
-        and the ``await`` on each chunk's write hands the loop back in
-        between.
+        Chunking is what keeps the flush off the loop's critical path.
+        Turning the whole buffer into row tuples in one comprehension would
+        stall the loop: at the target workload a 5 s interval holds tens of
+        thousands of events, each costing one ``dict.get`` per column, long
+        enough for runtime health to report it as lag. Rows are built one
+        ``FLUSH_CHUNK_ROWS`` slice at a time instead, and the ``await`` on
+        each chunk's write hands the loop back in between.
 
         The chunk is also the unit of loss. A chunk that still fails after
         ``max_flush_retries`` is dropped; before chunking that was the entire
@@ -1328,8 +1327,8 @@ class EventRecorder(EventWriter):
         new_path = make_db_path(self._store.db_dir, self._worker_name)
         # Same ordering contract as ``start``: owner-only before the driver
         # opens the file, so the rotated DB's sidecars are created
-        # owner-only too. Rotation previously skipped this entirely, so
-        # every post-rotation file was world-readable.
+        # owner-only too. Skipping this step here would leave every
+        # post-rotation file world-readable.
         secure_db_file(new_path)
         new_db = await aiosqlite.connect(new_path)
         try:

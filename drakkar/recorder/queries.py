@@ -132,8 +132,8 @@ class EventQueries:
 
         Reads use the dedicated reader connection so they don't serialize
         behind buffered-event flushes on the writer; the recorder falls
-        back to the writer when no reader is available (e.g. legacy tests
-        that set ``_db`` only).
+        back to the writer when no reader is available (e.g. tests that
+        construct the recorder with only ``_db`` set).
         """
         return self._ctx.reader()
 
@@ -153,8 +153,8 @@ class EventQueries:
     ) -> list[dict]:
         # Reads go through the dedicated reader connection so they don't
         # serialize behind buffered-event flushes on the writer; fall back
-        # to the writer when the reader isn't available (e.g. legacy tests
-        # that set ``_db`` only).
+        # to the writer when the reader isn't available (e.g. tests that
+        # construct the recorder with only ``_db`` set).
         reader = self._readable()
         if reader is None:
             return []

@@ -83,9 +83,9 @@ DEFAULT_STOP_TIMEOUT = 10.0
 # no workload-dependent right answer.
 FANOUT_CHUNK_TASKS = 256
 
-# Offset-commit coalescing. A commit is a broker round trip, and it used to
-# happen once per finished message: with a low-fan-out handler that makes the
-# commit rate the bottleneck, and completions queue behind the partition's
+# Offset-commit coalescing. A commit is a broker round trip; committing once
+# per finished message turns the commit rate into the bottleneck under a
+# low-fan-out handler, with completions queuing behind the partition's
 # commit lock waiting for it. Deferring is always safe for at-least-once —
 # it can only make the worker redo work after a crash, never skip it — so
 # the watermark, the tracker and the ordering guarantees are untouched;
@@ -569,8 +569,8 @@ class PartitionProcessor:
             # out and its tasks were cancelled, so their offsets stay pending
             # by design (nothing settles a cancelled task's tracker) and this
             # condition would never clear — the loop would spin until the
-            # caller force-cancelled it, which is exactly the ten seconds
-            # every ``stop()`` used to pay after a revoke.
+            # caller force-cancelled it, costing the full ``stop()`` timeout
+            # on every revoke.
             while not self._deliveries_suppressed and (self._inflight_count > 0 or self._has_drainable_pending()):
                 await asyncio.sleep(DRAIN_POLL_INTERVAL)
 
@@ -584,9 +584,9 @@ class PartitionProcessor:
             await log.ainfo('partition_processor_cancelled')
             raise
         # No generic ``except Exception`` here: _supervise owns crash
-        # handling. Swallowing it at this level is what used to make a
-        # dead loop invisible — the task completed successfully, so
-        # nothing restarted it and nothing reported it.
+        # handling. Swallowing it at this level would make a dead loop
+        # invisible — the task would complete successfully, so nothing
+        # would restart it and nothing would report it.
 
     async def _supervise(self) -> None:
         """Run the processing loop, restarting it once if it dies unexpectedly.
@@ -789,15 +789,16 @@ class PartitionProcessor:
 
         # Fan out in chunks, handing the loop back between them.
         #
-        # There used to be no await in this loop, and asyncio runs every ready
-        # handle before it polls I/O again — so creating N tasks also ran the
-        # first step of all N coroutines back to back: the context binds, the
-        # metric lookups, the priority computation and the gate's heap push.
-        # Measured at ~9 µs per task, which is a tenth of a second for a
-        # 10 000-task window and close to a second for 100 000, during which
-        # the worker does nothing else: no Kafka poll, no sink delivery, no UI
-        # frame, no health sample. A window's task count is bounded only by
-        # what the handler returns, so the stall grew with the message shape.
+        # Without a periodic yield here, asyncio runs every ready handle
+        # before it polls I/O again — so creating N tasks back to back also
+        # runs the first step of all N coroutines together: the context
+        # binds, the metric lookups, the priority computation and the gate's
+        # heap push. Measured at ~9 µs per task, that is a tenth of a second
+        # for a 10 000-task window and close to a second for 100 000, during
+        # which the worker does nothing else: no Kafka poll, no sink
+        # delivery, no UI frame, no health sample. A window's task count is
+        # bounded only by what the handler returns, so the stall scales with
+        # the message shape.
         #
         # Registration rides in the same chunk: a dict insert is cheap, but
         # 100 000 of them in one turn is not.

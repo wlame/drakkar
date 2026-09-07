@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Code comments no longer narrate implementation history.** Roughly 50
+  comments and docstrings across the pipeline core, sinks, cache, recorder
+  and UI server that referenced a prior implementation or a fixed bug now
+  state the current behavior and its rationale instead. `CONTRIBUTING.md`
+  gains a Comment style section, and `AGENTS.md`'s Mongo invariant drops
+  its reference to a retired workaround. No behavior changed.
+
 ## [2.2.0] - 2026-09-05
 
 ### Changed

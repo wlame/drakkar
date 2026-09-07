@@ -394,8 +394,8 @@ class DebugSinkCollector:
     When set, the flattener uses the topic as the ``destination``
     field — the UI then renders a correct Kafka-UI deep-link for that
     topic. When the map is empty, the destination falls back to the
-    sink instance name (old behaviour), so tests that don't wire a
-    config mapping still work.
+    sink instance name, so tests that don't wire a config mapping still
+    work.
     """
 
     def __init__(self, *, kafka_sink_topics: dict[str, str] | None = None) -> None:
@@ -436,10 +436,10 @@ class DebugSinkCollector:
             # Kafka payloads — destination is the real topic when we can
             # resolve the sink instance through the runner's config
             # mapping. Falling back to the sink instance name preserves
-            # behaviour for tests that don't wire a mapping. Putting the
-            # real topic in ``destination`` fixes the UI Kafka-UI deep-
-            # link (previously it was using the sink instance NAME as
-            # the topic, producing broken links).
+            # behaviour for tests that don't wire a mapping. The real
+            # topic in ``destination`` is what makes the UI's Kafka-UI
+            # deep-link correct; the sink instance name alone is not a
+            # valid topic to seek against.
             for kp in cr.kafka:
                 sink_name = kp.sink or ''
                 topic = self._kafka_sink_topics.get(sink_name)

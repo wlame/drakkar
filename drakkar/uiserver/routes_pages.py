@@ -12,10 +12,10 @@ Routes:
   * ``/api/v1/workers``             — peer-worker discovery JSON.
   * ``/api/v1/debug/processors``    — partition-processor diagnostics JSON.
 
-The server-rendered pages this module used to hold (``/``, ``/partitions``,
-``/history``, ``/sinks``) and the unprefixed ``/api/*`` aliases they called
-were removed in v1.19: the UI is one versioned drakkar-ui bundle, served by
-``routes_spa``, and every JSON endpoint lives under ``/api/v1``.
+This module serves JSON only. The pages themselves come from the
+versioned drakkar-ui bundle via ``routes_spa``; every JSON endpoint here
+lives under ``/api/v1``, with no unprefixed ``/api/*`` alias and no
+server-rendered page.
 
 The factory ``create_pages_router(deps)`` returns two leaf ``APIRouter``s
 (public probes/WS + auth-gated everything else) that the server module
@@ -305,8 +305,8 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
         summary.sort(key=lambda s: s['partition'])
         return summary
 
-    # v1-only contract endpoint (no legacy alias): the partitions table as
-    # JSON for the static SPA. ``[]`` when nothing has been recorded.
+    # Served only under /api/v1, no unprefixed alias: the partitions table
+    # as JSON for the static SPA. ``[]`` when nothing has been recorded.
     @router.get('/api/v1/partitions')
     async def api_partitions():
         """Per-partition summary rows as JSON, sorted by partition."""
@@ -330,8 +330,9 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
         detail['binary_path'] = drakkar_app._config.executor.binary_path
         return detail
 
-    # v1-only contract endpoint (no legacy alias): one task's full lifecycle
-    # as JSON for the static SPA. stdout/stderr live inside the event rows.
+    # Served only under /api/v1, no unprefixed alias: one task's full
+    # lifecycle as JSON for the static SPA. stdout/stderr live inside the
+    # event rows.
     @router.get('/api/v1/task/{task_id}')
     async def api_task_detail(task_id: str):
         """Single-task detail as JSON; ``:r…`` retry suffixes resolve to the base task."""
@@ -382,10 +383,10 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
             payload['links'] = links
         return JSONResponse(payload)
 
-    # v1-only contract endpoint (no legacy alias): worker identity + the
-    # one-line config summary for the SPA's debug-page banner. v1.2 adds
-    # the backend flavor/version and the served drakkar-ui bundle so the
-    # SPA header popover can show the full version picture.
+    # Served only under /api/v1, no unprefixed alias: worker identity plus
+    # the one-line config summary for the SPA's debug-page banner, the
+    # backend flavor/version, and the served drakkar-ui bundle, so the SPA
+    # header popover can show the full version picture.
     @router.get('/api/v1/identity')
     async def api_identity():
         """Worker identity: id, cluster, config summary, and versions."""

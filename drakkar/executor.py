@@ -283,8 +283,8 @@ class ExecutorPool:
         self._inherit_parent_env = inherit_parent_env
         # Patterns are compared case-insensitively against env var names.
         self._inherit_deny_patterns = list(inherit_deny_patterns or [])
-        # Upper-cased once at construction: the matcher previously re-cased
-        # every (constant) pattern for every env var, for every task.
+        # Upper-cased once at construction, rather than re-casing every
+        # (constant) pattern for every env var on every task.
         self._denied_patterns_upper = [p.upper() for p in self._inherit_deny_patterns]
         # Filled on first use by _filtered_parent_env(); see its docstring.
         self._filtered_parent_env_cache: dict[str, str] | None = None
@@ -545,11 +545,11 @@ class ExecutorPool:
         """The parent environment minus deny-listed names, computed once.
 
         The result depends only on ``os.environ`` and the deny patterns, and
-        neither changes once the worker is running — but it used to be
-        recomputed for every task, at roughly 80us of event-loop time each on
-        a typical environment. That cost is unavoidable by configuration: the
-        "inherit verbatim" fast path above needs an EMPTY deny list, and the
-        default ships several patterns, so real deployments never reach it.
+        neither changes once the worker is running. Recomputing it for every
+        task would cost roughly 80us of event-loop time each on a typical
+        environment — the "inherit verbatim" fast path above needs an EMPTY
+        deny list, and the default ships several patterns, so real
+        deployments never reach it.
 
         Computed lazily on first use rather than in ``__init__`` so variables
         set by startup hooks are still picked up. The consequence is that
@@ -699,7 +699,7 @@ class ExecutorPool:
             # After `communicate()` returns normally the process has exited and
             # returncode is set. If it isn't (unexpected), treat the task as
             # failed rather than silently masking None as success with `or 0` —
-            # that pattern previously let abnormal terminations look like exit
+            # that pattern would let an abnormal termination look like exit
             # code 0 and advance offset commits past a broken task.
             exit_code = proc.returncode if proc.returncode is not None else -1
             result = ExecutorResult(

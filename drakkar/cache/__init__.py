@@ -20,11 +20,11 @@ imports below to the appropriate sibling module.
 
 from __future__ import annotations
 
-# Re-exported for backward compatibility — tests historically reach through
-# ``cache_module.aiosqlite`` to patch ``aiosqlite.connect`` on the shared
-# module object. Keeping the import here means those patches still take
-# effect against ``drakkar.cache.engine`` (both modules reference the same
-# aiosqlite module object).
+# Re-exported for backward compatibility: tests patch ``aiosqlite.connect``
+# via ``cache_module.aiosqlite`` on the shared module object, so keeping the
+# import here means those patches take effect against
+# ``drakkar.cache.engine`` too (both modules reference the same aiosqlite
+# module object).
 import aiosqlite  # noqa: F401
 import structlog
 

@@ -93,9 +93,10 @@ parametrize).
      positionally. No replay — it would double-apply INCRBY/LPUSH.
    - Mongo sends one ordered `bulk_write` per collection run;
      `writeErrors[*].index` names the failing payload. No replay — PyMongo
-     writes generated `_id`s back into documents, so a replay raises
-     duplicate-key on an innocent document (this retired an `_id`-stripping
-     workaround; do not reintroduce either half).
+     writes generated `_id`s back into documents, so re-sending one raises
+     duplicate-key on an innocent document. Do not add a per-document retry
+     or an `_id`-stripping workaround to route around that; both reintroduce
+     the hazard this avoids.
    - The Kafka sink and the DLQ sink keep their per-write `flush()` — the
      producer buffers up to 1s, so dropping it stalls every delivery. Both
      also check the delivery report: a failed delivery arrives in

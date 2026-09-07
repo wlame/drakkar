@@ -128,10 +128,9 @@ def _group_into_runs[UnitT: _HasGroupKey](units: list[UnitT]) -> list[list[UnitT
     execution order equals payload order. Global bucketing would be a
     slightly better batcher but reorders: payloads ``A(shape1), B(shape2),
     C(shape1)`` would execute as A, C, B, deferring B past C. That is
-    harmless for INSERT — and is what this sink used to do — but for UPDATE
-    it silently loses a write when two payloads target the same row.
-    Restricting to runs also avoids reordering across ops, which mixing the
-    two rules would reintroduce.
+    harmless for INSERT alone, but for UPDATE it silently loses a write
+    when two payloads target the same row. Restricting to runs also avoids
+    reordering across ops, which mixing the two rules would reintroduce.
 
     Handlers overwhelmingly emit uniform payload lists, so runs are long in
     practice and the batching cost is small.
@@ -412,10 +411,10 @@ class PostgresSink(BaseSink[PostgresPayload]):
                 # statement-level transient). Safe only because a multi-row
                 # INSERT is atomic: the failed batch wrote nothing.
                 #
-                # Report it. The fallback keeps delivery correct but costs
-                # one round trip per payload, and it used to be silent — a
-                # run that degraded from one statement to hundreds looked
-                # exactly like a healthy one.
+                # Report it: the fallback keeps delivery correct but costs
+                # one round trip per payload, and without this warning it is
+                # silent — a run that degrades from one statement to
+                # hundreds looks exactly like a healthy one.
                 sink_batch_fallbacks.labels(sink_type=self.sink_type, sink_name=self._name).inc()
                 await logger.awarning(
                     'sink_batch_fallback_per_row',

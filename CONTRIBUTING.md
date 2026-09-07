@@ -78,6 +78,36 @@ any specific downstream application or its domain vocabulary. Describe
 motivations generically ("processes that emit very large output", not a
 named system).
 
+## Comment style
+
+A comment describes the code as it stands — what it does and why — not the
+history that produced it. State the current behavior and its rationale:
+the invariant it protects, the failure it avoids, the trade-off it makes.
+Don't narrate what an earlier version did, name a bug a change fixed, or
+say something "used to" work differently — a reader six months from now
+has no earlier version to compare against, only the code in front of them.
+
+    CORRECT:   Deferring the commit is always safe for at-least-once — it
+               can only make the worker redo work after a crash, never
+               skip it.
+    INCORRECT: This used to commit once per message, which made the commit
+               rate the bottleneck, so we changed it to coalesce.
+
+    CORRECT:   Nothing is ever replayed, deliberately: PyMongo writes a
+               generated `_id` back into every document it is handed, so
+               re-sending one raises duplicate-key on an innocent document.
+    INCORRECT: This retired the old `_id`-stripping workaround from the
+               1.3.0 fix; do not bring either half back.
+
+A rejected alternative is worth keeping if it explains the current design —
+frame it as what that alternative would cost or break, not as what the code
+used to do before this one replaced it. A genuinely open question — a
+trade-off worth revisiting under different constraints, or a natural
+extension not yet built — belongs too, stated as a forward-looking note
+("deliberately left out for now") rather than a status update on a past
+decision. `git log` and `CHANGELOG.md` are where the "what changed and
+when" story belongs; a comment only has to be true today.
+
 ## Orientation
 
 `AGENTS.md` is the condensed map: the mental model, the numbered

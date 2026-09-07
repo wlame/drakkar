@@ -1110,12 +1110,12 @@ class CacheEngine:
         )
         drained: list[tuple] = []
         cursor_key = last_key
-        # One connection for the whole drain — each iteration used to open
-        # and close its own ``aiosqlite.connect`` with the aiosqlite-spawned
-        # worker-thread overhead that implies. Hoisting the connection keeps
-        # the drain on a single worker thread end-to-end; the ``key > ?``
-        # cursor still guarantees forward progress and distinct pages per
-        # iteration.
+        # One connection for the whole drain, rather than one per iteration:
+        # opening and closing ``aiosqlite.connect`` per page would add the
+        # aiosqlite-spawned worker-thread overhead each time. Hoisting the
+        # connection keeps the drain on a single worker thread end-to-end;
+        # the ``key > ?`` cursor still guarantees forward progress and
+        # distinct pages per iteration.
         timeout = self._config.peer_sync.timeout_seconds
         async with _peer_reader(peer_db_path) as db:
             while True:

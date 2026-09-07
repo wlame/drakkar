@@ -122,12 +122,12 @@ class KafkaSink(BaseSink[KafkaPayload]):
                 )
                 futures.append(f)
 
-            # The flush stays. Unlike the postgres/mongo/redis sinks — which
-            # used to make one round-trip PER PAYLOAD and are now batched —
-            # this sink already sends the whole batch with a single flush;
-            # there is no per-payload round-trip to remove. Dropping it in
-            # favour of awaiting the futures alone would be a regression,
-            # not an optimisation: AIOProducer buffers internally and only
+            # The flush stays. Unlike the postgres/mongo/redis sinks, which
+            # batch multiple payloads into one round trip, this sink already
+            # sends the whole batch with a single flush; there is no
+            # per-payload round-trip to remove. Dropping the flush in favour
+            # of awaiting the futures alone would be wrong: AIOProducer
+            # buffers internally and only
             # hands messages to librdkafka once the buffer reaches
             # ``batch_size`` (default 1000) or its ``buffer_timeout``
             # (default 1.0s) expires. A Drakkar batch is normally far
@@ -166,7 +166,8 @@ class KafkaSink(BaseSink[KafkaPayload]):
                     f'(producer-wide queue: {remaining}, topic={self._config.topic!r}, sink={self._name!r})'
                 )
             # Every future is done; ``.result()`` re-raises a produce-side
-            # exception here exactly as the previous ``gather`` did.
+            # exception here, the same way an ``asyncio.gather`` over the
+            # futures would.
             results = [f.result() for f in futures]
             futures_collected = True
             for i, result in enumerate(results):

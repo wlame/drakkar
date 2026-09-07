@@ -2,12 +2,12 @@
 
 Why this exists
 ---------------
-``GET /api/v1/debug/databases`` used to open every ``.db`` file in ``db_dir``
-and run ``COUNT(*)`` / ``MIN`` / ``MAX`` / ``GROUP BY`` over its whole
-events table on every page load. With hourly rotation and a shared
-``db_dir`` that is dozens of full table scans per click — the page took
-seconds while producing information that, for rotated files, can never
-change again.
+Without a cache, ``GET /api/v1/debug/databases`` would open every ``.db``
+file in ``db_dir`` and run ``COUNT(*)`` / ``MIN`` / ``MAX`` / ``GROUP BY``
+over its whole events table on every page load. With hourly rotation and a
+shared ``db_dir`` that is dozens of full table scans per click — seconds
+of work producing information that, for rotated files, can never change
+again.
 
 The design leans on one fact and one requirement:
 
@@ -27,8 +27,8 @@ idempotent ``store``):
    right after the swap, so the most common new file is warm before
    anyone opens the page.
 2. **The warmer loop** — a periodic sweep scans whatever is missing
-   (legacy files at first boot, files rotated by co-located workers) and
-   purges cache rows whose files are gone.
+   (files present before the cache started tracking, files rotated by
+   co-located workers) and purges cache rows whose files are gone.
 3. **The endpoint itself** — a page request scans at most
    ``ui.recorder.dbstats_inline_scan_limit`` cold files inline; the rest
    render immediately as ``stats_pending`` rows and fill in as the warmer

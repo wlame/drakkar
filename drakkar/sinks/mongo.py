@@ -123,9 +123,9 @@ def _group_into_runs(units: list[_MongoUnit]) -> list[list[_MongoUnit]]:
     execution order equals payload order. Global bucketing would be a
     slightly better batcher but reorders: payloads ``A(c1), B(c2), C(c1)``
     would execute as A, C, B, deferring B past C. That is harmless for
-    inserts — and is what this sink used to do — but once updates and
-    deletes exist, an update to a document and a later delete of it must not
-    be reordered relative to each other.
+    inserts alone, but once updates and deletes exist, an update to a
+    document and a later delete of it must not be reordered relative to
+    each other.
 
     Handlers overwhelmingly emit uniform payload lists, so runs are long in
     practice and the batching cost is small. The Postgres sink groups the
@@ -417,8 +417,10 @@ class MongoSink(BaseSink[MongoPayload]):
         """Build the write for every payload up front.
 
         On the first bad payload returns the units built so far, the failing
-        index, and the error — the caller replays the legacy partial side
-        effects before raising it.
+        index, and the error — the caller replays those side effects, in
+        order, before raising it: a write failure on the way takes
+        precedence, exactly as a sequential per-payload loop would hit it
+        first.
         """
         units: list[_MongoUnit] = []
         for i, payload in enumerate(payloads):
@@ -437,14 +439,12 @@ class MongoSink(BaseSink[MongoPayload]):
         submitted — which is what names the offending payload EXACTLY,
         without re-sending anything.
 
-        Nothing is ever replayed. The previous fallback re-sent the run one
-        document at a time, which forced a workaround for PyMongo writing a
-        generated ``_id`` back into every document it was handed: a resent
-        document carrying that leftover id raised DuplicateKeyError on the
-        FIRST document rather than the guilty one, so the fallback stripped
-        the id and knowingly wrote duplicates. With no replay that whole
-        problem disappears — this is a strict improvement on the 1.3.0 fix,
-        not a regression of it.
+        Nothing is ever replayed, deliberately: PyMongo writes a generated
+        ``_id`` back into every document it is handed, so re-sending one
+        that already carries that id raises ``DuplicateKeyError`` on the
+        first document rather than the one that actually failed — and
+        stripping the id before a retry would let it duplicate silently.
+        Refusing to replay avoids the whole class of failure.
         """
         from pymongo.errors import BulkWriteError
 

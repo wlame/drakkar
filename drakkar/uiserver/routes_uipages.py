@@ -2,7 +2,8 @@
 
 Serves the handler's validated page declarations (see
 :mod:`drakkar.uipages`) verbatim — an empty list when the handler declares
-none. v1-only, no legacy unprefixed alias, same as ``routes_config_reference``.
+none. Served only under /api/v1, no unprefixed alias, same as
+``routes_config_reference``.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
 
 
 def create_uipages_router(deps: UIDeps) -> APIRouter:
-    """Build the router owning ``GET /api/v1/pages`` (v1-only, no legacy alias)."""
+    """Build the router owning ``GET /api/v1/pages`` (served only under /api/v1, no unprefixed alias)."""
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
 
     @router.get('/api/v1/pages')

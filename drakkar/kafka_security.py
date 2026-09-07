@@ -83,8 +83,8 @@ class KafkaSecurityConfig(BaseModel):
     """Authentication and encryption settings for one Kafka client.
 
     The default is ``PLAINTEXT`` with everything else empty, which emits no
-    librdkafka properties at all — an unconfigured worker connects exactly
-    as it did before this block existed.
+    librdkafka properties at all, so an unconfigured worker connects in
+    plain PLAINTEXT with nothing extra applied.
 
     Passwords are :class:`~pydantic.SecretStr`, so a stray ``repr()``,
     ``model_dump()``, or f-string renders ``**********`` instead of the

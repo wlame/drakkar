@@ -54,10 +54,9 @@ from drakkar.config import UIConfig
 from drakkar.recorder import EventRecorder
 from drakkar.uihost import ResolvedBundle
 
-# Re-import the helpers that used to live here so test imports and
-# patches like ``drakkar.uiserver.server.hook_flags`` keep working
-# without changes; ``noqa: F401`` keeps the re-exports visible without
-# tripping ruff's unused-import check.
+# Re-export the helpers here so test imports and patches like
+# ``drakkar.uiserver.server.hook_flags`` keep working; ``noqa: F401`` keeps
+# the re-exports visible without tripping ruff's unused-import check.
 from drakkar.uiserver.server_helpers import (
     hook_flags,  # noqa: F401  (re-exported for tests)
     origin_allowed,  # noqa: F401  (re-exported for tests)
@@ -103,8 +102,8 @@ MAX_BODY_BYTES = 10 * 1024 * 1024
 
 # A degraded recorder read repeats on every poll of every open page, so the
 # cause is logged at most once per interval per cause rather than per
-# request — enough for an operator to see WHY the UI is empty without the
-# log turning into the flood that made the previous silence tempting.
+# request — enough for an operator to see WHY the UI is empty without
+# flooding the log on a busy page.
 DEGRADED_READ_LOG_INTERVAL_SECONDS = 60.0
 _degraded_read_last_logged: dict[str, float] = {}
 
@@ -147,9 +146,7 @@ class UIDeps:
         # Identity v1.2: which drakkar-ui bundle this server serves — the
         # release tag, or ``None`` when no bundle could be resolved and the
         # server is running API-only. ``ui_source`` is ``'release'`` for a
-        # fetched or cached bundle and ``''`` when none is served; the
-        # retired ``'embedded'``/``'builtin'`` values went with the baked-in
-        # bundle and the server-rendered pages in 1.19.
+        # fetched or cached bundle and ``''`` when none is served.
         self.ui_version = ui_version
         self.ui_source = ui_source
 
@@ -363,8 +360,9 @@ class UIDeps:
     async def get_total_lag(self, partition_ids: list[int]) -> int:
         """Return summed lag across ``partition_ids`` (0 when unavailable).
 
-        Same bounding rationale as :meth:`get_lag`. Callers previously awaited
-        the consumer directly from the UI loop with no cap at all.
+        Same bounding rationale as :meth:`get_lag`: without a bound, awaiting
+        the consumer directly from the UI loop would have no cap on the
+        wait at all.
         """
         consumer = self.drakkar_app._consumer
         if not consumer or not partition_ids:

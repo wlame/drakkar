@@ -2,8 +2,8 @@
 
 Each function is pure (no module-level state, no contextvar reads) so it
 can be exercised in isolation without spinning up a runner. The runner
-imports these by name; tests historically import them directly from
-:mod:`drakkar.uiserver_runner` and that path is preserved via re-export.
+imports these by name; :mod:`drakkar.uiserver_runner` also re-exports them,
+so code importing from that path keeps working.
 """
 
 from __future__ import annotations

@@ -88,9 +88,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-# Seconds to sleep when Kafka poll returns no messages. Mirrors the
-# constant previously defined in ``drakkar.app`` and re-exported here
-# from a single location to keep the lifecycle self-contained.
+# Seconds to sleep when Kafka poll returns no messages. Defined once here,
+# next to the poll loop, so the lifecycle module is self-contained.
 POLL_IDLE_SLEEP = 0.05
 
 # Floor for the shares of a teardown deadline handed to a commit RPC or to
@@ -135,11 +134,10 @@ class AppLifecycle:
         makes lands. A handful of settings were already consumed while
         ``DrakkarApp`` was constructed — the sink manager, the handler's app
         config, the worker and cluster names — and changing those here
-        changes nothing. Rather than silently dropping such a change (the
-        old behaviour) or moving construction out of ``__init__``, the
-        ignored settings are named in one table
-        (``app.SETTINGS_CONSUMED_BEFORE_ON_STARTUP``) and reported at
-        warning level with what to do instead. ``docs/handler.md``
+        changes nothing. Rather than silently dropping such a change, or
+        moving construction out of ``__init__``, the ignored settings are
+        named in one table (``app.SETTINGS_CONSUMED_BEFORE_ON_STARTUP``) and
+        reported at warning level with what to do instead. ``docs/handler.md``
         documents the same boundary.
         """
         app = self._app
@@ -907,12 +905,12 @@ class AppLifecycle:
         rebalance thread waits here — which is what holds the rebalance
         open until our offsets are committed.
 
-        Returning early (the previous behaviour, which spawned detached
-        tasks) let the rebalance complete while this worker was still
-        draining: the new owner began consuming from the last committed
-        offset while in-flight work here was still producing sink
+        Returning early and finishing the drain on a detached background
+        task would let the rebalance complete while this worker is still
+        draining: the new owner would begin consuming from the last
+        committed offset while in-flight work here is still producing sink
         deliveries for the same messages, so every message between the
-        last commit and the drain end was delivered twice.
+        last commit and the drain end would be delivered twice.
 
         The wait is bounded, not open-ended: every ``_stop_processor`` runs
         against one ``executor.drain_timeout_seconds`` deadline that covers
@@ -927,8 +925,7 @@ class AppLifecycle:
         than leaving them running: their results are discarded anyway, and
         an uncancelled zombie holds an executor slot until
         ``task_timeout_seconds`` while it also keeps the processing loop
-        from exiting — which is what used to add a full stop timeout on top
-        of the drain.
+        from exiting, adding a full stop timeout on top of the drain.
 
         The handler's ``on_revoke`` hook stays on a background task — it is
         a user notification, not part of the commit contract, and a slow

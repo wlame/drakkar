@@ -793,12 +793,12 @@ class SinkManager:
                         'set dlq.on_send_failure=stall to prefer replay over loss',
                     )
             else:
-                # No DLQ sink wired. The handler is asked — and its answer is
-                # honoured. It used to be discarded, so SKIP, RETRY and DLQ
-                # all ended the same way: payloads dropped, offset committed,
-                # nothing counted and nothing but the generic circuit-open
-                # warning in the log. That is silent loss on the one path
-                # where the operator explicitly asked what to do.
+                # No DLQ sink wired. The handler is asked, and its answer is
+                # honoured — discarding it would make SKIP, RETRY and DLQ
+                # all end the same way: payloads dropped, offset committed,
+                # nothing counted beyond the generic circuit-open warning in
+                # the log. That would be silent loss on the one path where
+                # the operator explicitly asked what to do.
                 action = await on_delivery_error(error)
                 if action == DeliveryAction.SKIP:
                     # Operator intent: drop, but a counted and named drop —

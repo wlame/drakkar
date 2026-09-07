@@ -70,9 +70,8 @@ def secure_db_file(db_path: str) -> None:
     creates them, so tightening the main file first is what makes the
     sidecars owner-only too — and keeps them that way, because the sidecars
     are deleted on a clean close and re-created (again inheriting the main
-    file's mode) on the next write. Doing this *after* the pragma leaves
-    both sidecars at 0644 while the main file is 0600; that ordering was
-    the original bug.
+    file's mode) on the next write. Doing this *after* the pragma would
+    leave both sidecars at 0644 while the main file is 0600.
 
     Creating the file ourselves, rather than letting the driver create it
     0644 and chmod-ing afterwards, closes the window in which the DB is

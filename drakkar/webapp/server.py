@@ -621,11 +621,12 @@ class WebApp:
                 raise WebappError(status_code=401, body_dict={'error': 'unauthorized'})
             await rate_limit_dep(matched)
 
-        # The route signature uses the legacy ``Depends`` default-value
-        # form because the closure-bound dep callables are local
-        # variables at this scope — ``from __future__ import annotations``
-        # defers annotation evaluation, and FastAPI's ``Annotated[...]``
-        # resolver cannot find local names when it later evaluates the
+        # The route signature uses ``Depends``'s default-value form
+        # (rather than ``Annotated[..., Depends(...)]``) because the
+        # closure-bound dep callables are local variables at this scope —
+        # ``from __future__ import annotations`` defers annotation
+        # evaluation, and FastAPI's ``Annotated[...]`` resolver cannot find
+        # local names when it later evaluates the
         # strings. The default-value form sidesteps that.
         #
         # We type ``client`` as ``Any`` (not ``WebClientConfig``) for

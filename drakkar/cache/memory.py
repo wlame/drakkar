@@ -518,11 +518,11 @@ class Cache:
         reaches here acquires it first.
 
         This helper is the single source of truth for the "pop + bytes-sum
-        deduct" pair; five paths in this class used to inline the sequence,
-        diverging subtly over time (missing size tracking, missing gauge
-        refresh, etc.). Funneling through one helper keeps the invariant
-        that ``_bytes_sum == sum(entry.size_bytes for entry in _memory)``
-        after every mutation.
+        deduct" pair, so every eviction path stays consistent — inlining
+        the sequence at each call site risks one path missing the size
+        tracking or the gauge refresh. Funneling through one helper keeps
+        the invariant that ``_bytes_sum == sum(entry.size_bytes for entry
+        in _memory)`` after every mutation.
         """
         entry = self._memory.pop(key, None)
         if entry is not None:
@@ -571,10 +571,9 @@ class Cache:
         """Atomically swap ``_dirty`` for a fresh empty dict and return the
         old contents.
 
-        Taken under the cache lock: a bare reference swap used to be
-        enough (single opcode under the GIL), but with ``handler.offload()``
-        a pool thread can be mid-``set`` — already inside its locked
-        compound section — and the swap must not interleave with it. The
+        Taken under the cache lock: ``handler.offload()`` runs pool
+        threads that can be mid-``set`` — already inside their locked
+        compound section — so the swap must not interleave with one. The
         lock makes the swap see either all of a concurrent set's effects
         or none. A ``set`` / ``delete`` landing after the swap writes into
         the new empty dict and is picked up by the next flush cycle.

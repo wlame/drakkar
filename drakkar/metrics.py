@@ -96,7 +96,7 @@ executor_tasks = Counter(
 )
 
 # Sub-second buckets down to 10ms: production tasks commonly run 20-700ms,
-# and the old 100ms floor collapsed p50 into one bucket, making
+# and a coarser floor collapses p50 into one bucket, making
 # histogram_quantile useless exactly where most tasks live.
 executor_duration = Histogram(
     'drakkar_executor_duration_seconds',
@@ -378,9 +378,10 @@ sink_payloads_delivered = Counter(
 )
 
 # A batched statement that failed and was re-run one payload at a time. The
-# fallback is correct (the failed batch wrote nothing) but far slower, and it
-# used to be invisible: delivery kept succeeding, so a run silently degraded
-# from one statement to hundreds with nothing in the log or on a dashboard.
+# fallback is correct (the failed batch wrote nothing) but far slower, and
+# without this counter it is invisible: delivery keeps succeeding, so a run
+# can silently degrade from one statement to hundreds with nothing in the
+# log or on a dashboard.
 sink_batch_fallbacks = Counter(
     'drakkar_sink_batch_fallbacks_total',
     'Batched sink statements that failed and were retried one payload at a time',
@@ -755,7 +756,8 @@ recorder_flush_batches_dropped = Counter(
     ),
 )
 
-# Requeue-overflow observability — surfaces a previously silent data-loss path.
+# Requeue-overflow observability — surfaces a data-loss path that would
+# otherwise stay silent.
 #
 # When ``_flush`` catches an ``OperationalError`` it re-queues the failed
 # batch at the FRONT of the bounded ``deque(maxlen=max_buffer)`` via

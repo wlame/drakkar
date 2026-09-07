@@ -154,10 +154,9 @@ def _mask_env_dict(values: Any) -> Any:
 
     Delegating to :func:`sanitize_env_value` is the point. The recorder
     already sanitizes the SAME ``executor.env`` by key name before storing
-    it (``recorder/core.py``), so the two surfaces used to disagree about
-    what counts as a secret. Now one function decides for both: redact
-    fully on a secret-looking key name, otherwise strip credentials out of
-    URL-shaped values.
+    it (``recorder/core.py``), and one function decides what counts as a
+    secret for both surfaces: redact fully on a secret-looking key name,
+    otherwise strip credentials out of URL-shaped values.
     """
     if not isinstance(values, dict):
         return values
@@ -292,7 +291,7 @@ def build_app_config_group(instance: BaseModel, env_prefix: str) -> ConfigRefere
 
 
 def create_config_reference_router(deps: UIDeps) -> APIRouter:
-    """Build the router owning ``GET /api/v1/config-reference`` (v1-only, no legacy alias)."""
+    """Build the router owning ``GET /api/v1/config-reference`` (served only under /api/v1, no unprefixed alias)."""
     router = APIRouter(dependencies=[Depends(deps.require_auth)])
 
     @router.get('/api/v1/config-reference')

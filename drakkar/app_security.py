@@ -79,8 +79,8 @@ def warn_if_ui_unauthenticated(config: DrakkarConfig) -> None:
 
     What it does **not** make the UI is read-only. Two endpoints have real
     side effects (see :data:`SIDE_EFFECTING_ENDPOINTS`), so the warning
-    names whichever of them is still enabled rather than claiming, as it
-    used to, that no endpoint can affect the worker.
+    names whichever of them is still enabled rather than making the blanket
+    claim that no endpoint can affect the worker.
 
     The warning fires once at startup whenever ``ui.enabled`` is True and
     ``ui.auth_token`` is empty (the field validator on ``UIConfig``
