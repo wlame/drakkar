@@ -92,6 +92,7 @@ from drakkar.webapp.models import (
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
+    from drakkar.executor import ExecutorPool
 
 logger = structlog.get_logger()
 
@@ -312,21 +313,15 @@ class WebappRunner:
         # terminal on its first attempt.
         successful_results: list[ExecutorResult] = []
         group_errors: list[ExecutorError] = []
-        for task, outcome in zip(tasks, results, strict=True):
+        for outcome in results:
             if isinstance(outcome, ExecutorResult):
                 successful_results.append(outcome)
-            elif isinstance(outcome, ExecutorTaskError):
-                group_errors.append(outcome.error)
+            elif isinstance(outcome, ExecutorError):
+                group_errors.append(outcome)
             elif isinstance(outcome, asyncio.CancelledError):
                 # Shutdown/cancellation must never masquerade as a task
                 # failure — abort the request, like the cancellation gates.
                 raise outcome
-            elif isinstance(outcome, Exception):
-                # Unexpected (non-executor) failure: keep it visible in the
-                # group rather than reducing it to a bare count.
-                group_errors.append(
-                    ExecutorError(task=task, kind='internal', exception=f'{type(outcome).__name__}: {outcome}')
-                )
             else:
                 # Any other BaseException (KeyboardInterrupt, SystemExit):
                 # never convert interpreter-level signals into task errors.
@@ -536,11 +531,63 @@ class WebappRunner:
                 'executor pool is not initialised; webapp.run cannot submit tasks before AppLifecycle starts the pool'
             )
         pool = self._app._executor_pool
+        coros = [self._execute_and_record(pool, task) for task in tasks]
+        return await asyncio.gather(*coros, return_exceptions=True)
+
+    async def _execute_and_record(self, pool: ExecutorPool, task: ExecutorTask) -> ExecutorResult | ExecutorError:
+        """Run one task and record its terminal event as soon as it ends.
+
+        The pool records only ``task_started``; the terminal
+        ``task_completed`` / ``task_failed`` row is the caller's job (the
+        Kafka path writes it in the partition processor). Recording here,
+        per task rather than after the gather, keeps each timeline bar
+        ending when its own subprocess ended.
+
+        Returns the result on success, or the ``ExecutorError`` for a
+        terminal failure. Cancellation propagates unrecorded, as on the
+        Kafka path.
+        """
+        recorder = self._app._recorder
+        # A precomputed task never enters the pool; the pool records both
+        # its events itself, so a second terminal row here would duplicate it.
+        records_outcome = recorder is not None and task.precomputed is None
         # ``partition_id=-1`` matches the synthetic SourceMessage.partition
         # so recorder rows for HTTP-origin tasks all key on -1. The
         # recorder treats partition_id as opaque.
-        coros = [pool.execute(task, self._app._recorder, partition_id=-1) for task in tasks]
-        return await asyncio.gather(*coros, return_exceptions=True)
+        try:
+            result = await pool.execute(task, recorder, partition_id=-1)
+        except ExecutorTaskError as exc:
+            if records_outcome:
+                recorder.record_task_failed(
+                    task,
+                    exc.error,
+                    -1,
+                    pool_active=pool.active_count,
+                    pool_waiting=pool.waiting_count,
+                    duration_seconds=exc.result.duration_seconds,
+                )
+            return exc.error
+        except Exception as exc:
+            # Unexpected (non-executor) failure: keep it visible in the
+            # group as an internal error rather than reducing it to a count.
+            error = ExecutorError(task=task, kind='internal', exception=f'{type(exc).__name__}: {exc}')
+            if records_outcome:
+                recorder.record_task_failed(
+                    task,
+                    error,
+                    -1,
+                    pool_active=pool.active_count,
+                    pool_waiting=pool.waiting_count,
+                )
+            return error
+        if records_outcome:
+            recorder.record_task_completed(
+                result,
+                -1,
+                pool_active=pool.active_count,
+                pool_waiting=pool.waiting_count,
+            )
+        return result
 
     @staticmethod
     def _task_report(result: ExecutorResult) -> TaskReport:

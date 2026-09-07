@@ -42,6 +42,7 @@ from drakkar.models import (
     ExecutorResult,
     ExecutorTask,
     PendingContext,
+    PrecomputedResult,
     make_task_id,
 )
 from drakkar.webapp import WebApp
@@ -477,6 +478,74 @@ async def test_runner_synthesizes_executor_error_for_unexpected_exception():
     assert group.errors[0].exception == 'RuntimeError: boom'
     assert group.errors[0].exit_code is None
     assert group.errors[0].kind == 'internal'
+
+
+@pytest.mark.asyncio
+async def test_runner_records_terminal_event_for_every_executed_task():
+    """Each started task gets its task_completed / task_failed event —
+    the pool records only task_started, so without these the live
+    Timeline shows HTTP-origin tasks as running forever."""
+    handler = _RecordingHandler()
+    task_ok = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
+    task_exit = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
+    task_boom = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
+
+    async def arrange_impl(req, pending):
+        return [task_ok, task_exit, task_boom]
+
+    handler.arrange_http_request_impl = arrange_impl
+    ok_result = _make_canned_result(task_ok)
+    exit_error = ExecutorError(task=task_exit, exit_code=2, stderr='exploded')
+    pool = _make_pool_returning(
+        [
+            ok_result,
+            ExecutorTaskError(error=exit_error, result=_make_canned_result(task_exit, exit_code=2, duration=0.3)),
+            RuntimeError('boom'),
+        ]
+    )
+    recorder = MagicMock()
+    runner = WebappRunner(_make_stub_app(handler, pool=pool, recorder=recorder), _make_config())
+
+    await runner.run(_make_ctx())
+
+    recorder.record_task_completed.assert_called_once()
+    completed_args = recorder.record_task_completed.call_args
+    assert completed_args.args == (ok_result, -1)
+
+    failed_by_task = {c.args[0].task_id: c for c in recorder.record_task_failed.call_args_list}
+    assert set(failed_by_task) == {task_exit.task_id, task_boom.task_id}
+    exit_call = failed_by_task[task_exit.task_id]
+    assert exit_call.args[1] is exit_error
+    assert exit_call.args[2] == -1
+    assert exit_call.kwargs['duration_seconds'] == 0.3
+    boom_call = failed_by_task[task_boom.task_id]
+    assert boom_call.args[1].kind == 'internal'
+    assert boom_call.args[1].exception == 'RuntimeError: boom'
+
+
+@pytest.mark.asyncio
+async def test_runner_does_not_rerecord_precomputed_task_outcome():
+    """The pool records both events for a precomputed task itself; the
+    runner must not add a second completion row for it."""
+    handler = _RecordingHandler()
+    task = ExecutorTask(
+        task_id=make_task_id('t'),
+        source_offsets=[1],
+        precomputed=PrecomputedResult(stdout='cached'),
+    )
+
+    async def arrange_impl(req, pending):
+        return [task]
+
+    handler.arrange_http_request_impl = arrange_impl
+    pool = _make_pool_returning([_make_canned_result(task)])
+    recorder = MagicMock()
+    runner = WebappRunner(_make_stub_app(handler, pool=pool, recorder=recorder), _make_config())
+
+    await runner.run(_make_ctx())
+
+    recorder.record_task_completed.assert_not_called()
+    recorder.record_task_failed.assert_not_called()
 
 
 @pytest.mark.asyncio

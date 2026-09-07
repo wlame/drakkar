@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Webapp tasks now end on the live Timeline.** HTTP-started tasks now
+  record `task_completed` or `task_failed`, like Kafka tasks.
+
 ### Changed
 
 - **Code comments no longer narrate implementation history.** Roughly 50
