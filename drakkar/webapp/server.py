@@ -88,6 +88,7 @@ from pydantic import ValidationError
 
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.config import WebAppConfig
+from drakkar.loopserver import LoopLoggingServer
 from drakkar.metrics import (
     webapp_request_duration,
     webapp_requests,
@@ -224,7 +225,7 @@ class WebApp:
         # here so ``stop`` can signal the running server and join the
         # thread without re-discovering them.
         self._thread: threading.Thread | None = None
-        self._uvicorn_server: uvicorn.Server | None = None
+        self._uvicorn_server: LoopLoggingServer | None = None
         # The webapp's inner asyncio loop, captured by the FastAPI lifespan
         # hook running on T2. ``None`` until the thread enters the lifespan
         # startup phase. The route handler dispatches back to T1 from this
@@ -320,7 +321,7 @@ class WebApp:
             timeout_keep_alive=KEEP_ALIVE_TIMEOUT_SECONDS,
             h11_max_incomplete_event_size=MAX_HEADER_BYTES,
         )
-        self._uvicorn_server = uvicorn.Server(uvi_config)
+        self._uvicorn_server = LoopLoggingServer(uvi_config, server_name='webapp')
         self._thread = threading.Thread(
             target=self._uvicorn_server.run,
             name='drakkar-webapp',

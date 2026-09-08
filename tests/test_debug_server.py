@@ -2728,7 +2728,7 @@ class TestUIServerClass:
         fake_uvicorn.run = MagicMock()
 
         with (
-            patch('drakkar.uiserver.server.uvicorn.Server', return_value=fake_uvicorn) as mock_uvi_server,
+            patch('drakkar.uiserver.server.LoopLoggingServer', return_value=fake_uvicorn) as mock_uvi_server,
             patch('drakkar.uiserver.server.uvicorn.Config') as mock_uvi_config,
             patch('drakkar.uiserver.server.logger') as mock_logger,
         ):
@@ -2790,7 +2790,7 @@ class TestUIServerClass:
         fake_uvicorn.run = lambda: None
 
         with (
-            patch('drakkar.uiserver.server.uvicorn.Server', return_value=fake_uvicorn),
+            patch('drakkar.uiserver.server.LoopLoggingServer', return_value=fake_uvicorn),
             patch('drakkar.uiserver.server.logger') as mock_logger,
         ):
             mock_logger.ainfo = AsyncMock()
@@ -2818,7 +2818,7 @@ class TestUIServerClass:
         fake_uvicorn.run = _run
 
         with (
-            patch('drakkar.uiserver.server.uvicorn.Server', return_value=fake_uvicorn),
+            patch('drakkar.uiserver.server.LoopLoggingServer', return_value=fake_uvicorn),
             patch('drakkar.uiserver.server.logger') as mock_logger,
         ):
             mock_logger.ainfo = AsyncMock()
@@ -5413,7 +5413,13 @@ class TestUIServerBodyLimit:
         the Kubernetes probes."""
         from unittest.mock import patch
 
-        from drakkar.uiserver.server import KEEP_ALIVE_TIMEOUT_SECONDS, MAX_HEADER_BYTES, UIServer
+        from drakkar.uiserver.server import (
+            KEEP_ALIVE_TIMEOUT_SECONDS,
+            MAX_HEADER_BYTES,
+            WS_PING_INTERVAL_SECONDS,
+            WS_PING_TIMEOUT_SECONDS,
+            UIServer,
+        )
 
         server = UIServer(debug_config, mock_recorder, mock_app)
         fake_uvicorn = MagicMock()
@@ -5421,7 +5427,7 @@ class TestUIServerBodyLimit:
         fake_uvicorn.run = MagicMock()
 
         with (
-            patch('drakkar.uiserver.server.uvicorn.Server', return_value=fake_uvicorn),
+            patch('drakkar.uiserver.server.LoopLoggingServer', return_value=fake_uvicorn),
             patch('drakkar.uiserver.server.uvicorn.Config') as mock_uvi_config,
             patch('drakkar.uiserver.server.logger') as mock_logger,
         ):
@@ -5434,3 +5440,8 @@ class TestUIServerBodyLimit:
         kwargs = mock_uvi_config.call_args.kwargs
         assert kwargs['timeout_keep_alive'] == KEEP_ALIVE_TIMEOUT_SECONDS
         assert kwargs['h11_max_incomplete_event_size'] == MAX_HEADER_BYTES
+        # The legacy websockets backend (uvicorn's ``auto`` before 0.50) is
+        # never selected, and the /ws keepalive is pinned rather than inherited.
+        assert kwargs['ws'] == 'websockets-sansio'
+        assert kwargs['ws_ping_interval'] == WS_PING_INTERVAL_SECONDS
+        assert kwargs['ws_ping_timeout'] == WS_PING_TIMEOUT_SECONDS

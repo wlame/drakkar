@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Webapp tasks now end on the live Timeline.** HTTP-started tasks now
   record `task_completed` or `task_failed`, like Kafka tasks.
 
+- **A silent `/ws` client no longer prints a raw traceback.** The UI server
+  uses uvicorn's `websockets-sansio` backend, and loop errors now go to
+  structlog. The minimum uvicorn version is now 0.35.0.
+
 ### Changed
 
 - **Code comments no longer narrate implementation history.** Roughly 50

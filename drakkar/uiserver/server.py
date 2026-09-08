@@ -51,6 +51,7 @@ from starlette.responses import Response
 
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.config import UIConfig
+from drakkar.loopserver import LoopLoggingServer
 from drakkar.recorder import EventRecorder
 from drakkar.uihost import ResolvedBundle
 
@@ -91,6 +92,19 @@ KEEP_ALIVE_TIMEOUT_SECONDS = 120
 
 # Caps the request header section.
 MAX_HEADER_BYTES = 64 * 1024
+
+# The ``/ws`` live stream uses the sans-I/O websockets backend. Uvicorn's
+# ``auto`` picked the deprecated ``websockets.legacy`` backend before
+# uvicorn 0.50, whose close path could leave a keepalive-timeout error
+# unretrieved on the loop; naming the backend keeps that out of any install.
+WS_PROTOCOL = 'websockets-sansio'
+
+# Keepalive for ``/ws``: a client that misses a pong within the timeout
+# (sleeping laptop, throttled background tab) is disconnected, so a dead
+# dashboard does not keep a live-event subscriber queue alive. These are
+# uvicorn's own defaults, pinned so they cannot drift with an upgrade.
+WS_PING_INTERVAL_SECONDS = 20.0
+WS_PING_TIMEOUT_SECONDS = 20.0
 
 # Caps a request body before it is buffered. The UI server takes a body on
 # exactly two routes (the message probe and the merge request), and the
@@ -659,7 +673,7 @@ class UIServer:
         self._config = config
         self._recorder = recorder
         self._drakkar_app = app
-        self._server: uvicorn.Server | None = None
+        self._server: LoopLoggingServer | None = None
         self._thread: threading.Thread | None = None
 
     async def start(self) -> None:
@@ -679,8 +693,11 @@ class UIServer:
             # See the module constants for why each of these is set.
             timeout_keep_alive=KEEP_ALIVE_TIMEOUT_SECONDS,
             h11_max_incomplete_event_size=MAX_HEADER_BYTES,
+            ws=WS_PROTOCOL,
+            ws_ping_interval=WS_PING_INTERVAL_SECONDS,
+            ws_ping_timeout=WS_PING_TIMEOUT_SECONDS,
         )
-        self._server = uvicorn.Server(uvi_config)
+        self._server = LoopLoggingServer(uvi_config, server_name='ui')
         self._thread = threading.Thread(
             target=self._server.run,
             name='drakkar-ui-server',
